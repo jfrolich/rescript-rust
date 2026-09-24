@@ -816,13 +816,8 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
             })))
         }
         Token::Let { unwrap } => {
-            let unwrap = *unwrap;
-            // For signature let declarations, OCaml uses regions
-            p.begin_region();
-            // OCaml's value_description location starts at 'let', not at the attributes
-            let let_pos_idx = p.start_pos_idx();
-            // If unwrap (let?), emit error - not allowed in signatures
-            if unwrap {
+            // OCaml parse_signature_item_region (res_core.ml:7308-7318).
+            if *unwrap {
                 p.err_at(
                     p.arena().get_position(start_pos_idx).clone(),
                     p.end_pos.clone(),
@@ -831,9 +826,10 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
                             .to_string(),
                     ),
                 );
+                p.next();
             }
-            p.next();
-            let vd = parse_value_description(p, attrs.clone(), let_pos_idx, true);
+            p.begin_region();
+            let vd = parse_sign_let_desc(p, attrs.clone());
             parse_newline_or_semicolon_signature(p);
             p.end_region();
             Some(SignatureItemDesc::Psig_value(Box::new(vd)))
@@ -2211,7 +2207,7 @@ fn is_expr_start(token: &Token<'_>) -> bool {
 /// Parse a module long identifier.
 /// Handles both module paths (Foo.Bar.Baz) and module type paths (Foo.Bar.t).
 /// Module type names are typically lowercase (e.g., RGLEvents.t).
-fn parse_module_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
+pub(super) fn parse_module_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
     parse_module_long_ident_with_lowercase(p, false)
 }
 
@@ -2387,6 +2383,37 @@ fn parse_type_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
 /// the `let`/`rec` tokens: the first binding, then one binding per `and`. The
 /// attributes before each `and` are read by `parse_attributes_and_binding` in the
 /// enclosing region, so a failed lookahead there silences that region.
+/// OCaml `parse_let_bindings ~unwrap ~attrs ~start_pos`
+/// (compiler/syntax/src/res_core.ml:2790-2830), including the optional `let`
+/// and `rec` tokens.
+pub(super) fn parse_let_bindings_item(
+    p: &mut Parser<'_>,
+    unwrap: bool,
+    attrs: Attributes,
+    start_pos_idx: PosIdx,
+) -> (RecFlag, Vec<ValueBinding>) {
+    p.optional(&Token::Let { unwrap });
+    let rec_flag = if p.optional(&Token::Rec) {
+        RecFlag::Recursive
+    } else {
+        RecFlag::Nonrecursive
+    };
+    let end_pos_idx = p.start_pos_idx();
+    if rec_flag == RecFlag::Recursive && unwrap {
+        let start = *p.arena().get_position(start_pos_idx);
+        p.err_at(
+            start,
+            p.start_pos,
+            DiagnosticCategory::Message(
+                "let? is not allowed to be recursive. Use a regular `let` or remove `rec`."
+                    .to_string(),
+            ),
+        );
+    }
+    let (bindings, _) = parse_let_bindings(p, start_pos_idx, end_pos_idx, rec_flag, attrs, unwrap);
+    (rec_flag, bindings)
+}
+
 pub(super) fn parse_let_bindings(
     p: &mut Parser<'_>,
     start_pos_idx: PosIdx,
@@ -4046,141 +4073,16 @@ fn parse_external_value_description(
     (vd, inline_types)
 }
 
-/// Parse a value description (for external).
-/// `loc_start_idx` should be a PosIdx for the position before any outer attributes
-/// (to match OCaml's location and enable sharing).
-fn parse_value_description(
-    p: &mut Parser<'_>,
-    outer_attrs: Attributes,
-    loc_start_idx: PosIdx,
-    use_poly_type: bool,
-) -> ValueDescription {
-    let inner_attrs = parse_attributes(p);
-    // Merge outer (structure-level) attrs with inner (name-level) attrs
-    let attrs = outer_attrs.concat(inner_attrs);
-
-    let name = match &p.token {
-        Token::Lident(n) => {
-            let n = n.clone();
-            let loc = p.mk_loc_current();
-            p.next();
-            let n_idx = p.arena_mut().push_interned_string(&n);
-            with_loc(n_idx, loc)
-        }
-        Token::String(s) => {
-            // Escaped identifier like "export" - store with quotes for printer to recognize
-            let n = format!("\"{}\"", s);
-            let loc = p.mk_loc_current();
-            p.next();
-            let n_idx = p.arena_mut().push_string(n);
-            with_loc(n_idx, loc)
-        }
-        _ => {
-            p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
-            let err_idx = p.arena_mut().intern("error");
-            mknoloc(err_idx)
-        }
-    };
-
+/// OCaml `parse_sign_let_desc` (compiler/syntax/src/res_core.ml:7518-7526).
+fn parse_sign_let_desc(p: &mut Parser<'_>, attrs: Attributes) -> ValueDescription {
+    let start_pos_idx = p.start_pos_idx();
+    p.optional(&Token::Let { unwrap: false });
+    let (name, name_loc) = super::core::parse_lident(p);
+    let name = with_loc(p.arena_mut().push_interned_string(&name), name_loc);
     p.expect(Token::Colon);
-    // OCaml: InExternal.status := true before parsing type
-    let was_in_external = p.in_external;
-    p.in_external = true;
-    // OCaml's parse_sign_let_desc uses parse_poly_type_expr for signature `let`,
-    // while parse_external_def uses parse_typ_expr for `external`.
-    // The difference matters for `'a => T` where parse_poly_type_expr uses the
-    // type var's location (excluding ') for the arrow start, matching OCaml.
-    let typ_ct = if use_poly_type {
-        typ::parse_poly_type_expr(p)
-    } else {
-        typ::parse_typ_expr(p)
-    };
-    let typ = p.arena_mut().push_core_type(typ_ct);
-    p.in_external = was_in_external;
-
-    // Parse primitive. Externals require `= "..."`; signature `let`
-    // declarations share this helper and leave the primitive empty.
-    let prim = if p.token == Token::Equal {
-        let equal_start = p.start_pos.clone();
-        let equal_end = p.end_pos.clone();
-        p.next();
-        match &p.token {
-            Token::String(s) => {
-                let s = s.clone();
-                p.next();
-                // OCaml only parses a single string here
-                vec![p.arena_mut().push_interned_string(&s)]
-            }
-            _ => {
-                // OCaml: emit error when = is not followed by a string
-                let name_str = p.arena().get_string(name.txt).to_string();
-                let msg = format!(
-                    "An external requires the name of the JS value you're referring to, like \"{}\".",
-                    name_str
-                );
-                p.err_at(equal_start, equal_end, DiagnosticCategory::Message(msg));
-                vec![]
-            }
-        }
-    } else {
-        if !use_poly_type {
-            p.expect(Token::Equal);
-        }
-        vec![]
-    };
-
-    // Use the PosIdx directly for sharing with structure_item/signature_item location
-    let loc = p.mk_loc_idx_to_prev_end(loc_start_idx);
-    ValueDescription {
-        pval_name: name,
-        pval_type: typ,
-        pval_prim: prim,
-        pval_attributes: attrs,
-        pval_loc: loc,
-    }
-}
-
-/// Parse a value description for signature `let` declarations.
-///
-/// This mirrors OCaml `parse_sign_let_desc` in `res_core.ml`:
-/// - parse lowercase identifier name
-/// - expect `:`
-/// - parse with `parse_poly_type_expr` (not `parse_typ_expr`)
-/// - no inner attributes and no primitive (`= "..."`) parsing
-fn parse_signature_let_description(
-    p: &mut Parser<'_>,
-    attrs: Attributes,
-    loc_start_idx: PosIdx,
-) -> ValueDescription {
-    let name = match &p.token {
-        Token::Lident(n) => {
-            let n = n.clone();
-            let loc = p.mk_loc_current();
-            p.next();
-            let n_idx = p.arena_mut().push_interned_string(&n);
-            with_loc(n_idx, loc)
-        }
-        Token::Eof => {
-            p.err_unexpected();
-            let loc = p.mk_loc_idx_to_prev_end(loc_start_idx);
-            with_loc(p.arena_mut().intern("_"), loc)
-        }
-        _ => {
-            p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
-            // OCaml parse_lident recovery: if keyword on same line, skip it.
-            if p.token.is_keyword() && p.prev_end_pos.line == p.start_pos.line {
-                p.next();
-            }
-            let loc = p.mk_loc_idx_to_prev_end(loc_start_idx);
-            with_loc(p.arena_mut().intern("_"), loc)
-        }
-    };
-
-    p.expect(Token::Colon);
-    let typ_ct = typ::parse_poly_type_expr(p);
-    let typ = p.arena_mut().push_core_type(typ_ct);
-
-    let loc = p.mk_loc_idx_to_prev_end(loc_start_idx);
+    let typ = typ::parse_poly_type_expr(p);
+    let typ = p.arena_mut().push_core_type(typ);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     ValueDescription {
         pval_name: name,
         pval_type: typ,
@@ -4331,7 +4233,7 @@ fn parse_module_binding(
 }
 
 /// OCaml `parse_module_binding_body` (compiler/syntax/src/res_core.ml:7062-7078).
-fn parse_module_binding_body(p: &mut Parser<'_>) -> ModuleExpr {
+pub(super) fn parse_module_binding_body(p: &mut Parser<'_>) -> ModuleExpr {
     let mod_type = if p.token == Token::Colon {
         p.next();
         Some(parse_module_type(p))

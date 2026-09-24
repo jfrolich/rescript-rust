@@ -631,8 +631,7 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
         | Token::Minus
         | Token::MinusDot
         | Token::Bang
-        | Token::Bnot
-        | Token::Question => {
+        | Token::Bnot => {
             let token = p.token.clone();
             p.leave_breadcrumb(Grammar::ExprUnary);
             p.next();
@@ -779,7 +778,7 @@ fn parse_es6_arrow_expression_async(
     // For async functions:
     // - Pexp_fun location starts AFTER async (the default p.start_pos)
     // - Pexp_newtype location includes async (async_pos)
-    parse_es6_arrow_expression_internal(p, true, None, async_pos_idx, arrow_attrs, context)
+    parse_es6_arrow_expression_internal(p, true, None, async_pos_idx, arrow_attrs, context, None)
 }
 
 /// Parse an ES6 arrow function expression.
@@ -797,6 +796,7 @@ pub fn parse_es6_arrow_expression(
         None,
         arrow_attrs,
         context,
+        None,
     )
 }
 
@@ -808,12 +808,16 @@ fn parse_es6_arrow_expression_internal(
     _newtype_start_pos_idx: Option<PosIdx>, // For async, the position including 'async'
     arrow_attrs: Attributes,
     context: ExprContext,
+    term_parameters: Option<Vec<super::core::FundefParameter>>,
 ) -> Expression {
     let start_pos_idx = arrow_start_pos_idx.unwrap_or_else(|| p.start_pos_idx());
     p.leave_breadcrumb(Grammar::Es6ArrowExpr);
 
-    // Parse parameters
-    let parameters = parse_parameters(p);
+    // OCaml `parse_es6_arrow_expression ?term_parameters` (res_core.ml:1806-1818).
+    let parameters = match term_parameters {
+        Some(parameters) => parameters,
+        None => parse_parameters(p),
+    };
 
     // Parse optional return type
     // We use parse_typ_expr_no_arrow to avoid confusing the return type
@@ -996,72 +1000,6 @@ fn parse_es6_arrow_expression_internal(
     }
 }
 
-/// Parse ES6 arrow expression with pre-built term parameters.
-/// Used for special cases like `{ident =>}` where OCaml extends the pattern location.
-fn parse_es6_arrow_expression_with_params(
-    p: &mut Parser<'_>,
-    is_async: bool,
-    term_params: Vec<super::core::FundefTermParam>,
-    _context: ExprContext,
-) -> Expression {
-    p.leave_breadcrumb(Grammar::Es6ArrowExpr);
-
-    // The => has already been consumed in parse_braced_arrow_ident
-
-    // Parse body
-    let body = parse_expr(p);
-
-    p.eat_breadcrumb();
-    let end_pos_idx = p.prev_end_pos_idx();
-
-    // Compute arity for the outermost function
-    let total_arity = term_params.len();
-    // Pre-create arity indices before the fold (arena access needs mutable borrow)
-    let full_arity_idx = p.push_arity_full(total_arity);
-    let unknown_arity_idx = p.push_arity_unknown();
-    term_params
-        .into_iter()
-        .rev()
-        .enumerate()
-        .fold(body, |acc, (i, param)| {
-            // OCaml: for braced arrow {x => body}, Pexp_fun location starts at =>
-            // The pattern location is from `{` to end of ident
-            // So Pexp_fun starts at pattern.loc_end + 1 (skipping space after ident)
-            let mut fun_start = p.loc_end(param.pat.ppat_loc);
-            fun_start.cnum += 1; // Skip past the space after pattern (to the `=` of `=>`)
-            let fun_start_idx = p.push_pos(fun_start);
-            let fun_loc = p.mk_loc_idx(fun_start_idx, end_pos_idx);
-
-            let mut pat = param.pat;
-            if !param.attrs.is_empty() {
-                let mut attrs = param.attrs;
-                attrs.extend(pat.ppat_attributes);
-                pat.ppat_attributes = attrs;
-            }
-            let is_outermost = i == total_arity - 1;
-            let arity = if is_outermost {
-                full_arity_idx
-            } else {
-                unknown_arity_idx
-            };
-            let fn_is_async = is_outermost && is_async;
-            let default_idx = param.expr.map(|e| p.arena_mut().push_expr(e));
-            let rhs_idx = p.arena_mut().push_expr(acc);
-            let pat_idx = p.arena_mut().push_pat(pat);
-            Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                    arg_label: param.label,
-                    default: default_idx,
-                    lhs: pat_idx,
-                    rhs: rhs_idx,
-                    arity,
-                    is_async: fn_is_async,
-                }))),
-                pexp_loc: fun_loc,
-                pexp_attributes: Attributes::new(),
-            }
-        })
-}
 
 /// Parse function parameters.
 fn parse_parameters(p: &mut Parser<'_>) -> Vec<super::core::FundefParameter> {
@@ -3769,490 +3707,726 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     }
 }
 
-/// Parse a braced expression or record.
+
+
+
+
+
+
+
+
+
+
+// ============================================================================
+// Blocks, braced expressions and record expressions
+// (OCaml compiler/syntax/src/res_core.ml:3099-3688)
+// ============================================================================
+
+/// Prepend the `res.braces` attribute spanning `{` to the previous token.
+fn with_braces(p: &mut Parser<'_>, start_pos_idx: PosIdx, mut expr: Expression) -> Expression {
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    let braces = make_braces_attr(p.arena_mut(), loc);
+    expr.pexp_attributes.insert(0, braces);
+    expr
+}
+
+/// OCaml `parse_braced_or_record_expr` (compiler/syntax/src/res_core.ml:3099-3330).
 fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
     let start_pos_idx = p.start_pos_idx();
     p.expect(Token::Lbrace);
+    match p.token.clone() {
+        Token::Break | Token::Continue => {
+            let expr = parse_expr_block(p);
+            p.expect(Token::Rbrace);
+            with_braces(p, start_pos_idx, expr)
+        }
+        token if token.is_keyword() => {
+            match super::core::recover_keyword_field_name_if_probably_field(
+                p,
+                super::core::error_messages::keyword_field_in_expr,
+            ) {
+                Some((recovered_field_name, loc)) => {
+                    p.expect(Token::Colon);
+                    let opt = parse_optional_label(p);
+                    let field_expr = parse_expr(p);
+                    let lid_idx = p.push_lident(&recovered_field_name);
+                    let expr = p.arena_mut().push_expr(field_expr);
+                    let first_row = ExpressionRecordField {
+                        lid: with_loc(lid_idx, loc),
+                        expr,
+                        opt,
+                    };
+                    let expr = parse_record_expr(p, start_pos_idx, None, vec![first_row]);
+                    p.expect(Token::Rbrace);
+                    expr
+                }
+                None => {
+                    let expr = parse_expr_block(p);
+                    p.expect(Token::Rbrace);
+                    with_braces(p, start_pos_idx, expr)
+                }
+            }
+        }
+        Token::Rbrace => {
+            p.next();
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((vec![], None)))),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            }
+        }
+        Token::DotDotDot => {
+            p.next();
+            let spread_expr = parse_constrained_or_coerced_expr(p);
+            p.expect(Token::Comma);
+            let expr = parse_record_expr(p, start_pos_idx, Some(spread_expr), vec![]);
+            p.expect(Token::Rbrace);
+            expr
+        }
+        Token::String(s) => {
+            let loc = p.mk_loc_current();
+            p.next();
+            let lid_idx = p.push_lident(&s);
+            let field = with_loc(lid_idx, loc);
+            match p.token {
+                Token::Colon | Token::Equal => {
+                    if p.token == Token::Equal {
+                        p.err_at(
+                            p.start_pos,
+                            p.end_pos,
+                            DiagnosticCategory::Message(
+                                super::core::error_messages::RECORD_FIELD_MISSING_COLON
+                                    .to_string(),
+                            ),
+                        );
+                    }
+                    p.next();
+                    let field_expr = parse_expr(p);
+                    p.optional(&Token::Comma);
+                    let expr = p.arena_mut().push_expr(field_expr);
+                    let first_row = ExpressionRecordField {
+                        lid: field,
+                        expr,
+                        opt: false,
+                    };
+                    let expr = parse_record_expr_with_string_keys(p, start_pos_idx, first_row);
+                    p.expect(Token::Rbrace);
+                    expr
+                }
+                _ => {
+                    let tag = (p.mode == ParserMode::ParseForTypeChecker).then(|| Cow::Borrowed("js"));
+                    let constant = Expression {
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
+                            Constant::String(s.into_owned().into(), tag),
+                        ))),
+                        pexp_loc: field.loc,
+                        pexp_attributes: Attributes::new(),
+                    };
+                    let a = parse_primary_expr(p, constant, false);
+                    let e = parse_binary_expr(p, a, 1, ExprContext::Ordinary);
+                    let e = parse_ternary_expr(p, e);
+                    finish_braced_block(p, start_pos_idx, e)
+                }
+            }
+        }
+        Token::Question => {
+            let expr = parse_record_expr(p, start_pos_idx, None, vec![]);
+            p.expect(Token::Rbrace);
+            expr
+        }
+        Token::Lident(ref s)
+            if s == "async" && super::core::is_es6_arrow_expression(p, false) =>
+        {
+            let async_pos_idx = p.start_pos_idx();
+            p.expect(Token::Lident("async".into()));
+            let expr = parse_es6_arrow_expression_async(
+                p,
+                Some(async_pos_idx),
+                Attributes::new(),
+                ExprContext::Ordinary,
+            );
+            let expr = parse_expr_block_first(p, Some(expr));
+            p.expect(Token::Rbrace);
+            with_braces(p, start_pos_idx, expr)
+        }
+        Token::Uident(_) | Token::Lident(_) => {
+            let start_token_is_uident = matches!(p.token, Token::Uident(_));
+            let value_or_constructor = parse_value_or_constructor(p);
+            let path_ident = match &*value_or_constructor.pexp_desc {
+                ExpressionDesc::Pexp_ident(path_ident) => Some(*path_ident),
+                _ => None,
+            };
+            let Some(path_ident) = path_ident else {
+                p.leave_breadcrumb(Grammar::ExprBlock);
+                let a = parse_primary_expr(p, value_or_constructor, false);
+                let e = parse_binary_expr(p, a, 1, ExprContext::Ordinary);
+                let e = parse_ternary_expr(p, e);
+                p.eat_breadcrumb();
+                return finish_braced_block(p, start_pos_idx, e);
+            };
+            let ident_end_pos_idx = p.prev_end_pos_idx();
+            match p.token {
+                Token::Comma => {
+                    p.next();
+                    let value = if start_token_is_uident {
+                        remove_module_name_from_punned_field_value(p, value_or_constructor)
+                    } else {
+                        value_or_constructor
+                    };
+                    let expr = p.arena_mut().push_expr(value);
+                    let first_row = ExpressionRecordField {
+                        lid: path_ident,
+                        expr,
+                        opt: false,
+                    };
+                    let expr = parse_record_expr(p, start_pos_idx, None, vec![first_row]);
+                    p.expect(Token::Rbrace);
+                    expr
+                }
+                Token::Colon | Token::Equal => {
+                    if p.token == Token::Equal {
+                        p.err_at(
+                            p.start_pos,
+                            p.end_pos,
+                            DiagnosticCategory::Message(
+                                super::core::error_messages::RECORD_FIELD_MISSING_COLON
+                                    .to_string(),
+                            ),
+                        );
+                    }
+                    p.next();
+                    let opt = parse_optional_label(p);
+                    let field_expr = parse_expr(p);
+                    let expr = p.arena_mut().push_expr(field_expr);
+                    let first_row = ExpressionRecordField {
+                        lid: path_ident,
+                        expr,
+                        opt,
+                    };
+                    if p.token == Token::Rbrace {
+                        p.next();
+                        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                        Expression {
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((
+                                vec![first_row],
+                                None,
+                            )))),
+                            pexp_loc: loc,
+                            pexp_attributes: Attributes::new(),
+                        }
+                    } else {
+                        p.expect(Token::Comma);
+                        let expr = parse_record_expr(p, start_pos_idx, None, vec![first_row]);
+                        p.expect(Token::Rbrace);
+                        expr
+                    }
+                }
+                // error case
+                Token::Lident(_) => {
+                    if p.prev_end_pos.line < p.start_pos.line {
+                        p.expect(Token::Comma);
+                    } else {
+                        p.expect(Token::Colon);
+                    }
+                    let expr = p.arena_mut().push_expr(value_or_constructor);
+                    let first_row = ExpressionRecordField {
+                        lid: path_ident,
+                        expr,
+                        opt: false,
+                    };
+                    let expr = parse_record_expr(p, start_pos_idx, None, vec![first_row]);
+                    p.expect(Token::Rbrace);
+                    expr
+                }
+                Token::Semicolon => {
+                    // `Ast_helper.Exp.ident path_ident` without `~loc`.
+                    let first = ast_helper::make_ident_idx(path_ident.txt, LocIdx::none());
+                    let first = Expression {
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(path_ident)),
+                        ..first
+                    };
+                    let expr = parse_expr_block_first(p, Some(first));
+                    p.expect(Token::Rbrace);
+                    with_braces(p, start_pos_idx, expr)
+                }
+                Token::Rbrace => {
+                    p.next();
+                    let expr = ast_helper::make_ident_idx(path_ident.txt, path_ident.loc);
+                    let expr = Expression {
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(path_ident)),
+                        ..expr
+                    };
+                    with_braces(p, start_pos_idx, expr)
+                }
+                Token::EqualGreater => {
+                    let loc = p.mk_loc_idx(start_pos_idx, ident_end_pos_idx);
+                    let name = p.arena().get_longident(path_ident.txt).last_idx();
+                    let pat = Pattern {
+                        ppat_desc: Box::new(PatternDesc::Ppat_var(with_loc(name, loc))),
+                        ppat_loc: loc,
+                        ppat_attributes: Attributes::new(),
+                    };
+                    let term_param = super::core::FundefTermParam {
+                        attrs: Attributes::new(),
+                        label: ArgLabel::Nolabel,
+                        expr: None,
+                        pat,
+                        start_pos_idx,
+                        comptime: false,
+                    };
+                    let a = parse_es6_arrow_expression_internal(
+                        p,
+                        false,
+                        None,
+                        None,
+                        Attributes::new(),
+                        ExprContext::Ordinary,
+                        Some(vec![super::core::FundefParameter::Term(term_param)]),
+                    );
+                    let e = parse_binary_expr(p, a, 1, ExprContext::Ordinary);
+                    let e = parse_ternary_expr(p, e);
+                    finish_braced_block(p, start_pos_idx, e)
+                }
+                _ => {
+                    p.leave_breadcrumb(Grammar::ExprBlock);
+                    let operand = ast_helper::make_ident_idx(path_ident.txt, path_ident.loc);
+                    let operand = Expression {
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(path_ident)),
+                        ..operand
+                    };
+                    let a = parse_primary_expr(p, operand, false);
+                    let e = parse_binary_expr(p, a, 1, ExprContext::Ordinary);
+                    let e = parse_ternary_expr(p, e);
+                    p.eat_breadcrumb();
+                    finish_braced_block(p, start_pos_idx, e)
+                }
+            }
+        }
+        _ => {
+            let expr = parse_expr_block(p);
+            p.expect(Token::Rbrace);
+            with_braces(p, start_pos_idx, expr)
+        }
+    }
+}
 
-    // Check for empty braces
+/// The shared tail of the expression branches of `parse_braced_or_record_expr`:
+/// `Semicolon`/`_` continue the block with `e` first; `Rbrace` ends it.
+fn finish_braced_block(p: &mut Parser<'_>, start_pos_idx: PosIdx, e: Expression) -> Expression {
     if p.token == Token::Rbrace {
         p.next();
-        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-        return Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((vec![], None)))),
-            pexp_loc: loc,
-            pexp_attributes: Attributes::new(),
-        };
+        return with_braces(p, start_pos_idx, e);
     }
+    let expr = parse_expr_block_first(p, Some(e));
+    p.expect(Token::Rbrace);
+    with_braces(p, start_pos_idx, expr)
+}
 
-    // Check for spread - definitely a record
+/// OCaml `parse_optional_label` (compiler/syntax/src/res_core.ml:1440-1445).
+fn parse_optional_label(p: &mut Parser<'_>) -> bool {
+    p.optional(&Token::Question)
+}
+
+/// OCaml `remove_module_name_from_punned_field_value`
+/// (compiler/syntax/src/res_core.ml:648-658): `A.a` becomes `a`.
+fn remove_module_name_from_punned_field_value(p: &mut Parser<'_>, exp: Expression) -> Expression {
+    let ExpressionDesc::Pexp_ident(path_ident) = &*exp.pexp_desc else {
+        return exp;
+    };
+    let last = p.arena().get_longident(path_ident.txt).last_idx();
+    let lid_idx = p.push_longident(Longident::Lident(last));
+    Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(lid_idx, path_ident.loc))),
+        ..exp
+    }
+}
+
+/// OCaml `parse_record_expr_row` (compiler/syntax/src/res_core.ml:3440-3508).
+fn parse_record_expr_row(p: &mut Parser<'_>) -> Option<ExpressionRecordField> {
+    let attrs = parse_attributes(p);
     if p.token == Token::DotDotDot {
+        p.err(DiagnosticCategory::Message(
+            super::core::error_messages::RECORD_EXPR_SPREAD.to_string(),
+        ));
         p.next();
-        let spread_start_idx = p.start_pos_idx();
-        // Parse the spread expression including binary operators like ->
-        // We need to handle expressions like: {...states->sequence, valuesOpt: None}
-        let operand = parse_unary_expr(p);
-        let mut spread = parse_binary_expr(p, operand, 0, ExprContext::Ordinary);
-        // Check for type constraint on spread: {...make() : myRecord, foo: bar}
-        if p.token == Token::Colon {
+    }
+    match p.token {
+        Token::Lident(_) | Token::Uident(_) => {
+            let start_token_is_uident = matches!(p.token, Token::Uident(_));
+            let field = parse_record_row_value_path(p);
+            match p.token {
+                Token::Colon | Token::Equal => {
+                    if p.token == Token::Equal {
+                        p.err_at(
+                            p.start_pos,
+                            p.end_pos,
+                            DiagnosticCategory::Message(
+                                super::core::error_messages::RECORD_FIELD_MISSING_COLON
+                                    .to_string(),
+                            ),
+                        );
+                    }
+                    p.next();
+                    let opt = parse_optional_label(p);
+                    let field_expr = parse_expr(p);
+                    let expr = p.arena_mut().push_expr(field_expr);
+                    Some(ExpressionRecordField {
+                        lid: field,
+                        expr,
+                        opt,
+                    })
+                }
+                _ => {
+                    let value = punned_field_value(p, field, attrs, start_token_is_uident);
+                    let expr = p.arena_mut().push_expr(value);
+                    Some(ExpressionRecordField {
+                        lid: field,
+                        expr,
+                        opt: false,
+                    })
+                }
+            }
+        }
+        Token::Question => {
             p.next();
-            let typ = super::typ::parse_typ_expr(p);
-            let loc = p.mk_loc_idx_to_prev_end(spread_start_idx);
-            let spread_idx = p.arena_mut().push_expr(spread);
-            let typ_idx = p.arena_mut().push_core_type(typ);
-            spread = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
-                    spread_idx, typ_idx,
+            match p.token {
+                Token::Lident(_) | Token::Uident(_) => {
+                    let start_token_is_uident = matches!(p.token, Token::Uident(_));
+                    let field = parse_record_row_value_path(p);
+                    let value = punned_field_value(p, field, attrs, start_token_is_uident);
+                    let expr = p.arena_mut().push_expr(value);
+                    Some(ExpressionRecordField {
+                        lid: field,
+                        expr,
+                        opt: true,
+                    })
+                }
+                _ => None,
+            }
+        }
+        _ if p.token.is_keyword() => {
+            match super::core::recover_keyword_field_name_if_probably_field(
+                p,
+                super::core::error_messages::keyword_field_in_expr,
+            ) {
+                Some((recovered_field_name, loc)) => {
+                    p.expect(Token::Colon);
+                    let opt = parse_optional_label(p);
+                    let field_expr = parse_expr(p);
+                    let lid_idx = p.push_lident(&recovered_field_name);
+                    let expr = p.arena_mut().push_expr(field_expr);
+                    Some(ExpressionRecordField {
+                        lid: with_loc(lid_idx, loc),
+                        expr,
+                        opt,
+                    })
+                }
+                None => {
+                    super::core::emit_keyword_field_error(
+                        p,
+                        super::core::error_messages::keyword_field_in_expr,
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+/// OCaml `parse_value_path` as used by record rows (res_core.ml:742-776).
+fn parse_record_row_value_path(p: &mut Parser<'_>) -> Located<LidentIdx> {
+    let (path, loc) = super::module::parse_value_path(p);
+    let lid_idx = super::core::build_longident_idx(p, &path);
+    with_loc(lid_idx, loc)
+}
+
+/// A punned record row value: `Ast_helper.Exp.ident ~loc:field.loc ~attrs field`,
+/// with the module path removed when the row started with an uppercase name.
+fn punned_field_value(
+    p: &mut Parser<'_>,
+    field: Located<LidentIdx>,
+    attrs: Attributes,
+    start_token_is_uident: bool,
+) -> Expression {
+    let value = Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(field)),
+        pexp_loc: field.loc,
+        pexp_attributes: attrs,
+    };
+    if start_token_is_uident {
+        remove_module_name_from_punned_field_value(p, value)
+    } else {
+        value
+    }
+}
+
+/// OCaml `parse_record_expr_row_with_string_key` (res_core.ml:3413-3438).
+fn parse_record_expr_row_with_string_key(p: &mut Parser<'_>) -> Option<ExpressionRecordField> {
+    let Token::String(s) = p.token.clone() else {
+        return None;
+    };
+    let loc = p.mk_loc_current();
+    p.next();
+    let lid_idx = p.push_lident(&s);
+    let field = with_loc(lid_idx, loc);
+    match p.token {
+        Token::Colon | Token::Equal => {
+            if p.token == Token::Equal {
+                p.err_at(
+                    p.start_pos,
+                    p.end_pos,
+                    DiagnosticCategory::Message(
+                        super::core::error_messages::RECORD_FIELD_MISSING_COLON.to_string(),
+                    ),
+                );
+            }
+            p.next();
+            let field_expr = parse_expr(p);
+            let expr = p.arena_mut().push_expr(field_expr);
+            Some(ExpressionRecordField {
+                lid: field,
+                expr,
+                opt: false,
+            })
+        }
+        _ => {
+            let value = Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(field)),
+                pexp_loc: field.loc,
+                pexp_attributes: Attributes::new(),
+            };
+            let expr = p.arena_mut().push_expr(value);
+            Some(ExpressionRecordField {
+                lid: field,
+                expr,
+                opt: false,
+            })
+        }
+    }
+}
+
+/// OCaml `parse_record_expr_with_string_keys` (res_core.ml:3533-3544).
+fn parse_record_expr_with_string_keys(
+    p: &mut Parser<'_>,
+    start_pos_idx: PosIdx,
+    first_row: ExpressionRecordField,
+) -> Expression {
+    let mut rows = vec![first_row];
+    rows.extend(super::core::parse_comma_delimited_region(
+        p,
+        Grammar::RecordRowsStringKey,
+        Token::Rbrace,
+        parse_record_expr_row_with_string_key,
+    ));
+    let loc = p.mk_loc_idx_to_end(start_pos_idx);
+    let record = p.arena_mut().push_expr(Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((rows, None)))),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    });
+    let eval = StructureItem {
+        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((record, Attributes::new())))),
+        pstr_loc: loc,
+    };
+    let obj = p.arena_mut().intern("obj");
+    Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
+            with_loc(obj, loc),
+            Payload::PStr(Box::new(vec![eval])),
+        )))),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    }
+}
+
+/// OCaml `parse_record_expr` (res_core.ml:3546-3559).
+fn parse_record_expr(
+    p: &mut Parser<'_>,
+    start_pos_idx: PosIdx,
+    spread: Option<Expression>,
+    mut rows: Vec<ExpressionRecordField>,
+) -> Expression {
+    rows.extend(super::core::parse_comma_delimited_region(
+        p,
+        Grammar::RecordRows,
+        Token::Rbrace,
+        parse_record_expr_row,
+    ));
+    if rows.is_empty() {
+        p.err(DiagnosticCategory::Message(
+            "Record spread needs at least one field that's updated".to_string(),
+        ));
+    }
+    let loc = p.mk_loc_idx_to_end(start_pos_idx);
+    let spread = spread.map(|spread| p.arena_mut().push_expr(spread));
+    Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((rows, spread)))),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    }
+}
+
+/// OCaml `parse_expr_block_item` (compiler/syntax/src/res_core.ml:3574-3658).
+fn parse_expr_block_item(p: &mut Parser<'_>) -> Expression {
+    let start_pos_idx = p.start_pos_idx();
+    // Rust-only comptime builtins (`@typeInfo(...)` etc.) are expressions, not
+    // attributes; `parse_expr` handles them.
+    let attrs = if is_comptime_builtin_start(p) {
+        Attributes::new()
+    } else {
+        parse_attributes(p)
+    };
+    match p.token {
+        Token::Break | Token::Continue => {
+            let is_break = p.token == Token::Break;
+            p.next();
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            Expression {
+                pexp_desc: Box::new(if is_break {
+                    ExpressionDesc::Pexp_break
+                } else {
+                    ExpressionDesc::Pexp_continue
+                }),
+                pexp_loc: loc,
+                pexp_attributes: attrs,
+            }
+        }
+        Token::Module => {
+            p.next();
+            if p.token == Token::Lparen {
+                let expr = parse_first_class_module_expr(p, start_pos_idx);
+                let a = parse_primary_expr(p, expr, false);
+                let expr = parse_binary_expr(p, a, 1, ExprContext::Ordinary);
+                return parse_ternary_expr(p, expr);
+            }
+            let name = parse_module_name(p);
+            let body = super::module::parse_module_binding_body(p);
+            parse_newline_or_semicolon_expr_block(p);
+            let expr = parse_expr_block(p);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            let body = p.arena_mut().push_mod_expr(body);
+            let expr = p.arena_mut().push_expr(expr);
+            Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_letmodule(Box::new((name, body, expr)))),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            }
+        }
+        Token::Exception => {
+            // OCaml `parse_exception_def ~attrs` (res_core.ml:6626-6631).
+            let exception_start_idx = p.start_pos_idx();
+            p.expect(Token::Exception);
+            let ext = super::module::parse_extension_constructor(
+                p,
+                attrs,
+                Some(exception_start_idx),
+            );
+            parse_newline_or_semicolon_expr_block(p);
+            let block_expr = parse_expr_block(p);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            let block_expr = p.arena_mut().push_expr(block_expr);
+            Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_letexception(Box::new((ext, block_expr)))),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            }
+        }
+        Token::Open => {
+            // OCaml `parse_open_description ~attrs` (res_core.ml); the
+            // description's attributes are not kept by `Exp.open_`.
+            p.leave_breadcrumb(Grammar::OpenDescription);
+            p.expect(Token::Open);
+            let override_flag = if p.optional(&Token::Bang) {
+                OverrideFlag::Override
+            } else {
+                OverrideFlag::Fresh
+            };
+            let lid = super::module::parse_module_long_ident(p);
+            p.eat_breadcrumb();
+            parse_newline_or_semicolon_expr_block(p);
+            let block_expr = parse_expr_block(p);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            let block_expr = p.arena_mut().push_expr(block_expr);
+            Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_open(Box::new((
+                    override_flag,
+                    lid,
+                    block_expr,
                 )))),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
-            };
-        }
-        p.expect(Token::Comma);
-        let fields = parse_record_fields(p);
-        if fields.is_empty() {
-            p.err(DiagnosticCategory::Message(
-                super::core::error_messages::RECORD_SPREAD_WITHOUT_UPDATE.to_string(),
-            ));
-        }
-        p.expect(Token::Rbrace);
-        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-        let spread_idx = p.arena_mut().push_expr(spread);
-        return Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((
-                fields,
-                Some(spread_idx),
-            )))),
-            pexp_loc: loc,
-            pexp_attributes: Attributes::new(),
-        };
-    }
-
-    // Upstream #8348: braced break/continue treated as block expressions
-    // wrapped with the braces attribute. Mirrors OCaml's `Break`/`Continue`
-    // arms in `parse_braced_or_record_expr`.
-    if p.token == Token::Break || p.token == Token::Continue {
-        let mut expr = parse_expr_block(p);
-        p.expect(Token::Rbrace);
-        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-        let braces = super::core::make_braces_attr(p.arena_mut(), loc);
-        expr.pexp_attributes.push(braces);
-        return expr;
-    }
-
-    // OCaml: Token.is_keyword token case in parse_braced_or_record_expr
-    // Check for keyword as first token (before block expression check)
-    if p.token.is_keyword() {
-        if let Some((recovered_name, loc)) =
-            super::core::recover_keyword_field_name_if_probably_field(
-                p,
-                super::core::error_messages::keyword_field_in_expr,
-            )
-        {
-            // OCaml: Parser.expect Colon p
-            p.expect(Token::Colon);
-            // Check for optional marker
-            let opt = p.token == Token::Question;
-            if opt {
-                p.next();
             }
-            let field_expr = parse_expr(p);
-            let lid_idx = p.push_lident(&recovered_name);
-            let lid = with_loc(lid_idx, loc);
-            let field_expr_idx = p.arena_mut().push_expr(field_expr);
-            let first_field = ExpressionRecordField {
-                lid,
-                expr: field_expr_idx,
-                opt,
+        }
+        Token::Let { unwrap } => {
+            let (rec_flag, bindings) =
+                super::module::parse_let_bindings_item(p, unwrap, attrs, start_pos_idx);
+            parse_newline_or_semicolon_expr_block(p);
+            let next = if grammar::is_block_expr_start(&p.token) {
+                parse_expr_block(p)
+            } else {
+                let loc = p.mk_loc_current();
+                ast_helper::make_unit(p, loc)
             };
-            p.optional(&Token::Comma);
-            let mut fields = parse_record_fields(p);
-            fields.insert(0, first_field);
-            p.expect(Token::Rbrace);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            return Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((fields, None)))),
+            let next = p.arena_mut().push_expr(next);
+            Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((rec_flag, bindings, next)))),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
-            };
-        } else {
-            // Not followed by colon - parse as block expression
-            return parse_block_expr(p, start_pos_idx);
-        }
-    }
-
-    // Check if this looks like a block expression (module-level constructs or let/expressions)
-    if is_block_expression_start(&p.token) {
-        return parse_block_expr(p, start_pos_idx);
-    }
-
-    // Check if this looks like a record (name followed by : or ,)
-    // or a JS object (string key followed by :)
-    // Also check for optional field syntax: { ? name, ... }
-    // Also check for error case: {ident1 ident2:...} where we have two identifiers
-    // and the second one is followed by colon (this is a record field error case).
-    // OCaml res_core.ml line 3229-3247 handles this case specially.
-    let is_record = p.lookahead(|state| {
-        // Optional field punning: { ? name, ... }
-        if state.token == Token::Question {
-            state.next();
-            // Should be followed by an identifier
-            return matches!(state.token, Token::Lident(_));
-        }
-
-        let started_with_uident = matches!(state.token, Token::Uident(_));
-
-        let mut parts = 0;
-        while let Token::Lident(_) | Token::Uident(_) = &state.token {
-            parts += 1;
-            state.next();
-            if state.token == Token::Dot {
-                state.next();
-            } else {
-                break;
             }
         }
-
-        if parts == 0 {
-            return false;
+        Token::Typ => {
+            // Parse to be able to give a good error message.
+            let type_start = *p.arena().get_position(start_pos_idx);
+            p.begin_region();
+            let type_start_idx = p.start_pos_idx();
+            let _ = super::module::parse_type_definition_or_extension(p, &attrs, type_start_idx);
+            p.end_region();
+            p.err_at(
+                type_start,
+                p.prev_end_pos,
+                DiagnosticCategory::Message(
+                    super::core::error_messages::TYPE_DEFINITION_IN_FUNCTION.to_string(),
+                ),
+            );
+            parse_newline_or_semicolon_expr_block(p);
+            parse_expr_block(p)
         }
-
-        // If the record field starts with a module path (Uident or dotted),
-        // require a `:`/`?` to avoid misclassifying `{Foo.bar}` blocks as records.
-        if started_with_uident || parts > 1 {
-            matches!(state.token, Token::Colon | Token::Comma)
-        } else {
-            // Also check for error case: {ident1 ident2:...}
-            // This is when first identifier is followed by another identifier (on a different line)
-            // or followed by another identifier and then a colon (on same line)
-            // OCaml handles this specially to give good error messages for record fields
-            if matches!(state.token, Token::Lident(_)) {
-                // Skip the second identifier
-                state.next();
-                // If colon follows, this is likely {ident1 ident2: value} - missing comma
-                // If another identifier follows or something else, might be a record error case
-                // We'll return true to let the record field parsing handle the error
-                return matches!(state.token, Token::Colon | Token::Lident(_));
+        _ => {
+            let mut e1 = parse_expr(p);
+            if !attrs.is_empty() {
+                let mut all = attrs;
+                all.extend(e1.pexp_attributes.into_vec());
+                e1.pexp_attributes = all;
             }
-            // Include Token::Equal to detect {foo = value} as a record with wrong separator
-            // OCaml res_core.ml line 3206 handles this case
-            matches!(state.token, Token::Colon | Token::Comma | Token::Equal)
-        }
-    });
-
-    // Check if this looks like a JS object literal: { "key": value }
-    let is_js_object = p.lookahead(|state| {
-        if let Token::String(_) = &state.token {
-            state.next();
-            matches!(state.token, Token::Colon | Token::Equal)
-        } else {
-            false
-        }
-    });
-
-    if is_record {
-        let fields = parse_record_fields(p);
-        p.expect(Token::Rbrace);
-        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-        return Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((fields, None)))),
-            pexp_loc: loc,
-            pexp_attributes: Attributes::new(),
-        };
-    }
-
-    if is_js_object {
-        return parse_js_object_expr(p, start_pos_idx);
-    }
-
-    // Check for braced arrow function: {ident =>} (like OCaml's special case)
-    // OCaml handles {ident =>} specially by extending the pattern location to include {
-    let is_braced_arrow_ident = p.lookahead(|state| {
-        if let Token::Lident(_) = &state.token {
-            state.next();
-            matches!(state.token, Token::EqualGreater)
-        } else {
-            false
-        }
-    });
-
-    if is_braced_arrow_ident {
-        return parse_braced_arrow_ident(p, start_pos_idx);
-    }
-
-    // Special handling for identifier followed by semicolon: {a;} or {a; b()}
-    // OCaml creates the ident expression WITHOUT ~loc when followed by semicolon,
-    // which defaults to Location.none (ghost location).
-    // This matches res_core.ml line 3248-3250.
-    let is_ident_semicolon = p.lookahead(|state| {
-        if let Token::Lident(_) | Token::Uident(_) = &state.token {
-            // Check for simple ident or dotted path (Foo.bar)
-            loop {
-                state.next();
-                if state.token == Token::Dot {
-                    state.next();
-                    if !matches!(state.token, Token::Lident(_) | Token::Uident(_)) {
-                        return false;
-                    }
-                } else {
-                    break;
+            parse_newline_or_semicolon_expr_block(p);
+            if grammar::is_block_expr_start(&p.token) {
+                let e2 = parse_expr_block(p);
+                let loc = p.mk_loc_spanning_preserve_ghost(e1.pexp_loc, e2.pexp_loc);
+                let e1 = p.arena_mut().push_expr(e1);
+                let e2 = p.arena_mut().push_expr(e2);
+                Expression {
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_sequence(e1, e2)),
+                    pexp_loc: loc,
+                    pexp_attributes: Attributes::new(),
                 }
+            } else {
+                e1
             }
-            matches!(state.token, Token::Semicolon)
-        } else {
-            false
         }
-    });
-
-    if is_ident_semicolon {
-        return parse_braced_ident_semicolon(p, start_pos_idx);
     }
-
-    // Fall back to block expression
-    parse_block_expr(p, start_pos_idx)
 }
 
-/// Parse braced expression starting with identifier followed by semicolon: {a;} or {a; b()}
-/// OCaml creates the ident expression WITHOUT ~loc when followed by semicolon,
-/// which defaults to Location.none (ghost location).
-fn parse_braced_ident_semicolon(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
-    // Parse the value/constructor expression
-    let mut ident_expr = parse_value_or_constructor(p);
-
-    // Set the expression location to ghost (matching OCaml's behavior)
-    // OCaml: Ast_helper.Exp.ident path_ident  <- no ~loc, defaults to Location.none
-    ident_expr.pexp_loc = LocIdx::none();
-
-    // Consume the semicolon
-    p.expect(Token::Semicolon);
-
-    // Parse the rest of the block (if any)
-    let rest = parse_block_body(p);
-
-    p.expect(Token::Rbrace);
-    let braces_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    // Build the final expression
-    let mut expr = if let Some(rest_expr) = rest {
-        // Create sequence: a; b()
-        // OCaml: loc = {e1.pexp_loc with loc_end = e2.pexp_loc.loc_end}
-        // Since e1 has ghost loc, the sequence loc should also be ghost
-        let seq_loc = p.mk_loc_spanning_preserve_ghost(ident_expr.pexp_loc, rest_expr.pexp_loc);
-        let e1_idx = p.arena_mut().push_expr(ident_expr);
-        let e2_idx = p.arena_mut().push_expr(rest_expr);
-        Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_sequence(e1_idx, e2_idx)),
-            pexp_loc: seq_loc,
-            pexp_attributes: Attributes::new(),
-        }
-    } else {
-        // Just the identifier with trailing semicolon: {a;}
-        ident_expr
-    };
-
-    // Add res.braces attribute
-    let braces_attr = make_braces_attr(p.arena_mut(), braces_loc);
-    expr.pexp_attributes.insert(0, braces_attr);
-
-    expr
-}
-
-/// Check if a token starts a block expression (vs record).
-fn is_block_expression_start(token: &Token<'_>) -> bool {
-    matches!(
-        token,
-        Token::Open
-            | Token::Module
-            | Token::Exception
-            | Token::Typ
-            | Token::Let { .. }
-            | Token::If
-            | Token::Switch
-            | Token::While
-            | Token::For
-            | Token::Try
-            | Token::At // attribute
-    )
-}
-
-/// Parse the special `{ident => body}` braced arrow function.
-/// OCaml extends the pattern location to include `{` for this case.
-fn parse_braced_arrow_ident(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
-    // Get the identifier
-    let ident_name = match &p.token {
-        Token::Lident(name) => name.clone(),
-        _ => panic!("Expected Lident in parse_braced_arrow_ident"),
-    };
-    let _ident_start_idx = p.start_pos_idx();
-    p.next();
-    let ident_end_idx = p.prev_end_pos_idx();
-
-    // The pattern location is from `{` to end of ident (like OCaml)
-    let pat_loc = p.mk_loc_idx(start_pos_idx, ident_end_idx);
-    let var_loc = pat_loc;
-
-    // Create the pattern with extended location
-    let str_idx = p.arena_mut().push_interned_string(&ident_name);
-    let pat = Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_var(with_loc(str_idx, var_loc))),
-        ppat_loc: pat_loc,
-        ppat_attributes: Attributes::new(),
-    };
-
-    // Expect and consume =>
-    p.expect(Token::EqualGreater);
-
-    // The parameter's start_pos is the `{` position (for OCaml compatibility)
-    let term_param = super::core::FundefTermParam {
-        attrs: Attributes::new(),
-        label: ArgLabel::Nolabel,
-        expr: None,
-        pat,
-        start_pos_idx,
-        comptime: false,
-    };
-
-    // Parse as an arrow expression with the pre-built parameter
-    let arrow_expr =
-        parse_es6_arrow_expression_with_params(p, false, vec![term_param], ExprContext::Ordinary);
-
-    // Parse any binary operators
-    let arrow_expr = parse_binary_expr(p, arrow_expr, 1, ExprContext::Ordinary);
-    let arrow_expr = parse_ternary_expr(p, arrow_expr);
-
-    // Handle semicolon and continuation (block expression semantics)
-    parse_newline_or_semicolon_expr_block(p);
-
-    let expr = if p.token != Token::Rbrace && p.token != Token::Eof {
-        // There's more content - parse as sequence
-        if let Some(rest) = parse_block_body(p) {
-            let new_loc = p.mk_loc_spanning(arrow_expr.pexp_loc, rest.pexp_loc);
-            Expression {
-                pexp_desc: {
-                    let e1_idx = p.arena_mut().push_expr(arrow_expr);
-                    let e2_idx = p.arena_mut().push_expr(rest);
-                    Box::new(ExpressionDesc::Pexp_sequence(e1_idx, e2_idx))
-                },
-                pexp_loc: new_loc,
-                pexp_attributes: Attributes::new(),
-            }
-        } else {
-            arrow_expr
-        }
-    } else {
-        arrow_expr
-    };
-
-    p.expect(Token::Rbrace);
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    // Add res.braces attribute
-    let braces_attr = make_braces_attr(p.arena_mut(), loc);
-    let mut result = expr;
-    result.pexp_attributes.insert(0, braces_attr);
-    result
-}
-
-/// Parse an expression block body WITHOUT adding res.braces.
-/// This is used for if-then-else branches, for loops, while loops, etc.
-/// where the block is structurally required and res.braces is not needed.
-/// Note: This does NOT consume the closing Rbrace - the caller must do that.
-fn parse_expr_block(p: &mut Parser<'_>) -> Expression {
-    let _start_pos_idx = p.start_pos_idx();
-    // OCaml: leave_breadcrumb ExprBlock - critical for error recovery
-    // This allows should_abort_list_parse to detect } as a block terminator
-    p.leave_breadcrumb(Grammar::ExprBlock);
-    // OCaml `parse_expr_block` always parses a first item
-    // (compiler/syntax/src/res_core.ml:3672-3688), so an empty body reports
-    // the missing expression.
-    let body = parse_block_body_required(p);
-    p.eat_breadcrumb();
-    body
-}
-
-/// Parse a block expression { stmt1; stmt2; expr } WITH res.braces attribute.
-/// This is used for standalone braced expressions where res.braces is needed
-/// to preserve the bracing information.
-fn parse_block_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
-    // OCaml: leave_breadcrumb ExprBlock - critical for error recovery
-    p.leave_breadcrumb(Grammar::ExprBlock);
-    // OCaml `parse_braced_or_record_expr` handles `{}` itself and otherwise
-    // calls `parse_expr_block`, which always parses a first item.
-    let body = if p.token == Token::Rbrace {
-        None
-    } else {
-        Some(parse_block_body_required(p))
-    };
-
-    p.eat_breadcrumb();
-    p.expect(Token::Rbrace);
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    let mut expr = match body {
-        Some(e) => e,
-        None => ast_helper::make_unit(p, loc.clone()),
-    };
-
-    // Note: The special {ident =>} case is handled separately by parse_braced_arrow_ident.
-    // For other arrow functions inside braces ({_ => ...}, {() => ...}, {(x, y) => ...}),
-    // parse_es6_arrow_expression already sets the location correctly at line 745-749.
-    // We should NOT override it here.
-
-    // Add res.braces attribute to mark this as a braced expression
-    let braces_attr = make_braces_attr(p.arena_mut(), loc);
-    expr.pexp_attributes.insert(0, braces_attr);
-
-    expr
-}
-
-/// Parse the body of a block expression.
-/// Returns None if the block is empty, Some(expr) otherwise.
-/// This properly nests let/module/open/exception with their continuation as the body.
-fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
-    // Continuation items: OCaml only continues a block when
-    // `Grammar.is_block_expr_start` holds (compiler/syntax/src/res_core.ml:3630-3650),
-    // and that predicate excludes `type` (res_grammar.ml:266-273). Only the first
-    // item of a block reaches the `Typ` branch of `parse_expr_block_item`.
-    while p.token == Token::Semicolon {
-        p.next();
-    }
-    if !grammar::is_block_expr_start(&p.token) {
-        return None;
-    }
-    parse_block_body_first(p)
-}
-
-/// Body after `module`/`exception`/`open` block items: OCaml calls
-/// `parse_expr_block` unconditionally (compiler/syntax/src/res_core.ml:3605-3620),
-/// so a missing body is reported by `parse_expr` instead of becoming `()`.
-fn parse_block_body_required(p: &mut Parser<'_>) -> Expression {
-    if matches!(p.token, Token::Rbrace | Token::Eof) {
-        return parse_expr(p);
-    }
-    parse_block_body_first(p).unwrap_or_else(|| recover::default_expr(p.arena_mut()))
-}
-
-/// First item of a block: OCaml `parse_expr_block` parses one item unconditionally.
-fn parse_block_body_first(p: &mut Parser<'_>) -> Option<Expression> {
-    // Skip leading semicolons
-    while p.token == Token::Semicolon {
-        p.next();
-    }
-
-    // Check if we can parse more expressions.
-    // OCaml parse_expr_block always parses leading attributes/doc comments first
-    // (via parse_expr_block_item -> parse_attributes), then decides what to parse.
-    // Keep the early return only for hard block terminators before consuming attrs.
-    if p.token == Token::Rbrace || p.token == Token::Eof {
-        return None;
-    }
-
-    // Check for comptime builtins before consuming attributes
-    if p.token == Token::At {
-        let is_comptime_builtin = p.lookahead(|p| {
+/// Whether the current token starts a Rust-only comptime builtin expression.
+fn is_comptime_builtin_start(p: &mut Parser<'_>) -> bool {
+    p.token == Token::At
+        && p.lookahead(|p| {
             p.next();
-            match &p.token {
-                Token::Lident(s) => matches!(
+            matches!(
+                &p.token,
+                Token::Lident(s) if matches!(
                     s.as_ref(),
                     "typeInfo"
                         | "field"
@@ -4268,382 +4442,39 @@ fn parse_block_body_first(p: &mut Parser<'_>) -> Option<Expression> {
                         | "variantCase"
                         | "buildRecord"
                         | "recordField"
-                ),
-                _ => false,
-            }
-        });
-        if is_comptime_builtin {
-            let expr = parse_comptime_builtin_expr(p);
-            let expr = parse_primary_expr(p, expr, false);
-            // Check for sequence continuation
-            if p.token == Token::Semicolon {
-                p.next();
-                return match parse_block_body(p) {
-                    Some(rest) => {
-                        let loc = expr.pexp_loc;
-                        let e_idx = p.arena_mut().push_expr(expr);
-                        let r_idx = p.arena_mut().push_expr(rest);
-                        Some(Expression {
-                            pexp_desc: Box::new(ExpressionDesc::Pexp_sequence(e_idx, r_idx)),
-                            pexp_loc: loc,
-                            pexp_attributes: Attributes::new(),
-                        })
-                    }
-                    None => Some(expr),
-                };
-            }
-            return Some(expr);
-        }
-    }
-
-    // Parse any leading attributes
-    let attrs = parse_attributes(p);
-
-    // After consuming attributes, keep OCaml's behavior:
-    // - if no attrs and token can't start a block item, stop block parsing
-    //   (important for cases like `else` following an if-then block)
-    // - if attrs were present, continue and let parse_expr produce diagnostics
-    //   for invalid constructs (matches OCaml's parse_expr_block_item flow)
-
-
-    // Upstream #8348: break/continue as block items.
-    if matches!(p.token, Token::Break | Token::Continue) {
-        let start_idx = p.start_pos_idx();
-        let is_break = matches!(p.token, Token::Break);
-        p.next();
-        let loc = p.mk_loc_idx_to_prev_end(start_idx);
-        let desc = if is_break {
-            ExpressionDesc::Pexp_break
-        } else {
-            ExpressionDesc::Pexp_continue
-        };
-        let mut expr = Expression {
-            pexp_desc: Box::new(desc),
-            pexp_loc: loc,
-            pexp_attributes: attrs,
-        };
-        // Continue with sequence handling like other block items.
-        if p.token == Token::Semicolon {
-            p.next();
-            return match parse_block_body(p) {
-                Some(rest) => {
-                    let e_idx = p.arena_mut().push_expr(expr);
-                    let r_idx = p.arena_mut().push_expr(rest);
-                    Some(Expression {
-                        pexp_desc: Box::new(ExpressionDesc::Pexp_sequence(e_idx, r_idx)),
-                        pexp_loc: loc,
-                        pexp_attributes: Attributes::new(),
-                    })
-                }
-                None => Some(expr),
-            };
-        }
-        // No semicolon — try newline-or-semicolon expr block continuation
-        parse_newline_or_semicolon_expr_block(p);
-        if let Some(rest) = parse_block_body(p) {
-            let e_idx = p.arena_mut().push_expr(expr);
-            let r_idx = p.arena_mut().push_expr(rest);
-            return Some(Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_sequence(e_idx, r_idx)),
-                pexp_loc: loc,
-                pexp_attributes: Attributes::new(),
-            });
-        }
-        let _ = expr.pexp_attributes; // appease borrow if any
-        return Some(expr);
-    }
-
-    // Parse the first expression/statement
-    let mut expr = match &p.token {
-        Token::Open => {
-            let expr_start_idx = p.start_pos_idx();
-            p.next();
-            // Check for override flag (open!)
-            let override_flag = if p.token == Token::Bang {
-                p.next();
-                OverrideFlag::Override
-            } else {
-                OverrideFlag::Fresh
-            };
-            let lid = parse_module_longident(p);
-
-            // Check consecutive expressions
-            parse_newline_or_semicolon_expr_block(p);
-
-            // Parse the rest of the block as the body
-            let body = parse_block_body_required(p);
-
-            // OCaml uses p.prev_end_pos for Pexp_open location
-            let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
-            Expression {
-                pexp_desc: {
-                    let body_idx = p.arena_mut().push_expr(body);
-                    Box::new(ExpressionDesc::Pexp_open(Box::new((
-                        override_flag,
-                        lid,
-                        body_idx,
-                    ))))
-                },
-                pexp_loc: loc,
-                pexp_attributes: Attributes::new(),
-            }
-        }
-        Token::Let { .. } => {
-            // For let bindings, attributes go on the binding, not the expression
-            // Return early to avoid adding attrs to the expression at the end
-            return Some(parse_let_in_block_with_continuation_and_attrs(p, attrs));
-        }
-        Token::Module => {
-            let expr_start_idx = p.start_pos_idx();
-            p.next();
-            // Check for first-class module: module(Expr) or module(Expr: Type)
-            if p.token == Token::Lparen {
-                // Parse the first-class module and continue with full expression
-                let pack_expr = parse_first_class_module_expr(p, expr_start_idx);
-                let expr = parse_expr_with_operand(p, pack_expr);
-
-                // Check consecutive expressions
-                parse_newline_or_semicolon_expr_block(p);
-
-                // Check for continuation
-                if let Some(rest) = parse_block_body(p) {
-                    let new_loc = p.mk_loc_spanning(expr.pexp_loc, rest.pexp_loc);
-                    Expression {
-                        pexp_desc: {
-                            let e1_idx = p.arena_mut().push_expr(expr);
-                            let e2_idx = p.arena_mut().push_expr(rest);
-                            Box::new(ExpressionDesc::Pexp_sequence(e1_idx, e2_idx))
-                        },
-                        pexp_loc: new_loc,
-                        pexp_attributes: Attributes::new(),
-                    }
-                } else {
-                    expr
-                }
-            } else {
-                // Parse module definition: module M = expr or module M: T = expr
-                let module_name = parse_module_name(p);
-
-                // Check for optional type constraint: module M: T = expr
-                let mod_type = if p.token == Token::Colon {
-                    p.next();
-                    Some(super::module::parse_module_type(p))
-                } else {
-                    None
-                };
-
-                p.expect(Token::Equal);
-                let mut module_expr = super::module::parse_module_expr(p);
-
-                // If there's a type constraint, wrap the expression
-                // For `module M: T = E`, the constraint type T appears before =, so
-                // the location spans from mod_type start to module_expr end
-                if let Some(mod_type) = mod_type {
-                    let loc = p.mk_loc_spanning(mod_type.pmty_loc, module_expr.pmod_loc);
-                    module_expr = ModuleExpr {
-                        pmod_desc: {
-                            let me_idx = p.arena_mut().push_mod_expr(module_expr);
-                            let mt_idx = p.arena_mut().push_mod_type(mod_type);
-                            Box::new(ModuleExprDesc::Pmod_constraint(me_idx, mt_idx))
-                        },
-                        pmod_loc: loc,
-                        pmod_attributes: Attributes::new(),
-                    };
-                }
-
-                // Check consecutive expressions
-                parse_newline_or_semicolon_expr_block(p);
-
-                // Parse the rest of the block as the body
-                let body = parse_block_body_required(p);
-
-                // OCaml uses p.prev_end_pos for Pexp_letmodule location
-                let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
-                Expression {
-                    pexp_desc: {
-                        let body_idx = p.arena_mut().push_expr(body);
-                        let me_idx = p.arena_mut().push_mod_expr(module_expr);
-                        Box::new(ExpressionDesc::Pexp_letmodule(Box::new((
-                            module_name,
-                            me_idx,
-                            body_idx,
-                        ))))
-                    },
-                    pexp_loc: loc,
-                    pexp_attributes: Attributes::new(),
-                }
-            }
-        }
-        Token::Exception => {
-            // Capture start position BEFORE consuming 'exception' for accurate location
-            let expr_start_idx = p.start_pos_idx();
-            p.next();
-            let ext = super::module::parse_extension_constructor(
-                p,
-                Attributes::new(),
-                Some(expr_start_idx),
-            );
-
-            // Check consecutive expressions
-            parse_newline_or_semicolon_expr_block(p);
-
-            // Parse the rest of the block as the body
-            let body = parse_block_body_required(p);
-
-            // OCaml uses p.prev_end_pos for Pexp_letexception location
-            let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
-            Expression {
-                pexp_desc: {
-                    let body_idx = p.arena_mut().push_expr(body);
-                    Box::new(ExpressionDesc::Pexp_letexception(Box::new((ext, body_idx))))
-                },
-                pexp_loc: loc,
-                pexp_attributes: Attributes::new(),
-            }
-        }
-        Token::Typ => {
-            // OCaml `parse_expr_block_item` (compiler/syntax/src/res_core.ml:3637-3646):
-            // parse the definition for a good error location, then report it.
-            let type_start = p.start_pos.clone();
-            let type_start_idx = p.start_pos_idx();
-            p.begin_region();
-            let _ = super::module::parse_type_definition_or_extension(p, &attrs, type_start_idx);
-            p.end_region();
-            p.err_at(
-                type_start,
-                p.prev_end_pos.clone(),
-                super::diagnostics::DiagnosticCategory::Message(
-                    super::core::error_messages::TYPE_DEFINITION_IN_FUNCTION.to_string(),
-                ),
-            );
-            parse_newline_or_semicolon_expr_block(p);
-            return parse_block_body_first(p);
-        }
-        _ => {
-            let mut expr = parse_expr(p);
-
-            // Attach any leading attributes to this expression (before any sequence wrapping)
-            if !attrs.is_empty() {
-                expr.pexp_attributes.extend(attrs.clone());
-            }
-
-            // Check consecutive expressions
-            parse_newline_or_semicolon_expr_block(p);
-
-            // Check for continuation
-            if let Some(rest) = parse_block_body(p) {
-                let new_loc = p.mk_loc_spanning(expr.pexp_loc, rest.pexp_loc);
-                return Some(Expression {
-                    pexp_desc: {
-                        let e1_idx = p.arena_mut().push_expr(expr);
-                        let e2_idx = p.arena_mut().push_expr(rest);
-                        Box::new(ExpressionDesc::Pexp_sequence(e1_idx, e2_idx))
-                    },
-                    pexp_loc: new_loc,
-                    pexp_attributes: Attributes::new(),
-                });
-            } else {
-                let expr = over_parse_constrained_or_coerced_or_arrow_expression(p, expr);
-                return Some(expr);
-            }
-        }
-    };
-
-    // Attach any leading attributes to the expression (for let/open/module/exception cases)
-    if !attrs.is_empty() {
-        expr.pexp_attributes.extend(attrs);
-    }
-
-    Some(expr)
+                )
+            )
+        })
 }
 
-fn parse_let_in_block_with_continuation_and_attrs(
-    p: &mut Parser<'_>,
-    leading_attrs: Attributes,
-) -> Expression {
-    // If there are leading attributes, the value_binding location should start from them
-    // OCaml includes leading attributes in the binding location
-    let binding_start_pos_idx = if let Some(attr) = leading_attrs.first() {
-        if p.arena().get_string(attr.0.txt) == "res.doc" {
-            // Parser-inserted `res.doc` comments should not alias the attribute's
-            // existing start position object in value_binding locations.
-            let start_pos = p.loc_start(attr.0.loc);
-            p.arena_mut().push_position(start_pos)
-        } else {
-            p.loc_start_idx(attr.0.loc)
+/// OCaml `parse_expr_block` without `?first` (res_core.ml:3672-3688).
+fn parse_expr_block(p: &mut Parser<'_>) -> Expression {
+    parse_expr_block_first(p, None)
+}
+
+/// OCaml `parse_expr_block ?first` (compiler/syntax/src/res_core.ml:3672-3688).
+fn parse_expr_block_first(p: &mut Parser<'_>, first: Option<Expression>) -> Expression {
+    p.leave_breadcrumb(Grammar::ExprBlock);
+    let item = match first {
+        Some(e) => e,
+        None => parse_expr_block_item(p),
+    };
+    parse_newline_or_semicolon_expr_block(p);
+    let block_expr = if grammar::is_block_expr_start(&p.token) {
+        let next = parse_expr_block_item(p);
+        let loc = p.mk_loc_spanning_preserve_ghost(item.pexp_loc, next.pexp_loc);
+        let item = p.arena_mut().push_expr(item);
+        let next = p.arena_mut().push_expr(next);
+        Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_sequence(item, next)),
+            pexp_loc: loc,
+            pexp_attributes: Attributes::new(),
         }
     } else {
-        p.start_pos_idx()
+        item
     };
-
-    // Consume let token
-    let unwrap = match &p.token {
-        Token::Let { unwrap } => *unwrap,
-        _ => false,
-    };
-    p.next();
-    // Track let?/let? rec span end for let.unwrap location (OCaml uses p.start_pos).
-    let mut let_end_pos_idx = p.start_pos_idx();
-
-    // Check for rec
-    let rec_flag = if p.token == Token::Rec {
-        p.next();
-        let_end_pos_idx = p.start_pos_idx();
-        RecFlag::Recursive
-    } else {
-        RecFlag::Nonrecursive
-    };
-
-    // OCaml `parse_let_bindings` (compiler/syntax/src/res_core.ml:2790-2825) is
-    // shared by structure items and block items.
-    if rec_flag == RecFlag::Recursive && unwrap {
-        let start = p.arena().get_position(binding_start_pos_idx).clone();
-        p.err_at(
-            start,
-            p.start_pos.clone(),
-            DiagnosticCategory::Message(
-                "let? is not allowed to be recursive. Use a regular `let` or remove `rec`."
-                    .to_string(),
-            ),
-        );
-    }
-    let (bindings, _) = super::module::parse_let_bindings(
-        p,
-        binding_start_pos_idx,
-        let_end_pos_idx,
-        rec_flag,
-        leading_attrs,
-        unwrap,
-    );
-
-    // Check consecutive expressions
-    parse_newline_or_semicolon_expr_block(p);
-
-    // Parse the rest of the block as the body
-    let rest = parse_block_body(p);
-    let _is_implicit_body = rest.is_none();
-    let body = rest.unwrap_or_else(|| {
-        // OCaml: when block ends without trailing expression, implicit () is at the } position
-        let loc = p.mk_loc_current();
-        ast_helper::make_unit(p, loc)
-    });
-
-    // OCaml: Pexp_let location always uses p.prev_end_pos after parsing body
-    // This is different from body.pexp_loc.loc_end in some cases
-    let let_end_idx = p.prev_end_pos_idx();
-
-    let loc = p.mk_loc_idx(binding_start_pos_idx, let_end_idx);
-
-    Expression {
-        pexp_desc: {
-            let body_idx = p.arena_mut().push_expr(body);
-            Box::new(ExpressionDesc::Pexp_let(Box::new((
-                rec_flag, bindings, body_idx,
-            ))))
-        },
-        pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
-    }
+    p.eat_breadcrumb();
+    over_parse_constrained_or_coerced_or_arrow_expression(p, block_expr)
 }
 
 /// Parse a module name.
@@ -4664,344 +4495,9 @@ fn parse_module_name(p: &mut Parser<'_>) -> Located<StrIdx> {
     }
 }
 
-/// Parse a module long identifier.
-fn parse_module_longident(p: &mut Parser<'_>) -> Located<LidentIdx> {
-    let start_pos_idx = p.start_pos_idx();
-    let mut parts = vec![];
 
-    loop {
-        match &p.token {
-            Token::Uident(name) => {
-                parts.push(name.to_string());
-                p.next();
-                if p.token == Token::Dot {
-                    p.next();
-                } else {
-                    break;
-                }
-            }
-            _ => {
-                p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
-                if !parts.is_empty() {
-                    parts.push("_".to_string());
-                }
-                break;
-            }
-        }
-    }
 
-    if parts.is_empty() {
-        parts.push("_".to_string());
-    }
 
-    let lid = super::core::build_longident(p.arena_mut(), &parts);
-    let lid_idx = p.push_longident(lid);
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    with_loc(lid_idx, loc)
-}
-
-/// Handle comma after parsing a record field, matching OCaml's parse_comma_delimited_region.
-/// Returns true if parsing should continue, false if it should stop.
-fn handle_record_field_comma(p: &mut Parser<'_>) -> bool {
-    if p.token == Token::Comma {
-        p.next();
-        true
-    } else if p.token == Token::Rbrace || p.token == Token::Eof {
-        false
-    } else if grammar::is_record_row_start(&p.token) {
-        // Token looks like another field but no comma - missing comma case
-        p.expect(Token::Comma);
-        true
-    } else if !recover::should_abort_list_parse(p) {
-        // Unexpected token, not closing/EOF/abort - expect comma
-        p.expect(Token::Comma);
-        if p.token == Token::Semicolon {
-            p.next();
-        }
-        true
-    } else {
-        false
-    }
-}
-
-/// Parse record fields.
-fn parse_record_fields(p: &mut Parser<'_>) -> Vec<ExpressionRecordField> {
-    let mut fields = vec![];
-
-    p.leave_breadcrumb(Grammar::RecordRows);
-
-    while p.token != Token::Rbrace && p.token != Token::Eof {
-        let field_start_idx = p.start_pos_idx();
-
-        // Check for additional spread (second spread is an error)
-        // OCaml: parse_record_expr_row checks for DotDotDot and emits error
-        if p.token == Token::DotDotDot {
-            p.err(DiagnosticCategory::Message(
-                super::core::error_messages::RECORD_EXPR_SPREAD.to_string(),
-            ));
-            p.next();
-        }
-
-        // Check for optional field punning: { ? name, ... }
-        let opt_punning = p.token == Token::Question;
-        if opt_punning {
-            p.next();
-        }
-        // For optional punned fields, the expression location starts after the '?'
-        // OCaml: the expression location is just the identifier, not including '? '
-        let expr_start_idx = if opt_punning {
-            p.start_pos_idx()
-        } else {
-            field_start_idx
-        };
-
-        // Support qualified record labels: {Module.label: value}
-        // OCaml: Lident/Uident case in parse_record_expr_row
-        let mut parts: Vec<String> = vec![];
-        loop {
-            match &p.token {
-                Token::Lident(name) | Token::Uident(name) => {
-                    parts.push(name.to_string());
-                    p.next();
-                }
-                _ => break,
-            }
-            if p.token == Token::Dot {
-                p.next();
-            } else {
-                break;
-            }
-        }
-
-        // If parts is empty, check for keyword field
-        // OCaml: Token.is_keyword p.token case in parse_record_expr_row
-        if parts.is_empty() {
-            if p.token.is_keyword() {
-                // Try to recover keyword as field name if followed by colon
-                if let Some((recovered_name, loc)) =
-                    super::core::recover_keyword_field_name_if_probably_field(
-                        p,
-                        super::core::error_messages::keyword_field_in_expr,
-                    )
-                {
-                    // OCaml: Parser.expect Colon p
-                    p.expect(Token::Colon);
-                    // Check for optional marker after colon: name: ? value
-                    let opt = p.token == Token::Question;
-                    if opt {
-                        p.next();
-                    }
-                    let expr = parse_expr(p);
-                    let lid_idx = p.push_lident(&recovered_name);
-                    let lid = with_loc(lid_idx, loc);
-                    let expr_idx = p.arena_mut().push_expr(expr);
-                    fields.push(ExpressionRecordField {
-                        lid,
-                        expr: expr_idx,
-                        opt,
-                    });
-                    if !handle_record_field_comma(p) {
-                        break;
-                    }
-                    continue;
-                } else {
-                    // Just emit the error and break
-                    super::core::emit_keyword_field_error(
-                        p,
-                        super::core::error_messages::keyword_field_in_expr,
-                    );
-                    break;
-                }
-            }
-            // Token is not a valid field start - check if we should continue or stop
-            if p.token == Token::Rbrace
-                || p.token == Token::Eof
-                || recover::should_abort_list_parse(p)
-            {
-                break;
-            }
-            // Unexpected token - report error and skip
-            p.err_unexpected();
-            p.next();
-            continue;
-        }
-
-        let lid_unloc = super::core::build_longident(p.arena_mut(), &parts);
-        let lid_idx = p.push_longident(lid_unloc);
-        let (lid, expr, opt) = if p.token == Token::Colon {
-            // field: value or field: ? value
-            // Capture lid location - just the identifier, not including the colon
-            let lid_end_idx = p.prev_end_pos_idx();
-            p.next();
-            let lid_loc = p.mk_loc_idx(field_start_idx, lid_end_idx);
-            // Check for optional marker after colon: name: ? value
-            let opt = p.token == Token::Question;
-            if opt {
-                p.next();
-            }
-            let expr = parse_expr(p);
-            (with_loc(lid_idx, lid_loc), expr, opt)
-        } else if p.token == Token::Equal {
-            // OCaml: Token.Equal case in parse_record_expr_row
-            // {field=value} instead of {field: value}
-            let lid_end_idx = p.prev_end_pos_idx();
-            p.err_at(
-                p.start_pos.clone(),
-                p.end_pos.clone(),
-                DiagnosticCategory::message(
-                    "Records use `:` when assigning fields. Example: `{field: value}`",
-                ),
-            );
-            p.next(); // consume =
-            let lid_loc = p.mk_loc_idx(field_start_idx, lid_end_idx);
-            let opt = p.token == Token::Question;
-            if opt {
-                p.next();
-            }
-            let expr = parse_expr(p);
-            (with_loc(lid_idx, lid_loc), expr, opt)
-        } else if matches!(p.token, Token::Lident(_)) {
-            // OCaml res_core.ml line 3229-3247: Error case where ident is followed by another ident
-            // Example: {updateF value:...} where updateF and value are separate identifiers
-            // If they are on different lines, emit "Did you forget a `,`?"
-            // If they are on the same line, emit "Did you forget a `:`?"
-            let prev_line = p.prev_end_pos.line;
-            let curr_line = p.start_pos.line;
-
-            // Punning: this field is punned (value is same as name)
-            let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
-            // For simple identifiers, reuse lid_idx for sharing
-            let is_simple = matches!(p.arena().get_longident(lid_idx), Longident::Lident(_));
-            let punned_expr = if is_simple {
-                ast_helper::make_ident_idx(lid_idx, loc)
-            } else {
-                let pun_idx = p.arena().get_longident(lid_idx).last_idx();
-                ast_helper::make_ident(p, Longident::Lident(pun_idx), loc)
-            };
-            let lid = with_loc(lid_idx, loc);
-
-            // Emit appropriate error and expect comma or colon
-            if prev_line < curr_line {
-                // Different lines - expect comma
-                p.expect(Token::Comma);
-            } else {
-                // Same line - expect colon
-                p.expect(Token::Colon);
-            }
-
-            (lid, punned_expr, opt_punning)
-        } else {
-            // Punning: field is same as variable
-            // For optional punned fields, the expression location is just the identifier (using expr_start)
-            let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
-            // For simple identifiers (Lident), reuse the same lid_idx for both the
-            // field label and the expression to match OCaml's sharing behavior.
-            // For qualified paths (Ldot), OCaml uses remove_module_name_from_punned_field_value
-            // which creates a new Lident with just the last component.
-            let is_simple = matches!(p.arena().get_longident(lid_idx), Longident::Lident(_));
-            let expr = if is_simple {
-                ast_helper::make_ident_idx(lid_idx, loc)
-            } else {
-                let pun_idx = p.arena().get_longident(lid_idx).last_idx();
-                ast_helper::make_ident(p, Longident::Lident(pun_idx), loc)
-            };
-            (with_loc(lid_idx, loc), expr, opt_punning)
-        };
-
-        let expr_idx = p.arena_mut().push_expr(expr);
-        fields.push(ExpressionRecordField {
-            lid,
-            expr: expr_idx,
-            opt,
-        });
-
-        if !handle_record_field_comma(p) {
-            break;
-        }
-    }
-
-    p.eat_breadcrumb();
-    fields
-}
-
-/// Parse a JS object expression: { "key": value, ... }.
-/// Returns a %obj extension wrapping a record.
-fn parse_js_object_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
-    let mut fields = vec![];
-
-    while p.token != Token::Rbrace && p.token != Token::Eof {
-        if let Token::String(key) = &p.token {
-            let key = key.clone();
-            let field_start_idx = p.start_pos_idx();
-            p.next();
-
-            // The lid location should be just the key, not including the value
-            let key_loc = p.mk_loc_idx_to_prev_end(field_start_idx);
-            let lid_idx = p.push_lident(&*key);
-
-            if p.token == Token::Colon || p.token == Token::Equal {
-                if p.token == Token::Equal {
-                    p.err(DiagnosticCategory::message(
-                        super::core::error_messages::RECORD_FIELD_MISSING_COLON,
-                    ));
-                }
-                p.next();
-                let expr = parse_expr(p);
-                let expr_idx = p.arena_mut().push_expr(expr);
-                fields.push(ExpressionRecordField {
-                    lid: with_loc(lid_idx, key_loc),
-                    expr: expr_idx,
-                    opt: false,
-                });
-            } else {
-                // Punning for string keys (less common but valid)
-                let expr = ast_helper::make_ident_idx(lid_idx, key_loc.clone());
-                let expr_idx = p.arena_mut().push_expr(expr);
-                fields.push(ExpressionRecordField {
-                    lid: with_loc(lid_idx, key_loc),
-                    expr: expr_idx,
-                    opt: false,
-                });
-            }
-        } else {
-            break;
-        }
-
-        if !p.optional(&Token::Comma) {
-            break;
-        }
-    }
-
-    p.expect(Token::Rbrace);
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    // Create the inner record expression
-    let record_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((fields, None)))),
-        pexp_loc: loc.clone(),
-        pexp_attributes: Attributes::new(),
-    };
-
-    // Wrap in %obj extension
-    let record_expr_idx = p.arena_mut().push_expr(record_expr);
-    let record_item = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-            record_expr_idx,
-            Attributes::new(),
-        )))),
-        pstr_loc: loc.clone(),
-    };
-
-    let obj_idx = p.arena_mut().intern("obj");
-    Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
-            with_loc(obj_idx, loc.clone()),
-            Payload::PStr(Box::new(vec![record_item])),
-        )))),
-        pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
-    }
-}
 
 // ============================================================================
 // Control Flow Expressions

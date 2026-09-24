@@ -1051,20 +1051,6 @@ pub fn make_unary_expr(
     // General unary operator application
     let token_loc = p.mk_loc_idx(start_pos, token_end);
     let token_string = token.to_string();
-    if matches!(token, Token::Question) {
-        // "?" used as unary operator - use interned string
-        let lid = make_lident_static(p.arena_mut(), "?");
-        let op_expr = ast_helper::make_ident(p, lid, token_loc);
-        let operand_end_idx = p.loc_end_idx(operand.pexp_loc);
-        let loc = p.mk_loc_idx(start_pos, operand_end_idx);
-        return ast_helper::make_apply(
-            p.arena_mut(),
-            op_expr,
-            vec![(ArgLabel::Nolabel, operand)],
-            loc,
-        );
-    }
-
     if matches!(token, Token::Bang) {
         // For "not", use push_lident_static to deduplicate the Lident
         // (OCaml shares the Lident for literal "not" via compiler optimization)
