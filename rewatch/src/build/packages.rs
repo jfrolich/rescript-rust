@@ -726,17 +726,36 @@ fn collect_gentype_source_dirs(package: &Package) -> Vec<PathBuf> {
             return;
         }
         out.push(rel.to_path_buf());
-        let Ok(entries) = std::fs::read_dir(&abs) else {
-            return;
+        out.extend(walk_children(root, rel, &abs));
+    }
+
+    // Subdirectories are walked in parallel; results are concatenated in
+    // directory-entry order, so the output is identical to a serial walk.
+    fn walk_children(root: &Path, rel: &Path, abs: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(abs) else {
+            return Vec::new();
         };
-        for entry in entries.flatten() {
-            let Ok(child_meta) = entry.metadata() else {
-                continue;
-            };
-            if child_meta.is_dir() {
-                walk_recursive(root, &rel.join(entry.file_name()), out);
-            }
-        }
+        let child_dirs: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|entry| {
+                // `file_type` comes from the directory entry itself, so this
+                // avoids an lstat per file. Like `DirEntry::metadata`, it does
+                // not follow symlinks.
+                entry.file_type().is_ok_and(|file_type| file_type.is_dir())
+            })
+            .map(|entry| rel.join(entry.file_name()))
+            .collect();
+        child_dirs
+            .par_iter()
+            .map(|child| {
+                let mut out = Vec::new();
+                walk_recursive(root, child, &mut out);
+                out
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     for source in &package.source_folders {
