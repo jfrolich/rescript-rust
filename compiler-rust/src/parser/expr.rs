@@ -740,19 +740,17 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
 
 /// Parse a unary expression.
 pub fn parse_unary_expr(p: &mut Parser<'_>) -> Expression {
+    // OCaml `parse_unary_expr` (compiler/syntax/src/res_core.ml:2340-2351):
+    // attributes belong to the enclosing operand, not to unary expressions.
     let start_pos_idx = p.start_pos_idx();
 
-    // Parse any leading attributes: @attr expr
-    let attrs = parse_attributes(p);
-
-    let mut expr = match &p.token {
+    match &p.token {
         Token::Plus
         | Token::PlusDot
         | Token::Minus
         | Token::MinusDot
         | Token::Bang
-        | Token::Bnot
-        | Token::Question => {
+        | Token::Bnot => {
             let token = p.token.clone();
             p.leave_breadcrumb(Grammar::ExprUnary);
             p.next();
@@ -765,14 +763,7 @@ pub fn parse_unary_expr(p: &mut Parser<'_>) -> Expression {
             let atomic = parse_atomic_expr(p);
             parse_primary_expr(p, atomic, false)
         }
-    };
-
-    // Attach attributes to the expression
-    if !attrs.is_empty() {
-        expr.pexp_attributes.extend(attrs);
     }
-
-    expr
 }
 
 /// Parse an await expression.
@@ -782,7 +773,9 @@ pub fn parse_await_expression(p: &mut Parser<'_>) -> Expression {
     // Parse with -> precedence to match OCaml behavior
     // This allows: await x->Promise.resolve to parse as await (x->Promise.resolve)
     let token_prec = Token::MinusGreater.precedence();
-    let operand = parse_unary_expr(p);
+    // OCaml `parse_binary_expr` without `~a` starts with `parse_operand_expr`,
+    // which parses the operand's attributes (compiler/syntax/src/res_core.ml:3694-3701).
+    let operand = parse_operand_expr(p, ExprContext::Ordinary);
     let expr = parse_binary_expr(p, operand, token_prec, ExprContext::Ordinary);
     let loc = p.mk_loc_idx_to_end_of(start_pos_idx, expr.pexp_loc);
 
