@@ -5133,6 +5133,29 @@ fn type_pattern_construct(
         unify_pattern_types(tctx, loc, result_ty, expected_ty)?;
     }
 
+    // OCaml typecore.ml:1531-1541: an inline record argument may not be
+    // constrained, directly or under an or-pattern or alias.
+    if cstr_desc.cstr_inlined.is_some()
+        && let Some(arg_pat) = arg
+    {
+        fn check_non_escaping(arena: &ParseArena, pat: &ParsedPattern) -> TypeCoreResult<()> {
+            match &*pat.ppat_desc {
+                crate::parser::ast::PatternDesc::Ppat_or(p1, p2) => {
+                    check_non_escaping(arena, arena.get_pat(*p1))?;
+                    check_non_escaping(arena, arena.get_pat(*p2))
+                }
+                crate::parser::ast::PatternDesc::Ppat_alias(inner, _) => {
+                    check_non_escaping(arena, arena.get_pat(*inner))
+                }
+                crate::parser::ast::PatternDesc::Ppat_constraint(..) => {
+                    Err(TypeCoreError::InlinedRecordEscape { loc: pat.ppat_loc })
+                }
+                _ => Ok(()),
+            }
+        }
+        check_non_escaping(tctx.arena, arg_pat)?;
+    }
+
     // Type check the argument pattern(s)
     let typed_args = match (inst_arg_types.as_slice(), arg) {
         (arg_types, Some(arg_pat)) if arg_types.len() == 1 => {
