@@ -2684,12 +2684,42 @@ fn parse_type_declaration_body(
                 kind = parse_type_kind(p, None, None);
             }
             Token::Lbrace => {
-                // Record type OR object type ({"x": int})
-                if looks_like_object_type_after_lbrace(p) {
+                // OCaml `parse_record_or_object_decl` (res_core.ml:6030-6140)
+                // dispatches on the token after `{`; in the plain case it
+                // parses the leading attributes first and then sees whether a
+                // string field (object) or a record field follows.
+                let after_lbrace = p.lookahead(|state| {
+                    state.next();
+                    match state.token {
+                        Token::Dot | Token::DotDot => 0u8,
+                        Token::DotDotDot => 1,
+                        _ => 2,
+                    }
+                });
+                if after_lbrace == 0
+                    || (after_lbrace == 1 && looks_like_object_type_after_lbrace(p))
+                {
                     let typ = typ::parse_object_decl(p);
                     manifest = Some(p.arena_mut().push_core_type(typ));
-                } else {
+                } else if after_lbrace == 1 {
                     kind = parse_type_kind(p, inline_ctx, inline_ctx.map(|_| &current_type_name_path));
+                } else {
+                    let lbrace_pos_idx = p.start_pos_idx();
+                    p.next();
+                    let leading_attrs = parse_attributes(p);
+                    if matches!(p.token, Token::String(_)) {
+                        let typ =
+                            typ::parse_object_decl_string_fields(p, lbrace_pos_idx, leading_attrs);
+                        manifest = Some(p.arena_mut().push_core_type(typ));
+                    } else {
+                        kind = parse_record_decl_fields(
+                            p,
+                            inline_ctx,
+                            inline_ctx.map(|_| &current_type_name_path),
+                            lbrace_pos_idx,
+                            leading_attrs,
+                        );
+                    }
                 }
             }
             Token::Uident(_) => {
@@ -3039,29 +3069,41 @@ fn parse_type_kind(
             // attaches them to the first field while forcing first-field loc_start to the
             // first attribute's loc_start.
             let leading_attrs = parse_attributes(p);
-            // OCaml `parse_record_or_object_decl` (res_core.ml:6041).
-            p.leave_breadcrumb(grammar::Grammar::RecordDecl);
-            let labels = if leading_attrs.is_empty() {
-                parse_label_declarations(
-                    p,
-                    inline_ctx,
-                    current_type_name_path,
-                    Some(lbrace_pos_idx),
-                )
-            } else {
-                parse_label_declarations_with_leading_attrs(
-                    p,
-                    inline_ctx,
-                    current_type_name_path,
-                    leading_attrs,
-                )
-            };
-            p.expect(Token::Rbrace);
-            p.eat_breadcrumb();
-            TypeKind::Ptype_record(labels)
+            parse_record_decl_fields(
+                p,
+                inline_ctx,
+                current_type_name_path,
+                lbrace_pos_idx,
+                leading_attrs,
+            )
         }
         _ => TypeKind::Ptype_abstract,
     }
+}
+
+/// The record branch of OCaml `parse_record_or_object_decl`
+/// (res_core.ml:6101-6140), with `{` and the leading attributes consumed.
+fn parse_record_decl_fields(
+    p: &mut Parser<'_>,
+    inline_ctx: Option<&RefCell<InlineTypesContext>>,
+    current_type_name_path: Option<&Vec<StrIdx>>,
+    lbrace_pos_idx: PosIdx,
+    leading_attrs: Attributes,
+) -> TypeKind {
+    p.leave_breadcrumb(grammar::Grammar::RecordDecl);
+    let labels = if leading_attrs.is_empty() {
+        parse_label_declarations(p, inline_ctx, current_type_name_path, Some(lbrace_pos_idx))
+    } else {
+        parse_label_declarations_with_leading_attrs(
+            p,
+            inline_ctx,
+            current_type_name_path,
+            leading_attrs,
+        )
+    };
+    p.expect(Token::Rbrace);
+    p.eat_breadcrumb();
+    TypeKind::Ptype_record(labels)
 }
 
 /// Parse variant constructors (starting with |).

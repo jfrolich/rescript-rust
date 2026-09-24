@@ -608,8 +608,7 @@ pub fn parse_external_type_expr(p: &mut Parser<'_>) -> CoreType {
         let start_pos_idx = p.start_pos_idx();
         let attrs = parse_attributes(p);
         let arg_path = make_inline_record_argument_type_name(p, 0);
-        let typ =
-            with_current_type_name_path(p, arg_path, |p| parse_atomic_typ_expr(p, attrs));
+        let typ = with_current_type_name_path(p, arg_path, |p| parse_atomic_typ_expr(p, attrs));
         let typ = parse_arrow_type_rest(p, typ, start_pos_idx);
         parse_type_alias(p, typ)
     } else if super::core::is_es6_arrow_type(p) {
@@ -701,7 +700,6 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
 fn parse_type_attributes(p: &mut Parser<'_>) -> Attributes {
     parse_attributes(p)
 }
-
 
 /// Parse an attribute payload (in type context).
 fn parse_payload(p: &mut Parser<'_>) -> Payload {
@@ -1792,46 +1790,64 @@ pub(crate) fn parse_object_decl(p: &mut Parser<'_>) -> CoreType {
         }
         _ => {
             let attrs = parse_attributes(p);
-            let fields = if attrs.is_empty() {
-                super::core::parse_comma_delimited_region(
-                    p,
-                    Grammar::StringFieldDeclarations,
-                    Token::Rbrace,
-                    parse_string_field_declaration,
-                )
-            } else {
-                p.leave_breadcrumb(Grammar::StringFieldDeclarations);
-                let first = parse_string_field_declaration(p)
-                    .expect("object declaration starts with a string field");
-                match p.token {
-                    Token::Rbrace | Token::Eof => {}
-                    Token::Comma => p.next(),
-                    _ => p.expect(Token::Comma),
-                }
-                p.eat_breadcrumb();
-                let first = match first {
-                    ObjectField::Otag(label, _, typ) => ObjectField::Otag(label, attrs, typ),
-                    inherit => inherit,
-                };
-                let mut fields = vec![first];
-                fields.extend(super::core::parse_comma_delimited_region(
-                    p,
-                    Grammar::StringFieldDeclarations,
-                    Token::Rbrace,
-                    parse_string_field_declaration,
-                ));
-                fields
-            };
-            p.expect(Token::Rbrace);
-            CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((
-                    fields,
-                    ClosedFlag::Closed,
-                )))),
-                ptyp_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
-                ptyp_attributes: Attributes::new(),
-            }
+            return parse_object_decl_string_fields(p, start_pos_idx, attrs);
         }
+    };
+    let typ = parse_type_alias(p, typ);
+    if matches!(p.token, Token::EqualGreater | Token::MinusGreater) {
+        parse_arrow_type_rest(p, typ, start_pos_idx)
+    } else {
+        typ
+    }
+}
+
+/// The `String _` branch of OCaml `parse_record_or_object_decl`
+/// (res_core.ml:6060-6100): `{` and the leading attributes are consumed and the
+/// current token is a string field name.
+pub(crate) fn parse_object_decl_string_fields(
+    p: &mut Parser<'_>,
+    start_pos_idx: PosIdx,
+    attrs: Attributes,
+) -> CoreType {
+    let fields = if attrs.is_empty() {
+        super::core::parse_comma_delimited_region(
+            p,
+            Grammar::StringFieldDeclarations,
+            Token::Rbrace,
+            parse_string_field_declaration,
+        )
+    } else {
+        p.leave_breadcrumb(Grammar::StringFieldDeclarations);
+        // Callers only get here with a string field (res_core.ml:6063).
+        let first = parse_string_field_declaration(p)
+            .expect("object declaration starts with a string field");
+        match p.token {
+            Token::Rbrace | Token::Eof => {}
+            Token::Comma => p.next(),
+            _ => p.expect(Token::Comma),
+        }
+        p.eat_breadcrumb();
+        let first = match first {
+            ObjectField::Otag(label, _, typ) => ObjectField::Otag(label, attrs, typ),
+            inherit => inherit,
+        };
+        let mut fields = vec![first];
+        fields.extend(super::core::parse_comma_delimited_region(
+            p,
+            Grammar::StringFieldDeclarations,
+            Token::Rbrace,
+            parse_string_field_declaration,
+        ));
+        fields
+    };
+    p.expect(Token::Rbrace);
+    let typ = CoreType {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((
+            fields,
+            ClosedFlag::Closed,
+        )))),
+        ptyp_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
+        ptyp_attributes: Attributes::new(),
     };
     let typ = parse_type_alias(p, typ);
     if matches!(p.token, Token::EqualGreater | Token::MinusGreater) {
@@ -1908,7 +1924,11 @@ fn parse_object_decl_field(p: &mut Parser<'_>) -> Option<ObjectField> {
                     let typ = parse_poly_type_expr(p);
                     let typ_idx = p.arena_mut().push_core_type(typ);
                     let name_idx = p.arena_mut().push_interned_string(&name);
-                    Some(ObjectField::Otag(with_loc(name_idx, name_loc), attrs, typ_idx))
+                    Some(ObjectField::Otag(
+                        with_loc(name_idx, name_loc),
+                        attrs,
+                        typ_idx,
+                    ))
                 }
                 None => {
                     super::core::emit_keyword_field_error(
@@ -1985,7 +2005,11 @@ fn parse_string_field_declaration(p: &mut Parser<'_>) -> Option<ObjectField> {
     let typ = parse_poly_type_expr(p);
     let typ_idx = p.arena_mut().push_core_type(typ);
     let name_idx = p.arena_mut().push_interned_string(&name);
-    Some(ObjectField::Otag(with_loc(name_idx, name_loc), attrs, typ_idx))
+    Some(ObjectField::Otag(
+        with_loc(name_idx, name_loc),
+        attrs,
+        typ_idx,
+    ))
 }
 
 // ============================================================================
@@ -2001,18 +2025,14 @@ fn parse_polymorphic_variant_type_args(p: &mut Parser<'_>) -> CoreType {
     let start_pos_idx = p.start_pos_idx();
     p.expect(Token::Lparen);
 
-    let args = super::core::parse_comma_delimited_region(
-        p,
-        Grammar::TypExprList,
-        Token::Rparen,
-        |p| {
+    let args =
+        super::core::parse_comma_delimited_region(p, Grammar::TypExprList, Token::Rparen, |p| {
             if super::grammar::is_typ_expr_start(&p.token) {
                 Some(parse_typ_expr(p))
             } else {
                 None
             }
-        },
-    );
+        });
     p.expect(Token::Rparen);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
@@ -2172,7 +2192,9 @@ fn parse_tag_spec_full(p: &mut Parser<'_>) -> RowField {
 /// OCaml `parse_tag_specs` (compiler/syntax/src/res_core.ml:6188-6210).
 fn parse_tag_specs(p: &mut Parser<'_>) -> Vec<RowField> {
     let mut fields = vec![];
-    while matches!(p.token, Token::Bar | Token::DocComment { .. }) && is_bar_or_doc_comment_then_bar(p) {
+    while matches!(p.token, Token::Bar | Token::DocComment { .. })
+        && is_bar_or_doc_comment_then_bar(p)
+    {
         let doc_attrs = parse_optional_doc_comment_attr(p);
         p.expect(Token::Bar);
         let tag = parse_tag_spec(p);
