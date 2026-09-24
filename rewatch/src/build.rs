@@ -215,10 +215,20 @@ pub fn initialize_build(
     )
     .entered();
     let project_context = ProjectContext::new(path)?;
-    let compiler = get_compiler_info(&project_context)?;
-
     let timing_clean_start = Instant::now();
-    let packages = packages::make(filter, &project_context, show_progress, prod, features.as_ref())?;
+    // Hashing the compiler binary is independent of package discovery, so
+    // overlap the two.
+    let (compiler, packages) = std::thread::scope(|scope| {
+        let compiler = scope.spawn(|| get_compiler_info(&project_context));
+        let packages = packages::make(filter, &project_context, show_progress, prod, features.as_ref());
+        let compiler = compiler
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (compiler, packages)
+    });
+    let compiler = compiler?;
+    let packages = packages?;
+    phase_mark("init:packages-make");
 
     let source_map_args = project_context
         .get_root_config()
@@ -241,11 +251,15 @@ pub fn initialize_build(
         features,
         source_map_command,
     );
+    phase_mark("init:validate");
     packages::parse_packages(&mut build_state)?;
+    phase_mark("init:parse-packages");
 
     let compile_assets_state = read_compile_state::read(&mut build_state)?;
 
+    phase_mark("init:read-compile-state");
     let (diff_cleanup, total_cleanup) = clean::cleanup_previous_build(&mut build_state, compile_assets_state);
+    phase_mark("init:cleanup-previous");
     let timing_clean_total = timing_clean_start.elapsed();
 
     if show_progress {
@@ -357,6 +371,17 @@ pub fn incremental_build(
 
 // `build` needs to lock before initialization because initialization mutates previous
 // build artifacts. Keep the compile body separate so it can run under that wider lock.
+/// Print a wall-clock phase marker when RESCRIPT_BUILD_PHASES is set.
+pub fn phase_mark(label: &str) {
+    if std::env::var_os("RESCRIPT_BUILD_PHASES").is_some() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        eprintln!("[build-phase] {label} epoch_ms={now:.3}");
+    }
+}
+
 #[instrument(name = "build.incremental.unlocked", skip_all, fields(module_count = build_state.modules.len()))]
 pub fn incremental_build_without_lock(
     build_state: &mut BuildCommandState,
@@ -409,9 +434,54 @@ pub fn incremental_build_without_lock(
         .unwrap(),
     );
 
+    phase_mark("parse-start");
     let timing_parse_start = Instant::now();
     let timing_ast = Instant::now();
-    let result_asts = parse::generate_asts(build_state, || pb.inc(1));
+    let result_asts = if needs_in_process_seed {
+        // The runtime pre-compilation only needs the registry and the runtime
+        // sources, so run it while the project sources are parsed. `compile`
+        // later finds the runtime already registered and skips it.
+        compile::prepare_registry_for_runtime_precompile(build_state);
+        let registry = std::mem::take(&mut build_state.module_registry);
+        let runtime_root = build_state.build_state.compiler_info.runtime_path.clone();
+        let (result_asts, precompile_result) = std::thread::scope(|scope| {
+            let handle = std::thread::Builder::new()
+                .name("rewatch-runtime-precompile".to_string())
+                .stack_size(256 * 1024 * 1024)
+                .spawn_scoped(scope, || compile::pre_compile_runtime_modules(&registry, &runtime_root));
+            let result_asts = parse::generate_asts(build_state, || pb.inc(1));
+            let precompile_result = match handle {
+                Ok(handle) => handle.join().unwrap_or_else(|panic| {
+                    let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = panic.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "unknown".to_string()
+                    };
+                    Err(anyhow!("runtime pre-compilation panicked: {msg}"))
+                }),
+                Err(err) => Err(anyhow!("failed to spawn runtime pre-compilation thread: {err}")),
+            };
+            (result_asts, precompile_result)
+        });
+        build_state.module_registry = registry;
+        phase_mark("runtime-precompile-joined");
+        if let Err(err) = precompile_result {
+            if result_asts.is_ok() {
+                logs::finalize(&build_state.packages);
+                pb.finish();
+                print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
+                return Err(IncrementalBuildError {
+                    kind: IncrementalBuildErrorKind::CompileError(Some(err.to_string())),
+                    plain_output,
+                });
+            }
+        }
+        result_asts
+    } else {
+        parse::generate_asts(build_state, || pb.inc(1))
+    };
     let timing_ast_elapsed = timing_ast.elapsed();
 
     let parse_warnings = match result_asts {
@@ -443,8 +513,10 @@ pub fn incremental_build_without_lock(
             });
         }
     };
+    phase_mark("parse-end");
     let deleted_modules = build_state.deleted_modules.clone();
     deps::get_deps(build_state, &deleted_modules);
+    phase_mark("deps-end");
     let timing_parse_total = timing_parse_start.elapsed();
 
     if show_progress {
@@ -513,6 +585,7 @@ pub fn incremental_build_without_lock(
     })?;
 
     let compile_duration = start_compiling.elapsed();
+    phase_mark("compile-end");
 
     logs::finalize(&build_state.packages);
     if create_sourcedirs {
@@ -584,6 +657,7 @@ pub fn incremental_build_without_lock(
 
         // Write per-package compiler metadata to `lib/bs/compiler-info.json` (idempotent)
         write_compiler_info(build_state);
+        phase_mark("compiler-info-end");
 
         print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
         Ok(outcome)
@@ -728,6 +802,7 @@ pub fn build(
         None
     };
     let timing_total = Instant::now();
+    phase_mark("build-start");
     with_build_lock(path, || {
         let mut build_state = initialize_build(
             default_timing,
@@ -767,7 +842,9 @@ pub fn build(
                     );
                 }
                 clean::cleanup_after_build(&build_state);
+                phase_mark("cleanup-end");
                 write_build_ninja(&build_state);
+                phase_mark("ninja-end");
                 Ok(build_state)
             }
             Err(e) => {

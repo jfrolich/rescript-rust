@@ -17,6 +17,7 @@ use rescript::{
 };
 
 fn main() {
+    rescript::build::phase_mark("main");
     rescript_compiler::hash_seed::install_thread_local_hash_seeds();
     let telemetry_guard = telemetry::init_telemetry();
     let otel_enabled = telemetry_guard.otel_enabled();
@@ -27,6 +28,7 @@ fn main() {
             1
         }
     };
+    rescript::build::phase_mark("run-main-end");
     drop(telemetry_guard);
     std::process::exit(exit_code);
 }

@@ -30,6 +30,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -828,6 +829,7 @@ pub fn compile(
     // In --in-process mode, synthesize namespace module signatures in memory
     // before any source modules are compiled. Source modules may use `-open Namespace`,
     // so the namespace signature must be available in the PersistentEnv first.
+    crate::build::phase_mark("compile-start");
     if build_state.build_mode().is_in_process() {
         register_namespace_signatures(build_state);
         register_source_fallback_paths(build_state);
@@ -845,7 +847,10 @@ pub fn compile(
                 .stack_size(256 * 1024 * 1024)
                 .spawn_scoped(scope, || {
                     let _parent = parent_span.enter();
-                    pre_compile_runtime_modules(build_state)
+                    pre_compile_runtime_modules(
+                        &build_state.module_registry,
+                        &build_state.build_state.compiler_info.runtime_path,
+                    )
                 })
                 .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))?;
 
@@ -864,6 +869,7 @@ pub fn compile(
             }
         });
         pre_compile_result?;
+        crate::build::phase_mark("runtime-precompile-end");
 
         // Clear source-fallback paths after pre-compilation.
         build_state
@@ -950,6 +956,7 @@ pub fn compile(
         ModuleRegistry::new()
     };
 
+    crate::build::phase_mark("schedule-start");
     let mut completed: AHashSet<String> = AHashSet::new();
     let mut signature_ready: AHashSet<String> = AHashSet::new();
     let mut results_buffer: Vec<CompletionMsg> = Vec::with_capacity(compile_universe_count);
@@ -2264,6 +2271,15 @@ fn write_compiled_js_outputs(
 /// the shared ModuleRegistry so that `-open Namespace` works during compilation.
 ///
 /// This replaces the `compile_mlmap` bsc subprocess call used in file-based modes.
+/// Register everything the runtime pre-compilation reads from the registry
+/// (namespace signatures and source fallback paths). Both depend only on the
+/// discovered packages, so a fresh in-process build can do this before parsing
+/// and pre-compile the runtime while source files are parsed.
+pub(crate) fn prepare_registry_for_runtime_precompile(build_state: &BuildCommandState) {
+    register_namespace_signatures(build_state);
+    register_source_fallback_paths(build_state);
+}
+
 fn register_namespace_signatures(build_state: &BuildCommandState) {
     for (_package_name, package) in build_state.packages.iter() {
         let namespace_suffix = match package.namespace.to_suffix() {
@@ -2445,37 +2461,32 @@ struct RuntimeCompletionMsg {
 ///
 /// Runs on a dedicated thread with a large stack to handle any remaining
 /// source-fallback chains during the pre-compilation itself.
-fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
+pub(crate) fn pre_compile_runtime_modules(registry: &Mutex<ModuleRegistry>, runtime_root: &Path) -> Result<()> {
     let _span = info_span!("build.runtime_precompile").entered();
     let runtime_timing_enabled = std::env::var_os("RESCRIPT_RUNTIME_TIMINGS").is_some()
         || std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
     let runtime_timing_start = runtime_timing_enabled.then(Instant::now);
     let runtime_timing_before = runtime_timing_enabled.then(rescript_compiler::timing::snapshot);
-    let runtime_root = &build_state.build_state.compiler_info.runtime_path;
     let runtime_config = packages::read_config(runtime_root)
         .with_context(|| format!("failed to read runtime config from {}", runtime_root.display()))?;
     let runtime_path = runtime_root.join("lib").join("ocaml");
-    let mut runtime_modules = collect_runtime_sources(&runtime_path)?;
-    tracing::Span::current().record("runtime_modules", runtime_modules.len());
+    let runtime_paths = runtime_source_paths(&runtime_path)?;
+    tracing::Span::current().record("runtime_modules", runtime_paths.len());
 
-    if runtime_modules.is_empty() {
+    if runtime_paths.is_empty() {
         return Ok(());
     }
 
     let already_registered = {
-        let registry = build_state.module_registry.lock().unwrap();
-        runtime_modules.iter().all(|module| {
-            registry.module_info_is_runtime(&module.module_name)
-                && registry.has_cached_module(&module.module_name)
+        let registry = registry.lock().unwrap();
+        runtime_paths.iter().all(|(module_name, _)| {
+            registry.module_info_is_runtime(module_name) && registry.has_cached_module(module_name)
         })
     };
     if already_registered {
         return Ok(());
     }
 
-    populate_runtime_deps(&mut runtime_modules);
-
-    seed_runtime_registry(build_state, &runtime_modules);
     let runtime_compile_threads = rayon::current_num_threads().max(2);
     // Runtime module compilation runs inside Rayon workers, so the outer
     // precompile thread stack is not enough for very large runtime IR cleanup.
@@ -2485,9 +2496,13 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
         .stack_size(256 * 1024 * 1024)
         .build()
         .context("failed to create runtime in-process compiler pool")?;
+    let mut runtime_modules = runtime_compile_pool.install(|| collect_runtime_sources(runtime_paths))?;
+    populate_runtime_deps(&mut runtime_modules);
+
+    seed_runtime_registry(registry, &runtime_modules);
     runtime_compile_pool.install(|| {
         compile_runtime_modules_parallel(
-            build_state,
+            registry,
             runtime_root,
             &runtime_path,
             &runtime_config,
@@ -2538,8 +2553,8 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
     Ok(())
 }
 
-fn seed_runtime_registry(build_state: &BuildCommandState, runtime_modules: &[RuntimeModuleSource]) {
-    let mut registry = build_state.module_registry.lock().unwrap();
+fn seed_runtime_registry(registry: &Mutex<ModuleRegistry>, runtime_modules: &[RuntimeModuleSource]) {
+    let mut registry = registry.lock().unwrap();
     for module in runtime_modules {
         let fallback_path = module
             .resi
@@ -2560,7 +2575,7 @@ fn seed_runtime_registry(build_state: &BuildCommandState, runtime_modules: &[Run
 }
 
 fn compile_runtime_modules_parallel(
-    build_state: &BuildCommandState,
+    registry: &Mutex<ModuleRegistry>,
     runtime_root: &Path,
     runtime_path: &Path,
     runtime_config: &config::Config,
@@ -2581,7 +2596,7 @@ fn compile_runtime_modules_parallel(
 
     let (tx, rx) = mpsc::channel::<RuntimeCompletionMsg>();
     let capacity = rayon::current_num_threads().max(1);
-    let worker_registry_template = build_state.snapshot_module_registry();
+    let worker_registry_template = registry.lock().unwrap().for_worker_snapshot();
     let mut in_flight = 0usize;
     let mut completed = vec![false; runtime_modules.len()];
     let mut completed_count = 0usize;
@@ -2598,7 +2613,7 @@ fn compile_runtime_modules_parallel(
                 in_flight += 1;
                 scope.spawn(move |_| {
                     let result = compile_runtime_module_from_source(
-                        build_state,
+                        registry,
                         runtime_root,
                         runtime_path,
                         runtime_config,
@@ -2645,7 +2660,7 @@ fn compile_runtime_modules_parallel(
 
     if completed_count != runtime_modules.len() {
         compile_runtime_cycle_remainder_serial(
-            build_state,
+            registry,
             runtime_root,
             runtime_path,
             runtime_config,
@@ -2658,7 +2673,7 @@ fn compile_runtime_modules_parallel(
 }
 
 fn compile_runtime_cycle_remainder_serial(
-    build_state: &BuildCommandState,
+    registry: &Mutex<ModuleRegistry>,
     runtime_root: &Path,
     runtime_path: &Path,
     runtime_config: &config::Config,
@@ -2666,14 +2681,14 @@ fn compile_runtime_cycle_remainder_serial(
     completed: &[bool],
 ) -> Result<()> {
     debug!("runtime dependency graph has a cycle; compiling remaining modules serially");
-    let worker_registry_template = build_state.snapshot_module_registry();
+    let worker_registry_template = registry.lock().unwrap().for_worker_snapshot();
     for idx in runtime_compile_order(runtime_modules) {
         if completed[idx] {
             continue;
         }
         let registry_snapshot = worker_registry_template.clone();
         compile_runtime_module_from_source(
-            build_state,
+            registry,
             runtime_root,
             runtime_path,
             runtime_config,
@@ -2685,7 +2700,7 @@ fn compile_runtime_cycle_remainder_serial(
 }
 
 fn compile_runtime_module_from_source(
-    build_state: &BuildCommandState,
+    registry: &Mutex<ModuleRegistry>,
     runtime_root: &Path,
     runtime_path: &Path,
     runtime_config: &config::Config,
@@ -2759,7 +2774,7 @@ fn compile_runtime_module_from_source(
     .with_cmj_export_arities(compile_result.cmj_export_arities)
     .with_cmj_hoisted_exports(compile_result.hoisted_exports);
 
-    let mut shared_registry = build_state.module_registry.lock().unwrap();
+    let mut shared_registry = registry.lock().unwrap();
     if has_runtime_interface {
         // OCaml compiler/ml/typemod.ml:1742-1758 checks the implementation
         // against the already-saved interface `.cmi`; typemod.ml:1779-1787
@@ -2788,8 +2803,10 @@ fn compile_runtime_module_from_source(
     Ok(())
 }
 
-fn collect_runtime_sources(runtime_path: &Path) -> Result<Vec<RuntimeModuleSource>> {
-    let mut runtime_modules = Vec::new();
+/// List the runtime `.res` sources as `(module name, path)`, sorted by module
+/// name.
+fn runtime_source_paths(runtime_path: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let mut paths = Vec::new();
     for entry in std::fs::read_dir(runtime_path)
         .with_context(|| format!("failed to read runtime directory {}", runtime_path.display()))?
     {
@@ -2810,35 +2827,44 @@ fn collect_runtime_sources(runtime_path: &Path) -> Result<Vec<RuntimeModuleSourc
         let Some(module_name) = module_name_from_stem(stem) else {
             continue;
         };
-
-        let res_source = read_source_latin1(&path)?;
-        let (res_arena, structure, mut deps) = parse_runtime_structure(&path, &res_source)?;
-        let resi_path = path.with_extension("resi");
-        let resi = if resi_path.exists() {
-            let source = read_source_latin1(&resi_path)?;
-            let (arena, signature, intf_deps) = parse_runtime_signature(&resi_path, &source)?;
-            deps.extend(intf_deps);
-            Some(RuntimeInterfaceSource {
-                path: resi_path,
-                arena,
-                signature,
-            })
-        } else {
-            None
-        };
-
-        runtime_modules.push(RuntimeModuleSource {
-            module_name,
-            res_path: path,
-            res_arena,
-            structure,
-            resi,
-            deps,
-        });
+        paths.push((module_name, path));
     }
+    paths.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(paths)
+}
 
-    runtime_modules.sort_by(|a, b| a.module_name.cmp(&b.module_name));
-    Ok(runtime_modules)
+/// Read and parse the runtime sources (in parallel on the current Rayon
+/// pool), keeping the order of `paths`.
+fn collect_runtime_sources(paths: Vec<(String, PathBuf)>) -> Result<Vec<RuntimeModuleSource>> {
+    paths
+        .into_par_iter()
+        .map(|(module_name, path)| {
+            let res_source = read_source_latin1(&path)?;
+            let (res_arena, structure, mut deps) = parse_runtime_structure(&path, &res_source)?;
+            let resi_path = path.with_extension("resi");
+            let resi = if resi_path.exists() {
+                let source = read_source_latin1(&resi_path)?;
+                let (arena, signature, intf_deps) = parse_runtime_signature(&resi_path, &source)?;
+                deps.extend(intf_deps);
+                Some(RuntimeInterfaceSource {
+                    path: resi_path,
+                    arena,
+                    signature,
+                })
+            } else {
+                None
+            };
+
+            Ok(RuntimeModuleSource {
+                module_name,
+                res_path: path,
+                res_arena,
+                structure,
+                resi,
+                deps,
+            })
+        })
+        .collect()
 }
 
 fn module_name_from_stem(stem: &str) -> Option<String> {
