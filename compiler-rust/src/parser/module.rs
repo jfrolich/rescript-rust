@@ -2560,315 +2560,11 @@ fn parse_type_declaration_body(
 
     // Parse optional manifest and/or kind (and ReScript's `type t = T = ...` equation form).
     // OCaml: if token is Bar, call expect Equal to generate "Did you forget a `=` here?" error
-    let (manifest, kind, private) = if p.token == Token::Equal || p.token == Token::Bar {
-        if p.token == Token::Bar {
-            // Generate error about missing `=` before variant constructors
-            p.expect(Token::Equal);
-        }
-        // Heuristic: `{...}` after `=` can be a record type *or* a bs-object/object type.
-        // Disambiguate by looking at the first significant token inside the braces.
-        let looks_like_object_type_after_lbrace = |p: &mut Parser<'_>| -> bool {
-            p.lookahead(|state| {
-                // Current token is `{`
-                state.next();
-
-                // Skip leading attributes: @attr ...
-                while state.token == Token::At {
-                    state.next();
-                    // Skip attribute id segments (possibly dotted)
-                    if matches!(state.token, Token::Lident(_) | Token::Uident(_))
-                        || state.token.is_keyword()
-                    {
-                        state.next();
-                        while state.token == Token::Dot {
-                            state.next();
-                            if matches!(state.token, Token::Lident(_) | Token::Uident(_))
-                                || state.token.is_keyword()
-                            {
-                                state.next();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    // Skip optional payload in parentheses
-                    if state.token == Token::Lparen {
-                        let mut depth = 1;
-                        state.next();
-                        while depth > 0 && state.token != Token::Eof {
-                            match state.token {
-                                Token::Lparen => depth += 1,
-                                Token::Rparen => depth -= 1,
-                                _ => {}
-                            }
-                            state.next();
-                        }
-                    }
-                }
-
-                // It's an object type if we see a string field name (like {"x": int})
-                // Spread (...) alone doesn't make it an object - records can have spread too
-                if matches!(state.token, Token::String(_)) {
-                    return true;
-                }
-
-                // If we see spread, look for a string field anywhere after it
-                // If all fields are spreads or idents, it's a record
-                if state.token == Token::DotDotDot {
-                    // Scan through the rest to see if there's any string field
-                    let mut depth = 0;
-                    loop {
-                        match state.token {
-                            Token::String(_) if depth == 0 => return true, // Found a string field - it's an object
-                            Token::Rbrace if depth == 0 => return false, // End of braces, no string found - it's a record
-                            Token::Eof => return false,
-                            Token::Lparen | Token::Lbrace | Token::Lbracket => depth += 1,
-                            Token::Rparen | Token::Rbracket => {
-                                if depth > 0 {
-                                    depth -= 1;
-                                }
-                            }
-                            Token::Rbrace => {
-                                if depth > 0 {
-                                    depth -= 1;
-                                } else {
-                                    return false;
-                                }
-                            }
-                            _ => {}
-                        }
-                        state.next();
-                    }
-                }
-
-                // Dot or DotDot at start also indicates object type
-                matches!(state.token, Token::Dot | Token::DotDot)
-            })
-        };
-
-        // Better variant-vs-manifest disambiguation: a leading Uident without a following `.`
-        // is a constructor in a variant type.
-        // OCaml parser logic: if Uident is followed by `.`, it's a type path (Module.Type),
-        // otherwise it's a constructor declaration.
-        let is_variant_type_starting_with_uident = |p: &mut Parser<'_>| -> bool {
-            p.lookahead(|state| {
-                state.next(); // consume Uident
-
-                // `Foo.bar` is a type path, not a constructor.
-                // Anything else means it's a constructor.
-                state.token != Token::Dot
-            })
-        };
-
-        p.next(); // consume first '='
-        let mut private = if p.token == Token::Private {
-            p.next();
-            PrivateFlag::Private
-        } else {
-            PrivateFlag::Public
-        };
-
-        let mut manifest = None;
-        let mut kind = TypeKind::Ptype_abstract;
-
-        match &p.token {
-            // OCaml `parse_private_eq_or_repr` (compiler/syntax/src/res_core.ml): after
-            // `private`, a token that starts a type expression (including `@`) is a
-            // manifest, not an attributed variant.
-            Token::At if private == PrivateFlag::Private => {
-                let typ = typ::parse_typ_expr(p);
-                manifest = Some(p.arena_mut().push_core_type(typ));
-            }
-            Token::Bar => {
-                // Variant type starting with | (e.g., type t = | A | B)
-                kind = parse_type_kind(p, None, None);
-            }
-            Token::Lbrace => {
-                // OCaml `parse_record_or_object_decl` (res_core.ml:6030-6140)
-                // dispatches on the token after `{`; in the plain case it
-                // parses the leading attributes first and then sees whether a
-                // string field (object) or a record field follows.
-                let after_lbrace = p.lookahead(|state| {
-                    state.next();
-                    match state.token {
-                        Token::Dot | Token::DotDot => 0u8,
-                        Token::DotDotDot => 1,
-                        _ => 2,
-                    }
-                });
-                if after_lbrace == 0
-                    || (after_lbrace == 1 && looks_like_object_type_after_lbrace(p))
-                {
-                    let typ = typ::parse_object_decl(p);
-                    manifest = Some(p.arena_mut().push_core_type(typ));
-                } else if after_lbrace == 1 {
-                    kind = parse_type_kind(p, inline_ctx, inline_ctx.map(|_| &current_type_name_path));
-                } else {
-                    let lbrace_pos_idx = p.start_pos_idx();
-                    p.next();
-                    let leading_attrs = parse_attributes(p);
-                    if matches!(p.token, Token::String(_)) {
-                        let typ =
-                            typ::parse_object_decl_string_fields(p, lbrace_pos_idx, leading_attrs);
-                        manifest = Some(p.arena_mut().push_core_type(typ));
-                    } else {
-                        kind = parse_record_decl_fields(
-                            p,
-                            inline_ctx,
-                            inline_ctx.map(|_| &current_type_name_path),
-                            lbrace_pos_idx,
-                            leading_attrs,
-                        );
-                    }
-                }
-            }
-            Token::Uident(_) => {
-                if is_variant_type_starting_with_uident(p) {
-                    let constructors = parse_constructors_without_leading_bar(p);
-                    kind = TypeKind::Ptype_variant(constructors);
-                } else {
-                    let typ = typ::parse_typ_expr(p);
-                    manifest = Some(p.arena_mut().push_core_type(typ));
-                }
-            }
-            Token::At | Token::DocComment { .. } => {
-                // Check if this is a variant constructor with attribute: @attr Constr
-                // vs a manifest type with attribute: @attr Type.t
-                // vs an open type with attribute: @attr ..
-                // vs a record type with attribute: @attr {x: int}
-                // Lookahead to see if there's a Uident after the attribute that's NOT followed by `.`
-                let what_follows = p.lookahead(|state| {
-                    // Skip attributes and doc comments
-                    while matches!(state.token, Token::At | Token::DocComment { .. }) {
-                        if matches!(state.token, Token::DocComment { .. }) {
-                            state.next();
-                        } else {
-                            state.next(); // @
-                            // Skip attribute name (may be dotted like res.doc)
-                            while matches!(state.token, Token::Lident(_) | Token::Uident(_))
-                                || state.token.is_keyword()
-                            {
-                                state.next();
-                                if state.token == Token::Dot {
-                                    state.next();
-                                } else {
-                                    break;
-                                }
-                            }
-                            if state.token == Token::Lparen {
-                                let mut depth = 1;
-                                state.next();
-                                while depth > 0 && state.token != Token::Eof {
-                                    if state.token == Token::Lparen {
-                                        depth += 1;
-                                    } else if state.token == Token::Rparen {
-                                        depth -= 1;
-                                    }
-                                    state.next();
-                                }
-                            }
-                        }
-                    }
-                    // Check what comes after attributes
-                    if state.token == Token::Bar {
-                        "variant"
-                    } else if state.token == Token::DotDot {
-                        "open"
-                    } else if state.token == Token::Lbrace {
-                        "record_or_object"
-                    } else if matches!(state.token, Token::Uident(_)) {
-                        state.next();
-                        if state.token != Token::Dot {
-                            "variant"
-                        } else {
-                            "manifest"
-                        }
-                    } else {
-                        "manifest"
-                    }
-                });
-                match what_follows {
-                    "variant" => {
-                        kind = TypeKind::Ptype_variant(parse_constructors(p));
-                    }
-                    "open" => {
-                        // Parse attributes and then ..
-                        let _attrs = parse_attributes(p);
-                        if p.token == Token::DotDot {
-                            p.next();
-                            kind = TypeKind::Ptype_open;
-                        }
-                    }
-                    "record_or_object" => {
-                        // Parse attributes then check if record or object
-                        let attrs = parse_attributes(p);
-                        if p.token == Token::Lbrace {
-                            if looks_like_object_type_after_lbrace(p) {
-                                let mut typ = typ::parse_typ_expr(p);
-                                typ.ptyp_attributes = attrs;
-                                manifest = Some(p.arena_mut().push_core_type(typ));
-                            } else {
-                                kind = parse_type_kind(
-                                    p,
-                                    inline_ctx,
-                                    inline_ctx.map(|_| &current_type_name_path),
-                                );
-                            }
-                        }
-                    }
-                    _ => {
-                        let typ = typ::parse_typ_expr(p);
-                        manifest = Some(p.arena_mut().push_core_type(typ));
-                    }
-                }
-            }
-            Token::DotDot => {
-                // Extensible variant: type t = ..
-                p.next();
-                kind = TypeKind::Ptype_open;
-            }
-            _ => {
-                // Manifest type
-                let typ = typ::parse_typ_expr(p);
-                manifest = Some(p.arena_mut().push_core_type(typ));
-            }
-        }
-
-        // ReScript type equation: `type t = T = ...`
-        if manifest.is_some() && p.token == Token::Equal {
-            p.next(); // consume second '='
-            private = if p.token == Token::Private {
-                p.next();
-                PrivateFlag::Private
-            } else {
-                PrivateFlag::Public
-            };
-
-            kind = match &p.token {
-                Token::Bar => parse_type_kind(p, None, None),
-                Token::Lbrace => {
-                    parse_type_kind(p, inline_ctx, inline_ctx.map(|_| &current_type_name_path))
-                }
-                Token::Uident(_) => {
-                    TypeKind::Ptype_variant(parse_constructors_without_leading_bar(p))
-                }
-                Token::DotDot => {
-                    p.next();
-                    TypeKind::Ptype_open
-                }
-                _ => {
-                    p.err(DiagnosticCategory::Message(
-                        "Expected variant or record type after '='".to_string(),
-                    ));
-                    TypeKind::Ptype_abstract
-                }
-            };
-        }
-
-        (manifest, kind, private)
-    } else {
-        (None, TypeKind::Ptype_abstract, PrivateFlag::Public)
-    };
+    let (manifest, kind, private) = parse_type_equation_and_representation(
+        p,
+        inline_ctx,
+        &current_type_name_path,
+    );
 
     let cstrs = parse_type_constraints(p);
 
@@ -2891,6 +2587,289 @@ fn parse_type_declaration_body(
         ptype_attributes: attrs,
         ptype_loc: loc,
     })
+}
+
+type TypeEquation = (Option<CoreTypeIdx>, TypeKind, PrivateFlag);
+
+/// OCaml `parse_type_equation_and_representation`
+/// (compiler/syntax/src/res_core.ml:6320-6395).
+fn parse_type_equation_and_representation(
+    p: &mut Parser<'_>,
+    inline_ctx: Option<&RefCell<InlineTypesContext>>,
+    current_type_name_path: &Vec<StrIdx>,
+) -> TypeEquation {
+    if !matches!(p.token, Token::Equal | Token::Bar) {
+        return (None, TypeKind::Ptype_abstract, PrivateFlag::Public);
+    }
+    if p.token == Token::Bar {
+        p.expect(Token::Equal);
+    }
+    p.next();
+    match p.token {
+        Token::Uident(_) => parse_type_equation_or_constr_decl(p),
+        Token::Lbrace => parse_record_or_object_decl(p, inline_ctx, current_type_name_path),
+        Token::Private => parse_private_eq_or_repr(p, current_type_name_path),
+        Token::Bar | Token::DotDot | Token::DocComment { .. } => {
+            let (private, kind) = parse_type_representation(p, None, None);
+            (None, kind, private)
+        }
+        Token::At => {
+            // Look past the attributes (and doc comments): a representation-like
+            // token means a representation, anything else a manifest.
+            let is_representation_after_attrs = p.lookahead(|state| {
+                parse_attributes(state);
+                super::core::skip_doc_comments(state);
+                match state.token {
+                    Token::Lbrace => {
+                        state.next();
+                        parse_attributes(state);
+                        super::core::skip_doc_comments(state);
+                        !matches!(
+                            state.token,
+                            Token::String(_) | Token::Dot | Token::DotDot | Token::DotDotDot
+                        )
+                    }
+                    Token::Bar | Token::DotDot | Token::DocComment { .. } => true,
+                    Token::Uident(_) => {
+                        state.next();
+                        state.token != Token::Dot
+                    }
+                    _ => false,
+                }
+            });
+            if is_representation_after_attrs {
+                let (private, kind) = parse_type_representation(p, None, None);
+                (None, kind, private)
+            } else {
+                parse_manifest_and_representation(p, inline_ctx, current_type_name_path)
+            }
+        }
+        _ => parse_manifest_and_representation(p, inline_ctx, current_type_name_path),
+    }
+}
+
+/// The manifest fallback of `parse_type_equation_and_representation`: a type
+/// expression, optionally followed by `= representation`.
+fn parse_manifest_and_representation(
+    p: &mut Parser<'_>,
+    inline_ctx: Option<&RefCell<InlineTypesContext>>,
+    current_type_name_path: &Vec<StrIdx>,
+) -> TypeEquation {
+    let typ = typ::parse_typ_expr(p);
+    let manifest = Some(p.arena_mut().push_core_type(typ));
+    if p.token == Token::Equal {
+        p.next();
+        let (private, kind) =
+            parse_type_representation(p, inline_ctx, Some(current_type_name_path));
+        (manifest, kind, private)
+    } else {
+        (manifest, TypeKind::Ptype_abstract, PrivateFlag::Public)
+    }
+}
+
+/// OCaml `parse_type_equation_or_constr_decl` (res_core.ml:5822-5874).
+fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
+    let is_type_path = p.lookahead(|state| {
+        state.next();
+        state.token == Token::Dot
+    });
+    if is_type_path {
+        let typ = typ::parse_typ_expr(p);
+        let manifest = Some(p.arena_mut().push_core_type(typ));
+        if p.token == Token::Equal {
+            p.next();
+            let (private, kind) = parse_type_representation(p, None, None);
+            (manifest, kind, private)
+        } else {
+            (manifest, TypeKind::Ptype_abstract, PrivateFlag::Public)
+        }
+    } else {
+        (
+            None,
+            TypeKind::Ptype_variant(parse_constructors_without_leading_bar(p)),
+            PrivateFlag::Public,
+        )
+    }
+}
+
+/// OCaml `parse_private_eq_or_repr` (res_core.ml:6081-6097).
+fn parse_private_eq_or_repr(
+    p: &mut Parser<'_>,
+    current_type_name_path: &Vec<StrIdx>,
+) -> TypeEquation {
+    p.expect(Token::Private);
+    match p.token {
+        Token::Lbrace => {
+            let (manifest, kind, _) =
+                parse_record_or_object_decl(p, None, current_type_name_path);
+            (manifest, kind, PrivateFlag::Private)
+        }
+        Token::Uident(_) => {
+            let (manifest, kind, _) = parse_type_equation_or_constr_decl(p);
+            (manifest, kind, PrivateFlag::Private)
+        }
+        Token::Bar | Token::DotDot => {
+            let (_, kind) = parse_type_representation(p, None, None);
+            (None, kind, PrivateFlag::Private)
+        }
+        ref t if grammar::is_typ_expr_start(t) => {
+            let typ = typ::parse_typ_expr(p);
+            (
+                Some(p.arena_mut().push_core_type(typ)),
+                TypeKind::Ptype_abstract,
+                PrivateFlag::Private,
+            )
+        }
+        _ => {
+            let (_, kind) = parse_type_representation(p, None, None);
+            (None, kind, PrivateFlag::Private)
+        }
+    }
+}
+
+/// OCaml `parse_record_or_object_decl` (res_core.ml:6030-6140).
+fn parse_record_or_object_decl(
+    p: &mut Parser<'_>,
+    inline_ctx: Option<&RefCell<InlineTypesContext>>,
+    current_type_name_path: &Vec<StrIdx>,
+) -> TypeEquation {
+    let path = inline_ctx.map(|_| current_type_name_path);
+    let after_lbrace = p.lookahead(|state| {
+        state.next();
+        match state.token {
+            Token::Dot | Token::DotDot => 0u8,
+            Token::DotDotDot => 1,
+            _ => 2,
+        }
+    });
+    if after_lbrace == 0 || (after_lbrace == 1 && spread_decl_has_object_field(p)) {
+        let typ = typ::parse_object_decl(p);
+        (
+            Some(p.arena_mut().push_core_type(typ)),
+            TypeKind::Ptype_abstract,
+            PrivateFlag::Public,
+        )
+    } else if after_lbrace == 1 {
+        (None, parse_type_kind(p, inline_ctx, path), PrivateFlag::Public)
+    } else {
+        let lbrace_pos_idx = p.start_pos_idx();
+        p.next();
+        let leading_attrs = parse_attributes(p);
+        if matches!(p.token, Token::String(_)) {
+            let typ = typ::parse_object_decl_string_fields(p, lbrace_pos_idx, leading_attrs);
+            (
+                Some(p.arena_mut().push_core_type(typ)),
+                TypeKind::Ptype_abstract,
+                PrivateFlag::Public,
+            )
+        } else {
+            let kind =
+                parse_record_decl_fields(p, inline_ctx, path, lbrace_pos_idx, leading_attrs);
+            (None, kind, PrivateFlag::Public)
+        }
+    }
+}
+
+/// Whether a `{...spread, ...}` declaration has a string (object) field at
+/// the top level, which OCaml's `parse_field_declaration_region
+/// ~found_object_field` records while parsing the fields.
+fn spread_decl_has_object_field(p: &mut Parser<'_>) -> bool {
+    p.lookahead(|state| {
+        state.next();
+        let mut depth = 0;
+        loop {
+            match state.token {
+                Token::String(_) if depth == 0 => return true,
+                Token::Eof => return false,
+                Token::Lparen | Token::Lbrace | Token::Lbracket => depth += 1,
+                Token::Rparen | Token::Rbracket => {
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                }
+                Token::Rbrace => {
+                    if depth > 0 {
+                        depth -= 1;
+                    } else {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+            state.next();
+        }
+    })
+}
+
+/// OCaml `parse_type_representation` (res_core.ml:5640-5692).
+fn parse_type_representation(
+    p: &mut Parser<'_>,
+    inline_ctx: Option<&RefCell<InlineTypesContext>>,
+    current_type_name_path: Option<&Vec<StrIdx>>,
+) -> (PrivateFlag, TypeKind) {
+    p.leave_breadcrumb(grammar::Grammar::TypeRepresentation);
+    let private = if p.optional(&Token::Private) {
+        PrivateFlag::Private
+    } else {
+        PrivateFlag::Public
+    };
+    let kind = match p.token {
+        Token::Bar | Token::Uident(_) | Token::DocComment { .. } => {
+            TypeKind::Ptype_variant(parse_constructors(p))
+        }
+        Token::At => {
+            let after_attrs = p.lookahead(|state| {
+                parse_attributes(state);
+                super::core::skip_doc_comments(state);
+                match state.token {
+                    Token::Lbrace => 0u8,
+                    Token::DotDot => 1,
+                    _ => 2,
+                }
+            });
+            match after_attrs {
+                0 => {
+                    parse_attributes(p);
+                    super::core::skip_doc_comments(p);
+                    parse_record_declaration(p, inline_ctx, current_type_name_path)
+                }
+                1 => {
+                    parse_attributes(p);
+                    super::core::skip_doc_comments(p);
+                    p.next();
+                    TypeKind::Ptype_open
+                }
+                _ => TypeKind::Ptype_variant(parse_constructors(p)),
+            }
+        }
+        Token::Lbrace => parse_record_declaration(p, inline_ctx, current_type_name_path),
+        Token::DotDot => {
+            p.next();
+            TypeKind::Ptype_open
+        }
+        _ => {
+            p.err_unexpected();
+            TypeKind::Ptype_variant(vec![])
+        }
+    };
+    p.eat_breadcrumb();
+    (private, kind)
+}
+
+/// OCaml `parse_record_declaration` (res_core.ml:5346-5358).
+fn parse_record_declaration(
+    p: &mut Parser<'_>,
+    inline_ctx: Option<&RefCell<InlineTypesContext>>,
+    current_type_name_path: Option<&Vec<StrIdx>>,
+) -> TypeKind {
+    p.leave_breadcrumb(grammar::Grammar::RecordDecl);
+    let lbrace_pos_idx = p.start_pos_idx();
+    p.expect(Token::Lbrace);
+    let labels =
+        parse_label_declarations(p, inline_ctx, current_type_name_path, Some(lbrace_pos_idx));
+    p.expect(Token::Rbrace);
+    p.eat_breadcrumb();
+    TypeKind::Ptype_record(labels)
 }
 
 /// Fix the location of a Ptyp_constr in a type manifest context.
