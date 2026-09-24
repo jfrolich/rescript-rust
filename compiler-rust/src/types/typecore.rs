@@ -9445,7 +9445,7 @@ fn function_argument_type_clash_context(typed_funct_value_path: Option<&Path>) -
             };
         }
 
-        if path.name() == "Primitive_promise.unsafe_await" {
+        if path.name_eq("Primitive_promise.unsafe_await") {
             return TypeClashContext::Await;
         }
     }
@@ -35038,7 +35038,7 @@ fn contains_ident_reference(expr: &Expression, name: &str) -> bool {
 fn substitute_ident(expr: &mut Expression, name: &str, replacement: &Expression) {
     match &mut expr.exp_desc {
         ExpressionDesc::Texp_ident(path, _, _) => {
-            if path.name() == name {
+            if path.name_eq(name) {
                 *expr = replacement.clone();
             }
         }

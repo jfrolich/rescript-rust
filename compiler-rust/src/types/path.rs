@@ -139,6 +139,18 @@ impl Path {
         self.name_with_paren(|_| false)
     }
 
+    /// Whether `name()` equals `target`, without building the name.
+    pub fn name_eq(&self, target: &str) -> bool {
+        match self {
+            Path::Pident(id) => id.name() == target,
+            Path::Pdot(parent, s, _) => target
+                .strip_suffix(s.as_str())
+                .and_then(|prefix| prefix.strip_suffix('.'))
+                .is_some_and(|prefix| parent.name_eq(prefix)),
+            Path::Papply(_, _) => self.name() == target,
+        }
+    }
+
     /// Get the last component name of the path (e.g., "ref" for both "ref" and "Pervasives.ref").
     pub fn head_name(&self) -> &str {
         match self {
@@ -345,6 +357,22 @@ fn is_uident_str(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_name_eq_matches_name() {
+        let a = Path::pident(Ident::create_persistent("A"));
+        let ab = Path::pdot(a.clone(), "B");
+        let abc = Path::pdot(ab.clone(), "c");
+        for path in [&a, &ab, &abc] {
+            assert!(path.name_eq(&path.name()));
+        }
+        assert!(!abc.name_eq("A.Bc"));
+        assert!(!abc.name_eq("AB.c"));
+        assert!(!abc.name_eq("B.c"));
+        assert!(!ab.name_eq("A.B.c"));
+        let applied = Path::papply(a.clone(), ab.clone());
+        assert!(applied.name_eq(&applied.name()));
+    }
 
     #[test]
     fn test_pident() {

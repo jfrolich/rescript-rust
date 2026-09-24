@@ -2890,11 +2890,6 @@ fn try_expand_head_with_mode<'a>(
                 _ => None,
             };
 
-            // For Pdot paths, get the full path name for qualified lookup
-            let full_path_name = match &path {
-                Path::Pdot(_, _, _) => Some(path.name()),
-                _ => None,
-            };
 
             drop(desc);
 
@@ -3224,7 +3219,8 @@ fn try_expand_head_with_mode<'a>(
             }
 
             // 3. Try full qualified path lookup (for Pdot paths like Js.Promise.t)
-            if allow_global_fallbacks && let Some(ref _path_name) = full_path_name {
+            if allow_global_fallbacks && matches!(path, Path::Pdot(_, _, _)) {
+                let _path_name = &path.name();
                 // First check cached path store
                 if let Some(store_decl) = ctx.find_type_decl_by_path(_path_name) {
                     if let Some(manifest) = store_decl.type_manifest {

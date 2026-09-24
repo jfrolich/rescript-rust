@@ -974,6 +974,21 @@ impl Default for ParseArena {
 }
 
 impl ParseArena {
+    /// Reserve arena capacity for parsing `source_len` bytes.
+    ///
+    /// Growing the arenas by doubling copied every node table several times
+    /// per file. The ratios are the 90th percentile of nodes per source byte
+    /// over a large project, so most files never reallocate.
+    pub fn reserve_for_source(&mut self, source_len: usize) {
+        self.positions.reserve(source_len * 45 / 100);
+        self.locations.reserve(source_len * 16 / 100);
+        self.expressions.reserve(source_len * 9 / 100);
+        self.longidents.reserve(source_len * 65 / 1000);
+        self.patterns.reserve(source_len * 2 / 100);
+        self.core_types.reserve(source_len * 15 / 1000);
+        self.strings.reserve(source_len / 10);
+    }
+
     /// Create a new arena with the "none" position and location pre-allocated at index 0.
     ///
     /// This ensures that `LocIdx::default()` (which is `LocIdx(0)`) always refers to

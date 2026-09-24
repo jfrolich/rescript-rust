@@ -170,6 +170,7 @@ impl<'src> Parser<'src> {
     pub fn with_mode(filename: impl Into<String>, src: &'src str, mode: ParserMode) -> Self {
         // Create arena first so we can intern the filename
         let mut arena = ParseArena::new();
+        arena.reserve_for_source(src.len());
         // Intern the filename - this StrIdx will be shared by all positions in this file
         let filename_idx = arena.intern_string(&filename.into());
         let scanner = Scanner::new(filename_idx, src);

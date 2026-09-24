@@ -758,21 +758,35 @@ impl<T> Default for TypeExprRefMap<T> {
     }
 }
 
-/// Intentional Rust performance representation for short-lived type-node sets.
-///
-/// Like [`TypeExprRefMap`], this is still keyed by exact type-node identity.
-/// It replaces short-lived `HashSet<TypeExprRef>` visited tables in hot
-/// type traversals without changing OCaml physical-sharing semantics from
-/// compiler/ml/types.ml:22.
-#[derive(Debug, Clone, Default)]
-struct DenseTypeExprRefSet {
-    offset: u32,
-    values: Vec<u8>,
+
+/// Number of keys a `TypeExprRefSet` holds inline before it spills to a
+/// hash set.
+const TYPE_EXPR_SET_INLINE: usize = 16;
+
+/// Multiplicative hash for `TypeExprRef` keys (arena indices).
+#[derive(Default, Clone, Copy)]
+struct TypeKeyHasher(u64);
+
+impl Hasher for TypeKeyHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ u64::from(b)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+
+    #[inline]
+    fn write_u32(&mut self, n: u32) {
+        self.0 = u64::from(n).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
 }
 
-/// Number of keys a `TypeExprRefSet` holds inline before it spills to the
-/// dense representation.
-const TYPE_EXPR_SET_INLINE: usize = 16;
+type TypeKeySet = std::collections::HashSet<u32, std::hash::BuildHasherDefault<TypeKeyHasher>>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TypeExprRefSet {
@@ -780,125 +794,68 @@ pub(crate) struct TypeExprRefSet {
     /// set allocates nothing.
     inline: [u32; TYPE_EXPR_SET_INLINE],
     inline_len: u8,
-    spilled: bool,
-    local: DenseTypeExprRefSet,
-    // A separate span prevents the store tag from creating a 2 GiB gap.
-    store: Option<Box<DenseTypeExprRefSet>>,
+    /// Keys once the inline storage is full; storage comes from a per-thread
+    /// pool so large traversals reuse capacity.
+    spilled: Option<TypeKeySet>,
 }
 
 thread_local! {
-    /// Byte buffers of dropped spilled sets, reused by later traversals.
-    static DENSE_SET_POOL: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Cleared hash sets of dropped spilled `TypeExprRefSet`s.
+    static SPILLED_SET_POOL: std::cell::RefCell<Vec<TypeKeySet>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-const DENSE_SET_POOL_MAX: usize = 8;
-const DENSE_SET_POOL_MAX_BYTES: usize = 1 << 20;
-
-fn pooled_dense_set() -> DenseTypeExprRefSet {
-    let values = DENSE_SET_POOL.with(|pool| pool.borrow_mut().pop()).unwrap_or_default();
-    DenseTypeExprRefSet { offset: 0, values }
-}
-
-fn recycle_dense_set(mut set: DenseTypeExprRefSet) {
-    if set.values.capacity() == 0 || set.values.capacity() > DENSE_SET_POOL_MAX_BYTES {
-        return;
-    }
-    set.values.clear();
-    DENSE_SET_POOL.with(|pool| {
-        let mut pool = pool.borrow_mut();
-        if pool.len() < DENSE_SET_POOL_MAX {
-            pool.push(set.values);
-        }
-    });
-}
+const SPILLED_SET_POOL_MAX: usize = 8;
+const SPILLED_SET_POOL_MAX_CAPACITY: usize = 1 << 16;
 
 impl TypeExprRefSet {
     pub(crate) fn new() -> Self {
         Self {
             inline: [0; TYPE_EXPR_SET_INLINE],
             inline_len: 0,
-            spilled: false,
-            local: DenseTypeExprRefSet::default(),
-            store: None,
+            spilled: None,
         }
     }
 
     #[inline]
     pub(crate) fn insert(&mut self, key: TypeExprRef) -> bool {
-        if !self.spilled {
-            let len = self.inline_len as usize;
-            if self.inline[..len].contains(&key.0) {
-                return false;
-            }
-            if len < TYPE_EXPR_SET_INLINE {
-                self.inline[len] = key.0;
-                self.inline_len += 1;
-                return true;
-            }
-            self.spill();
+        if let Some(spilled) = self.spilled.as_mut() {
+            return spilled.insert(key.0);
         }
-        self.insert_dense(key)
+        let len = self.inline_len as usize;
+        if self.inline[..len].contains(&key.0) {
+            return false;
+        }
+        if len < TYPE_EXPR_SET_INLINE {
+            self.inline[len] = key.0;
+            self.inline_len += 1;
+            return true;
+        }
+        self.spill().insert(key.0)
     }
 
     #[cold]
-    fn spill(&mut self) {
-        self.spilled = true;
-        self.local = pooled_dense_set();
-        let inline = self.inline;
-        for &raw in &inline[..self.inline_len as usize] {
-            self.insert_dense(TypeExprRef(raw));
-        }
-    }
-
-    #[inline]
-    fn insert_dense(&mut self, key: TypeExprRef) -> bool {
-        if key.is_store() {
-            self.store
-                .get_or_insert_with(|| Box::new(pooled_dense_set()))
-                .insert(key)
-        } else {
-            self.local.insert(key)
-        }
+    fn spill(&mut self) -> &mut TypeKeySet {
+        let mut set = SPILLED_SET_POOL
+            .with(|pool| pool.borrow_mut().pop())
+            .unwrap_or_default();
+        set.extend(self.inline[..self.inline_len as usize].iter().copied());
+        self.spilled.insert(set)
     }
 }
 
 impl Drop for TypeExprRefSet {
     fn drop(&mut self) {
-        if self.spilled {
-            recycle_dense_set(std::mem::take(&mut self.local));
-            if let Some(store) = self.store.take() {
-                recycle_dense_set(*store);
+        if let Some(mut set) = self.spilled.take() {
+            if set.capacity() > SPILLED_SET_POOL_MAX_CAPACITY {
+                return;
             }
-        }
-    }
-}
-
-impl DenseTypeExprRefSet {
-    #[inline]
-    fn insert(&mut self, key: TypeExprRef) -> bool {
-        if self.values.is_empty() {
-            self.offset = key.0;
-            self.values.push(1);
-            return true;
-        }
-        if key.0 < self.offset {
-            let prepend = (self.offset - key.0) as usize;
-            let mut values = Vec::with_capacity(self.values.len() + prepend);
-            values.resize(prepend, 0);
-            values.append(&mut self.values);
-            self.values = values;
-            self.offset = key.0;
-        }
-        let idx = (key.0 - self.offset) as usize;
-        if idx >= self.values.len() {
-            self.values.resize(idx + 1, 0);
-        }
-        let slot = &mut self.values[idx];
-        if *slot == 0 {
-            *slot = 1;
-            true
-        } else {
-            false
+            set.clear();
+            SPILLED_SET_POOL.with(|pool| {
+                let mut pool = pool.borrow_mut();
+                if pool.len() < SPILLED_SET_POOL_MAX {
+                    pool.push(set);
+                }
+            });
         }
     }
 }
@@ -1245,8 +1202,7 @@ mod tests {
                 assert_eq!(map.get(TypeExprRef::from_usize(index)), Some(&false));
             }
             assert!(matches!(map.storage, TypeExprRefMapStorage::Sparse(_)));
-            assert_eq!(set.local.values.len(), 40);
-            assert_eq!(set.store.as_ref().unwrap().values.len(), 40);
+            assert_eq!(set.spilled.as_ref().unwrap().len(), 80);
         }
     }
 
