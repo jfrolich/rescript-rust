@@ -281,6 +281,20 @@ pub fn parse_comma_delimited_region<'a, T>(
     nodes
 }
 
+/// OCaml `parse_comma_delimited_reversed_list`
+/// (compiler/syntax/src/res_core.ml:1113-1156). The result is in reverse
+/// source order, like the OCaml list.
+pub fn parse_comma_delimited_reversed_list<'a, T>(
+    p: &mut Parser<'a>,
+    grammar: grammar::Grammar,
+    closing: Token<'static>,
+    f: impl FnMut(&mut Parser<'a>) -> Option<T>,
+) -> Vec<T> {
+    let mut nodes = parse_comma_delimited_region(p, grammar, closing, f);
+    nodes.reverse();
+    nodes
+}
+
 // ============================================================================
 // Error Messages
 // ============================================================================
