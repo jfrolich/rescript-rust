@@ -14880,6 +14880,19 @@ fn validate_expression_await_context(
     async_context: bool,
     in_function_def: bool,
 ) -> PpxResult<()> {
+    // `default_expr_mapper` maps the attributes first (ast_mapper.ml); extension
+    // nodes and delimited string constants are returned unmapped
+    // (bs_builtin_ppx.ml:112-118), and functions map theirs below.
+    if !matches!(
+        &*expr.pexp_desc,
+        ExpressionDesc::Pexp_extension(_)
+            | ExpressionDesc::Pexp_constant(_)
+            | ExpressionDesc::Pexp_fun(_)
+    ) {
+        for attr in expr.pexp_attributes.iter() {
+            validate_payload_await_errors(&attr.1, arena, async_context)?;
+        }
+    }
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_let(inner) => {
             let (_rec_flag, bindings, body) = &**inner;
@@ -14887,15 +14900,30 @@ fn validate_expression_await_context(
             validate_expression_idx_await_context(*body, arena, async_context, false)?;
         }
         ExpressionDesc::Pexp_fun(inner) => {
-            let child_async_context = if has_this_attr(&expr.pexp_attributes, arena) {
+            // bs_builtin_ppx.ml:120-158: set the async context, then map the
+            // attributes, parameter defaults and body. A `@this` callback resets
+            // the context and keeps its remaining attributes unmapped.
+            let is_method_callback = has_this_attr(&expr.pexp_attributes, arena);
+            let child_async_context = if is_method_callback {
                 false
             } else {
                 (in_function_def && async_context) || inner.is_async
             };
-            if let Some(default) = inner.default {
+            if !is_method_callback {
+                for attr in expr.pexp_attributes.iter() {
+                    validate_payload_await_errors(&attr.1, arena, child_async_context)?;
+                }
+            }
+            let defaults: Vec<ExprIdx> = arena
+                .nary_fun_params(inner)
+                .iter()
+                .filter_map(|param| param.p_default)
+                .collect();
+            for default in defaults {
                 validate_expression_idx_await_context(default, arena, child_async_context, false)?;
             }
-            validate_expression_idx_await_context(inner.rhs, arena, child_async_context, true)?;
+            let body = arena.nary_fun_body(inner);
+            validate_expression_idx_await_context(body, arena, child_async_context, true)?;
         }
         ExpressionDesc::Pexp_apply(inner) => {
             // Match ast_exp_apply.ml: #= only assigns to send expressions or ## property reads.
