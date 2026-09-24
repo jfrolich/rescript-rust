@@ -2385,13 +2385,10 @@ fn parse_type_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
     with_loc(lid_idx, loc)
 }
 
-/// Parse let bindings.
-/// `start_pos_idx` should be the PosIdx BEFORE the `let` keyword for the first binding.
-/// `let_end_pos_idx` should be the PosIdx AFTER the `let`/`let?` keyword (for let.unwrap attribute location).
-/// Using PosIdx for start_pos enables position sharing with the structure_item location.
-/// Returns (bindings, Option<LocIdx>) where LocIdx is Some only when there's exactly one binding
-/// (to enable sharing with structure_item). For multiple bindings, returns None and the caller
-/// should create a fresh location spanning all bindings.
+/// OCaml `parse_let_bindings` (compiler/syntax/src/res_core.ml:2790-2824), after
+/// the `let`/`rec` tokens: the first binding, then one binding per `and`. The
+/// attributes before each `and` are read by `parse_attributes_and_binding` in the
+/// enclosing region, so a failed lookahead there silences that region.
 pub(super) fn parse_let_bindings(
     p: &mut Parser<'_>,
     start_pos_idx: PosIdx,
@@ -2400,193 +2397,136 @@ pub(super) fn parse_let_bindings(
     outer_attrs: Attributes,
     unwrap: bool,
 ) -> (Vec<ValueBinding>, Option<LocIdx>) {
-    let mut bindings = vec![];
-    // For the first binding, use the passed-in PosIdx to enable sharing
-    let mut binding_start_idx = start_pos_idx;
-    // Track the first binding's LocIdx for sharing with structure_item
-    let mut first_binding_loc: Option<LocIdx> = None;
-    // Track the location for let.unwrap attribute
-    // For first binding: from start_pos to let_end_pos
-    // For and bindings: captured at end of previous iteration when we see 'and'
-    let mut unwrap_attr_start_idx = start_pos_idx;
-    let mut unwrap_attr_end_idx = let_end_pos_idx;
-
+    let attrs = add_let_unwrap_attr(p, unwrap, start_pos_idx, let_end_pos_idx, outer_attrs);
+    let first = parse_let_binding_body(p, start_pos_idx, attrs);
+    let first_binding_loc = first.pvb_loc;
+    let mut bindings = vec![first];
     loop {
-        // OCaml's parse_let_binding_body uses begin_region and leave_breadcrumb(LetBinding)
-        // for each binding. This allows proper error messages and error de-duplication.
-        p.begin_region();
-        p.leave_breadcrumb(Grammar::LetBinding);
-
-        let mut attrs = parse_attributes(p);
-
-        // Handle `and` after attributes: `@attr and foo = ...`
-        // We need to check for And here and capture its location for let.unwrap
-        if p.token == Token::And {
-            // Capture `and` keyword location for let.unwrap attribute
-            unwrap_attr_start_idx = p.start_pos_idx();
-            unwrap_attr_end_idx = p.end_pos_idx();
-            p.next(); // consume `and`
-        }
-
-        // For the first binding, prepend the outer attributes
-        if bindings.is_empty() {
-            attrs = outer_attrs.clone().concat(attrs);
-        }
-        // Add let.unwrap attribute if this is let? (for all bindings, including `and` bindings)
-        // OCaml uses: mk_loc start_pos end_pos (not ghost!)
-        if unwrap {
-            let unwrap_loc = p.mk_loc_idx(unwrap_attr_start_idx, unwrap_attr_end_idx);
-            let unwrap_idx = p.arena_mut().intern("let.unwrap");
-            attrs.push((
-                with_loc(unwrap_idx, unwrap_loc),
-                Payload::PStr(Box::new(vec![])),
-            ));
-        }
-
-        // OCaml sets Pattern breadcrumb before parsing the pattern
-        p.leave_breadcrumb(Grammar::Pattern);
-        let pat = pattern::parse_pattern(p);
-        p.eat_breadcrumb();
-
-        // Parse an ordinary pattern constraint or the current-Parsetree
-        // value constraint used by `let x: type a. t = expr`.
-        let (pat, value_constraint) = if p.token == Token::Colon {
-            p.next();
-            if p.token == Token::Typ {
-                p.next();
-                let pvc_newtypes = expr::parse_lident_list(p);
-                p.expect(Token::Dot);
-                let pvc_type = typ::parse_typ_expr(p);
-                let pvc_type = p.arena_mut().push_core_type(pvc_type);
-                (
-                    pat,
-                    Some(crate::parser::ast::ValueConstraint {
-                        pvc_newtypes,
-                        pvc_type,
-                        pvc_pattern: None,
-                        pvc_expression: None,
-                    }),
-                )
-            } else {
-                let poly_type = typ::parse_poly_type_expr(p);
-                let loc = p.mk_loc_spanning(pat.ppat_loc, poly_type.ptyp_loc);
-                let pat_idx = p.arena_mut().push_pat(pat);
-                let typ_idx = p.arena_mut().push_core_type(poly_type);
-                (
-                    Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
-                            pat_idx, typ_idx,
-                        )))),
-                        ppat_loc: loc,
-                        ppat_attributes: Attributes::new(),
-                    },
-                    None,
-                )
-            }
-        } else {
-            (pat, None)
-        };
-
-        p.expect(Token::Equal);
-        let mut expr = expr::parse_expr(p);
-        // The locally abstract branch follows `parse_expr` directly; ordinary
-        // bindings retain the parser's constrained/arrow over-parse.
-        if value_constraint.is_none() {
-            expr = expr::over_parse_constrained_or_coerced_or_arrow_expression(p, expr);
-        }
-
-        let vb_loc = p.mk_loc_idx_to_prev_end(binding_start_idx);
-        if first_binding_loc.is_none() {
-            first_binding_loc = Some(vb_loc);
-        }
-
-        let pat_idx = p.arena_mut().push_pat(pat);
-        let expr_idx = p.arena_mut().push_expr(expr);
-        if let Some(value_constraint) = value_constraint
-            && let Err(loc) =
-                p.arena_mut()
-                    .set_value_constraint(pat_idx, value_constraint, expr_idx, vb_loc)
-        {
-            p.err_at(
-                p.loc_start(loc),
-                p.loc_end(loc),
-                DiagnosticCategory::FatalSyntaxerr,
-            );
-        }
-        bindings.push(ValueBinding {
-            pvb_pat: pat_idx,
-            pvb_expr: expr_idx,
-            pvb_attributes: attrs,
-            pvb_loc: vb_loc,
-        });
-
-        // End the region and breadcrumb for this binding
-        p.eat_breadcrumb();
-        p.end_region();
-
-        // Check for `and` to continue with more bindings.
-        // Also handle attributes/doc comments before `and`: `@attr and ...` or `/** doc */ and ...`
-        if p.token == Token::And {
-            // Capture `and` keyword location for let.unwrap attribute in next binding
-            // OCaml uses p.Parser.start_pos and p.Parser.end_pos (before consuming 'and')
-            unwrap_attr_start_idx = p.start_pos_idx();
-            unwrap_attr_end_idx = p.end_pos_idx();
-            // Capture start position BEFORE consuming `and` for next binding
-            // For `and` bindings, we push a fresh position (no sharing needed with structure_item)
-            binding_start_idx = p.start_pos_idx();
-            p.next();
-        } else if matches!(p.token, Token::At | Token::AtAt | Token::DocComment { .. }) {
-            // Look ahead to see if attributes/doc comments are followed by And
-            let has_and_after = p.lookahead(|state| {
-                // Skip attributes and doc comments
-                while matches!(
-                    state.token,
-                    Token::At | Token::AtAt | Token::DocComment { .. }
-                ) {
-                    if matches!(state.token, Token::DocComment { .. }) {
-                        state.next();
-                    } else {
-                        state.next(); // @
-                        // Skip the attribute identifier and any payload
-                        while !matches!(
-                            state.token,
-                            Token::At
-                                | Token::AtAt
-                                | Token::DocComment { .. }
-                                | Token::And
-                                | Token::Eof
-                                | Token::Let { .. }
-                                | Token::Typ
-                                | Token::Module
-                                | Token::External
-                                | Token::Open
-                                | Token::Include
-                        ) {
-                            state.next();
-                        }
-                    }
-                }
-                state.token == Token::And
-            });
-            if !has_and_after {
-                break;
-            }
-            // Capture start position BEFORE the attributes for next binding
-            binding_start_idx = p.start_pos_idx();
-            // Continue - attributes will be parsed in the next iteration, and `and` will be consumed there
-        } else {
+        let binding_start_idx = p.start_pos_idx();
+        let binding_end_idx = p.end_pos_idx();
+        let attrs = parse_attributes_and_binding(p);
+        let attrs = add_let_unwrap_attr(p, unwrap, binding_start_idx, binding_end_idx, attrs);
+        if p.token != Token::And {
             break;
         }
+        p.next();
+        // Over-parse `and let` for fault tolerance.
+        p.optional(&Token::Let { unwrap: false });
+        bindings.push(parse_let_binding_body(p, binding_start_idx, attrs));
     }
 
     // Return bindings and optionally the LocIdx for sharing with structure_item.
     // Only share when there's exactly one binding - for multiple bindings, the structure_item
     // should span all bindings which is different from the first binding's location.
     if bindings.len() == 1 {
-        (bindings, first_binding_loc)
+        (bindings, Some(first_binding_loc))
     } else {
         (bindings, None)
     }
+}
+
+/// OCaml `add_unwrap_attr` in `parse_let_bindings`: `let?` prepends
+/// `@let.unwrap` located at `start_pos..end_pos`.
+fn add_let_unwrap_attr(
+    p: &mut Parser<'_>,
+    unwrap: bool,
+    start_idx: PosIdx,
+    end_idx: PosIdx,
+    attrs: Attributes,
+) -> Attributes {
+    if !unwrap {
+        return attrs;
+    }
+    let loc = p.mk_loc_idx(start_idx, end_idx);
+    let name = p.arena_mut().intern("let.unwrap");
+    let unwrap_attr: Attribute = (with_loc(name, loc), Payload::PStr(Box::new(vec![])));
+    Attributes::from_vec(vec![unwrap_attr]).concat(attrs)
+}
+
+/// OCaml `parse_let_binding_body` (compiler/syntax/src/res_core.ml:2690-2731).
+fn parse_let_binding_body(
+    p: &mut Parser<'_>,
+    start_pos_idx: PosIdx,
+    attrs: Attributes,
+) -> ValueBinding {
+    p.begin_region();
+    p.leave_breadcrumb(Grammar::LetBinding);
+    // OCaml sets Pattern breadcrumb before parsing the pattern
+    p.leave_breadcrumb(Grammar::Pattern);
+    let pat = pattern::parse_pattern(p);
+    p.eat_breadcrumb();
+
+    // Parse an ordinary pattern constraint or the current-Parsetree
+    // value constraint used by `let x: type a. t = expr`.
+    let (pat, value_constraint) = if p.token == Token::Colon {
+        p.next();
+        if p.token == Token::Typ {
+            p.next();
+            let pvc_newtypes = expr::parse_lident_list(p);
+            p.expect(Token::Dot);
+            let pvc_type = typ::parse_typ_expr(p);
+            let pvc_type = p.arena_mut().push_core_type(pvc_type);
+            (
+                pat,
+                Some(crate::parser::ast::ValueConstraint {
+                    pvc_newtypes,
+                    pvc_type,
+                    pvc_pattern: None,
+                    pvc_expression: None,
+                }),
+            )
+        } else {
+            let poly_type = typ::parse_poly_type_expr(p);
+            let loc = p.mk_loc_spanning(pat.ppat_loc, poly_type.ptyp_loc);
+            let pat_idx = p.arena_mut().push_pat(pat);
+            let typ_idx = p.arena_mut().push_core_type(poly_type);
+            (
+                Pattern {
+                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
+                        pat_idx, typ_idx,
+                    )))),
+                    ppat_loc: loc,
+                    ppat_attributes: Attributes::new(),
+                },
+                None,
+            )
+        }
+    } else {
+        (pat, None)
+    };
+
+    p.expect(Token::Equal);
+    let mut expr = expr::parse_expr(p);
+    // The locally abstract branch follows `parse_expr` directly; ordinary
+    // bindings retain the parser's constrained/arrow over-parse.
+    if value_constraint.is_none() {
+        expr = expr::over_parse_constrained_or_coerced_or_arrow_expression(p, expr);
+    }
+
+    let vb_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+
+    let pat_idx = p.arena_mut().push_pat(pat);
+    let expr_idx = p.arena_mut().push_expr(expr);
+    if let Some(value_constraint) = value_constraint
+        && let Err(loc) =
+            p.arena_mut()
+                .set_value_constraint(pat_idx, value_constraint, expr_idx, vb_loc)
+    {
+        p.err_at(
+            p.loc_start(loc),
+            p.loc_end(loc),
+            DiagnosticCategory::FatalSyntaxerr,
+        );
+    }
+    let binding = ValueBinding {
+        pvb_pat: pat_idx,
+        pvb_expr: expr_idx,
+        pvb_attributes: attrs,
+        pvb_loc: vb_loc,
+    };
+    p.eat_breadcrumb();
+    p.end_region();
+    binding
 }
 
 
@@ -4044,28 +3984,25 @@ fn parse_external_value_description(
 
     let typ = p.arena_mut().push_core_type(typ_ct);
 
-    let prim = if p.token == Token::Equal {
-        let equal_start = p.start_pos.clone();
-        let equal_end = p.end_pos.clone();
-        p.next();
-        match &p.token {
-            Token::String(s) => {
-                let s = s.clone();
-                p.next();
-                vec![p.arena_mut().push_interned_string(&s)]
-            }
-            _ => {
-                let msg = format!(
-                    "An external requires the name of the JS value you're referring to, like \"{}\".",
-                    name_text
-                );
-                p.err_at(equal_start, equal_end, DiagnosticCategory::Message(msg));
-                vec![]
-            }
+    // OCaml res_core.ml: `Parser.expect Equal` recovers when `=` is missing,
+    // and the primitive string is read either way.
+    let equal_start = p.start_pos.clone();
+    let equal_end = p.end_pos.clone();
+    p.expect(Token::Equal);
+    let prim = match &p.token {
+        Token::String(s) => {
+            let s = s.clone();
+            p.next();
+            vec![p.arena_mut().push_interned_string(&s)]
         }
-    } else {
-        p.expect(Token::Equal);
-        vec![]
+        _ => {
+            let msg = format!(
+                "An external requires the name of the JS value you're referring to, like \"{}\".",
+                name_text
+            );
+            p.err_at(equal_start, equal_end, DiagnosticCategory::Message(msg));
+            vec![]
+        }
     };
 
     let loc = p.mk_loc_idx_to_prev_end(loc_start_idx);
