@@ -7252,16 +7252,156 @@ fn has_this_attr(attrs: &[Attribute], arena: &ParseArena) -> bool {
         .any(|(attr_name, _)| arena.get_string(attr_name.txt) == "this")
 }
 
-/// Process @get/@set attributes on object fields and generate setter fields.
-/// Mirrors OCaml's Ast_core_type_class_type.typ_mapper for Ptyp_object.
-/// When a field has @set, an additional field `name#=` is generated with type `typ -> unit`.
+/// `Ast_payload.ident_or_record_as_config` entries of a method attribute
+/// payload (compiler/ml/ast_payload.ml:168-209). Payload shape errors are
+/// reported by `validate_object_field_method_attrs`.
+fn method_attribute_config(payload: &Payload, arena: &ParseArena) -> Vec<(String, Option<ExprIdx>)> {
+    let Payload::PStr(items) = payload else {
+        return Vec::new();
+    };
+    let [item] = items.as_slice() else {
+        return Vec::new();
+    };
+    let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
+        return Vec::new();
+    };
+    let expr = arena.get_expr(inner.0);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_ident(lid) => match arena.get_longident(lid.txt) {
+            Longident::Lident(name) => vec![(arena.get_string(*name).to_string(), None)],
+            _ => Vec::new(),
+        },
+        ExpressionDesc::Pexp_record(inner) => {
+            let (fields, with_obj) = &**inner;
+            if with_obj.is_some() {
+                return Vec::new();
+            }
+            fields
+                .iter()
+                .filter_map(|field| {
+                    let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
+                        return None;
+                    };
+                    let name = arena.get_string(*name_idx);
+                    let punned = matches!(
+                        &*arena.get_expr(field.expr).pexp_desc,
+                        ExpressionDesc::Pexp_ident(value)
+                            if matches!(arena.get_longident(value.txt),
+                                Longident::Lident(v) if arena.get_string(*v) == name)
+                    );
+                    Some((name.to_string(), (!punned).then_some(field.expr)))
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// `Ast_payload.assert_bool_lit` on an already validated literal.
+fn method_attribute_bool(opt_expr: Option<ExprIdx>, arena: &ParseArena) -> bool {
+    match opt_expr {
+        None => true,
+        Some(expr_idx) => match &*arena.get_expr(expr_idx).pexp_desc {
+            ExpressionDesc::Pexp_construct(lid, None) => matches!(
+                arena.get_longident(lid.txt),
+                Longident::Lident(name) if arena.get_string(*name) == "true"
+            ),
+            _ => false,
+        },
+    }
+}
+
+enum SetterKind {
+    Get,
+    NoGet,
+}
+
+/// `Ast_attributes.process_method_attributes_rev`
+/// (compiler/frontend/ast_attributes.ml:29-72): the `@get`/`@set` settings and
+/// the other attributes in reverse order.
+fn process_method_attributes_rev(
+    attrs: &[Attribute],
+    arena: &ParseArena,
+) -> (Option<(bool, bool)>, Option<SetterKind>, Vec<Attribute>) {
+    let mut get = None;
+    let mut set = None;
+    let mut acc = Vec::new();
+    for attr in attrs {
+        match arena.get_string(attr.0.txt) {
+            "get" => {
+                let mut result = (false, false);
+                for (name, opt_expr) in method_attribute_config(&attr.1, arena) {
+                    let (null, undefined) = result;
+                    result = match name.as_str() {
+                        "null" => (method_attribute_bool(opt_expr, arena), undefined),
+                        "undefined" => (null, method_attribute_bool(opt_expr, arena)),
+                        "nullable" => {
+                            let v = method_attribute_bool(opt_expr, arena);
+                            (v, v)
+                        }
+                        _ => result,
+                    };
+                }
+                get = Some(result);
+            }
+            "set" => {
+                let mut result = SetterKind::Get;
+                for (name, opt_expr) in method_attribute_config(&attr.1, arena) {
+                    if name == "no_get" {
+                        result = if method_attribute_bool(opt_expr, arena) {
+                            SetterKind::NoGet
+                        } else {
+                            SetterKind::Get
+                        };
+                    }
+                }
+                set = Some(result);
+            }
+            _ => acc.insert(0, attr.clone()),
+        }
+    }
+    (get, set, acc)
+}
+
+/// `Ast_attributes.process_attributes_rev` (ast_attributes.ml:77-81): the last
+/// `@this` attribute and the other attributes in reverse order.
+fn process_attributes_rev(attrs: &[Attribute], arena: &ParseArena) -> (Option<Attribute>, Vec<Attribute>) {
+    let mut this_attr = None;
+    let mut acc = Vec::new();
+    for attr in attrs {
+        if arena.get_string(attr.0.txt) == "this" {
+            this_attr = Some(attr.clone());
+        } else {
+            acc.insert(0, attr.clone());
+        }
+    }
+    (this_attr, acc)
+}
+
+/// The `Otag` case of `Ast_core_type_class_type.typ_mapper`
+/// (compiler/frontend/ast_core_type_class_type.ml:26-54, 94-134).
 fn rewrite_object_fields(
     fields: &[ObjectField],
     obj_loc: LocIdx,
     arena: &mut ParseArena,
 ) -> Vec<ObjectField> {
-    let mut result: Vec<ObjectField> = Vec::new();
+    // `attr +> ty` then `self.typ self ty`.
+    fn map_field_type(
+        this_attr: Option<Attribute>,
+        typ_idx: CoreTypeIdx,
+        arena: &mut ParseArena,
+    ) -> CoreTypeIdx {
+        let mut ty = arena.get_core_type(typ_idx).clone();
+        if let Some(attr) = this_attr {
+            let mut attrs = vec![attr];
+            attrs.extend(ty.ptyp_attributes.iter().cloned());
+            ty.ptyp_attributes = attrs.into();
+        }
+        let rewritten = rewrite_core_type(&ty, arena);
+        arena.push_core_type(rewritten)
+    }
 
+    let mut result: Vec<ObjectField> = Vec::new();
     for field in fields {
         match field {
             ObjectField::Oinherit(typ_idx) => {
@@ -7270,106 +7410,18 @@ fn rewrite_object_fields(
                 result.push(ObjectField::Oinherit(arena.push_core_type(rewritten)));
             }
             ObjectField::Otag(name, attrs, typ_idx) => {
-                let mut has_get: Option<(bool, bool)> = None;
-                let mut has_set = false;
-                let mut no_get = false;
-                let mut remaining_attrs: Vec<Attribute> = Vec::new();
-
-                for attr in attrs.iter() {
-                    let attr_name = arena.get_string(attr.0.txt);
-                    match attr_name {
-                        "get" => {
-                            let mut null = false;
-                            let mut undefined = false;
-                            if let Payload::PStr(items) = &attr.1 {
-                                for item in items.iter() {
-                                    if let StructureItemDesc::Pstr_eval(eval_inner) =
-                                        &*item.pstr_desc
-                                    {
-                                        let (expr_idx, _) = &**eval_inner;
-                                        let expr = arena.get_expr(*expr_idx);
-                                        if let ExpressionDesc::Pexp_record(record_inner) =
-                                            &*expr.pexp_desc
-                                        {
-                                            let (fields, _) = &**record_inner;
-                                            for field in fields.iter() {
-                                                let field_name = match arena
-                                                    .get_longident(field.lid.txt)
-                                                {
-                                                    Longident::Lident(s) => arena.get_string(*s),
-                                                    _ => "",
-                                                };
-                                                match field_name {
-                                                    "null" => null = true,
-                                                    "undefined" => undefined = true,
-                                                    "nullable" => {
-                                                        null = true;
-                                                        undefined = true;
-                                                    }
-                                                    _ => {}
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            has_get = Some((null, undefined));
-                        }
-                        "set" => {
-                            has_set = true;
-                            if let Payload::PStr(items) = &attr.1 {
-                                for item in items.iter() {
-                                    if let StructureItemDesc::Pstr_eval(eval_inner) =
-                                        &*item.pstr_desc
-                                    {
-                                        let (expr_idx, _) = &**eval_inner;
-                                        let expr = arena.get_expr(*expr_idx);
-                                        if let ExpressionDesc::Pexp_record(record_inner) =
-                                            &*expr.pexp_desc
-                                        {
-                                            let (fields, _) = &**record_inner;
-                                            for field in fields.iter() {
-                                                let field_name = match arena
-                                                    .get_longident(field.lid.txt)
-                                                {
-                                                    Longident::Lident(s) => arena.get_string(*s),
-                                                    _ => "",
-                                                };
-                                                if field_name == "no_get" {
-                                                    no_get = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        "this" => {}
-                        _ => remaining_attrs.push(attr.clone()),
-                    }
-                }
-
-                if has_get.is_none() && !has_set {
-                    let typ_ct = arena.get_core_type(*typ_idx).clone();
-                    let rewritten = rewrite_core_type(&typ_ct, arena);
-                    result.push(ObjectField::Otag(
-                        name.clone(),
-                        rewrite_attributes(attrs, arena).into(),
-                        arena.push_core_type(rewritten),
-                    ));
+                let (get, set, pctf_attributes) = process_method_attributes_rev(attrs, arena);
+                if get.is_none() && set.is_none() {
+                    let (this_attr, attrs) = process_attributes_rev(attrs, arena);
+                    let typ = map_field_type(this_attr, *typ_idx, arena);
+                    result.push(ObjectField::Otag(name.clone(), attrs.into(), typ));
                     continue;
                 }
-
-                if has_set {
-                    let setter_name = format!("{}#=", arena.get_string(name.txt));
-                    let setter_name_idx = arena.push_string(setter_name);
-                    let setter_name_loc = Located {
-                        txt: setter_name_idx,
-                        loc: name.loc,
-                    };
-
+                if set.is_some() {
+                    let (this_attr, attrs) = process_attributes_rev(&pctf_attributes, arena);
+                    let arg = map_field_type(this_attr, *typ_idx, arena);
                     let unit_lid = arena.push_lident("unit");
-                    let unit_type = CoreType {
+                    let unit_type = arena.push_core_type(CoreType {
                         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
                             Located {
                                 txt: unit_lid,
@@ -7379,87 +7431,71 @@ fn rewrite_object_fields(
                         )))),
                         ptyp_loc: obj_loc,
                         ptyp_attributes: Attributes::new(),
-                    };
-                    let unit_idx = arena.push_core_type(unit_type);
-
-                    let typ_ct = arena.get_core_type(*typ_idx).clone();
-                    let rewritten_inner = rewrite_core_type(&typ_ct, arena);
-                    let rewritten_inner_idx = arena.push_core_type(rewritten_inner);
-
+                    });
                     let setter_type = CoreType {
                         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
                             Box::new(TypeArg {
                                 attrs: Attributes::new(),
                                 lbl: ArgLabel::Nolabel,
-                                typ: rewritten_inner_idx,
+                                typ: arg,
                             }),
-                            unit_idx,
+                            unit_type,
                             arena.push_arity(Some(1)),
                         )))),
                         ptyp_loc: obj_loc,
                         ptyp_attributes: Attributes::new(),
                     };
+                    let setter_name = format!("{}#=", arena.get_string(name.txt));
+                    let setter_name = Located {
+                        txt: arena.push_string(setter_name),
+                        loc: name.loc,
+                    };
                     result.push(ObjectField::Otag(
-                        setter_name_loc,
-                        remaining_attrs.clone().into(),
+                        setter_name,
+                        attrs.into(),
                         arena.push_core_type(setter_type),
                     ));
                 }
-
-                if !no_get {
-                    let typ_ct = arena.get_core_type(*typ_idx).clone();
-                    let getter_type = if let Some((null, undefined)) = has_get {
-                        match (null, undefined) {
-                            (false, false) => rewrite_core_type(&typ_ct, arena),
-                            (true, false) => {
-                                let inner = rewrite_core_type(&typ_ct, arena);
-                                wrap_in_js_type(&inner, "Js", "null", arena)
-                            }
-                            (false, true) => {
-                                let inner = rewrite_core_type(&typ_ct, arena);
-                                wrap_in_js_type(&inner, "Js", "undefined", arena)
-                            }
-                            (true, true) => {
-                                let inner = rewrite_core_type(&typ_ct, arena);
-                                wrap_in_js_type(&inner, "Js", "null_undefined", arena)
-                            }
-                        }
-                    } else {
-                        rewrite_core_type(&typ_ct, arena)
+                if !matches!(set, Some(SetterKind::NoGet)) {
+                    let (null, undefined) = get.unwrap_or((false, false));
+                    // `lift txt = Typ.constr ~loc {txt; loc} [ty]`.
+                    let lift = match (null, undefined) {
+                        (false, false) => None,
+                        (true, false) => Some(("Stdlib.Null", "t")),
+                        (false, true) => Some(("", "undefined")),
+                        (true, true) => Some(("Stdlib.Nullable", "t")),
                     };
-                    result.push(ObjectField::Otag(
-                        name.clone(),
-                        remaining_attrs.clone().into(),
-                        arena.push_core_type(getter_type),
-                    ));
+                    let typ_idx = match lift {
+                        None => *typ_idx,
+                        Some((prefix, last)) => {
+                            let lid = if prefix.is_empty() {
+                                arena.push_lident(last)
+                            } else {
+                                let stdlib = arena.push_lident("Stdlib");
+                                let module = arena.push_ldot(stdlib, &prefix["Stdlib.".len()..]);
+                                arena.push_ldot(module, last)
+                            };
+                            arena.push_core_type(CoreType {
+                                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+                                    Located {
+                                        txt: lid,
+                                        loc: obj_loc,
+                                    },
+                                    vec![*typ_idx],
+                                )))),
+                                ptyp_loc: obj_loc,
+                                ptyp_attributes: Attributes::new(),
+                            })
+                        }
+                    };
+                    let (this_attr, attrs) = process_attributes_rev(&pctf_attributes, arena);
+                    let typ = map_field_type(this_attr, typ_idx, arena);
+                    result.push(ObjectField::Otag(name.clone(), attrs.into(), typ));
                 }
             }
         }
     }
-
     result
-}
-
-/// Wrap a type in Js.wrapper<typ> (e.g., Js.null<typ>, Js.undefined<typ>)
-fn wrap_in_js_type(
-    typ: &CoreType,
-    module_name: &str,
-    type_name: &str,
-    arena: &mut ParseArena,
-) -> CoreType {
-    let module_lid = arena.push_lident(module_name);
-    let full_lid = arena.push_ldot(module_lid, type_name);
-    CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-            Located {
-                txt: full_lid,
-                loc: typ.ptyp_loc,
-            },
-            vec![arena.push_core_type(typ.clone())],
-        )))),
-        ptyp_loc: typ.ptyp_loc,
-        ptyp_attributes: Attributes::new(),
-    }
 }
 
 /// Rewrite a core type, recursing into nested types and extension payloads.
