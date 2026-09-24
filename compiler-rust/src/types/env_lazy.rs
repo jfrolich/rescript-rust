@@ -1507,10 +1507,7 @@ fn build_local_module_components<'a>(
                         pers.get_renamed_sig_shared(alias_id.name(), ctx)
                     } else {
                         ctx.trigger_module_sig_rename(alias_id.name());
-                        ctx.renamed_module_sigs
-                            .borrow()
-                            .get(alias_id.name())
-                            .cloned()
+                        ctx.renamed_module_sig(alias_id.name())
                     };
                     renamed_sig.map(|renamed_sig| {
                         (

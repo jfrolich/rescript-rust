@@ -7378,8 +7378,7 @@ fn normalize_module_path_via_ctx(
                 }
             } else {
                 let alias_path = {
-                    let renamed_sigs = ctx_ref.renamed_module_sigs.borrow();
-                    renamed_sigs.get(&prefix_name).and_then(|sig| {
+                    ctx_ref.renamed_module_sig(&prefix_name).and_then(|sig| {
                         sig.iter().find_map(|item| match item {
                             SignatureItem::SigModule(id, md, _) if id.name() == name => {
                                 match &md.md_type {

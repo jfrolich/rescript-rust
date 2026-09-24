@@ -436,7 +436,12 @@ pub struct TypeContext {
     /// Cache of renamed module signatures.
     /// Matches OCaml's lazy ps_sig = Subst.signature Subst.identity sign.
     /// Populated by PersistentEnv::get_renamed_sig, consumed by normalize_path.
-    pub(crate) renamed_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
+    pub(crate) renamed_module_sigs: RefCell<ahash::AHashMap<String, Arc<DeferredRenamedSig>>>,
+
+    /// Reserved stamp cursor `(next, last)` used while materializing a
+    /// [`DeferredRenamedSig`], so its binders get the stamps reserved when the
+    /// rename was forced.
+    reserved_rename_stamps: Cell<Option<(i32, i32)>>,
 
     /// Raw (un-renamed) module signatures for persistent modules.
     /// Used by trigger_module_sig_rename to lazily rename on first access
@@ -564,6 +569,17 @@ fn push_unique_path(paths: &mut Vec<Path>, path: Path) {
     }
 }
 
+/// A forced persistent-signature rename whose copy is built on first read.
+/// See [`TypeContext::defer_renamed_sig`].
+#[derive(Debug)]
+pub(crate) struct DeferredRenamedSig {
+    kind: &'static str,
+    source: Arc<super::decl::Signature>,
+    first_stamp: i32,
+    stamp_count: i32,
+    renamed: std::sync::OnceLock<Arc<super::decl::Signature>>,
+}
+
 impl TypeContext {
     /// Create a new type context.
     pub fn new(id_gen: Arc<IdGenerator>) -> Self {
@@ -617,6 +633,7 @@ impl TypeContext {
             load_paths: RefCell::new(Vec::new()),
             persistent_env: RefCell::new(None),
             renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
+            reserved_rename_stamps: Cell::new(None),
             raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
             gentype_raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
             gentype_portable_raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
@@ -2614,13 +2631,7 @@ impl TypeContext {
             // sequence (compiler/ml/subst.ml:358-364). Keep this lazy rename
             // to that single pass instead of copying before calling the
             // freshening helper.
-            let renamed = Arc::new(
-                crate::cmi::persistent_env::freshened_signature_bound_idents_from_kind(
-                    "type_context_lazy_rename",
-                    sig.as_ref(),
-                    self,
-                ),
-            );
+            let renamed = self.defer_renamed_sig("type_context_lazy_rename", sig);
             self.renamed_module_sigs
                 .borrow_mut()
                 .insert(module_name.to_string(), renamed);
@@ -2689,8 +2700,76 @@ impl TypeContext {
 
     /// Rename an identifier using the typing context's shared stamp source.
     pub fn rename_ident(&self, id: &Ident) -> Ident {
+        if let Some((next, last)) = self.reserved_rename_stamps.get() {
+            assert!(
+                next <= last,
+                "deferred signature rename used more stamps than it reserved"
+            );
+            self.reserved_rename_stamps.set(Some((next + 1, last)));
+            return id.with_stamp(next);
+        }
         // See `create_ident`: this mirrors compiler/ext/ident.ml:38-40.
         id.rename(&self.id_gen)
+    }
+
+    /// Force a lazy `Subst.signature Subst.identity` rename of `source`.
+    ///
+    /// OCaml `ps_sig` (compiler/ml/env.ml:669-678) is forced by `find_module`
+    /// (compiler/ml/env.ml:865-875), and most forces only come from
+    /// `normalize_path` (compiler/ml/env.ml:903-914), which discards the
+    /// signature unless it is an alias. The only observable effect of the
+    /// force is the fresh binder stamps allocated by `Subst.signature`
+    /// (compiler/ml/subst.ml:358-364), so reserve exactly those stamps now and
+    /// copy the signature with them when its contents are first read.
+    pub(crate) fn defer_renamed_sig(
+        &self,
+        kind: &'static str,
+        source: Arc<super::decl::Signature>,
+    ) -> Arc<DeferredRenamedSig> {
+        let stamp_count = crate::cmi::persistent_env::signature_freshen_stamp_count(&source);
+        let first_stamp = self.id_gen.current_stamp() + 1;
+        self.id_gen.advance_stamp_by(stamp_count);
+        Arc::new(DeferredRenamedSig {
+            kind,
+            source,
+            first_stamp,
+            stamp_count,
+            renamed: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// Copy a deferred renamed signature, using its reserved stamps.
+    pub(crate) fn materialize_renamed_sig(
+        &self,
+        deferred: &DeferredRenamedSig,
+    ) -> Arc<super::decl::Signature> {
+        deferred
+            .renamed
+            .get_or_init(|| {
+                let last = deferred.first_stamp + deferred.stamp_count - 1;
+                let saved = self
+                    .reserved_rename_stamps
+                    .replace(Some((deferred.first_stamp, last)));
+                let renamed = crate::cmi::persistent_env::freshened_signature_bound_idents_from_kind(
+                    deferred.kind,
+                    deferred.source.as_ref(),
+                    self,
+                );
+                let cursor = self.reserved_rename_stamps.replace(saved);
+                assert_eq!(
+                    cursor,
+                    Some((last + 1, last)),
+                    "deferred signature rename used fewer stamps than it reserved"
+                );
+                Arc::new(renamed)
+            })
+            .clone()
+    }
+
+    /// Materialized renamed signature for `module_name`, if it was forced.
+    pub(crate) fn renamed_module_sig(&self, module_name: &str) -> Option<Arc<super::decl::Signature>> {
+        let deferred = self.renamed_module_sigs.borrow().get(module_name).cloned()?;
+        Some(self.materialize_renamed_sig(&deferred))
     }
 
     /// Initialize definition level (equivalent of OCaml's `Ctype.init_def`).

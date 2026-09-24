@@ -641,7 +641,7 @@ pub struct PersistentEnv {
     nopervasives: bool,
     /// Cache of renamed signatures (matching OCaml's lazy Subst.signature).
     /// Each module's signature is renamed once and cached here.
-    renamed_sig_cache: Arc<HashMap<String, Arc<Signature>>>,
+    renamed_sig_cache: Arc<HashMap<String, Arc<crate::types::context::DeferredRenamedSig>>>,
     /// In-memory module registry for `--in-process` builds.
     /// When a module is registered here, its metadata (source path, purity)
     /// is resolved from memory instead of from `.ast`/`.cmj` files on disk.
@@ -1893,19 +1893,18 @@ impl PersistentEnv {
         ctx: &'a TypeContext,
     ) -> Option<Arc<Signature>> {
         // Check TypeContext cache first (populated by trigger_module_sig_rename)
-        if let Some(cached) = ctx.renamed_module_sigs.borrow().get(name) {
-            return Some(cached.clone());
+        if let Some(renamed) = ctx.renamed_module_sig(name) {
+            return Some(renamed);
         }
         // Check local cache
-        if let Some(cached) = self.renamed_sig_cache.get(name) {
-            return Some(cached.clone());
+        if let Some(cached) = self.renamed_sig_cache.get(name).cloned() {
+            return Some(ctx.materialize_renamed_sig(&cached));
         }
         self.force_lazy_signature_rename(name, ctx)?;
-        ctx.renamed_module_sigs
-            .borrow()
-            .get(name)
-            .cloned()
-            .or_else(|| self.renamed_sig_cache.get(name).cloned())
+        ctx.renamed_module_sig(name).or_else(|| {
+            let cached = self.renamed_sig_cache.get(name).cloned()?;
+            Some(ctx.materialize_renamed_sig(&cached))
+        })
     }
 
     pub fn get_renamed_sig<'a>(&mut self, name: &str, ctx: &'a TypeContext) -> Option<Signature> {
@@ -1934,11 +1933,7 @@ impl PersistentEnv {
         // signature here; the helper below owns that single OCaml-equivalent
         // copy.
         let ps = self.find_pers_struct(name, ctx)?;
-        let renamed = Arc::new(freshened_signature_bound_idents_from_kind(
-            "persistent_env_lazy_rename",
-            &ps.ps_sig,
-            ctx,
-        ));
+        let renamed = ctx.defer_renamed_sig("persistent_env_lazy_rename", ps.ps_sig.clone());
         Arc::make_mut(&mut self.renamed_sig_cache).insert(name.to_string(), renamed.clone());
         ctx.renamed_module_sigs
             .borrow_mut()
@@ -3495,6 +3490,36 @@ fn freshened_signature_ident_plan(
     }
 
     (new_idents, local_maps, has_nested_module_types)
+}
+
+/// Number of binder stamps `freshened_signature_bound_idents_from_kind`
+/// allocates for `sig_items`: one per top-level binder
+/// (`freshened_signature_ident_plan`), then the nested module-type binders
+/// renamed by `freshen_nested_signature_module_types`.
+pub(crate) fn signature_freshen_stamp_count(sig_items: &[SignatureItem]) -> i32 {
+    fn module_type_count(module_type: &ModuleType) -> i32 {
+        match module_type {
+            ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => 0,
+            ModuleType::MtySignature(sig) => signature_freshen_stamp_count(sig),
+            ModuleType::MtyFunctor {
+                param_type, result, ..
+            } => {
+                1 + module_type_count(result)
+                    + param_type.as_ref().map_or(0, |param| module_type_count(param))
+            }
+        }
+    }
+    sig_items
+        .iter()
+        .map(|item| match item {
+            SignatureItem::SigValue(..) | SignatureItem::SigTypext(..) | SignatureItem::SigType(..) => 1,
+            SignatureItem::SigModtype(_, mtd) => {
+                1 + mtd.mtd_type.as_ref().map_or(0, module_type_count)
+            }
+            SignatureItem::SigModule(_, md, _) => 1 + module_type_count(&md.md_type),
+            SignatureItem::SigClass | SignatureItem::SigClassType => 0,
+        })
+        .sum()
 }
 
 fn freshen_nested_signature_module_types(sig_items: &mut [SignatureItem], ctx: &TypeContext) {

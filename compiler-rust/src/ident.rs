@@ -301,6 +301,15 @@ impl Ident {
     /// This creates a new identifier with the same name and flags
     /// but a fresh stamp.
     #[inline]
+    /// Copy this identifier with a stamp reserved earlier from the generator.
+    pub(crate) fn with_stamp(&self, stamp: i32) -> Self {
+        Self {
+            name: self.name.clone(),
+            stamp,
+            flags: self.flags,
+        }
+    }
+
     pub fn rename(&self, id_gen: &super::context::IdGenerator) -> Self {
         let stamp = id_gen.next_stamp();
         Self {
