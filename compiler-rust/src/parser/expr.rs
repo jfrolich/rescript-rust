@@ -2725,154 +2725,11 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                 expr =
                     transform_placeholder_application(funct_idx, args, partial, loc, p.arena_mut());
             }
-            Token::Lbracket => {
-                // If [ is on a new line, it's an array literal (new expression), not indexing.
-                // This is needed for automatic semicolon insertion (ASI) in sequences like:
-                //   let x = foo
-                //   [1, 2]  // This is a new array expression, not foo[1, 2]
-                if p.has_newline_before() {
-                    break;
-                }
-                // Array indexing or assignment
-                // Use the captured start_pos from the operand, not expr (which may have been transformed)
-                // Capture the bracket location for Array.set/get identifiers
-                // OCaml uses the location from [ to ] for synthesized Array.set/get
-                let lbracket_start_idx = p.start_pos_idx();
-                p.next();
-                let index = parse_constrained_or_coerced_expr(p);
-                p.expect(Token::Rbracket);
-                let rbracket_end_idx = p.prev_end_pos_idx();
-                let bracket_loc = p.mk_loc_idx(lbracket_start_idx, rbracket_end_idx);
-
-                if p.token == Token::Equal {
-                    let is_string_index =
-                        if let ExpressionDesc::Pexp_constant(c) = &*index.pexp_desc {
-                            matches!(&**c, Constant::String(..))
-                        } else {
-                            false
-                        };
-                    if !is_string_index {
-                        p.leave_breadcrumb(Grammar::ExprArrayMutation);
-                    }
-                    let equal_start_idx = p.start_pos_idx();
-                    p.next();
-                    let equal_end_idx = p.prev_end_pos_idx();
-                    let value = parse_expr(p);
-                    if !is_string_index {
-                        p.eat_breadcrumb();
-                    }
-
-                    if is_string_index {
-                        let (s, _) = if let ExpressionDesc::Pexp_constant(c) = &*index.pexp_desc {
-                            if let Constant::String(s, tag) = &**c {
-                                (s.clone(), tag.clone())
-                            } else {
-                                unreachable!()
-                            }
-                        } else {
-                            unreachable!()
-                        };
-                        // String index: obj["prop"] = value -> Pexp_apply("#=", [Pexp_send(obj, "prop"), value])
-                        // OCaml: loc = mk_loc start_pos rhs_expr.pexp_loc.loc_end
-                        // Use the inner expression's end, not prev_end_pos (which includes braces)
-                        let value_end_idx = p.loc_end_idx(value.pexp_loc);
-                        let loc = p.mk_loc_idx_full(start_pos_idx, value_end_idx);
-                        // First create the Pexp_send for property access
-                        // Use rbracket_end for location (OCaml includes the ] in the location)
-                        let expr_idx = p.arena_mut().push_expr(expr);
-                        let send_expr = Expression {
-                            pexp_desc: Box::new(ExpressionDesc::Pexp_send(Box::new((
-                                expr_idx,
-                                Loc {
-                                    txt: s,
-                                    loc: index.pexp_loc.clone(),
-                                },
-                            )))),
-                            pexp_loc: p.mk_loc_idx_full(start_pos_idx, rbracket_end_idx),
-                            pexp_attributes: Attributes::new(),
-                        };
-                        // Create the "#=" operator
-                        let operator_loc = p.mk_loc_idx(equal_start_idx, equal_end_idx);
-                        let op_lid = super::core::make_lident_static(p.arena_mut(), "#=");
-                        let operator = ast_helper::make_ident(p, op_lid, operator_loc);
-                        // Apply "#=" to [send_expr, value]
-                        expr = ast_helper::make_apply(
-                            p.arena_mut(),
-                            operator,
-                            vec![(ArgLabel::Nolabel, send_expr), (ArgLabel::Nolabel, value)],
-                            loc,
-                        );
-                    } else {
-                        // Non-string index: arr[index] = value -> Array.set(arr, index, value)
-                        // OCaml: loc = mk_loc start_pos p.prev_end_pos
-                        // Uses prev_end_pos (includes braces) for Array.set
-                        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                        // Use static pre-allocated Array.set lident for sharing parity with OCaml
-                        let array_set_lid_idx = p.arena().array_set_lid();
-                        let array_set =
-                            ast_helper::make_ident_idx(array_set_lid_idx, bracket_loc.clone());
-                        let apply_expr = ast_helper::make_apply(
-                            p.arena_mut(),
-                            array_set,
-                            vec![
-                                (ArgLabel::Nolabel, expr),
-                                (ArgLabel::Nolabel, index),
-                                (ArgLabel::Nolabel, value),
-                            ],
-                            loc,
-                        );
-                        expr = apply_expr;
-                    }
-                } else {
-                    // Check if index is a string constant for Pexp_send (JS object access)
-                    // or use Array.get for other index types
-                    // Use rbracket_end for the location end (OCaml includes the ] in the location)
-                    let loc = p.mk_loc_idx_full(start_pos_idx, rbracket_end_idx);
-
-                    let is_string_index =
-                        if let ExpressionDesc::Pexp_constant(c) = &*index.pexp_desc {
-                            matches!(&**c, Constant::String(..))
-                        } else {
-                            false
-                        };
-                    if is_string_index {
-                        let s = if let ExpressionDesc::Pexp_constant(c) = &*index.pexp_desc {
-                            if let Constant::String(s, _) = &**c {
-                                s.clone()
-                            } else {
-                                unreachable!()
-                            }
-                        } else {
-                            unreachable!()
-                        };
-                        // String index: obj["prop"] -> Pexp_send(obj, "prop")
-                        let expr_idx = p.arena_mut().push_expr(expr);
-                        expr = Expression {
-                            pexp_desc: Box::new(ExpressionDesc::Pexp_send(Box::new((
-                                expr_idx,
-                                Loc {
-                                    txt: s,
-                                    loc: index.pexp_loc.clone(),
-                                },
-                            )))),
-                            pexp_loc: loc,
-                            pexp_attributes: Attributes::new(),
-                        };
-                    } else {
-                        // Non-string index: arr[index] -> Array.get(arr, index)
-                        // Use static pre-allocated Array.get lident for sharing parity with OCaml
-                        let array_get_lid_idx = p.arena().array_get_lid();
-                        let array_get = ast_helper::make_ident_idx(array_get_lid_idx, bracket_loc);
-                        // OCaml doesn't add res.array.access attribute in the parser
-                        // The printer can detect array access from the AST structure
-                        expr = ast_helper::make_apply(
-                            p.arena_mut(),
-                            array_get,
-                            vec![(ArgLabel::Nolabel, expr), (ArgLabel::Nolabel, index)],
-                            loc,
-                        );
-                    }
-                }
+            // OCaml `parse_primary_expr` (res_core.ml:2312-2314): bracket access
+            // on the same line hands the rest of the expression to
+            // `parse_bracket_access`.
+            Token::Lbracket if !no_call && p.prev_end_pos.line == p.start_pos.line => {
+                return parse_bracket_access(p, expr, start_pos_idx);
             }
             // Note: MinusGreater (->) is handled by parse_binary_expr as a regular
             // binary operator, not here. It is NOT desugared - a->f(b) stays as (->)(a, f(b))
@@ -2906,6 +2763,93 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
     }
 
     expr
+}
+
+/// OCaml `parse_bracket_access` (compiler/syntax/src/res_core.ml:2214-2284):
+/// a string literal right after `[` is JS object access (`Pexp_send`), with an
+/// optional `#=` assignment; anything else is `Array.get`/`Array.set`.
+fn parse_bracket_access(
+    p: &mut Parser<'_>,
+    expr: Expression,
+    start_pos_idx: crate::parse_arena::PosIdx,
+) -> Expression {
+    p.leave_breadcrumb(Grammar::ExprArrayAccess);
+    let lbracket_start_idx = p.start_pos_idx();
+    p.expect(Token::Lbracket);
+    let string_start_idx = p.start_pos_idx();
+    if let Token::String(s) = &p.token {
+        let s = extend_cow_lifetime(s.clone());
+        p.next();
+        let string_end_idx = p.prev_end_pos_idx();
+        p.expect(Token::Rbracket);
+        p.eat_breadcrumb();
+        let rbracket_end_idx = p.prev_end_pos_idx();
+        let ident_loc = p.mk_loc_idx(string_start_idx, string_end_idx);
+        let expr_idx = p.arena_mut().push_expr(expr);
+        let send = Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_send(Box::new((
+                expr_idx,
+                Loc {
+                    txt: s,
+                    loc: ident_loc,
+                },
+            )))),
+            pexp_loc: p.mk_loc_idx_full(start_pos_idx, rbracket_end_idx),
+            pexp_attributes: Attributes::new(),
+        };
+        let e = parse_primary_expr(p, send, false);
+        if p.token != Token::Equal {
+            return e;
+        }
+        let equal_start_idx = p.start_pos_idx();
+        p.next();
+        let equal_end_idx = p.prev_end_pos_idx();
+        let rhs = parse_expr(p);
+        let rhs_end_idx = p.loc_end_idx(rhs.pexp_loc);
+        let loc = p.mk_loc_idx_full(start_pos_idx, rhs_end_idx);
+        let operator_loc = p.mk_loc_idx(equal_start_idx, equal_end_idx);
+        let op_lid = super::core::make_lident_static(p.arena_mut(), "#=");
+        let operator = ast_helper::make_ident(p, op_lid, operator_loc);
+        return ast_helper::make_apply(
+            p.arena_mut(),
+            operator,
+            vec![(ArgLabel::Nolabel, e), (ArgLabel::Nolabel, rhs)],
+            loc,
+        );
+    }
+    let index = parse_constrained_or_coerced_expr(p);
+    p.expect(Token::Rbracket);
+    p.eat_breadcrumb();
+    let rbracket_end_idx = p.prev_end_pos_idx();
+    let array_loc = p.mk_loc_idx(lbracket_start_idx, rbracket_end_idx);
+    if p.token == Token::Equal {
+        p.leave_breadcrumb(Grammar::ExprArrayMutation);
+        p.next();
+        let rhs = parse_expr(p);
+        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+        let array_set = ast_helper::make_ident_idx(p.arena().array_set_lid(), array_loc);
+        let apply = ast_helper::make_apply(
+            p.arena_mut(),
+            array_set,
+            vec![
+                (ArgLabel::Nolabel, expr),
+                (ArgLabel::Nolabel, index),
+                (ArgLabel::Nolabel, rhs),
+            ],
+            loc,
+        );
+        p.eat_breadcrumb();
+        return apply;
+    }
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    let array_get = ast_helper::make_ident_idx(p.arena().array_get_lid(), array_loc);
+    let e = ast_helper::make_apply(
+        p.arena_mut(),
+        array_get,
+        vec![(ArgLabel::Nolabel, expr), (ArgLabel::Nolabel, index)],
+        loc,
+    );
+    parse_primary_expr(p, e, false)
 }
 
 /// Parse function call arguments.
