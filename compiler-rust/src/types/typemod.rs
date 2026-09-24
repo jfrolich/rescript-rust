@@ -22153,7 +22153,11 @@ fn type_structure_item<'a>(
                                                 },
                                             ),
                                             cstr_generalized: source_cstr.cd_res.is_some(),
-                                            cstr_private: crate::types::PrivateFlag::Public,
+                                            // OCaml Datarepr.constructor_descrs uses the
+                                            // declaration's `type_private`.
+                                            cstr_private: parser_private_to_type_private(
+                                                decl.ptype_private,
+                                            ),
                                             cstr_loc: source_cstr.cd_loc.clone(),
                                             cstr_attributes: source_cstr.cd_attributes.clone(),
                                             cstr_inlined: sc_desc_inlined,
@@ -22532,7 +22536,11 @@ fn type_structure_item<'a>(
                                         },
                                     ),
                                     cstr_generalized: internal_cd_res.is_some(),
-                                    cstr_private: crate::types::PrivateFlag::Public,
+                                    // OCaml Datarepr.constructor_descrs uses the
+                                    // declaration's `type_private`.
+                                    cstr_private: parser_private_to_type_private(
+                                        decl.ptype_private,
+                                    ),
                                     cstr_loc: arena.to_location(cstr.pcd_loc),
                                     cstr_attributes:
                                         crate::types::decl::constructor_description_attrs_for_variant(
@@ -22775,7 +22783,17 @@ fn type_structure_item<'a>(
                 let (typ_manifest, manifest_type_ref) = if let Some(object_manifest) =
                     manifest_from_kind.as_ref()
                 {
-                    let (typed_manifest, type_ref) = transl_type(tctx, &temp_env, object_manifest)?;
+                    // OCaml typedecl.ml translates every manifest with
+                    // `transl_simple_type env no_row`.
+                    let (typed_manifest, type_ref) = if type_decl_manifest_uses_fixed_type_variables(
+                        arena,
+                        decl,
+                        object_manifest,
+                    ) {
+                        transl_type_fixed(tctx, &temp_env, object_manifest)?
+                    } else {
+                        transl_type(tctx, &temp_env, object_manifest)?
+                    };
                     touch_manifest_cyclic_abbrev_check(ctx, &temp_env, type_ref);
                     (Some(typed_manifest), Some(type_ref))
                 } else {

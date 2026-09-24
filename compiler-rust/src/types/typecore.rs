@@ -1191,6 +1191,9 @@ pub struct TypeCheckContext<'a> {
     /// Used type variables within the current type expression (for sharing).
     /// Maps type variable names to their TypeExprRef, matching OCaml's used_variables.
     pub used_variables: HashMap<String, TypeExprRef>,
+    /// Location of each used variable's first occurrence (OCaml stores
+    /// `(ty, loc)` in `used_variables`).
+    pub used_variable_locs: HashMap<String, LocIdx>,
     /// Universal variables currently bound by Ptyp_poly.
     /// This mirrors OCaml typetexp's `univars` stack, which is deliberately
     /// separate from `used_variables`.
@@ -1294,6 +1297,7 @@ impl<'a> TypeCheckContext<'a> {
             warning_config: WarningConfig::new(),
             loop_depth: 0,
             used_variables: HashMap::new(),
+            used_variable_locs: HashMap::new(),
             univars: Vec::new(),
             type_variables: HashMap::new(),
             fixed_type_variables: false,
@@ -1893,6 +1897,7 @@ fn transl_type_with_options(
 ) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
     // Reset used_variables for each top-level type translation (matches OCaml's transl_simple_type)
     tctx.used_variables.clear();
+    tctx.used_variable_locs.clear();
     tctx.univars.clear();
     let old_fixed_type_variables = tctx.fixed_type_variables;
     let old_defer_component_lookup = tctx.defer_delayed_type_component_lookup;
@@ -1907,11 +1912,13 @@ fn transl_type_with_options(
     // this type expression back to declaration-level variables and register
     // new names for later constraints in the same typing scope.
     if !tctx.used_variables.is_empty() {
-        let used_vars: Vec<(String, TypeExprRef)> = tctx
+        // OCaml iterates the `used_variables` Tbl (a map ordered by name).
+        let mut used_vars: Vec<(String, TypeExprRef)> = tctx
             .used_variables
             .iter()
             .map(|(name, ty)| (name.clone(), *ty))
             .collect();
+        used_vars.sort_by(|(a, _), (b, _)| a.cmp(b));
         for (name, used_ty) in used_vars {
             let ctx = tctx.type_ctx;
             if globalize {
@@ -1927,6 +1934,24 @@ fn transl_type_with_options(
                 if let Some(bound_ty) = tctx.type_variables.get(&name).copied() {
                     let _ = crate::types::unify(ctx, &mut tctx.unify_state, lowered_ty, bound_ty);
                 } else {
+                    // OCaml typetexp.ml:675-676: under the Fixed policy an
+                    // undeclared variable that is still a Tvar is unbound.
+                    if fixed_type_variables
+                        && matches!(&*ctx.get_desc(ctx.repr(used_ty)), TypeDesc::Tvar(_))
+                    {
+                        let loc = tctx
+                            .used_variable_locs
+                            .get(&name)
+                            .copied()
+                            .unwrap_or(styp.ptyp_loc);
+                        tctx.used_variables.clear();
+                        tctx.used_variable_locs.clear();
+                        tctx.univars.clear();
+                        return Err(TypeCoreError::UnboundTypeVariable {
+                            loc,
+                            name: format!("'{name}"),
+                        });
+                    }
                     let bound_ty = ctx.new_global_var(None);
                     let _ = crate::types::unify(ctx, &mut tctx.unify_state, lowered_ty, bound_ty);
                     tctx.type_variables.insert(name, bound_ty);
@@ -1934,12 +1959,30 @@ fn transl_type_with_options(
             } else if let Some(bound_ty) = tctx.type_variables.get(&name).copied() {
                 let _ = crate::types::unify(ctx, &mut tctx.unify_state, used_ty, bound_ty);
             } else {
+                // OCaml typetexp.ml:675-676 (Fixed policy).
+                if fixed_type_variables
+                    && matches!(&*ctx.get_desc(ctx.repr(used_ty)), TypeDesc::Tvar(_))
+                {
+                    let loc = tctx
+                        .used_variable_locs
+                        .get(&name)
+                        .copied()
+                        .unwrap_or(styp.ptyp_loc);
+                    tctx.used_variables.clear();
+                    tctx.used_variable_locs.clear();
+                    tctx.univars.clear();
+                    return Err(TypeCoreError::UnboundTypeVariable {
+                        loc,
+                        name: format!("'{name}"),
+                    });
+                }
                 tctx.type_variables.insert(name, used_ty);
             }
         }
     }
 
     tctx.used_variables.clear();
+    tctx.used_variable_locs.clear();
     tctx.univars.clear();
     Ok(translated)
 }
@@ -2320,6 +2363,7 @@ fn transl_type_inner(
             } else {
                 let v = ctx.new_var(Some(name_str.clone()));
                 tctx.used_variables.insert(name_str.clone(), v);
+                tctx.used_variable_locs.insert(name_str.clone(), loc);
                 v
             };
             let ctyp = TypedCoreType {
@@ -2540,6 +2584,7 @@ fn transl_type_inner(
             } else {
                 let alias_ty = ctx.new_var(None);
                 tctx.used_variables.insert(name_str.clone(), alias_ty);
+                tctx.used_variable_locs.insert(name_str.clone(), loc);
 
                 let (inner_ctyp, inner_ty) = transl_type_inner(tctx, env, inner)?;
 
@@ -4938,18 +4983,11 @@ fn type_pattern_construct(
                     );
                     (desc, path)
                 }
-                None => match env.find_constructor(&lid_name) {
-                    Ok(desc) => (
-                        desc.clone(),
-                        Path::pident(Ident::create_persistent(&lid_name)),
-                    ),
-                    Err(_) => {
-                        return Err(TypeCoreError::NotAVariantType {
-                            loc,
-                            lid: lid_txt.clone(),
-                        });
-                    }
-                },
+                // OCaml `Typetexp.find_all_constructors` only reads the
+                // qualifying module; a miss is a (narrowed) unbound error.
+                None => {
+                    return Err(unbound_constructor_lookup_error(tctx, env, loc, lid_txt));
+                }
             }
         }
     } else {
@@ -17352,20 +17390,11 @@ fn type_construct(
                     );
                     (path, desc)
                 }
-                None => match env.find_constructor(&lid_name) {
-                    Ok(desc) => (
-                        Path::pident(Ident::create_persistent(lid_name.clone())),
-                        desc.clone(),
-                    ),
-                    Err(_) => {
-                        let alternatives = unbound_constructor_alternatives(tctx, env, &longident);
-                        return Err(TypeCoreError::UnboundConstructor {
-                            loc: lid.loc,
-                            lid: longident,
-                            alternatives,
-                        });
-                    }
-                },
+                // OCaml `Typetexp.find_all_constructors` only reads the
+                // qualifying module; a miss is a (narrowed) unbound error.
+                None => {
+                    return Err(unbound_constructor_lookup_error(tctx, env, lid.loc, &longident));
+                }
             }
         }
     } else {
