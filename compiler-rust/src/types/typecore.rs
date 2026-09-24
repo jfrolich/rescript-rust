@@ -21787,6 +21787,15 @@ fn narrowed_module_lookup_error(
     {
         return Some(error);
     }
+    // `check_module` (compiler/ml/typetexp.ml:66-72): `Env.lookup_module`
+    // raises `Recmodule` for a recursive module bound to its `#recmod#`
+    // placeholder (compiler/ml/env.ml:1031-1034).
+    if let Longident::Lident(name) = lid
+        && let Ok((_, md)) = env.find_module_with_id(tctx.arena.get_string(*name))
+        && crate::types::typemod::is_recursive_module_placeholder_type(&md.md_type)
+    {
+        return Some(TypeCoreError::IllegalReferenceToRecursiveModule { loc });
+    }
 
     let Some(module_path) = env.resolve_module_access_path_for_lid(
         lid,
