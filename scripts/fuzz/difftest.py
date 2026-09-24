@@ -76,23 +76,47 @@ def _run(exe: Path, cwd: Path, name: str, flags: list[str]) -> Run:
         code, err, to = p.returncode, p.stderr, False
     except subprocess.TimeoutExpired as e:
         code, err, to = -1, e.stderr or b"", True
-    text = ANSI.sub("", err.decode("utf-8", "replace"))
-    # Rust panics exit with 101; treat any panic text as a crash too.
+    # ANSI codes are kept: the two-step pipeline compares colored output.
+    text = err.decode("utf-8", "replace")
     status = _classify(code, to)
     # Rust panics exit with 101; OCaml uncaught exceptions print "Fatal error".
-    if "panicked at" in text or "RUST_BACKTRACE" in text or "Fatal error: exception" in text:
+    plain = ANSI.sub("", text)
+    if "panicked at" in plain or "RUST_BACKTRACE" in plain or "Fatal error: exception" in plain:
         status = "crash"
     return Run(status, code, text)
 
 
-def _compile_all(exe: Path, case: dict[str, str], flags: list[str]) -> list[Run]:
+# `direct` compiles each source file in one call. `two_step` is what the build
+# system does: `bsc -bs-ast` writes the preprocessed tree (parser warnings,
+# PPXs and their diagnostics happen here), then `bsc X.ast` type checks it.
+PIPELINES = tuple(
+    p for p in os.environ.get("FUZZ_PIPELINES", "direct,two_step").split(",") if p
+)
+
+
+def _compile_all(
+    exe: Path, case: dict[str, str], flags: list[str], pipeline: str = "direct"
+) -> list[Run]:
     d = Path(tempfile.mkdtemp(prefix="fz-"))
     try:
         for name, src in case.items():
             (d / name).write_text(src)
         runs = []
+        if pipeline == "two_step":
+            # The build system leaves bsc's default `-color always` in place.
+            flags = [
+                "always" if i and flags[i - 1] == "-color" else f for i, f in enumerate(flags)
+            ]
         for name in case:
-            r = _run(exe, d, name, flags)
+            if pipeline == "two_step":
+                ast = name.rsplit(".", 1)[0] + (".iast" if name.endswith(".resi") else ".ast")
+                r = _run(exe, d, name, [*flags, "-bs-ast", "-o", ast])
+                runs.append(r)
+                if r.status != "ok":
+                    break
+                r = _run(exe, d, ast, flags)
+            else:
+                r = _run(exe, d, name, flags)
             runs.append(r)
             if r.status != "ok":
                 break
@@ -115,6 +139,7 @@ _HEADLINE_SKIP = re.compile(
 
 def signature(stderr: str) -> str:
     """Coarse error identity: first message line, with names/numbers masked."""
+    stderr = ANSI.sub("", stderr)
     for line in stderr.splitlines():
         if _HEADLINE_SKIP.match(line):
             continue
@@ -132,10 +157,29 @@ def signature(stderr: str) -> str:
     return "<no message>"
 
 
-def compare(case: dict[str, str], flags: list[str] | None = None, check_text: bool = True) -> Result:
-    flags = flags or DEFAULT_FLAGS
-    o = _compile_all(OCAML_BSC, case, flags)
-    r = _compile_all(RUST_BSC, case, flags)
+def compare(
+    case: dict[str, str],
+    flags: list[str] | None = None,
+    check_text: bool = True,
+    pipelines: tuple[str, ...] | None = None,
+) -> Result:
+    """Compare under each pipeline; return the first disagreement found."""
+    result = None
+    for pipeline in pipelines or PIPELINES:
+        result = _compare_pipeline(case, flags or DEFAULT_FLAGS, check_text, pipeline)
+        if result.interesting:
+            if pipeline != "direct":
+                result.signature = f"[{pipeline}] {result.signature}"
+            return result
+    assert result is not None
+    return result
+
+
+def _compare_pipeline(
+    case: dict[str, str], flags: list[str], check_text: bool, pipeline: str
+) -> Result:
+    o = _compile_all(OCAML_BSC, case, flags, pipeline)
+    r = _compile_all(RUST_BSC, case, flags, pipeline)
     ov, rv = overall(o), overall(r)
     sig = signature(o[-1].stderr) if ov != "ok" else ""
     if ov == "crash" and rv == "crash" and _norm(o[-1].stderr) == _norm(r[-1].stderr):

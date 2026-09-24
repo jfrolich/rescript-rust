@@ -15,6 +15,13 @@ python3 scripts/fuzz/fuzz.py report --open    # list open buckets by priority
 python3 scripts/fuzz/fuzz.py check A.res      # compare one case by hand
 ```
 
+Every case is compared under two pipelines (set `FUZZ_PIPELINES` to pick):
+`direct` compiles each source file in one `bsc` call; `two_step` does what the
+build system does, `bsc -bs-ast` (parser warnings, PPXs and their diagnostics)
+and then `bsc X.ast`, with bsc's default `-color always` so colour differences
+show up. Findings from the second pipeline carry a `[two_step]` signature
+prefix.
+
 Finding kinds, most important first:
 
 | kind | meaning |
