@@ -4307,33 +4307,6 @@ fn check_type_decl_variance_requirements(
     typed_decl: &TypedTypeDeclaration,
     variance_row: &[TypesVariance],
 ) -> TypeModResult<()> {
-    if !parsed_decl.ptype_cstrs.is_empty()
-        && let crate::types::decl::TypeKind::TypeVariant(constructors, _) =
-            &typed_decl.typ_type.type_kind
-        && let TypedTypeKind::Ttype_variant(typed_constructors) = &typed_decl.typ_kind
-    {
-        let expected = ctx.new_constr(
-            Path::pident(typed_decl.typ_id.clone()),
-            typed_decl.typ_type.type_params.clone(),
-        );
-        for (constructor, typed_constructor) in constructors.iter().zip(typed_constructors) {
-            let (Some(actual), Some(typed_result)) =
-                (constructor.cd_res, typed_constructor.cd_res.as_ref())
-            else {
-                continue;
-            };
-            let mut unify_state = crate::types::ctype::UnifyState::new();
-            unify_state.set_env(env);
-            if crate::types::ctype::unify(ctx, &mut unify_state, actual, expected).is_err() {
-                return Err(TypeModError::ConstraintFailed {
-                    loc: typed_result.ctyp_loc,
-                    actual,
-                    expected,
-                });
-            }
-        }
-    }
-
     // compiler/ml/typedecl.ml:1244-1270 checks each explicit GADT
     // result before computing ordinary declaration variance. An annotated
     // parameter cannot be checked when its result argument is constrained
