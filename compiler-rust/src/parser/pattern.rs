@@ -1244,12 +1244,12 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
             p.next();
             let rest_name_start_pos_idx = p.start_pos_idx();
             let has_type_annotation = p.lookahead(|p| {
-                let _ = super::typ::parse_atomic_typ_expr(p, Attributes::new(), true);
+                let _ = super::typ::parse_atomic_typ_expr(p, Attributes::new());
                 p.token == Token::As
             });
             if has_type_annotation {
                 // ...TypeAnnotation as name
-                let core_type = super::typ::parse_atomic_typ_expr(p, Attributes::new(), true);
+                let core_type = super::typ::parse_atomic_typ_expr(p, Attributes::new());
                 let core_type_idx = p.arena_mut().push_core_type(core_type);
                 p.expect(Token::As);
                 let name_start_idx = p.start_pos_idx();

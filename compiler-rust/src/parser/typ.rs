@@ -436,7 +436,7 @@ pub fn parse_typ_expr_no_arrow(p: &mut Parser<'_>) -> CoreType {
 /// Parse a type expression with pre-parsed attributes.
 fn parse_typ_expr_with_attrs(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
     let start_pos_idx = p.start_pos_idx();
-    let mut typ = parse_atomic_typ_expr(p, attrs, true);
+    let mut typ = parse_atomic_typ_expr(p, attrs);
     // Match OCaml: handle both EqualGreater and MinusGreater (error recovery)
     if matches!(p.token, Token::EqualGreater | Token::MinusGreater) {
         typ = parse_arrow_type_rest(p, typ, start_pos_idx);
@@ -505,7 +505,7 @@ fn parse_typ_expr_inner_with_start(
         // `let start_pos = p.start_pos`, creating different heap objects even though
         // they point to the same position. With identity-based PosIdx, each function
         // must push its own fresh position to avoid incorrect sharing.
-        let typ = parse_atomic_typ_expr_with_start(p, attrs.clone(), es6_arrow, None);
+        let typ = parse_atomic_typ_expr_with_start(p, attrs.clone(), None);
         // Match OCaml: handle both EqualGreater and MinusGreater (error recovery)
         // When MinusGreater is found where EqualGreater is expected, generate error and continue
         if es6_arrow && matches!(p.token, Token::EqualGreater | Token::MinusGreater) {
@@ -592,7 +592,7 @@ fn is_external_bare_arrow_type(p: &mut Parser<'_>) -> bool {
                 // OCaml's lookahead calls `parse_atomic_typ_expr ~attrs state`
                 // without an inline-types context.
                 let _ = without_inline_record_context(state, |state| {
-                    parse_atomic_typ_expr(state, attrs, true)
+                    parse_atomic_typ_expr(state, attrs)
                 });
                 matches!(state.token, Token::EqualGreater | Token::MinusGreater)
             }
@@ -609,7 +609,7 @@ pub fn parse_external_type_expr(p: &mut Parser<'_>) -> CoreType {
         let attrs = parse_attributes(p);
         let arg_path = make_inline_record_argument_type_name(p, 0);
         let typ =
-            with_current_type_name_path(p, arg_path, |p| parse_atomic_typ_expr(p, attrs, true));
+            with_current_type_name_path(p, arg_path, |p| parse_atomic_typ_expr(p, attrs));
         let typ = parse_arrow_type_rest(p, typ, start_pos_idx);
         parse_type_alias(p, typ)
     } else if super::core::is_es6_arrow_type(p) {
@@ -717,7 +717,6 @@ fn parse_payload(p: &mut Parser<'_>) -> Payload {
 fn parse_atomic_typ_expr_with_start(
     p: &mut Parser<'_>,
     attrs: Attributes,
-    es6_arrow: bool,
     outer_start_pos_idx: Option<crate::parse_arena::PosIdx>,
 ) -> CoreType {
     p.leave_breadcrumb(Grammar::AtomicTypExpr);
@@ -763,50 +762,10 @@ fn parse_atomic_typ_expr_with_start(
         Token::Lident(_) | Token::Uident(_) => parse_type_constr_with_start(p, outer_start_pos_idx),
         Token::Lparen => {
             p.next();
-            // Disambiguate `( ... ) => ...` function types from parenthesized/tuple types.
-            //
-            // ReScript function types with multiple or labeled arguments use a parenthesized
-            // parameter list, e.g. `(~x: int, ~y: int) => int`.
-            //
-            // Note that `(t1 => t2) => t3` is *not* a parameter list, it's a normal arrow type
-            // taking a function. So we only treat `( ... ) => ...` as a parameter-list function
-            // type when the parens look like a parameter list (start with `~`/`.`/`@` or contain
-            // a top-level comma).
-            let is_function_type = es6_arrow
-                && p.lookahead(|state| {
-                    let starts_like_params =
-                        matches!(state.token, Token::Tilde | Token::Dot | Token::At);
-                    let is_empty = state.token == Token::Rparen;
-
-                    let mut depth = 0;
-                    let mut saw_top_level_comma = false;
-
-                    while state.token != Token::Eof {
-                        match state.token {
-                            Token::Lparen => depth += 1,
-                            Token::Rparen => {
-                                if depth == 0 {
-                                    state.next();
-                                    let followed_by_arrow = state.token == Token::EqualGreater;
-                                    return followed_by_arrow
-                                        && !is_empty
-                                        && (starts_like_params || saw_top_level_comma);
-                                }
-                                depth -= 1;
-                            }
-                            Token::Comma if depth == 0 => {
-                                saw_top_level_comma = true;
-                            }
-                            _ => {}
-                        }
-                        state.next();
-                    }
-                    false
-                });
-
-            if is_function_type {
-                parse_function_type(p, start_pos_idx)
-            } else if p.token == Token::Rparen {
+            // OCaml `parse_atomic_typ_expr` (res_core.ml:4608-4627): `()`, a
+            // parenthesized type, or a tuple. Function types are recognized
+            // earlier by `is_es6_arrow_type` in `parse_typ_expr`.
+            if p.token == Token::Rparen {
                 // Unit type: ()
                 // OCaml: Ast_helper.Typ.constr ~attrs unit_constr []
                 // No ~loc passed, so ptyp_loc defaults to Location.none (ghost)
@@ -862,7 +821,7 @@ fn parse_atomic_typ_expr_with_start(
                 // Eat our breadcrumb first, then recurse
                 // OCaml returns from match, then eat_breadcrumb runs
                 p.eat_breadcrumb();
-                return parse_atomic_typ_expr(p, attrs, es6_arrow);
+                return parse_atomic_typ_expr(p, attrs);
             }
             recover::default_type(p.arena_mut())
         }
@@ -878,12 +837,8 @@ fn parse_atomic_typ_expr_with_start(
 }
 
 /// Parse an atomic type expression (wrapper without outer start position).
-pub(crate) fn parse_atomic_typ_expr(
-    p: &mut Parser<'_>,
-    attrs: Attributes,
-    es6_arrow: bool,
-) -> CoreType {
-    parse_atomic_typ_expr_with_start(p, attrs, es6_arrow, None)
+pub(crate) fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
+    parse_atomic_typ_expr_with_start(p, attrs, None)
 }
 
 // ============================================================================
