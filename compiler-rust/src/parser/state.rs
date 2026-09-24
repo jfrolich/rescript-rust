@@ -44,7 +44,7 @@ pub enum RegionStatus {
 /// Used by `parse_attributes_and_binding` to speculatively parse attributes
 /// and restore state if they're not followed by `and`.
 pub struct ParserSnapshot<'src> {
-    scanner_snapshot: super::scanner::ScannerSnapshot<'src>,
+    scanner_snapshot: super::scanner::ScannerSnapshot,
     token: Token<'src>,
     start_pos: Position,
     end_pos: Position,
