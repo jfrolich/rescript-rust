@@ -371,6 +371,11 @@ pub struct TypeContext {
     /// last cleanup. Mirrors OCaml btype.ml `memo` list used by cleanup_abbrev.
     memoized_abbrev_refs: RefCell<Vec<AbbrevMemoRef>>,
 
+    /// `full_expand` results recorded when a top-level unification fails,
+    /// OCaml's `expand_trace` (ctype.ml:1601-1605, 2589-2594). Error reports
+    /// print "(defined as ...)" from these.
+    trace_expansions: RefCell<ahash::AHashMap<TypeExprRef, TypeExprRef>>,
+
     /// Stable forward references for canonical variant layouts. Entries are
     /// allocated before translating a recursive declaration group and completed
     /// exactly once after the group is available in the environment.
@@ -637,6 +642,7 @@ impl TypeContext {
                 RefCell::new(AbbrevMemo::Mnil),
             ]),
             memoized_abbrev_refs: RefCell::new(Vec::new()),
+            trace_expansions: RefCell::new(ahash::AHashMap::new()),
             variant_layouts: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
@@ -1790,6 +1796,17 @@ impl TypeContext {
             crate::perf_counters::TypeMutationKind::Desc,
         );
         self.types.get(r).set_desc(desc);
+    }
+
+    /// Record `full_expand env ty` for a type in a failed unification trace.
+    pub(crate) fn record_trace_expansion(&self, ty: TypeExprRef, expansion: TypeExprRef) {
+        self.trace_expansions.borrow_mut().insert(ty, expansion);
+    }
+
+    /// The recorded `full_expand` of a trace type, if its unification failed
+    /// with an environment.
+    pub fn trace_expansion(&self, ty: TypeExprRef) -> Option<TypeExprRef> {
+        self.trace_expansions.borrow().get(&ty).copied()
     }
 
     /// Start an OCaml-style speculative mutation trail.

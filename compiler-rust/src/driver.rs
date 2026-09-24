@@ -7116,6 +7116,20 @@ fn rendered_alias_expansion(
     trace: &[(TypeExprRef, TypeExprRef)],
     actual_side: bool,
 ) -> Option<TypeExprRef> {
+    // OCaml's trace expansions come from `full_expand` (ctype.ml), i.e.
+    // `expand_head`, which only rewrites a type-constructor head.
+    if !matches!(
+        &*type_ctx.get_desc(type_ctx.repr(ty)),
+        TypeDesc::Tconstr { .. }
+    ) {
+        return None;
+    }
+    if let Some(expansion) = type_ctx.trace_expansion(type_ctx.repr(ty)) {
+        let expansion = type_ctx.repr(expansion);
+        return (!printtyp_same_path(type_ctx, ty, expansion)
+            && !type_is_polyvariant(type_ctx, expansion))
+        .then_some(expansion);
+    }
     if let Some(expansion) = type_alias_expansion(type_ctx, ty)
         && !type_expansion_same(type_ctx, ty, expansion)
         && !type_is_polyvariant(type_ctx, expansion)
@@ -7180,6 +7194,32 @@ fn rendered_alias_expansion(
             None
         }
     })
+}
+
+/// OCaml `Printtyp.same_path` (printtyp.ml:1220-1234) without a printing
+/// environment, where `best_type_path p` is `(p, Id)`.
+fn printtyp_same_path(type_ctx: &TypeContext, t: TypeExprRef, t2: TypeExprRef) -> bool {
+    let t = type_ctx.repr(t);
+    let t2 = type_ctx.repr(t2);
+    if t == t2 {
+        return true;
+    }
+    let d1 = type_ctx.get_desc(t);
+    let d2 = type_ctx.get_desc(t2);
+    match (&*d1, &*d2) {
+        (
+            TypeDesc::Tconstr { path: p1, args: a1, .. },
+            TypeDesc::Tconstr { path: p2, args: a2, .. },
+        ) => {
+            p1.same(p2)
+                && a1.len() == a2.len()
+                && a1
+                    .iter()
+                    .zip(a2.iter())
+                    .all(|(x, y)| type_ctx.repr(*x) == type_ctx.repr(*y))
+        }
+        _ => false,
+    }
 }
 
 fn expand_promise_compat_alias(type_ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
@@ -9650,7 +9690,10 @@ fn expanded_type_clash_entry(
     ty: TypeExprRef,
 ) -> (TypeExprRef, TypeExprRef) {
     let repr = type_ctx.repr(ty);
-    let expansion = type_alias_expansion(type_ctx, repr).unwrap_or(repr);
+    let expansion = type_ctx
+        .trace_expansion(repr)
+        .or_else(|| type_alias_expansion(type_ctx, repr))
+        .unwrap_or(repr);
     (repr, expansion)
 }
 

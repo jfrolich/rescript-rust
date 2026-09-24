@@ -1167,34 +1167,104 @@ pub fn update_level(ctx: &TypeContext, level: i32, ty: TypeExprRef) {
 /// to its expansion. This normalizes module-alias paths (e.g.,
 /// `Pdot(Pident("U"), "t")` → `Pident("list")`).
 pub fn update_level_expand<'a>(ctx: &'a TypeContext, env: &Env, level: i32, ty: TypeExprRef) {
-    let mut pending_type_lookup_paths = None;
-    let mut pending_type_expansion_paths = None;
-    update_level_expand_with_lookup_capture(
-        ctx,
-        env,
-        level,
-        ty,
-        &mut pending_type_lookup_paths,
-        &mut pending_type_expansion_paths,
-    );
+    // Callers of this form ignore an escaping constructor, like the memoized
+    // expansion in OCaml `expand_abbrev` (ctype.ml:1153-1160).
+    let _ = update_level_checked(ctx, env, level, ty, &mut None, &mut None);
 }
 
-fn update_level_expand_with_lookup_capture<'a>(
-    ctx: &'a TypeContext,
+/// The tail of OCaml `unify1_var` (ctype.ml:2086-2095): link the variable,
+/// then lower levels; if a constructor would escape, undo the link.
+fn unify1_var_link(
+    ctx: &TypeContext,
+    state: &mut UnifyState,
+    var: TypeExprRef,
+    ty: TypeExprRef,
+) -> Result<(), TypeError> {
+    let level = ctx.get_level(var);
+    let Some(env) = state.env() else {
+        update_level(ctx, level, ty);
+        link_type(ctx, var, ty);
+        return Ok(());
+    };
+    let var_desc = ctx.get_desc(var).clone();
+    link_type(ctx, var, ty);
+    if let Err(err) = update_level_checked(ctx, env, level, ty, &mut None, &mut None) {
+        ctx.set_desc(var, var_desc);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// OCaml `update_level` (ctype.ml:615-622): first lower levels without
+/// expanding parameterized constructors; if a constructor would escape its
+/// scope, backtrack and retry expanding them. The error is OCaml's
+/// `Unify [(ty, newvar2 level)]`.
+pub(crate) fn update_level_checked(
+    ctx: &TypeContext,
     env: &Env,
     level: i32,
     ty: TypeExprRef,
     pending_type_lookup_paths: &mut Option<&mut Vec<Path>>,
     pending_type_expansion_paths: &mut Option<&mut Vec<Path>>,
-) {
+) -> Result<(), TypeError> {
+    let ty = ctx.repr(ty);
+    if ctx.get_level(ty) <= level {
+        return Ok(());
+    }
+    let snapshot = ctx.snapshot_type_state();
+    if update_level_expand_with_lookup_capture(
+        ctx,
+        env,
+        level,
+        false,
+        ty,
+        pending_type_lookup_paths,
+        pending_type_expansion_paths,
+    )
+    .is_ok()
+    {
+        return Ok(());
+    }
+    ctx.restore_type_state(snapshot);
+    update_level_expand_with_lookup_capture(
+        ctx,
+        env,
+        level,
+        true,
+        ty,
+        pending_type_lookup_paths,
+        pending_type_expansion_paths,
+    )
+    .map_err(|escaping| TypeError::Unify(vec![(escaping, new_var_at_level(ctx, level))]))
+}
+
+/// OCaml `newvar2 level`.
+fn new_var_at_level(ctx: &TypeContext, level: i32) -> TypeExprRef {
+    let var = ctx.new_var(None);
+    ctx.set_level(var, level);
+    var
+}
+
+/// OCaml `update_level env level expand` (ctype.ml:561-613). Returns the type
+/// whose constructor would escape its scope.
+fn update_level_expand_with_lookup_capture<'a>(
+    ctx: &'a TypeContext,
+    env: &Env,
+    level: i32,
+    expand: bool,
+    ty: TypeExprRef,
+    pending_type_lookup_paths: &mut Option<&mut Vec<Path>>,
+    pending_type_expansion_paths: &mut Option<&mut Vec<Path>>,
+) -> Result<(), TypeExprRef> {
     let ty = ctx.repr(ty);
     let current = ctx.get_level(ty);
 
     if level < current {
         let desc = ctx.borrow_desc(ty);
         match &*desc {
-            TypeDesc::Tconstr { path, .. } => {
+            TypeDesc::Tconstr { path, args, .. } => {
                 let path = path.clone();
+                let has_args = !args.is_empty();
                 // OCaml compiler/ml/ctype.ml:695 calls `get_level env p`
                 // here. Keep the same lookup side effects even when the
                 // numeric result falls back to `Path.binding_time`.
@@ -1233,17 +1303,15 @@ fn update_level_expand_with_lookup_capture<'a>(
                         });
                     if is_firstclass_module_pdot {
                         ctx.set_level(ty, level);
-                        iter_type_expr(ctx, ty, |child| {
-                            update_level_expand_with_lookup_capture(
-                                ctx,
-                                env,
-                                level,
-                                child,
-                                pending_type_lookup_paths,
-                                pending_type_expansion_paths,
-                            );
-                        });
-                        return;
+                        return update_level_children(
+                            ctx,
+                            env,
+                            level,
+                            expand,
+                            ty,
+                            pending_type_lookup_paths,
+                            pending_type_expansion_paths,
+                        );
                     }
                     if let Some(paths) = pending_type_expansion_paths.as_deref_mut() {
                         paths.push(path.clone());
@@ -1254,45 +1322,65 @@ fn update_level_expand_with_lookup_capture<'a>(
                             ctx, env, &path, expanded,
                         ) {
                             ctx.set_level(ty, level);
-                            iter_type_expr(ctx, ty, |child| {
-                                update_level_expand_with_lookup_capture(
-                                    ctx,
-                                    env,
-                                    level,
-                                    child,
-                                    pending_type_lookup_paths,
-                                    pending_type_expansion_paths,
-                                );
-                            });
-                            return;
+                            return update_level_children(
+                                ctx,
+                                env,
+                                level,
+                                expand,
+                                ty,
+                                pending_type_lookup_paths,
+                                pending_type_expansion_paths,
+                            );
                         }
                         if expanded != ty && !deep_occur(ctx, ty, expanded) {
                             link_type(ctx, ty, expanded);
                             // Recursively update the expansion
-                            update_level_expand_with_lookup_capture(
+                            return update_level_expand_with_lookup_capture(
                                 ctx,
                                 env,
                                 level,
+                                expand,
                                 expanded,
                                 pending_type_lookup_paths,
                                 pending_type_expansion_paths,
                             );
-                            return;
                         }
                     }
                 }
-                // Couldn't expand; just set level and recurse
+                // OCaml ctype.ml:574-578: a constructor that cannot be
+                // expanded would escape its scope.
+                if should_try_expand {
+                    return Err(ty);
+                }
+                // ctype.ml:579-585: the second pass also expands parameterized
+                // constructors.
+                if expand && has_args {
+                    if let Some(expanded) = try_expand_head(ctx, env, ty) {
+                        let expanded = ctx.repr(expanded);
+                        if expanded != ty && !deep_occur(ctx, ty, expanded) {
+                            link_type(ctx, ty, expanded);
+                            return update_level_expand_with_lookup_capture(
+                                ctx,
+                                env,
+                                level,
+                                expand,
+                                expanded,
+                                pending_type_lookup_paths,
+                                pending_type_expansion_paths,
+                            );
+                        }
+                    }
+                }
                 ctx.set_level(ty, level);
-                iter_type_expr(ctx, ty, |child| {
-                    update_level_expand_with_lookup_capture(
-                        ctx,
-                        env,
-                        level,
-                        child,
-                        pending_type_lookup_paths,
-                        pending_type_expansion_paths,
-                    );
-                });
+                return update_level_children(
+                    ctx,
+                    env,
+                    level,
+                    expand,
+                    ty,
+                    pending_type_lookup_paths,
+                    pending_type_expansion_paths,
+                );
             }
             TypeDesc::Tobject {
                 fields,
@@ -1310,27 +1398,26 @@ fn update_level_expand_with_lookup_capture<'a>(
                 drop(desc);
                 if should_clear_name {
                     ctx.set_desc(ty, TypeDesc::Tobject { fields, name: None });
-                    update_level_expand_with_lookup_capture(
+                    return update_level_expand_with_lookup_capture(
                         ctx,
                         env,
                         level,
+                        expand,
                         ty,
                         pending_type_lookup_paths,
                         pending_type_expansion_paths,
                     );
-                    return;
                 }
                 ctx.set_level(ty, level);
-                iter_type_expr(ctx, ty, |child| {
-                    update_level_expand_with_lookup_capture(
-                        ctx,
-                        env,
-                        level,
-                        child,
-                        pending_type_lookup_paths,
-                        pending_type_expansion_paths,
-                    );
-                });
+                return update_level_children(
+                    ctx,
+                    env,
+                    level,
+                    expand,
+                    ty,
+                    pending_type_lookup_paths,
+                    pending_type_expansion_paths,
+                );
             }
             TypeDesc::Tvariant(row) => {
                 let row = row.clone();
@@ -1349,33 +1436,57 @@ fn update_level_expand_with_lookup_capture<'a>(
                     ctx.set_desc(ty, TypeDesc::Tvariant(row));
                 }
                 ctx.set_level(ty, level);
-                iter_type_expr(ctx, ty, |child| {
-                    update_level_expand_with_lookup_capture(
-                        ctx,
-                        env,
-                        level,
-                        child,
-                        pending_type_lookup_paths,
-                        pending_type_expansion_paths,
-                    );
-                });
+                return update_level_children(
+                    ctx,
+                    env,
+                    level,
+                    expand,
+                    ty,
+                    pending_type_lookup_paths,
+                    pending_type_expansion_paths,
+                );
             }
             _ => {
                 drop(desc);
                 ctx.set_level(ty, level);
-                iter_type_expr(ctx, ty, |child| {
-                    update_level_expand_with_lookup_capture(
-                        ctx,
-                        env,
-                        level,
-                        child,
-                        pending_type_lookup_paths,
-                        pending_type_expansion_paths,
-                    );
-                });
+                return update_level_children(
+                    ctx,
+                    env,
+                    level,
+                    expand,
+                    ty,
+                    pending_type_lookup_paths,
+                    pending_type_expansion_paths,
+                );
             }
         }
+    }    Ok(())
+}
+
+/// `iter_type_expr (update_level env level expand) ty`.
+fn update_level_children(
+    ctx: &TypeContext,
+    env: &Env,
+    level: i32,
+    expand: bool,
+    ty: TypeExprRef,
+    pending_type_lookup_paths: &mut Option<&mut Vec<Path>>,
+    pending_type_expansion_paths: &mut Option<&mut Vec<Path>>,
+) -> Result<(), TypeExprRef> {
+    let mut children = Vec::new();
+    iter_type_expr(ctx, ty, |child| children.push(child));
+    for child in children {
+        update_level_expand_with_lookup_capture(
+            ctx,
+            env,
+            level,
+            expand,
+            child,
+            pending_type_lookup_paths,
+            pending_type_expansion_paths,
+        )?;
     }
+    Ok(())
 }
 
 /// Get the binding time of a path (matches OCaml's Path.binding_time).
@@ -4974,7 +5085,51 @@ pub fn unify<'a>(
 
     ctx.reset_trace_gadt_instances(reset_tracing);
     state.recursion_depth -= 1;
+    // OCaml's outer `unify` (ctype.ml:2589-2594) expands the whole trace with
+    // `full_expand` in the unification environment.
+    if state.recursion_depth == 0
+        && let Err(TypeError::Unify(trace)) = &result
+        && let Some(env) = state.env()
+    {
+        record_trace_expansions(ctx, env, trace);
+    }
     result
+}
+
+/// OCaml `full_expand` (ctype.ml:1305-1310).
+fn full_expand(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+    let expanded = ctx.repr(expand_head(ctx, env, ty));
+    let desc = ctx.get_desc(expanded);
+    if let TypeDesc::Tobject {
+        fields,
+        name: Some((_, args)),
+    } = &*desc
+        && let Some(first) = args.first()
+        && matches!(&*ctx.get_desc(ctx.repr(*first)), TypeDesc::Tvar(_))
+    {
+        let fields = *fields;
+        let level = ctx.get_level(expanded);
+        drop(desc);
+        let object = ctx.new_type(TypeDesc::Tobject { fields, name: None });
+        ctx.set_level(object, level);
+        return object;
+    }
+    expanded
+}
+
+/// OCaml `expand_trace` (ctype.ml:1601-1605), kept beside the raw trace.
+pub(crate) fn record_trace_expansions(
+    ctx: &TypeContext,
+    env: &Env,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) {
+    for &(t1, t2) in trace {
+        for ty in [t1, t2] {
+            let ty = ctx.repr(ty);
+            let expansion = full_expand(ctx, env, ty);
+            ctx.record_trace_expansion(ty, expansion);
+        }
+    }
 }
 
 /// Unify with OCaml's `unify_var` fast path.
@@ -5017,26 +5172,31 @@ pub fn unify_var<'a>(
             let capture_type_lookup_paths = state.should_capture_type_lookup_paths();
             let mut pending_type_lookup_paths = Vec::new();
             let mut pending_type_expansion_paths = Vec::new();
-            if let Some(env) = state.env() {
+            let lowered = if let Some(env) = state.env() {
                 if capture_type_lookup_paths {
                     let mut capture = Some(&mut pending_type_lookup_paths);
                     let mut expansion_capture = Some(&mut pending_type_expansion_paths);
-                    update_level_expand_with_lookup_capture(
-                        ctx,
-                        env,
-                        level,
-                        t2,
-                        &mut capture,
-                        &mut expansion_capture,
-                    );
+                    update_level_checked(ctx, env, level, t2, &mut capture, &mut expansion_capture)
                 } else {
-                    update_level_expand(ctx, env, level, t2);
+                    update_level_checked(ctx, env, level, t2, &mut None, &mut None)
                 }
             } else {
                 update_level(ctx, level, t2);
-            }
+                Ok(())
+            };
             state.extend_type_lookup_paths(pending_type_lookup_paths);
             state.extend_type_expansion_paths(pending_type_expansion_paths);
+            // OCaml ctype.ml:2617-2625: `update_level` raising aborts before
+            // `link_type`, and the trace starts with the variable pair.
+            if let Err(TypeError::Unify(trace)) = lowered {
+                let mut full = vec![(t1, t2)];
+                full.extend(trace);
+                // ctype.ml:2622-2625: `unify_var` expands its trace.
+                if let Some(env) = state.env() {
+                    record_trace_expansions(ctx, env, &full);
+                }
+                return Err(TypeError::Unify(full));
+            }
             link_type(ctx, t1, t2);
             Ok(())
         }
@@ -5160,6 +5320,8 @@ fn unify_after_expansion<'a>(
             drop(lhs_desc);
             drop(rhs_desc);
 
+            // ctype.ml:2178: `d1` is restored if unification fails.
+            let lhs_desc = ctx.get_desc(lhs).clone();
             if state.mode != crate::types::UnifyMode::Pattern {
                 // OCaml unify3 Expression mode (compiler/ml/ctype.ml:2198-2201):
                 // `occur !env t1' t2'` before `link_type t1' t2`.
@@ -5176,6 +5338,8 @@ fn unify_after_expansion<'a>(
 
             for (a, b) in pairs {
                 if let Err(err) = unify(ctx, state, a, b) {
+                    // ctype.ml:2321-2323 `with Unify trace -> t1'.desc <- d1`.
+                    ctx.set_desc(lhs, lhs_desc);
                     return swap_trace(Err(err));
                 }
             }
@@ -5275,31 +5439,21 @@ fn unify_types<'a>(
         let capture_type_lookup_paths = state.should_capture_type_lookup_paths();
         let mut pending_type_lookup_paths = Vec::new();
         let mut pending_type_expansion_paths = Vec::new();
-        if capture_type_lookup_paths {
+        // OCaml ctype.ml:2154-2155 `update_level !env lv t2; update_level !env lv t1`.
+        let lowered = if capture_type_lookup_paths {
             let mut capture = Some(&mut pending_type_lookup_paths);
             let mut expansion_capture = Some(&mut pending_type_expansion_paths);
-            update_level_expand_with_lookup_capture(
-                ctx,
-                env,
-                lv,
-                t2,
-                &mut capture,
-                &mut expansion_capture,
-            );
-            update_level_expand_with_lookup_capture(
-                ctx,
-                env,
-                lv,
-                t1,
-                &mut capture,
-                &mut expansion_capture,
-            );
+            update_level_checked(ctx, env, lv, t2, &mut capture, &mut expansion_capture)
+                .and_then(|()| {
+                    update_level_checked(ctx, env, lv, t1, &mut capture, &mut expansion_capture)
+                })
         } else {
-            update_level_expand(ctx, env, lv, t2);
-            update_level_expand(ctx, env, lv, t1);
-        }
+            update_level_checked(ctx, env, lv, t2, &mut None, &mut None)
+                .and_then(|()| update_level_checked(ctx, env, lv, t1, &mut None, &mut None))
+        };
         state.extend_type_lookup_paths(pending_type_lookup_paths);
         state.extend_type_expansion_paths(pending_type_expansion_paths);
+        lowered?;
     }
 
     // Re-repr after update_level_expand may have linked types.
@@ -5358,11 +5512,7 @@ fn unify_types<'a>(
             if let Some(env) = state.env() {
                 occur_univar(ctx, env, t2)?;
             }
-
-            let t1_level = ctx.get_level(t1);
-            update_level(ctx, t1_level, t2);
-            link_type(ctx, t1, t2);
-            Ok(())
+            unify1_var_link(ctx, state, t1, t2)
         }
 
         // Type variable on right - occurs check and link
@@ -5377,11 +5527,7 @@ fn unify_types<'a>(
             if let Some(env) = state.env() {
                 occur_univar(ctx, env, t1)?;
             }
-
-            let t2_level = ctx.get_level(t2);
-            update_level(ctx, t2_level, t1);
-            link_type(ctx, t2, t1);
-            Ok(())
+            unify1_var_link(ctx, state, t2, t1)
         }
 
         // Universal type variables
