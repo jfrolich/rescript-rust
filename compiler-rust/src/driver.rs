@@ -7202,21 +7202,25 @@ fn printtyp_same_path(type_ctx: &TypeContext, t: TypeExprRef, t2: TypeExprRef) -
 }
 
 fn expand_promise_compat_alias(type_ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
-    let repr = type_ctx.repr(ty);
-    let desc = type_ctx.get_desc(repr);
-    let TypeDesc::Tconstr { path, .. } = &*desc else {
-        return repr;
-    };
-    let is_promise_alias = path.name() == "Promise.t" || path.name() == "Stdlib.Promise.t";
-    drop(desc);
-    if is_promise_alias
-        && let Some(expansion) = type_alias_expansion(type_ctx, repr)
-        && !type_expansion_same(type_ctx, repr, expansion)
-    {
-        expand_promise_compat_alias(type_ctx, expansion)
-    } else {
-        repr
+    let mut current = type_ctx.repr(ty);
+    let mut seen = AHashSet::new();
+    while seen.insert(current) {
+        let desc = type_ctx.get_desc(current);
+        let TypeDesc::Tconstr { path, .. } = &*desc else {
+            return current;
+        };
+        let is_promise_alias = path.name() == "Promise.t" || path.name() == "Stdlib.Promise.t";
+        drop(desc);
+        match type_alias_expansion(type_ctx, current) {
+            Some(expansion)
+                if is_promise_alias && !type_expansion_same(type_ctx, current, expansion) =>
+            {
+                current = type_ctx.repr(expansion);
+            }
+            _ => return current,
+        }
     }
+    current
 }
 
 fn format_not_subtype_report(
@@ -9725,6 +9729,15 @@ fn type_decl_manifest_for_path(
         decl.type_manifest
             .map(|manifest| (decl.type_params.clone(), manifest))
     };
+
+    // A predefined type (e.g. `promise`) has no manifest; resolving it by name
+    // could pick a user declaration that shadows it.
+    if let crate::types::Path::Pident(id) = path
+        && crate::types::predef::find_predef_ident(id.name())
+            .is_some_and(|predef| predef.stamp() == id.stamp())
+    {
+        return None;
+    }
 
     // Once the declaration for `path` is found, its manifest (or lack of one)
     // is the answer; falling back to another declaration with the same name
