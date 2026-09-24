@@ -527,6 +527,11 @@ fn parse_arrow_type_rest(
     param_type: CoreType,
     start_pos_idx: crate::parse_arena::PosIdx,
 ) -> CoreType {
+    // OCaml matches `(EqualGreater | MinusGreater) when es6_arrow` and
+    // otherwise returns the type unchanged (res_core.ml:5057-5074).
+    if !matches!(p.token, Token::EqualGreater | Token::MinusGreater) {
+        return param_type;
+    }
     // Error recovery: if user wrote -> instead of =>, report error but continue
     // This matches OCaml's: if token = MinusGreater then Parser.expect EqualGreater p;
     if p.token == Token::MinusGreater {
