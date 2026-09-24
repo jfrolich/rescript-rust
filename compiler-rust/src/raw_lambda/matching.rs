@@ -1103,7 +1103,7 @@ fn normalize_pat(q: &Pattern) -> Pattern {
             q.pat_env,
         ),
         PatternDesc::Tpat_or(..) => {
-            panic!("Parmatch.normalize_pat: Tpat_or")
+            crate::misc::fatal_error("Parmatch.normalize_pat")
         }
     }
 }
@@ -1193,7 +1193,7 @@ fn do_set_args(erase_mutable: bool, q: &Pattern, r: &[Pattern]) -> Vec<Pattern> 
             result.extend_from_slice(r);
             result
         }
-        _ => panic!("Parmatch.set_args"),
+        _ => crate::misc::fatal_error("Parmatch.set_args"),
     }
 }
 
@@ -1654,7 +1654,7 @@ pub fn filter_matrix(
             Some((row, rem)) => {
                 if row.is_empty() {
                     // Empty rows shouldn't appear here — fatal error in OCaml.
-                    panic!("Matching.filter_matrix: empty row");
+                    crate::misc::fatal_error("Matching.filter_matrix");
                 }
                 let p = &row[0];
                 let ps = &row[1..];
@@ -1876,7 +1876,7 @@ pub fn ctx_matcher<'a>(
                 _ => Err(MatchError::NoMatch),
             })
         }
-        _ => panic!("Matching.ctx_matcher: unsupported pattern"),
+        _ => crate::misc::fatal_error("Matching.ctx_matcher"),
     }
 }
 
@@ -1896,7 +1896,7 @@ pub fn filter_ctx<'a>(ctx_ref: Option<&'a TypeContext>, q: &Pattern, ctx: &[Ctx]
         match ctx.split_first() {
             None => Vec::new(),
             Some((l, rem)) => match l.right.split_first() {
-                None => panic!("Matching.filter_ctx: empty right"),
+                None => crate::misc::fatal_error("Matching.filter_ctx"),
                 Some((p, ps)) => match &p.pat_desc {
                     PatternDesc::Tpat_or(p1, p2, _) => {
                         let ctx1 = Ctx {
@@ -2013,7 +2013,7 @@ pub fn ctx_lub(p: &Pattern, ctx: &[Ctx]) -> Vec<Ctx> {
                 }
                 Err(Empty) => { /* skip */ }
             },
-            None => panic!("Matching.ctx_lub: empty right"),
+            None => crate::misc::fatal_error("Matching.ctx_lub"),
         }
     }
     result.reverse();
@@ -4061,7 +4061,7 @@ fn is_guarded(lam: &RawLambda) -> bool {
 fn pat_as_constr(p: &Pattern) -> &crate::types::ConstructorDescription {
     match &p.pat_desc {
         PatternDesc::Tpat_construct(_, cstr, _) => cstr,
-        _ => panic!("Matching.pat_as_constr"),
+        _ => crate::misc::fatal_error("Matching.pat_as_constr"),
     }
 }
 
@@ -4124,7 +4124,7 @@ fn get_group(p: &Pattern) -> fn(&Pattern) -> bool {
         PatternDesc::Tpat_record(_, _, _) => group_record,
         PatternDesc::Tpat_array(_) => group_array,
         PatternDesc::Tpat_variant(_, _, _) => group_variant,
-        _ => panic!("Matching.get_group"),
+        _ => crate::misc::fatal_error("Matching.get_group"),
     }
 }
 
@@ -5302,7 +5302,7 @@ fn make_constant_matching(
     args: &MatchArgs,
 ) -> MatchCell {
     match args.split_first() {
-        None => panic!("Matching.make_constant_matching"),
+        None => crate::misc::fatal_error("Matching.make_constant_matching"),
         Some(_) => {
             let key = get_key_constant("make", p);
             let def = make_default(&|p2, rem| matcher_const(&key, p2, rem), def);
@@ -5541,7 +5541,7 @@ fn make_constr_matching(
     args: &MatchArgs,
 ) -> MatchCell {
     match args.split_first() {
-        None => panic!("Matching.make_constr_matching"),
+        None => crate::misc::fatal_error("Matching.make_constr_matching"),
         Some(((arg, _mut), _)) => {
             let argl = args.tail(1);
             let cstr = pat_as_constr(p);
@@ -5687,7 +5687,7 @@ fn make_variant_matching_constant(
     args: &MatchArgs,
 ) -> MatchCell {
     match args.split_first() {
-        None => panic!("Matching.make_variant_matching_constant"),
+        None => crate::misc::fatal_error("Matching.make_variant_matching_constant"),
         Some(_) => {
             let lab_owned = lab.to_string();
             let def = make_default(&|p2, rem| matcher_variant_const(&lab_owned, p2, rem), def);
@@ -5738,7 +5738,7 @@ fn make_variant_matching_nonconst(
     args: &MatchArgs,
 ) -> MatchCell {
     match args.split_first() {
-        None => panic!("Matching.make_variant_matching_nonconst"),
+        None => crate::misc::fatal_error("Matching.make_variant_matching_nonconst"),
         Some(((arg, _mut), _)) => {
             let argl = args.tail(1);
             let lab_owned = lab.to_string();
@@ -5870,7 +5870,7 @@ fn matcher_get_args_var(_p: &Pattern, rem: &[Pattern]) -> Result<Vec<Pattern>, M
 /// Equivalent to OCaml's `make_var_matching`.
 fn make_var_matching(def: &DefaultEnv, args: &MatchArgs) -> PatternMatching {
     match args.split_first() {
-        None => panic!("Matching.make_var_matching"),
+        None => crate::misc::fatal_error("Matching.make_var_matching"),
         Some(_) => PatternMatching {
             cases: Vec::new(),
             args: args.tail(1),
@@ -5940,7 +5940,7 @@ fn make_tuple_matching(
     args: &MatchArgs,
 ) -> PatternMatching {
     match args.split_first() {
-        None => panic!("Matching.make_tuple_matching"),
+        None => crate::misc::fatal_error("Matching.make_tuple_matching"),
         Some(((arg, _mut), _)) => {
             let argl = args.tail(1);
             let mut new_args = Vec::new();
@@ -6085,7 +6085,7 @@ fn make_record_matching(
     args: &MatchArgs,
 ) -> PatternMatching {
     match args.split_first() {
-        None => panic!("Matching.make_record_matching"),
+        None => crate::misc::fatal_error("Matching.make_record_matching"),
         Some(((arg, _mut), _)) => {
             let argl = args.tail(1);
             let mut new_args = Vec::new();
@@ -6197,7 +6197,7 @@ fn matcher_array(len: usize, p: &Pattern, rem: &[Pattern]) -> Result<Vec<Pattern
 /// Equivalent to OCaml's `make_array_matching`.
 fn make_array_matching(p: &Pattern, def: &DefaultEnv, ctx: &[Ctx], args: &MatchArgs) -> MatchCell {
     match args.split_first() {
-        None => panic!("Matching.make_array_matching"),
+        None => crate::misc::fatal_error("Matching.make_array_matching"),
         Some(((arg, _mut), _)) => {
             let argl = args.tail(1);
             let len = get_key_array(p);
@@ -7545,7 +7545,7 @@ pub fn call_switcher(
 /// Equivalent to OCaml's `list_as_pat`.
 fn list_as_pat(pats: &[Pattern]) -> Pattern {
     match pats {
-        [] => panic!("Matching.list_as_pat"),
+        [] => crate::misc::fatal_error("Matching.list_as_pat"),
         [pat] => pat.clone(),
         [pat, rest @ ..] => Pattern {
             pat_desc: PatternDesc::Tpat_or(
@@ -9228,7 +9228,7 @@ fn comp_exit(ctx: &[Ctx], m: &PatternMatching) -> Result<(MatchCode, Jumps), Unu
             MatchCode::raw(RawLambda::LstaticRaise(*i, Vec::new())),
             jumps_singleton(*i, ctx.to_vec()),
         )),
-        None => panic!("Matching.comp_exit"),
+        None => crate::misc::fatal_error("Matching.comp_exit"),
     }
 }
 

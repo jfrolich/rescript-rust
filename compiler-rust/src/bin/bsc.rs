@@ -158,7 +158,15 @@ fn main() {
         })
         .expect("Failed to spawn compiler thread");
 
-    handler.join().expect("Compiler thread panicked");
+    if let Err(payload) = handler.join() {
+        if payload.is::<rescript_compiler::misc::FatalError>() {
+            // OCaml's runtime report for the uncaught `Misc.Fatal_error`.
+            eprintln!("Fatal error: exception Misc.Fatal_error");
+            let _ = std::io::stderr().flush();
+            std::process::exit(2);
+        }
+        panic!("Compiler thread panicked: {payload:?}");
+    }
 }
 
 fn run() -> Result<()> {

@@ -13740,7 +13740,7 @@ fn pressure_matrix_record_arg(pat: &Pattern) -> Vec<PressureRecordField> {
     match &pat.pat_desc {
         PatternDesc::Tpat_any => vec![],
         PatternDesc::Tpat_record(fields, _, _) => fields.clone(),
-        _ => panic!("Parmatch.record_arg"),
+        _ => crate::misc::fatal_error("Parmatch.as_record"),
     }
 }
 

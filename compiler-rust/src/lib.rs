@@ -55,6 +55,7 @@ pub mod intern;
 pub mod js_ir;
 pub mod lambda;
 pub mod location;
+pub mod misc;
 pub mod parse_arena;
 pub mod parser;
 /// Optional aggregate compiler performance counters.
