@@ -5418,705 +5418,441 @@ fn parse_try_expr(p: &mut Parser<'_>) -> Expression {
 }
 
 // ============================================================================
-// JSX Parsing
+// JSX Parsing (OCaml res_core.ml:836-958, 2826-3089)
 // ============================================================================
 
-/// Maximum JSX nesting depth to prevent stack overflow.
-/// This is a safety limit for malformed input with deeply nested JSX-like syntax.
-const MAX_JSX_DEPTH: usize = 20;
-
-/// Convert a Longident to a string.
-fn longident_to_string(lid: &super::longident::Longident, arena: &ParseArena) -> String {
-    match lid {
-        super::longident::Longident::Lident(idx) => arena.get_string(*idx).to_string(),
-        super::longident::Longident::Ldot(prefix, idx) => {
-            format!(
-                "{}.{}",
-                longident_to_string(prefix, arena),
-                arena.get_string(*idx)
-            )
-        }
-        super::longident::Longident::Lapply(a, b) => {
-            format!(
-                "{}({})",
-                longident_to_string(a, arena),
-                longident_to_string(b, arena)
-            )
-        }
-    }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JsxIdentKind {
+    Lower,
+    Upper,
 }
 
-/// Convert a JSX tag name to a string for error messages.
-fn jsx_tag_name_to_string_for_error(tag_name: &JsxTagName, p: &Parser<'_>) -> String {
-    match tag_name {
-        JsxTagName::Lower(name) => name.clone(),
-        JsxTagName::Upper(lid_idx) => {
-            let lid = p.arena().get_longident(*lid_idx);
-            longident_to_string(lid, p.arena())
-        }
-        JsxTagName::QualifiedLower { path, name } => {
-            let lid = p.arena().get_longident(*path);
-            format!("{}.{}", longident_to_string(lid, p.arena()), name)
-        }
-        JsxTagName::Invalid(name) => name.clone(),
-    }
+/// OCaml `peek_ident` (res_core.ml:840-845): the current identifier with its
+/// start/end positions, without advancing.
+fn jsx_peek_ident(p: &mut Parser<'_>) -> Option<(String, PosIdx, PosIdx, JsxIdentKind)> {
+    let (txt, kind) = match &p.token {
+        Token::Lident(txt) => (txt.to_string(), JsxIdentKind::Lower),
+        Token::Uident(txt) => (txt.to_string(), JsxIdentKind::Upper),
+        _ => return None,
+    };
+    Some((txt, p.start_pos_idx(), p.end_pos_idx(), kind))
 }
 
-/// Check if two JSX tag names match.
-fn jsx_tag_names_match(opening: &JsxTagName, closing: &JsxTagName, p: &Parser<'_>) -> bool {
-    jsx_tag_name_to_string_for_error(opening, p) == jsx_tag_name_to_string_for_error(closing, p)
+/// OCaml `expect_ident` (res_core.ml:847-852).
+fn jsx_expect_ident(p: &mut Parser<'_>) -> Option<(String, PosIdx, PosIdx, JsxIdentKind)> {
+    let ident = jsx_peek_ident(p)?;
+    p.next();
+    Some(ident)
 }
 
-/// Parse a JSX element.
-fn parse_jsx(p: &mut Parser<'_>) -> Expression {
-    p.leave_breadcrumb(Grammar::Jsx);
-    let start_pos_idx = p.start_pos_idx();
-    let start_pos = p.start_pos.clone();
-
-    // Check for excessive nesting depth to prevent stack overflow
-    if p.jsx_depth >= MAX_JSX_DEPTH {
-        p.err(super::diagnostics::DiagnosticCategory::Message(
-            "Maximum JSX nesting depth exceeded".to_string(),
-        ));
-        // Return a placeholder expression instead of continuing
-        p.next(); // consume <
-        return recover::default_expr(p.arena_mut());
-    }
-
-    p.jsx_depth += 1;
-    p.expect(Token::LessThan);
-
-    // Check for fragment <>
-    if p.token == Token::GreaterThan {
-        let result = parse_jsx_fragment(p, start_pos_idx);
-        p.eat_breadcrumb();
-        p.jsx_depth -= 1;
-        return result;
-    }
-
-    // OCaml `parse_jsx` (compiler/syntax/src/res_core.ml): anything other than a
-    // name or `>` after `<` is read with `parse_jsx_name` and becomes a plain
-    // identifier expression, not a JSX element.
-    if !matches!(p.token, Token::Lident(_) | Token::Uident(_)) {
-        let tag_name = parse_jsx_tag_name(p);
-        let name = match tag_name {
-            JsxTagName::Invalid(name) | JsxTagName::Lower(name) => name,
-            _ => String::new(),
-        };
-        let lid_idx = p.push_lident(&name);
-        p.eat_breadcrumb();
-        p.jsx_depth -= 1;
-        return Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(lid_idx, LocIdx::none()))),
-            pexp_loc: LocIdx::none(),
-            pexp_attributes: Attributes::new(),
-        };
-    }
-
-    // Parse tag name - the location starts at the identifier, not the '<'
-    let tag_name_start_idx = p.start_pos_idx();
-    let tag_name = parse_jsx_tag_name(p);
-    let tag_name_loc = p.mk_loc_idx_to_prev_end(tag_name_start_idx);
-
-    // Parse props
-    let props = parse_jsx_props(p);
-
-    // Self-closing, container, or error recovery?
-    // OCaml has three cases: Forwardslash, GreaterThan, or token (unexpected)
-    if p.token == Token::Forwardslash {
+/// OCaml `read_hyphen_chain` (res_core.ml:855-874).
+fn read_hyphen_chain(p: &mut Parser<'_>, buf: &mut String, last_end: &mut PosIdx) {
+    while p.token == Token::Minus {
         p.next();
-        p.expect(Token::GreaterThan);
-        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-        p.eat_breadcrumb();
-        p.jsx_depth -= 1;
-        Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_jsx_element(Box::new(
-                JsxElement::Unary(JsxUnaryElement {
-                    tag_name: with_loc(tag_name, tag_name_loc),
-                    props,
-                }),
-            ))),
-            pexp_loc: loc,
-            pexp_attributes: Attributes::new(),
-        }
-    } else if p.token != Token::GreaterThan {
-        // OCaml: | token -> Parser.err p (Diagnostics.unexpected token p.breadcrumbs);
-        //        Ast_helper.Exp.jsx_unary_element ~loc name jsx_props
-        p.err(DiagnosticCategory::unexpected(
-            p.token.clone().into_owned(),
-            p.breadcrumbs().to_vec(),
-        ));
-        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-        p.eat_breadcrumb();
-        p.jsx_depth -= 1;
-        Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_jsx_element(Box::new(
-                JsxElement::Unary(JsxUnaryElement {
-                    tag_name: with_loc(tag_name, tag_name_loc),
-                    props,
-                }),
-            ))),
-            pexp_loc: loc,
-            pexp_attributes: Attributes::new(),
-        }
-    } else {
-        // OCaml captures opening_tag_end = p.start_pos BEFORE consuming '>'
-        let opening_end_idx = p.start_pos_idx();
-        p.expect(Token::GreaterThan);
-        let opening_end = p.prev_end_pos.clone();
-
-        // Parse children
-        let children = parse_jsx_children(p);
-
-        // Parse closing tag
-        // OCaml has three cases:
-        // 1. LessThan when peekSlash -> proper closing tag
-        // 2. token when is_structure_item_start -> None (missing closing tag)
-        // 3. _ -> "Did you forget a `</` here?"
-        // OCaml: closing_tag_start = p.start_pos (position at '<')
-        let closing_tag_start_idx = p.start_pos_idx();
-        let has_closing_tag = if p.token == Token::LessThan
-            && p.lookahead(|state| {
-                state.next();
-                state.token == Token::Forwardslash
-            }) {
-            // Case 1: proper closing tag `</`
-            p.next(); // consume <
-            p.next(); // consume /
-            true
-        } else if super::grammar::is_structure_item_start(&p.token) {
-            // Case 2: structure item start - no closing tag found
-            // OCaml: emits "Missing </TagName>" at the opening tag position
-            let opening_name = jsx_tag_name_to_string_for_error(&tag_name, p);
-            p.err_at(
-                start_pos.clone(),
-                opening_end.clone(),
-                DiagnosticCategory::Message(format!("Missing </{}>", opening_name)),
-            );
-            false
-        } else {
-            // Case 3: unexpected token
-            p.err(DiagnosticCategory::Message(
-                "Did you forget a `</` here?".to_string(),
-            ));
-            false
-        };
-
-        let closing_tag = if has_closing_tag {
-            let token0 = p.token.clone().into_owned();
-            match token0 {
-                Token::Lident(_) | Token::Uident(_) => {
-                    let closing_name_start_idx = p.start_pos_idx();
-                    let closing_tag_name = parse_jsx_tag_name(p);
-                    let closing_tag_name_loc = p.mk_loc_idx_to_prev_end(closing_name_start_idx);
-                    // Check for tag name mismatch (OCaml: "Missing </Foo.Bar>")
-                    let closing_tag_end_idx = if !jsx_tag_names_match(
-                        &tag_name,
-                        &closing_tag_name,
-                        p,
-                    ) {
-                        let opening_name = jsx_tag_name_to_string_for_error(&tag_name, p);
-                        if super::grammar::is_structure_item_start(&token0) {
-                            p.err_at(
-                                start_pos.clone(),
-                                p.prev_end_pos.clone(),
-                                DiagnosticCategory::Message(format!("Missing </{}>", opening_name)),
-                            );
-                            // OCaml consumes '>' in this mismatch branch to keep AST shape stable.
-                            p.expect(Token::GreaterThan);
-                            p.prev_end_pos_idx()
-                        } else {
-                            p.err_at(
-                                    start_pos.clone(),
-                                    p.prev_end_pos.clone(),
-                                    DiagnosticCategory::Message(format!(
-                                        "Closing jsx name should be the same as the opening name. Did you mean </{}> ?",
-                                        opening_name
-                                    )),
-                                );
-                            p.expect(Token::GreaterThan);
-                            p.prev_end_pos_idx()
-                        }
-                    } else {
-                        let closing_tag_end_idx = p.start_pos_idx();
-                        p.expect(Token::GreaterThan);
-                        closing_tag_end_idx
-                    };
-                    Some(JsxClosingTag {
-                        start: closing_tag_start_idx,
-                        name: with_loc(closing_tag_name, closing_tag_name_loc),
-                        end: closing_tag_end_idx,
-                    })
-                }
-                token => {
-                    let opening_name = jsx_tag_name_to_string_for_error(&tag_name, p);
-                    if super::grammar::is_structure_item_start(&token) {
-                        p.err_at(
-                            start_pos.clone(),
-                            p.prev_end_pos.clone(),
-                            DiagnosticCategory::Message(format!("Missing </{}>", opening_name)),
-                        );
-                    } else {
-                        p.err_at(
-                            start_pos.clone(),
-                            p.prev_end_pos.clone(),
-                            DiagnosticCategory::Message(format!(
-                                "Closing jsx name should be the same as the opening name. Did you mean </{}> ?",
-                                opening_name
-                            )),
-                        );
-                    }
-                    None
-                }
+        match jsx_peek_ident(p) {
+            Some((txt, _, _, _)) => {
+                buf.push('-');
+                buf.push_str(&txt);
+                p.next();
+                *last_end = p.prev_end_pos_idx();
             }
-        } else {
-            // OCaml: closing_tag_start is None when no proper closing tag was found
-            None
-        };
-
-        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-        p.eat_breadcrumb();
-        p.jsx_depth -= 1;
-        let children_idx: Vec<ExprIdx> = children
-            .into_iter()
-            .map(|e| p.arena_mut().push_expr(e))
-            .collect();
-        Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_jsx_element(Box::new(
-                JsxElement::Container(JsxContainerElement {
-                    tag_name_start: with_loc(tag_name, tag_name_loc),
-                    opening_end: opening_end_idx,
-                    props,
-                    children: children_idx,
-                    closing_tag,
-                }),
-            ))),
-            pexp_loc: loc,
-            pexp_attributes: Attributes::new(),
+            None => {
+                p.err(DiagnosticCategory::Message(
+                    "JSX identifier cannot end with a hyphen".to_string(),
+                ));
+                return;
+            }
         }
     }
 }
 
-/// Parse a JSX fragment.
-fn parse_jsx_fragment(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
-    // OCaml: children_start_pos = p.Parser.start_pos (before consuming >)
-    // This is the start position of the > token
-    let opening = p.start_pos_idx();
-    p.expect(Token::GreaterThan);
+/// OCaml `read_local_jsx_name` (res_core.ml:877-889).
+fn read_local_jsx_name(p: &mut Parser<'_>) -> Option<(String, LocIdx, JsxIdentKind)> {
+    let (head, start, head_end, kind) = jsx_expect_ident(p)?;
+    let mut buf = head;
+    let mut last_end = head_end;
+    read_hyphen_chain(p, &mut buf, &mut last_end);
+    let loc = p.mk_loc_idx_full(start, last_end);
+    Some((buf, loc, kind))
+}
 
-    let children = parse_jsx_children(p);
+/// OCaml `read_jsx_tag_name` (res_core.ml:901-958).
+fn read_jsx_tag_name(p: &mut Parser<'_>) -> Result<(JsxTagName, LocIdx), String> {
+    let Some((first_seg, start, first_end, kind)) = jsx_peek_ident(p) else {
+        return Err(String::new());
+    };
+    if kind == JsxIdentKind::Lower {
+        return read_local_jsx_name(p)
+            .map(|(name, loc, _)| (JsxTagName::Lower(name), loc))
+            .ok_or_else(String::new);
+    }
+    p.next();
+    let mut segs = vec![first_seg];
+    let mut last_end = first_end;
+    loop {
+        if p.token != Token::Dot {
+            let path = super::core::build_longident(p.arena_mut(), &segs);
+            let path_idx = p.push_longident(path);
+            let loc = p.mk_loc_idx_full(start, last_end);
+            return Ok((JsxTagName::Upper(path_idx), loc));
+        }
+        p.next();
+        match jsx_peek_ident(p) {
+            None => {
+                p.err(DiagnosticCategory::Message(
+                    "expected identifier after '.' in JSX tag name".to_string(),
+                ));
+                return Err(segs.join(".") + ".");
+            }
+            Some((txt, _, _, JsxIdentKind::Upper)) => {
+                p.next();
+                segs.push(txt);
+                last_end = p.prev_end_pos_idx();
+            }
+            Some((_, _, _, JsxIdentKind::Lower)) => {
+                let Some((lname, l_loc, _)) = read_local_jsx_name(p) else {
+                    return Err(String::new());
+                };
+                let path = super::core::build_longident(p.arena_mut(), &segs);
+                let path_idx = p.push_longident(path);
+                let loc = p.mk_loc_idx_to_end_of(start, l_loc);
+                return Ok((
+                    JsxTagName::QualifiedLower {
+                        path: path_idx,
+                        name: lname,
+                    },
+                    loc,
+                ));
+            }
+        }
+    }
+}
 
-    // OCaml: children_end_pos = p.Parser.start_pos (after children, before consuming <)
-    // This is the start position of the < in </>
-    let closing = p.start_pos_idx();
-    p.expect(Token::LessThan);
-    p.expect(Token::Forwardslash);
-    p.expect(Token::GreaterThan);
+/// `Ast_helper.Jsx.longident_of_jsx_tag_name`, flattened to its segments.
+fn jsx_tag_name_segments(tag_name: &JsxTagName, p: &Parser<'_>) -> Vec<String> {
+    fn lid_segments(lid: &super::longident::Longident, arena: &ParseArena, out: &mut Vec<String>) {
+        match lid {
+            super::longident::Longident::Lident(idx) => out.push(arena.get_string(*idx).to_string()),
+            super::longident::Longident::Ldot(prefix, idx) => {
+                lid_segments(prefix, arena, out);
+                out.push(arena.get_string(*idx).to_string());
+            }
+            super::longident::Longident::Lapply(a, b) => {
+                lid_segments(a, arena, out);
+                lid_segments(b, arena, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    match tag_name {
+        JsxTagName::Lower(name) | JsxTagName::Invalid(name) => out.push(name.clone()),
+        JsxTagName::Upper(lid_idx) => lid_segments(p.arena().get_longident(*lid_idx), p.arena(), &mut out),
+        JsxTagName::QualifiedLower { path, name } => {
+            lid_segments(p.arena().get_longident(*path), p.arena(), &mut out);
+            out.push(name.clone());
+        }
+    }
+    out
+}
 
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+/// `Ast_helper.Jsx.string_of_jsx_tag_name`.
+fn jsx_tag_name_to_string_for_error(tag_name: &JsxTagName, p: &Parser<'_>) -> String {
+    jsx_tag_name_segments(tag_name, p).join(".")
+}
 
-    let children_idx: Vec<ExprIdx> = children
-        .into_iter()
-        .map(|e| p.arena_mut().push_expr(e))
-        .collect();
+/// OCaml `parse_jsx_name` (res_core.ml:2826-2835).
+fn parse_jsx_name(p: &mut Parser<'_>) -> (JsxTagName, LocIdx) {
+    match read_jsx_tag_name(p) {
+        Ok(name) => name,
+        Err(invalid) => {
+            p.err(DiagnosticCategory::Message(
+                "A jsx name must be a lowercase or uppercase name, like: div in <div /> or Navbar in <Navbar />".to_string(),
+            ));
+            (JsxTagName::Invalid(invalid), LocIdx::none())
+        }
+    }
+}
+
+fn jsx_expression(desc: JsxElement, loc: LocIdx) -> Expression {
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_jsx_element(Box::new(
-            JsxElement::Fragment(JsxFragment {
-                opening,
-                children: children_idx,
-                closing,
-            }),
-        ))),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_jsx_element(Box::new(desc))),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
 }
 
-/// Read hyphen chain: consumes `-ident` sequences and appends them to the buffer.
-/// Returns the final name with hyphens concatenated.
-fn read_hyphen_chain(p: &mut Parser<'_>, initial: impl Into<String>) -> String {
-    let mut result = initial.into();
-    while p.token == Token::Minus {
-        // Look ahead to see if there's an identifier after the hyphen
-        let has_ident_after = p.lookahead(|state| {
-            state.next(); // consume -
-            matches!(&state.token, Token::Lident(_) | Token::Uident(_))
-        });
-        if !has_ident_after {
-            // OCaml: advances past '-' THEN emits error at the next token position
-            p.next(); // consume '-'
-            p.err(DiagnosticCategory::Message(
-                "JSX identifier cannot end with a hyphen".to_string(),
-            ));
-            break;
-        }
-        p.next(); // consume -
-        match &p.token {
-            Token::Lident(name) | Token::Uident(name) => {
-                result.push('-');
-                result.push_str(name);
-                p.next();
-            }
-            _ => break,
-        }
-    }
-    result
-}
-
-/// Parse a JSX tag name.
-fn parse_jsx_tag_name(p: &mut Parser<'_>) -> JsxTagName {
-    match &p.token {
-        Token::Lident(name) => {
-            let name = name.clone();
+/// OCaml `parse_jsx_opening_or_self_closing_element` (res_core.ml:2837-2961).
+fn parse_jsx_opening_or_self_closing_element(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
+    let start_pos = p.arena().get_position(start_pos_idx).clone();
+    let (name, name_loc) = parse_jsx_name(p);
+    let props = parse_jsx_props(p);
+    match p.token {
+        Token::Forwardslash => {
             p.next();
-            // Handle hyphenated tag names like `custom-tag`
-            let full_name = read_hyphen_chain(p, name);
-            JsxTagName::Lower(full_name)
+            let jsx_end_pos = p.end_pos_idx();
+            p.expect(Token::GreaterThan);
+            let loc = p.mk_loc_idx_full(start_pos_idx, jsx_end_pos);
+            jsx_expression(
+                JsxElement::Unary(JsxUnaryElement {
+                    tag_name: with_loc(name, name_loc),
+                    props,
+                }),
+                loc,
+            )
         }
-        Token::Uident(name) => {
-            let mut parts = vec![name.clone()];
+        Token::GreaterThan => {
+            let opening_tag_end = p.start_pos_idx();
             p.next();
-            while p.token == Token::Dot {
+            let children = parse_jsx_children(p);
+            let closing_tag_start = if p.token == Token::LessThan && p.peek_slash() {
+                let pos = p.start_pos_idx();
                 p.next();
-                match &p.token {
-                    Token::Uident(name) => {
-                        parts.push(name.clone());
-                        p.next();
-                    }
-                    Token::Lident(name) => {
-                        // Last segment is lowercase, may have hyphens
-                        let lname = name.clone();
-                        p.next();
-                        let full_name = read_hyphen_chain(p, lname);
-                        // This is a qualified lowercase tag: Foo.custom-tag
-                        let path = super::core::build_longident(p.arena_mut(), &parts);
-                        let path_idx = p.push_longident(path);
-                        return JsxTagName::QualifiedLower {
-                            path: path_idx,
-                            name: full_name,
+                p.next();
+                Some(pos)
+            } else if super::grammar::is_structure_item_start(&p.token) {
+                None
+            } else {
+                p.err(DiagnosticCategory::Message(
+                    "Did you forget a `</` here?".to_string(),
+                ));
+                None
+            };
+            let children: Vec<ExprIdx> = children
+                .into_iter()
+                .map(|e| p.arena_mut().push_expr(e))
+                .collect();
+            let opening_name = jsx_tag_name_to_string_for_error(&name, p);
+            let token0 = p.token.clone().into_owned();
+            let closing_tag = match token0 {
+                Token::Lident(_) | Token::Uident(_) => {
+                    let closing_name_res = read_jsx_tag_name(p);
+                    let matches = matches!(&closing_name_res, Ok((closing, _))
+                        if jsx_tag_name_segments(closing, p) == jsx_tag_name_segments(&name, p));
+                    let (end_tag_name, closing_tag_end) = if matches {
+                        let closing_tag_end = p.start_pos_idx();
+                        p.expect(Token::GreaterThan);
+                        (closing_name_res.ok().expect("matched closing name"), closing_tag_end)
+                    } else {
+                        let end = p.prev_end_pos;
+                        if super::grammar::is_structure_item_start(&token0) {
+                            p.err_at(
+                                start_pos,
+                                end,
+                                DiagnosticCategory::Message(format!("Missing </{opening_name}>")),
+                            );
+                        } else {
+                            p.err_at(
+                                start_pos,
+                                end,
+                                DiagnosticCategory::Message(format!(
+                                    "Closing jsx name should be the same as the opening name. Did you mean </{opening_name}> ?"
+                                )),
+                            );
+                        }
+                        p.expect(Token::GreaterThan);
+                        let end_tag_name = match closing_name_res {
+                            Ok(closing) => closing,
+                            Err(invalid) => (JsxTagName::Invalid(invalid), LocIdx::none()),
                         };
-                    }
-                    _ => {
-                        // OCaml: "expected identifier after '.' in JSX tag name"
-                        // OCaml returns Error "Foo." which becomes JsxTagInvalid "Foo."
-                        p.err(DiagnosticCategory::Message(
-                            "expected identifier after '.' in JSX tag name".to_string(),
-                        ));
-                        let name_with_dot = parts.join(".") + ".";
-                        return JsxTagName::Invalid(name_with_dot);
-                    }
+                        (end_tag_name, p.prev_end_pos_idx())
+                    };
+                    closing_tag_start.map(|start| JsxClosingTag {
+                        start,
+                        name: with_loc(end_tag_name.0, end_tag_name.1),
+                        end: closing_tag_end,
+                    })
                 }
-            }
-            let lid = super::core::build_longident(p.arena_mut(), &parts);
-            let lid_idx = p.push_longident(lid);
-            JsxTagName::Upper(lid_idx)
+                token => {
+                    let end = p.prev_end_pos;
+                    if super::grammar::is_structure_item_start(&token) {
+                        p.err_at(
+                            start_pos,
+                            end,
+                            DiagnosticCategory::Message(format!("Missing </{opening_name}>")),
+                        );
+                    } else {
+                        p.err_at(
+                            start_pos,
+                            end,
+                            DiagnosticCategory::Message(format!(
+                                "Closing jsx name should be the same as the opening name. Did you mean </{opening_name}> ?"
+                            )),
+                        );
+                    }
+                    None
+                }
+            };
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            jsx_expression(
+                JsxElement::Container(JsxContainerElement {
+                    tag_name_start: with_loc(name, name_loc),
+                    opening_end: opening_tag_end,
+                    props,
+                    children,
+                    closing_tag,
+                }),
+                loc,
+            )
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "A jsx name must be a lowercase or uppercase name, like: div in <div /> or Navbar in <Navbar />".to_string(),
+            p.err(DiagnosticCategory::unexpected(
+                p.token.clone().into_owned(),
+                p.breadcrumbs().to_vec(),
             ));
-            // OCaml `read_jsx_tag_name` returns `Error ""` (res_core.ml:901-904).
-            JsxTagName::Invalid(String::new())
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            jsx_expression(
+                JsxElement::Unary(JsxUnaryElement {
+                    tag_name: with_loc(name, name_loc),
+                    props,
+                }),
+                loc,
+            )
         }
     }
 }
 
-/// Parse JSX props.
-/// Matches OCaml: parse_region ~grammar:Grammar.JsxAttribute ~f:parse_jsx_prop p
-fn parse_jsx_props(p: &mut Parser<'_>) -> Vec<JsxProp> {
-    p.leave_breadcrumb(Grammar::JsxAttribute);
-    let mut props = vec![];
-
-    loop {
-        match &p.token {
-            Token::Lbrace => {
-                // Spreading: `{...props}`
-                if p.lookahead(|state| {
-                    state.next();
-                    state.token == Token::DotDotDot
-                }) {
-                    let spread_start_idx = p.start_pos_idx();
-                    p.next(); // {
-                    p.expect(Token::DotDotDot);
-                    let expr = parse_expr(p);
-                    p.expect(Token::Rbrace);
-                    let loc = p.mk_loc_idx_to_prev_end(spread_start_idx);
-                    let expr_idx = p.arena_mut().push_expr(expr);
-                    props.push(JsxProp::Spreading {
-                        loc,
-                        expr: expr_idx,
-                    });
-                } else {
-                    break;
-                }
+/// OCaml `parse_jsx` (res_core.ml:2972-2991).
+fn parse_jsx(p: &mut Parser<'_>) -> Expression {
+    p.leave_breadcrumb(Grammar::Jsx);
+    let start_pos_idx = p.start_pos_idx();
+    p.expect(Token::LessThan);
+    let jsx_expr = match p.token {
+        Token::Lident(_) | Token::Uident(_) => {
+            parse_jsx_opening_or_self_closing_element(p, start_pos_idx)
+        }
+        Token::GreaterThan => parse_jsx_fragment(p, start_pos_idx),
+        _ => {
+            let (tag_name, loc) = parse_jsx_name(p);
+            let segments = jsx_tag_name_segments(&tag_name, p);
+            let lid = super::core::build_longident(p.arena_mut(), &segments);
+            let lid_idx = p.push_longident(lid);
+            Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc))),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
             }
-            Token::Lident(name) => {
-                let name = name.clone();
-                let name_start_idx = p.start_pos_idx();
-                p.next();
-                let name = read_hyphen_chain(p, name);
-                let name_loc = p.mk_loc_idx_to_prev_end(name_start_idx);
+        }
+    };
+    p.eat_breadcrumb();
+    jsx_expr
+}
 
-                if p.token == Token::Equal {
-                    p.next();
-                    let optional = p.optional(&Token::Question);
-                    // JSX prop values can be braced expressions (`={expr}`) or simple literals/idents (`="str"`, `=x`).
-                    let value = if p.token == Token::Lbrace {
-                        // Parse the full braced expression (record/object/block) without
-                        // consuming beyond the closing `}`.
-                        let atomic = parse_atomic_expr(p);
-                        parse_primary_expr(p, atomic, false)
-                    } else {
-                        // Parse a single operand (not a full binary expression), so we don't consume the tag's `>`/`/>`.
-                        parse_operand_expr(p, ExprContext::Ordinary)
-                    };
+/// OCaml `parse_jsx_fragment` (res_core.ml:2997-3010).
+fn parse_jsx_fragment(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
+    let opening = p.start_pos_idx();
+    p.expect(Token::GreaterThan);
+    let children = parse_jsx_children(p);
+    let closing = p.start_pos_idx();
+    p.expect(Token::LessThan);
+    p.expect(Token::Forwardslash);
+    let end_pos = p.end_pos_idx();
+    p.expect(Token::GreaterThan);
+    let loc = p.mk_loc_idx_full(start_pos_idx, end_pos);
+    let children: Vec<ExprIdx> = children
+        .into_iter()
+        .map(|e| p.arena_mut().push_expr(e))
+        .collect();
+    jsx_expression(
+        JsxElement::Fragment(JsxFragment {
+            opening,
+            children,
+            closing,
+        }),
+        loc,
+    )
+}
+
+/// OCaml `parse_jsx_prop` (res_core.ml:3019-3056).
+fn parse_jsx_prop(p: &mut Parser<'_>) -> Option<JsxProp> {
+    match p.token {
+        Token::Question | Token::Lident(_) => {
+            let optional = p.optional(&Token::Question);
+            match read_local_jsx_name(p) {
+                Some((name, loc, JsxIdentKind::Lower)) => {
                     let name_idx = p.arena_mut().push_interned_string(&name);
-                    let value_idx = p.arena_mut().push_expr(value);
-                    props.push(JsxProp::Value {
-                        name: with_loc(name_idx, name_loc),
-                        optional,
-                        value: value_idx,
-                    });
-                } else {
-                    // Punning
-                    let optional = name.starts_with('?');
-                    let name_idx = p.arena_mut().push_interned_string(&name);
-                    props.push(JsxProp::Punning {
-                        optional,
-                        name: with_loc(name_idx, name_loc),
-                    });
-                }
-            }
-            Token::Question => {
-                p.next();
-                match &p.token {
-                    Token::Lident(name) => {
-                        let name = name.clone();
-                        let name_start_idx = p.start_pos_idx();
-                        p.next();
-                        let name = read_hyphen_chain(p, name);
-                        let name_loc = p.mk_loc_idx_to_prev_end(name_start_idx);
-                        let name_idx = p.arena_mut().push_interned_string(&name);
-                        props.push(JsxProp::Punning {
+                    let name = with_loc(name_idx, loc);
+                    if optional {
+                        return Some(JsxProp::Punning {
                             optional: true,
-                            name: with_loc(name_idx, name_loc),
+                            name,
                         });
                     }
-                    Token::Uident(name) => {
-                        let name = name.clone();
+                    if p.token == Token::Equal {
                         p.next();
-                        drop(read_hyphen_chain(p, name));
-                        p.err(DiagnosticCategory::Message(
-                            "JSX prop names must be lowercase".to_string(),
-                        ));
-                    }
-                    _ => {}
-                }
-            }
-            token if token.is_keyword() => {
-                // JSX props may use keyword-like identifiers (rare but valid).
-                let name = token.to_string();
-                let name_loc = p.mk_loc_current();
-                p.next();
-
-                if p.token == Token::Equal {
-                    p.next();
-                    let optional = p.optional(&Token::Question);
-                    let value = if p.token == Token::Lbrace {
-                        let atomic = parse_atomic_expr(p);
-                        parse_primary_expr(p, atomic, false)
+                        let optional = p.optional(&Token::Question);
+                        let operand = parse_atomic_expr(p);
+                        let attr_expr = parse_primary_expr(p, operand, false);
+                        let value = p.arena_mut().push_expr(attr_expr);
+                        Some(JsxProp::Value {
+                            name,
+                            optional,
+                            value,
+                        })
                     } else {
-                        parse_operand_expr(p, ExprContext::Ordinary)
-                    };
-                    let name_idx = p.arena_mut().push_interned_string(&name);
-                    let value_idx = p.arena_mut().push_expr(value);
-                    props.push(JsxProp::Value {
-                        name: with_loc(name_idx, name_loc),
-                        optional,
-                        value: value_idx,
-                    });
-                } else {
-                    let name_idx = p.arena_mut().push_interned_string(&name);
-                    props.push(JsxProp::Punning {
-                        optional: false,
-                        name: with_loc(name_idx, name_loc),
-                    });
+                        Some(JsxProp::Punning {
+                            optional: false,
+                            name,
+                        })
+                    }
                 }
-            }
-            _ => {
-                // OCaml parse_region recovery: if token is EOF or should_abort_list_parse, stop.
-                // Otherwise, emit error, skip token, and continue.
-                if p.token == Token::Eof || recover::should_abort_list_parse(p) {
-                    break;
+                Some((_, _, JsxIdentKind::Upper)) => {
+                    p.err(DiagnosticCategory::Message(
+                        "JSX prop names must be lowercase".to_string(),
+                    ));
+                    None
                 }
-                p.err(DiagnosticCategory::unexpected(
-                    p.token.clone().into_owned(),
-                    p.breadcrumbs().to_vec(),
-                ));
-                p.next();
+                None => None,
             }
         }
+        Token::Lbrace => {
+            let spread_start = p.start_pos_idx();
+            p.next();
+            if p.token != Token::DotDotDot {
+                return None;
+            }
+            p.next();
+            let operand = parse_expr(p);
+            let attr_expr = parse_primary_expr(p, operand, false);
+            if p.token != Token::Rbrace {
+                return None;
+            }
+            let spread_end = p.end_pos_idx();
+            let loc = p.mk_loc_idx_full(spread_start, spread_end);
+            p.next();
+            let expr = p.arena_mut().push_expr(attr_expr);
+            Some(JsxProp::Spreading { loc, expr })
+        }
+        _ => None,
     }
-
-    p.eat_breadcrumb();
-    props
 }
 
-/// Parse JSX children.
-fn parse_jsx_children(p: &mut Parser<'_>) -> Vec<Expression> {
-    let mut children = vec![];
-    let mut skip_count = 0;
-    const MAX_SKIP_COUNT: usize = 100;
+/// OCaml `parse_jsx_props` (res_core.ml:3058-3059).
+fn parse_jsx_props(p: &mut Parser<'_>) -> Vec<JsxProp> {
+    super::core::parse_region(p, Grammar::JsxAttribute, parse_jsx_prop)
+}
 
+/// OCaml `parse_jsx_children` (res_core.ml:3061-3089).
+fn parse_jsx_children(p: &mut Parser<'_>) -> Vec<Expression> {
+    if p.token == Token::DotDotDot {
+        p.err(DiagnosticCategory::Message(
+            "Spreading JSX children is no longer supported.".to_string(),
+        ));
+        p.next();
+        let operand = parse_atomic_expr(p);
+        return vec![parse_primary_expr(p, operand, true)];
+    }
+    let mut children = vec![];
     loop {
-        // Check for closing tag
-        if p.token == Token::LessThan {
-            // Look ahead for closing
-            if p.lookahead(|state| {
-                state.next();
-                state.token == Token::Forwardslash
-            }) {
-                break;
+        match p.token {
+            Token::Eof => return children,
+            Token::LessThan if p.peek_slash() => return children,
+            ref token if token == &Token::LessThan || grammar::is_jsx_child_start(token) => {
+                let operand = parse_atomic_expr(p);
+                children.push(parse_primary_expr(p, operand, true));
             }
-            // Otherwise it's a child element
-            children.push(parse_jsx(p));
-        } else if p.token == Token::Lbrace {
-            let atomic = parse_atomic_expr(p);
-            let expr = parse_primary_expr(p, atomic, true);
-            children.push(expr);
-        } else if p.token == Token::DotDotDot {
-            // OCaml: "Spreading JSX children is no longer supported."
-            p.err(DiagnosticCategory::Message(
-                "Spreading JSX children is no longer supported.".to_string(),
-            ));
-            p.next(); // consume ...
-            // Parse the expression after ... to not lose it
-            let expr = parse_atomic_expr(p);
-            children.push(expr);
-        } else if p.token == Token::Eof {
-            break;
-        } else if matches!(p.token, Token::Lident(_) | Token::Uident(_)) {
-            // Handle identifiers and module paths as JSX children (e.g., React.null)
-            // Only parse field access (.) after identifiers in JSX children.
-            // Do NOT parse [] as subscript or () as function call - these should be
-            // separate children (arrays wrapped in [] or calls wrapped in {}).
-            let mut expr = parse_value_or_constructor(p);
-            // Only parse field access chains like x.y.z
-            while p.token == Token::Dot {
-                p.next();
-                match &p.token {
-                    Token::Lident(name) => {
-                        let name = name.clone();
-                        let name_loc = p.mk_loc_current();
-                        let lid_idx = p.push_lident(&*name);
-                        p.next();
-                        // Reuse the existing PosIdx from expr.pexp_loc to match OCaml's sharing
-                        let loc_start_idx = p.loc_start_idx(expr.pexp_loc);
-                        let loc = p.mk_loc_idx_to_prev_end(loc_start_idx);
-                        expr = Expression {
-                            pexp_desc: {
-                                let e_idx = p.arena_mut().push_expr(expr);
-                                Box::new(ExpressionDesc::Pexp_field(
-                                    e_idx,
-                                    with_loc(lid_idx, name_loc),
-                                ))
-                            },
-                            pexp_loc: loc,
-                            pexp_attributes: Attributes::new(),
-                        };
-                    }
-                    Token::Uident(_) => {
-                        let field_path = parse_value_path_after_dot(p);
-                        // Reuse the existing PosIdx from expr.pexp_loc to match OCaml's sharing
-                        let loc_start_idx = p.loc_start_idx(expr.pexp_loc);
-                        let end_idx = p.loc_end_idx(field_path.loc);
-                        let loc = p.mk_loc_idx_full(loc_start_idx, end_idx);
-                        expr = Expression {
-                            pexp_desc: {
-                                let e_idx = p.arena_mut().push_expr(expr);
-                                Box::new(ExpressionDesc::Pexp_field(e_idx, field_path))
-                            },
-                            pexp_loc: loc,
-                            pexp_attributes: Attributes::new(),
-                        };
-                    }
-                    _ => break,
-                }
-            }
-            children.push(expr);
-        } else if let Token::String(s) = &p.token {
-            // Handle string literals in JSX content
-            let s = extend_cow_lifetime(s.clone());
-            let start_pos_idx = p.start_pos_idx();
-            let tag = get_string_tag(p);
-            p.next();
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            children.push(ast_helper::make_constant(Constant::String(s, tag), loc));
-        } else if p.token == Token::List {
-            // Handle list{...} expressions in JSX children
-            let start_pos_idx = p.start_pos_idx();
-            p.next(); // consume 'list'
-            let expr = parse_list_expr(p, start_pos_idx);
-            children.push(expr);
-        } else if p.token == Token::Lbracket {
-            // Handle array literals [a, b, c] in JSX children
-            let expr = parse_array_expr(p);
-            children.push(expr);
-        } else if p.token == Token::Lparen {
-            // Handle parenthesized expressions including first-class modules
-            let expr = parse_atomic_expr(p);
-            let expr = parse_primary_expr(p, expr, true);
-            children.push(expr);
-        } else if p.token == Token::Module {
-            // Handle first-class modules: module(Foo), module(Foo: Bar)
-            let expr = parse_atomic_expr(p);
-            let expr = parse_primary_expr(p, expr, true);
-            children.push(expr);
-        } else if p.token == Token::Percent {
-            // Handle extension expressions: %raw("...")
-            let expr = parse_atomic_expr(p);
-            let expr = parse_primary_expr(p, expr, true);
-            children.push(expr);
-        } else if matches!(
-            &p.token,
-            Token::Int { .. } | Token::Float { .. } | Token::Codepoint { .. }
-        ) {
-            // Handle numeric literals as JSX children
-            let expr = parse_atomic_expr(p);
-            children.push(expr);
-        } else {
-            // Break on tokens that clearly indicate we're outside JSX context
-            // These are structural tokens that should never appear inside JSX children
-            if matches!(
-                p.token,
-                Token::Typ
-                    | Token::Let { .. }
-                    | Token::Module
-                    | Token::External
-                    | Token::Open
-                    | Token::Include
-                    | Token::Exception
-                    | Token::Rbrace  // End of enclosing block
-                    | Token::Rparen  // End of enclosing parens
-                    | Token::Rbracket  // End of enclosing array
-                    | Token::Equal  // Assignment, likely type definition
-                    | Token::Semicolon // Statement separator
-            ) {
-                break;
-            }
-            // Skip whitespace and other tokens (with limit to prevent infinite loop)
-            skip_count += 1;
-            if skip_count > MAX_SKIP_COUNT {
-                break;
-            }
-            p.next();
+            _ => return children,
         }
     }
-
-    children
 }
 
 // ============================================================================

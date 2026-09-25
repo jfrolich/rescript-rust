@@ -307,6 +307,19 @@ impl<'src> Scanner<'src> {
     /// Peek at the next character without advancing.
     ///
     /// Uses byte-level access: skips past current character's bytes to find the next.
+    /// OCaml `Scanner.peek_slash` (res_scanner.ml:140-151): whether the next
+    /// non-whitespace source character after the current token is `/`.
+    pub fn peek_slash(&self) -> bool {
+        let mut offset = self.offset;
+        while offset < self.bytes.len() {
+            match self.bytes[offset] {
+                b' ' | b'\t' | b'\n' | b'\r' => offset += 1,
+                c => return c == b'/',
+            }
+        }
+        false
+    }
+
     fn peek(&self) -> char {
         let next_offset = self.offset + self.ch_len;
         if next_offset >= self.bytes.len() {

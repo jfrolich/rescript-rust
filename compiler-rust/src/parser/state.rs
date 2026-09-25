@@ -343,6 +343,11 @@ impl<'src> Parser<'src> {
 
     /// Return the current end position index (no allocation).
     /// This enables sharing - multiple uses of `p.end_pos` return the same PosIdx.
+    /// OCaml `Scanner.peek_slash p.scanner`.
+    pub fn peek_slash(&self) -> bool {
+        self.scanner.peek_slash()
+    }
+
     pub fn end_pos_idx(&mut self) -> PosIdx {
         self.end_pos_idx
     }
