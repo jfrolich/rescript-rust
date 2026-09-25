@@ -3601,11 +3601,8 @@ impl<'a> RawLambdaConverter<'a> {
                                     arg.exp_type,
                                 )
                             });
-                        let no_env_skip =
-                            type_cannot_contain_undefined_no_env(self.type_ctx, arg.exp_type);
                         let can_skip = arg_env_skip.unwrap_or(false)
-                            || fallback_env_skip.unwrap_or(false)
-                            || no_env_skip;
+                            || fallback_env_skip.unwrap_or(false);
                         if can_skip {
                             TagInfo::SomeNotNested
                         } else {
