@@ -134,6 +134,19 @@ fn normalize_args() -> Vec<String> {
 }
 
 fn main() {
+    // Parse on a thread with a large stack, like `bsc`, so deeply nested input
+    // does not overflow the default main-thread stack.
+    let handle = std::thread::Builder::new()
+        .name("res_parser".into())
+        .stack_size(512 * 1024 * 1024)
+        .spawn(run)
+        .expect("failed to spawn parser thread");
+    if handle.join().is_err() {
+        process::exit(2);
+    }
+}
+
+fn run() {
     let args = Args::parse_from(normalize_args());
 
     // Read file as raw bytes, converting each byte to a char (Latin-1 encoding).

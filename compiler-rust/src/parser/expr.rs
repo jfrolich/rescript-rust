@@ -533,23 +533,11 @@ pub fn parse_expr_with_operand(p: &mut Parser<'_>, operand: Expression) -> Expre
 
 /// Parse an expression with a specific context.
 pub fn parse_expr_with_context(p: &mut Parser<'_>, context: ExprContext) -> Expression {
-    // Check for excessive parse depth to prevent stack overflow
-    if p.exceeded_parse_depth() {
-        p.err(super::diagnostics::DiagnosticCategory::Message(
-            "Maximum parse depth exceeded".to_string(),
-        ));
-        return recover::default_expr(p.arena_mut());
-    }
-    p.inc_parse_depth();
-
     let expr = parse_operand_expr(p, context);
     let expr = parse_binary_expr(p, expr, 1, context);
     // OCaml `parse_expr` (res_core.ml:1780-1783) stops after the ternary;
     // coercions are only parsed by the callers that expect them.
-    let result = parse_ternary_expr(p, expr);
-
-    p.dec_parse_depth();
-    result
+    parse_ternary_expr(p, expr)
 }
 
 /// Parse a ternary expression (condition ? true_branch : false_branch).
