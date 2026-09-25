@@ -1998,40 +1998,52 @@ fn parse_with_constraints(p: &mut Parser<'_>) -> Vec<WithConstraint> {
 }
 
 /// Parse type constraints following a type declaration or `with type` constraint.
+/// OCaml `parse_type_constraints` (res_core.ml:5819-5820):
+/// `parse_region ~grammar:Grammar.TypeConstraint ~f:parse_type_constraint`.
 fn parse_type_constraints(p: &mut Parser<'_>) -> Vec<(CoreTypeIdx, CoreTypeIdx, Location)> {
-    let mut cstrs = vec![];
-    while p.token == Token::Constraint {
-        // OCaml compiler/syntax/src/res_core.ml:5838-5866 includes the
-        // `constraint` keyword in both the type variable location and the
-        // tuple location.
-        let cstr_start_idx = p.start_pos_idx();
-        p.next();
-        p.expect(Token::SingleQuote);
-        let var = match &p.token {
-            Token::Lident(name) | Token::Uident(name) => {
-                let name = extend_cow_lifetime(name.clone());
-                let var_end_idx = p.end_pos_idx();
-                p.next();
-                CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
-                    ptyp_loc: p.mk_loc_idx(cstr_start_idx, var_end_idx),
-                    ptyp_attributes: Attributes::new(),
-                }
-            }
-            _ => {
-                p.err(DiagnosticCategory::Message(
-                    "Expected type variable in constraint".to_string(),
-                ));
-                break;
-            }
-        };
-        p.expect(Token::Equal);
-        let typ = typ::parse_typ_expr(p);
-        let var_idx = p.arena_mut().push_core_type(var);
-        let typ_idx = p.arena_mut().push_core_type(typ);
-        cstrs.push((var_idx, typ_idx, p.mk_loc_idx_to_prev_end(cstr_start_idx)));
+    super::core::parse_region(p, Grammar::TypeConstraint, parse_type_constraint)
+}
+
+/// OCaml `parse_type_constraint` (res_core.ml:5793-5811). The location of
+/// the type variable and of the constraint include the `constraint` keyword.
+fn parse_type_constraint(p: &mut Parser<'_>) -> Option<(CoreTypeIdx, CoreTypeIdx, Location)> {
+    if p.token != Token::Constraint {
+        return None;
     }
-    cstrs
+    let cstr_start_idx = p.start_pos_idx();
+    p.next();
+    p.expect(Token::SingleQuote);
+    match &p.token {
+        Token::Lident(name) | Token::Uident(name) => {
+            let name = extend_cow_lifetime(name.clone());
+            let var_end_idx = p.end_pos_idx();
+            p.next();
+            let var = CoreType {
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
+                ptyp_loc: p.mk_loc_idx(cstr_start_idx, var_end_idx),
+                ptyp_attributes: Attributes::new(),
+            };
+            p.expect(Token::Equal);
+            let typ = typ::parse_typ_expr(p);
+            let loc = p.mk_loc_idx_to_prev_end(cstr_start_idx);
+            let var_idx = p.arena_mut().push_core_type(var);
+            let typ_idx = p.arena_mut().push_core_type(typ);
+            Some((var_idx, typ_idx, loc))
+        }
+        token => {
+            p.err(DiagnosticCategory::Lident(token.clone().into_owned()));
+            let loc = p.mk_loc_idx_to_prev_end(cstr_start_idx);
+            let any = CoreType {
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
+                ptyp_loc: LocIdx::none(),
+                ptyp_attributes: Attributes::new(),
+            };
+            let typ = typ::parse_typ_expr(p);
+            let any_idx = p.arena_mut().push_core_type(any);
+            let typ_idx = p.arena_mut().push_core_type(typ);
+            Some((any_idx, typ_idx, loc))
+        }
+    }
 }
 
 /// Parse a single with constraint.
