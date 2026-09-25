@@ -17287,7 +17287,26 @@ fn rescript_hide_structure_item(desc: &StructureItemDesc, arena: &ParseArena) ->
 }
 
 /// Type check a structure (module body).
+///
+/// OCaml `Typemod.type_structure` (typemod.ml:1617-1624) runs inside
+/// `Builtin_attributes.warning_scope []` unless `~toplevel` (only the
+/// toplevel REPL): floating `@@warning` attributes of the structure do not
+/// outlive it, so the later phases see the warning state from before typing.
 pub fn type_structure<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    items: &[ParsedStructureItem],
+) -> TypeModResult<(Structure, Env)> {
+    tctx.drain_open_slot_uses();
+    let previous_config = tctx.warning_config.clone();
+    let result = type_structure_unscoped(tctx, env, arena, items);
+    tctx.drain_open_slot_uses();
+    tctx.warning_config = previous_config;
+    result
+}
+
+fn type_structure_unscoped<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     arena: &'a ParseArena,

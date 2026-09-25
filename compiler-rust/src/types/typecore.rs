@@ -5666,8 +5666,10 @@ fn type_pattern_construct(
         }
     };
 
-    // typecore.ml:1392: `Env.mark_constructor Env.Pattern !env (Longident.last
-    // lid.txt) constr`.
+    // The chosen candidate's `use ()` marks its type (`Env.lookup_all_constructors`,
+    // env.ml:1197-1206), then typecore.ml:1392: `Env.mark_constructor
+    // Env.Pattern !env (Longident.last lid.txt) constr`.
+    mark_type_path_of(tctx.type_ctx, env, cstr_desc.cstr_res);
     mark_constructor(
         tctx.type_ctx,
         env,
@@ -6293,6 +6295,11 @@ fn type_pattern_record(
             }
         }
 
+        // `Label.disambiguate` calls the chosen label's `use ()`, which marks
+        // its type (`Env.lookup_all_labels`, env.ml:1230-1238).
+        if let Some(label) = label.as_ref() {
+            mark_type_path_of(ctx, env, label.lbl_res);
+        }
         pending_fields.push(PendingRecordPatternField {
             lid: field.lid.clone(),
             pat: field.pat,
@@ -14306,8 +14313,10 @@ fn type_construct(
         }
     };
 
-    // typecore.ml:4228: `Env.mark_constructor Env.Positive env (Longident.last
-    // lid.txt) constr`.
+    // The chosen candidate's `use ()` marks its type (`Env.lookup_all_constructors`,
+    // env.ml:1197-1206), then typecore.ml:4228: `Env.mark_constructor
+    // Env.Positive env (Longident.last lid.txt) constr`.
+    mark_type_path_of(tctx.type_ctx, env, cstr_desc.cstr_res);
     mark_constructor(
         tctx.type_ctx,
         env,
@@ -15475,6 +15484,11 @@ fn type_record(
             {
                 ambiguous_label_warnings.push((field_name.to_string(), types, selected_path));
             }
+        }
+        // `Label.disambiguate` calls the chosen label's `use ()`, which marks
+        // its type (`Env.lookup_all_labels`, env.ml:1230-1238).
+        if let Some(label) = disambiguated.as_ref() {
+            mark_type_path_of(ctx, env, label.lbl_res);
         }
         explicit_fields.push(ExplicitField {
             original_index: idx,
@@ -17060,6 +17074,11 @@ fn type_setfield(
         && extract_concrete_record_type_info(ty_exp, env, &mut tctx.persistent_env, ctx).is_none()
     {
         warn_ambiguous_label_access(tctx, env, field_lid.loc, &field_name, label);
+    }
+    // `Label.disambiguate` calls the chosen label's `use ()`, which marks its
+    // type (`Env.lookup_all_labels`, env.ml:1230-1238).
+    if let Some(label) = env_label.as_ref() {
+        mark_type_path_of(tctx.type_ctx, env, label.lbl_res);
     }
     let mut env_label = env_label;
     if let Some(label) = env_label.as_mut() {
@@ -21299,8 +21318,30 @@ fn report_let_partial_match_warnings<'a>(
     env: &Env,
     bindings: &[ValueBinding],
 ) {
-    let ctx = tctx.type_ctx;
+    let arena = tctx.arena;
     for binding in bindings {
+        // typecore.ml:4681-4700: each check runs in the binding's warning
+        // scope (`Builtin_attributes.warning_scope ~ppwarning:false attrs`).
+        let _ = crate::types::typemod::with_warning_scope(
+            tctx,
+            arena,
+            &binding.vb_attributes,
+            false,
+            |tctx| {
+                report_let_partial_match_warning(tctx, env, binding);
+                Ok::<(), TypeCoreError>(())
+            },
+        );
+    }
+}
+
+fn report_let_partial_match_warning<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    binding: &ValueBinding,
+) {
+    let ctx = tctx.type_ctx;
+    {
         // OCaml compiler/ml/typecore.ml:4680-4700 computes the LetUnwrap
         // partial-match warning hint before calling `check_partial`, and before
         // typecore.ml:4715 `end_def ()`. That `Ctype.expand_head` side effect

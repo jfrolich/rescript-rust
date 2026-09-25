@@ -6433,13 +6433,43 @@ impl<'a> RawLambdaConverter<'a> {
             return f(self);
         }
         let previous = self.warning_config.clone();
+        // `Builtin_attributes.warning_attribute` (builtin_attributes.ml:180-212):
+        // an unusable payload is reported, a usable one updates the state.
         for attr in attrs.iter().rev() {
-            if let Some((is_error, spec)) = self.warning_attribute_spec(attr) {
-                if is_error {
-                    let _ = self.warning_config.parse_as_error(&spec);
-                } else {
-                    let _ = self.warning_config.parse(&spec);
-                }
+            let name = self.arena.get_string(attr.0.txt);
+            if !matches!(name, "warning" | "ocaml.warning" | "warnerror" | "ocaml.warnerror") {
+                continue;
+            }
+            let Some((is_error, spec)) = self.warning_attribute_spec(attr) else {
+                self.report_warning(
+                    attr.0.loc,
+                    Warning::AttributePayload {
+                        attr: name.to_string(),
+                        message: "A single string literal is expected".to_string(),
+                    },
+                );
+                continue;
+            };
+            let mut scratch = WarningConfig::new();
+            let parsed = if is_error {
+                scratch.parse_as_error(&spec)
+            } else {
+                scratch.parse(&spec)
+            };
+            if parsed.is_err() {
+                self.report_warning(
+                    attr.0.loc,
+                    Warning::AttributePayload {
+                        attr: name.to_string(),
+                        message: "Ill-formed list of warnings".to_string(),
+                    },
+                );
+                continue;
+            }
+            if is_error {
+                let _ = self.warning_config.parse_as_error(&spec);
+            } else {
+                let _ = self.warning_config.parse(&spec);
             }
         }
         let result = f(self);
@@ -6458,15 +6488,26 @@ impl<'a> RawLambdaConverter<'a> {
         match &expr.exp_desc {
             ExpressionDesc::Texp_ident(path, _, desc) => match &desc.val_kind {
                 ValueKind::ValPrim(prim) => {
+                    // translcore.ml `transl_primitive` warns about a
+                    // polymorphic comparison used as a value.
+                    let warn_loc = Some(expr.exp_loc);
                     if let Some(env) = self.env_for_expr(expr) {
                         self.translate_primitive_raw_in_env(
                             self.loc(expr.exp_loc),
                             prim,
                             expr.exp_type,
                             env.as_ref(),
+                            warn_loc,
                         )
                     } else {
-                        self.translate_primitive_raw(self.loc(expr.exp_loc), prim, expr.exp_type)
+                        let env = self.env;
+                        self.translate_primitive_raw_in_env(
+                            self.loc(expr.exp_loc),
+                            prim,
+                            expr.exp_type,
+                            env,
+                            warn_loc,
+                        )
                     }
                 }
                 ValueKind::ValReg => {
@@ -11694,21 +11735,13 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn translate_primitive_raw(
-        &mut self,
-        loc: Location,
-        prim: &crate::types::PrimitiveDescription,
-        ty: TypeExprRef,
-    ) -> RawLambda {
-        self.translate_primitive_raw_in_env(loc, prim, ty, self.env)
-    }
-
     fn translate_primitive_raw_in_env(
         &mut self,
         loc: Location,
         prim: &crate::types::PrimitiveDescription,
         ty: TypeExprRef,
         env: &crate::types::env::Env,
+        warn_loc: Option<LocIdx>,
     ) -> RawLambda {
         let raw_name = Self::raw_primitive_name(&prim.prim_name);
         if let Some(kind) = Self::raw_loc_kind(raw_name) {
@@ -11759,6 +11792,9 @@ impl<'a> RawLambdaConverter<'a> {
                     transformed_jsx: false,
                 }
             };
+        if let Some(warn_loc) = warn_loc {
+            self.report_polymorphic_comparison_warning(warn_loc, &primitive, &[]);
+        }
 
         if prim.prim_from_constructor || prim.prim_arity == 0 {
             RawLambda::prim(primitive, vec![], loc)
@@ -13399,6 +13435,7 @@ external myJson: Js.Json.t = "default"
             &prim,
             alias_ty,
             &env,
+            None,
         ));
 
         assert_eq!(primitive, Primitive::Pintorder);
@@ -13496,6 +13533,7 @@ external myJson: Js.Json.t = "default"
             &prim,
             alias_ty,
             &env,
+            None,
         ));
 
         assert_eq!(
