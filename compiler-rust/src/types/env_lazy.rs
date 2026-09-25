@@ -1625,6 +1625,11 @@ fn build_local_module_components<'a>(
                 access_path,
             );
         }
+        crate::cmi::persistent_env::substitute_module_alias_paths_in_child_sig(
+            &mut qualified_sig,
+            parent_sig,
+            parent_access_path,
+        );
     }
     if raw_sig.len() != qualified_sig.len() {
         return None;

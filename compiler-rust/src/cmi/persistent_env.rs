@@ -3955,6 +3955,35 @@ pub fn substitute_type_paths_in_child_sig(
     restore_child_self_manifests_from_parent_scope(child_sig, parent_sig, parent_module_path, ctx);
 }
 
+/// Rewrite module-alias targets of a scraped child signature through the
+/// parent component substitution.
+///
+/// OCaml compiler/ml/env.ml:1573-1578 builds child component tables with the
+/// parent `sub` from env.ml:1530 `prefix_idents`; `scrape_alias` at
+/// env.ml:1396-1408 strengthens the scraped signature with the unprefixed alias
+/// path (e.g. `X.B` for a sibling `X`), and forcing the child module thunk at
+/// env.ml:475-477 applies `Subst.modtype sub`, which rewrites that `X` to the
+/// selected parent path (compiler/ml/subst.ml:69-76).
+pub fn substitute_module_alias_paths_in_child_sig(
+    child_sig: &mut [SignatureItem],
+    parent_sig: &[SignatureItem],
+    parent_module_path: &Path,
+) {
+    let maps = build_subst_maps(parent_sig, parent_module_path);
+    for item in child_sig.iter_mut() {
+        if let SignatureItem::SigModule(_, md, _) = item
+            && let ModuleType::MtyAlias(_, path) = &mut md.md_type
+        {
+            *path = substitute_module_path(
+                path,
+                &maps.module_stamp_map,
+                &maps.module_name_map,
+                maps.protected_module_head.as_ref(),
+            );
+        }
+    }
+}
+
 fn restore_child_self_manifests_from_parent_scope(
     child_sig: &[SignatureItem],
     parent_sig: &[SignatureItem],
