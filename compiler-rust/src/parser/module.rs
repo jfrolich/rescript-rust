@@ -118,59 +118,6 @@ impl InlineTypesContext {
 
 
 // ============================================================================
-// Helper Functions
-// ============================================================================
-
-/// Convert a module type to a package type (for Ptyp_package).
-/// For a simple module type identifier like `T`, creates `(T, [])`.
-/// For `T with type t = int`, creates `(T, [(t, int)])`.
-fn module_type_to_package(p: &mut Parser<'_>, mt: &ModuleType) -> PackageType {
-    match &*mt.pmty_desc {
-        ModuleTypeDesc::Pmty_ident(lid) => (lid.clone(), vec![]),
-        ModuleTypeDesc::Pmty_with(inner) => {
-            let (ref base_idx, ref constraints) = **inner;
-            // For "T with type t = int", extract base identifier and constraints
-            let base = p.arena().get_mod_type(*base_idx);
-            let lid = if let ModuleTypeDesc::Pmty_ident(lid) = &*base.pmty_desc {
-                lid.clone()
-            } else {
-                let lid_idx = p.push_lident_static("_");
-                with_loc(lid_idx, mt.pmty_loc.clone())
-            };
-
-            // Convert WithConstraint to package type constraints
-            let pkg_constraints: Vec<(Loc<LidentIdx>, CoreTypeIdx)> = constraints
-                .iter()
-                .filter_map(|c| match c {
-                    WithConstraint::Pwith_type(type_lid, type_decl) => {
-                        // Extract the manifest type from the type declaration
-                        type_decl
-                            .ptype_manifest
-                            .as_ref()
-                            .map(|manifest| (type_lid.clone(), manifest.clone()))
-                    }
-                    WithConstraint::Pwith_typesubst(type_lid, type_decl) => {
-                        // Type substitution also has a manifest
-                        type_decl
-                            .ptype_manifest
-                            .as_ref()
-                            .map(|manifest| (type_lid.clone(), manifest.clone()))
-                    }
-                    // Module constraints are not relevant for package types
-                    _ => None,
-                })
-                .collect();
-
-            (lid, pkg_constraints)
-        }
-        _ => {
-            let lid_idx = p.push_lident_static("_");
-            (with_loc(lid_idx, mt.pmty_loc.clone()), vec![])
-        }
-    }
-}
-
-// ============================================================================
 // Structure (Implementation) Parsing
 // ============================================================================
 
@@ -1222,21 +1169,11 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                 p.expect(Token::Lparen);
                 let expr = expr::parse_expr(p);
                 let final_expr = if p.token == Token::Colon {
-                    // OCaml captures colon position for package type location start
+                    // OCaml `parse_module_expr` unpack branch (res_core.ml:6793-6798).
                     let colon_pos_idx = p.start_pos_idx();
                     p.next();
-                    // Parse module type and convert to Ptyp_package
-                    let mod_type = parse_module_type(p);
-                    // Create Ptyp_package from module type
-                    // OCaml uses colon_start for the package type location start
-                    let pkg_loc = p.mk_loc_idx_to_end_of(colon_pos_idx, mod_type.pmty_loc);
-                    let pkg_type = CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_package(Box::new(
-                            module_type_to_package(p, &mod_type),
-                        ))),
-                        ptyp_loc: pkg_loc,
-                        ptyp_attributes: Attributes::new(),
-                    };
+                    let attrs = parse_attributes(p);
+                    let pkg_type = super::typ::parse_package_type(p, colon_pos_idx, attrs);
                     let pkg_type_idx = p.arena_mut().push_core_type(pkg_type);
                     // OCaml: expect Rparen first, then create constraint with loc including Rparen
                     p.expect(Token::Rparen);
