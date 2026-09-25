@@ -4131,6 +4131,7 @@ fn type_mod_error_to_anyhow(
             loc,
             name,
             detail: None,
+            ..
         } => UserDiagnostic::new(
             format_unbound_type_variable_report(arena, source, filename, *loc, name),
             2,
@@ -4140,6 +4141,7 @@ fn type_mod_error_to_anyhow(
             loc,
             name,
             detail: Some(detail),
+            var,
         } => UserDiagnostic::new(
             format_unbound_type_declaration_variable_report(
                 type_ctx,
@@ -4149,6 +4151,7 @@ fn type_mod_error_to_anyhow(
                 *loc,
                 name,
                 Some(detail),
+                *var,
             ),
             2,
         )
@@ -4977,58 +4980,100 @@ fn format_unbound_type_declaration_variable_report(
     loc: LocIdx,
     name: &str,
     detail: Option<&UnboundTypeVarDetail>,
+    var: Option<TypeExprRef>,
 ) -> String {
     let mut message = String::from("  A type variable is unbound in this type declaration.");
     if let Some(detail) = detail {
-        match detail {
-            UnboundTypeVarDetail::Type { ty } => {
-                message.push_str("\nIn type ");
-                message.push_str(&format_type_expr(type_ctx, *ty));
-                message.push_str(" the variable ");
-                message.push_str(name);
-                message.push_str(" is unbound");
+        if let UnboundTypeVarDetail::Constructor {
+            name: case_name,
+            args,
+        } = detail
+        {
+            // typedecl.ml:2185-2193: `typ ti` is a fresh tuple of the
+            // argument types; the case prints `Printtyp.constructor_arguments`.
+            let tys = match args {
+                crate::types::ConstructorArguments::CstrTuple(tys) => tys.clone(),
+                crate::types::ConstructorArguments::CstrRecord(labels) => {
+                    labels.iter().map(|l| l.ld_type).collect()
+                }
+            };
+            let typ_ti = type_ctx.new_generic_type(TypeDesc::Ttuple(tys));
+            let mut printer = TypeExprPrinter::new(type_ctx);
+            printer.reset();
+            printer.mark_loops(typ_ti);
+            if let Some(var) = var {
+                let ty0 = type_ctx.new_generic_type(TypeDesc::Tobject {
+                    fields: var,
+                    name: None,
+                });
+                printer.mark_loops(ty0);
             }
+            let args_text = printer.printtyp.constructor_arguments(args);
+            let var_text = match var {
+                Some(var) => printer.print(var),
+                None => name.to_string(),
+            };
+            message.push_str("\nIn case ");
+            message.push_str(case_name);
+            message.push_str(" of ");
+            message.push_str(&args_text);
+            message.push_str(" the variable ");
+            message.push_str(&var_text);
+            message.push_str(" is unbound");
+            return format_compiler_error_report_raw_message(arena, source, filename, loc, &message);
+        }
+        let (kwd, label, ty) = match detail {
+            UnboundTypeVarDetail::Constructor { .. } => unreachable!(),
+            UnboundTypeVarDetail::Type { ty } => ("type", String::new(), *ty),
             UnboundTypeVarDetail::Case {
                 name: case_name,
                 ty,
                 polymorphic,
-            } => {
-                message.push_str("\nIn case ");
+            } => (
+                "case",
                 if *polymorphic {
-                    message.push('`');
-                }
-                message.push_str(case_name);
-                message.push_str(" of ");
-                message.push_str(&format_type_expr(type_ctx, *ty));
-                message.push_str(" the variable ");
-                message.push_str(name);
-                message.push_str(" is unbound");
-            }
+                    format!("`{case_name} of ")
+                } else {
+                    format!("{case_name} of ")
+                },
+                *ty,
+            ),
             UnboundTypeVarDetail::Field {
                 name: field_name,
                 ty,
-            } => {
-                message.push_str("\nIn field ");
-                message.push_str(field_name);
-                message.push_str(": ");
-                message.push_str(&format_type_expr(type_ctx, *ty));
-                message.push_str(" the variable ");
-                message.push_str(name);
-                message.push_str(" is unbound");
-            }
+            } => ("field", format!("{field_name}: "), *ty),
             UnboundTypeVarDetail::Method {
                 name: method_name,
                 ty,
-            } => {
-                message.push_str("\nIn method ");
-                message.push_str(method_name);
-                message.push_str(": ");
-                message.push_str(&format_type_expr(type_ctx, *ty));
-                message.push_str(" the variable ");
-                message.push_str(name);
-                message.push_str(" is unbound");
-            }
+            } => ("method", format!("{method_name}: "), *ty),
+        };
+        // `Typedecl.explain_unbound_gen` (typedecl.ml:2080-2090):
+        // `reset_and_mark_loops_list [typ ti; ty0]` with
+        // `ty0 = newgenty (Tobject (tv, ref None))` to force aliasing, then
+        // print `typ ti` and `tv` in that naming session.
+        let mut printer = TypeExprPrinter::new(type_ctx);
+        printer.reset();
+        printer.mark_loops(ty);
+        if let Some(var) = var {
+            let ty0 = type_ctx.new_generic_type(TypeDesc::Tobject {
+                fields: var,
+                name: None,
+            });
+            printer.mark_loops(ty0);
         }
+        let ty_text = printer.format(ty);
+        let var_text = match var {
+            Some(var) => printer.print(var),
+            None => name.to_string(),
+        };
+        message.push_str("\nIn ");
+        message.push_str(kwd);
+        message.push(' ');
+        message.push_str(&label);
+        message.push_str(&ty_text);
+        message.push_str(" the variable ");
+        message.push_str(&var_text);
+        message.push_str(" is unbound");
     }
     format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
 }

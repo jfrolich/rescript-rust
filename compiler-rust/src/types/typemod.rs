@@ -3429,6 +3429,13 @@ pub enum UnboundTypeVarDetail {
         /// Whether this is a polymorphic-variant tag.
         polymorphic: bool,
     },
+    /// The variable appears in a variant constructor's arguments.
+    Constructor {
+        /// Constructor name.
+        name: String,
+        /// The constructor's arguments.
+        args: crate::types::ConstructorArguments,
+    },
     /// The variable appears in a record field.
     Field {
         /// Field name.
@@ -3622,6 +3629,8 @@ pub enum TypeModError {
         name: String,
         /// Extra detail matching `Typedecl.explain_unbound`.
         detail: Option<UnboundTypeVarDetail>,
+        /// The unbound variable itself, printed by `explain_unbound`.
+        var: Option<TypeExprRef>,
     },
     /// An extension constructor contains an unbound type variable.
     UnboundTypeVarExt {
@@ -18664,10 +18673,9 @@ fn find_unbound_type_var_detail_in_type_decl(
                 if let Some(display_ty) = constructor_args_display_type(ctx, &cstr.cd_args)
                     && crate::types::ctype::deep_occur(ctx, unbound, display_ty)
                 {
-                    return Some(UnboundTypeVarDetail::Case {
+                    return Some(UnboundTypeVarDetail::Constructor {
                         name: cstr.cd_id.name().to_string(),
-                        ty: display_ty,
-                        polymorphic: false,
+                        args: cstr.cd_args.clone(),
                     });
                 }
             }
@@ -18901,11 +18909,16 @@ fn find_unbound_type_var_in_typed_constructor_args(
 fn find_unbound_type_var_in_typed_type_decl(
     ctx: &crate::types::context::TypeContext,
     decl: &TypedTypeDeclaration,
-) -> Option<(String, LocIdx, Option<UnboundTypeVarDetail>)> {
+) -> Option<(
+    String,
+    LocIdx,
+    Option<UnboundTypeVarDetail>,
+    Option<TypeExprRef>,
+)> {
     if let Some((name, loc)) =
         find_unbound_type_var_in_typed_type_decl_before_closed_decl(ctx, decl)
     {
-        return Some((name, loc, None));
+        return Some((name, loc, None, None));
     }
 
     if let Some(unbound) = find_unbound_type_var_in_type_decl(ctx, &decl.typ_type) {
@@ -18915,6 +18928,7 @@ fn find_unbound_type_var_in_typed_type_decl(
             type_var_report_name_from_type_expr(ctx, unbound),
             decl.typ_loc,
             Some(detail),
+            Some(unbound),
         ));
     }
 
@@ -23158,10 +23172,15 @@ fn type_structure_item<'a>(
             )?;
 
             for typed_decl in &typed_tree_decls {
-                if let Some((name, loc, detail)) =
+                if let Some((name, loc, detail, var)) =
                     find_unbound_type_var_in_typed_type_decl(ctx, typed_decl)
                 {
-                    return Err(TypeModError::UnboundTypeVar { loc, name, detail });
+                    return Err(TypeModError::UnboundTypeVar {
+                        loc,
+                        name,
+                        detail,
+                        var,
+                    });
                 }
             }
 
