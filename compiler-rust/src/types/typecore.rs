@@ -510,6 +510,8 @@ pub enum TypeCoreError {
         loc: LocIdx,
         trace: Vec<(TypeExprRef, TypeExprRef)>,
         context: Option<TypeClashContext>,
+        /// The environment of the failed unification (OCaml's `Error` env).
+        env: Option<EnvRef>,
     },
 
     /// Subtype check failed during an explicit coercion.
@@ -8965,10 +8967,15 @@ fn unify_expression_types(
                 TypeError::Unify(trace) if !trace.is_empty() => trace,
                 _ => vec![(ty1, ty2)],
             };
+            let env = tctx
+                .unify_state
+                .env()
+                .map(|env| tctx.type_ctx.store_typed_env(env));
             Err(TypeCoreError::ExprTypeClash {
                 loc,
                 trace,
                 context,
+                env,
             })
         }
     }
@@ -13250,6 +13257,7 @@ fn type_for_of(
                             loc: iterable_expr.pexp_loc,
                             trace,
                             context: None,
+                            env: Some(tctx.type_ctx.store_typed_env(env)),
                         });
                     }
                 }
@@ -16399,6 +16407,7 @@ fn type_coerce(
             loc,
             trace: vec![(inst_expected, to_ty)],
             context: None,
+            env: Some(tctx.type_ctx.store_typed_env(env)),
         });
     }
 
@@ -16425,6 +16434,7 @@ fn type_coerce(
                     _ => vec![(scope_var, typed_inner.exp_type)],
                 },
                 context: None,
+                env: Some(tctx.type_ctx.store_typed_env(env)),
             })?;
 
         if !is_generalizable {
@@ -18260,6 +18270,7 @@ fn type_letmodule(
                 loc,
                 trace,
                 context: None,
+                env: Some(tctx.type_ctx.store_typed_env(env)),
             });
         }
         // NOTE: OCaml does NOT unify body.exp_type with ty_expected here.

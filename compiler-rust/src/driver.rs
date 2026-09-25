@@ -3,6 +3,8 @@
 //! This module wires together parsing, type-checking, Lambda conversion, and
 //! JS IR codegen to produce JavaScript output.
 
+mod type_clash;
+
 use std::borrow::Cow;
 use std::ffi::OsString;
 use std::fmt;
@@ -3055,9 +3057,17 @@ fn type_mod_error_to_anyhow(
             loc,
             trace,
             context,
+            env,
         }) => {
-            let mut report =
-                format_expr_type_clash_report(type_ctx, arena, source, filename, *loc, trace, context);
+            let env = env.and_then(|env| type_ctx.get_typed_env(env));
+            let mut report = match env {
+                Some(env) => format_expr_type_clash_report_ocaml(
+                    type_ctx, arena, source, filename, *loc, trace, context, &env,
+                ),
+                None => format_expr_type_clash_report(
+                    type_ctx, arena, source, filename, *loc, trace, context,
+                ),
+            };
             // Style escapes embedded in the message follow OCaml's
             // `Color.color_enabled`, which a printed warning switches to the
             // configured `-color` value (compiler/ext/misc.ml:337-392).
@@ -6230,6 +6240,51 @@ fn format_labels_missing_report(
     }
 
     format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+/// `Typecore.report_error`'s `Expr_type_clash` (typecore.ml:4879-4894).
+#[allow(clippy::too_many_arguments)]
+fn format_expr_type_clash_report_ocaml(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    context: &Option<TypeClashContext>,
+    env: &crate::types::Env,
+) -> String {
+    if let Some((arity_a, arity_b)) = type_clash::expr_type_clash_arity_mismatch(type_ctx, trace) {
+        return format_function_arity_mismatch_report(
+            arena,
+            source,
+            filename,
+            loc,
+            arity_a as i32,
+            arity_b as i32,
+        );
+    }
+    let message = type_clash::render_error_message(|ppf| {
+        type_clash::print_expr_type_clash(ppf, type_ctx, env, arena, source, loc, trace, context)
+    });
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
+}
+
+/// A report whose message was laid out by Format like `Location.errorf`:
+/// `default_error_reporter` prints it followed by `@,` and the final `@.`
+/// (location.ml:237-251, 272-279), i.e. always two newlines.
+fn format_compiler_error_report_formatted(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    message: &str,
+) -> String {
+    let mut output = String::new();
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
+    output.push_str(&code_frame::apply_message_styles(message));
+    output.push_str("\n\n");
+    output
 }
 
 fn format_expr_type_clash_report(

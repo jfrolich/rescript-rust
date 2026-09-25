@@ -2852,7 +2852,7 @@ fn unwrap_poly_type(ctx: &crate::types::context::TypeContext, ty: TypeExprRef) -
     }
 }
 
-fn find_type_decl_for_path(
+pub(crate) fn find_type_decl_for_path(
     env: &Env,
     ctx: &crate::types::context::TypeContext,
     path: &Path,

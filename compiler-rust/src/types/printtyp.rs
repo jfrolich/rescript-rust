@@ -83,6 +83,8 @@ pub(crate) struct Printtyp<'a> {
     visited_objects: Vec<TypeExprRef>,
     aliased: Vec<TypeExprRef>,
     delayed: Vec<TypeExprRef>,
+    /// `unique_names`: identifiers printed as `Ident.unique_toplevel_name`.
+    unique_names: Vec<(crate::ident::Ident, String)>,
     /// `Env.lookup_type (Lident s) !printing_env` for
     /// `non_shadowed_pervasive_or_stdlib`; `None` stands for `Env.empty`,
     /// where every lookup fails.
@@ -102,6 +104,7 @@ impl<'a> Printtyp<'a> {
             visited_objects: Vec::new(),
             aliased: Vec::new(),
             delayed: Vec::new(),
+            unique_names: Vec::new(),
             printing_env_lookup_type: None,
         }
     }
@@ -134,10 +137,27 @@ impl<'a> Printtyp<'a> {
         }
     }
 
+    /// `ident_name`.
+    fn ident_name(&self, id: &crate::ident::Ident) -> String {
+        self.unique_names
+            .iter()
+            .find(|(i, _)| i.same(id))
+            .map(|(_, n)| n.clone())
+            .unwrap_or_else(|| id.name().to_string())
+    }
+
+    /// `add_unique`.
+    fn add_unique(&mut self, id: &crate::ident::Ident) {
+        if !self.unique_names.iter().any(|(i, _)| i.same(id)) {
+            let unique = format!("{}/{}", id.name(), id.stamp());
+            self.unique_names.push((id.clone(), unique));
+        }
+    }
+
     /// `tree_of_path`.
     pub(crate) fn tree_of_path(&self, path: &Path) -> OutIdent {
         match path {
-            Path::Pident(id) => OutIdent::Oide_ident(id.name().to_string()),
+            Path::Pident(id) => OutIdent::Oide_ident(self.ident_name(id)),
             Path::Pdot(_, s, _) if self.non_shadowed_pervasive_or_stdlib(path) => {
                 OutIdent::Oide_ident(s.to_string())
             }
@@ -1083,4 +1103,678 @@ fn print_record_declaration_doc(inline: bool, rows: &[(String, bool, bool, OutTy
 /// `print_out_type`: the doc rendered at width 80.
 pub(crate) fn print_out_type(out_type: &OutType) -> String {
     print_out_type_doc(out_type).to_string(80)
+}
+
+// ============================================================================
+// Unification errors (compiler/ml/printtyp.ml:1219-1567)
+// ============================================================================
+
+use crate::parser::formatter::{BoxKind, Formatter};
+
+/// `Misc.Color` style escapes for the semantic tags used in reports.
+pub(crate) const TAG_ERROR: &str = "\x1b[1;31m";
+pub(crate) const TAG_INFO: &str = "\x1b[1;33m";
+pub(crate) const TAG_DIM: &str = "\x1b[2m";
+pub(crate) const TAG_RESET: &str = "\x1b[0m";
+
+/// An expanded trace entry: a type and its `full_expand`.
+pub(crate) type TracePair = (TypeExprRef, TypeExprRef);
+
+/// `Ctype.expand_trace` (ctype.ml:1601-1605) over Rust's raw unification
+/// trace: every `(t1, t2)` level becomes `(t1, full_expand t1)` and
+/// `(t2, full_expand t2)`, using the expansions recorded when the
+/// unification failed.
+pub(crate) fn expand_trace(ctx: &TypeContext, trace: &[(TypeExprRef, TypeExprRef)]) -> Vec<TracePair> {
+    let mut out = Vec::with_capacity(trace.len() * 2);
+    for &(t1, t2) in trace {
+        for t in [t1, t2] {
+            let t = ctx.repr(t);
+            let expanded = ctx.trace_expansion(t).unwrap_or(t);
+            out.push((t, expanded));
+        }
+    }
+    out
+}
+
+/// `pp_print_string` of a rendered type, measured by its byte length.
+fn pp_type_text<W: std::io::Write>(ppf: &mut Formatter<W>, text: &str) {
+    ppf.string_as(text.len(), text);
+}
+
+fn open_tag<W: std::io::Write>(ppf: &mut Formatter<W>, tag: &str) {
+    ppf.string_as(0, tag);
+}
+
+fn close_tag<W: std::io::Write>(ppf: &mut Formatter<W>) {
+    ppf.string_as(0, TAG_RESET);
+}
+
+impl<'a> Printtyp<'a> {
+    fn is_tvar(&self, t: TypeExprRef) -> bool {
+        matches!(&*self.ctx.borrow_desc(self.ctx.repr(t)), TypeDesc::Tvar(_))
+    }
+
+    /// `same_path` (printtyp.ml:1219-1232); `best_type_path` is `(p, Id)`.
+    pub(crate) fn same_path(&self, t: TypeExprRef, t2: TypeExprRef) -> bool {
+        let t = self.ctx.repr(t);
+        let t2 = self.ctx.repr(t2);
+        if t == t2 {
+            return true;
+        }
+        match (&*self.ctx.borrow_desc(t), &*self.ctx.borrow_desc(t2)) {
+            (
+                TypeDesc::Tconstr { path: p1, args: tl1, .. },
+                TypeDesc::Tconstr { path: p2, args: tl2, .. },
+            ) => {
+                p1.same(p2)
+                    && tl1.len() == tl2.len()
+                    && tl1
+                        .iter()
+                        .zip(tl2.iter())
+                        .all(|(a, b)| self.ctx.repr(*a) == self.ctx.repr(*b))
+            }
+            _ => false,
+        }
+    }
+
+    fn path_same_name(&mut self, p1: &Path, p2: &Path) {
+        match (p1, p2) {
+            (Path::Pident(id1), Path::Pident(id2)) => {
+                if id1.name() == id2.name() && !id1.same(id2) {
+                    self.add_unique(id1);
+                    self.add_unique(id2);
+                }
+            }
+            (Path::Pdot(p1, s1, _), Path::Pdot(p2, s2, _)) if s1 == s2 => {
+                self.path_same_name(p1, p2)
+            }
+            (Path::Papply(p1, p1b), Path::Papply(p2, p2b)) => {
+                self.path_same_name(p1, p2);
+                self.path_same_name(p1b, p2b);
+            }
+            _ => {}
+        }
+    }
+
+    fn type_same_name(&mut self, t1: TypeExprRef, t2: TypeExprRef) {
+        let paths = match (
+            &*self.ctx.borrow_desc(self.ctx.repr(t1)),
+            &*self.ctx.borrow_desc(self.ctx.repr(t2)),
+        ) {
+            (TypeDesc::Tconstr { path: p1, .. }, TypeDesc::Tconstr { path: p2, .. }) => {
+                Some((p1.clone(), p2.clone()))
+            }
+            _ => None,
+        };
+        if let Some((p1, p2)) = paths {
+            self.path_same_name(&p1, &p2);
+        }
+    }
+
+    /// `trace_same_names`.
+    fn trace_same_names(&mut self, tr: &[TracePair]) {
+        for pair in tr.chunks(2) {
+            if let [(t1, t1e), (t2, t2e)] = pair {
+                self.type_same_name(*t1, *t2);
+                self.type_same_name(*t1e, *t2e);
+            }
+        }
+    }
+
+    /// `hide_variant_name`: force printing the expanded row.
+    fn hide_variant_name(&self, t: TypeExprRef) -> TypeExprRef {
+        let t = self.ctx.repr(t);
+        let row = match &*self.ctx.borrow_desc(t) {
+            TypeDesc::Tvariant(row) => btype::row_repr(self.ctx, row),
+            _ => return t,
+        };
+        if row.row_name.is_none() {
+            return t;
+        }
+        let more_level = self.ctx.get_level(btype::row_more(self.ctx, &row));
+        let row_more = self.ctx.alloc_type_at_level(TypeDesc::Tvar(None), more_level);
+        let level = self.ctx.get_level(t);
+        self.ctx.alloc_type_at_level(
+            TypeDesc::Tvariant(RowDesc {
+                row_name: None,
+                row_more,
+                ..row
+            }),
+            level,
+        )
+    }
+
+    /// `Ctype.unalias` (ctype.ml:3941-3950).
+    fn unalias(&self, ty: TypeExprRef) -> TypeExprRef {
+        let ty = self.ctx.repr(ty);
+        let level = self.ctx.get_level(ty);
+        let desc = (*self.ctx.get_desc(ty)).clone();
+        match desc {
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => ty,
+            TypeDesc::Tvariant(row) => {
+                let row = btype::row_repr(self.ctx, &row);
+                let more = self.ctx.repr(row.row_more);
+                let more_desc = (*self.ctx.get_desc(more)).clone();
+                let row_more = self.ctx.alloc_type_at_level(more_desc, self.ctx.get_level(more));
+                self.ctx
+                    .alloc_type_at_level(TypeDesc::Tvariant(RowDesc { row_more, ..row }), level)
+            }
+            TypeDesc::Tobject { fields, name } => {
+                // `newty2 ty.level` reads the shadowed `ty`: the fields' level.
+                let fields = self.ctx.repr(fields);
+                let fields_level = self.ctx.get_level(fields);
+                let fields = self.unalias_object(fields);
+                self.ctx
+                    .alloc_type_at_level(TypeDesc::Tobject { fields, name }, fields_level)
+            }
+            desc => self.ctx.alloc_type_at_level(desc, level),
+        }
+    }
+
+    fn unalias_object(&self, ty: TypeExprRef) -> TypeExprRef {
+        let ty = self.ctx.repr(ty);
+        let level = self.ctx.get_level(ty);
+        let desc = (*self.ctx.get_desc(ty)).clone();
+        match desc {
+            TypeDesc::Tfield {
+                name,
+                kind,
+                typ,
+                rest,
+            } => {
+                let rest = self.unalias_object(rest);
+                self.ctx.alloc_type_at_level(
+                    TypeDesc::Tfield {
+                        name,
+                        kind,
+                        typ,
+                        rest,
+                    },
+                    level,
+                )
+            }
+            desc @ (TypeDesc::Tvar(_) | TypeDesc::Tnil) => self.ctx.alloc_type_at_level(desc, level),
+            TypeDesc::Tunivar(_) => ty,
+            _ => self.ctx.alloc_type_at_level(TypeDesc::Tvar(None), level),
+        }
+    }
+
+    /// `Btype.is_constr_row ~allow_ident`.
+    fn is_constr_row(&self, allow_ident: bool, t: TypeExprRef) -> bool {
+        let is_row_name = |s: &str| s.len() >= 4 && s.ends_with("#row");
+        match &*self.ctx.borrow_desc(self.ctx.repr(t)) {
+            TypeDesc::Tconstr {
+                path: Path::Pident(id),
+                ..
+            } if allow_ident => is_row_name(id.name()),
+            TypeDesc::Tconstr {
+                path: Path::Pdot(_, s, _),
+                ..
+            } => is_row_name(s),
+            _ => false,
+        }
+    }
+
+    /// `filter_trace keep_last`.
+    fn filter_trace(&self, keep_last: bool, tr: &[TracePair]) -> Vec<TracePair> {
+        match tr {
+            [(_, t1e), (_, t2e)] if self.is_tvar(*t1e) || self.is_tvar(*t2e) => Vec::new(),
+            [(t1, t1e), (t2, t2e), rem @ ..] => {
+                let rem2 = self.filter_trace(keep_last, rem);
+                if self.is_constr_row(true, *t1e)
+                    || self.is_constr_row(true, *t2e)
+                    || (self.same_path(*t1, *t1e)
+                        && self.same_path(*t2, *t2e)
+                        && !(keep_last && rem2.is_empty()))
+                {
+                    rem2
+                } else {
+                    let mut out = vec![(*t1, *t1e), (*t2, *t2e)];
+                    out.extend(rem2);
+                    out
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// `has_explanation`.
+    fn has_explanation(&self, t3: TypeExprRef, t4: TypeExprRef) -> bool {
+        let d3 = self.ctx.get_desc(self.ctx.repr(t3));
+        let d4 = self.ctx.get_desc(self.ctx.repr(t4));
+        match (&*d3, &*d4) {
+            (TypeDesc::Tfield { .. }, TypeDesc::Tnil | TypeDesc::Tconstr { .. })
+            | (TypeDesc::Tnil | TypeDesc::Tconstr { .. }, TypeDesc::Tfield { .. })
+            | (TypeDesc::Tnil, TypeDesc::Tconstr { .. })
+            | (TypeDesc::Tconstr { .. }, TypeDesc::Tnil)
+            | (_, TypeDesc::Tvar(_))
+            | (TypeDesc::Tvar(_), _)
+            | (TypeDesc::Tvariant(_), TypeDesc::Tvariant(_)) => true,
+            (
+                TypeDesc::Tfield { name: l, rest: r1, .. },
+                TypeDesc::Tfield { name: l2, rest: r2, .. },
+            ) => {
+                matches!(&*self.ctx.borrow_desc(self.ctx.repr(*r1)), TypeDesc::Tnil)
+                    && matches!(&*self.ctx.borrow_desc(self.ctx.repr(*r2)), TypeDesc::Tnil)
+                    && l == l2
+            }
+            _ => false,
+        }
+    }
+
+    /// `mismatch`.
+    fn mismatch(&self, tr: &[TracePair]) -> Option<(TypeExprRef, TypeExprRef)> {
+        match tr {
+            [(_, t), (_, t2), rem @ ..] => match self.mismatch(rem) {
+                Some(m) => Some(m),
+                None => self.has_explanation(*t, *t2).then_some((*t, *t2)),
+            },
+            _ => None,
+        }
+    }
+
+    /// `prepare_expansion`.
+    fn prepare_expansion(&mut self, (t, t2): TracePair) -> TracePair {
+        let t2 = self.hide_variant_name(t2);
+        self.mark_loops(t);
+        if !self.same_path(t, t2) {
+            self.mark_loops(t2);
+        }
+        (t, t2)
+    }
+
+    /// `may_prepare_expansion compact`.
+    fn may_prepare_expansion(&mut self, compact: bool, (t, t2): TracePair) -> TracePair {
+        let is_row_or_object = matches!(
+            &*self.ctx.borrow_desc(self.ctx.repr(t2)),
+            TypeDesc::Tvariant(_) | TypeDesc::Tobject { .. }
+        );
+        if is_row_or_object && compact {
+            self.mark_loops(t);
+            (t, t)
+        } else {
+            self.prepare_expansion((t, t2))
+        }
+    }
+
+    /// `type_expr ppf ty` into a Format stream.
+    pub(crate) fn pp_type_expr<W: std::io::Write>(&mut self, ppf: &mut Formatter<W>, ty: TypeExprRef) {
+        let text = self.type_expr(ty);
+        pp_type_text(ppf, &text);
+    }
+
+    /// `super_type_expansion ~tag t ppf t'`.
+    fn super_type_expansion<W: std::io::Write>(
+        &mut self,
+        ppf: &mut Formatter<W>,
+        tag: &str,
+        t: TypeExprRef,
+        t2: TypeExprRef,
+    ) {
+        if self.same_path(t, t2) {
+            open_tag(ppf, tag);
+            self.pp_type_expr(ppf, t);
+            close_tag(ppf);
+        } else {
+            let t2 = if self.proxy(t) == self.proxy(t2) {
+                self.unalias(t2)
+            } else {
+                t2
+            };
+            ppf.open_box(BoxKind::Box, 2);
+            open_tag(ppf, tag);
+            self.pp_type_expr(ppf, t);
+            close_tag(ppf);
+            ppf.space();
+            open_tag(ppf, TAG_DIM);
+            ppf.str("(defined as");
+            close_tag(ppf);
+            ppf.space();
+            open_tag(ppf, tag);
+            self.pp_type_expr(ppf, t2);
+            close_tag(ppf);
+            open_tag(ppf, TAG_DIM);
+            ppf.str(")");
+            close_tag(ppf);
+            ppf.close_box();
+        }
+    }
+
+    /// `super_trace`.
+    fn super_trace<W: std::io::Write>(&mut self, ppf: &mut Formatter<W>, first: bool, tr: &[TracePair]) {
+        if let [(t1, t1e), (t2, t2e), rem @ ..] = tr {
+            ppf.cut();
+            ppf.cut();
+            ppf.open_box(BoxKind::V, 2);
+            if first {
+                ppf.str("The incompatible parts:");
+            } else {
+                ppf.str("Further expanded:");
+            }
+            ppf.cut();
+            ppf.open_box(BoxKind::HOV, 0);
+            self.super_type_expansion(ppf, TAG_ERROR, *t1, *t1e);
+            ppf.space();
+            ppf.str("vs");
+            ppf.space();
+            self.super_type_expansion(ppf, TAG_INFO, *t2, *t2e);
+            ppf.close_box();
+            self.super_trace(ppf, false, rem);
+            ppf.close_box();
+        }
+    }
+
+    fn print_tags<W: std::io::Write>(&self, ppf: &mut Formatter<W>, fields: &[(String, RowField)]) {
+        for (i, (t, _)) in fields.iter().enumerate() {
+            if i > 0 {
+                ppf.str(",");
+                ppf.space();
+            }
+            ppf.str(&polyvar_ident_to_string(t));
+        }
+    }
+
+    /// `explanation unif t3 t4` (printtyp.ml:1328-1437).
+    fn explanation<W: std::io::Write>(
+        &mut self,
+        ppf: &mut Formatter<W>,
+        unif: bool,
+        t3: TypeExprRef,
+        t4: TypeExprRef,
+    ) {
+        let t3 = self.ctx.repr(t3);
+        let t4 = self.ctx.repr(t4);
+        let d3 = (*self.ctx.get_desc(t3)).clone();
+        let d4 = (*self.ctx.get_desc(t4)).clone();
+        let binding_time = |p: &Path| path_binding_time(p);
+        match (&d3, &d4) {
+            (TypeDesc::Ttuple(l), TypeDesc::Tvar(_)) | (TypeDesc::Tvar(_), TypeDesc::Ttuple(l))
+                if l.is_empty() =>
+            {
+                ppf.cut();
+                ppf.str("Self type cannot escape its class");
+            }
+            (TypeDesc::Tconstr { path: p, .. }, TypeDesc::Tvar(_))
+                if unif && self.ctx.get_level(t4) < binding_time(p) =>
+            {
+                self.escape_scope(ppf, p);
+            }
+            (TypeDesc::Tvar(_), TypeDesc::Tconstr { path: p, .. })
+                if unif && self.ctx.get_level(t3) < binding_time(p) =>
+            {
+                self.escape_scope(ppf, p);
+            }
+            (TypeDesc::Tvar(_), TypeDesc::Tunivar(_)) | (TypeDesc::Tunivar(_), TypeDesc::Tvar(_)) => {
+                ppf.cut();
+                ppf.str("The universal variable ");
+                let u = if matches!(d3, TypeDesc::Tunivar(_)) { t3 } else { t4 };
+                self.pp_type_expr(ppf, u);
+                ppf.str(" would escape its scope");
+            }
+            (TypeDesc::Tvar(_), _) | (_, TypeDesc::Tvar(_)) => {
+                let (t, t2) = if matches!(d3, TypeDesc::Tvar(_)) { (t3, t4) } else { (t4, t3) };
+                let occurs = crate::types::ctype::occur_check(
+                    self.ctx,
+                    None,
+                    crate::types::ctype::UnifyMode::Expression,
+                    t,
+                    t2,
+                )
+                .is_err();
+                ppf.cut();
+                ppf.open_box(BoxKind::HOV, 0);
+                if occurs {
+                    ppf.str("The type variable ");
+                    self.pp_type_expr(ppf, t);
+                    ppf.str(" occurs inside");
+                    ppf.space();
+                    self.pp_type_expr(ppf, t2);
+                } else {
+                    ppf.str("This instance of ");
+                    self.pp_type_expr(ppf, t2);
+                    ppf.str(" is ambiguous:");
+                    ppf.space();
+                    ppf.str("it would escape the scope of its equation");
+                }
+                ppf.close_box();
+            }
+            (TypeDesc::Tfield { name, .. }, _) | (_, TypeDesc::Tfield { name, .. })
+                if name == "*dummy method*" =>
+            {
+                ppf.cut();
+                ppf.str("Self type cannot be unified with a closed object type");
+            }
+            (
+                TypeDesc::Tfield { name: l, typ: f1, rest: r1, .. },
+                TypeDesc::Tfield { name: l2, typ: f2, rest: r2, .. },
+            ) if l == l2
+                && matches!(&*self.ctx.borrow_desc(self.ctx.repr(*r1)), TypeDesc::Tnil)
+                && matches!(&*self.ctx.borrow_desc(self.ctx.repr(*r2)), TypeDesc::Tnil) =>
+            {
+                ppf.cut();
+                ppf.cut();
+                ppf.str("Types for field ");
+                open_tag(ppf, TAG_INFO);
+                ppf.print(format_args!("\"{l}\""));
+                close_tag(ppf);
+                ppf.str(" are incompatible:");
+                ppf.cut();
+                ppf.str("Field ");
+                open_tag(ppf, TAG_INFO);
+                ppf.print(format_args!("\"{l}\""));
+                close_tag(ppf);
+                ppf.str(" in the passed object has type ");
+                open_tag(ppf, TAG_ERROR);
+                self.pp_type_expr(ppf, *f1);
+                close_tag(ppf);
+                ppf.str(", but is expected to have type ");
+                open_tag(ppf, TAG_INFO);
+                self.pp_type_expr(ppf, *f2);
+                close_tag(ppf);
+                ppf.str(".");
+            }
+            (TypeDesc::Tnil | TypeDesc::Tconstr { .. }, TypeDesc::Tfield { name: l, typ: f1, .. }) => {
+                ppf.cut();
+                ppf.cut();
+                ppf.open_box(BoxKind::Box, 0);
+                ppf.str("The first object is expected to have a field ");
+                open_tag(ppf, TAG_INFO);
+                ppf.print(format_args!("\"{l}\""));
+                close_tag(ppf);
+                ppf.str(" of type ");
+                open_tag(ppf, TAG_INFO);
+                self.pp_type_expr(ppf, *f1);
+                close_tag(ppf);
+                ppf.str(", but it does not.");
+                ppf.close_box();
+            }
+            (TypeDesc::Tfield { name: l, typ: f1, .. }, TypeDesc::Tnil | TypeDesc::Tconstr { .. }) => {
+                ppf.cut();
+                ppf.cut();
+                ppf.open_box(BoxKind::Box, 0);
+                ppf.str("The second object is expected to have a field ");
+                open_tag(ppf, TAG_INFO);
+                ppf.print(format_args!("\"{l}\""));
+                close_tag(ppf);
+                ppf.str(" of type ");
+                open_tag(ppf, TAG_INFO);
+                self.pp_type_expr(ppf, *f1);
+                close_tag(ppf);
+                ppf.str(", but it does not.");
+                ppf.close_box();
+            }
+            (TypeDesc::Tnil, TypeDesc::Tconstr { .. }) | (TypeDesc::Tconstr { .. }, TypeDesc::Tnil) => {
+                ppf.cut();
+                ppf.open_box(BoxKind::Box, 0);
+                ppf.print(format_args!(
+                    "The {} object type has an abstract row, it cannot be closed",
+                    if matches!(d4, TypeDesc::Tnil) { "first" } else { "second" }
+                ));
+                ppf.close_box();
+            }
+            (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
+                let row1 = btype::row_repr(self.ctx, row1);
+                let row2 = btype::row_repr(self.ctx, row2);
+                let f1: Vec<(String, RowField)> =
+                    row1.row_fields.iter().map(|(l, f)| (l.to_string(), f.clone())).collect();
+                let f2: Vec<(String, RowField)> =
+                    row2.row_fields.iter().map(|(l, f)| (l.to_string(), f.clone())).collect();
+                match (f1.as_slice(), row1.row_closed, f2.as_slice(), row2.row_closed) {
+                    ([], true, [], true) => {
+                        ppf.cut();
+                        ppf.cut();
+                        ppf.str(
+                            "These polymorphic variants are incompatible - they share no common constructors.",
+                        );
+                    }
+                    ([], true, fields, _) if !fields.is_empty() => {
+                        self.closed_variant_explanation(ppf, "first", fields);
+                    }
+                    (fields, _, [], true) if !fields.is_empty() => {
+                        self.closed_variant_explanation(ppf, "second", fields);
+                    }
+                    ([(l1, _)], true, [(l2, _)], true) if l1 == l2 => {
+                        let name = polyvar_ident_to_string(l1);
+                        ppf.cut();
+                        ppf.cut();
+                        ppf.str("Both polymorphic variants have the constructor ");
+                        open_tag(ppf, TAG_INFO);
+                        ppf.str(&name);
+                        close_tag(ppf);
+                        ppf.str(", but their payload types are incompatible.");
+                        ppf.cut();
+                        ppf.str("Make sure the payload types for ");
+                        open_tag(ppf, TAG_INFO);
+                        ppf.str(&name);
+                        close_tag(ppf);
+                        ppf.str(" match exactly in both polymorphic variants.");
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn escape_scope<W: std::io::Write>(&mut self, ppf: &mut Formatter<W>, p: &Path) {
+        ppf.cut();
+        ppf.open_box(BoxKind::Box, 0);
+        ppf.str("The type constructor");
+        ppf.break_(1, 2);
+        let text = self.path_text(p);
+        ppf.str(&text);
+        ppf.space();
+        ppf.str("would escape its scope");
+        ppf.close_box();
+    }
+
+    fn closed_variant_explanation<W: std::io::Write>(
+        &mut self,
+        ppf: &mut Formatter<W>,
+        which: &str,
+        fields: &[(String, RowField)],
+    ) {
+        let constructors_txt = if fields.len() == 1 { "constructor" } else { "constructors" };
+        ppf.cut();
+        ppf.cut();
+        ppf.print(format_args!("The {which} polymorphic variant is "));
+        open_tag(ppf, TAG_INFO);
+        ppf.str("closed");
+        close_tag(ppf);
+        ppf.print(format_args!(" and doesn't include the {constructors_txt}: "));
+        open_tag(ppf, TAG_ERROR);
+        self.print_tags(ppf, fields);
+        close_tag(ppf);
+        ppf.str(".");
+        ppf.cut();
+        ppf.cut();
+        ppf.str("Possible solutions:\n");
+        ppf.print(format_args!(
+            "  - Either make the {which} variant "
+        ));
+        open_tag(ppf, TAG_INFO);
+        ppf.str("open");
+        close_tag(ppf);
+        ppf.str(
+            " so it can accept additional constructors. To do this, make sure the type starts with ",
+        );
+        open_tag(ppf, TAG_INFO);
+        ppf.str("[>");
+        close_tag(ppf);
+        ppf.str(" instead of ");
+        open_tag(ppf, TAG_INFO);
+        ppf.str("[");
+        close_tag(ppf);
+        ppf.str("\n");
+        ppf.print(format_args!("  - Or add the missing {constructors_txt} to it."));
+    }
+
+    /// `Printtyp.path ppf p`.
+    pub(crate) fn path_text(&self, p: &Path) -> String {
+        match p {
+            Path::Pident(id) => self.ident_name(id),
+            Path::Pdot(_, s, _) if self.non_shadowed_pervasive_or_stdlib(p) => s.to_string(),
+            Path::Pdot(parent, s, _) => format!("{}.{}", self.path_text(parent), s),
+            Path::Papply(p1, p2) => format!("{}({})", self.path_text(p1), self.path_text(p2)),
+        }
+    }
+
+    /// `super_unification_error ?print_extra_info unif tr txt1 ppf txt2`
+    /// (printtyp.ml:1542-1562) on an expanded trace.
+    pub(crate) fn super_unification_error<W: std::io::Write>(
+        &mut self,
+        ppf: &mut Formatter<W>,
+        unif: bool,
+        tr: &[TracePair],
+        txt1: &mut dyn FnMut(&mut Formatter<W>),
+        txt2: &mut dyn FnMut(&mut Formatter<W>),
+        print_extra_info: Option<&mut dyn FnMut(&mut Formatter<W>, &mut Self, TypeExprRef, TypeExprRef)>,
+    ) {
+        self.reset();
+        self.trace_same_names(tr);
+        let tr: Vec<TracePair> = tr.iter().map(|&(t, t2)| (t, self.hide_variant_name(t2))).collect();
+        let mis = self.mismatch(&tr);
+        let [first, second, rest @ ..] = tr.as_slice() else {
+            return;
+        };
+        let rest = self.filter_trace(mis.is_none(), rest);
+        let compact = rest.is_empty();
+        let (t1, t1e) = self.may_prepare_expansion(compact, *first);
+        let (t2, t2e) = self.may_prepare_expansion(compact, *second);
+        let rest: Vec<TracePair> = rest.into_iter().map(|p| self.prepare_expansion(p)).collect();
+        ppf.open_box(BoxKind::V, 0);
+        ppf.open_box(BoxKind::HOV, 2);
+        txt1(ppf);
+        ppf.space();
+        self.super_type_expansion(ppf, TAG_ERROR, t1, t1e);
+        ppf.close_box();
+        ppf.cut();
+        ppf.open_box(BoxKind::HOV, 2);
+        txt2(ppf);
+        ppf.space();
+        self.super_type_expansion(ppf, TAG_INFO, t2, t2e);
+        ppf.close_box();
+        self.super_trace(ppf, true, &rest);
+        if let Some((t3, t4)) = mis {
+            self.explanation(ppf, unif, t3, t4);
+        }
+        if let Some(f) = print_extra_info {
+            f(ppf, self, t1, t2);
+        }
+        ppf.close_box();
+    }
+}
+
+/// `Res_printer.polyvar_ident_to_string` (`print_res_poly_identifier`).
+fn polyvar_ident_to_string(txt: &str) -> String {
+    Doc::concat(vec![Doc::text("#"), print_poly_var_ident(txt)]).to_string(80)
+}
+
+/// `Path.binding_time`.
+fn path_binding_time(p: &Path) -> i32 {
+    match p {
+        Path::Pident(id) => id.stamp(),
+        Path::Pdot(p, _, _) => path_binding_time(p),
+        Path::Papply(p1, p2) => path_binding_time(p1).max(path_binding_time(p2)),
+    }
 }
