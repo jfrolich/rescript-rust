@@ -18827,35 +18827,47 @@ fn type_jsx_element(
     Err(TypeCoreError::JsxNotEnabled { loc })
 }
 
+/// The module type of `Pmod_unpack` on a module pattern variable, as typed
+/// by the `let module` that `wrap_unpacks` builds (typemod.ml:1357-1370).
 fn module_type_from_package_binding(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     ty: TypeExprRef,
-) -> crate::types::decl::ModuleType {
+    loc: LocIdx,
+) -> TypeCoreResult<crate::types::decl::ModuleType> {
     let ctx = tctx.type_ctx;
     let expanded = crate::types::ctype::expand_head(ctx, env, ty);
     let package_info = {
         let desc = ctx.get_desc(ctx.repr(expanded));
         match &*desc {
             TypeDesc::Tpackage { path, lids, args } => {
-                Some((path.clone(), lids.clone(), args.clone()))
+                Ok((path.clone(), lids.clone(), args.clone()))
             }
-            _ => None,
+            TypeDesc::Tvar(_) => Err(TypeCoreError::CannotInferSignature { loc }),
+            _ => Err(TypeCoreError::ModuleError(Box::new(
+                crate::types::typemod::TypeModError::NotAPackedModule { loc, ty: expanded },
+            ))),
         }
     };
-    match package_info {
-        Some((path, lids, args)) => crate::types::typemod::modtype_of_package(
-            env,
-            &path,
-            &lids,
-            &args,
-            tctx.arena,
-            &mut tctx.persistent_env,
-            ctx,
-        )
-        .unwrap_or(crate::types::decl::ModuleType::MtyIdent(path)),
-        _ => crate::types::decl::ModuleType::MtySignature(vec![]),
+    let (path, lids, args) = package_info?;
+    if args
+        .iter()
+        .any(|arg| crate::types::typemod::type_expr_has_free_variables(ctx, *arg))
+    {
+        return Err(TypeCoreError::ModuleError(Box::new(
+            crate::types::typemod::TypeModError::IncompletePackedModule { loc, ty: expanded },
+        )));
     }
+    Ok(crate::types::typemod::modtype_of_package(
+        env,
+        &path,
+        &lids,
+        &args,
+        tctx.arena,
+        &mut tctx.persistent_env,
+        ctx,
+    )
+    .unwrap_or(crate::types::decl::ModuleType::MtyIdent(path)))
 }
 
 fn typed_module_type_for_unpack(
@@ -18911,7 +18923,7 @@ fn type_expect_with_module_unpacks(
         return type_expect(tctx, env, body, expected_ty, context);
     };
 
-    let decl_mty = module_type_from_package_binding(tctx, env, unpack.ty);
+    let decl_mty = module_type_from_package_binding(tctx, env, unpack.ty, unpack.loc_idx)?;
     // `wrap_unpacks` builds a real `Pexp_letmodule` (typecore.ml:2097-2108),
     // typed with its level scoping (typecore.ml:3352-3375): a result
     // variable at the outer level, `begin_def`, the ident clock set to that

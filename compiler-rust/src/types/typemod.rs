@@ -18847,7 +18847,10 @@ fn find_unbound_type_var_in_typed_type_decl(
     None
 }
 
-fn type_expr_has_free_variables(ctx: &crate::types::context::TypeContext, ty: TypeExprRef) -> bool {
+pub(crate) fn type_expr_has_free_variables(
+    ctx: &crate::types::context::TypeContext,
+    ty: TypeExprRef,
+) -> bool {
     // OCaml `Ctype.free_variables` only traverses unmarked nodes and reports
     // `Tvar` nodes for this env-less call site.
     fn loop_(
