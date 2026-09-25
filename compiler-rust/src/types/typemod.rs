@@ -20138,8 +20138,6 @@ fn type_structure_item<'a>(
                             let target_type_attributes =
                                 parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
                             let target_unboxed = has_decl_attr(&target_type_attributes, "unboxed");
-                            let target_tag_name =
-                                process_variant_tag_name(&target_type_attributes)?;
                             let mut all_constructor_names = HashSet::new();
                             for cstr in cstrs.iter() {
                                 let cstr_name = arena.get_string(cstr.pcd_name.txt);
@@ -20206,6 +20204,13 @@ fn type_structure_item<'a>(
                                                         },
                                                     );
                                                 }
+                                                // Variant_coercion.variant_configuration_can_be_coerced_raises
+                                                // (variant_coercion.ml:237-240) reads the tag
+                                                // names only for a spread; the tuple is
+                                                // evaluated right to left (target first).
+                                                let target_tag_name = process_variant_tag_name(
+                                                    &target_type_attributes,
+                                                )?;
                                                 let source_tag_name = process_variant_tag_name(
                                                     &source_decl.type_attributes,
                                                 )?;
