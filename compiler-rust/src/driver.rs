@@ -3426,9 +3426,11 @@ fn type_mod_error_to_anyhow_styled(
             name,
             alternatives,
             jsx_component_info,
+            env,
         }) => UserDiagnostic::new(
             format_wrong_name_report(
                 type_ctx,
+                env.and_then(|env| type_ctx.get_typed_env(env)),
                 arena,
                 source,
                 filename,
@@ -5831,6 +5833,7 @@ fn format_compiler_error_report_raw_message(
 
 fn format_wrong_name_report(
     type_ctx: &TypeContext,
+    env: Option<std::sync::Arc<crate::types::env::Env>>,
     arena: &ParseArena,
     source: &str,
     filename: &str,
@@ -5903,12 +5906,19 @@ fn format_wrong_name_report(
 
     let label = if kind == "record" { "field" } else { kind };
     let type_text = format_type_expr(type_ctx, ty);
+    // `Printtyp.path` under `wrap_printing_env env` (typecore.ml:5253-5254).
+    let mut printer = crate::types::printtyp::Printtyp::new(type_ctx);
+    if let Some(env) = env {
+        printer.set_printing_env(Box::new(move |name| {
+            env.find_type_with_path(name).ok().map(|(p, _)| p)
+        }));
+    }
     // typecore.ml:4963-4971:
     //   @[<v>@[<2>The %s @{<error>%s@} does not belong to type @{<info>%a@}@]@,@,
     //   @[<2>%s type@ @{<info>%a@}@]@]
     // The type is one Format string, measured by its byte length even when
     // the outcome printer broke it over several lines.
-    let path_text = path.to_string();
+    let path_text = printer.string_of_path(path);
     let message = {
         let mut buf = Vec::new();
         {

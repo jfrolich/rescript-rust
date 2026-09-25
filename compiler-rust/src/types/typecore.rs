@@ -574,6 +574,9 @@ pub enum TypeCoreError {
         name: String,
         alternatives: Vec<String>,
         jsx_component_info: Option<JsxPropErrorInfo>,
+        /// The environment of the error (OCaml's `Error` env), used as the
+        /// printing environment.
+        env: Option<EnvRef>,
     },
 
     /// Name/type mismatch.
@@ -6076,6 +6079,7 @@ fn record_pattern_unresolved_label_error(
             name: field_name,
             alternatives,
             jsx_component_info,
+            env: Some(tctx.type_ctx.store_typed_env(env)),
         };
     }
     TypeCoreError::UnboundRecordField {
@@ -16544,6 +16548,7 @@ fn wrong_record_field_name_error(
         name: field_name.to_string(),
         alternatives,
         jsx_component_info,
+        env: Some(tctx.type_ctx.store_typed_env(env)),
     })
 }
 
@@ -25880,6 +25885,7 @@ fn wrong_constructor_name_error(
         name: name.to_string(),
         alternatives,
         jsx_component_info: None,
+        env: Some(tctx.type_ctx.store_typed_env(env)),
     }
 }
 
