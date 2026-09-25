@@ -940,11 +940,11 @@ impl TypeNodeSink for ThreadTypeStore {
 /// `compiler/ml/ctype.ml:488-503` generalizes only representatives), so their
 /// level is dead state and does not disqualify a graph.
 fn entry_is_shareable(entry: &PortableTypeEntry) -> bool {
-    match entry.desc {
-        PortableTypeDesc::Tlink(_) => true,
-        PortableTypeDesc::Tsubst(_) => false,
-        _ => entry.level >= GENERIC_LEVEL,
-    }
+    // A non-generic entry is shareable too: every level and descriptor write
+    // to a store node goes to the reading compilation's overlay, so each
+    // compilation sees the published level and its own later changes, as
+    // with a private copy.
+    !matches!(entry.desc, PortableTypeDesc::Tsubst(_))
 }
 
 /// Whether a portable graph can live in the worker store; a graph that does
@@ -1052,7 +1052,11 @@ fn internalize_signature_into_store(
         .collect();
     for (i, entry) in graph.entries.iter().enumerate() {
         let desc = internalize_desc(&entry.desc, &remap, store);
-        let allocated = store.alloc_type(desc, GENERIC_LEVEL);
+        let level = match entry.desc {
+            PortableTypeDesc::Tlink(_) => GENERIC_LEVEL,
+            _ => entry.level,
+        };
+        let allocated = store.alloc_type(desc, level);
         assert_eq!(
             allocated, remap[i],
             "thread store arena grew during internalization"
