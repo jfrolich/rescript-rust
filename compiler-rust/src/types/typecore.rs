@@ -5148,13 +5148,22 @@ fn type_pattern_construct(
         if let Some((path, desc)) =
             lookup_predef_option_constructor(lid_txt, tctx.arena, env, tctx.type_ctx)
         {
-            force_constructor_disambiguate_by_type_compare(
+            if let Some((expected, alternatives)) = qualified_constructor_type_mismatch(
                 qualified_opath.as_ref(),
                 &desc,
+                expected_ty,
                 env,
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
-            );
+            ) {
+                return Err(TypeCoreError::NameTypeMismatch {
+                    loc: lid.loc,
+                    kind: "variant".to_string(),
+                    lid: lid_txt.clone(),
+                    expected,
+                    alternatives,
+                });
+            }
             (desc, path)
         } else {
             // Module-qualified: use direct lookup
@@ -5167,13 +5176,22 @@ fn type_pattern_construct(
                 Some(expected_ty),
             ) {
                 Some((path, desc)) => {
-                    force_constructor_disambiguate_by_type_compare(
-                        qualified_opath.as_ref(),
-                        &desc,
-                        env,
-                        &mut tctx.persistent_env,
-                        tctx.type_ctx,
-                    );
+                if let Some((expected, alternatives)) = qualified_constructor_type_mismatch(
+                    qualified_opath.as_ref(),
+                    &desc,
+                    expected_ty,
+                    env,
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                ) {
+                    return Err(TypeCoreError::NameTypeMismatch {
+                        loc: lid.loc,
+                        kind: "variant".to_string(),
+                        lid: lid_txt.clone(),
+                        expected,
+                        alternatives,
+                    });
+                }
                     (desc, path)
                 }
                 // OCaml `Typetexp.find_all_constructors` only reads the
@@ -13608,13 +13626,22 @@ fn type_construct(
         if let Some((path, desc)) =
             lookup_predef_option_constructor(&longident, tctx.arena, env, tctx.type_ctx)
         {
-            force_constructor_disambiguate_by_type_compare(
+            if let Some((expected, alternatives)) = qualified_constructor_type_mismatch(
                 qualified_opath.as_ref(),
                 &desc,
+                expected_ty,
                 env,
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
-            );
+            ) {
+                return Err(TypeCoreError::NameTypeMismatch {
+                    loc: lid.loc,
+                    kind: "variant".to_string(),
+                    lid: longident.clone(),
+                    expected,
+                    alternatives,
+                });
+            }
             (path, desc)
         } else {
             // Module-qualified: use direct lookup
@@ -13627,13 +13654,22 @@ fn type_construct(
                 Some(expected_ty),
             ) {
                 Some((path, desc)) => {
-                    force_constructor_disambiguate_by_type_compare(
-                        qualified_opath.as_ref(),
-                        &desc,
-                        env,
-                        &mut tctx.persistent_env,
-                        tctx.type_ctx,
-                    );
+                if let Some((expected, alternatives)) = qualified_constructor_type_mismatch(
+                    qualified_opath.as_ref(),
+                    &desc,
+                    expected_ty,
+                    env,
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                ) {
+                    return Err(TypeCoreError::NameTypeMismatch {
+                        loc: lid.loc,
+                        kind: "variant".to_string(),
+                        lid: longident.clone(),
+                        expected,
+                        alternatives,
+                    });
+                }
                     (path, desc)
                 }
                 // OCaml `Typetexp.find_all_constructors` only reads the
@@ -25271,6 +25307,37 @@ fn wrong_constructor_name_error(
         alternatives,
         jsx_component_info: None,
     }
+}
+
+/// `Constructor.disambiguate` for a qualified constructor with an expected
+/// type path (typecore.ml:914-944): the candidate is kept only when
+/// `disambiguate_by_type` accepts it; `lookup_from_type` raises `Not_found`
+/// for a qualified name, so the result is `Name_type_mismatch` with
+/// `tp = (tpath0, expand_path tpath)` and the candidates' `(tp0, expand_path
+/// tp0)`.
+fn qualified_constructor_type_mismatch<'a>(
+    opath: Option<&Path>,
+    cstr: &crate::types::decl::ConstructorDescription,
+    expected_ty: TypeExprRef,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+) -> Option<((Path, Path), Vec<(Path, Path)>)> {
+    let target_path = opath?;
+    let cstr_path = constructor_result_path(ctx, cstr)?;
+    if compare_type_paths_for_constructor_disambiguation(target_path, &cstr_path, env, pers_env, ctx) {
+        return None;
+    }
+    let mut expand = |path: &Path| {
+        expand_type_path_for_compare(path, env, pers_env, ctx, 0, &mut HashSet::new(), true)
+    };
+    let tpath0 = match &*ctx.get_desc(ctx.repr(expected_ty)) {
+        TypeDesc::Tconstr { path, .. } => path.clone(),
+        _ => target_path.clone(),
+    };
+    let expected = (tpath0, expand(target_path));
+    let candidate = (cstr_path.clone(), expand(&cstr_path));
+    Some((expected, vec![candidate]))
 }
 
 fn force_constructor_disambiguate_by_type_compare<'a>(
