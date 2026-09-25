@@ -4731,14 +4731,16 @@ fn format_cannot_apply_module_report(
     loc: LocIdx,
     mty: &crate::types::decl::ModuleType,
 ) -> String {
-    let mut output = String::new();
-    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
-
+    // typemod.ml:1816 "@[This module is not a functor; it has type@ %a@]".
     let rendered_module_type = format_typemod_module_type(type_ctx, mty);
-    output.push_str("  This module is not a functor; it has type ");
-    output.push_str(&rendered_module_type);
-    output.push_str("\n\n");
-    output
+    let message = type_clash::render_error_message(|ppf| {
+        ppf.open_box(crate::parser::formatter::BoxKind::Box, 0);
+        ppf.str("This module is not a functor; it has type");
+        ppf.space();
+        ppf.string_as(rendered_module_type.len(), &rendered_module_type);
+        ppf.close_box();
+    });
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn format_missing_module_message(
@@ -4768,26 +4770,24 @@ fn format_cannot_eliminate_dependency_report(
     loc: LocIdx,
     mty: &crate::types::decl::ModuleType,
 ) -> String {
-    let mut output = String::new();
-    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
-
     let rendered_module_type =
         crate::types::includemod::format_module_type_full_paths(type_ctx, mty);
-    // typemod.ml:1819-1823 prints the module type after a break hint in a
-    // box. The outcome printer hands Format the rendered type as one string
-    // (res_outcome_printer.ml:1063-1065), so Format breaks when its whole
-    // length, newlines included, does not fit after column 24.
-    output.push_str("  This functor has type");
-    if rendered_module_type.len() + 24 > 80 {
-        output.push_str("\n  ");
-    } else {
-        output.push(' ');
-    }
-    output.push_str(&rendered_module_type);
-    output.push('\n');
-    output.push_str("  The parameter cannot be eliminated in the result type.\n");
-    output.push_str("   Bind the argument to a module identifier.\n\n");
-    output
+    // typemod.ml:1819-1823: "@[This functor has type@ %a@ The parameter
+    // cannot be eliminated in the result type.@  Bind the argument to a
+    // module identifier.@]"; the outcome printer hands Format the module
+    // type as one string (res_outcome_printer.ml:1063-1065).
+    let message = type_clash::render_error_message(|ppf| {
+        ppf.open_box(crate::parser::formatter::BoxKind::Box, 0);
+        ppf.str("This functor has type");
+        ppf.space();
+        ppf.string_as(rendered_module_type.len(), &rendered_module_type);
+        ppf.space();
+        ppf.str("The parameter cannot be eliminated in the result type.");
+        ppf.space();
+        ppf.str(" Bind the argument to a module identifier.");
+        ppf.close_box();
+    });
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn format_structure_expected_report(
@@ -4798,19 +4798,16 @@ fn format_structure_expected_report(
     loc: LocIdx,
     mty: &crate::types::decl::ModuleType,
 ) -> String {
-    let mut output = String::new();
-    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
-
+    // typemod.ml:1826 "@[This module is not a structure; it has type@ %a".
     let rendered_module_type = format_typemod_module_type(type_ctx, mty);
-    output.push_str("  This module is not a structure; it has type");
-    if rendered_module_type.contains('\n') {
-        output.push_str("\n  ");
-    } else {
-        output.push(' ');
-    }
-    output.push_str(&rendered_module_type);
-    output.push_str("\n\n");
-    output
+    let message = type_clash::render_error_message(|ppf| {
+        ppf.open_box(crate::parser::formatter::BoxKind::Box, 0);
+        ppf.str("This module is not a structure; it has type");
+        ppf.space();
+        ppf.string_as(rendered_module_type.len(), &rendered_module_type);
+        ppf.close_box();
+    });
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn format_typemod_module_type(
