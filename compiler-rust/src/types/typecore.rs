@@ -5716,6 +5716,72 @@ fn qualify_unqualified_pattern_record_fields(
     rewritten
 }
 
+/// The error `Label.disambiguate` raises for a record pattern field whose
+/// label is not found: `Wrong_name` against the expected record type for an
+/// unqualified label, an unbound label otherwise.
+fn record_pattern_unresolved_label_error(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    record_ty: TypeExprRef,
+    expected_ty: TypeExprRef,
+    lid: &Located<LidentIdx>,
+    field_name: String,
+) -> TypeCoreError {
+    let ctx = tctx.type_ctx;
+    let field_lid_for_error = tctx.arena.get_longident(lid.txt).clone();
+    // A qualified label that is not in its module is unbound
+    // (OCaml `lookup_from_type` only matches unqualified labels).
+    if !matches!(field_lid_for_error, Longident::Ldot(..))
+        && let Some(path) = extract_type_path_from_expected_with_persistent_env(
+            record_ty,
+            env,
+            &mut tctx.persistent_env,
+            ctx,
+        )
+    {
+        let decl = lookup_type_decl_for_path(&path, env, &mut tctx.persistent_env, ctx);
+        let (alternatives, jsx_component_info) =
+            match decl.as_ref().map(|decl| (&decl.type_kind, &decl.type_attributes)) {
+                Some((crate::types::TypeKind::TypeRecord(labels, _), attrs)) => (
+                    labels
+                        .iter()
+                        .map(|label| label.ld_id.name().to_string())
+                        .collect::<Vec<_>>(),
+                    // `Typecore.report_error`'s `Wrong_name` asks
+                    // `get_jsx_component_props` (typecore.ml:4950-4954).
+                    jsx_prop_error_info_from_record_parts(&path, labels, attrs),
+                ),
+                _ => (Vec::new(), None),
+            };
+        return TypeCoreError::WrongName {
+            loc: lid.loc,
+            kind: "record".to_string(),
+            ty: expected_ty,
+            expected: "This record pattern is expected to have".to_string(),
+            path,
+            name: field_name,
+            alternatives,
+            jsx_component_info,
+        };
+    }
+    TypeCoreError::UnboundRecordField {
+        loc: lid.loc,
+        field_name: tctx.longident_to_string(&field_lid_for_error),
+        from_type: None,
+        // OCaml compiler/ml/typecore.ml:1118-1119 raises the unbound-label
+        // error from label disambiguation; spelling suggestions are produced
+        // only while reporting Typetexp.Unbound_label at
+        // compiler/ml/typetexp.ml:916-959.
+        alternatives: unbound_label_alternatives(
+            tctx.arena,
+            env,
+            &mut tctx.persistent_env,
+            ctx,
+            &field_lid_for_error,
+        ),
+    }
+}
+
 /// Type check record pattern.
 #[allow(clippy::too_many_arguments)]
 fn type_pattern_record(
@@ -5915,6 +5981,22 @@ fn type_pattern_record(
         emit_ambiguous_record_label_warnings(tctx, env, loc, ambiguous_label_warnings);
     }
 
+    // OCaml `disambiguate_record_elem_list` (typecore.ml:1000-1021) resolves
+    // every label, raising `Wrong_name`/unbound-label errors, before
+    // `type_record_elem_list` sorts the fields and types their patterns.
+    if !has_dict_pattern_attr
+        && let Some(field) = pending_fields.iter().find(|field| field.label.is_none())
+    {
+        return Err(record_pattern_unresolved_label_error(
+            tctx,
+            env,
+            record_ty,
+            expected_ty,
+            &field.lid,
+            field.field_name.clone(),
+        ));
+    }
+
     // OCaml compiler/ml/typecore.ml:1163-1200 resolves record labels, sorts
     // `lbl_a_list` by `lbl_pos`, then `map_fold_cont type_lbl_a` types the
     // field patterns. Allocate field variables and bind subpatterns in that
@@ -5973,56 +6055,14 @@ fn type_pattern_record(
             (env_label, ty_arg, vars, true)
         } else {
             if !has_dict_pattern_attr {
-                // A qualified label that is not in its module is unbound
-                // (OCaml `lookup_from_type` only matches unqualified labels).
-                if !matches!(field_lid_for_error, Longident::Ldot(..))
-                    && let Some(path) = extract_type_path_from_expected_with_persistent_env(
-                    record_ty,
+                return Err(record_pattern_unresolved_label_error(
+                    tctx,
                     env,
-                    &mut tctx.persistent_env,
-                    ctx,
-                ) {
-                    let alternatives =
-                        lookup_type_decl_for_path(&path, env, &mut tctx.persistent_env, ctx)
-                            .and_then(|decl| match &decl.type_kind {
-                                crate::types::TypeKind::TypeRecord(labels, _) => Some(
-                                    labels
-                                        .iter()
-                                        .map(|label| label.ld_id.name().to_string())
-                                        .collect::<Vec<_>>(),
-                                ),
-                                _ => None,
-                            })
-                            .unwrap_or_default();
-                    return Err(TypeCoreError::WrongName {
-                        loc: field.lid.loc,
-                        kind: "record".to_string(),
-                        ty: expected_ty,
-                        expected: "This record pattern is expected to have".to_string(),
-                        path,
-                        name: field.field_name,
-                        alternatives,
-                        jsx_component_info: None,
-                    });
-                }
-                return Err(TypeCoreError::UnboundRecordField {
-                    loc: field.lid.loc,
-                    field_name: tctx.longident_to_string(&field_lid_for_error),
-                    from_type: None,
-                    // OCaml compiler/ml/typecore.ml:1118-1119 raises the
-                    // unbound-label error from label disambiguation; spelling
-                    // suggestions are produced only while reporting
-                    // Typetexp.Unbound_label at compiler/ml/typetexp.ml:916-959.
-                    // Keep this module-signature scan on the error path so
-                    // successful record patterns do not force diagnostic data.
-                    alternatives: unbound_label_alternatives(
-                        tctx.arena,
-                        env,
-                        &mut tctx.persistent_env,
-                        ctx,
-                        &field_lid_for_error,
-                    ),
-                });
+                    record_ty,
+                    expected_ty,
+                    &field.lid,
+                    field.field_name,
+                ));
             }
             let field_ty = ctx.new_var(None);
             let label_desc = crate::types::LabelDescription {
