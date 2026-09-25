@@ -1986,62 +1986,15 @@ fn update_level_expand_with_lookup_capture<'a>(
                 // for abbreviation expansion during `moregeneral`.
                 let should_try_expand = level < path_level;
                 drop(desc);
-                // OCaml compiler/ml/ctype.ml:742-768 does not special-case
-                // local Pident constructors here. It attempts abbreviation
-                // expansion whenever `level < get_level env p`, and preserves
-                // the original constructor only when expansion fails.
-                // Match OCaml: skip expansion in update_level for Pdot paths
-                // through first-class module parameters whose manifest is a
-                // locally-abstract type (non-generic, non-predef Pident).
-                // In OCaml, expand_head_unif doesn't link during unify2, so the
-                // Pdot path form is preserved. Rust's update_level_expand links
-                // eagerly, destroying the path form. Skipping here lets the
-                // general Tconstr/Tconstr expansion path handle it correctly
-                // through unify_after_expansion's relink logic.
+                // OCaml compiler/ml/ctype.ml:568-578: try to replace the
+                // constructor by its expansion; a constructor that cannot be
+                // expanded would escape its scope.
                 if should_try_expand {
-                    let is_firstclass_module_pdot = matches!(&path, Path::Pdot(parent, _, _) if !path_root_is_persistent(parent))
-                        && env.lookup_type(&path).ok().is_some_and(|decl| {
-                            decl.type_manifest.is_some_and(|manifest| {
-                                let m = ctx.repr(manifest);
-                                let m_level = ctx.get_level(m);
-                                let m_desc = ctx.borrow_desc(m);
-                                m_level != crate::types::type_expr::GENERIC_LEVEL
-                                    && matches!(&*m_desc, TypeDesc::Tconstr { path: mp, .. }
-                                        if matches!(mp, Path::Pident(id)
-                                            if id.stamp() != 0 && !is_predef_type_name(id.name())))
-                            })
-                        });
-                    if is_firstclass_module_pdot {
-                        ctx.set_level(ty, level);
-                        return update_level_children(
-                            ctx,
-                            env,
-                            level,
-                            expand,
-                            ty,
-                            pending_type_lookup_paths,
-                            pending_type_expansion_paths,
-                        );
-                    }
                     if let Some(paths) = pending_type_expansion_paths.as_deref_mut() {
                         paths.push(path.clone());
                     }
                     if let Some(expanded) = try_expand_head(ctx, env, ty) {
                         let expanded = ctx.repr(expanded);
-                        if should_preserve_local_t_alias_during_level_update(
-                            ctx, env, &path, expanded,
-                        ) {
-                            ctx.set_level(ty, level);
-                            return update_level_children(
-                                ctx,
-                                env,
-                                level,
-                                expand,
-                                ty,
-                                pending_type_lookup_paths,
-                                pending_type_expansion_paths,
-                            );
-                        }
                         if expanded != ty && !deep_occur(ctx, ty, expanded) {
                             link_type(ctx, ty, expanded);
                             // Recursively update the expansion
@@ -2254,60 +2207,6 @@ fn is_predef_type_name(name: &str) -> bool {
             | "symbol"
             | "regexp"
     )
-}
-
-fn should_preserve_local_t_alias_during_level_update(
-    ctx: &TypeContext,
-    env: &Env,
-    original_path: &Path,
-    expanded: TypeExprRef,
-) -> bool {
-    let is_local_t_path = matches!(
-        original_path,
-        Path::Pdot(parent, name, _) if name == "t" && is_local_path(parent)
-    );
-    let is_local_cmp_path = matches!(
-        original_path,
-        Path::Pdot(parent, name, _) if name == "cmp" && is_local_path(parent)
-    );
-    if !is_local_t_path && !is_local_cmp_path {
-        return false;
-    }
-
-    let expanded = ctx.repr(expanded);
-    let desc = ctx.get_desc(expanded);
-    let should_preserve = matches!(&*desc, TypeDesc::Tconstr { path, .. } if {
-        if is_local_t_path {
-            // OCaml compiler/ml/ctype.ml:698-704 only links
-            // `forward_try_expand_once` after compiler/ml/env.ml:800-813 has
-            // resolved the selected path. Local module aliases such as
-            // `module L = List; L.t` remain observable as the local path in the
-            // typedtree. Aliases through another local module (`module U = L`)
-            // continue to collapse through env.ml:1435-1444 `scrape_alias`;
-            // module-type ascriptions (`module(L: X)`) have no module binding
-            // for their target and preserve the selected local path.
-            is_predef_type_name(path.head_name())
-        } else {
-            path.last() == "cmp"
-        }
-    });
-    if !should_preserve {
-        return false;
-    }
-
-    match original_path {
-        Path::Pdot(parent, _, _) => match env.lookup_module(parent) {
-            Ok(md) => match &md.md_type {
-                super::decl::ModuleType::MtyAlias(_, target)
-                | super::decl::ModuleType::MtyIdent(target) => {
-                    path_root_is_persistent(target) || !env.has_module_ident(target.head())
-                }
-                _ => false,
-            },
-            Err(_) => false,
-        },
-        _ => false,
-    }
 }
 
 // ============================================================================
