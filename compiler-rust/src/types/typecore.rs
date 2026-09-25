@@ -5007,7 +5007,7 @@ fn type_pattern_construct(
                 // OCaml `Typetexp.find_all_constructors` only reads the
                 // qualifying module; a miss is a (narrowed) unbound error.
                 None => {
-                    return Err(unbound_constructor_lookup_error(tctx, env, loc, lid_txt));
+                    return Err(unbound_constructor_lookup_error(tctx, env, lid.loc, lid_txt));
                 }
             }
         }
@@ -5064,9 +5064,14 @@ fn type_pattern_construct(
                 ) {
                     Some((path, desc)) => (desc, path),
                     None => {
-                        return Err(TypeCoreError::NotAVariantType {
-                            loc,
+                        // `Constructor.disambiguate` with no candidates and no
+                        // expected type path: `unbound_name_error`
+                        // (typecore.ml:752-760) at the constructor's location.
+                        let alternatives = unbound_constructor_alternatives(tctx, env, lid_txt);
+                        return Err(TypeCoreError::UnboundConstructor {
+                            loc: lid.loc,
                             lid: lid_txt.clone(),
+                            alternatives,
                         });
                     }
                 }
