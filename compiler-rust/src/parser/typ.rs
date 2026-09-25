@@ -1502,23 +1502,9 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
 }
 
 /// Parse a lowercase identifier.
+/// OCaml `parse_lident` (res_core.ml), including its recovery.
 fn parse_lident(p: &mut Parser<'_>) -> (String, Location) {
-    let start_pos_idx = p.start_pos_idx();
-    match &p.token {
-        Token::Lident(name) => {
-            let name = name.to_string();
-            p.next();
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            (name, loc)
-        }
-        _ => {
-            // OCaml uses Lident diagnostic here which produces context-sensitive error
-            p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
-            p.next(); // Consume the invalid token
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            ("_".to_string(), loc)
-        }
-    }
+    super::core::parse_lident(p)
 }
 
 /// Parse attributes (including doc comments which become res.doc attributes).
