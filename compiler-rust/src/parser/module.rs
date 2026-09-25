@@ -116,41 +116,6 @@ impl InlineTypesContext {
     }
 }
 
-/// Parse label declarations using the parser's inline types context fields.
-/// This is called from typ.rs when extracting inline records inside type constructor args.
-pub fn parse_label_declarations_for_inline(
-    p: &mut Parser<'_>,
-    lbrace_pos_idx: Option<PosIdx>,
-) -> Vec<LabelDeclaration> {
-    // Create a temporary RefCell<InlineTypesContext> from parser fields
-    // to reuse the existing parse_label_declarations logic.
-    let found_stridx: Vec<(StrIdx, Location, TypeKind, Vec<(CoreTypeIdx, Variance)>)> =
-        p.inline_types_found.take().unwrap_or_default();
-    let inline_ctx = RefCell::new(InlineTypesContext {
-        found_inline_types: found_stridx,
-        params: p.inline_types_params.clone(),
-        outer_name_loc: Location::none(),
-    });
-    // Convert current_type_name_path from Vec<String> to Vec<StrIdx>
-    let current_path_strings = p.current_type_name_path.clone();
-    let current_path: Option<Vec<StrIdx>> = current_path_strings
-        .map(|path| path.into_iter().map(|s| p.arena_mut().intern(&s)).collect());
-
-    let labels =
-        parse_label_declarations(p, Some(&inline_ctx), current_path.as_ref(), lbrace_pos_idx);
-
-    // Copy back any found inline types to the parser fields.
-    let ctx = inline_ctx.into_inner();
-    let InlineTypesContext {
-        found_inline_types,
-        params,
-        ..
-    } = ctx;
-    p.inline_types_found = Some(found_inline_types);
-    p.inline_types_params = params;
-
-    labels
-}
 
 // ============================================================================
 // Helper Functions
@@ -2589,7 +2554,11 @@ fn parse_type_equation_and_representation(
     p.next();
     match p.token {
         Token::Uident(_) => parse_type_equation_or_constr_decl(p),
-        Token::Lbrace => parse_record_or_object_decl(p, inline_ctx, current_type_name_path),
+        Token::Lbrace => parse_record_or_object_decl(
+            p,
+            inline_ctx,
+            inline_ctx.map(|_| current_type_name_path),
+        ),
         Token::Private => parse_private_eq_or_repr(p, current_type_name_path),
         Token::Bar | Token::DotDot | Token::DocComment { .. } => {
             let (private, kind) = parse_type_representation(p, None, None);
@@ -2682,8 +2651,7 @@ fn parse_private_eq_or_repr(
     p.expect(Token::Private);
     match p.token {
         Token::Lbrace => {
-            let (manifest, kind, _) =
-                parse_record_or_object_decl(p, None, current_type_name_path);
+            let (manifest, kind, _) = parse_record_or_object_decl(p, None, None);
             (manifest, kind, PrivateFlag::Private)
         }
         Token::Uident(_) => {
@@ -2709,79 +2677,7 @@ fn parse_private_eq_or_repr(
     }
 }
 
-/// OCaml `parse_record_or_object_decl` (res_core.ml:6030-6140).
-fn parse_record_or_object_decl(
-    p: &mut Parser<'_>,
-    inline_ctx: Option<&RefCell<InlineTypesContext>>,
-    current_type_name_path: &Vec<StrIdx>,
-) -> TypeEquation {
-    let path = inline_ctx.map(|_| current_type_name_path);
-    let after_lbrace = p.lookahead(|state| {
-        state.next();
-        match state.token {
-            Token::Dot | Token::DotDot => 0u8,
-            Token::DotDotDot => 1,
-            _ => 2,
-        }
-    });
-    if after_lbrace == 0 || (after_lbrace == 1 && spread_decl_has_object_field(p)) {
-        let typ = typ::parse_object_decl(p);
-        (
-            Some(p.arena_mut().push_core_type(typ)),
-            TypeKind::Ptype_abstract,
-            PrivateFlag::Public,
-        )
-    } else if after_lbrace == 1 {
-        (None, parse_type_kind(p, inline_ctx, path), PrivateFlag::Public)
-    } else {
-        let lbrace_pos_idx = p.start_pos_idx();
-        p.next();
-        let leading_attrs = parse_attributes(p);
-        if matches!(p.token, Token::String(_)) {
-            let typ = typ::parse_object_decl_string_fields(p, lbrace_pos_idx, leading_attrs);
-            (
-                Some(p.arena_mut().push_core_type(typ)),
-                TypeKind::Ptype_abstract,
-                PrivateFlag::Public,
-            )
-        } else {
-            let kind =
-                parse_record_decl_fields(p, inline_ctx, path, lbrace_pos_idx, leading_attrs);
-            (None, kind, PrivateFlag::Public)
-        }
-    }
-}
 
-/// Whether a `{...spread, ...}` declaration has a string (object) field at
-/// the top level, which OCaml's `parse_field_declaration_region
-/// ~found_object_field` records while parsing the fields.
-fn spread_decl_has_object_field(p: &mut Parser<'_>) -> bool {
-    p.lookahead(|state| {
-        state.next();
-        let mut depth = 0;
-        loop {
-            match state.token {
-                Token::String(_) if depth == 0 => return true,
-                Token::Eof => return false,
-                Token::Lparen | Token::Lbrace | Token::Lbracket => depth += 1,
-                Token::Rparen | Token::Rbracket => {
-                    if depth > 0 {
-                        depth -= 1;
-                    }
-                }
-                Token::Rbrace => {
-                    if depth > 0 {
-                        depth -= 1;
-                    } else {
-                        return false;
-                    }
-                }
-                _ => {}
-            }
-            state.next();
-        }
-    })
-}
 
 /// OCaml `parse_type_representation` (res_core.ml:5640-5692).
 fn parse_type_representation(
@@ -2813,7 +2709,7 @@ fn parse_type_representation(
                 0 => {
                     parse_attributes(p);
                     super::core::skip_doc_comments(p);
-                    parse_record_declaration(p, inline_ctx, current_type_name_path)
+                    TypeKind::Ptype_record(parse_record_declaration(p, inline_ctx, current_type_name_path))
                 }
                 1 => {
                     parse_attributes(p);
@@ -2824,7 +2720,7 @@ fn parse_type_representation(
                 _ => TypeKind::Ptype_variant(parse_constructors(p)),
             }
         }
-        Token::Lbrace => parse_record_declaration(p, inline_ctx, current_type_name_path),
+        Token::Lbrace => TypeKind::Ptype_record(parse_record_declaration(p, inline_ctx, current_type_name_path)),
         Token::DotDot => {
             p.next();
             TypeKind::Ptype_open
@@ -2838,21 +2734,6 @@ fn parse_type_representation(
     (private, kind)
 }
 
-/// OCaml `parse_record_declaration` (res_core.ml:5346-5358).
-fn parse_record_declaration(
-    p: &mut Parser<'_>,
-    inline_ctx: Option<&RefCell<InlineTypesContext>>,
-    current_type_name_path: Option<&Vec<StrIdx>>,
-) -> TypeKind {
-    p.leave_breadcrumb(grammar::Grammar::RecordDecl);
-    let lbrace_pos_idx = p.start_pos_idx();
-    p.expect(Token::Lbrace);
-    let labels =
-        parse_label_declarations(p, inline_ctx, current_type_name_path, Some(lbrace_pos_idx));
-    p.expect(Token::Rbrace);
-    p.eat_breadcrumb();
-    TypeKind::Ptype_record(labels)
-}
 
 /// Fix the location of a Ptyp_constr in a type manifest context.
 /// For qualified identifiers (Ldot), OCaml creates a NEW location with the same
@@ -3010,62 +2891,7 @@ fn format_type_with_angle_brackets(
     }
 }
 
-/// Parse type kind (variant or record).
-fn parse_type_kind(
-    p: &mut Parser<'_>,
-    inline_ctx: Option<&RefCell<InlineTypesContext>>,
-    current_type_name_path: Option<&Vec<StrIdx>>,
-) -> TypeKind {
-    match &p.token {
-        Token::Bar => {
-            // Variant type
-            let constructors = parse_constructors(p);
-            TypeKind::Ptype_variant(constructors)
-        }
-        Token::Lbrace => {
-            // Record type - capture { position for first field's location (OCaml extends first spread field's loc to {)
-            let lbrace_pos_idx = p.start_pos_idx();
-            p.next();
-            // OCaml parse_record_or_object_decl parses leading attrs once and, when present,
-            // attaches them to the first field while forcing first-field loc_start to the
-            // first attribute's loc_start.
-            let leading_attrs = parse_attributes(p);
-            parse_record_decl_fields(
-                p,
-                inline_ctx,
-                current_type_name_path,
-                lbrace_pos_idx,
-                leading_attrs,
-            )
-        }
-        _ => TypeKind::Ptype_abstract,
-    }
-}
 
-/// The record branch of OCaml `parse_record_or_object_decl`
-/// (res_core.ml:6101-6140), with `{` and the leading attributes consumed.
-fn parse_record_decl_fields(
-    p: &mut Parser<'_>,
-    inline_ctx: Option<&RefCell<InlineTypesContext>>,
-    current_type_name_path: Option<&Vec<StrIdx>>,
-    lbrace_pos_idx: PosIdx,
-    leading_attrs: Attributes,
-) -> TypeKind {
-    p.leave_breadcrumb(grammar::Grammar::RecordDecl);
-    let labels = if leading_attrs.is_empty() {
-        parse_label_declarations(p, inline_ctx, current_type_name_path, Some(lbrace_pos_idx))
-    } else {
-        parse_label_declarations_with_leading_attrs(
-            p,
-            inline_ctx,
-            current_type_name_path,
-            leading_attrs,
-        )
-    };
-    p.expect(Token::Rbrace);
-    p.eat_breadcrumb();
-    TypeKind::Ptype_record(labels)
-}
 
 /// Parse variant constructors (starting with |).
 fn parse_constructors(p: &mut Parser<'_>) -> Vec<ConstructorDeclaration> {
@@ -3194,11 +3020,6 @@ fn parse_constructor_with_start(
     parse_constructor_impl(p, start_pos_idx)
 }
 
-/// Parse a single constructor.
-fn parse_constructor(p: &mut Parser<'_>) -> Option<ConstructorDeclaration> {
-    let start_pos_idx = p.start_pos_idx();
-    parse_constructor_impl(p, start_pos_idx)
-}
 
 /// OCaml `parse_type_constructor_declaration ~start_pos`
 /// (compiler/syntax/src/res_core.ml:5586-5605). Like OCaml, the
@@ -3259,665 +3080,664 @@ fn parse_constructor_impl(
     })
 }
 
-/// OCaml `parse_constr_decl_args` (compiler/syntax/src/res_core.ml:5369-5558).
-fn parse_constr_decl_args(p: &mut Parser<'_>) -> (ConstructorArguments, Option<CoreTypeIdx>) {
-    // Parse constructor arguments
-    let args = if p.token == Token::Lparen {
-        p.next();
-        // Check for inline record: Foo({...}) with braces inside parens
-        // But NOT object types which use string keys or . markers
-        let is_inline_record = p.token == Token::Lbrace
-            && p.lookahead(|state| {
-                state.next(); // consume {
-                // Skip any leading attributes
-                while state.token == Token::At {
-                    state.next();
-                    // Skip attribute id and any payload
-                    if matches!(
-                        state.token,
-                        Token::Lident(_) | Token::Uident(_) | Token::Module
-                    ) {
-                        state.next();
-                    }
-                    // Skip attribute payload if present
-                    if state.token == Token::Lparen {
-                        let mut depth = 1;
-                        state.next();
-                        while depth > 0 && state.token != Token::Eof {
-                            match state.token {
-                                Token::Lparen => depth += 1,
-                                Token::Rparen => depth -= 1,
-                                _ => {}
-                            }
-                            state.next();
-                        }
-                    }
-                }
-                // If we see string, ".", or ".." it's an object type, not inline record
-                // Note: {} (empty) is an inline record, NOT an object type
-                // DotDotDot (spread) could be either - scan past it looking for string fields
-                if matches!(state.token, Token::String(_) | Token::Dot | Token::DotDot) {
-                    return false; // Object type, not inline record
-                }
-                if state.token == Token::DotDotDot {
-                    // Scan past spread to check if subsequent fields have string keys
-                    // If all fields are identifiers, it's an inline record
-                    let mut depth = 0;
-                    loop {
-                        match state.token {
-                            Token::String(_) if depth == 0 => return false, // String field = object type
-                            Token::Rbrace if depth == 0 => return true, // End without string = record
-                            Token::Eof => return true,
-                            Token::Lparen | Token::Lbrace | Token::Lbracket => depth += 1,
-                            Token::Rparen | Token::Rbracket => {
-                                if depth > 0 {
-                                    depth -= 1;
-                                }
-                            }
-                            Token::Rbrace => {
-                                if depth > 0 {
-                                    depth -= 1;
-                                } else {
-                                    return true;
-                                }
-                            }
-                            _ => {}
-                        }
-                        state.next();
-                    }
-                }
-                true // Not object type → inline record
-            });
-        if is_inline_record {
-            let lbrace_pos_idx = p.start_pos_idx();
-            p.next(); // consume {
-            let labels = parse_constructor_record_labels(p, Some(lbrace_pos_idx));
-            p.expect(Token::Rbrace);
-            // Allow trailing comma after inline record: Foo({...},)
-            p.optional(&Token::Comma);
-            p.expect(Token::Rparen);
-            ConstructorArguments::Pcstr_record(labels)
-        } else {
-            // OCaml `parse_constr_decl_args` (compiler/syntax/src/res_core.ml:5369-5520):
-            // a leading object type is parsed first (its location starts after `{`),
-            // followed by an optional comma; the remaining arguments use
-            // `parse_comma_delimited_region ~grammar:TypExprList ~closing:Rparen`.
-            let mut args = vec![];
-            if p.token == Token::Lbrace {
-                let is_object = p.lookahead(|state| {
-                    state.next(); // consume {
-                    // Skip any leading attributes
-                    while state.token == Token::At {
-                        state.next();
-                        if matches!(
-                            state.token,
-                            Token::Lident(_) | Token::Uident(_) | Token::Module
-                        ) {
-                            state.next();
-                        }
-                        if state.token == Token::Lparen {
-                            let mut depth = 1;
-                            state.next();
-                            while depth > 0 && state.token != Token::Eof {
-                                match state.token {
-                                    Token::Lparen => depth += 1,
-                                    Token::Rparen => depth -= 1,
-                                    _ => {}
-                                }
-                                state.next();
-                            }
-                        }
-                    }
-                    // String, ".", or ".." indicate object type (NOT empty record)
-                    // DotDotDot (spread) needs further scanning to check for string fields
-                    if matches!(state.token, Token::String(_) | Token::Dot | Token::DotDot) {
-                        return true;
-                    }
-                    if state.token == Token::DotDotDot {
-                        // Scan past spread to check for string fields
-                        let mut depth = 0;
-                        loop {
-                            match state.token {
-                                Token::String(_) if depth == 0 => return true,
-                                Token::Rbrace if depth == 0 => return false,
-                                Token::Eof => return false,
-                                Token::Lparen | Token::Lbrace | Token::Lbracket => depth += 1,
-                                Token::Rparen | Token::Rbracket => {
-                                    if depth > 0 {
-                                        depth -= 1;
-                                    }
-                                }
-                                Token::Rbrace => {
-                                    if depth > 0 {
-                                        depth -= 1;
-                                    } else {
-                                        return false;
-                                    }
-                                }
-                                _ => {}
-                            }
-                            state.next();
-                        }
-                    }
-                    false
-                });
-                if is_object {
-                    p.next();
-                    let start_pos_idx = p.start_pos_idx();
-                    let obj = typ::parse_object_type_body(p, start_pos_idx);
-                    let obj_idx = p.arena_mut().push_core_type(obj);
-                    args.push(obj_idx);
-                    p.optional(&Token::Comma);
-                }
-            }
-            let rest = super::core::parse_comma_delimited_region(
-                p,
-                Grammar::TypExprList,
-                Token::Rparen,
-                |p| {
-                    if super::grammar::is_typ_expr_start(&p.token) {
-                        let arg = typ::parse_typ_expr(p);
-                        Some(p.arena_mut().push_core_type(arg))
-                    } else {
-                        None
-                    }
-                },
-            );
-            args.extend(rest);
-            p.expect(Token::Rparen);
-            ConstructorArguments::Pcstr_tuple(args)
-        }
-    } else {
-        ConstructorArguments::Pcstr_tuple(vec![])
-    };
 
-    // Optional GADT result type: Constructor: type
-    let res = if p.token == Token::Colon {
-        p.next();
-        let res_typ = typ::parse_typ_expr(p);
-        Some(p.arena_mut().push_core_type(res_typ))
-    } else {
-        None
-    };
 
-    (args, res)
+
+
+
+
+
+// ============================================================================
+// Record declarations (OCaml res_core.ml:5186-5358, 5369-5558, 5876-6078)
+// ============================================================================
+
+type InlineCtx<'c> = Option<&'c RefCell<InlineTypesContext>>;
+
+/// OCaml `extend_current_type_name_path`.
+fn extend_type_name_path(path: Option<&Vec<StrIdx>>, name: StrIdx) -> Option<Vec<StrIdx>> {
+    path.map(|path| {
+        let mut extended = path.clone();
+        extended.push(name);
+        extended
+    })
 }
 
-/// Parse record label declarations.
-/// Handles both regular fields and spread syntax (...typ).
-/// `lbrace_pos` is the position of the opening `{` - OCaml extends the first spread field's
-/// location back to this position.
-fn parse_label_declarations(
+fn label_declaration(
     p: &mut Parser<'_>,
-    inline_ctx: Option<&RefCell<InlineTypesContext>>,
-    current_type_name_path: Option<&Vec<StrIdx>>,
-    lbrace_pos_idx: Option<PosIdx>,
-) -> Vec<LabelDeclaration> {
-    parse_label_declarations_with_first_state(
-        p,
-        inline_ctx,
-        current_type_name_path,
-        lbrace_pos_idx,
-        true,
-    )
-}
-
-fn parse_label_declarations_with_first_state(
-    p: &mut Parser<'_>,
-    inline_ctx: Option<&RefCell<InlineTypesContext>>,
-    current_type_name_path: Option<&Vec<StrIdx>>,
-    lbrace_pos_idx: Option<PosIdx>,
-    mut is_first: bool,
-) -> Vec<LabelDeclaration> {
-    p.leave_breadcrumb(grammar::Grammar::FieldDeclarations);
-    let mut labels = vec![];
-
-    while p.token != Token::Rbrace && p.token != Token::Eof {
-        // Handle spread: ...typ - represented as a label with name "..."
-        if p.token == Token::DotDotDot {
-            let start_pos_idx = p.start_pos_idx();
-            p.next();
-            // Name location is just the "..." part
-            let name_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            let spread_type = typ::parse_typ_expr(p);
-            // OCaml extends the first spread field's location back to the { position
-            let loc_start_idx = if is_first {
-                lbrace_pos_idx.unwrap_or(start_pos_idx)
-            } else {
-                start_pos_idx
-            };
-            // OCaml has different end position handling for first vs non-first spread fields:
-            // - First spread field: location extends to p.end_pos (includes comma/brace)
-            // - Non-first spread fields: location uses typ.ptyp_loc.loc_end
-            let loc = if is_first {
-                p.mk_loc_idx_to_end(loc_start_idx)
-            } else {
-                p.mk_loc_idx_to_end_of(loc_start_idx, spread_type.ptyp_loc)
-            };
-            let spread_type_idx = p.arena_mut().push_core_type(spread_type);
-            let ellipsis_idx = p.arena_mut().intern("...");
-            labels.push(LabelDeclaration {
-                pld_name: with_loc(ellipsis_idx, name_loc),
-                pld_mutable: MutableFlag::Immutable,
-                pld_type: spread_type_idx,
-                pld_loc: loc,
-                pld_attributes: Attributes::new(),
-                pld_optional: false,
-            });
-            is_first = false;
-            if !p.optional(&Token::Comma) {
-                break;
-            }
-            continue;
-        }
-
-        match parse_label_declaration(p, inline_ctx, current_type_name_path, None, true) {
-            Some(l) => labels.push(l),
-            None => {
-                // OCaml `parse_comma_delimited_region`'s `None` branch
-                // (compiler/syntax/src/res_core.ml:1096-1102): stop on a
-                // closing token or abort point, otherwise report the token,
-                // skip it, and keep parsing the region.
-                if p.token == Token::Eof
-                    || p.token == Token::Rbrace
-                    || super::core::recover::should_abort_list_parse(p)
-                {
-                    break;
-                }
-                p.err_unexpected();
-                p.next();
-                continue;
-            }
-        }
-        is_first = false;
-        if !p.optional(&Token::Comma) {
-            let implicit_comma = matches!(p.token, Token::At | Token::DocComment { .. });
-            if implicit_comma {
-                continue;
-            }
-            if grammar::is_list_element(&grammar::Grammar::FieldDeclarations, &p.token) {
-                // Missing comma but next token looks like another field declaration.
-                // Emit "Did you forget a `,` here?" and continue parsing.
-                p.expect(Token::Comma);
-            } else if p.token != Token::Eof
-                && p.token != Token::Rbrace
-                && !super::core::recover::should_abort_list_parse(p)
-            {
-                p.expect(Token::Comma);
-                if p.token == Token::Semicolon {
-                    p.next();
-                }
-            } else {
-                break;
-            }
-        }
-    }
-
-    p.eat_breadcrumb();
-    labels
-}
-
-/// Parse record label declarations when attrs were parsed once before the first field.
-///
-/// Mirrors OCaml parse_record_or_object_decl's `attr :: _ as attrs` branch:
-/// - attach pre-parsed attrs to the first field
-/// - force first-field `pld_loc.loc_start` to first attr `loc_start`
-/// - then parse the remaining fields normally
-fn parse_label_declarations_with_leading_attrs(
-    p: &mut Parser<'_>,
-    inline_ctx: Option<&RefCell<InlineTypesContext>>,
-    current_type_name_path: Option<&Vec<StrIdx>>,
-    leading_attrs: Attributes,
-) -> Vec<LabelDeclaration> {
-    let mut labels = Vec::new();
-    let first_attr_start_idx = leading_attrs
-        .iter()
-        .next()
-        .map(|(name, _)| p.loc_start_idx(name.loc))
-        .expect("leading attrs must be non-empty");
-
-    let parsed_first = if let Some(first) = parse_first_label_with_preparsed_attrs(
-        p,
-        inline_ctx,
-        current_type_name_path,
-        leading_attrs,
-        first_attr_start_idx,
-    ) {
-        labels.push(first);
-        true
-    } else {
-        false
-    };
-
-    // OCaml uses `Parser.optional p Comma |> ignore` before parsing the rest.
-    p.optional(&Token::Comma);
-    labels.extend(parse_label_declarations_with_first_state(
-        p,
-        inline_ctx,
-        current_type_name_path,
-        None,
-        !parsed_first,
-    ));
-
-    labels
-}
-
-/// Parse the first label declaration with already-parsed attrs and an overridden loc start.
-///
-/// Supports both regular fields and spread (`...typ`) fields.
-fn parse_first_label_with_preparsed_attrs(
-    p: &mut Parser<'_>,
-    inline_ctx: Option<&RefCell<InlineTypesContext>>,
-    current_type_name_path: Option<&Vec<StrIdx>>,
+    start_pos_idx: PosIdx,
+    name: Located<StrIdx>,
+    mutable: MutableFlag,
+    optional: bool,
+    typ: CoreType,
     attrs: Attributes,
-    first_attr_start_idx: PosIdx,
-) -> Option<LabelDeclaration> {
-    if p.token == Token::DotDotDot {
-        let spread_start_idx = p.start_pos_idx();
-        p.next();
-        let name_loc = p.mk_loc_idx_to_prev_end(spread_start_idx);
-        let spread_type = typ::parse_typ_expr(p);
-        let spread_type_end_idx = p.loc_end_idx(spread_type.ptyp_loc);
-        let spread_type_idx = p.arena_mut().push_core_type(spread_type);
-        let ellipsis_idx = p.arena_mut().intern("...");
-        let loc = p.mk_loc_idx_full(first_attr_start_idx, spread_type_end_idx);
-        return Some(LabelDeclaration {
-            pld_name: with_loc(ellipsis_idx, name_loc),
-            pld_mutable: MutableFlag::Immutable,
-            pld_type: spread_type_idx,
-            pld_loc: loc,
-            pld_attributes: attrs,
-            pld_optional: false,
-        });
-    }
-
-    if let Some(mut first) =
-        parse_label_declaration(p, inline_ctx, current_type_name_path, Some(attrs), false)
-    {
-        let first_loc = p.arena().get_location(first.pld_loc).clone();
-        first.pld_loc =
-            p.arena_mut()
-                .push_loc(first_attr_start_idx, first_loc.loc_end, first_loc.loc_ghost);
-        Some(first)
-    } else {
-        None
-    }
-}
-
-/// Parse record labels in constructor inline records (`Pcstr_record`).
-///
-/// OCaml `parse_constr_decl_args` parses leading field attributes once at `{...}` entry.
-/// When present, those attrs are attached to the first field but the first field location
-/// starts at the field name token (not at the leading attrs).
-fn parse_constructor_record_labels(
-    p: &mut Parser<'_>,
-    lbrace_pos_idx: Option<PosIdx>,
-) -> Vec<LabelDeclaration> {
-    let leading_attrs = parse_attributes(p);
-    if leading_attrs.is_empty() {
-        return parse_label_declarations(p, None, None, lbrace_pos_idx);
-    }
-
-    let mut labels = Vec::new();
-    let parsed_first =
-        if let Some(first) = parse_label_declaration(p, None, None, Some(leading_attrs), false) {
-            labels.push(first);
-            true
-        } else {
-            false
-        };
-
-    if p.token == Token::Rbrace || p.token == Token::Eof {
-        return labels;
-    }
-
-    p.expect(Token::Comma);
-    labels.extend(parse_label_declarations_with_first_state(
-        p,
-        None,
-        None,
-        None,
-        !parsed_first,
-    ));
-    labels
-}
-
-/// Parse a single label declaration.
-fn parse_label_declaration(
-    p: &mut Parser<'_>,
-    inline_ctx: Option<&RefCell<InlineTypesContext>>,
-    current_type_name_path: Option<&Vec<StrIdx>>,
-    preparsed_attrs: Option<Attributes>,
-    include_preparsed_attrs_in_loc: bool,
-) -> Option<LabelDeclaration> {
-    // OCaml usually captures label declaration start before parsing field attrs.
-    // Constructor records with pre-parsed leading attrs are the exception: first field
-    // location starts at the field name token.
-    let start_pos_before_attrs = p.start_pos.clone();
-    let start_pos_before_attrs_idx = p.start_pos_idx();
-    let attrs = match preparsed_attrs {
-        Some(attrs) => attrs,
-        None => parse_attributes(p),
-    };
-    let start_pos = if include_preparsed_attrs_in_loc {
-        start_pos_before_attrs
-    } else {
-        p.start_pos.clone()
-    };
-    let start_pos_idx = if include_preparsed_attrs_in_loc {
-        start_pos_before_attrs_idx
-    } else {
-        p.start_pos_idx()
-    };
-
-    let mutable = if p.token == Token::Mutable {
-        p.next();
-        MutableFlag::Mutable
-    } else {
-        MutableFlag::Immutable
-    };
-
-    let name = match &p.token {
-        Token::Lident(n) => {
-            let n = n.clone();
-            let loc = p.mk_loc_current();
-            p.next();
-            let n_idx = p.arena_mut().push_interned_string(&n);
-            with_loc(n_idx, loc)
-        }
-        _ if p.token.is_keyword() => {
-            // OCaml: Token.is_keyword p.token
-            // Check if the keyword is followed by a colon - if so, recover by renaming
-            if let Some((recovered_name, loc)) =
-                super::core::recover_keyword_field_name_if_probably_field(
-                    p,
-                    error_messages::keyword_field_in_type,
-                )
-            {
-                let name_idx = p.arena_mut().push_string(recovered_name);
-                with_loc(name_idx, loc)
-            } else {
-                // Just emit the error without recovery
-                super::core::emit_keyword_field_error(p, error_messages::keyword_field_in_type);
-                return None;
-            }
-        }
-        _ => {
-            // Match OCaml's error handling: give specific messages for dangling attrs/mutable
-            // OCaml uses p.end_pos as the end position (not p.start_pos)
-            if !attrs.is_empty() {
-                p.err_at(start_pos.clone(), p.end_pos.clone(), DiagnosticCategory::Message(
-                    "Attributes and doc comments can only be used at the beginning of a field declaration".to_string(),
-                ));
-            }
-            if mutable == MutableFlag::Mutable {
-                p.err_at(start_pos.clone(), p.end_pos.clone(), DiagnosticCategory::Message(
-                    "The `mutable` qualifier can only be used at the beginning of a field declaration".to_string(),
-                ));
-            }
-            // OCaml `parse_field_declaration_region` (res_core.ml) returns
-            // `None` without a diagnostic here; the enclosing comma-delimited
-            // region reports the unexpected token.
-            return None;
-        }
-    };
-
-    // Extend current type name path with this field name for nested inline records
-    let extended_path = current_type_name_path.map(|path| {
-        let mut new_path = path.clone();
-        new_path.push(name.txt.clone());
-        new_path
-    });
-
-    // Check for optional field marker
-    let is_optional = p.optional(&Token::Question);
-
-    // Check for colon, equal (error recovery), or field punning
-    // OCaml: if Equal instead of Colon, emit specific error and continue
-    let is_punning = match &p.token {
-        Token::Colon => {
-            p.next();
-            false
-        }
-        Token::Equal => {
-            // Common mistake: using = instead of : in record type declarations
-            p.err(DiagnosticCategory::Message(
-                "Record fields in type declarations use `:`. Example: `{field: string}`"
-                    .to_string(),
-            ));
-            p.next();
-            false
-        }
-        _ => {
-            // Field punning: {form} is shorthand for {form: form}
-            true
-        }
-    };
-
-    // Check if the field type is an inline record
-    let typ = if is_punning {
-        // Field punning: {form} becomes {form: form}
-        // The type is a simple type constructor with the field name
-        let lid_idx = p.push_lident_from_idx(name.txt);
-        CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-                with_loc(lid_idx, name.loc.clone()),
-                vec![],
-            )))),
-            ptyp_loc: name.loc.clone(),
-            ptyp_attributes: Attributes::new(),
-        }
-    } else if p.token == Token::Lbrace && inline_ctx.is_some() && extended_path.is_some() {
-        // Check if this looks like a record (starts with Lident, Mutable, At, or DotDotDot)
-        let looks_like_record = p.lookahead(|state| {
-            state.next(); // Skip {
-            // Skip leading attributes
-            while state.token == Token::At {
-                state.next();
-                // Skip attribute identifier
-                if matches!(state.token, Token::Lident(_) | Token::Uident(_))
-                    || state.token.is_keyword()
-                {
-                    state.next();
-                    while state.token == Token::Dot {
-                        state.next();
-                        if matches!(state.token, Token::Lident(_) | Token::Uident(_))
-                            || state.token.is_keyword()
-                        {
-                            state.next();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                // Skip optional payload
-                if state.token == Token::Lparen {
-                    let mut depth = 1;
-                    state.next();
-                    while depth > 0 && state.token != Token::Eof {
-                        match state.token {
-                            Token::Lparen => depth += 1,
-                            Token::Rparen => depth -= 1,
-                            _ => {}
-                        }
-                        state.next();
-                    }
-                }
-            }
-            // Check if first significant token indicates a record declaration
-            matches!(
-                state.token,
-                Token::Lident(_) | Token::Mutable | Token::At | Token::DotDotDot
-            )
-        });
-
-        if looks_like_record {
-            // Parse as inline record and register it
-            let type_start_pos_idx = p.start_pos_idx();
-            p.next(); // consume {
-            let inline_ctx = inline_ctx.unwrap();
-            let extended_path = extended_path.as_ref().unwrap();
-            let labels = parse_label_declarations(
-                p,
-                Some(inline_ctx),
-                Some(extended_path),
-                Some(type_start_pos_idx),
-            );
-            p.expect(Token::Rbrace);
-            let type_loc = p.mk_loc_idx_to_prev_end(type_start_pos_idx);
-
-            // Create the inline type name (e.g., "options.permissions.all")
-            let inline_type_name: String = extended_path
-                .iter()
-                .map(|idx| p.arena().get_string(*idx))
-                .collect::<Vec<_>>()
-                .join(".");
-            let inline_type_idx = p.arena_mut().push_string(inline_type_name.to_string());
-
-            let params = inline_ctx.borrow().params.clone();
-            // Register this inline type (insert at front for correct order)
-            inline_ctx.borrow_mut().found_inline_types.insert(
-                0,
-                (
-                    inline_type_idx,
-                    type_loc.clone(),
-                    TypeKind::Ptype_record(labels),
-                    params.clone(),
-                ),
-            );
-
-            // Return a Ptyp_constr pointing to the inline type
-            let type_args: Vec<CoreTypeIdx> = params.into_iter().map(|(t, _)| t).collect();
-            let lid_idx = p.push_lident_from_idx(inline_type_idx);
-            CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-                    with_loc(lid_idx, type_loc.clone()),
-                    type_args,
-                )))),
-                ptyp_loc: type_loc,
-                ptyp_attributes: Attributes::new(),
-            }
-        } else {
-            // Not a record - parse as regular type (object type)
-            // But still thread inline context through parser fields for nested extraction
-            parse_poly_type_with_inline_context(p, inline_ctx, extended_path.as_ref())
-        }
-    } else {
-        // Thread inline context through parser fields if available
-        parse_poly_type_with_inline_context(p, inline_ctx, extended_path.as_ref())
-    };
-
-    // OCaml uses typ.ptyp_loc.loc_end for label declaration's end, not p.prev_end_pos
+) -> LabelDeclaration {
     let loc = p.mk_loc_idx_to_end_of(start_pos_idx, typ.ptyp_loc);
     let typ_idx = p.arena_mut().push_core_type(typ);
-    Some(LabelDeclaration {
+    LabelDeclaration {
         pld_name: name,
         pld_mutable: mutable,
         pld_type: typ_idx,
         pld_loc: loc,
         pld_attributes: attrs,
-        pld_optional: is_optional,
-    })
+        pld_optional: optional,
+    }
+}
+
+/// `Ast_helper.Typ.constr ~loc:name.loc ?attrs {name with txt = Lident name.txt} []`.
+fn punned_field_type(p: &mut Parser<'_>, name: &Located<StrIdx>, attrs: Attributes) -> CoreType {
+    let lid_idx = p.push_lident_from_idx(name.txt);
+    CoreType {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+            with_loc(lid_idx, name.loc),
+            vec![],
+        )))),
+        ptyp_loc: name.loc,
+        ptyp_attributes: attrs,
+    }
+}
+
+fn mutable_flag(p: &mut Parser<'_>) -> MutableFlag {
+    if p.optional(&Token::Mutable) {
+        MutableFlag::Mutable
+    } else {
+        MutableFlag::Immutable
+    }
+}
+
+/// OCaml `parse_field_declaration` (res_core.ml:5227-5260).
+fn parse_field_declaration(
+    p: &mut Parser<'_>,
+    ctx: InlineCtx<'_>,
+    path: Option<&Vec<StrIdx>>,
+) -> LabelDeclaration {
+    let start_pos_idx = p.start_pos_idx();
+    let attrs = parse_attributes(p);
+    let mutable = mutable_flag(p);
+    let (lident, lident_loc) = super::core::parse_lident(p);
+    let optional = p.optional(&Token::Question);
+    let name_idx = p.arena_mut().push_interned_string(&lident);
+    let name = with_loc(name_idx, lident_loc);
+    let typ = match p.token {
+        Token::Colon => {
+            p.next();
+            let path = extend_type_name_path(path, name_idx);
+            parse_poly_type_with_inline_context(p, ctx, path.as_ref())
+        }
+        Token::Equal => {
+            p.err(DiagnosticCategory::Message(
+                error_messages::RECORD_TYPE_FIELD_MISSING_COLON.to_string(),
+            ));
+            p.next();
+            let path = extend_type_name_path(path, name_idx);
+            parse_poly_type_with_inline_context(p, ctx, path.as_ref())
+        }
+        _ => punned_field_type(p, &name, Attributes::new()),
+    };
+    label_declaration(p, start_pos_idx, name, mutable, optional, typ, attrs)
+}
+
+/// OCaml `parse_field_declaration_region ?found_object_field`
+/// (res_core.ml:5262-5344).
+fn parse_field_declaration_region(
+    p: &mut Parser<'_>,
+    ctx: InlineCtx<'_>,
+    path: Option<&Vec<StrIdx>>,
+    found_object_field: Option<&mut bool>,
+) -> Option<LabelDeclaration> {
+    let start_pos_idx = p.start_pos_idx();
+    let start_pos = p.start_pos;
+    let attrs = parse_attributes(p);
+    let mutable = mutable_flag(p);
+    match p.token {
+        Token::DotDotDot => {
+            p.next();
+            let name_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            let name_idx = p.arena_mut().intern("...");
+            let typ = parse_poly_type_with_inline_context(p, None, None);
+            Some(label_declaration(
+                p,
+                start_pos_idx,
+                with_loc(name_idx, name_loc),
+                mutable,
+                false,
+                typ,
+                attrs,
+            ))
+        }
+        Token::String(ref s) if found_object_field.is_some() => {
+            let s = s.to_string();
+            if let Some(found) = found_object_field {
+                *found = true;
+            }
+            p.next();
+            let name_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            let name_idx = p.arena_mut().push_interned_string(&s);
+            p.expect(Token::Colon);
+            let typ = parse_poly_type_with_inline_context(p, None, None);
+            Some(label_declaration(
+                p,
+                start_pos_idx,
+                with_loc(name_idx, name_loc),
+                mutable,
+                false,
+                typ,
+                attrs,
+            ))
+        }
+        Token::Lident(_) => {
+            let (lident, lident_loc) = super::core::parse_lident(p);
+            let name_idx = p.arena_mut().push_interned_string(&lident);
+            let name = with_loc(name_idx, lident_loc);
+            let path = extend_type_name_path(path, name_idx);
+            let optional = p.optional(&Token::Question);
+            let typ = match p.token {
+                Token::Colon => {
+                    p.next();
+                    parse_poly_type_with_inline_context(p, ctx, path.as_ref())
+                }
+                Token::Equal => {
+                    p.err(DiagnosticCategory::Message(
+                        error_messages::RECORD_TYPE_FIELD_MISSING_COLON.to_string(),
+                    ));
+                    p.next();
+                    parse_poly_type_with_inline_context(p, ctx, path.as_ref())
+                }
+                _ => punned_field_type(p, &name, attrs.clone()),
+            };
+            Some(label_declaration(p, start_pos_idx, name, mutable, optional, typ, attrs))
+        }
+        _ => {
+            if p.token.is_keyword() {
+                match super::core::recover_keyword_field_name_if_probably_field(
+                    p,
+                    error_messages::keyword_field_in_type,
+                ) {
+                    Some((recovered_field_name, name_loc)) => {
+                        let optional = p.optional(&Token::Question);
+                        p.expect(Token::Colon);
+                        let typ = parse_poly_type_with_inline_context(p, ctx, path);
+                        let name_idx = p.arena_mut().push_string(recovered_field_name);
+                        Some(label_declaration(
+                            p,
+                            start_pos_idx,
+                            with_loc(name_idx, name_loc),
+                            mutable,
+                            optional,
+                            typ,
+                            attrs,
+                        ))
+                    }
+                    None => {
+                        super::core::emit_keyword_field_error(
+                            p,
+                            error_messages::keyword_field_in_type,
+                        );
+                        None
+                    }
+                }
+            } else {
+                if !attrs.is_empty() {
+                    p.err_at(
+                        start_pos,
+                        p.end_pos,
+                        DiagnosticCategory::Message(
+                            "Attributes and doc comments can only be used at the beginning of a field declaration".to_string(),
+                        ),
+                    );
+                }
+                if mutable == MutableFlag::Mutable {
+                    p.err_at(
+                        start_pos,
+                        p.end_pos,
+                        DiagnosticCategory::Message(
+                            "The `mutable` qualifier can only be used at the beginning of a field declaration".to_string(),
+                        ),
+                    );
+                }
+                None
+            }
+        }
+    }
+}
+
+/// OCaml `parse_record_declaration` (res_core.ml:5346-5358).
+fn parse_record_declaration(
+    p: &mut Parser<'_>,
+    ctx: InlineCtx<'_>,
+    path: Option<&Vec<StrIdx>>,
+) -> Vec<LabelDeclaration> {
+    p.leave_breadcrumb(grammar::Grammar::RecordDecl);
+    p.expect(Token::Lbrace);
+    let rows = super::core::parse_comma_delimited_region(
+        p,
+        grammar::Grammar::RecordDecl,
+        Token::Rbrace,
+        |p| parse_field_declaration_region(p, ctx, path, None),
+    );
+    p.expect(Token::Rbrace);
+    p.eat_breadcrumb();
+    rows
+}
+
+/// Parse the rows after `{` with OCaml `parse_field_declaration_region` in a
+/// comma delimited region of `grammar`, reporting whether an object (string)
+/// field was found.
+fn parse_field_declarations_tracking_objects(
+    p: &mut Parser<'_>,
+    ctx: InlineCtx<'_>,
+    path: Option<&Vec<StrIdx>>,
+    grammar: grammar::Grammar,
+) -> (Vec<LabelDeclaration>, bool) {
+    let mut found_object_field = false;
+    let fields = super::core::parse_comma_delimited_region(p, grammar, Token::Rbrace, |p| {
+        parse_field_declaration_region(p, ctx, path, Some(&mut found_object_field))
+    });
+    (fields, found_object_field)
+}
+
+/// OCaml's conversion of spread-record fields into object fields when a string
+/// field was found (res_core.ml:5896-5906, 5981-5986).
+fn object_fields_of_labels(fields: Vec<LabelDeclaration>, p: &Parser<'_>) -> Vec<ObjectField> {
+    fields
+        .into_iter()
+        .map(|ld| {
+            if p.arena().get_string(ld.pld_name.txt) == "..." {
+                ObjectField::Oinherit(ld.pld_type)
+            } else {
+                ObjectField::Otag(ld.pld_name, ld.pld_attributes, ld.pld_type)
+            }
+        })
+        .collect()
+}
+
+fn object_type(fields: Vec<ObjectField>, closed: ClosedFlag, loc: LocIdx) -> CoreType {
+    CoreType {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((fields, closed)))),
+        ptyp_loc: loc,
+        ptyp_attributes: Attributes::new(),
+    }
+}
+
+/// `Ast_helper.Type.field ~loc {txt = "..."; loc = mk_loc dd_start dd_end} typ`.
+fn spread_field(
+    p: &mut Parser<'_>,
+    loc: LocIdx,
+    name_loc: LocIdx,
+    typ: CoreTypeIdx,
+) -> LabelDeclaration {
+    let name_idx = p.arena_mut().intern("...");
+    LabelDeclaration {
+        pld_name: with_loc(name_idx, name_loc),
+        pld_mutable: MutableFlag::Immutable,
+        pld_type: typ,
+        pld_loc: loc,
+        pld_attributes: Attributes::new(),
+        pld_optional: false,
+    }
+}
+
+/// Object fields after `{` and optional leading attributes on the first
+/// field (res_core.ml:6000-6031, 5431-5460).
+fn parse_string_field_declarations_with_attrs(
+    p: &mut Parser<'_>,
+    attrs: Attributes,
+) -> Vec<ObjectField> {
+    if attrs.is_empty() {
+        return super::core::parse_comma_delimited_region(
+            p,
+            grammar::Grammar::StringFieldDeclarations,
+            Token::Rbrace,
+            typ::parse_string_field_declaration,
+        );
+    }
+    p.leave_breadcrumb(grammar::Grammar::StringFieldDeclarations);
+    let field = typ::parse_string_field_declaration(p)
+        .expect("a string field declaration after attributes");
+    match p.token {
+        Token::Rbrace | Token::Eof => {}
+        Token::Comma => p.next(),
+        _ => p.expect(Token::Comma),
+    }
+    p.eat_breadcrumb();
+    let first = match field {
+        ObjectField::Otag(label, _, ct) => ObjectField::Otag(label, attrs, ct),
+        ObjectField::Oinherit(ct) => ObjectField::Oinherit(ct),
+    };
+    let mut fields = vec![first];
+    fields.extend(super::core::parse_comma_delimited_region(
+        p,
+        grammar::Grammar::StringFieldDeclarations,
+        Token::Rbrace,
+        typ::parse_string_field_declaration,
+    ));
+    fields
+}
+
+fn closed_flag_after_lbrace(p: &mut Parser<'_>) -> ClosedFlag {
+    match p.token {
+        Token::DotDot => {
+            p.next();
+            ClosedFlag::Open
+        }
+        Token::Dot => {
+            p.next();
+            ClosedFlag::Closed
+        }
+        _ => ClosedFlag::Closed,
+    }
+}
+
+/// OCaml `parse_record_or_object_decl` (res_core.ml:5917-6078).
+fn parse_record_or_object_decl(
+    p: &mut Parser<'_>,
+    ctx: InlineCtx<'_>,
+    path: Option<&Vec<StrIdx>>,
+) -> TypeEquation {
+    let start_pos_idx = p.start_pos_idx();
+    p.expect(Token::Lbrace);
+    match p.token {
+        Token::DotDot | Token::Dot => {
+            let closed = closed_flag_after_lbrace(p);
+            let fields = super::core::parse_comma_delimited_region(
+                p,
+                grammar::Grammar::StringFieldDeclarations,
+                Token::Rbrace,
+                typ::parse_string_field_declaration,
+            );
+            p.expect(Token::Rbrace);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            let typ = typ::parse_type_alias(p, object_type(fields, closed, loc));
+            let typ = typ::parse_arrow_type_rest(p, typ, start_pos_idx);
+            (
+                Some(p.arena_mut().push_core_type(typ)),
+                TypeKind::Ptype_abstract,
+                PrivateFlag::Public,
+            )
+        }
+        Token::DotDotDot => {
+            let dotdotdot_start = p.start_pos_idx();
+            let dotdotdot_end = p.end_pos_idx();
+            p.next();
+            let typ = typ::parse_typ_expr(p);
+            let dot_name_loc = p.mk_loc_idx_full(dotdotdot_start, dotdotdot_end);
+            if p.token == Token::Rbrace {
+                p.next();
+                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                let typ_idx = p.arena_mut().push_core_type(typ);
+                let dot_field = spread_field(p, loc, dot_name_loc, typ_idx);
+                return (None, TypeKind::Ptype_record(vec![dot_field]), PrivateFlag::Public);
+            }
+            p.expect(Token::Comma);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            let typ_idx = p.arena_mut().push_core_type(typ);
+            let dot_field = spread_field(p, loc, dot_name_loc, typ_idx);
+            let (fields, found_object_field) =
+                parse_field_declarations_tracking_objects(p, ctx, path, grammar::Grammar::RecordDecl);
+            p.expect(Token::Rbrace);
+            if found_object_field {
+                let mut obj_fields = vec![ObjectField::Oinherit(typ_idx)];
+                obj_fields.extend(object_fields_of_labels(fields, p));
+                let typ_obj = object_type(obj_fields, ClosedFlag::Closed, LocIdx::none());
+                let typ_obj = typ::parse_type_alias(p, typ_obj);
+                let typ_obj = typ::parse_arrow_type_rest(p, typ_obj, start_pos_idx);
+                (
+                    Some(p.arena_mut().push_core_type(typ_obj)),
+                    TypeKind::Ptype_abstract,
+                    PrivateFlag::Public,
+                )
+            } else {
+                let mut all = vec![dot_field];
+                all.extend(fields);
+                (None, TypeKind::Ptype_record(all), PrivateFlag::Public)
+            }
+        }
+        _ => {
+            let attrs = parse_attributes(p);
+            if matches!(p.token, Token::String(_)) {
+                let fields = parse_string_field_declarations_with_attrs(p, attrs);
+                p.expect(Token::Rbrace);
+                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                let typ = typ::parse_type_alias(p, object_type(fields, ClosedFlag::Closed, loc));
+                let typ = typ::parse_arrow_type_rest(p, typ, start_pos_idx);
+                return (
+                    Some(p.arena_mut().push_core_type(typ)),
+                    TypeKind::Ptype_abstract,
+                    PrivateFlag::Public,
+                );
+            }
+            p.leave_breadcrumb(grammar::Grammar::RecordDecl);
+            let fields = if attrs.is_empty() {
+                super::core::parse_comma_delimited_region(
+                    p,
+                    grammar::Grammar::FieldDeclarations,
+                    Token::Rbrace,
+                    |p| parse_field_declaration_region(p, ctx, path, None),
+                )
+            } else {
+                let first_attr_start = p.loc_start_idx(attrs.as_slice()[0].0.loc);
+                let mut first = parse_field_declaration(p, ctx, path);
+                p.optional(&Token::Comma);
+                let field_loc_end = p.loc_end_idx(first.pld_loc);
+                let field_loc_ghost = p.loc_ghost(first.pld_loc);
+                first.pld_loc = p
+                    .arena_mut()
+                    .push_loc(first_attr_start, field_loc_end, field_loc_ghost);
+                first.pld_attributes = attrs;
+                let mut fields = vec![first];
+                fields.extend(super::core::parse_comma_delimited_region(
+                    p,
+                    grammar::Grammar::FieldDeclarations,
+                    Token::Rbrace,
+                    |p| parse_field_declaration_region(p, ctx, path, None),
+                ));
+                fields
+            };
+            p.expect(Token::Rbrace);
+            p.eat_breadcrumb();
+            (None, TypeKind::Ptype_record(fields), PrivateFlag::Public)
+        }
+    }
+}
+
+/// OCaml `parse_spread_tail_classified` (res_core.ml:5876-5915).
+enum SpreadTail {
+    Record(Vec<LabelDeclaration>),
+    Object(CoreType),
+}
+
+fn parse_spread_tail_classified(
+    p: &mut Parser<'_>,
+    start_pos_idx: PosIdx,
+    spread_typ: CoreTypeIdx,
+    grammar: grammar::Grammar,
+) -> SpreadTail {
+    if p.token == Token::Rbrace {
+        p.next();
+        return SpreadTail::Record(vec![]);
+    }
+    p.expect(Token::Comma);
+    let (fields, found_object_field) =
+        parse_field_declarations_tracking_objects(p, None, None, grammar);
+    p.expect(Token::Rbrace);
+    if found_object_field {
+        let mut obj_fields = vec![ObjectField::Oinherit(spread_typ)];
+        obj_fields.extend(object_fields_of_labels(fields, p));
+        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+        let typ = typ::parse_type_alias(p, object_type(obj_fields, ClosedFlag::Closed, loc));
+        SpreadTail::Object(typ::parse_arrow_type_rest(p, typ, start_pos_idx))
+    } else {
+        SpreadTail::Record(fields)
+    }
+}
+
+/// The comma-delimited `TypExprList` after a constructor's first argument.
+fn parse_more_constr_args(p: &mut Parser<'_>, first: CoreType) -> ConstructorArguments {
+    p.optional(&Token::Comma);
+    let more = super::core::parse_comma_delimited_region(
+        p,
+        grammar::Grammar::TypExprList,
+        Token::Rparen,
+        typ::parse_typ_expr_region,
+    );
+    p.expect(Token::Rparen);
+    let mut args = vec![p.arena_mut().push_core_type(first)];
+    args.extend(more.into_iter().map(|t| p.arena_mut().push_core_type(t)));
+    ConstructorArguments::Pcstr_tuple(args)
+}
+
+/// OCaml `parse_constr_decl_args` (res_core.ml:5369-5545).
+fn parse_constr_decl_args(p: &mut Parser<'_>) -> (ConstructorArguments, Option<CoreTypeIdx>) {
+    let args = if p.token == Token::Lparen {
+        p.next();
+        if p.token == Token::Lbrace {
+            p.next();
+            let start_pos_idx = p.start_pos_idx();
+            match p.token {
+                Token::DotDot | Token::Dot => {
+                    let closed = closed_flag_after_lbrace(p);
+                    let fields = super::core::parse_comma_delimited_region(
+                        p,
+                        grammar::Grammar::StringFieldDeclarations,
+                        Token::Rbrace,
+                        typ::parse_string_field_declaration,
+                    );
+                    p.expect(Token::Rbrace);
+                    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                    parse_more_constr_args(p, object_type(fields, closed, loc))
+                }
+                Token::DotDotDot => {
+                    let dotdotdot_start = p.start_pos_idx();
+                    let dotdotdot_end = p.end_pos_idx();
+                    p.next();
+                    let spread_typ = typ::parse_typ_expr(p);
+                    let spread_end = p.loc_end_idx(spread_typ.ptyp_loc);
+                    let spread_typ_idx = p.arena_mut().push_core_type(spread_typ);
+                    if p.token == Token::Rbrace {
+                        p.next();
+                        let name_loc = p.mk_loc_idx_full(dotdotdot_start, dotdotdot_end);
+                        let loc = p.mk_loc_idx_full(start_pos_idx, spread_end);
+                        let field = spread_field(p, loc, name_loc, spread_typ_idx);
+                        p.optional(&Token::Comma);
+                        p.expect(Token::Rparen);
+                        ConstructorArguments::Pcstr_record(vec![field])
+                    } else {
+                        match parse_spread_tail_classified(
+                            p,
+                            start_pos_idx,
+                            spread_typ_idx,
+                            grammar::Grammar::FieldDeclarations,
+                        ) {
+                            SpreadTail::Record(fields) => {
+                                let name_loc = p.mk_loc_idx_full(dotdotdot_start, dotdotdot_end);
+                                let loc = p.mk_loc_idx_full(start_pos_idx, spread_end);
+                                let field = spread_field(p, loc, name_loc, spread_typ_idx);
+                                p.optional(&Token::Comma);
+                                p.expect(Token::Rparen);
+                                let mut all = vec![field];
+                                all.extend(fields);
+                                ConstructorArguments::Pcstr_record(all)
+                            }
+                            SpreadTail::Object(typ) => parse_more_constr_args(p, typ),
+                        }
+                    }
+                }
+                _ => {
+                    let attrs = parse_attributes(p);
+                    if matches!(p.token, Token::String(_)) {
+                        let fields = parse_string_field_declarations_with_attrs(p, attrs);
+                        p.expect(Token::Rbrace);
+                        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                        let typ =
+                            typ::parse_type_alias(p, object_type(fields, ClosedFlag::Closed, loc));
+                        let typ = typ::parse_arrow_type_rest(p, typ, start_pos_idx);
+                        parse_more_constr_args(p, typ)
+                    } else {
+                        let fields = if attrs.is_empty() {
+                            super::core::parse_comma_delimited_region(
+                                p,
+                                grammar::Grammar::FieldDeclarations,
+                                Token::Rbrace,
+                                |p| parse_field_declaration_region(p, None, None, None),
+                            )
+                        } else {
+                            let mut first = parse_field_declaration(p, None, None);
+                            first.pld_attributes = attrs;
+                            if p.token == Token::Rbrace {
+                                vec![first]
+                            } else {
+                                p.expect(Token::Comma);
+                                let mut fields = vec![first];
+                                fields.extend(super::core::parse_comma_delimited_region(
+                                    p,
+                                    grammar::Grammar::FieldDeclarations,
+                                    Token::Rbrace,
+                                    |p| parse_field_declaration_region(p, None, None, None),
+                                ));
+                                fields
+                            }
+                        };
+                        p.expect(Token::Rbrace);
+                        p.optional(&Token::Comma);
+                        p.expect(Token::Rparen);
+                        ConstructorArguments::Pcstr_record(fields)
+                    }
+                }
+            }
+        } else {
+            let args = super::core::parse_comma_delimited_region(
+                p,
+                grammar::Grammar::TypExprList,
+                Token::Rparen,
+                typ::parse_typ_expr_region,
+            );
+            p.expect(Token::Rparen);
+            ConstructorArguments::Pcstr_tuple(
+                args.into_iter()
+                    .map(|t| p.arena_mut().push_core_type(t))
+                    .collect(),
+            )
+        }
+    } else {
+        ConstructorArguments::Pcstr_tuple(vec![])
+    };
+    let res = if p.token == Token::Colon {
+        p.next();
+        let typ = typ::parse_typ_expr(p);
+        Some(p.arena_mut().push_core_type(typ))
+    } else {
+        None
+    };
+    (args, res)
+}
+
+/// OCaml `parse_record_or_object_type`'s inline-record branch
+/// (res_core.ml:4749-4756), called from `typ.rs` with the parser-state inline
+/// context: `parse_comma_delimited_region ~grammar:RecordDecl ~closing:Rbrace
+/// ~f:(parse_field_declaration_region ~current_type_name_path ~inline_types_context)`.
+pub fn parse_label_declarations_for_inline(p: &mut Parser<'_>) -> Vec<LabelDeclaration> {
+    let found = p.inline_types_found.take().unwrap_or_default();
+    let inline_ctx = RefCell::new(InlineTypesContext {
+        found_inline_types: found,
+        params: p.inline_types_params.clone(),
+        outer_name_loc: Location::none(),
+    });
+    let path_strings = p.current_type_name_path.clone();
+    let path: Option<Vec<StrIdx>> =
+        path_strings.map(|path| path.into_iter().map(|s| p.arena_mut().intern(&s)).collect());
+    let labels = super::core::parse_comma_delimited_region(
+        p,
+        grammar::Grammar::RecordDecl,
+        Token::Rbrace,
+        |p| parse_field_declaration_region(p, Some(&inline_ctx), path.as_ref(), None),
+    );
+    let InlineTypesContext {
+        found_inline_types,
+        params,
+        ..
+    } = inline_ctx.into_inner();
+    p.inline_types_found = Some(found_inline_types);
+    p.inline_types_params = params;
+    labels
 }
 
 /// Parse a poly type expression, threading inline context through parser fields
@@ -3958,7 +3778,14 @@ fn parse_poly_type_with_inline_context(
 
         typ
     } else {
-        typ::parse_poly_type_expr(p)
+        // OCaml calls `parse_poly_type_expr` without `?current_type_name_path`
+        // / `?inline_types_context` here, so no inline-record context applies.
+        let old_path = p.current_type_name_path.take();
+        let old_found = p.inline_types_found.take();
+        let typ = typ::parse_poly_type_expr(p);
+        p.current_type_name_path = old_path;
+        p.inline_types_found = old_found;
+        typ
     }
 }
 
