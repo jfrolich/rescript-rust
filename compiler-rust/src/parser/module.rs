@@ -422,16 +422,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             let ext_start_idx = p.start_pos_idx();
             p.next();
             let id = parse_extension_id(p, ext_start_idx);
-            // Parse optional payload
-            let is_adjacent = p.start_pos.cnum == p.prev_end_pos.cnum;
-            let payload = if p.token == Token::Lparen && is_adjacent {
-                p.next();
-                let payload = parse_payload(p);
-                p.expect(Token::Rparen);
-                payload
-            } else {
-                Payload::PStr(Box::new(vec![]))
-            };
+            let payload = parse_payload_region(p);
             parse_newline_or_semicolon_structure(p);
             Some(StructureItemDesc::Pstr_extension(Box::new((
                 (id, payload),
@@ -4333,16 +4324,7 @@ fn parse_attribute_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Attribute 
     // OCaml `parse_attribute_id` (compiler/syntax/src/res_core.ml:7531-7556).
     let attr_name = parse_extension_id(p, start_pos_idx);
 
-    // Parse optional payload
-    let is_adjacent = p.start_pos.cnum == p.prev_end_pos.cnum;
-    let payload = if p.token == Token::Lparen && is_adjacent {
-        p.next();
-        let payload = parse_payload(p);
-        p.expect(Token::Rparen);
-        payload
-    } else {
-        Payload::PStr(Box::new(vec![]))
-    };
+    let payload = parse_payload_region(p);
 
     (attr_name, payload)
 }
@@ -4353,6 +4335,22 @@ fn parse_attribute_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Attribute 
 /// - Type: `(: type)` - indicated by leading colon followed by type
 /// - Signature: `(: signature_items)` - indicated by leading colon followed by signature items
 /// - Pattern: `(? pattern)` or `(? pattern when guard)` - indicated by leading question mark
+/// OCaml `parse_payload` (compiler/syntax/src/res_core.ml:7568-7612): an
+/// adjacent `(` opens an `AttributePayload` region that ends at `)`;
+/// anything else is an empty payload.
+pub fn parse_payload_region(p: &mut Parser<'_>) -> Payload {
+    if p.token == Token::Lparen && p.start_pos.cnum == p.prev_end_pos.cnum {
+        p.leave_breadcrumb(Grammar::AttributePayload);
+        p.next();
+        let payload = parse_payload(p);
+        p.expect(Token::Rparen);
+        p.eat_breadcrumb();
+        payload
+    } else {
+        Payload::PStr(Box::new(vec![]))
+    }
+}
+
 pub fn parse_payload(p: &mut Parser<'_>) -> Payload {
     // OCaml `parse_payload` (compiler/syntax/src/res_core.ml:7568-7610), after the
     // opening `(` has been consumed by the caller.
@@ -4462,16 +4460,7 @@ pub(super) fn parse_extension(p: &mut Parser<'_>) -> Extension {
     }
     let id = parse_extension_id(p, id_start_idx);
 
-    // Parse optional payload only if it's immediately adjacent.
-    let is_adjacent = p.start_pos.cnum == p.prev_end_pos.cnum;
-    let payload = if p.token == Token::Lparen && is_adjacent {
-        p.next();
-        let payload = parse_payload(p);
-        p.expect(Token::Rparen);
-        payload
-    } else {
-        Payload::PStr(Box::new(vec![]))
-    };
+    let payload = parse_payload_region(p);
 
     (id, payload)
 }

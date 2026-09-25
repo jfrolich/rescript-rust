@@ -1457,17 +1457,7 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
 
     let attr_id = parse_attribute_id(p, start_pos_idx);
 
-    // Only parse Lparen as payload if it's immediately adjacent to the attribute ID
-    // (no whitespace between them). e.g., @attr(payload) vs @attr (expression)
-    let is_adjacent = p.start_pos.cnum == p.prev_end_pos.cnum;
-    let payload = if p.token == Token::Lparen && is_adjacent {
-        p.next();
-        let payload = parse_payload(p);
-        p.expect(Token::Rparen);
-        payload
-    } else {
-        Payload::PStr(Box::new(vec![]))
-    };
+    let payload = super::module::parse_payload_region(p);
 
     Some((attr_id, payload))
 }
@@ -1478,13 +1468,6 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
 fn parse_attribute_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> StringLoc {
     // OCaml `parse_attribute_id` (compiler/syntax/src/res_core.ml:7531-7556).
     super::module::parse_extension_id(p, start_pos_idx)
-}
-
-/// Parse an attribute payload.
-/// Handles simple payloads like `("string")` or `(expression)`.
-fn parse_payload(p: &mut Parser<'_>) -> Payload {
-    // OCaml has a single `parse_payload` (compiler/syntax/src/res_core.ml:7568-7610).
-    super::module::parse_payload(p)
 }
 
 // ============================================================================
@@ -1768,14 +1751,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             p.next();
             let name = super::module::parse_extension_id(p, id_start_idx);
 
-            let payload = if p.token == Token::Lparen {
-                p.next();
-                let payload = super::module::parse_payload(p);
-                p.expect(Token::Rparen);
-                payload
-            } else {
-                Payload::PStr(Box::new(vec![]))
-            };
+            let payload = super::module::parse_payload_region(p);
 
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             Expression {

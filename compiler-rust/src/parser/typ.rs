@@ -702,14 +702,6 @@ fn parse_type_attributes(p: &mut Parser<'_>) -> Attributes {
     parse_attributes(p)
 }
 
-/// Parse an attribute payload (in type context).
-fn parse_payload(p: &mut Parser<'_>) -> Payload {
-    p.expect(Token::Lparen);
-    let payload = super::module::parse_payload(p);
-    p.expect(Token::Rparen);
-    payload
-}
-
 /// Parse an atomic type expression.
 /// `outer_start_pos_idx` is an optional PosIdx from the caller that can be reused
 /// for position sharing with simple type constructors.
@@ -1588,24 +1580,9 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
     // OCaml `parse_attribute_id` (compiler/syntax/src/res_core.ml:7531-7556).
     let attr_id = super::module::parse_extension_id(p, start_pos_idx);
 
-    // Only parse Lparen as payload if it's immediately adjacent to the attribute ID
-    let is_adjacent = p.start_pos.cnum == p.prev_end_pos.cnum;
-    let payload = if p.token == Token::Lparen && is_adjacent {
-        p.next();
-        let payload = parse_attribute_payload(p);
-        p.expect(Token::Rparen);
-        payload
-    } else {
-        Payload::PStr(Box::new(vec![]))
-    };
+    let payload = super::module::parse_payload_region(p);
 
     Some((attr_id, payload))
-}
-
-/// Parse an attribute payload.
-fn parse_attribute_payload(p: &mut Parser<'_>) -> Payload {
-    // OCaml has a single `parse_payload` (compiler/syntax/src/res_core.ml:7568-7610).
-    super::module::parse_payload(p)
 }
 
 // ============================================================================
@@ -2277,12 +2254,7 @@ fn parse_extension(p: &mut Parser<'_>) -> Extension {
     p.expect(Token::Percent);
     let id = super::module::parse_extension_id(p, id_start_idx);
 
-    // Parse optional payload: %ext(payload)
-    let payload = if p.token == Token::Lparen {
-        parse_payload(p)
-    } else {
-        Payload::PStr(Box::new(vec![]))
-    };
+    let payload = super::module::parse_payload_region(p);
 
     (id, payload)
 }
