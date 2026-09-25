@@ -6457,6 +6457,7 @@ fn type_record_pat_rest(
 
     Ok(crate::types::typedtree::RecordPatternRest {
         rest_ident,
+        rest_loc,
         rest_name: crate::parse_arena::Located {
             txt: tctx.arena.get_string(rest.rest_name.txt).to_string(),
             loc: rest.rest_name.loc,

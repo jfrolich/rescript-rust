@@ -247,6 +247,8 @@ pub enum PatternDesc {
 pub struct RecordPatternRest {
     /// Identifier bound for the rest value.
     pub rest_ident: Ident,
+    /// Location passed to `enter_variable` (the value's `val_loc`).
+    pub rest_loc: crate::parse_arena::LocIdx,
     /// Source name of the rest binding.
     pub rest_name: Loc<String>,
     /// Inferred record-rest type.

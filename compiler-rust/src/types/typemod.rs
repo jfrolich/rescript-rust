@@ -7218,7 +7218,14 @@ fn collect_bound_pattern_idents_with_loc(
                 collect_bound_pattern_idents_with_loc(pat, out);
             }
         }
-        PatternDesc::Tpat_record(fields, _, _) => {
+        PatternDesc::Tpat_record(fields, _, rest) => {
+            if let Some(rest) = rest {
+                out.push((
+                    rest.rest_ident.clone(),
+                    rest.rest_ident.name().to_string(),
+                    rest.rest_loc,
+                ));
+            }
             for (_, _, pat, _) in fields {
                 collect_bound_pattern_idents_with_loc(pat, out);
             }
@@ -11072,7 +11079,19 @@ fn push_sig_values_from_env_pattern(
                 push_sig_values_from_env_pattern(env, p, sig_items);
             }
         }
-        PatternDesc::Tpat_record(fields, _, _) => {
+        PatternDesc::Tpat_record(fields, _, rest) => {
+            // `Typedtree.bound_idents` binds the record rest before the fields
+            // (typedtree.ml:464-469).
+            if let Some(rest) = rest {
+                let value_desc = env
+                    .lookup_value(&Path::Pident(rest.rest_ident.clone()))
+                    .expect("let-bound record rest missing from structure environment")
+                    .clone();
+                sig_items.push(crate::types::decl::SignatureItem::SigValue(
+                    rest.rest_ident.clone(),
+                    value_desc,
+                ));
+            }
             for (_, _, p, _) in fields {
                 push_sig_values_from_env_pattern(env, p, sig_items);
             }
