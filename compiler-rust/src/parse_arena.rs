@@ -578,6 +578,7 @@ pub struct ParseArena {
     /// Pre-allocated `Lident "None"` for optional field desugaring.
     /// Allocated in `new()`, not `default()`.
     static_none_lid: LidentIdx,
+    static_option_lid: LidentIdx,
     /// Pre-allocated `Ldot(Lident "*predef*", "None")` for optional-default rewrites.
     static_predef_none_lid: LidentIdx,
     /// Pre-allocated `Lident "Some"` for unqualified option wrapping paths.
@@ -962,6 +963,7 @@ impl Default for ParseArena {
             static_ast_literal_type_float_lident,
             static_placeholder_lid: LidentIdx::default(),
             static_none_lid: LidentIdx::default(),
+            static_option_lid: LidentIdx::default(),
             static_predef_none_lid,
             static_some_lid,
             static_predef_some_lid,
@@ -1053,6 +1055,9 @@ impl ParseArena {
         // Pre-allocate "*predef*" longident
         let predef_str = arena.strings.intern("*predef*");
         arena.longidents.push(Longident::Lident(predef_str));
+        // Pre-allocate "option" longident (for optional record label types)
+        let option_str = arena.strings.intern("option");
+        arena.static_option_lid = arena.longidents.push(Longident::Lident(option_str));
         arena
     }
 
@@ -1066,6 +1071,13 @@ impl ParseArena {
     /// Used for optional field desugaring (synthesizing None for missing optional fields).
     pub fn none_lid(&self) -> LidentIdx {
         self.static_none_lid
+    }
+
+    /// Get the pre-allocated `Lident "option"` index. Optional record labels
+    /// are typed as `Ptyp_constr (Lident "option", [typ])`
+    /// (compiler/ml/typedecl.ml:314-329, 600-618).
+    pub fn option_lid(&self) -> LidentIdx {
+        self.static_option_lid
     }
 
     /// Get the pre-allocated Ldot(*predef*, "None") longident index.

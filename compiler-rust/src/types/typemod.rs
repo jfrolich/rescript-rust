@@ -40,6 +40,33 @@ use crate::types::typedtree::{
 use crate::types::{Path, TypeDesc};
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
+/// OCaml typedecl.ml:314-329 and 600-618: an optional record label is typed as
+/// `{typ with ptyp_desc = Ptyp_constr ({txt = Lident "option"; loc =
+/// typ.ptyp_loc}, [typ])}`, so `option` is looked up in the environment.
+fn transl_label_type(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    arena: &ParseArena,
+    label: &crate::parser::ast::LabelDeclaration,
+) -> Result<(crate::types::typedtree::TypedCoreType, TypeExprRef), TypeCoreError> {
+    let typ = arena.get_core_type(label.pld_type);
+    if !label.pld_optional {
+        return transl_type(tctx, env, typ);
+    }
+    let option_typ = crate::parser::ast::CoreType {
+        ptyp_desc: Box::new(crate::parser::ast::CoreTypeDesc::Ptyp_constr(Box::new((
+            crate::parse_arena::Located {
+                txt: arena.option_lid(),
+                loc: typ.ptyp_loc,
+            },
+            vec![label.pld_type],
+        )))),
+        ptyp_loc: typ.ptyp_loc,
+        ptyp_attributes: typ.ptyp_attributes.clone(),
+    };
+    transl_type(tctx, env, &option_typ)
+}
+
 fn core_type_has_row_var(arena: &ParseArena, core_type: &crate::parser::ast::CoreType) -> bool {
     match &*core_type.ptyp_desc {
         crate::parser::ast::CoreTypeDesc::Ptyp_alias(inner) => {
@@ -15929,15 +15956,8 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                     Vec::with_capacity(labels.len());
                                                 for label in labels {
                                                     let lbl_name = arena.get_string(label.pld_name.txt);
-                                                    let (_typed_label_ty, mut lbl_type) =
-                                                        transl_type(tctx, &sig_env, arena.get_core_type(label.pld_type))?;
-                                                    if label.pld_optional {
-                                                        let option_path =
-                                                            crate::types::predef::path_option();
-                                                        lbl_type = tctx
-                                                            .type_ctx
-                                                            .new_constr(option_path, vec![lbl_type]);
-                                                    }
+                                                    let (_typed_label_ty, lbl_type) =
+                                                        transl_label_type(tctx, &sig_env, arena, label)?;
                                                     let lbl_type =
                                                         tctx.type_ctx.new_poly(lbl_type, vec![]);
                                                     let mutable_flag = match label.pld_mutable {
@@ -15994,17 +16014,8 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                     let mut record_labels = Vec::with_capacity(labels.len());
                                     for label in labels {
                                         let lbl_name = arena.get_string(label.pld_name.txt);
-                                        let (_typed_label_ty, mut lbl_type) = transl_type(
-                                            tctx,
-                                            &sig_env,
-                                            arena.get_core_type(label.pld_type),
-                                        )?;
-                                        if label.pld_optional {
-                                            let option_path = crate::types::predef::path_option();
-                                            lbl_type = tctx
-                                                .type_ctx
-                                                .new_constr(option_path, vec![lbl_type]);
-                                        }
+                                        let (_typed_label_ty, lbl_type) =
+                                            transl_label_type(tctx, &sig_env, arena, label)?;
                                         let lbl_type = tctx.type_ctx.new_poly(lbl_type, vec![]);
                                         let mutable_flag = match label.pld_mutable {
                                             crate::parser::ast::MutableFlag::Immutable => {
@@ -22327,33 +22338,8 @@ fn type_structure_item<'a>(
                                     let mut internal_labels: Vec<crate::types::LabelDeclaration> =
                                         Vec::new();
                                     for lbl in labels {
-                                        let lbl_type = arena.get_core_type(lbl.pld_type);
                                         let (typed_core_type, type_ref) =
-                                            transl_type(tctx, &temp_env, lbl_type)?;
-                                        // OCaml wraps optional label types in option
-                                        let (typed_core_type, type_ref) = if lbl.pld_optional {
-                                            let option_path = crate::types::predef::path_option();
-                                            let option_type_ref =
-                                                ctx.new_constr(option_path.clone(), vec![type_ref]);
-                                            let option_lid = crate::parse_arena::Located {
-                                                txt: arena.placeholder_lid(),
-                                                loc: lbl_type.ptyp_loc,
-                                            };
-                                            let option_typed = TypedCoreType {
-                                                ctyp_desc: TypedCoreTypeDesc::Ttyp_constr(
-                                                    option_path,
-                                                    option_lid,
-                                                    vec![typed_core_type],
-                                                ),
-                                                ctyp_type: option_type_ref,
-                                                ctyp_env: EnvRef(0),
-                                                ctyp_loc: lbl_type.ptyp_loc,
-                                                ctyp_attributes: Attributes::new(),
-                                            };
-                                            (option_typed, option_type_ref)
-                                        } else {
-                                            (typed_core_type, type_ref)
-                                        };
+                                            transl_label_type(tctx, &temp_env, arena, lbl)?;
                                         let mutable_flag = match lbl.pld_mutable {
                                             crate::parser::ast::MutableFlag::Immutable => {
                                                 crate::types::MutableFlag::Immutable
@@ -22723,33 +22709,8 @@ fn type_structure_item<'a>(
                         let mut typed_tree_labels: Vec<TypedLabelDeclaration> = Vec::new();
                         for lbl in labels {
                             let lbl_name_str = arena.get_string(lbl.pld_name.txt);
-                            let lbl_type = arena.get_core_type(lbl.pld_type);
                             let (typed_core_type, type_ref) =
-                                transl_type(tctx, &temp_env, lbl_type)?;
-                            // OCaml wraps optional label types in option (typedecl.ml lines 616-628)
-                            let (typed_core_type, type_ref) = if lbl.pld_optional {
-                                let option_path = crate::types::predef::path_option();
-                                let option_type_ref =
-                                    ctx.new_constr(option_path.clone(), vec![type_ref]);
-                                let option_lid = crate::parse_arena::Located {
-                                    txt: arena.placeholder_lid(),
-                                    loc: lbl_type.ptyp_loc,
-                                };
-                                let option_typed = TypedCoreType {
-                                    ctyp_desc: TypedCoreTypeDesc::Ttyp_constr(
-                                        option_path,
-                                        option_lid,
-                                        vec![typed_core_type],
-                                    ),
-                                    ctyp_type: option_type_ref,
-                                    ctyp_env: EnvRef(0),
-                                    ctyp_loc: lbl_type.ptyp_loc,
-                                    ctyp_attributes: Attributes::new(),
-                                };
-                                (option_typed, option_type_ref)
-                            } else {
-                                (typed_core_type, type_ref)
-                            };
+                                transl_label_type(tctx, &temp_env, arena, lbl)?;
                             let mutable_flag = match lbl.pld_mutable {
                                 crate::parser::ast::MutableFlag::Immutable => {
                                     crate::types::MutableFlag::Immutable
@@ -23495,34 +23456,8 @@ fn type_structure_item<'a>(
                                 for label in labels {
                                     let label_name =
                                         arena.get_string(label.pld_name.txt).to_string();
-                                    let lbl_type = arena.get_core_type(label.pld_type);
-                                    let (typed_ct, ty_ref) = transl_type(tctx, env, lbl_type)?;
-                                    // Upstream #8319: extension constructor (exception) record
-                                    // fields get the same optional → option wrapping as regular
-                                    // record fields.
-                                    let (typed_ct, ty_ref) = if label.pld_optional {
-                                        let option_path = crate::types::predef::path_option();
-                                        let option_type_ref =
-                                            ctx.new_constr(option_path.clone(), vec![ty_ref]);
-                                        let option_lid = crate::parse_arena::Located {
-                                            txt: arena.placeholder_lid(),
-                                            loc: lbl_type.ptyp_loc,
-                                        };
-                                        let option_typed = TypedCoreType {
-                                            ctyp_desc: TypedCoreTypeDesc::Ttyp_constr(
-                                                option_path,
-                                                option_lid,
-                                                vec![typed_ct],
-                                            ),
-                                            ctyp_type: option_type_ref,
-                                            ctyp_env: EnvRef(0),
-                                            ctyp_loc: lbl_type.ptyp_loc,
-                                            ctyp_attributes: Attributes::new(),
-                                        };
-                                        (option_typed, option_type_ref)
-                                    } else {
-                                        (typed_ct, ty_ref)
-                                    };
+                                    let (typed_ct, ty_ref) =
+                                        transl_label_type(tctx, env, arena, label)?;
                                     let (poly_typed_ct, poly_ty_ref) =
                                         force_poly_typed_core_type(ctx, typed_ct, ty_ref);
                                     let internal_ty_ref = match &*ctx.get_desc(poly_ty_ref) {
@@ -23860,34 +23795,8 @@ fn type_structure_item<'a>(
                             let mut decl_labels = Vec::new();
                             for label in labels {
                                 let label_name = arena.get_string(label.pld_name.txt).to_string();
-                                let lbl_type = arena.get_core_type(label.pld_type);
-                                let (typed_ct, ty_ref) = transl_type(tctx, env, lbl_type)?;
-                                // Upstream #8319: exception inline-record fields get
-                                // the same optional → option wrapping as regular record
-                                // fields and type-extension (Pext_decl) constructors.
-                                let (typed_ct, ty_ref) = if label.pld_optional {
-                                    let option_path = crate::types::predef::path_option();
-                                    let option_type_ref =
-                                        ctx.new_constr(option_path.clone(), vec![ty_ref]);
-                                    let option_lid = crate::parse_arena::Located {
-                                        txt: arena.placeholder_lid(),
-                                        loc: lbl_type.ptyp_loc,
-                                    };
-                                    let option_typed = TypedCoreType {
-                                        ctyp_desc: TypedCoreTypeDesc::Ttyp_constr(
-                                            option_path,
-                                            option_lid,
-                                            vec![typed_ct],
-                                        ),
-                                        ctyp_type: option_type_ref,
-                                        ctyp_env: EnvRef(0),
-                                        ctyp_loc: lbl_type.ptyp_loc,
-                                        ctyp_attributes: Attributes::new(),
-                                    };
-                                    (option_typed, option_type_ref)
-                                } else {
-                                    (typed_ct, ty_ref)
-                                };
+                                let (typed_ct, ty_ref) =
+                                    transl_label_type(tctx, env, arena, label)?;
                                 let (poly_typed_ct, poly_ty_ref) =
                                     force_poly_typed_core_type(ctx, typed_ct, ty_ref);
                                 let internal_ty_ref = match &*ctx.get_desc(poly_ty_ref) {
@@ -25225,30 +25134,8 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
 
                     for label in labels {
                         let lbl_name = arena.get_string(label.pld_name.txt);
-                        let (mut typed_label_ty, mut lbl_type) =
-                            transl_type(tctx, &temp_env, arena.get_core_type(label.pld_type))?;
-                        if label.pld_optional {
-                            let option_path = crate::types::predef::path_option();
-                            let option_type_ref = tctx
-                                .type_ctx
-                                .new_constr(option_path.clone(), vec![lbl_type]);
-                            let label_type = arena.get_core_type(label.pld_type);
-                            typed_label_ty = TypedCoreType {
-                                ctyp_desc: TypedCoreTypeDesc::Ttyp_constr(
-                                    option_path,
-                                    Located {
-                                        txt: arena.placeholder_lid(),
-                                        loc: label_type.ptyp_loc,
-                                    },
-                                    vec![typed_label_ty],
-                                ),
-                                ctyp_type: option_type_ref,
-                                ctyp_env: EnvRef(0),
-                                ctyp_loc: label_type.ptyp_loc,
-                                ctyp_attributes: Attributes::new(),
-                            };
-                            lbl_type = option_type_ref;
-                        }
+                        let (typed_label_ty, lbl_type) =
+                            transl_label_type(tctx, &temp_env, arena, label)?;
                         let (poly_typed_core_type, poly_lbl_type) =
                             force_poly_typed_core_type(tctx.type_ctx, typed_label_ty, lbl_type);
                         let internal_lbl_type = match &*tctx.type_ctx.get_desc(poly_lbl_type) {
@@ -25408,33 +25295,8 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                 let mut typed_record_labels = Vec::with_capacity(labels.len());
                                 for label in labels {
                                     let lbl_name = arena.get_string(label.pld_name.txt);
-                                    let (mut typed_label_ty, mut lbl_type) = transl_type(
-                                        tctx,
-                                        &temp_env,
-                                        arena.get_core_type(label.pld_type),
-                                    )?;
-                                    if label.pld_optional {
-                                        let option_path = crate::types::predef::path_option();
-                                        let option_type_ref = tctx
-                                            .type_ctx
-                                            .new_constr(option_path.clone(), vec![lbl_type]);
-                                        let label_type = arena.get_core_type(label.pld_type);
-                                        typed_label_ty = TypedCoreType {
-                                            ctyp_desc: TypedCoreTypeDesc::Ttyp_constr(
-                                                option_path,
-                                                Located {
-                                                    txt: arena.placeholder_lid(),
-                                                    loc: label_type.ptyp_loc,
-                                                },
-                                                vec![typed_label_ty],
-                                            ),
-                                            ctyp_type: option_type_ref,
-                                            ctyp_env: EnvRef(0),
-                                            ctyp_loc: label_type.ptyp_loc,
-                                            ctyp_attributes: Attributes::new(),
-                                        };
-                                        lbl_type = option_type_ref;
-                                    }
+                                    let (typed_label_ty, lbl_type) =
+                                        transl_label_type(tctx, &temp_env, arena, label)?;
                                     let (poly_typed_core_type, poly_lbl_type) =
                                         force_poly_typed_core_type(
                                             tctx.type_ctx,
