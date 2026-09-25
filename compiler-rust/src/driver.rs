@@ -71,6 +71,10 @@ pub struct UserDiagnostic {
 
 impl UserDiagnostic {
     pub fn new(output: String, exit_code: i32) -> Self {
+        let output = match crate::source_text::decode_internal_utf8_runs(&output) {
+            std::borrow::Cow::Borrowed(_) => output,
+            std::borrow::Cow::Owned(decoded) => decoded,
+        };
         Self { output, exit_code }
     }
 
@@ -1857,6 +1861,7 @@ pub fn emit_parser_warnings(
 
 fn write_stderr(output: &str) {
     if !output.is_empty() {
+        let output = crate::source_text::decode_internal_utf8_runs(output);
         let mut stderr = std::io::stderr();
         let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
         let _ = std::io::Write::flush(&mut stderr);
@@ -5653,6 +5658,7 @@ fn emit_type_warnings(
     let mut stderr = std::io::stderr();
     for warning in warnings {
         let output = format_compiler_warning_report(arena, source, filename, warning);
+        let output = crate::source_text::decode_internal_utf8_runs(&output);
         let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
     }
     let _ = std::io::Write::flush(&mut stderr);

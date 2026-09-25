@@ -40,3 +40,37 @@ pub fn decode_internal_utf8(s: &str) -> Cow<'_, str> {
         Err(_) => Cow::Borrowed(s),
     }
 }
+
+/// Decode the byte-preserving Latin-1 runs of a diagnostic for UTF-8 output.
+///
+/// Diagnostics interleave static text with names taken from the source,
+/// which the parser keeps as one `char` per byte. OCaml writes those names'
+/// bytes unchanged, so each maximal run of `U+0080..=U+00FF` characters is
+/// turned back into its bytes and shown as UTF-8 when the bytes are valid.
+pub fn decode_internal_utf8_runs(s: &str) -> Cow<'_, str> {
+    if s.is_ascii() || !s.chars().any(|ch| ('\u{80}'..='\u{ff}').contains(&ch)) {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut run: Vec<u8> = Vec::new();
+    let flush = |run: &mut Vec<u8>, out: &mut String| {
+        if run.is_empty() {
+            return;
+        }
+        match std::str::from_utf8(run) {
+            Ok(text) => out.push_str(text),
+            Err(_) => out.extend(run.iter().map(|&b| b as char)),
+        }
+        run.clear();
+    };
+    for ch in s.chars() {
+        if ('\u{80}'..='\u{ff}').contains(&ch) {
+            run.push(ch as u32 as u8);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(ch);
+        }
+    }
+    flush(&mut run, &mut out);
+    Cow::Owned(out)
+}
