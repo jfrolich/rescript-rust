@@ -12130,20 +12130,26 @@ fn validate_deriving_accessors_for_tdcls(
     let Some(last_tdcl) = tdcls.last() else {
         return Ok(());
     };
-    for tdcl in tdcls {
-        let mut seen_deriving = false;
-        for (attr_name, payload) in &tdcl.ptype_attributes {
-            if arena.get_string(attr_name.txt) == "deriving" {
-                if seen_deriving {
-                    return Err(PpxError::at_loc(
-                        attr_name.loc,
-                        "Duplicate @deriving attribute; a type can only have one.",
-                    ));
-                }
-                seen_deriving = true;
-                validate_deriving_attr_payload(payload, arena)?;
+    // `Ast_attributes.process_derive_type` (compiler/frontend/ast_attributes.ml:146-160)
+    // folds over the last declaration's attributes: the first `@deriving`
+    // payload is read with `ident_or_record_as_config`, a second one raises
+    // `Duplicated_bs_deriving`. The actions are checked afterwards
+    // (`Ast_derive_abstract.is_abstract`, then `Ast_derive.gen_structure`).
+    let mut first_deriving = None;
+    for (attr_name, payload) in &last_tdcl.ptype_attributes {
+        if arena.get_string(attr_name.txt) == "deriving" {
+            if first_deriving.is_some() {
+                return Err(PpxError::at_loc(
+                    attr_name.loc,
+                    "Duplicate @deriving attribute; a type can only have one.",
+                ));
             }
+            deriving_config_actions(payload, arena)?;
+            first_deriving = Some(payload);
         }
+    }
+    if let Some(payload) = first_deriving {
+        validate_deriving_attr_payload(payload, arena)?;
     }
 
     let (actions, _remaining_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
