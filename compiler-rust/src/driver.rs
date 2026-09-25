@@ -2490,7 +2490,54 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
     }
 }
 
+/// Remove SGR style escapes (`ESC [ ... m`).
+fn strip_style_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("\x1b[") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find('m') {
+            Some(end) if after[..end].bytes().all(|b| b.is_ascii_digit() || b == b';') => {
+                rest = &after[end + 1..];
+            }
+            _ => {
+                out.push_str("\x1b[");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn type_mod_error_to_anyhow(
+    err: TypeModError,
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    suppress_info_style: bool,
+) -> anyhow::Error {
+    let error =
+        type_mod_error_to_anyhow_styled(err, type_ctx, arena, source, filename, suppress_info_style);
+    if !suppress_info_style {
+        return error;
+    }
+    // OCaml compiler/ext/misc.ml:337-392: once a printed warning has run
+    // `Location.setup_colors` with colors disabled, the style tags of later
+    // error messages print nothing.
+    match error.downcast::<UserDiagnostic>() {
+        Ok(diagnostic) => UserDiagnostic {
+            output: strip_style_escapes(&diagnostic.output),
+            exit_code: diagnostic.exit_code,
+        }
+        .into(),
+        Err(error) => error,
+    }
+}
+
+fn type_mod_error_to_anyhow_styled(
     err: TypeModError,
     type_ctx: &TypeContext,
     arena: &ParseArena,
@@ -11442,13 +11489,16 @@ fn compile_source_to_js_with_options_inner(
         if let Err(e) =
             crate::types::typemod::check_nongen_schemes(&type_ctx, &final_env, &simple_signature)
         {
+            // The warnings printed so far have set up colors (misc.ml:337-392).
+            let suppress_info_style =
+                !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
             return Err(type_mod_error_to_anyhow(
                 e,
                 &type_ctx,
                 parser.arena(),
                 source,
                 filename,
-                false,
+                suppress_info_style,
             ));
         }
         normalize_signature_types(&type_ctx, &typed_structure, &final_env);
