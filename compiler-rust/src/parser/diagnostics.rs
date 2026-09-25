@@ -215,9 +215,26 @@ impl ParserDiagnostic {
                 "This comment seems to be missing a closing `*/`".to_string()
             }
             DiagnosticCategory::UnknownUchar(ch) => {
-                format!("Not sure what to do with this character: \"{}\".", ch)
+                format!(
+                    "Not sure what to do with this character: \"{}\".",
+                    char_escaped(*ch)
+                )
             }
         }
+    }
+}
+
+/// OCaml `Char.escaped` for a source byte (kept as a Latin-1 `char`).
+fn char_escaped(ch: char) -> String {
+    match ch {
+        '\'' => "\\'".to_string(),
+        '\\' => "\\\\".to_string(),
+        '\n' => "\\n".to_string(),
+        '\t' => "\\t".to_string(),
+        '\r' => "\\r".to_string(),
+        '\u{8}' => "\\b".to_string(),
+        ' '..='~' => ch.to_string(),
+        _ => format!("\\{:03}", ch as u32),
     }
 }
 
