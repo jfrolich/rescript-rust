@@ -4571,6 +4571,7 @@ fn subtype_rec(
         (TypeDesc::Tvar(_) | TypeDesc::Tunivar(_), _)
         | (_, TypeDesc::Tvar(_) | TypeDesc::Tunivar(_)) => {
             let mut unify_state = UnifyState::new();
+            unify_state.set_env(env);
             unify(ctx, &mut unify_state, ty1, ty2).map_err(|_| subtype_error(trace))
         }
         (
