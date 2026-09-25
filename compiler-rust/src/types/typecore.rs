@@ -14620,6 +14620,26 @@ fn type_record(
     for (idx, field) in fields.iter().enumerate() {
         let resolved_lid = arena.get_longident(field.lid.txt);
         let field_name = arena.get_string(resolved_lid.last_idx());
+        // `process_label` (typecore.ml:1028-1029): with no `opath`, a label
+        // with nothing in scope is unbound.
+        if record_opath_ty.is_none()
+            && matches!(resolved_lid, Longident::Lident(_))
+            && env.find_all_labels(field_name).is_empty()
+        {
+            let resolved_lid = resolved_lid.clone();
+            return Err(TypeCoreError::UnboundRecordField {
+                loc: field.lid.loc,
+                field_name: field_name.to_string(),
+                from_type: None,
+                alternatives: unbound_label_alternatives(
+                    tctx.arena,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                    &resolved_lid,
+                ),
+            });
+        }
         let unqualified_with_opath =
             record_opath_ty.is_some() && matches!(resolved_lid, Longident::Lident(_));
         if matches!(resolved_lid, Longident::Lident(_)) {
