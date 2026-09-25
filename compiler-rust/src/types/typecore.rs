@@ -1016,13 +1016,22 @@ pub struct PatternState {
     /// Type paths whose component-table side effects must run after the whole
     /// pattern has allocated binders.
     deferred_type_path_forces: Vec<TypeExprRef>,
+    /// OCaml `pattern_force` (typecore.ml:421): the closures returned by
+    /// `Typetexp.transl_simple_type_delayed` for pattern constraints, in
+    /// registration order.
+    globalize_forces: Vec<GlobalizeForce>,
 }
+
+/// One deferred unification of `Typetexp.globalize_used_variables`'s force
+/// closure (typetexp.ml:682-688): `(loc, t1, t2)`.
+pub(crate) type GlobalizeForce = (LocIdx, TypeExprRef, TypeExprRef);
 
 #[derive(Clone, Copy)]
 struct PatternStateCheckpoint {
     pattern_variables_len: usize,
     module_variables_len: usize,
     deferred_type_path_forces_len: usize,
+    globalize_forces_len: usize,
 }
 
 /// A pattern variable with its binding information.
@@ -1052,6 +1061,7 @@ impl PatternState {
             allow_modules: false,
             module_variables: Vec::new(),
             deferred_type_path_forces: Vec::new(),
+            globalize_forces: Vec::new(),
         }
     }
 
@@ -1119,6 +1129,15 @@ impl PatternState {
         self.allow_modules = allow_modules;
         self.module_variables.clear();
         self.deferred_type_path_forces.clear();
+        self.globalize_forces.clear();
+    }
+
+    fn add_globalize_forces(&mut self, forces: Vec<GlobalizeForce>) {
+        self.globalize_forces.extend(forces);
+    }
+
+    fn take_globalize_forces(&mut self) -> Vec<GlobalizeForce> {
+        std::mem::take(&mut self.globalize_forces)
     }
 
     fn defer_type_path_force(&mut self, ty: TypeExprRef) {
@@ -1134,6 +1153,7 @@ impl PatternState {
             pattern_variables_len: self.pattern_variables.len(),
             module_variables_len: self.module_variables.len(),
             deferred_type_path_forces_len: self.deferred_type_path_forces.len(),
+            globalize_forces_len: self.globalize_forces.len(),
         }
     }
 
@@ -1144,6 +1164,8 @@ impl PatternState {
             .truncate(checkpoint.module_variables_len);
         self.deferred_type_path_forces
             .truncate(checkpoint.deferred_type_path_forces_len);
+        self.globalize_forces
+            .truncate(checkpoint.globalize_forces_len);
     }
 
     fn restore_binding_checkpoint(&mut self, checkpoint: PatternStateCheckpoint) {
@@ -2069,6 +2091,26 @@ pub(crate) fn transl_type_fixed(
     transl_type_with_options(tctx, env, styp, false, true, false)
 }
 
+/// Run the deferred unifications of `Typetexp.globalize_used_variables`'s
+/// force closure (typetexp.ml:682-688). `forces` is in registration order;
+/// OCaml prepends each entry (and each pattern's closure to `pattern_force`),
+/// so they run last-registered first.
+pub(crate) fn run_globalize_forces(
+    tctx: &mut TypeCheckContext<'_>,
+    forces: Vec<GlobalizeForce>,
+) -> TypeCoreResult<()> {
+    for (loc, t1, t2) in forces.into_iter().rev() {
+        if let Err(err) = crate::types::unify(tctx.type_ctx, &mut tctx.unify_state, t1, t2) {
+            let trace = match err {
+                TypeError::Unify(trace) => trace,
+                _ => vec![(t1, t2)],
+            };
+            return Err(TypeCoreError::TypeMismatch { loc, trace });
+        }
+    }
+    Ok(())
+}
+
 /// Translate a type with delayed globalization (matching OCaml's
 /// transl_simple_type_delayed). When `globalize` is true, we route used
 /// variables through fresh global variables before linking them in
@@ -2078,10 +2120,16 @@ pub fn transl_type_delayed(
     env: &Env,
     styp: &crate::parser::ast::CoreType,
     globalize: bool,
-) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
-    transl_type_with_options(tctx, env, styp, globalize, false, true)
+) -> TypeCoreResult<(
+    crate::types::typedtree::TypedCoreType,
+    TypeExprRef,
+    Vec<GlobalizeForce>,
+)> {
+    transl_type_globalized(tctx, env, styp, globalize, false, true)
 }
 
+/// `Typetexp.transl_simple_type` (typetexp.ml:690-696): translate, then run
+/// the `globalize_used_variables` force immediately.
 fn transl_type_with_options(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -2090,6 +2138,30 @@ fn transl_type_with_options(
     fixed_type_variables: bool,
     defer_component_lookup: bool,
 ) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
+    let (typed, ty, forces) = transl_type_globalized(
+        tctx,
+        env,
+        styp,
+        globalize,
+        fixed_type_variables,
+        defer_component_lookup,
+    )?;
+    run_globalize_forces(tctx, forces)?;
+    Ok((typed, ty))
+}
+
+fn transl_type_globalized(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    styp: &crate::parser::ast::CoreType,
+    globalize: bool,
+    fixed_type_variables: bool,
+    defer_component_lookup: bool,
+) -> TypeCoreResult<(
+    crate::types::typedtree::TypedCoreType,
+    TypeExprRef,
+    Vec<GlobalizeForce>,
+)> {
     // Reset used_variables for each top-level type translation (matches OCaml's transl_simple_type)
     tctx.used_variables.clear();
     tctx.used_variable_locs.clear();
@@ -2106,6 +2178,7 @@ fn transl_type_with_options(
     // Match OCaml typetexp `globalize_used_variables`: link variables seen in
     // this type expression back to declaration-level variables and register
     // new names for later constraints in the same typing scope.
+    let mut forces: Vec<GlobalizeForce> = Vec::new();
     if !tctx.used_variables.is_empty() {
         // OCaml iterates the `used_variables` Tbl (a map ordered by name).
         let mut used_vars: Vec<(String, TypeExprRef)> = tctx
@@ -2116,18 +2189,26 @@ fn transl_type_with_options(
         used_vars.sort_by(|(a, _), (b, _)| a.cmp(b));
         for (name, used_ty) in used_vars {
             let ctx = tctx.type_ctx;
+            let var_loc = tctx
+                .used_variable_locs
+                .get(&name)
+                .copied()
+                .unwrap_or(styp.ptyp_loc);
             if globalize {
-                // OCaml typetexp.ml globalize_used_variables:
-                //   v = new_global_var (); unify v used_ty;
-                // and then unify v with either an existing table binding or a
-                // fresh table entry (v2 = new_global_var ()).
-                let lowered_ty = {
-                    let v = ctx.new_global_var(None);
-                    let _ = crate::types::unify(ctx, &mut tctx.unify_state, v, used_ty);
-                    v
-                };
+                // OCaml typetexp.ml:659-681 globalize_used_variables:
+                //   v = new_global_var (); unify v used_ty under a snapshot
+                //   (backtracked and skipped on failure); the unification of
+                //   v with the table binding (or a fresh v2) is deferred to
+                //   the returned force.
+                let lowered_ty = ctx.new_global_var(None);
+                let snapshot = ctx.snapshot_type_state();
+                if crate::types::unify(ctx, &mut tctx.unify_state, lowered_ty, used_ty).is_err() {
+                    ctx.restore_type_state(snapshot);
+                    continue;
+                }
+                drop(snapshot);
                 if let Some(bound_ty) = tctx.type_variables.get(&name).copied() {
-                    let _ = crate::types::unify(ctx, &mut tctx.unify_state, lowered_ty, bound_ty);
+                    forces.push((var_loc, lowered_ty, bound_ty));
                 } else {
                     // OCaml typetexp.ml:675-676: under the Fixed policy an
                     // undeclared variable that is still a Tvar is unbound.
@@ -2148,11 +2229,11 @@ fn transl_type_with_options(
                         });
                     }
                     let bound_ty = ctx.new_global_var(None);
-                    let _ = crate::types::unify(ctx, &mut tctx.unify_state, lowered_ty, bound_ty);
+                    forces.push((var_loc, lowered_ty, bound_ty));
                     tctx.type_variables.insert(name, bound_ty);
                 }
             } else if let Some(bound_ty) = tctx.type_variables.get(&name).copied() {
-                let _ = crate::types::unify(ctx, &mut tctx.unify_state, used_ty, bound_ty);
+                forces.push((var_loc, used_ty, bound_ty));
             } else {
                 // OCaml typetexp.ml:675-676 (Fixed policy).
                 if fixed_type_variables
@@ -2179,7 +2260,7 @@ fn transl_type_with_options(
     tctx.used_variables.clear();
     tctx.used_variable_locs.clear();
     tctx.univars.clear();
-    Ok(translated)
+    Ok((translated.0, translated.1, forces))
 }
 
 fn path_from_longident_persistent(lid: &Longident, arena: &ParseArena) -> Path {
@@ -6540,9 +6621,11 @@ fn type_record_pat_rest(
         let mut args_out = Vec::with_capacity(n_args);
         for sty_idx in &rest_type_args_syntax {
             let sty = tctx.arena.get_core_type(*sty_idx).clone();
-            let (_ctyp, cty_ty) = transl_type_delayed(tctx, env, &sty, true)?;
-            // OCaml appends the returned force to `pattern_force`; the Rust
-            // PatternState drains deferred forces after binder allocation.
+            let (_ctyp, cty_ty, force) = transl_type_delayed(tctx, env, &sty, true)?;
+            // OCaml appends the returned force to `pattern_force`
+            // (typecore_record_rest.ml:69-70); the Rust PatternState drains
+            // deferred forces after binder allocation.
+            state.add_globalize_forces(force);
             state.defer_type_path_force(cty_ty);
             args_out.push(cty_ty);
         }
@@ -6783,7 +6866,7 @@ fn type_pattern_constraint(
     // begin_def; transl_simple_type_delayed; end_def; generalize_structure;
     // then use two independent instances (constraint ty and inner-pattern ty).
     ctx.begin_def();
-    let (typed_ctype, ctype_ty) = transl_type_delayed(tctx, env, core_type, true)?;
+    let (typed_ctype, ctype_ty, force) = transl_type_delayed(tctx, env, core_type, true)?;
     ctx.end_def();
     let var_level = ctx.current_level();
     crate::types::generalize_structure(ctx, var_level, ctype_ty);
@@ -6808,6 +6891,7 @@ fn type_pattern_constraint(
     // typed. compiler/ml/typecore.ml:4270-4288 then runs those pattern forces
     // after pattern binders have been entered, so qualified constraint paths
     // such as `M.t` must not force component substitutions before `Tpat_var`.
+    state.add_globalize_forces(force);
     state.defer_type_path_force(ctype_ty);
 
     // OCaml uses inner pattern attributes for Tpat_constraint extra.
@@ -6879,10 +6963,12 @@ fn type_pattern_constraint_poly_var(
     let lloc = inner_pat.ppat_loc;
 
     // OCaml: let cty, force = Typetexp.transl_simple_type_delayed !env sty in
-    let (typed_ctype, ctype_ty) = transl_type_delayed(tctx, env, core_type, true)?;
+    let (typed_ctype, ctype_ty, force) = transl_type_delayed(tctx, env, core_type, true)?;
 
     // OCaml: unify_pat_types lloc !env ty expected_ty
     unify_pattern_types(tctx, lloc, ctype_ty, expected_ty)?;
+    // OCaml typecore.ml:1274: `pattern_force := force :: !pattern_force`.
+    state.add_globalize_forces(force);
 
     // OCaml: match ty.desc with Tpoly(body, tyl) -> ...
     let ctype_repr = ctx.repr(ctype_ty);
@@ -11128,6 +11214,13 @@ fn type_match_cases_sequential(
     });
     tctx.unify_state.set_env(env);
     unified?;
+    // OCaml typecore.ml:4407, 4423: the cases' pattern forces run together
+    // after `unify_pats`.
+    let pattern_forces: Vec<GlobalizeForce> = pending_cases
+        .iter_mut()
+        .flat_map(|pending| std::mem::take(&mut pending.pattern_forces))
+        .collect();
+    run_globalize_forces(tctx, pattern_forces)?;
 
     let mut typed_cases = Vec::with_capacity(pending_cases.len());
     for pending in pending_cases {
@@ -11155,6 +11248,7 @@ struct PendingSequentialMatchCase<'a> {
     case_env: Env,
     unpacks: Vec<PatternVariable>,
     case_has_gadt: bool,
+    pattern_forces: Vec<GlobalizeForce>,
 }
 
 fn pressure_matrix_close_variant_type(tctx: &mut TypeCheckContext<'_>, env: &Env, ty: TypeExprRef) {
@@ -11305,6 +11399,7 @@ fn type_match_cases_batch_non_gadt<'a>(
         }
 
         let mut pending_cases: Vec<PendingMatchCase<'a>> = Vec::with_capacity(cases.len());
+        let mut pattern_forces: Vec<GlobalizeForce> = Vec::new();
         for case in cases {
             let case_loc = tctx
                 .arena
@@ -11348,6 +11443,8 @@ fn type_match_cases_batch_non_gadt<'a>(
                 }
             }
 
+            // OCaml typecore.ml:4407: `pattern_force := force @ !pattern_force`.
+            pattern_forces.extend(state.take_globalize_forces());
             pending_cases.push(PendingMatchCase {
                 parsed_case: case,
                 typed_pat,
@@ -11390,6 +11487,8 @@ fn type_match_cases_batch_non_gadt<'a>(
                 finalize_variant_in_pattern(tctx, env, &mut pending.typed_pat, false);
             }
         }
+        // OCaml typecore.ml:4422-4423: "Contaminating" unifications start here.
+        run_globalize_forces(tctx, std::mem::take(&mut pattern_forces))?;
 
         if propagate || erase_either {
             let propagated_ty = if erase_either {
@@ -12605,12 +12704,14 @@ fn type_case_pattern_impl<'a>(
         }
     }
 
+    let pattern_forces = state.take_globalize_forces();
     Ok(PendingSequentialMatchCase {
         parsed_case: case,
         typed_pat,
         case_env,
         unpacks,
         case_has_gadt,
+        pattern_forces,
     })
 }
 
@@ -13181,6 +13282,8 @@ fn type_function_nary(
             parmatch_pressure_variants(tctx, &body_env, &[&typed]);
             finalize_variant_in_pattern(tctx, &body_env, &mut typed, false);
         }
+        // typecore.ml:3714: `List.iter (fun f -> f ()) !pattern_force`.
+        run_globalize_forces(tctx, state.take_globalize_forces())?;
         if propagate {
             let parameter_instance = crate::types::instance(ctx, typ);
             unify_pattern_types(tctx, typed.pat_loc, typed.pat_type, parameter_instance)?;
@@ -21273,6 +21376,8 @@ fn type_let_bindings(
                 finalize_variant_in_pattern(tctx, env, typed_pat, false);
             }
         }
+        // typecore.ml:4569: `List.iter (fun f -> f ()) force`.
+        run_globalize_forces(tctx, state.take_globalize_forces())?;
 
         // Type check expressions after recursive approximation unification.
         // OCaml typecore.ml type_let lines 4189-4211
