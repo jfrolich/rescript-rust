@@ -4,7 +4,7 @@
 //! of the program block. Also includes free variable analysis and side-effect
 //! checking for JS IR statements and expressions.
 
-use std::collections::HashSet;
+use ahash::AHashSet as HashSet;
 
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, Kind, UsedStats};

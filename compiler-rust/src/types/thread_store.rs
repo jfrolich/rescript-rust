@@ -27,7 +27,7 @@ use crate::cmi::persistent_env::PersStruct;
 use crate::cmi::portable_types::PortablePersStruct;
 use crate::intern::StrIdx;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};

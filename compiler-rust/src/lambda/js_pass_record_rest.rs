@@ -1,7 +1,7 @@
 //! Materialize `RecordRest` expressions as object destructuring declarations.
 //! Port of `compiler/core/js_pass_record_rest.ml`.
 
-use std::collections::HashMap;
+use ahash::AHashMap as HashMap;
 
 use crate::ident::Ident;
 use crate::js_ir::op::IdentInfo;

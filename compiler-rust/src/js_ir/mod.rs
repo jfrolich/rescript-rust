@@ -2917,7 +2917,7 @@ pub struct Program {
     /// Exported identifiers
     pub exports: Exports,
     /// Set of exported identifiers
-    pub export_set: std::collections::HashSet<Ident>,
+    pub export_set: ahash::AHashSet<Ident>,
     /// Idents that occupy printed names without emitting statements.
     pub name_reservations: Vec<Ident>,
 }
@@ -2954,7 +2954,7 @@ impl Program {
         Self {
             block: vec![],
             exports: vec![],
-            export_set: std::collections::HashSet::new(),
+            export_set: ahash::AHashSet::new(),
             name_reservations: Vec::new(),
         }
     }

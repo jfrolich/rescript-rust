@@ -3,7 +3,7 @@
 //! Port of `lam_compile_const.ml`.
 //! Extracted from `lam_compile.rs` for organization.
 
-use std::collections::HashMap;
+use ahash::AHashMap as HashMap;
 
 use super::js_exp_make::{
     int_expr, js_expr_no_side_effects, poly_var_tag_access, poly_var_value_access,

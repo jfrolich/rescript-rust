@@ -5,7 +5,8 @@
 
 use ahash::AHashSet;
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::path::Path as StdPath;
 use std::sync::{Mutex, OnceLock};
 

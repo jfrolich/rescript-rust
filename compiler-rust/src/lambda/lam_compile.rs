@@ -6,7 +6,7 @@
 //! that can be extended with more advanced codegen passes.
 
 use ahash::{AHashMap, AHashSet};
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::sync::Arc;
 
 use crate::cmi::persistent_env::{CmjExportArity, CmjExportConstant};

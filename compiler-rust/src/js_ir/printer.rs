@@ -16,7 +16,7 @@ use crate::ident::Ident;
 use crate::js_ir::source_map::SourceMapBuilder;
 use crate::lambda::SwitchCaseTag;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::fmt::Write;
 
 #[derive(Clone, Default)]

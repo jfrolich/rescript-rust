@@ -4,7 +4,7 @@
 //! projections, and marks dead code for elimination.
 
 use ahash::AHashMap as HashMap;
-use std::collections::HashSet;
+use ahash::AHashSet as HashSet;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;

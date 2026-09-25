@@ -3,7 +3,7 @@
 //! Port of `lam_coercion.ml` — resolves export aliases, rewrites toplevel
 //! variable initializers, and handles toplevel export extraction.
 
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 use crate::ident::Ident;
 use crate::js_ir::op::IdentInfo;
