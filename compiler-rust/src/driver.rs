@@ -4669,6 +4669,25 @@ fn format_compiler_error_report(
     output
 }
 
+/// The error OCaml raises when writing a binary AST reaches an `[%error]`
+/// extension: `Location.Error (Builtin_attributes.error_of_extension ext)`
+/// from `Depend.handle_extension` (depend.ml:92-96).
+pub fn error_extension_to_anyhow(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    extension: &crate::parser::ast::Extension,
+) -> anyhow::Error {
+    match crate::types::typecore::builtin_extension_error(arena, extension) {
+        TypeCoreError::ExtensionError(error) => UserDiagnostic::new(
+            format_builtin_extension_error_report(arena, source, filename, &error),
+            2,
+        )
+        .into(),
+        _ => UserDiagnostic::new(String::new(), 2).into(),
+    }
+}
+
 fn format_builtin_extension_error_report(
     arena: &ParseArena,
     source: &str,

@@ -10,12 +10,13 @@
 
 use anyhow::{Context, Result, anyhow};
 use rescript_compiler::binary_ast::{
-    write_signature_ast_current_with_extra_deps_and_builtin_ppx,
+    deps, write_signature_ast_current_with_extra_deps_and_builtin_ppx,
     write_structure_ast_current_with_extra_deps_and_builtin_ppx,
 };
 use rescript_compiler::cmi::cmi_format;
 use rescript_compiler::driver::{
     CompilerOptions, UserDiagnostic, compile_file_to_js_with_options, enable_cli_cleanup_skip,
+    error_extension_to_anyhow,
     run_implementation_frontend, run_interface_frontend, typecheck_interface_file,
 };
 use rescript_compiler::js_ir::ModuleFormat;
@@ -600,6 +601,16 @@ fn generate_ast(
             let _ = stderr.write_all(b"\n");
         }
 
+        if let Some(extension) =
+            deps::signature_error_extension(parser.arena(), &frontend.signature)
+        {
+            return Err(error_extension_to_anyhow(
+                parser.arena(),
+                &source,
+                &filename,
+                &extension,
+            ));
+        }
         // The frontend already applied the builtin PPX.
         write_signature_ast_current_with_extra_deps_and_builtin_ppx(
             &out_path,
@@ -630,6 +641,16 @@ fn generate_ast(
             let _ = stderr.write_all(b"\n");
         }
 
+        if let Some(extension) =
+            deps::structure_error_extension(parser.arena(), &frontend.structure)
+        {
+            return Err(error_extension_to_anyhow(
+                parser.arena(),
+                &source,
+                &filename,
+                &extension,
+            ));
+        }
         // The frontend already applied the builtin PPX.
         write_structure_ast_current_with_extra_deps_and_builtin_ppx(
             &out_path,
