@@ -40,6 +40,9 @@ pub struct JsxConfig {
     pub file_name: String,
     /// First fatal PPX diagnostic found while transforming.
     pub fatal_error: Option<JsxPreprocessorError>,
+    /// OCaml `empty_loc = Location.in_file file_name` (jsx_v4.ml:1021-1022):
+    /// the location of the nodes `map_binding` generates for a component.
+    pub empty_loc: Location,
 }
 
 impl Default for JsxConfig {
@@ -51,6 +54,7 @@ impl Default for JsxConfig {
             has_component: false,
             file_name: String::new(),
             fatal_error: None,
+            empty_loc: Location::none(),
         }
     }
 }
@@ -199,9 +203,16 @@ pub fn transform_structure_with_warnings_result(
         .map(|item| filename_from_loc(&item.pstr_loc, arena))
         .unwrap_or_default();
 
+    // `Location.in_file file_name`: one position shared by start and end.
+    let empty_loc = {
+        let file_name_idx = arena.intern_string(&file_name);
+        let pos = arena.push_pos(file_name_idx, 1, 0, -1);
+        arena.push_loc(pos, pos, true)
+    };
     let mut config = JsxConfig {
         version: initial_version,
         file_name,
+        empty_loc,
         ..Default::default()
     };
 
@@ -259,9 +270,16 @@ pub fn transform_signature_with_warnings_result(
         .map(|item| filename_from_loc(&item.psig_loc, arena))
         .unwrap_or_default();
 
+    // `Location.in_file file_name`: one position shared by start and end.
+    let empty_loc = {
+        let file_name_idx = arena.intern_string(&file_name);
+        let pos = arena.push_pos(file_name_idx, 1, 0, -1);
+        arena.push_loc(pos, pos, true)
+    };
     let mut config = JsxConfig {
         version: initial_version,
         file_name,
+        empty_loc,
         ..Default::default()
     };
 
@@ -438,12 +456,13 @@ fn transform_value_bindings(
     });
 
     if !new_bindings.is_empty() {
+        // jsx_v4.ml:1045-1052: `{pstr_loc = empty_loc; ...}`.
         result.push(StructureItem {
             pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
                 RecFlag::Nonrecursive,
                 new_bindings,
             )))),
-            pstr_loc: empty_loc(),
+            pstr_loc: config.empty_loc,
         });
     }
 
@@ -693,11 +712,11 @@ fn transform_react_component_binding(
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
             Loc {
                 txt: props_lid_idx,
-                loc: empty_loc(),
+                loc: config.empty_loc,
             },
             props_type_params_idx,
         )))),
-        ptyp_loc: empty_loc(),
+        ptyp_loc: config.empty_loc,
         ptyp_attributes: Attributes::new(),
     };
 
@@ -853,15 +872,15 @@ fn transform_react_component_binding(
             pvb_pat: arena.push_pat(Pattern {
                 ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
                     txt: binding_name_idx,
-                    loc: empty_loc(),
+                    loc: config.empty_loc,
                 })),
-                ppat_loc: empty_loc(),
+                ppat_loc: config.empty_loc,
                 ppat_attributes: Attributes::new(),
             }),
             // OCaml line 632: ~attrs:binding.pvb_expr.pexp_attributes
             pvb_expr: arena.push_expr(generated_wrapper_expr),
             pvb_attributes: Attributes::new(),
-            pvb_loc: empty_loc(),
+            pvb_loc: config.empty_loc,
         };
 
         let binding_str_idx = arena.push_interned_string(&binding_name);
@@ -869,7 +888,7 @@ fn transform_react_component_binding(
         let ident_expr_idx = arena.push_expr(Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
                 txt: binding_lid_idx,
-                loc: empty_loc(),
+                loc: config.empty_loc,
             })),
             pexp_loc: pstr_loc.clone(),
             pexp_attributes: Attributes::new(),
@@ -891,7 +910,7 @@ fn transform_react_component_binding(
     let full_expression = if has_forward_ref {
         full_expression
     } else {
-        jsx_component_expr(arena, config, empty_loc(), full_expression)
+        jsx_component_expr(arena, config, config.empty_loc, full_expression)
     };
 
     let final_full_expression = if let Some(wrapper_expr) = binding_wrapper_expr {
@@ -928,7 +947,7 @@ fn transform_react_component_binding(
         }),
         pvb_expr: arena.push_expr(func_expr),
         pvb_attributes: filtered_attrs.clone(),
-        pvb_loc: empty_loc(),
+        pvb_loc: config.empty_loc,
     };
 
     let new_binding = if !full_module_name.is_empty() {
@@ -986,7 +1005,7 @@ fn transform_react_component_with_props_binding(
 
     // Create props pattern based on the original function's pattern
     let binding_expr = arena.get_expr(binding.pvb_expr).clone();
-    let props_pattern = make_with_props_pattern(arena, &binding_expr);
+    let props_pattern = make_with_props_pattern(arena, &binding_expr, config.empty_loc);
 
     // Create the applied expression: fnName(props) or fnName$Internal(props)
     let called_fn_name = match rec_flag {
@@ -1001,7 +1020,7 @@ fn transform_react_component_with_props_binding(
     let funct_idx = arena.push_expr(Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
             txt: called_fn_lid,
-            loc: empty_loc(),
+            loc: config.empty_loc,
         })),
         pexp_loc: empty_loc(),
         pexp_attributes: Attributes::new(),
@@ -1014,7 +1033,7 @@ fn transform_react_component_with_props_binding(
                 arena.push_expr(Expression {
                     pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
                         txt: props_lid,
-                        loc: empty_loc(),
+                        loc: config.empty_loc,
                     })),
                     pexp_loc: empty_loc(),
                     pexp_attributes: Attributes::new(),
@@ -1062,7 +1081,7 @@ fn transform_react_component_with_props_binding(
                 pvb_pat: arena.push_pat(Pattern {
                     ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
                         txt: full_module_name_idx,
-                        loc: empty_loc(),
+                        loc: config.empty_loc,
                     })),
                     ppat_loc: empty_loc(),
                     ppat_attributes: Attributes::new(),
@@ -1076,7 +1095,7 @@ fn transform_react_component_with_props_binding(
                 arena.push_expr(Expression {
                     pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
                         txt: lid,
-                        loc: empty_loc(),
+                        loc: config.empty_loc,
                     })),
                     pexp_loc: empty_loc(),
                     pexp_attributes: Attributes::new(),
@@ -1089,16 +1108,16 @@ fn transform_react_component_with_props_binding(
 
     // jsx_v4.ml's componentWithProps path applies the same component identity
     // coercion to its generated wrapper.
-    let internal_expr = jsx_component_expr(arena, config, empty_loc(), internal_expr);
+    let internal_expr = jsx_component_expr(arena, config, config.empty_loc, internal_expr);
 
-    // Create the new binding
-    // OCaml's make_new_binding uses empty_loc for both pvb_loc and ppat_loc
+    // Create the new binding: `Vb.mk ~attrs (Pat.var {txt = fn_name; loc})`
+    // (jsx_v4.ml:872-874) gives only the name the `empty_loc` location.
     let fn_name_idx = arena.push_interned_string(&fn_name);
     let new_binding = ValueBinding {
         pvb_pat: arena.push_pat(Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
                 txt: fn_name_idx,
-                loc: empty_loc(),
+                loc: config.empty_loc,
             })),
             ppat_loc: empty_loc(),
             ppat_attributes: Attributes::new(),
@@ -1193,7 +1212,7 @@ fn wrap_function_body_with_constraint(
 }
 
 /// Create props pattern for componentWithProps based on the original function's pattern
-fn make_with_props_pattern(arena: &mut ParseArena, expr: &Expression) -> Pattern {
+fn make_with_props_pattern(arena: &mut ParseArena, expr: &Expression, loc: Location) -> Pattern {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun { ref lhs, .. } = **inner;
@@ -1221,7 +1240,7 @@ fn make_with_props_pattern(arena: &mut ParseArena, expr: &Expression) -> Pattern
                             let inner_pat_idx = arena.push_pat(Pattern {
                                 ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
                                     txt: inner_pat_name,
-                                    loc: empty_loc(),
+                                    loc,
                                 })),
                                 ppat_loc: empty_loc(),
                                 ppat_attributes: Attributes::new(),
@@ -1240,7 +1259,7 @@ fn make_with_props_pattern(arena: &mut ParseArena, expr: &Expression) -> Pattern
                                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
                                     Loc {
                                         txt: props_lid,
-                                        loc: empty_loc(),
+                                        loc,
                                     },
                                     props_type_args,
                                 )))),
@@ -1256,22 +1275,22 @@ fn make_with_props_pattern(arena: &mut ParseArena, expr: &Expression) -> Pattern
                                 ppat_attributes: Attributes::new(),
                             }
                         }
-                        None => simple_props_pattern(arena),
+                        None => simple_props_pattern(arena, loc),
                     }
                 }
-                _ => simple_props_pattern(arena),
+                _ => simple_props_pattern(arena, loc),
             }
         }
-        _ => simple_props_pattern(arena),
+        _ => simple_props_pattern(arena, loc),
     }
 }
 
-fn simple_props_pattern(arena: &mut ParseArena) -> Pattern {
+fn simple_props_pattern(arena: &mut ParseArena, loc: Location) -> Pattern {
     let props_str_idx = arena.intern_string("props");
     Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
             txt: props_str_idx,
-            loc: empty_loc(),
+            loc,
         })),
         ppat_loc: empty_loc(),
         ppat_attributes: Attributes::new(),

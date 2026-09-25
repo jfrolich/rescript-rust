@@ -4689,7 +4689,15 @@ fn push_compiler_error_report_header(
     let start_pos = arena.loc_start(loc);
     let end_pos = arena.loc_end(loc);
     if !code_frame::has_printable_range(start_pos, end_pos) {
-        push_compiler_report_location(output, filename);
+        // `Location.show_filename` (location.ml:38): the location's own file
+        // name unless it is the `_none_` placeholder.
+        let pos_fname = arena.get_string(start_pos.file_name);
+        let shown = if pos_fname.is_empty() || pos_fname == "_none_" {
+            filename
+        } else {
+            pos_fname
+        };
+        push_compiler_report_location(output, shown);
     } else {
         let location = code_frame::format_location(filename, start_pos, end_pos);
         push_compiler_report_location(output, &location);
@@ -5936,18 +5944,6 @@ fn format_type_path_for_report(path: &crate::types::Path) -> String {
         .to_string()
 }
 
-fn compilation_unit_name(filename: &str) -> String {
-    let stem = std::path::Path::new(filename)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or(filename);
-    let mut chars = stem.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars).collect(),
-        None => stem.to_string(),
-    }
-}
-
 fn format_unbound_value_report(
     arena: &ParseArena,
     source: &str,
@@ -6015,20 +6011,6 @@ fn format_unbound_value_report(
         message.push_str(RESET);
     }
 
-    // Generated JSX component lookups use Location.none. OCaml's diagnostic
-    // header reads Location.input_name in that case, which the compiler driver
-    // has set to the compilation-unit name rather than the source path.
-    let report_filename;
-    let filename = if qualifier.is_some()
-        && arena.loc_ghost(loc)
-        && arena.loc_start(loc).cnum < 0
-        && arena.loc_end(loc).cnum < 0
-    {
-        report_filename = compilation_unit_name(filename);
-        &report_filename
-    } else {
-        filename
-    };
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
