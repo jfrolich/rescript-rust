@@ -1569,3 +1569,50 @@ pub(super) fn print_tagged_template_non_tag(ppf: &mut Ppf<'_>, ctx: &TypeContext
     ppf.str(".");
     ppf.close_box();
 }
+
+/// `Printtyp.report_unification_error ppf Env.empty trace txt1 txt2`.
+pub(super) fn print_report_unification_error(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    raw_trace: &[(TypeExprRef, TypeExprRef)],
+    txt1: &str,
+    txt2: &str,
+) {
+    let tr = expand_trace(ctx, raw_trace);
+    let mut printer = Printtyp::new(ctx);
+    printer.report_unification_error(ppf, true, &tr, txt1, txt2);
+}
+
+/// `Typecore.report_error`'s `Name_type_mismatch (kind, lid, tp, tpl)`
+/// (typecore.ml:4973-4986).
+pub(super) fn print_name_type_mismatch(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    env: Option<&Env>,
+    kind: &str,
+    lid: &str,
+    tp: &(Path, Path),
+    tpl: &[(Path, Path)],
+) {
+    let mut printer = match env {
+        Some(env) => printer_with_env(ctx, env),
+        None => Printtyp::new(ctx),
+    };
+    let name = if kind == "record" { "field" } else { "constructor" };
+    printer.report_ambiguous_type_error(
+        ppf,
+        tp,
+        tpl,
+        &mut |ppf| {
+            ppf.str(&format!("The {name} {lid}"));
+            ppf.space();
+            ppf.str(&format!("belongs to the {kind} type"));
+        },
+        &mut |ppf| {
+            ppf.str(&format!("The {name} {lid}"));
+            ppf.space();
+            ppf.str(&format!("belongs to one of the following {kind} types:"));
+        },
+        &mut |ppf| ppf.str(&format!("but a {name} was expected belonging to the {kind} type")),
+    );
+}

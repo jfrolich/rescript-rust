@@ -2278,3 +2278,107 @@ fn print_record_field_subtype_violation<W: std::io::Write>(
         }
     }
 }
+
+impl<'a> Printtyp<'a> {
+    /// `unification_error env unif tr txt1 ppf txt2` (printtyp.ml:1480-1500),
+    /// the reporter of `Printtyp.report_unification_error`. The
+    /// `warn_on_missing_def` hints are printed only for a non-empty env, which
+    /// no Rust caller passes.
+    pub(crate) fn report_unification_error<W: std::io::Write>(
+        &mut self,
+        ppf: &mut Formatter<W>,
+        unif: bool,
+        tr: &[TracePair],
+        txt1: &str,
+        txt2: &str,
+    ) {
+        self.reset();
+        self.trace_same_names(tr);
+        let tr: Vec<TracePair> = tr.iter().map(|&(t, t2)| (t, self.hide_variant_name(t2))).collect();
+        let mis = self.mismatch(&tr);
+        let [first, second, rest @ ..] = tr.as_slice() else {
+            return;
+        };
+        let rest = self.filter_trace(mis.is_none(), rest);
+        let compact = rest.is_empty();
+        let (t1, t1e) = self.may_prepare_expansion(compact, *first);
+        let (t2, t2e) = self.may_prepare_expansion(compact, *second);
+        let rest: Vec<TracePair> = rest.into_iter().map(|p| self.prepare_expansion(p)).collect();
+        ppf.open_box(BoxKind::V, 0);
+        ppf.open_box(BoxKind::Box, 0);
+        ppf.str(txt1);
+        ppf.break_(1, 2);
+        self.type_expansion(ppf, t1, t1e);
+        ppf.space();
+        ppf.str(txt2);
+        ppf.break_(1, 2);
+        self.type_expansion(ppf, t2, t2e);
+        ppf.close_box();
+        self.plain_trace(ppf, false, "is not compatible with type", &rest);
+        if let Some((t3, t4)) = mis {
+            self.explanation(ppf, unif, t3, t4);
+        }
+        ppf.close_box();
+    }
+}
+
+impl<'a> Printtyp<'a> {
+    /// `type_path_expansion tp ppf tp'` (printtyp.ml:1243-1245).
+    fn type_path_expansion<W: std::io::Write>(&self, ppf: &mut Formatter<W>, tp: &Path, tp2: &Path) {
+        if tp.same(tp2) {
+            ppf.str(&self.path_text(tp));
+        } else {
+            ppf.open_box(BoxKind::Box, 2);
+            ppf.str(&self.path_text(tp));
+            ppf.space();
+            ppf.str("=");
+            ppf.space();
+            ppf.str(&self.path_text(tp2));
+            ppf.close_box();
+        }
+    }
+
+    /// `report_ambiguous_type_error ppf env (tp0, tp0') tpl txt1 txt2 txt3`
+    /// (printtyp.ml:1805-1822), after `wrap_printing_env env`.
+    pub(crate) fn report_ambiguous_type_error<W: std::io::Write>(
+        &mut self,
+        ppf: &mut Formatter<W>,
+        tp0: &(Path, Path),
+        tpl: &[(Path, Path)],
+        txt1: &mut dyn FnMut(&mut Formatter<W>),
+        txt2: &mut dyn FnMut(&mut Formatter<W>),
+        txt3: &mut dyn FnMut(&mut Formatter<W>),
+    ) {
+        self.reset();
+        for (tp, tp2) in tpl {
+            self.path_same_name(&tp0.0, tp);
+            self.path_same_name(&tp0.1, tp2);
+        }
+        ppf.open_box(BoxKind::Box, 0);
+        match tpl {
+            [] => {}
+            [(tp, tp2)] => {
+                txt1(ppf);
+                ppf.break_(1, 2);
+                self.type_path_expansion(ppf, tp, tp2);
+            }
+            _ => {
+                txt2(ppf);
+                ppf.break_(1, 2);
+                ppf.open_box(BoxKind::HV, 0);
+                for (index, (tp, tp2)) in tpl.iter().enumerate() {
+                    if index > 0 {
+                        ppf.break_(2, 0);
+                    }
+                    self.type_path_expansion(ppf, tp, tp2);
+                }
+                ppf.close_box();
+            }
+        }
+        ppf.space();
+        txt3(ppf);
+        ppf.break_(1, 2);
+        self.type_path_expansion(ppf, &tp0.0, &tp0.1);
+        ppf.close_box();
+    }
+}

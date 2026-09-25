@@ -3343,6 +3343,7 @@ fn type_mod_error_to_anyhow(
             alternatives,
         }) => UserDiagnostic::new(
             format_name_type_mismatch_report(
+                type_ctx,
                 arena,
                 source,
                 filename,
@@ -5330,20 +5331,17 @@ fn format_type_mismatch_report(
     loc: LocIdx,
     trace: &[(TypeExprRef, TypeExprRef)],
 ) -> String {
-    let Some((actual, expected)) = trace.first().copied() else {
-        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
-    };
-    format_compiler_error_report(
-        arena,
-        source,
-        filename,
-        loc,
-        &format!(
-            "This type {} should be an instance of type {}",
-            format_type_expr(type_ctx, actual),
-            format_type_expr(type_ctx, expected)
-        ),
-    )
+    // Typetexp `Type_mismatch` (typetexp.ml:790-794).
+    let message = type_clash::render_error_message(|ppf| {
+        type_clash::print_report_unification_error(
+            ppf,
+            type_ctx,
+            trace,
+            "This type",
+            "should be an instance of type",
+        )
+    });
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn format_alias_type_mismatch_report(
@@ -5354,20 +5352,17 @@ fn format_alias_type_mismatch_report(
     loc: LocIdx,
     trace: &[(TypeExprRef, TypeExprRef)],
 ) -> String {
-    let Some((actual, expected)) = trace.first().copied() else {
-        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
-    };
-    format_compiler_error_report(
-        arena,
-        source,
-        filename,
-        loc,
-        &format!(
-            "This alias is bound to type {} but is used as an instance of type {}",
-            format_type_expr(type_ctx, actual),
-            format_type_expr(type_ctx, expected)
-        ),
-    )
+    // Typetexp `Alias_type_mismatch` (typetexp.ml:795-799).
+    let message = type_clash::render_error_message(|ppf| {
+        type_clash::print_report_unification_error(
+            ppf,
+            type_ctx,
+            trace,
+            "This alias is bound to type",
+            "but is used as an instance of type",
+        )
+    });
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn format_type_arity_mismatch_report(
@@ -5818,6 +5813,7 @@ fn format_wrong_name_report(
 }
 
 fn format_name_type_mismatch_report(
+    type_ctx: &TypeContext,
     arena: &ParseArena,
     source: &str,
     filename: &str,
@@ -5827,26 +5823,11 @@ fn format_name_type_mismatch_report(
     expected: &(crate::types::Path, crate::types::Path),
     alternatives: &[(crate::types::Path, crate::types::Path)],
 ) -> String {
-    let label = if kind == "record" { "field" } else { kind };
-    let expected_type = format_type_path_for_report(&expected.1);
     let lid = format_longident_for_report(arena, lid);
-    let message = match alternatives {
-        [(actual, _)] => format!(
-            "The {label} {lid} belongs to the {kind} type {}\nbut a {label} was expected belonging to the {kind} type {expected_type}",
-            format_type_path_for_report(actual)
-        ),
-        _ => {
-            let types = alternatives
-                .iter()
-                .map(|(path, _)| format_type_path_for_report(path))
-                .collect::<Vec<_>>()
-                .join("\n  ");
-            format!(
-                "The {label} {lid} belongs to one of the following {kind} types:\n  {types}\nbut a {label} was expected belonging to the {kind} type {expected_type}"
-            )
-        }
-    };
-    format_compiler_error_report(arena, source, filename, loc, &message)
+    let message = type_clash::render_error_message(|ppf| {
+        type_clash::print_name_type_mismatch(ppf, type_ctx, None, kind, &lid, expected, alternatives)
+    });
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn format_undefined_method_report(
