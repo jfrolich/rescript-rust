@@ -14617,7 +14617,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
             crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Modtype);
             let path = lookup_modtype_path_or_error(
                 &longident,
-                lid.loc,
+                mty.pmty_loc,
                 arena,
                 env,
                 &mut tctx.persistent_env,
@@ -14789,7 +14789,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 TypeModError::CoreError(crate::types::typecore::unbound_module_lookup_error(
                     tctx,
                     env,
-                    arena.none_loc(),
+                    mty.pmty_loc,
                     &longident,
                 ))
             })?;
@@ -15054,7 +15054,7 @@ fn approx_modtype_rec<'a>(
             crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Modtype);
             let path = lookup_modtype_path_or_error(
                 &longident,
-                lid.loc,
+                mty.pmty_loc,
                 arena,
                 env,
                 &mut tctx.persistent_env,
@@ -15077,7 +15077,7 @@ fn approx_modtype_rec<'a>(
                 TypeModError::CoreError(crate::types::typecore::unbound_module_lookup_error(
                     tctx,
                     env,
-                    arena.none_loc(),
+                    mty.pmty_loc,
                     &longident,
                 ))
             })?;
@@ -18261,7 +18261,7 @@ fn transl_modtype<'a>(
             crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Modtype);
             let path = lookup_modtype_path_or_error(
                 &longident,
-                lid.loc,
+                smty.pmty_loc,
                 arena,
                 env,
                 &mut tctx.persistent_env,
@@ -18351,7 +18351,7 @@ fn transl_modtype<'a>(
                 TypeModError::CoreError(crate::types::typecore::unbound_module_lookup_error(
                     tctx,
                     env,
-                    arena.none_loc(),
+                    smty.pmty_loc,
                     &longident,
                 ))
             })?;
