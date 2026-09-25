@@ -520,7 +520,7 @@ impl<'a> Checker<'a> {
             let (fields, _closed) = &**inner;
             for field in fields.iter().rev() {
                 if let ObjectField::Otag(_label, attrs, field_type) = field {
-                    validate_object_field_method_attrs(attrs, self.arena)?;
+                    validate_object_field_method_attrs(attrs, self.arena, &mut self.warnings)?;
                     self.typ(*field_type)?;
                 }
             }

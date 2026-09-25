@@ -11693,8 +11693,25 @@ fn validate_method_attribute_bool_payload(
     }
 }
 
-fn validate_object_field_method_attrs(attrs: &[Attribute], arena: &ParseArena) -> PpxResult<()> {
+/// `Ast_attributes.process_method_attributes_rev` (ast_attributes.ml): each
+/// `@get`/`@set` payload is read with `Ast_payload.ident_or_record_as_config`,
+/// which warns about a payload it cannot use.
+fn validate_object_field_method_attrs(
+    attrs: &[Attribute],
+    arena: &ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) -> PpxResult<()> {
     for (attr_name, payload) in attrs {
+        if matches!(arena.get_string(attr_name.txt), "get" | "set")
+            && let Some((loc, message)) = return_wrapper_config_warning(payload, arena, attr_name.loc)
+        {
+            warnings.push(PpxWarning {
+                loc,
+                warning: Warning::BsDeriveWarning {
+                    message: message.to_string(),
+                },
+            });
+        }
         match arena.get_string(attr_name.txt) {
             "get" => {
                 validate_method_attribute_config_names(payload, arena, |name, loc, opt_expr| {
