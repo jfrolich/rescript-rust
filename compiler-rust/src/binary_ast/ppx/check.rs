@@ -8,6 +8,9 @@
 //! rebuilt constructor, function application or record right to left, while
 //! `List.map`/`Ext_list.map` visit lists left to right and `Ext_list.fold_right`
 //! right to left.
+//!
+//! The warnings the mapper prints (`Location.prerr_warning`) are collected in
+//! the same walk, so only those emitted before the first error are reported.
 
 use super::*;
 use crate::parser::ast::{Extension, ModuleBinding, ModuleTypeDeclaration};
@@ -18,6 +21,8 @@ pub(super) struct Checker<'a> {
     async_context: bool,
     /// `in_function_def`: whether the expression is the body of a function.
     in_function_def: bool,
+    /// Warnings emitted so far, in mapping order.
+    pub(super) warnings: Vec<PpxWarning>,
 }
 
 impl<'a> Checker<'a> {
@@ -26,6 +31,7 @@ impl<'a> Checker<'a> {
             arena,
             async_context: true,
             in_function_def: false,
+            warnings: Vec::new(),
         }
     }
 
@@ -46,8 +52,13 @@ impl<'a> Checker<'a> {
         if let StructureItemDesc::Pstr_extension(inner) = &*item.pstr_desc {
             let ((ext_name, payload), _attrs) = &**inner;
             match self.arena.get_string(ext_name.txt) {
-                // `Ast_exp_handle_external.handle_raw_structure`.
-                "raw" => return validate_structure_extension_payload_error(&inner.0, self.arena),
+                // `Ast_exp_handle_external.handle_raw_structure`: the Flow
+                // parse of a string payload warns about its errors.
+                "raw" => {
+                    validate_structure_extension_payload_error(&inner.0, self.arena)?;
+                    push_raw_js_program_warning(payload, self.arena, &mut self.warnings);
+                    return Ok(());
+                }
                 // `aux` maps each payload item with `self.structure_item`.
                 "private" => {
                     for work in private_extension_structure_items(payload, ext_name.loc)? {
@@ -209,14 +220,14 @@ impl<'a> Checker<'a> {
         tdcls: &[TypeDeclaration],
         in_structure: bool,
     ) -> PpxResult<()> {
-        match deriving_process_derive_type(tdcls, self.arena)? {
+        match deriving_process_derive_type(tdcls, self.arena, &mut self.warnings)? {
             Some(payload) => {
                 let payload = payload.clone();
                 let last = tdcls.len() - 1;
                 for (index, tdcl) in tdcls.iter().enumerate() {
                     self.type_declaration(tdcl, index == last)?;
                 }
-                validate_deriving_actions(tdcls, self.arena, in_structure, &payload)
+                run_derivers(tdcls, self.arena, in_structure, &payload, &mut self.warnings)
             }
             None => {
                 for tdcl in tdcls {
@@ -232,7 +243,7 @@ impl<'a> Checker<'a> {
     fn external(&mut self, vd: &ValueDescription) -> PpxResult<()> {
         self.typ(vd.pval_type)?;
         self.attributes(&vd.pval_attributes)?;
-        validate_external_attribute_errors(vd, self.arena)
+        validate_external_attribute_errors(vd, self.arena, &mut self.warnings)
     }
 
     // ------------------------------------------------------------------
@@ -687,7 +698,9 @@ impl<'a> Checker<'a> {
         self.in_function_def = false;
         match &*expr.pexp_desc {
             // `Ast_exp_extension.handle_extension` (ast_exp_extension.ml:26-83).
-            ExpressionDesc::Pexp_extension(extension) => self.expression_extension(extension),
+            ExpressionDesc::Pexp_extension(extension) => {
+                self.expression_extension(expr.pexp_loc, extension)
+            }
             ExpressionDesc::Pexp_constant(constant) => match &**constant {
                 // `Ast_utf8_string_interp.transform_exp`.
                 Constant::String(s, Some(delim)) => {
@@ -873,12 +886,39 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// `Ast_exp_extension.handle_extension`: the payload is not mapped,
-    /// except the fields of `%obj`.
-    fn expression_extension(&mut self, extension: &Extension) -> PpxResult<()> {
+    /// `Ast_exp_extension.handle_extension` (ast_exp_extension.ml:26-83): the
+    /// payload is not mapped, except the fields of `%obj`.
+    fn expression_extension(&mut self, loc: LocIdx, extension: &Extension) -> PpxResult<()> {
         let (ext_name, payload) = extension;
-        if self.arena.get_string(ext_name.txt) != "obj" {
-            return validate_expression_extension_payload_error(extension, self.arena);
+        match self.arena.get_string(ext_name.txt) {
+            "obj" => {}
+            "todo" => {
+                self.warnings.push(PpxWarning {
+                    loc,
+                    warning: Warning::BsTodo {
+                        message: todo_payload_message(payload, self.arena),
+                    },
+                });
+                return Ok(());
+            }
+            // `Ast_payload.raw_as_string_exp_exn` warns about the Flow parse
+            // errors of a string payload before `handle_ffi` rejects one that
+            // is not a function.
+            "ffi" => {
+                push_raw_js_expression_warning(payload, self.arena, &mut self.warnings);
+                return validate_expression_extension_payload_error(extension, self.arena);
+            }
+            "raw" => {
+                validate_expression_extension_payload_error(extension, self.arena)?;
+                push_raw_js_expression_warning(payload, self.arena, &mut self.warnings);
+                return Ok(());
+            }
+            "re" => {
+                validate_expression_extension_payload_error(extension, self.arena)?;
+                push_raw_re_warning(payload, self.arena, &mut self.warnings);
+                return Ok(());
+            }
+            _ => return validate_expression_extension_payload_error(extension, self.arena),
         }
         let Some(fields) = payload_single_record_fields_without_spread(payload, self.arena) else {
             return Err(PpxError::at_loc(ext_name.loc, "Expect a record expression here"));

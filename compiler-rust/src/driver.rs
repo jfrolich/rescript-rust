@@ -1722,12 +1722,15 @@ pub(crate) fn jsx_preserve_for_structure(
     options.jsx_preserve || structure_has_config_string(structure, "-bs-jsx-preserve", arena)
 }
 
+/// `builtin_ppx_warnings` receives the warnings the builtin mapper prints,
+/// including those emitted before a mapper error.
 fn preprocess_signature_for_typecheck_with_source(
     signature: Signature,
     options: &CompilerOptions,
     arena: &mut crate::parse_arena::ParseArena,
     source: &str,
     filename: &str,
+    builtin_ppx_warnings: &mut Vec<ppx::PpxWarning>,
 ) -> Result<Signature> {
     let signature = if let Some(jsx_version) = options.jsx_version {
         jsx_ppx::transform_signature_result(signature, jsx_version, arena)
@@ -1739,8 +1742,9 @@ fn preprocess_signature_for_typecheck_with_source(
     if options.no_builtin_ppx {
         Ok(signature)
     } else {
-        ppx::rewrite_signature(&signature, arena)
-            .map_err(|e| ppx_error_to_anyhow(e, arena, source, filename))
+        let (rewritten, warnings) = ppx::rewrite_signature_with_warnings(&signature, arena);
+        builtin_ppx_warnings.extend(warnings);
+        rewritten.map_err(|e| ppx_error_to_anyhow(e, arena, source, filename))
     }
 }
 
@@ -11249,7 +11253,12 @@ pub fn run_implementation_frontend(
         // OCaml `Ast_config.process_str` marks the leading `@@config` before
         // the builtin mapper runs (compiler/frontend/ppx_entry.ml:48-50).
         ppx::mark_config_attributes_structure(&structure, parser.arena());
-        let ppx_warnings = ppx::collect_raw_js_warnings(&structure, parser.arena_mut());
+        // Rewrite expressions: desugar pipe (->), setter (#=), property access (##),
+        // await, tagged templates, encode externals, and apply spice mapper rewrites.
+        // spice is handled here, so avoid running a second top-level spice expansion pass.
+        // The mapper's warnings precede its error.
+        let (rewritten, ppx_warnings) =
+            ppx::rewrite_structure_with_warnings(&structure, parser.arena_mut());
         ppx_warnings_have_errors |= format_ppx_warnings_with_config(
             parser.arena(),
             source,
@@ -11258,12 +11267,8 @@ pub fn run_implementation_frontend(
             &ppx_warnings,
             out,
         );
-
-        // Rewrite expressions: desugar pipe (->), setter (#=), property access (##),
-        // await, tagged templates, encode externals, and apply spice mapper rewrites.
-        // spice is handled here, so avoid running a second top-level spice expansion pass.
-        let rewritten = ppx::rewrite_structure(&structure, parser.arena_mut())
-            .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
+        let rewritten =
+            rewritten.map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
         // OCaml `Bs_ast_invariant.emit_external_warnings_on_structure` runs over
         // the rewritten structure (compiler/frontend/ppx_entry.ml:60-63).
         let (unused_attribute_warnings, invariant_error) =
@@ -12274,23 +12279,25 @@ pub fn run_interface_frontend(
         &frontend_warning_specs,
     );
     let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
+    let mut builtin_ppx_warnings = Vec::new();
     let signature = preprocess_signature_for_typecheck_with_source(
         signature,
         options,
         parser.arena_mut(),
         source,
         filename,
-    )?;
+        &mut builtin_ppx_warnings,
+    );
+    ppx_warnings_have_errors |= format_ppx_warnings_with_config(
+        parser.arena(),
+        source,
+        filename,
+        &file_warning_config,
+        &builtin_ppx_warnings,
+        out,
+    );
+    let signature = signature?;
     if !options.no_builtin_ppx {
-        let ppx_warnings = ppx::collect_signature_warnings(&signature, parser.arena());
-        ppx_warnings_have_errors |= format_ppx_warnings_with_config(
-            parser.arena(),
-            source,
-            filename,
-            &file_warning_config,
-            &ppx_warnings,
-            out,
-        );
         // OCaml `Ast_config.process_sig` + `emit_external_warnings_on_signature`.
         ppx::mark_config_attributes_signature(&signature, parser.arena());
         let (unused_attribute_warnings, invariant_error) =
@@ -12754,6 +12761,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             parser.arena_mut(),
             source,
             filename,
+            &mut Vec::new(),
         )?;
         parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
@@ -12862,7 +12870,10 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             structure
         } else {
             ppx::mark_config_attributes_structure(&structure, parser.arena());
-            let ppx_warnings = ppx::collect_raw_js_warnings(&structure, parser.arena_mut());
+            let structure = ppx::expand_extensions(&structure, parser.arena_mut())
+                .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
+            let (rewritten, ppx_warnings) =
+                ppx::rewrite_structure_with_warnings(&structure, parser.arena_mut());
             let _ = emit_ppx_warnings_with_config(
                 parser.arena(),
                 source,
@@ -12870,10 +12881,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 &file_warning_config,
                 &ppx_warnings,
             );
-
-            let structure = ppx::expand_extensions(&structure, parser.arena_mut())
-                .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
-            let rewritten = ppx::rewrite_structure(&structure, parser.arena_mut())
+            let rewritten = rewritten
                 .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
             let (unused_attribute_warnings, invariant_error) =
                 ppx::collect_unused_attribute_warnings_structure(&rewritten, parser.arena());
@@ -15544,6 +15552,7 @@ pub fn typecheck_interface_in_process(
         parser.arena_mut(),
         source,
         filename,
+        &mut Vec::new(),
     )?;
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
