@@ -16399,18 +16399,6 @@ fn type_coerce(
     // Translate the target type.
     let (to_typed_ctype, to_ty) = transl_type(tctx, env, to_type)?;
 
-    // OCaml: rue { ... exp_type = ty'; ... } — unify coercion target with expected
-    // Keep original argument order to preserve Tlink direction.
-    let inst_expected = instance_if_generic(ctx, expected_ty);
-    if crate::types::unify(ctx, &mut tctx.unify_state, inst_expected, to_ty).is_err() {
-        return Err(TypeCoreError::ExprTypeClash {
-            loc,
-            trace: vec![(inst_expected, to_ty)],
-            context: None,
-            env: Some(tctx.type_ctx.store_typed_env(env)),
-        });
-    }
-
     let typed_inner = if let Some(from_type) = opt_from_type {
         let (_from_typed_ctype, from_ty) = transl_type(tctx, env, from_type)?;
         type_expect(tctx, env, inner_expr, from_ty, None)?
@@ -16474,6 +16462,12 @@ fn type_coerce(
             },
         },
     )?;
+
+    // OCaml `rue { exp_type = ty'; ... }` (typecore.ml:3295-3305, 2369-2371)
+    // after the coercion check: `unify_exp` at the coercion's location
+    // (`proper_exp_loc`) of `ty'` with `instance env ty_expected`.
+    let inst_expected = instance_if_generic(ctx, expected_ty);
+    unify_expression_types(tctx, loc, to_ty, inst_expected, None)?;
 
     // Return the inner expression with the coercion as exp_extra
     // The expression type becomes the target type after coercion
