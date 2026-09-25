@@ -12548,7 +12548,7 @@ pub fn run_interface_frontend(
         );
         // OCaml `Ast_config.process_sig` + `emit_external_warnings_on_signature`.
         ppx::mark_config_attributes_signature(&signature, parser.arena());
-        let unused_attribute_warnings =
+        let (unused_attribute_warnings, invariant_error) =
             ppx::collect_unused_attribute_warnings_signature(&signature, parser.arena());
         ppx_warnings_have_errors |= format_ppx_warnings_with_config(
             parser.arena(),
@@ -12558,6 +12558,9 @@ pub fn run_interface_frontend(
             &unused_attribute_warnings,
             out,
         );
+        if let Some(e) = invariant_error {
+            return Err(ppx_error_to_anyhow(e, parser.arena(), source, filename));
+        }
     }
     Ok(InterfaceFrontend {
         signature,
