@@ -2136,10 +2136,14 @@ fn validate_external_attribute_errors(
     let vd_type = arena.get_core_type(vd.pval_type).clone();
     let (args, result_type) = list_of_arrow(&vd_type, arena);
 
-    validate_external_attribute_payload_errors(&vd.pval_attributes, prim_name.as_str(), arena)?;
+    // OCaml `handle_external_in_stru`/`handle_external_in_sig` map the
+    // attributes with the builtin mapper before `encode_attributes_as_string`
+    // (ast_external.ml:29-39, 58-68), so payload checks see expanded payloads.
+    let mapped_attrs = rewrite_attributes(&vd.pval_attributes, arena);
+    validate_external_attribute_payload_errors(&mapped_attrs, prim_name.as_str(), arena)?;
 
     let desc = parse_external_attrs(
-        &vd.pval_attributes,
+        &mapped_attrs,
         prim_name.as_str(),
         args.is_empty(),
         vd.pval_loc,
@@ -3924,25 +3928,24 @@ fn validate_module_import_attributes_payload(
     };
 
     for field in with_fields {
+        // OCaml checks the value shape before the key (ast_external_process.ml:283-293).
         let field_expr = arena.get_expr(field.expr);
+        let is_string = matches!(
+            &*field_expr.pexp_desc,
+            ExpressionDesc::Pexp_constant(c) if matches!(&**c, current::Constant::String(_, _))
+        );
+        if !is_string {
+            return Err(PpxError::at_loc(
+                field_expr.pexp_loc,
+                "Only string values are allowed here.",
+            ));
+        }
         let Longident::Lident(_) = arena.get_longident(field.lid.txt) else {
             return Err(PpxError::at_loc(
                 field_expr.pexp_loc,
                 "Field must be a regular key.",
             ));
         };
-        let ExpressionDesc::Pexp_constant(c) = &*field_expr.pexp_desc else {
-            return Err(PpxError::at_loc(
-                field_expr.pexp_loc,
-                "Only string values are allowed here.",
-            ));
-        };
-        if !matches!(&**c, current::Constant::String(_, _)) {
-            return Err(PpxError::at_loc(
-                field_expr.pexp_loc,
-                "Only string values are allowed here.",
-            ));
-        }
     }
 
     Ok(true)
