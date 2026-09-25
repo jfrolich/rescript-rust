@@ -12223,7 +12223,10 @@ fn validate_structure_deriving_errors(
     structure: &[StructureItem],
     arena: &mut ParseArena,
 ) -> PpxResult<()> {
-    for item in structure {
+    // OCaml raises these errors while `Bs_builtin_ppx.structure_mapper`
+    // maps the items, in its order.
+    for index in structure_mapper_order(structure, arena) {
+        let item = &structure[index];
         match &*item.pstr_desc {
             StructureItemDesc::Pstr_type(inner) => {
                 let (_rec_flag, tdcls) = &**inner;
@@ -12837,7 +12840,10 @@ fn validate_structure_method_attribute_errors(
     structure: &[StructureItem],
     arena: &mut ParseArena,
 ) -> PpxResult<()> {
-    for item in structure {
+    // OCaml raises these errors while `Bs_builtin_ppx.structure_mapper`
+    // maps the items, in its order.
+    for index in structure_mapper_order(structure, arena) {
+        let item = &structure[index];
         match &*item.pstr_desc {
             StructureItemDesc::Pstr_eval(inner) => {
                 let (expr, attrs) = &**inner;
@@ -14119,7 +14125,10 @@ fn validate_structure_js_string_errors(
     structure: &[StructureItem],
     arena: &mut ParseArena,
 ) -> PpxResult<()> {
-    for item in structure {
+    // OCaml raises these errors while `Bs_builtin_ppx.structure_mapper`
+    // maps the items, in its order.
+    for index in structure_mapper_order(structure, arena) {
+        let item = &structure[index];
         match &*item.pstr_desc {
             StructureItemDesc::Pstr_eval(inner) => {
                 let (expr, attrs) = &**inner;
@@ -14262,7 +14271,10 @@ fn validate_structure_await_errors(
     arena: &mut ParseArena,
     async_context: bool,
 ) -> PpxResult<()> {
-    for item in structure {
+    // OCaml raises these errors while `Bs_builtin_ppx.structure_mapper`
+    // maps the items, in its order.
+    for index in structure_mapper_order(structure, arena) {
+        let item = &structure[index];
         match &*item.pstr_desc {
             StructureItemDesc::Pstr_eval(inner) => {
                 let (expr, attrs) = &**inner;
@@ -14942,7 +14954,10 @@ fn validate_structure_this_errors(
     structure: &[StructureItem],
     arena: &mut ParseArena,
 ) -> PpxResult<()> {
-    for item in structure {
+    // OCaml raises these errors while `Bs_builtin_ppx.structure_mapper`
+    // maps the items, in its order.
+    for index in structure_mapper_order(structure, arena) {
+        let item = &structure[index];
         match &*item.pstr_desc {
             StructureItemDesc::Pstr_value(inner) => {
                 let (_rec_flag, bindings) = &**inner;
@@ -16367,19 +16382,62 @@ pub fn rewrite_structure_for_parser_debug(
     with_deferred_ppx_error(result, arena)
 }
 
+/// The builtin PPX's invariant checks of `items`, which OCaml performs while
+/// mapping them.
+fn validate_structure_items(items: &[StructureItem], arena: &mut ParseArena) -> PpxResult<()> {
+    validate_structure_deriving_errors(items, arena)?;
+    validate_structure_method_attribute_errors(items, arena)?;
+    validate_structure_js_string_errors(items, arena)?;
+    validate_structure_await_errors(items, arena, true)?;
+    validate_structure_this_errors(items, arena)
+}
+
+/// The order in which OCaml `Bs_builtin_ppx.structure_mapper`
+/// (bs_builtin_ppx.ml:676-802) maps the items of `structure`: it recurses as
+/// `head :: structure_mapper rest`, evaluated right to left, so most items
+/// are mapped after the rest of the structure; `let` items and `@res.await`
+/// module aliases bind their mapped item first, and a run of `%%private`
+/// items maps its payload before the rest.
+fn structure_mapper_order(structure: &[StructureItem], arena: &ParseArena) -> Vec<usize> {
+    let mut order = std::collections::VecDeque::with_capacity(structure.len());
+    let mut units = Vec::new();
+    let mut i = 0;
+    while i < structure.len() {
+        if is_private_extension(&structure[i], arena) {
+            let start = i;
+            while i < structure.len() && is_private_extension(&structure[i], arena) {
+                i += 1;
+            }
+            units.push((start, i, true));
+        } else {
+            units.push((i, i + 1, false));
+            i += 1;
+        }
+    }
+    for &(start, end, private) in units.iter().rev() {
+        let head_first = !private
+            && match &*structure[start].pstr_desc {
+                StructureItemDesc::Pstr_value(_) => true,
+                StructureItemDesc::Pstr_module(mb) => is_await_module_alias(mb, arena),
+                _ => false,
+            };
+        if private || head_first {
+            for index in (start..end).rev() {
+                order.push_front(index);
+            }
+        } else {
+            order.push_back(start);
+        }
+    }
+    order.into_iter().collect()
+}
+
 fn rewrite_structure_impl(
     structure: &[StructureItem],
     arena: &mut ParseArena,
     apply_spice: bool,
     validate_invariants: bool,
 ) -> PpxResult<Vec<StructureItem>> {
-    if validate_invariants {
-        validate_structure_deriving_errors(structure, arena)?;
-        validate_structure_method_attribute_errors(structure, arena)?;
-        validate_structure_js_string_errors(structure, arena)?;
-        validate_structure_await_errors(structure, arena, true)?;
-        validate_structure_this_errors(structure, arena)?;
-    }
 
     // Context for tracking already-created module type names (per-structure scope)
     let mut await_context = std::collections::HashSet::new();
@@ -16445,6 +16503,9 @@ fn rewrite_structure_impl(
                 let Unit::Item(index) = units[unit_index] else {
                     unreachable!("item event for a %%private run")
                 };
+                if validate_invariants {
+                    validate_structure_items(std::slice::from_ref(&structure[index]), arena)?;
+                }
                 slots[unit_index] = rewrite_structure_unit(
                     &structure[index],
                     arena,
@@ -16457,6 +16518,9 @@ fn rewrite_structure_impl(
                 let Unit::Private(start, end) = units[unit_index] else {
                     unreachable!("%%private event for an item")
                 };
+                if validate_invariants {
+                    validate_structure_items(&structure[start..end], arena)?;
+                }
                 let mut mapped = Vec::new();
                 for item in &structure[start..end] {
                     let StructureItemDesc::Pstr_extension(inner) = &*item.pstr_desc else {
