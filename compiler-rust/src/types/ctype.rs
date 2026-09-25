@@ -7712,7 +7712,7 @@ fn unify_row_field<'a>(
 /// Unify object fields.
 /// Flatten an object field chain into a sorted list of (name, kind, type) + rest.
 /// Matches OCaml `flatten_fields` in ctype.ml.
-fn flatten_fields(
+pub(crate) fn flatten_fields(
     ctx: &TypeContext,
     ty: TypeExprRef,
 ) -> (Vec<(String, FieldKind, TypeExprRef)>, TypeExprRef) {

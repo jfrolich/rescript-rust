@@ -1745,3 +1745,63 @@ pub(super) fn print_wrong_name_inline_record_field(
     ppf.close_box();
     did_you_mean(ppf, hint);
 }
+
+/// `Typecore.report_error`'s `Labels_missing` (typecore.ml:4942-4947) and
+/// `Error_message_utils.print_component_labels_missing_error`
+/// (error_message_utils.ml:933-939).
+pub(super) fn print_labels_missing(
+    ppf: &mut Ppf<'_>,
+    labels: &[String],
+    component_name: Option<Option<&str>>,
+) {
+    ppf.open_box(BoxKind::HOV, 0);
+    match component_name {
+        Some(component_name) => {
+            ppf.str("The component ");
+            // `print_component_name` (error_message_utils.ml:914-917).
+            if let Some(name) = component_name {
+                tagged(ppf, TAG_INFO, &format!("<{name} />"));
+                ppf.str(" ");
+            }
+            ppf.str("is missing these required props:");
+            ppf.newline();
+            for label in labels {
+                ppf.space();
+                ppf.str(label);
+            }
+        }
+        None => {
+            ppf.str("Some required record fields are missing:");
+            for label in labels {
+                ppf.space();
+                ppf.str(label);
+            }
+            ppf.str(".");
+        }
+    }
+    ppf.close_box();
+}
+
+/// `Typecore.report_error`'s `Undefined_method (ty, me, valid_methods)`
+/// (typecore.ml:4987-4993).
+pub(super) fn print_undefined_method(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    ty: TypeExprRef,
+    method: &str,
+    hint: Option<Option<&str>>,
+) {
+    let mut printer = Printtyp::new(ctx);
+    ppf.open_box(BoxKind::V, 0);
+    ppf.open_box(BoxKind::Box, 0);
+    ppf.str("This expression has type");
+    ppf.break_(1, 2);
+    typecore_type_expr(ppf, &mut printer, ty);
+    ppf.close_box();
+    ppf.cut();
+    ppf.str(&format!("It has no field {method}"));
+    ppf.close_box();
+    if let Some(hint) = hint {
+        did_you_mean(ppf, hint);
+    }
+}

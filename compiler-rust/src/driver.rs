@@ -5841,34 +5841,11 @@ fn format_undefined_method_report(
     method: &str,
     alternatives: Option<&[String]>,
 ) -> String {
-    let type_text = format_type_expr(type_ctx, ty);
-    if let Some(hint) = alternatives.and_then(|alts| spellcheck_hint(method, alts)) {
-        let mut raw_message = String::new();
-        raw_message.push_str("  This expression has type ");
-        raw_message.push_str(&type_text);
-        raw_message.push('\n');
-        raw_message.push_str("  It has no field ");
-        raw_message.push_str(method);
-        raw_message.push('\n');
-        raw_message.push_str("Hint: Did you mean ");
-        raw_message.push_str(&hint);
-        raw_message.push('?');
-        return format_compiler_error_report_raw_message(
-            arena,
-            source,
-            filename,
-            loc,
-            &raw_message,
-        );
-    }
-
-    format_compiler_error_report(
-        arena,
-        source,
-        filename,
-        loc,
-        &format!("This expression has type {type_text}\nIt has no field {method}"),
-    )
+    let hint = alternatives.map(|alts| spellcheck_hint(method, alts));
+    let message = type_clash::render_error_message(|ppf| {
+        type_clash::print_undefined_method(ppf, type_ctx, ty, method, hint.as_ref().map(|h| h.as_deref()))
+    });
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn format_type_path_for_report(path: &crate::types::Path) -> String {
@@ -6225,32 +6202,12 @@ fn format_labels_missing_report(
     labels: &[String],
     jsx_component_info: Option<&crate::types::typecore::JsxPropErrorInfo>,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
-    let mut message = String::new();
-    if let Some(jsx_component_info) = jsx_component_info {
-        message.push_str("The component ");
-        if let Some(component_name) = &jsx_component_info.component_name {
-            message.push_str(INFO);
-            message.push('<');
-            message.push_str(component_name);
-            message.push_str(" />");
-            message.push_str(RESET);
-            message.push(' ');
-        }
-        message.push_str("is missing these required props:\n ");
-        message.push_str(&labels.join(" "));
-    } else {
-        message.push_str("Some required record fields are missing:");
-        for label in labels {
-            message.push(' ');
-            message.push_str(label);
-        }
-        message.push('.');
-    }
-
-    format_compiler_error_report(arena, source, filename, loc, &message)
+    let component_name =
+        jsx_component_info.map(|info| info.component_name.as_deref());
+    let message = type_clash::render_error_message(|ppf| {
+        type_clash::print_labels_missing(ppf, labels, component_name)
+    });
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 /// `Typecore.report_error`'s `Expr_type_clash` (typecore.ml:4879-4894).

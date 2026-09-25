@@ -17211,41 +17211,16 @@ fn collect_public_methods_from_object_type<'a>(
         }
     };
 
-    let mut methods = Vec::new();
-    let mut seen = HashSet::new();
-    let mut current = fields;
-
-    loop {
-        let current_repr = ctx.repr(current);
-        if !seen.insert(current_repr) {
-            break;
-        }
-
-        let (next, should_collect, method_name, stop) = {
-            let desc = ctx.get_desc(current_repr);
-            match &*desc {
-                TypeDesc::Tfield {
-                    name, kind, rest, ..
-                } => (
-                    *rest,
-                    matches!(kind, crate::types::type_expr::FieldKind::Fpresent),
-                    name.clone(),
-                    false,
-                ),
-                TypeDesc::Tnil => (current_repr, false, String::new(), true),
-                _ => (current_repr, false, String::new(), true),
-            }
-        };
-
-        if stop {
-            break;
-        }
-        if should_collect {
-            methods.push(method_name);
-        }
-        current = next;
-    }
-
+    // OCaml typecore.ml:3339-3345: `List.fold_left collect_fields []` over
+    // `Ctype.flatten_fields fields` (sorted by name), prepending each present
+    // method.
+    let (fields, _) = crate::types::ctype::flatten_fields(ctx, fields);
+    let methods: Vec<String> = fields
+        .into_iter()
+        .rev()
+        .filter(|(_, kind, _)| matches!(kind, crate::types::type_expr::FieldKind::Fpresent))
+        .map(|(name, _, _)| name)
+        .collect();
     Some(methods)
 }
 
