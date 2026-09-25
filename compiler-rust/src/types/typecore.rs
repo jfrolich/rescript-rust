@@ -13325,7 +13325,11 @@ fn type_function_nary(
             )?;
             body_env = next_env;
             unpacks.extend(let_unpacks);
-            default_lets.push((typed_bindings, let_env));
+            // typecore.ml:3540-3586 turns the default into `let p = switch
+            // *opt_l* {...}`, typed by `type_let`, which registers its unused
+            // checks (typecore.ml:4600-4625) before the rest is typed.
+            let local_warning_seq = tctx.reserve_delayed_check_seq();
+            default_lets.push((typed_bindings, let_env, local_warning_seq));
         }
         typed_patterns.push(typed);
     }
@@ -13346,7 +13350,14 @@ fn type_function_nary(
         Located::mknoloc(tctx.arena.default_attr_str()),
         crate::parser::ast::Payload::PStr(Box::new(vec![])),
     );
-    for (typed_bindings, _let_env) in default_lets.into_iter().rev() {
+    for (typed_bindings, _let_env, local_warning_seq) in default_lets.into_iter().rev() {
+        report_unused_local_let_warnings(
+            tctx,
+            local_warning_seq,
+            RecFlag::Nonrecursive,
+            &typed_bindings,
+            &typed_body,
+        );
         let body_type = typed_body.exp_type;
         typed_body = Expression::new(
             ExpressionDesc::Texp_let(RecFlag::Nonrecursive, typed_bindings, Box::new(typed_body)),
