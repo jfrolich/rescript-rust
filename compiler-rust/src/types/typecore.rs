@@ -7098,7 +7098,8 @@ fn type_expect_with_recarg_unscoped<'a>(
             // Create tuple type and unify (instance generic expected_ty to avoid corruption)
             let tuple_ty = ctx.new_tuple(elem_types.clone());
             let eff_expected = instance_if_generic(ctx, expected_ty);
-            unify_expression_types(tctx, loc, tuple_ty, eff_expected, context.clone())?;
+            // OCaml typecore.ml:2670: `unify_exp_types ~context:None`.
+            unify_expression_types(tctx, loc, tuple_ty, eff_expected, None)?;
 
             // Type check each element
             let mut typed_exprs = Vec::new();
