@@ -1171,6 +1171,18 @@ struct DelayedUnusedCheck {
     seq: u64,
 }
 
+/// The `Delayed_checks.add_delayed_check` closure `Env.open_signature`
+/// registers for a warning-tracked open (env.ml:1843-1846).
+struct DelayedOpenCheck {
+    slot: u32,
+    /// `Path.name root`.
+    root: String,
+    loc: LocIdx,
+    /// `Warnings.backup ()` at registration.
+    warning_config: WarningConfig,
+    seq: u64,
+}
+
 /// Context for type checking.
 pub struct TypeCheckContext<'a> {
     /// Type context for allocation.
@@ -1198,6 +1210,9 @@ pub struct TypeCheckContext<'a> {
     /// Registration counter shared by all delayed checks, so they are forced
     /// in registration order like `Delayed_checks.force_delayed_checks`.
     delayed_check_seq: u64,
+    /// The unused-open delayed checks of `Env.open_signature`
+    /// (env.ml:1843-1846).
+    delayed_open_checks: Vec<DelayedOpenCheck>,
     /// `Parmatch.Conv.name_counter`.
     conv_name_counter: u32,
     generated_pattern_constructors: Vec<(String, crate::types::ConstructorDescription)>,
@@ -1313,6 +1328,7 @@ impl<'a> TypeCheckContext<'a> {
             delayed_unused_checks: Vec::new(),
             delayed_warnings: Vec::new(),
             delayed_check_seq: 0,
+            delayed_open_checks: Vec::new(),
             conv_name_counter: 0,
             generated_pattern_constructors: Vec::new(),
             generated_pattern_labels: Vec::new(),
@@ -1368,7 +1384,91 @@ impl<'a> TypeCheckContext<'a> {
 
     /// Report a warning.
     pub fn report_warning(&mut self, loc: LocIdx, warning: Warning) {
+        self.drain_open_slot_uses();
         self.report_warning_at(self.warnings.len(), loc, warning);
+    }
+
+    /// The open part of `Env.open_signature ~used_slot ~loc ovf root`
+    /// (env.ml:1832-1864): for a fresh, non-ghost open with warning 33, 44
+    /// or 45 active, create the slot its opened layers carry and register the
+    /// unused-open delayed check. Returns the slot to pass to the open.
+    pub(crate) fn open_signature_slot(
+        &mut self,
+        override_flag: crate::parser::ast::OverrideFlag,
+        loc: LocIdx,
+    ) -> Option<u32> {
+        self.drain_open_slot_uses();
+        let tracked = matches!(override_flag, crate::parser::ast::OverrideFlag::Fresh)
+            && !self.arena.to_location(loc).loc_ghost
+            && (self.warning_config.is_active(&Warning::UnusedOpen {
+                name: String::new(),
+            }) || self.warning_config.is_active(&Warning::OpenShadowIdentifier {
+                kind: String::new(),
+                name: String::new(),
+            }) || self.warning_config.is_active(&Warning::OpenShadowLabelConstructor {
+                kind: String::new(),
+                name: String::new(),
+            }));
+        if !tracked {
+            return None;
+        }
+        let slot = self.type_ctx.new_open_slot(loc);
+        let seq = self.next_delayed_check_seq();
+        self.delayed_open_checks.push(DelayedOpenCheck {
+            slot,
+            root: String::new(),
+            loc,
+            warning_config: self.warning_config.clone(),
+            seq,
+        });
+        Some(slot)
+    }
+
+    /// Record the opened root of a slot created by
+    /// [`Self::open_signature_slot`] once the open resolved it.
+    pub(crate) fn set_open_slot_root(&mut self, slot: Option<u32>, root: &Path) {
+        let Some(slot) = slot else {
+            return;
+        };
+        if let Some(check) = self.delayed_open_checks.iter_mut().rev().find(|c| c.slot == slot) {
+            check.root = root.name();
+        }
+    }
+
+    /// Run the `using` callbacks recorded by lookups (env.ml:1847-1861):
+    /// report each newly shadowed `(kind, name)` at the open's location, and
+    /// mark the open used.
+    pub(crate) fn drain_open_slot_uses(&mut self) {
+        for event in self.type_ctx.take_open_slot_events() {
+            let report = self.type_ctx.with_open_slot(event.slot, |state| {
+                let report = if event.shadowed
+                    && !state
+                        .shadowed
+                        .iter()
+                        .any(|(kind, name)| *kind == event.kind && *name == event.name)
+                {
+                    state.shadowed.push((event.kind, event.name.clone()));
+                    Some(state.loc)
+                } else {
+                    None
+                };
+                state.used = true;
+                report
+            });
+            if let Some(loc) = report {
+                let warning = match event.kind {
+                    "label" | "constructor" => Warning::OpenShadowLabelConstructor {
+                        kind: event.kind.to_string(),
+                        name: event.name,
+                    },
+                    _ => Warning::OpenShadowIdentifier {
+                        kind: event.kind.to_string(),
+                        name: event.name,
+                    },
+                };
+                self.report_warning_at(self.warnings.len(), loc, warning);
+            }
+        }
     }
 
     /// Report a warning at a specific position in the collected warning stream.
@@ -1463,6 +1563,26 @@ impl<'a> TypeCheckContext<'a> {
     /// `Delayed_checks.force_delayed_checks`: run value-usage and unused-case
     /// checks in registration order.
     pub fn flush_value_usage_checks(&mut self) {
+        self.drain_open_slot_uses();
+        for check in std::mem::take(&mut self.delayed_open_checks) {
+            let used = self.type_ctx.with_open_slot(check.slot, |state| {
+                let used = state.used;
+                state.used = true;
+                used
+            });
+            let warning = Warning::UnusedOpen { name: check.root };
+            if !used && check.warning_config.is_active(&warning) {
+                let is_error = check.warning_config.is_error(&warning);
+                self.delayed_warnings.push((
+                    (check.seq, 0),
+                    TypeCoreWarning {
+                        loc: check.loc,
+                        warning,
+                        is_error,
+                    },
+                ));
+            }
+        }
         let mut usage = std::mem::take(&mut self.value_usage_checks).into_iter().peekable();
         let mut unused = std::mem::take(&mut self.delayed_unused_checks)
             .into_iter()
@@ -1502,11 +1622,13 @@ impl<'a> TypeCheckContext<'a> {
 
     /// Apply a `@warning`/`@@warning` payload.
     pub fn apply_warning_spec(&mut self, spec: &str) {
+        self.drain_open_slot_uses();
         let _ = self.warning_config.parse(spec);
     }
 
     /// Apply a `@warnerror`/`@@warnerror` payload.
     pub fn apply_warning_error_spec(&mut self, spec: &str) {
+        self.drain_open_slot_uses();
         let _ = self.warning_config.parse_as_error(spec);
     }
 
@@ -2193,6 +2315,8 @@ pub(crate) fn resolve_type_constructor_path(
     env: &Env,
     lid: &Longident,
 ) -> (Path, Option<crate::types::decl::TypeDeclaration>) {
+    // `Env.lookup_type` (env.ml:1062-1073) marks the source name.
+    mark_open_lid_use(tctx.type_ctx, env, tctx.arena, lid, crate::types::env::OpenLookupKind::Type);
     match lid {
         Longident::Lident(name_idx) => {
             let name = tctx.arena.get_string(*name_idx);
@@ -3266,6 +3390,7 @@ fn transl_type_inner(
             // component path here: opened namespace modules are not local
             // `Pident`s, even when their source-level name is unqualified.
             let longident = tctx.resolve_lid(mod_lid.txt).clone();
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, tctx.arena, &longident, crate::types::env::OpenLookupKind::Modtype);
             let pack_path = match crate::types::typemod::lookup_modtype_path_by_lid(
                 &longident,
                 tctx.arena,
@@ -4985,6 +5110,11 @@ fn type_pattern_construct(
     let lid_txt = tctx.arena.get_longident(lid.txt);
     let lid_name = tctx.longident_last_name(lid_txt);
     let is_qualified = matches!(lid_txt, Longident::Ldot(..));
+    if is_qualified {
+        // `Typetexp.find_all_constructors` marks the qualifying module
+        // through `lookup_module_descr` (env.ml:1076-1089).
+        mark_open_lid_use(ctx, env, tctx.arena, lid_txt, crate::types::env::OpenLookupKind::Component);
+    }
     let qualified_opath = if is_qualified {
         // OCaml compiler/ml/typecore.ml:1456-1478 computes `opath`, gets
         // candidates through `Typetexp.find_all_constructors`, then still
@@ -7050,6 +7180,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             }
 
             // Normal identifier expression
+            mark_open_lid_use(ctx, env, tctx.arena, longident, crate::types::env::OpenLookupKind::Value);
             let (path, desc) = match env.lookup_value_by_lid(
                 longident,
                 tctx.arena,
@@ -10599,6 +10730,7 @@ fn report_unused_match_cases(
 }
 
 fn run_delayed_unused_check(tctx: &mut TypeCheckContext<'_>, check: DelayedUnusedCheck) {
+    tctx.drain_open_slot_uses();
     let saved = std::mem::replace(&mut tctx.warning_config, check.warning_config);
     let expected_ty = crate::types::instance(tctx.type_ctx, check.ty_arg_check);
     let refs: Vec<_> = check
@@ -10631,6 +10763,7 @@ fn run_delayed_unused_check(tctx: &mut TypeCheckContext<'_>, check: DelayedUnuse
             .collect();
         pm.check_ambiguous_bindings(&cases);
     }
+    tctx.drain_open_slot_uses();
     tctx.warning_config = saved;
 }
 
@@ -11724,6 +11857,15 @@ fn pattern_contains_generalized_constructor(
             let lid_txt = tctx.resolve_lid(lid.txt).clone();
             let lid_name = tctx.longident_last_name(&lid_txt);
             let is_qualified = matches!(lid_txt, Longident::Ldot(..));
+            // `Env.lookup_all_constructors` on a qualified name marks its head
+            // through `lookup_module_descr` (env.ml:1076-1089).
+            mark_open_lid_use(
+                tctx.type_ctx,
+                env,
+                tctx.arena,
+                &lid_txt,
+                crate::types::env::OpenLookupKind::Component,
+            );
             let is_generalized = if is_qualified {
                 lookup_predef_option_constructor(&lid_txt, tctx.arena, env, tctx.type_ctx)
                     .map(|(_, desc)| desc.cstr_generalized)
@@ -13405,6 +13547,11 @@ fn type_construct(
     // 2. For unqualified constructors (Lident), use disambiguation considering expected type
     let lid_name = tctx.longident_last_name(&longident);
     let is_qualified = matches!(longident, Longident::Ldot(..));
+    if is_qualified {
+        // `Typetexp.find_all_constructors` marks the qualifying module
+        // through `lookup_module_descr` (env.ml:1076-1089).
+        mark_open_lid_use(ctx, env, tctx.arena, &longident, crate::types::env::OpenLookupKind::Component);
+    }
     let qualified_opath = if is_qualified {
         // OCaml compiler/ml/typecore.ml:4244-4253 computes `opath`, gathers
         // candidates with `Typetexp.find_all_constructors`, then still calls
@@ -16535,6 +16682,17 @@ fn type_open(
     // Open the module's bindings into scope for the body
     let open_lid = tctx.arena.get_longident(lid.txt);
     let mut open_env = env.clone();
+    // OCaml `type_open_` (typemod.ml:88-95): `Typetexp.lookup_module`, then
+    // `Env.open_signature ~loc ovf path env`.
+    mark_open_lid_use(
+        tctx.type_ctx,
+        env,
+        tctx.arena,
+        open_lid,
+        crate::types::env::OpenLookupKind::Module,
+    );
+    let slot = tctx.open_signature_slot(override_flag.clone(), loc);
+    open_env.set_pending_open_slot(slot);
 
     let persistent_root_open = match open_lid {
         Longident::Lident(mod_idx) => {
@@ -16599,18 +16757,11 @@ fn type_open(
         }
     };
 
+    open_env.set_pending_open_slot(None);
+    tctx.set_open_slot_root(slot, &path);
+
     // Type check the body expression in the extended environment
     let typed_body = type_expect(tctx, &open_env, body, expected_ty, None)?;
-    if matches!(override_flag, crate::parser::ast::OverrideFlag::Fresh)
-        && !crate::types::typemod::expression_uses_opened_path(
-            tctx.type_ctx,
-            tctx.arena,
-            &typed_body,
-            &path,
-        )
-    {
-        tctx.report_warning(loc, Warning::UnusedOpen { name: path.name() });
-    }
 
     // Return expression with Texp_open in exp_extra (matching OCaml)
     Ok(prepend_exp_extra(
@@ -24847,6 +24998,40 @@ enum ConstructorDisambiguationSource {
     ExpectedType { tpath: Path },
 }
 
+/// The `use ()` callback of a chosen in-scope constructor candidate
+/// (`TycompTbl.mk_callback` then `Env.check_shadowing`, env.ml:198-204,
+/// 457-460).
+fn use_constructor_candidate(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    name: &str,
+    desc: &crate::types::decl::ConstructorDescription,
+    mark: Option<(u32, Option<&crate::types::decl::ConstructorDescription>)>,
+) {
+    if let Some((slot, hidden)) = mark {
+        let shadowed = hidden.is_some_and(|hidden| {
+            !crate::types::ctype::same_constr(ctx, env, desc.cstr_res, hidden.cstr_res)
+        });
+        ctx.record_open_slot_use(slot, "constructor", name, shadowed);
+    }
+}
+
+/// The `use ()` callback of a chosen in-scope label candidate.
+fn use_label_candidate(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    name: &str,
+    desc: &crate::types::decl::LabelDescription,
+    mark: Option<(u32, Option<&crate::types::decl::LabelDescription>)>,
+) {
+    if let Some((slot, hidden)) = mark {
+        let shadowed = hidden.is_some_and(|hidden| {
+            !crate::types::ctype::same_constr(ctx, env, desc.lbl_res, hidden.lbl_res)
+        });
+        ctx.record_open_slot_use(slot, "label", name, shadowed);
+    }
+}
+
 /// Disambiguate a constructor by name, considering both the environment and
 /// the expected type. Follows OCaml's disambiguate pattern:
 /// 1. Try to extract the concrete variant type from expected_ty
@@ -24869,7 +25054,9 @@ fn disambiguate_constructor<'a>(
     );
 
     // Step 2: Find all constructors with this name
-    let all_constrs = env.find_all_constructors(cstr_name);
+    let marked_constrs = env.find_all_constructors_marking(cstr_name);
+    let all_constrs: Vec<&crate::types::decl::ConstructorDescription> =
+        marked_constrs.iter().map(|(desc, _)| *desc).collect();
 
     if all_constrs.is_empty() {
         // No constructors found in env - try type-directed lookup
@@ -24896,7 +25083,7 @@ fn disambiguate_constructor<'a>(
         // Match OCaml NameChoice.disambiguate_by_type: choose the first
         // path-compatible constructor in scope order, with compare_type_path
         // semantics (alias-expanded path compare).
-        for cstr in &all_constrs {
+        for (index, cstr) in all_constrs.iter().enumerate() {
             let cstr_ty = ctx.repr(cstr.cstr_res);
             let cstr_desc = ctx.get_desc(cstr_ty);
             if let TypeDesc::Tconstr {
@@ -24915,6 +25102,7 @@ fn disambiguate_constructor<'a>(
                     pers_env,
                     ctx,
                 ) {
+                    use_constructor_candidate(ctx, env, cstr_name, cstr, marked_constrs[index].1);
                     let path = Path::pident(Ident::create_persistent(cstr_name));
                     return Ok(Some(DisambiguatedConstructor {
                         path,
@@ -24952,6 +25140,7 @@ fn disambiguate_constructor<'a>(
     // `ambiguous_types` for this `opath = None` branch, so preserve those
     // compare_type_path/env-normalize side effects before returning.
     let cstr = all_constrs.first().unwrap();
+    use_constructor_candidate(ctx, env, cstr_name, cstr, marked_constrs[0].1);
     let ambiguous_types = ambiguous_constructor_warning_types(
         cstr,
         all_constrs.iter().skip(1).copied(),
@@ -25121,6 +25310,9 @@ fn lookup_label_by_lid<'a>(
     let Longident::Ldot(module_lid, label_idx) = lid else {
         return None;
     };
+    // `Typetexp.find_all_labels` marks the qualifying module through
+    // `lookup_module_descr` (env.ml:1076-1089).
+    mark_open_lid_use(ctx, env, arena, lid, crate::types::env::OpenLookupKind::Component);
 
     let label_name = arena.get_string(*label_idx);
     let mut defer_component_label_force = false;
@@ -25915,6 +26107,18 @@ fn disambiguate_label<'a>(
             pers_env,
             ctx,
         );
+    }
+
+    // `Label.disambiguate` calls the `use ()` callback of a candidate chosen
+    // from the scope (typecore.ml:912-922).
+    if let Some(label) = selected.as_ref() {
+        if let Some((desc, mark)) = env
+            .find_all_labels_marking(lookup_name)
+            .into_iter()
+            .find(|(desc, _)| desc.lbl_res == label.lbl_res && desc.lbl_pos == label.lbl_pos)
+        {
+            use_label_candidate(ctx, env, lookup_name, desc, mark);
+        }
     }
 
     if let Some(override_name) = override_name {
@@ -27190,6 +27394,51 @@ fn with_resolved_child_module_components<'a, R>(
         ctx.register_qualified_module_components(module_key, components);
     }
     Some(result)
+}
+
+/// OCaml `IdTbl.find_name ~mark:true` (env.ml:292-312) for an unqualified
+/// source name: call the `using` callback of the opened layer it resolves to.
+pub(crate) fn mark_open_name_use(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    kind: crate::types::env::OpenLookupKind,
+    name: &str,
+) {
+    if let Some(slot_use) = env.open_slot_use(kind, name) {
+        ctx.record_open_slot_use(slot_use.slot, kind.shadow_kind(), name, slot_use.shadowed);
+    }
+}
+
+/// The `find_name` marking of `Env.lookup`/`lookup_module` for a source
+/// longident (env.ml:1000-1014, 1036-1074): the name itself when
+/// unqualified, else the head module through `lookup_module_descr`. The
+/// `*predef*` prefix is looked up in the initial environment
+/// (typetexp.ml:87-91), which has no opens.
+pub(crate) fn mark_open_lid_use(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    arena: &ParseArena,
+    lid: &Longident,
+    kind: crate::types::env::OpenLookupKind,
+) {
+    match lid {
+        Longident::Lident(idx) => mark_open_name_use(ctx, env, kind, arena.get_string(*idx)),
+        Longident::Ldot(prefix, _) => {
+            if let Longident::Lident(head) = prefix.as_ref()
+                && arena.get_string(*head) == "*predef*"
+            {
+                return;
+            }
+            mark_open_lid_use(
+                ctx,
+                env,
+                arena,
+                prefix,
+                crate::types::env::OpenLookupKind::Component,
+            );
+        }
+        Longident::Lapply(_, _) => {}
+    }
 }
 
 fn with_resolved_module_components_for_lid_inner<'a, R>(

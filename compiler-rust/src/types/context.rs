@@ -298,6 +298,28 @@ fn normalize_component_cache_path(path: Path) -> Path {
     }
 }
 
+/// The refs captured by an `Env.open_signature` `using` callback.
+#[derive(Debug, Clone)]
+pub(crate) struct OpenSlotState {
+    /// The open's location (warnings 44/45 are reported there).
+    pub loc: crate::parse_arena::LocIdx,
+    /// `used_slot`.
+    pub used: bool,
+    /// `shadowed`: the `(kind, name)` pairs already reported.
+    pub shadowed: Vec<(&'static str, String)>,
+}
+
+/// One `using name shadowed` call.
+#[derive(Debug, Clone)]
+pub(crate) struct OpenSlotEvent {
+    pub slot: u32,
+    /// The `Env.check_shadowing` kind.
+    pub kind: &'static str,
+    pub name: String,
+    /// Whether `check_shadowing` returns `Some kind`.
+    pub shadowed: bool,
+}
+
 /// Type checking context.
 ///
 /// This context is created for each type checking session (typically one
@@ -377,6 +399,15 @@ pub struct TypeContext {
     /// OCaml's `expand_trace` (ctype.ml:1601-1605, 2589-2594). Error reports
     /// print "(defined as ...)" from these.
     trace_expansions: RefCell<ahash::AHashMap<TypeExprRef, TypeExprRef>>,
+
+    /// State of the `used_slot`/`shadowed` refs captured by
+    /// `Env.open_signature`'s `using` callbacks (env.ml:1835-1864), indexed
+    /// by the slot id stored in opened environment layers.
+    open_slots: RefCell<Vec<OpenSlotState>>,
+
+    /// `using` calls made by lookups, processed by the type checker with the
+    /// warning state current at the lookup.
+    open_slot_events: RefCell<Vec<OpenSlotEvent>>,
 
     /// Stable forward references for canonical variant layouts. Entries are
     /// allocated before translating a recursive declaration group and completed
@@ -646,6 +677,8 @@ impl TypeContext {
             ]),
             memoized_abbrev_refs: RefCell::new(Vec::new()),
             trace_expansions: RefCell::new(ahash::AHashMap::new()),
+            open_slots: RefCell::new(Vec::new()),
+            open_slot_events: RefCell::new(Vec::new()),
             variant_layouts: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
@@ -1799,6 +1832,37 @@ impl TypeContext {
             crate::perf_counters::TypeMutationKind::Desc,
         );
         self.types.get(r).set_desc(desc);
+    }
+
+    /// Create the `used_slot` of a warning-tracked open (env.ml:1842).
+    pub(crate) fn new_open_slot(&self, loc: crate::parse_arena::LocIdx) -> u32 {
+        let mut slots = self.open_slots.borrow_mut();
+        slots.push(OpenSlotState {
+            loc,
+            used: false,
+            shadowed: Vec::new(),
+        });
+        (slots.len() - 1) as u32
+    }
+
+    /// Record a `using name shadowed` call of an open's slot.
+    pub(crate) fn record_open_slot_use(&self, slot: u32, kind: &'static str, name: &str, shadowed: bool) {
+        self.open_slot_events.borrow_mut().push(OpenSlotEvent {
+            slot,
+            kind,
+            name: name.to_string(),
+            shadowed,
+        });
+    }
+
+    /// Take the recorded `using` calls in call order.
+    pub(crate) fn take_open_slot_events(&self) -> Vec<OpenSlotEvent> {
+        std::mem::take(&mut *self.open_slot_events.borrow_mut())
+    }
+
+    /// Run `f` on the state of an open's slot.
+    pub(crate) fn with_open_slot<R>(&self, slot: u32, f: impl FnOnce(&mut OpenSlotState) -> R) -> R {
+        f(&mut self.open_slots.borrow_mut()[slot as usize])
     }
 
     /// Record `full_expand env ty` for a type in a failed unification trace.

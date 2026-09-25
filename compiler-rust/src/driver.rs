@@ -11555,6 +11555,7 @@ fn compile_source_to_js_with_options_inner(
                 // the first `Location.setup_colors` (location.ml:45-47), which
                 // printing a warning triggers. Messages formatted afterwards
                 // only carry style escapes when colors are enabled.
+                tctx.drain_open_slot_uses();
                 let suppress_info_style =
                     !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
                 emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
@@ -11582,6 +11583,7 @@ fn compile_source_to_js_with_options_inner(
     {
         return Err(persistent_env_error_to_anyhow(error, filename));
     }
+    tctx.drain_open_slot_uses();
     emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
     if ppx_warnings_have_errors || type_warnings_have_errors(&tctx.warnings) {
         return Err(UserDiagnostic::new(String::new(), 2).into());
@@ -12562,6 +12564,7 @@ pub fn typecheck_interface_source(
         Ok(typed_signature) => typed_signature,
         Err(e) => {
             // See the implementation path above (compiler/ext/misc.ml:337-392).
+            tctx.drain_open_slot_uses();
             let suppress_info_style =
                 !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
             emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);

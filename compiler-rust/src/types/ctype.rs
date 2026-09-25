@@ -4190,6 +4190,17 @@ pub(crate) fn expand_abbrev_opt_once<'a>(
         .map(|expanded| ctx.repr(expanded))
 }
 
+/// OCaml `Ctype.same_constr` (ctype.ml:4259-4264): whether two types expand
+/// to constructors with the same path.
+pub fn same_constr(ctx: &TypeContext, env: &Env, t1: TypeExprRef, t2: TypeExprRef) -> bool {
+    let t1 = ctx.repr(expand_head(ctx, env, t1));
+    let t2 = ctx.repr(expand_head(ctx, env, t2));
+    match (&*ctx.get_desc(t1), &*ctx.get_desc(t2)) {
+        (TypeDesc::Tconstr { path: p1, .. }, TypeDesc::Tconstr { path: p2, .. }) => p1.same(p2),
+        _ => false,
+    }
+}
+
 /// Fully expand a type through all aliases until it can't be expanded further.
 /// Like OCaml's expand_head_opt: repeatedly calls try_expand_head until stable.
 pub fn expand_head<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {

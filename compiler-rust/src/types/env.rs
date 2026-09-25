@@ -195,6 +195,42 @@ struct IdOpened<T> {
     root: Option<Path>,
     components: PersistentHashMap<String, (Ident, T, i32)>,
     next: Arc<IdTbl<T>>,
+    /// The open's `using` callback (OCaml `IdTbl.opened.using`), as a slot
+    /// registered with the type checker.
+    slot: Option<u32>,
+}
+
+/// The environment table a source name is looked up in (OCaml's `proj1`
+/// argument of `Env.lookup`, or the table `lookup_module{,_descr}` reads).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenLookupKind {
+    Value,
+    Type,
+    Module,
+    Component,
+    Modtype,
+}
+
+impl OpenLookupKind {
+    /// The kind `Env.check_shadowing` reports.
+    pub fn shadow_kind(self) -> &'static str {
+        match self {
+            OpenLookupKind::Value => "value",
+            OpenLookupKind::Type => "type",
+            OpenLookupKind::Module | OpenLookupKind::Component => "module",
+            OpenLookupKind::Modtype => "module type",
+        }
+    }
+}
+
+/// A name found through an opened layer that has a usage slot (OCaml
+/// `IdTbl.find_name ~mark:true` calling `using name shadowed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenSlotUse {
+    /// The open's slot.
+    pub slot: u32,
+    /// Whether an earlier binding of the name is hidden by the open.
+    pub shadowed: bool,
 }
 
 /// A fold that conses every visited name (`fun x xs -> x :: xs`) returns
@@ -343,7 +379,12 @@ impl<T: Clone> IdTbl<T> {
         }
     }
 
-    pub fn add_open_layer(&mut self, root: Path, components: Vec<(Ident, T, i32)>) {
+    pub fn add_open_layer(
+        &mut self,
+        root: Path,
+        components: Vec<(Ident, T, i32)>,
+        slot: Option<u32>,
+    ) {
         if components.is_empty() {
             return;
         }
@@ -358,35 +399,26 @@ impl<T: Clone> IdTbl<T> {
                 root: Some(root),
                 components: opened_components,
                 next: Arc::new(next),
+                slot,
             })),
         };
     }
 
-    fn opened_names_added_since(&self, previous: &Self) -> HashSet<String> {
-        let current_counts = self.opened_name_counts();
-        let previous_counts = previous.opened_name_counts();
-        let mut names = HashSet::new();
-        for (name, count) in current_counts {
-            if count > previous_counts.get(&name).copied().unwrap_or(0) {
-                names.insert(name.clone());
-            }
+    /// The `using` call of OCaml `IdTbl.find_name ~mark:true` for `name`:
+    /// the slot of the opened layer the name resolves to, and whether that
+    /// layer hides an earlier binding (`find_name ~mark:false name next`).
+    pub fn open_slot_use(&self, name: &str) -> Option<OpenSlotUse> {
+        if self.current.get(name).is_some_and(|entries| !entries.is_empty()) {
+            return None;
         }
-        names
-    }
-
-    fn opened_name_counts(&self) -> HashMap<String, usize> {
-        let mut counts = HashMap::new();
-        self.collect_opened_name_counts(&mut counts);
-        counts
-    }
-
-    fn collect_opened_name_counts(&self, counts: &mut HashMap<String, usize>) {
-        if let Some(opened) = &self.opened {
-            for name in opened.components.keys() {
-                *counts.entry(name.clone()).or_default() += 1;
-            }
-            opened.next.collect_opened_name_counts(counts);
+        let opened = self.opened.as_ref()?;
+        if opened.components.contains_key(name) {
+            return opened.slot.map(|slot| OpenSlotUse {
+                slot,
+                shadowed: opened.next.find_by_name(name).is_some(),
+            });
         }
+        opened.next.open_slot_use(name)
     }
 
     fn find_current_by_ident(&self, id: &Ident) -> Option<&T> {
@@ -591,6 +623,8 @@ impl<T: Clone> Default for IdTbl<T> {
 struct TycompOpened<T> {
     components: PersistentHashMap<String, Vec<(Ident, T)>>,
     next: Arc<TycompTbl<T>>,
+    /// The open's `using` callback slot.
+    slot: Option<u32>,
 }
 
 /// OCaml-shaped table for constructors and labels.
@@ -622,7 +656,7 @@ impl<T: Clone> TycompTbl<T> {
         }
     }
 
-    pub fn add_open_layer(&mut self, components: Vec<(Ident, T)>) {
+    pub fn add_open_layer(&mut self, components: Vec<(Ident, T)>, slot: Option<u32>) {
         if components.is_empty() {
             return;
         }
@@ -643,35 +677,9 @@ impl<T: Clone> TycompTbl<T> {
             opened: Some(Arc::new(TycompOpened {
                 components: opened_components,
                 next: Arc::new(next),
+                slot,
             })),
         };
-    }
-
-    fn opened_names_added_since(&self, previous: &Self) -> HashSet<String> {
-        let current_counts = self.opened_name_counts();
-        let previous_counts = previous.opened_name_counts();
-        let mut names = HashSet::new();
-        for (name, count) in current_counts {
-            if count > previous_counts.get(&name).copied().unwrap_or(0) {
-                names.insert(name.clone());
-            }
-        }
-        names
-    }
-
-    fn opened_name_counts(&self) -> HashMap<String, usize> {
-        let mut counts = HashMap::new();
-        self.collect_opened_name_counts(&mut counts);
-        counts
-    }
-
-    fn collect_opened_name_counts(&self, counts: &mut HashMap<String, usize>) {
-        if let Some(opened) = &self.opened {
-            for (name, entries) in opened.components.iter() {
-                *counts.entry(name.clone()).or_default() += entries.len();
-            }
-            opened.next.collect_opened_name_counts(counts);
-        }
     }
 
     pub fn find_by_name(&self, name: &str) -> Option<&T> {
@@ -740,6 +748,28 @@ impl<T: Clone> TycompTbl<T> {
         items
     }
 
+    /// OCaml `TycompTbl.find_all`: each candidate with the `mk_callback`
+    /// data of its opened layer, `(slot, first hidden candidate)`.
+    pub fn find_all_marking(&self, name: &str) -> Vec<(&T, Option<(u32, Option<&T>)>)> {
+        let mut items: Vec<(&T, Option<(u32, Option<&T>)>)> = Vec::new();
+        if let Some(entries) = self.current.get(name) {
+            items.extend(entries.iter().rev().map(|(_, value)| (value, None)));
+        }
+        if let Some(opened) = &self.opened {
+            let rest = opened.next.find_all_marking(name);
+            if let Some(entries) = opened.components.get(name) {
+                let hidden = rest.first().map(|(value, _)| *value);
+                items.extend(
+                    entries
+                        .iter()
+                        .map(|(_, value)| (value, opened.slot.map(|slot| (slot, hidden)))),
+                );
+            }
+            items.extend(rest);
+        }
+        items
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&Ident, &T)> {
         let mut items = Vec::new();
         self.collect_iter(&mut items);
@@ -790,16 +820,6 @@ impl<T: Clone> TycompTbl<T> {
             opened.next.collect_fold_name_order(names);
         }
     }
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct OpenedBindingNames {
-    pub(crate) values: HashSet<String>,
-    pub(crate) types: HashSet<String>,
-    pub(crate) modules: HashSet<String>,
-    pub(crate) modtypes: HashSet<String>,
-    pub(crate) constructors: HashSet<String>,
-    pub(crate) labels: HashSet<String>,
 }
 
 impl<T: Clone> Default for TycompTbl<T> {
@@ -896,6 +916,10 @@ pub struct Env {
 
     /// Environment flags.
     flags: EnvFlags,
+
+    /// The usage slot the next opened component layers take (the `slot`
+    /// OCaml `Env.open_signature` passes to `add_components`).
+    pending_open_slot: Option<u32>,
 }
 
 impl Clone for Env {
@@ -924,6 +948,7 @@ impl Clone for Env {
             local_constraints: self.local_constraints.clone(),
             gadt_instances: self.gadt_instances.clone(),
             flags: self.flags,
+            pending_open_slot: self.pending_open_slot,
         }
     }
 }
@@ -957,7 +982,51 @@ impl Env {
             local_constraints: PersistentHashMap::default(),
             gadt_instances: Vec::new(),
             flags: EnvFlags::default(),
+            pending_open_slot: None,
         }
+    }
+
+    /// OCaml `IdTbl.find_name ~mark:true` usage of an unqualified source
+    /// name in the table `kind` selects.
+    pub(crate) fn open_slot_use(&self, kind: OpenLookupKind, name: &str) -> Option<OpenSlotUse> {
+        match kind {
+            OpenLookupKind::Value => self.values.open_slot_use(name),
+            OpenLookupKind::Type => self.types.open_slot_use(name),
+            OpenLookupKind::Module => self.modules.open_slot_use(name),
+            OpenLookupKind::Component => self.module_components.open_slot_use(name),
+            OpenLookupKind::Modtype => self.modtypes.open_slot_use(name),
+        }
+    }
+
+    /// OCaml `TycompTbl.find_all` for constructors, with each candidate's
+    /// `mk_callback` data `(slot, first hidden candidate)`.
+    pub(crate) fn find_all_constructors_marking(
+        &self,
+        name: &str,
+    ) -> Vec<(&ConstructorDescription, Option<(u32, Option<&ConstructorDescription>)>)> {
+        self.constrs
+            .find_all_marking(name)
+            .into_iter()
+            .map(|(desc, mark)| (desc.as_ref(), mark.map(|(slot, hidden)| (slot, hidden.map(|h| h.as_ref())))))
+            .collect()
+    }
+
+    /// OCaml `TycompTbl.find_all` for labels, with `mk_callback` data.
+    pub(crate) fn find_all_labels_marking(
+        &self,
+        name: &str,
+    ) -> Vec<(&LabelDescription, Option<(u32, Option<&LabelDescription>)>)> {
+        self.labels
+            .find_all_marking(name)
+            .into_iter()
+            .map(|(desc, mark)| (desc.as_ref(), mark.map(|(slot, hidden)| (slot, hidden.map(|h| h.as_ref())))))
+            .collect()
+    }
+
+    /// Set the usage slot of the opened layers the next open adds (OCaml
+    /// `open_signature (Some slot)`); `None` after the open.
+    pub(crate) fn set_pending_open_slot(&mut self, slot: Option<u32>) {
+        self.pending_open_slot = slot;
     }
 
     /// Unique identifier for this environment instance.
@@ -990,6 +1059,7 @@ impl Env {
             local_constraints: self.local_constraints.clone(),
             gadt_instances: self.gadt_instances.clone(),
             flags: self.flags,
+            pending_open_slot: self.pending_open_slot,
         }
     }
 
@@ -1427,21 +1497,6 @@ impl Env {
         self.labels.iter().map(|(id, l)| (id, l.as_ref()))
     }
 
-    pub(crate) fn opened_binding_names_added_since(&self, previous: &Env) -> OpenedBindingNames {
-        // OCaml compiler/ml/env.ml:1874-1911 attaches the open warning slot
-        // while `open_signature` installs the opened component tables through
-        // env.ml:181-187 and env.ml:277-283. Derive Rust warning names from the
-        // same just-added opened bindings instead of resolving the module again.
-        OpenedBindingNames {
-            values: self.values.opened_names_added_since(&previous.values),
-            types: self.types.opened_names_added_since(&previous.types),
-            modules: self.modules.opened_names_added_since(&previous.modules),
-            modtypes: self.modtypes.opened_names_added_since(&previous.modtypes),
-            constructors: self.constrs.opened_names_added_since(&previous.constrs),
-            labels: self.labels.opened_names_added_since(&previous.labels),
-        }
-    }
-
     // ========================================================================
     // Module Bindings
     // ========================================================================
@@ -1524,12 +1579,14 @@ impl Env {
 
         self.bump_id();
         self.invalidate_module_alias_caches();
+        let slot = self.pending_open_slot;
         self.values.add_open_layer(
             root.clone(),
             values
                 .into_iter()
                 .map(|(id, desc, pos)| (id, Arc::new(desc), pos))
                 .collect(),
+            slot,
         );
         self.types.add_open_layer(
             root.clone(),
@@ -1537,18 +1594,21 @@ impl Env {
                 .into_iter()
                 .map(|(id, decl)| (id, Arc::new(decl), crate::types::path::NOPOS))
                 .collect(),
+            slot,
         );
         self.constrs.add_open_layer(
             constructors
                 .into_iter()
                 .map(|(id, desc)| (id, Arc::new(desc)))
                 .collect(),
+            slot,
         );
         self.labels.add_open_layer(
             labels
                 .into_iter()
                 .map(|(id, desc)| (id, Arc::new(desc)))
                 .collect(),
+            slot,
         );
         self.modules.add_open_layer(
             root.clone(),
@@ -1556,15 +1616,17 @@ impl Env {
                 .into_iter()
                 .map(|(id, decl, pos)| (id, Arc::new(decl), pos))
                 .collect(),
+            slot,
         );
         self.module_components
-            .add_open_layer(root.clone(), module_components);
+            .add_open_layer(root.clone(), module_components, slot);
         self.modtypes.add_open_layer(
             root,
             modtypes
                 .into_iter()
                 .map(|(id, decl)| (id, Arc::new(decl), crate::types::path::NOPOS))
                 .collect(),
+            slot,
         );
     }
 

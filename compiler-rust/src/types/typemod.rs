@@ -677,6 +677,7 @@ where
         return f(tctx);
     }
 
+    tctx.drain_open_slot_uses();
     let previous_config = tctx.warning_config.clone();
     // OCaml compiler/ml/builtin_attributes.ml:215-223 applies warning
     // attributes in reverse order inside a saved warning state, then restores
@@ -685,6 +686,7 @@ where
         apply_warning_attribute_with_ppwarning(tctx, arena, attr, ppwarning);
     }
     let result = f(tctx);
+    tctx.drain_open_slot_uses();
     tctx.warning_config = previous_config;
     result
 }
@@ -7080,154 +7082,6 @@ struct TopLevelExtensionUseCheck {
     is_exception: bool,
 }
 
-struct OpenShadowIdentifierUseCheck {
-    kind: &'static str,
-    name: String,
-    path: Path,
-    loc: LocIdx,
-    item_index: usize,
-    emitted: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpenShadowLabelConstructorKind {
-    Constructor,
-    Label,
-}
-
-impl OpenShadowLabelConstructorKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            OpenShadowLabelConstructorKind::Constructor => "constructor",
-            OpenShadowLabelConstructorKind::Label => "label",
-        }
-    }
-}
-
-struct OpenShadowLabelConstructorUseCheck {
-    kind: OpenShadowLabelConstructorKind,
-    name: String,
-    previous_res: TypeExprRef,
-    opened_res: TypeExprRef,
-    loc: LocIdx,
-    item_index: usize,
-    emitted: bool,
-}
-
-#[derive(Debug, Clone)]
-struct OpenUseCheck {
-    name: String,
-    path: Path,
-    opened_modtypes: HashSet<String>,
-    loc: LocIdx,
-    item_index: usize,
-    used: bool,
-}
-
-#[derive(Debug, Clone, Default)]
-struct OpenedNames {
-    values: HashSet<String>,
-    types: HashSet<String>,
-    modules: HashSet<String>,
-    modtypes: HashSet<String>,
-    constructors: HashSet<String>,
-    labels: HashSet<String>,
-}
-
-fn is_fresh_open(open: &OpenDeclaration) -> bool {
-    matches!(open.open_override, crate::parser::ast::OverrideFlag::Fresh)
-}
-
-fn opened_names_from_signature(sig_items: &[crate::types::decl::SignatureItem]) -> OpenedNames {
-    let mut names = OpenedNames::default();
-    for item in sig_items {
-        match item {
-            crate::types::decl::SignatureItem::SigValue(id, _) => {
-                names.values.insert(id.name().to_string());
-            }
-            crate::types::decl::SignatureItem::SigType(id, decl, _) => {
-                names.types.insert(id.name().to_string());
-                match &decl.type_kind {
-                    crate::types::decl::TypeKind::TypeVariant(constructors, _) => {
-                        for constructor in constructors {
-                            names
-                                .constructors
-                                .insert(constructor.cd_id.name().to_string());
-                            if let crate::types::decl::ConstructorArguments::CstrRecord(labels) =
-                                &constructor.cd_args
-                            {
-                                for label in labels {
-                                    names.labels.insert(label.ld_id.name().to_string());
-                                }
-                            }
-                        }
-                    }
-                    crate::types::decl::TypeKind::TypeRecord(labels, _) => {
-                        for label in labels {
-                            names.labels.insert(label.ld_id.name().to_string());
-                        }
-                    }
-                    crate::types::decl::TypeKind::TypeAbstract
-                    | crate::types::decl::TypeKind::TypeOpen => {}
-                }
-            }
-            crate::types::decl::SignatureItem::SigTypext(id, _, _) => {
-                names.constructors.insert(id.name().to_string());
-            }
-            crate::types::decl::SignatureItem::SigModule(id, _, _) => {
-                names.modules.insert(id.name().to_string());
-            }
-            crate::types::decl::SignatureItem::SigModtype(id, _) => {
-                names.modtypes.insert(id.name().to_string());
-            }
-            crate::types::decl::SignatureItem::SigClass
-            | crate::types::decl::SignatureItem::SigClassType => {}
-        }
-    }
-    names
-}
-
-fn opened_names_for_open(env_before_open: &Env, env_after_open: &Env) -> OpenedNames {
-    // OCaml compiler/ml/env.ml:1874-1911 computes open warning state as part
-    // of the same `open_signature` component insertion used by
-    // compiler/ml/typemod.ml:1566-1568 for `Pstr_open`; it does not perform a
-    // second module lookup after typing the open declaration.
-    let opened = env_after_open.opened_binding_names_added_since(env_before_open);
-    OpenedNames {
-        values: opened.values,
-        types: opened.types,
-        modules: opened.modules,
-        modtypes: opened.modtypes,
-        constructors: opened.constructors,
-        labels: opened.labels,
-    }
-}
-
-fn collect_open_use_check(
-    open: &OpenDeclaration,
-    loc: LocIdx,
-    item_index: usize,
-    opened_names: OpenedNames,
-    out: &mut Vec<OpenUseCheck>,
-) {
-    out.push(OpenUseCheck {
-        name: open.open_path.name(),
-        path: open.open_path.clone(),
-        opened_modtypes: opened_names.modtypes,
-        loc,
-        item_index,
-        used: false,
-    });
-}
-
-fn mark_open_use_check_used(checks: &mut [OpenUseCheck], item_index: usize, _loc: LocIdx) {
-    for check in checks {
-        if check.item_index == item_index {
-            check.used = true;
-        }
-    }
-}
-
 fn collect_bound_pattern_idents_with_loc(
     pat: &crate::types::typedtree::Pattern,
     out: &mut Vec<(Ident, String, LocIdx)>,
@@ -7481,703 +7335,12 @@ fn collect_top_level_extension_use_checks(
     }
 }
 
-fn collect_open_shadow_identifier_use_checks(
-    env_before_open: &Env,
-    env_after_open: &Env,
-    opened_names: &OpenedNames,
-    loc: LocIdx,
-    item_index: usize,
-    out: &mut Vec<OpenShadowIdentifierUseCheck>,
-) {
-    // TODO(env usage port): OCaml reports these from the opened table's
-    // use callback in lookup order (compiler/ml/env.ml:1880-1908); until
-    // then, visit the candidates in a deterministic (name) order.
-    let mut candidate_names: Vec<String> = env_before_open
-        .iter_values()
-        .map(|(id, _)| id.name().to_string())
-        .collect();
-    candidate_names.sort();
-    candidate_names.dedup();
-    for name in &candidate_names {
-        let name = name.as_str();
-        if !opened_names.values.contains(name) {
-            continue;
-        }
-        let Ok(_) = env_before_open.find_value(name) else {
-            continue;
-        };
-        let Ok((opened_path, _opened_desc)) = env_after_open.find_value_with_path(name) else {
-            continue;
-        };
-        if matches!(opened_path, Path::Pident(_)) {
-            continue;
-        }
-        out.push(OpenShadowIdentifierUseCheck {
-            kind: "value",
-            name: name.to_string(),
-            path: opened_path,
-            loc,
-            item_index,
-            emitted: false,
-        });
-    }
-
-    // TODO(env usage port): OCaml reports these from the opened table's
-    // use callback in lookup order (compiler/ml/env.ml:1880-1908); until
-    // then, visit the candidates in a deterministic (name) order.
-    let mut candidate_names: Vec<String> = env_before_open
-        .iter_types()
-        .map(|(id, _)| id.name().to_string())
-        .collect();
-    candidate_names.sort();
-    candidate_names.dedup();
-    for name in &candidate_names {
-        let name = name.as_str();
-        if !opened_names.types.contains(name) {
-            continue;
-        }
-        let Ok(_) = env_before_open.find_type(name) else {
-            continue;
-        };
-        let Ok((opened_path, _opened_desc)) = env_after_open.find_type_with_path(name) else {
-            continue;
-        };
-        if matches!(opened_path, Path::Pident(_)) {
-            continue;
-        }
-        out.push(OpenShadowIdentifierUseCheck {
-            kind: "type",
-            name: name.to_string(),
-            path: opened_path,
-            loc,
-            item_index,
-            emitted: false,
-        });
-    }
-
-    // TODO(env usage port): OCaml reports these from the opened table's
-    // use callback in lookup order (compiler/ml/env.ml:1880-1908); until
-    // then, visit the candidates in a deterministic (name) order.
-    let mut candidate_names: Vec<String> = env_before_open
-        .iter_modules()
-        .map(|(id, _)| id.name().to_string())
-        .collect();
-    candidate_names.sort();
-    candidate_names.dedup();
-    for name in &candidate_names {
-        let name = name.as_str();
-        if !opened_names.modules.contains(name) {
-            continue;
-        }
-        let Ok(_) = env_before_open.find_module(name) else {
-            continue;
-        };
-        let Ok((opened_path, _opened_desc)) = env_after_open.find_module_with_path(name) else {
-            continue;
-        };
-        if matches!(opened_path, Path::Pident(_)) {
-            continue;
-        }
-        out.push(OpenShadowIdentifierUseCheck {
-            kind: "module",
-            name: name.to_string(),
-            path: opened_path,
-            loc,
-            item_index,
-            emitted: false,
-        });
-    }
-
-    // TODO(env usage port): OCaml reports these from the opened table's
-    // use callback in lookup order (compiler/ml/env.ml:1880-1908); until
-    // then, visit the candidates in a deterministic (name) order.
-    let mut candidate_names: Vec<String> = env_before_open
-        .iter_modtypes()
-        .map(|(id, _)| id.name().to_string())
-        .collect();
-    candidate_names.sort();
-    candidate_names.dedup();
-    for name in &candidate_names {
-        let name = name.as_str();
-        if !opened_names.modtypes.contains(name) {
-            continue;
-        }
-        let Ok(_) = env_before_open.find_modtype(name) else {
-            continue;
-        };
-        let Ok((opened_path, _)) = env_after_open.find_modtype_with_path(name) else {
-            continue;
-        };
-        if matches!(opened_path, Path::Pident(_)) {
-            continue;
-        }
-        out.push(OpenShadowIdentifierUseCheck {
-            kind: "module type",
-            name: name.to_string(),
-            path: opened_path,
-            loc,
-            item_index,
-            emitted: false,
-        });
-    }
-}
-
-fn same_constructor_result(
-    ctx: &crate::types::TypeContext,
-    env: &Env,
-    left: TypeExprRef,
-    right: TypeExprRef,
-) -> bool {
-    let left = ctx.repr(crate::types::ctype::expand_head(ctx, env, left));
-    let right = ctx.repr(crate::types::ctype::expand_head(ctx, env, right));
-    match (&*ctx.get_desc(left), &*ctx.get_desc(right)) {
-        (TypeDesc::Tconstr { path: left, .. }, TypeDesc::Tconstr { path: right, .. }) => {
-            left.same(right)
-        }
-        _ => false,
-    }
-}
-
-fn collect_open_shadow_label_constructor_use_checks(
-    env_before_open: &Env,
-    env_after_open: &Env,
-    opened_names: &OpenedNames,
-    loc: LocIdx,
-    item_index: usize,
-    out: &mut Vec<OpenShadowLabelConstructorUseCheck>,
-) {
-    // TODO(env usage port): OCaml reports these from the opened table's
-    // use callback in lookup order (compiler/ml/env.ml:1880-1908); until
-    // then, visit the candidates in a deterministic (name) order.
-    let mut candidate_names: Vec<String> = env_before_open
-        .iter_constructors()
-        .map(|(id, _)| id.name().to_string())
-        .collect();
-    candidate_names.sort();
-    candidate_names.dedup();
-    for name in &candidate_names {
-        let name = name.as_str();
-        if !opened_names.constructors.contains(name) {
-            continue;
-        }
-        let Ok(previous_desc) = env_before_open.find_constructor(name) else {
-            continue;
-        };
-        let Ok((_, opened_desc, is_local)) = env_after_open.find_constructor_with_origin(name)
-        else {
-            continue;
-        };
-        if is_local {
-            continue;
-        }
-        out.push(OpenShadowLabelConstructorUseCheck {
-            kind: OpenShadowLabelConstructorKind::Constructor,
-            name: name.to_string(),
-            // OCaml compiler/ml/env.ml:181-187, 277-283, and 1895-1908 keep
-            // this comparison inside the opened-component use callback. Store
-            // the two result types here, but do not call `same_constr` until a
-            // later typed item actually uses the opened constructor.
-            previous_res: previous_desc.cstr_res,
-            opened_res: opened_desc.cstr_res,
-            loc,
-            item_index,
-            emitted: false,
-        });
-    }
-
-    // TODO(env usage port): OCaml reports these from the opened table's
-    // use callback in lookup order (compiler/ml/env.ml:1880-1908); until
-    // then, visit the candidates in a deterministic (name) order.
-    let mut candidate_names: Vec<String> = env_before_open
-        .iter_labels()
-        .map(|(id, _)| id.name().to_string())
-        .collect();
-    candidate_names.sort();
-    candidate_names.dedup();
-    for name in &candidate_names {
-        let name = name.as_str();
-        if !opened_names.labels.contains(name) {
-            continue;
-        }
-        let Ok(previous_desc) = env_before_open.find_label(name) else {
-            continue;
-        };
-        let Ok((_, opened_desc, is_local)) = env_after_open.find_label_with_origin(name) else {
-            continue;
-        };
-        if is_local {
-            continue;
-        }
-        out.push(OpenShadowLabelConstructorUseCheck {
-            kind: OpenShadowLabelConstructorKind::Label,
-            name: name.to_string(),
-            // See the constructor case above: OCaml runs
-            // compiler/ml/env.ml:457-462 `check_shadowing` from the open-table
-            // use callback, not while building the open declaration.
-            previous_res: previous_desc.lbl_res,
-            opened_res: opened_desc.lbl_res,
-            loc,
-            item_index,
-            emitted: false,
-        });
-    }
-}
-
-fn report_open_shadow_identifier_warnings_for_item(
-    tctx: &mut TypeCheckContext<'_>,
-    arena: &ParseArena,
-    item_index: usize,
-    item: &StructureItem,
-    checks: &mut [OpenShadowIdentifierUseCheck],
-    open_checks: &mut [OpenUseCheck],
-    mut warning_insert_index: usize,
-) {
-    let ctx = tctx.type_ctx;
-    for check in checks.iter_mut() {
-        if check.emitted || check.item_index >= item_index {
-            continue;
-        }
-        let used = match check.kind {
-            "value" => {
-                structure_item_uses_unqualified_value_path(arena, item, &check.name, &check.path)
-            }
-            "module" => {
-                structure_item_uses_unqualified_module_path(arena, item, &check.name, &check.path)
-            }
-            _ => structure_item_uses_path(ctx, item, &|path| path.same(&check.path)),
-        };
-        if used {
-            check.emitted = true;
-            mark_open_use_check_used(open_checks, check.item_index, check.loc);
-            if tctx.report_warning_at(
-                warning_insert_index,
-                check.loc,
-                Warning::OpenShadowIdentifier {
-                    kind: check.kind.to_string(),
-                    name: check.name.clone(),
-                },
-            ) {
-                warning_insert_index += 1;
-            }
-        }
-    }
-}
-
-fn report_open_shadow_identifier_warnings_for_signature_item(
-    tctx: &mut TypeCheckContext<'_>,
-    arena: &ParseArena,
-    item_index: usize,
-    item: &crate::types::typedtree::TypedSignatureItem,
-    checks: &mut [OpenShadowIdentifierUseCheck],
-    open_checks: &mut [OpenUseCheck],
-    mut warning_insert_index: usize,
-) {
-    let ctx = tctx.type_ctx;
-    for check in checks.iter_mut() {
-        if check.emitted || check.item_index >= item_index {
-            continue;
-        }
-        if signature_item_uses_path(ctx, item, &|path| {
-            path.same(&check.path)
-                || (check.kind == "module" && path_is_strict_prefix(path, &check.path))
-        }) {
-            check.emitted = true;
-            mark_open_use_check_used(open_checks, check.item_index, check.loc);
-            if tctx.report_warning_at(
-                warning_insert_index,
-                check.loc,
-                Warning::OpenShadowIdentifier {
-                    kind: check.kind.to_string(),
-                    name: check.name.clone(),
-                },
-            ) {
-                warning_insert_index += 1;
-            }
-        }
-    }
-}
-
-fn mark_open_uses_for_item(
-    ctx: &crate::types::TypeContext,
-    arena: &ParseArena,
-    item_index: usize,
-    item: &StructureItem,
-    checks: &mut [OpenUseCheck],
-) {
-    for check in checks.iter_mut() {
-        if check.used || check.item_index >= item_index {
-            continue;
-        }
-        if structure_item_uses_opened_path(ctx, arena, item, &check.path)
-            || structure_item_uses_opened_modtype_name(arena, item, &check.opened_modtypes)
-        {
-            check.used = true;
-        }
-    }
-}
-
-fn mark_open_uses_for_signature_item(
-    ctx: &crate::types::TypeContext,
-    arena: &ParseArena,
-    item_index: usize,
-    item: &crate::types::typedtree::TypedSignatureItem,
-    checks: &mut [OpenUseCheck],
-) {
-    for check in checks.iter_mut() {
-        if check.used || check.item_index >= item_index {
-            continue;
-        }
-        if signature_item_uses_opened_path(ctx, arena, item, &check.path)
-            || signature_item_uses_opened_modtype_name(arena, item, &check.opened_modtypes)
-        {
-            check.used = true;
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 struct DelayedWarning {
     item_index: usize,
     order: usize,
     loc: LocIdx,
     warning: Warning,
-}
-
-fn collect_unused_open_warnings(checks: &[OpenUseCheck], out: &mut Vec<DelayedWarning>) {
-    for (order, check) in checks.iter().enumerate() {
-        if !check.used {
-            out.push(DelayedWarning {
-                item_index: check.item_index,
-                order,
-                loc: check.loc,
-                warning: Warning::UnusedOpen {
-                    name: check.name.clone(),
-                },
-            });
-        }
-    }
-}
-
-fn constructor_matches_open_shadow_label_constructor(
-    ctx: &crate::types::TypeContext,
-    env: &Env,
-    desc: &crate::types::decl::ConstructorDescription,
-    check: &OpenShadowLabelConstructorUseCheck,
-) -> bool {
-    check.kind == OpenShadowLabelConstructorKind::Constructor
-        && desc.cstr_name == check.name
-        && same_constructor_result(ctx, env, desc.cstr_res, check.opened_res)
-        && !same_constructor_result(ctx, env, check.previous_res, check.opened_res)
-}
-
-fn label_matches_open_shadow_label_constructor(
-    ctx: &crate::types::TypeContext,
-    env: &Env,
-    desc: &crate::types::decl::LabelDescription,
-    check: &OpenShadowLabelConstructorUseCheck,
-) -> bool {
-    check.kind == OpenShadowLabelConstructorKind::Label
-        && desc.lbl_name == check.name
-        && same_constructor_result(ctx, env, desc.lbl_res, check.opened_res)
-        && !same_constructor_result(ctx, env, check.previous_res, check.opened_res)
-}
-
-fn pattern_uses_open_shadow_label_constructor(
-    ctx: &crate::types::TypeContext,
-    env: &Env,
-    pat: &crate::types::typedtree::Pattern,
-    check: &OpenShadowLabelConstructorUseCheck,
-) -> bool {
-    match &pat.pat_desc {
-        crate::types::typedtree::PatternDesc::Tpat_alias(inner, _, _) => {
-            pattern_uses_open_shadow_label_constructor(ctx, env, inner, check)
-        }
-        crate::types::typedtree::PatternDesc::Tpat_tuple(pats)
-        | crate::types::typedtree::PatternDesc::Tpat_array(pats) => pats
-            .iter()
-            .any(|pat| pattern_uses_open_shadow_label_constructor(ctx, env, pat, check)),
-        crate::types::typedtree::PatternDesc::Tpat_construct(_, desc, args) => {
-            constructor_matches_open_shadow_label_constructor(ctx, env, desc, check)
-                || args
-                    .iter()
-                    .any(|pat| pattern_uses_open_shadow_label_constructor(ctx, env, pat, check))
-        }
-        crate::types::typedtree::PatternDesc::Tpat_variant(_, payload, _) => payload
-            .as_deref()
-            .is_some_and(|pat| pattern_uses_open_shadow_label_constructor(ctx, env, pat, check)),
-        crate::types::typedtree::PatternDesc::Tpat_record(fields, _, _) => {
-            fields.iter().any(|(_, label, pat, _)| {
-                label_matches_open_shadow_label_constructor(ctx, env, label, check)
-                    || pattern_uses_open_shadow_label_constructor(ctx, env, pat, check)
-            })
-        }
-        crate::types::typedtree::PatternDesc::Tpat_or(left, right, _) => {
-            pattern_uses_open_shadow_label_constructor(ctx, env, left, check)
-                || pattern_uses_open_shadow_label_constructor(ctx, env, right, check)
-        }
-        crate::types::typedtree::PatternDesc::Tpat_any
-        | crate::types::typedtree::PatternDesc::Tpat_var(_, _)
-        | crate::types::typedtree::PatternDesc::Tpat_constant(_) => false,
-    }
-}
-
-fn function_param_pattern_uses_open_shadow_label_constructor(
-    ctx: &crate::types::TypeContext,
-    env: &Env,
-    pat: &crate::types::typedtree::Pattern,
-    check: &OpenShadowLabelConstructorUseCheck,
-) -> bool {
-    pattern_uses_open_shadow_label_constructor(ctx, env, pat, check)
-}
-
-fn typed_case_uses_open_shadow_label_constructor(
-    ctx: &crate::types::TypeContext,
-    env: &Env,
-    case: &crate::types::typedtree::Case,
-    check: &OpenShadowLabelConstructorUseCheck,
-) -> bool {
-    pattern_uses_open_shadow_label_constructor(ctx, env, &case.c_lhs, check)
-        || case.c_guard.as_ref().is_some_and(|guard| {
-            expression_uses_open_shadow_label_constructor(ctx, env, guard, check)
-        })
-        || expression_uses_open_shadow_label_constructor(ctx, env, &case.c_rhs, check)
-}
-
-fn expression_uses_open_shadow_label_constructor(
-    ctx: &crate::types::TypeContext,
-    env: &Env,
-    expr: &Expression,
-    check: &OpenShadowLabelConstructorUseCheck,
-) -> bool {
-    match &expr.exp_desc {
-        crate::types::typedtree::ExpressionDesc::Texp_let(_, bindings, body) => {
-            bindings.iter().any(|binding| {
-                pattern_uses_open_shadow_label_constructor(ctx, env, &binding.vb_pat, check)
-                    || expression_uses_open_shadow_label_constructor(
-                        ctx,
-                        env,
-                        &binding.vb_expr,
-                        check,
-                    )
-            }) || expression_uses_open_shadow_label_constructor(ctx, env, body, check)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_function { params, body, .. } => {
-            params.iter().any(|param| {
-                function_param_pattern_uses_open_shadow_label_constructor(
-                    ctx,
-                    env,
-                    &param.fp_pat,
-                    check,
-                )
-            }) || expression_uses_open_shadow_label_constructor(ctx, env, body, check)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_apply { funct, args, .. } => {
-            expression_uses_open_shadow_label_constructor(ctx, env, funct, check)
-                || args.iter().any(|arg| {
-                    arg.expression.as_ref().is_some_and(|expr| {
-                        expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
-                    })
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_match(
-            scrutinee,
-            value_cases,
-            exn_cases,
-            _,
-        ) => {
-            expression_uses_open_shadow_label_constructor(ctx, env, scrutinee, check)
-                || value_cases.iter().chain(exn_cases.iter()).any(|case| {
-                    typed_case_uses_open_shadow_label_constructor(ctx, env, case, check)
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_try(body, cases) => {
-            expression_uses_open_shadow_label_constructor(ctx, env, body, check)
-                || cases.iter().any(|case| {
-                    typed_case_uses_open_shadow_label_constructor(ctx, env, case, check)
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_tuple(items)
-        | crate::types::typedtree::ExpressionDesc::Texp_array(items) => items
-            .iter()
-            .any(|item| expression_uses_open_shadow_label_constructor(ctx, env, item, check)),
-        crate::types::typedtree::ExpressionDesc::Texp_construct(_, desc, args) => {
-            constructor_matches_open_shadow_label_constructor(ctx, env, desc, check)
-                || args
-                    .iter()
-                    .any(|arg| expression_uses_open_shadow_label_constructor(ctx, env, arg, check))
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_variant(_, payload) => {
-            payload.as_deref().is_some_and(|expr| {
-                expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
-            })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_record {
-            fields,
-            extended_expression,
-        }
-        | crate::types::typedtree::ExpressionDesc::Texp_record_sparse {
-            fields,
-            extended_expression,
-            ..
-        } => {
-            fields.iter().any(|(_, label, definition, _)| {
-                label_matches_open_shadow_label_constructor(ctx, env, label, check)
-                    || match definition {
-                        crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) => {
-                            expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
-                        }
-                        crate::types::typedtree::RecordLabelDefinition::Kept(_)
-                        | crate::types::typedtree::RecordLabelDefinition::OmittedOptionalNone(
-                            _,
-                            _,
-                        ) => false,
-                    }
-            }) || extended_expression.as_deref().is_some_and(|expr| {
-                expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
-            })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_field(base, _, label) => {
-            expression_uses_open_shadow_label_constructor(ctx, env, base, check)
-                || label_matches_open_shadow_label_constructor(ctx, env, label, check)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_setfield(base, _, label, value) => {
-            expression_uses_open_shadow_label_constructor(ctx, env, base, check)
-                || label_matches_open_shadow_label_constructor(ctx, env, label, check)
-                || expression_uses_open_shadow_label_constructor(ctx, env, value, check)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_ifthenelse(cond, then_expr, else_expr) => {
-            expression_uses_open_shadow_label_constructor(ctx, env, cond, check)
-                || expression_uses_open_shadow_label_constructor(ctx, env, then_expr, check)
-                || else_expr.as_deref().is_some_and(|expr| {
-                    expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_sequence(first, second)
-        | crate::types::typedtree::ExpressionDesc::Texp_while(first, second)
-        | crate::types::typedtree::ExpressionDesc::Texp_for_of(_, _, first, second)
-        | crate::types::typedtree::ExpressionDesc::Texp_for_await_of(_, _, first, second) => {
-            expression_uses_open_shadow_label_constructor(ctx, env, first, check)
-                || expression_uses_open_shadow_label_constructor(ctx, env, second, check)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_for(_, pat, start, stop, _, body) => {
-            pattern_uses_open_shadow_label_constructor(ctx, env, pat, check)
-                || expression_uses_open_shadow_label_constructor(ctx, env, start, check)
-                || expression_uses_open_shadow_label_constructor(ctx, env, stop, check)
-                || expression_uses_open_shadow_label_constructor(ctx, env, body, check)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_send(receiver, _, arg) => {
-            expression_uses_open_shadow_label_constructor(ctx, env, receiver, check)
-                || arg.as_deref().is_some_and(|expr| {
-                    expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
-            module_expr_uses_open_shadow_label_constructor(ctx, env, module_expr, check)
-                || expression_uses_open_shadow_label_constructor(ctx, env, body, check)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_letexception(_, body)
-        | crate::types::typedtree::ExpressionDesc::Texp_assert(body) => {
-            expression_uses_open_shadow_label_constructor(ctx, env, body, check)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_pack(module_expr) => {
-            module_expr_uses_open_shadow_label_constructor(ctx, env, module_expr, check)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_ident(_, _, _)
-        | crate::types::typedtree::ExpressionDesc::Texp_constant(_)
-        | crate::types::typedtree::ExpressionDesc::Texp_break
-        | crate::types::typedtree::ExpressionDesc::Texp_continue
-        | crate::types::typedtree::ExpressionDesc::Texp_extension_constructor(_, _) => false,
-    }
-}
-
-fn module_expr_uses_open_shadow_label_constructor(
-    ctx: &crate::types::TypeContext,
-    env: &Env,
-    module_expr: &ModuleExpr,
-    check: &OpenShadowLabelConstructorUseCheck,
-) -> bool {
-    match &module_expr.mod_desc {
-        ModuleExprDesc::Tmod_structure(structure) => structure
-            .str_items
-            .iter()
-            .any(|item| structure_item_uses_open_shadow_label_constructor(ctx, env, item, check)),
-        ModuleExprDesc::Tmod_apply(func, arg, _) => {
-            module_expr_uses_open_shadow_label_constructor(ctx, env, func, check)
-                || module_expr_uses_open_shadow_label_constructor(ctx, env, arg, check)
-        }
-        ModuleExprDesc::Tmod_functor(_, _, _, body) => {
-            module_expr_uses_open_shadow_label_constructor(ctx, env, body, check)
-        }
-        ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
-            module_expr_uses_open_shadow_label_constructor(ctx, env, inner, check)
-        }
-        ModuleExprDesc::Tmod_unpack(expr, _) => {
-            expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
-        }
-        ModuleExprDesc::Tmod_ident(_, _) => false,
-    }
-}
-
-fn structure_item_uses_open_shadow_label_constructor(
-    ctx: &crate::types::TypeContext,
-    env: &Env,
-    item: &StructureItem,
-    check: &OpenShadowLabelConstructorUseCheck,
-) -> bool {
-    match &item.str_desc {
-        StructureItemDesc::Tstr_eval(expr, _) => {
-            expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
-        }
-        StructureItemDesc::Tstr_value(_, bindings) => bindings.iter().any(|binding| {
-            pattern_uses_open_shadow_label_constructor(ctx, env, &binding.vb_pat, check)
-                || expression_uses_open_shadow_label_constructor(ctx, env, &binding.vb_expr, check)
-        }),
-        StructureItemDesc::Tstr_module(binding) => {
-            module_expr_uses_open_shadow_label_constructor(ctx, env, &binding.mb_expr, check)
-        }
-        StructureItemDesc::Tstr_recmodule(bindings) => bindings.iter().any(|binding| {
-            module_expr_uses_open_shadow_label_constructor(ctx, env, &binding.mb_expr, check)
-        }),
-        StructureItemDesc::Tstr_include(include) => {
-            module_expr_uses_open_shadow_label_constructor(ctx, env, &include.incl_mod, check)
-        }
-        StructureItemDesc::Tstr_type(_, _)
-        | StructureItemDesc::Tstr_typext(_)
-        | StructureItemDesc::Tstr_exception(_)
-        | StructureItemDesc::Tstr_primitive(_)
-        | StructureItemDesc::Tstr_modtype(_)
-        | StructureItemDesc::Tstr_open(_)
-        | StructureItemDesc::Tstr_attribute(_) => false,
-    }
-}
-
-fn report_open_shadow_label_constructor_warnings_for_item(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    item_index: usize,
-    item: &StructureItem,
-    checks: &mut [OpenShadowLabelConstructorUseCheck],
-    mut warning_insert_index: usize,
-) {
-    let ctx = tctx.type_ctx;
-    for check in checks.iter_mut() {
-        if check.emitted || check.item_index >= item_index {
-            continue;
-        }
-        if structure_item_uses_open_shadow_label_constructor(ctx, env, item, check) {
-            check.emitted = true;
-            if tctx.report_warning_at(
-                warning_insert_index,
-                check.loc,
-                Warning::OpenShadowLabelConstructor {
-                    kind: check.kind.as_str().to_string(),
-                    name: check.name.clone(),
-                },
-            ) {
-                warning_insert_index += 1;
-            }
-        }
-    }
 }
 
 fn module_expr_uses_ident(module_expr: &ModuleExpr, target: &Ident) -> bool {
@@ -9006,15 +8169,6 @@ fn lid_has_path_prefix(arena: &ParseArena, lid: &Located<LidentIdx>, path: &Path
             .all(|(left, right)| left == right)
 }
 
-fn lid_uses_opened_path(
-    arena: &ParseArena,
-    lid: &Located<LidentIdx>,
-    path: &Path,
-    open_path: &Path,
-) -> bool {
-    path_is_strict_prefix(path, open_path) && !lid_has_path_prefix(arena, lid, open_path)
-}
-
 fn expression_uses_unqualified_value_path(
     arena: &ParseArena,
     expr: &Expression,
@@ -9391,584 +8545,6 @@ fn structure_item_uses_unqualified_module_path(
     }
 }
 
-fn typed_core_type_uses_opened_path(
-    arena: &ParseArena,
-    ctyp: &TypedCoreType,
-    open_path: &Path,
-) -> bool {
-    let desc_uses = match &ctyp.ctyp_desc {
-        TypedCoreTypeDesc::Ttyp_arrow(args, ret) => {
-            args.iter()
-                .any(|arg| typed_core_type_uses_opened_path(arena, &arg.typ, open_path))
-                || typed_core_type_uses_opened_path(arena, ret, open_path)
-        }
-        TypedCoreTypeDesc::Ttyp_tuple(items) => items
-            .iter()
-            .any(|item| typed_core_type_uses_opened_path(arena, item, open_path)),
-        TypedCoreTypeDesc::Ttyp_constr(path, lid, args) => {
-            lid_uses_opened_path(arena, lid, path, open_path)
-                || args
-                    .iter()
-                    .any(|arg| typed_core_type_uses_opened_path(arena, arg, open_path))
-        }
-        TypedCoreTypeDesc::Ttyp_object(fields, _) => {
-            fields.iter().any(|field| match &field.of_desc {
-                crate::types::typedtree::ObjectFieldDesc::OTtag(_, ty)
-                | crate::types::typedtree::ObjectFieldDesc::OTinherit(ty) => {
-                    typed_core_type_uses_opened_path(arena, ty, open_path)
-                }
-            })
-        }
-        TypedCoreTypeDesc::Ttyp_poly(_, body) | TypedCoreTypeDesc::Ttyp_alias(body, _) => {
-            typed_core_type_uses_opened_path(arena, body, open_path)
-        }
-        TypedCoreTypeDesc::Ttyp_variant(rows, _, _) => rows.iter().any(|row| match &row.rf_desc {
-            crate::types::typedtree::RowFieldDesc::Rtag(_, _, args) => args
-                .iter()
-                .any(|arg| typed_core_type_uses_opened_path(arena, arg, open_path)),
-            crate::types::typedtree::RowFieldDesc::Rinherit(ty) => {
-                typed_core_type_uses_opened_path(arena, ty, open_path)
-            }
-        }),
-        TypedCoreTypeDesc::Ttyp_package(package) => {
-            package
-                .pack_path
-                .name()
-                .starts_with(&format!("{}.", open_path.name()))
-                || package
-                    .pack_fields
-                    .iter()
-                    .any(|(_, ty)| typed_core_type_uses_opened_path(arena, ty, open_path))
-        }
-        TypedCoreTypeDesc::Ttyp_var(_) => false,
-    };
-
-    desc_uses
-}
-
-fn typed_type_declaration_uses_opened_path(
-    ctx: &crate::types::TypeContext,
-    arena: &ParseArena,
-    decl: &TypedTypeDeclaration,
-    open_path: &Path,
-) -> bool {
-    decl.typ_params
-        .iter()
-        .any(|(ctyp, _)| typed_core_type_uses_opened_path(arena, ctyp, open_path))
-        || decl.typ_cstrs.iter().any(|(left, right, _)| {
-            typed_core_type_uses_opened_path(arena, left, open_path)
-                || typed_core_type_uses_opened_path(arena, right, open_path)
-        })
-        || decl
-            .typ_manifest
-            .as_ref()
-            .is_some_and(|ctyp| typed_core_type_uses_opened_path(arena, ctyp, open_path))
-        || match &decl.typ_kind {
-            TypedTypeKind::Ttype_variant(constructors) => constructors.iter().any(|cstr| {
-                (match &cstr.cd_args {
-                    TypedConstructorArguments::Cstr_tuple(args) => args
-                        .iter()
-                        .any(|arg| typed_core_type_uses_opened_path(arena, arg, open_path)),
-                    TypedConstructorArguments::Cstr_record(labels) => labels.iter().any(|label| {
-                        typed_core_type_uses_opened_path(arena, &label.ld_type, open_path)
-                    }),
-                }) || cstr
-                    .cd_res
-                    .as_ref()
-                    .is_some_and(|ctyp| typed_core_type_uses_opened_path(arena, ctyp, open_path))
-            }),
-            TypedTypeKind::Ttype_record(labels) => labels
-                .iter()
-                .any(|label| typed_core_type_uses_opened_path(arena, &label.ld_type, open_path)),
-            TypedTypeKind::Ttype_abstract | TypedTypeKind::Ttype_open => false,
-        }
-}
-
-fn typed_value_description_uses_opened_path(
-    _ctx: &crate::types::TypeContext,
-    arena: &ParseArena,
-    desc: &crate::types::typedtree::TypedValueDescription,
-    open_path: &Path,
-) -> bool {
-    typed_core_type_uses_opened_path(arena, &desc.val_desc, open_path)
-}
-
-fn type_extension_uses_opened_path(
-    ctx: &crate::types::TypeContext,
-    arena: &ParseArena,
-    ext: &TypeExtension,
-    open_path: &Path,
-) -> bool {
-    ext.tyext_path
-        .name()
-        .starts_with(&format!("{}.", open_path.name()))
-        || ext
-            .tyext_params
-            .iter()
-            .any(|(ctyp, _)| typed_core_type_uses_opened_path(arena, ctyp, open_path))
-        || ext
-            .tyext_constructors
-            .iter()
-            .any(|cstr| typed_extension_constructor_uses_opened_path(ctx, arena, cstr, open_path))
-}
-
-fn typed_constructor_uses_opened_path(
-    ctx: &crate::types::TypeContext,
-    arena: &ParseArena,
-    lid: &Located<LidentIdx>,
-    desc: &crate::types::ConstructorDescription,
-    open_path: &Path,
-) -> bool {
-    type_expr_uses_path(ctx, desc.cstr_res, &|path| {
-        lid_uses_opened_path(arena, lid, path, open_path)
-    })
-}
-
-fn typed_label_uses_opened_path(
-    ctx: &crate::types::TypeContext,
-    arena: &ParseArena,
-    lid: &Located<LidentIdx>,
-    label: &crate::types::LabelDescription,
-    open_path: &Path,
-) -> bool {
-    type_expr_uses_path(ctx, label.lbl_res, &|path| {
-        lid_uses_opened_path(arena, lid, path, open_path)
-    })
-}
-
-fn pattern_uses_opened_path(
-    ctx: &crate::types::TypeContext,
-    arena: &ParseArena,
-    pat: &crate::types::typedtree::Pattern,
-    open_path: &Path,
-) -> bool {
-    if pat.pat_extra.iter().any(|(extra, _, _)| match extra {
-        crate::types::typedtree::PatExtra::Tpat_constraint(ctyp) => {
-            typed_core_type_uses_opened_path(arena, ctyp, open_path)
-        }
-        crate::types::typedtree::PatExtra::Tpat_type(path, lid)
-        | crate::types::typedtree::PatExtra::Tpat_open(path, lid, _) => {
-            lid_uses_opened_path(arena, lid, path, open_path)
-        }
-        crate::types::typedtree::PatExtra::Tpat_unpack => false,
-    }) {
-        return true;
-    }
-
-    match &pat.pat_desc {
-        crate::types::typedtree::PatternDesc::Tpat_alias(inner, _, _) => {
-            pattern_uses_opened_path(ctx, arena, inner, open_path)
-        }
-        crate::types::typedtree::PatternDesc::Tpat_tuple(pats)
-        | crate::types::typedtree::PatternDesc::Tpat_array(pats) => pats
-            .iter()
-            .any(|pat| pattern_uses_opened_path(ctx, arena, pat, open_path)),
-        crate::types::typedtree::PatternDesc::Tpat_construct(lid, desc, args) => {
-            typed_constructor_uses_opened_path(ctx, arena, lid, desc, open_path)
-                || args
-                    .iter()
-                    .any(|pat| pattern_uses_opened_path(ctx, arena, pat, open_path))
-        }
-        crate::types::typedtree::PatternDesc::Tpat_variant(_, payload, _) => payload
-            .as_deref()
-            .is_some_and(|pat| pattern_uses_opened_path(ctx, arena, pat, open_path)),
-        crate::types::typedtree::PatternDesc::Tpat_record(fields, _, _) => {
-            fields.iter().any(|(lid, label, pat, _)| {
-                typed_label_uses_opened_path(ctx, arena, lid, label, open_path)
-                    || pattern_uses_opened_path(ctx, arena, pat, open_path)
-            })
-        }
-        crate::types::typedtree::PatternDesc::Tpat_or(left, right, _) => {
-            pattern_uses_opened_path(ctx, arena, left, open_path)
-                || pattern_uses_opened_path(ctx, arena, right, open_path)
-        }
-        crate::types::typedtree::PatternDesc::Tpat_any
-        | crate::types::typedtree::PatternDesc::Tpat_var(_, _)
-        | crate::types::typedtree::PatternDesc::Tpat_constant(_) => false,
-    }
-}
-
-fn typed_case_uses_opened_path(
-    ctx: &crate::types::TypeContext,
-    arena: &ParseArena,
-    case: &crate::types::typedtree::Case,
-    open_path: &Path,
-) -> bool {
-    pattern_uses_opened_path(ctx, arena, &case.c_lhs, open_path)
-        || case
-            .c_guard
-            .as_ref()
-            .is_some_and(|guard| expression_uses_opened_path(ctx, arena, guard, open_path))
-        || expression_uses_opened_path(ctx, arena, &case.c_rhs, open_path)
-}
-
-pub(crate) fn expression_uses_opened_path(
-    ctx: &crate::types::TypeContext,
-    arena: &ParseArena,
-    expr: &Expression,
-    open_path: &Path,
-) -> bool {
-    if expr.exp_extra.iter().any(|(extra, _, _)| match extra {
-        crate::types::typedtree::ExpExtra::Texp_constraint(ctyp)
-        | crate::types::typedtree::ExpExtra::Texp_coerce(ctyp) => {
-            typed_core_type_uses_opened_path(arena, ctyp, open_path)
-        }
-        crate::types::typedtree::ExpExtra::Texp_open(_, path, lid, _) => {
-            lid_uses_opened_path(arena, lid, path, open_path)
-        }
-        crate::types::typedtree::ExpExtra::Texp_newtype(_) => false,
-    }) {
-        return true;
-    }
-
-    match &expr.exp_desc {
-        crate::types::typedtree::ExpressionDesc::Texp_ident(path, lid, _) => {
-            lid_uses_opened_path(arena, lid, path, open_path)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_let(_, bindings, body) => {
-            bindings.iter().any(|binding| {
-                pattern_uses_opened_path(ctx, arena, &binding.vb_pat, open_path)
-                    || expression_uses_opened_path(ctx, arena, &binding.vb_expr, open_path)
-            }) || expression_uses_opened_path(ctx, arena, body, open_path)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_function { params, body, .. } => {
-            params.iter().any(|param| {
-                function_param_pattern_uses_opened_path(ctx, arena, &param.fp_pat, open_path)
-            }) || expression_uses_opened_path(ctx, arena, body, open_path)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_apply { funct, args, .. } => {
-            expression_uses_opened_path(ctx, arena, funct, open_path)
-                || args.iter().any(|arg| {
-                    arg.expression.as_ref().is_some_and(|expr| {
-                        expression_uses_opened_path(ctx, arena, expr, open_path)
-                    })
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_match(
-            scrutinee,
-            value_cases,
-            exn_cases,
-            _,
-        ) => {
-            expression_uses_opened_path(ctx, arena, scrutinee, open_path)
-                || value_cases
-                    .iter()
-                    .chain(exn_cases.iter())
-                    .any(|case| typed_case_uses_opened_path(ctx, arena, case, open_path))
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_try(body, cases) => {
-            expression_uses_opened_path(ctx, arena, body, open_path)
-                || cases
-                    .iter()
-                    .any(|case| typed_case_uses_opened_path(ctx, arena, case, open_path))
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_tuple(items)
-        | crate::types::typedtree::ExpressionDesc::Texp_array(items) => items
-            .iter()
-            .any(|item| expression_uses_opened_path(ctx, arena, item, open_path)),
-        crate::types::typedtree::ExpressionDesc::Texp_construct(lid, desc, args) => {
-            typed_constructor_uses_opened_path(ctx, arena, lid, desc, open_path)
-                || args
-                    .iter()
-                    .any(|arg| expression_uses_opened_path(ctx, arena, arg, open_path))
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_variant(_, payload) => payload
-            .as_deref()
-            .is_some_and(|expr| expression_uses_opened_path(ctx, arena, expr, open_path)),
-        crate::types::typedtree::ExpressionDesc::Texp_record {
-            fields,
-            extended_expression,
-        }
-        | crate::types::typedtree::ExpressionDesc::Texp_record_sparse {
-            fields,
-            extended_expression,
-            ..
-        } => {
-            fields.iter().any(|(lid, label, definition, _)| {
-                typed_label_uses_opened_path(ctx, arena, lid, label, open_path)
-                    || match definition {
-                        crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) => {
-                            expression_uses_opened_path(ctx, arena, expr, open_path)
-                        }
-                        crate::types::typedtree::RecordLabelDefinition::Kept(_)
-                        | crate::types::typedtree::RecordLabelDefinition::OmittedOptionalNone(
-                            _,
-                            _,
-                        ) => false,
-                    }
-            }) || extended_expression
-                .as_deref()
-                .is_some_and(|expr| expression_uses_opened_path(ctx, arena, expr, open_path))
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_field(base, lid, label) => {
-            expression_uses_opened_path(ctx, arena, base, open_path)
-                || typed_label_uses_opened_path(ctx, arena, lid, label, open_path)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_setfield(base, lid, label, value) => {
-            expression_uses_opened_path(ctx, arena, base, open_path)
-                || typed_label_uses_opened_path(ctx, arena, lid, label, open_path)
-                || expression_uses_opened_path(ctx, arena, value, open_path)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_ifthenelse(cond, then_expr, else_expr) => {
-            expression_uses_opened_path(ctx, arena, cond, open_path)
-                || expression_uses_opened_path(ctx, arena, then_expr, open_path)
-                || else_expr
-                    .as_deref()
-                    .is_some_and(|expr| expression_uses_opened_path(ctx, arena, expr, open_path))
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_sequence(first, second)
-        | crate::types::typedtree::ExpressionDesc::Texp_while(first, second)
-        | crate::types::typedtree::ExpressionDesc::Texp_for_of(_, _, first, second)
-        | crate::types::typedtree::ExpressionDesc::Texp_for_await_of(_, _, first, second) => {
-            expression_uses_opened_path(ctx, arena, first, open_path)
-                || expression_uses_opened_path(ctx, arena, second, open_path)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_for(_, pat, start, stop, _, body) => {
-            pattern_uses_opened_path(ctx, arena, pat, open_path)
-                || expression_uses_opened_path(ctx, arena, start, open_path)
-                || expression_uses_opened_path(ctx, arena, stop, open_path)
-                || expression_uses_opened_path(ctx, arena, body, open_path)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_send(receiver, _, arg) => {
-            expression_uses_opened_path(ctx, arena, receiver, open_path)
-                || arg
-                    .as_deref()
-                    .is_some_and(|expr| expression_uses_opened_path(ctx, arena, expr, open_path))
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
-            module_expr_uses_opened_path(ctx, arena, module_expr, open_path)
-                || expression_uses_opened_path(ctx, arena, body, open_path)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_letexception(ext, body) => {
-            typed_extension_constructor_uses_opened_path(ctx, arena, ext, open_path)
-                || expression_uses_opened_path(ctx, arena, body, open_path)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_assert(body) => {
-            expression_uses_opened_path(ctx, arena, body, open_path)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_pack(module_expr) => {
-            module_expr_uses_opened_path(ctx, arena, module_expr, open_path)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_constant(_)
-        | crate::types::typedtree::ExpressionDesc::Texp_break
-        | crate::types::typedtree::ExpressionDesc::Texp_continue
-        | crate::types::typedtree::ExpressionDesc::Texp_extension_constructor(_, _) => false,
-    }
-}
-
-fn function_param_pattern_uses_opened_path(
-    ctx: &crate::types::TypeContext,
-    arena: &ParseArena,
-    pat: &crate::types::typedtree::Pattern,
-    open_path: &Path,
-) -> bool {
-    pattern_uses_opened_path(ctx, arena, pat, open_path)
-}
-
-fn typed_extension_constructor_uses_opened_path(
-    ctx: &crate::types::TypeContext,
-    arena: &ParseArena,
-    ext: &crate::types::typedtree::ExtensionConstructor,
-    open_path: &Path,
-) -> bool {
-    extension_constructor_uses_path(ctx, &ext.ext_type, &|path| {
-        path_is_strict_prefix(path, open_path)
-    }) || match &ext.ext_kind {
-        crate::types::typedtree::ExtensionConstructorKind::Text_decl(args, ret) => {
-            typed_constructor_argument_uses_opened_path(ctx, arena, args, open_path)
-                || ret
-                    .as_ref()
-                    .is_some_and(|ret| typed_core_type_uses_opened_path(arena, ret, open_path))
-        }
-        crate::types::typedtree::ExtensionConstructorKind::Text_rebind(path, lid) => {
-            lid_uses_opened_path(arena, lid, path, open_path)
-        }
-    }
-}
-
-fn typed_constructor_argument_uses_opened_path(
-    ctx: &crate::types::TypeContext,
-    arena: &ParseArena,
-    arg: &crate::types::typedtree::ConstructorArgument,
-    open_path: &Path,
-) -> bool {
-    match arg {
-        crate::types::typedtree::ConstructorArgument::Cstr_tuple(args) => args
-            .iter()
-            .any(|arg| typed_core_type_uses_opened_path(arena, arg, open_path)),
-        crate::types::typedtree::ConstructorArgument::Cstr_record(labels) => labels
-            .iter()
-            .any(|label| typed_core_type_uses_opened_path(arena, &label.ld_type, open_path)),
-    }
-}
-
-fn module_expr_uses_opened_path(
-    ctx: &crate::types::TypeContext,
-    arena: &ParseArena,
-    module_expr: &ModuleExpr,
-    open_path: &Path,
-) -> bool {
-    match &module_expr.mod_desc {
-        ModuleExprDesc::Tmod_ident(path, lid) => lid_uses_opened_path(arena, lid, path, open_path),
-        ModuleExprDesc::Tmod_structure(structure) => structure
-            .str_items
-            .iter()
-            .any(|item| structure_item_uses_opened_path(ctx, arena, item, open_path)),
-        ModuleExprDesc::Tmod_apply(func, arg, _) => {
-            module_expr_uses_opened_path(ctx, arena, func, open_path)
-                || module_expr_uses_opened_path(ctx, arena, arg, open_path)
-        }
-        ModuleExprDesc::Tmod_functor(_, _, arg, body) => {
-            arg.as_ref()
-                .is_some_and(|arg| module_type_uses_opened_path(ctx, arena, arg, open_path))
-                || module_expr_uses_opened_path(ctx, arena, body, open_path)
-        }
-        ModuleExprDesc::Tmod_constraint(inner, _, constraint, _) => {
-            module_expr_uses_opened_path(ctx, arena, inner, open_path)
-                || match constraint {
-                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(mty) => {
-                        module_type_uses_opened_path(ctx, arena, mty, open_path)
-                    }
-                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit => false,
-                }
-        }
-        ModuleExprDesc::Tmod_unpack(expr, _) => {
-            expression_uses_opened_path(ctx, arena, expr, open_path)
-        }
-    }
-}
-
-fn module_type_uses_opened_path(
-    ctx: &crate::types::TypeContext,
-    arena: &ParseArena,
-    module_type: &ModuleType,
-    open_path: &Path,
-) -> bool {
-    match &module_type.mty_desc {
-        crate::types::typedtree::ModuleTypeDesc::Tmty_ident(path, lid)
-        | crate::types::typedtree::ModuleTypeDesc::Tmty_alias(path, lid) => {
-            lid_uses_opened_path(arena, lid, path, open_path)
-        }
-        crate::types::typedtree::ModuleTypeDesc::Tmty_signature(signature) => signature
-            .sig_items
-            .iter()
-            .any(|item| signature_item_uses_opened_path(ctx, arena, item, open_path)),
-        crate::types::typedtree::ModuleTypeDesc::Tmty_functor(_, _, arg, body) => {
-            arg.as_ref()
-                .is_some_and(|arg| module_type_uses_opened_path(ctx, arena, arg, open_path))
-                || module_type_uses_opened_path(ctx, arena, body, open_path)
-        }
-        crate::types::typedtree::ModuleTypeDesc::Tmty_with(inner, constraints) => {
-            module_type_uses_opened_path(ctx, arena, inner, open_path)
-                || constraints.iter().any(|(path, lid, constraint)| {
-                    lid_uses_opened_path(arena, lid, path, open_path)
-                        || match constraint {
-                            crate::types::typedtree::WithConstraint::Twith_type(decl)
-                            | crate::types::typedtree::WithConstraint::Twith_typesubst(decl) => {
-                                typed_type_declaration_uses_opened_path(ctx, arena, decl, open_path)
-                            }
-                            crate::types::typedtree::WithConstraint::Twith_module(path, lid)
-                            | crate::types::typedtree::WithConstraint::Twith_modsubst(
-                                path,
-                                lid,
-                            ) => lid_uses_opened_path(arena, lid, path, open_path),
-                        }
-                })
-        }
-        crate::types::typedtree::ModuleTypeDesc::Tmty_typeof(module_expr) => {
-            module_expr_uses_opened_path(ctx, arena, module_expr, open_path)
-        }
-        crate::types::typedtree::ModuleTypeDesc::Tmty_placeholder => false,
-    }
-}
-
-fn signature_item_uses_opened_path(
-    ctx: &crate::types::TypeContext,
-    arena: &ParseArena,
-    item: &crate::types::typedtree::TypedSignatureItem,
-    open_path: &Path,
-) -> bool {
-    match &item.sig_desc {
-        crate::types::typedtree::TypedSignatureItemDesc::Tsig_value(desc) => {
-            typed_value_description_uses_opened_path(ctx, arena, desc, open_path)
-        }
-        crate::types::typedtree::TypedSignatureItemDesc::Tsig_type(_, decls) => decls
-            .iter()
-            .any(|decl| typed_type_declaration_uses_opened_path(ctx, arena, decl, open_path)),
-        crate::types::typedtree::TypedSignatureItemDesc::Tsig_typext(ext) => {
-            type_extension_uses_opened_path(ctx, arena, ext, open_path)
-        }
-        crate::types::typedtree::TypedSignatureItemDesc::Tsig_exception(ext) => {
-            typed_extension_constructor_uses_opened_path(ctx, arena, ext, open_path)
-        }
-        crate::types::typedtree::TypedSignatureItemDesc::Tsig_module(decl) => {
-            module_type_uses_opened_path(ctx, arena, &decl.md_type, open_path)
-        }
-        crate::types::typedtree::TypedSignatureItemDesc::Tsig_recmodule(decls) => decls
-            .iter()
-            .any(|decl| module_type_uses_opened_path(ctx, arena, &decl.md_type, open_path)),
-        crate::types::typedtree::TypedSignatureItemDesc::Tsig_modtype(decl) => decl
-            .mtd_type
-            .as_ref()
-            .is_some_and(|mty| module_type_uses_opened_path(ctx, arena, mty, open_path)),
-        crate::types::typedtree::TypedSignatureItemDesc::Tsig_include(include) => {
-            module_type_uses_opened_path(ctx, arena, &include.incl_mod, open_path)
-        }
-        crate::types::typedtree::TypedSignatureItemDesc::Tsig_open(open) => {
-            lid_is_unqualified(arena, &open.open_txt)
-                && path_is_strict_prefix(&open.open_path, open_path)
-        }
-        crate::types::typedtree::TypedSignatureItemDesc::Tsig_attribute(_) => false,
-    }
-}
-
-fn structure_item_uses_opened_path(
-    ctx: &crate::types::TypeContext,
-    arena: &ParseArena,
-    item: &StructureItem,
-    open_path: &Path,
-) -> bool {
-    match &item.str_desc {
-        StructureItemDesc::Tstr_eval(expr, _) => {
-            expression_uses_opened_path(ctx, arena, expr, open_path)
-        }
-        StructureItemDesc::Tstr_value(_, bindings) => bindings.iter().any(|binding| {
-            pattern_uses_opened_path(ctx, arena, &binding.vb_pat, open_path)
-                || expression_uses_opened_path(ctx, arena, &binding.vb_expr, open_path)
-        }),
-        StructureItemDesc::Tstr_primitive(desc) => {
-            typed_value_description_uses_opened_path(ctx, arena, desc, open_path)
-        }
-        StructureItemDesc::Tstr_type(_, decls) => decls
-            .iter()
-            .any(|decl| typed_type_declaration_uses_opened_path(ctx, arena, decl, open_path)),
-        StructureItemDesc::Tstr_typext(ext) => {
-            type_extension_uses_opened_path(ctx, arena, ext, open_path)
-        }
-        StructureItemDesc::Tstr_exception(ext) => {
-            typed_extension_constructor_uses_opened_path(ctx, arena, ext, open_path)
-        }
-        StructureItemDesc::Tstr_module(binding) => {
-            module_expr_uses_opened_path(ctx, arena, &binding.mb_expr, open_path)
-        }
-        StructureItemDesc::Tstr_recmodule(bindings) => bindings
-            .iter()
-            .any(|binding| module_expr_uses_opened_path(ctx, arena, &binding.mb_expr, open_path)),
-        StructureItemDesc::Tstr_modtype(decl) => decl
-            .mtd_type
-            .as_ref()
-            .is_some_and(|mty| module_type_uses_opened_path(ctx, arena, mty, open_path)),
-        StructureItemDesc::Tstr_open(open) => {
-            lid_is_unqualified(arena, &open.open_txt)
-                && path_is_strict_prefix(&open.open_path, open_path)
-        }
-        StructureItemDesc::Tstr_include(include) => {
-            module_expr_uses_opened_path(ctx, arena, &include.incl_mod, open_path)
-        }
-        StructureItemDesc::Tstr_attribute(_) => false,
-    }
-}
-
 fn lid_unqualified_name_in(
     arena: &ParseArena,
     lid: &Located<LidentIdx>,
@@ -9978,338 +8554,6 @@ fn lid_unqualified_name_in(
         arena.get_longident(lid.txt),
         Longident::Lident(name_idx) if names.contains(arena.get_string(*name_idx))
     )
-}
-
-fn typed_core_type_uses_opened_modtype_name(
-    arena: &ParseArena,
-    ctyp: &TypedCoreType,
-    names: &HashSet<String>,
-) -> bool {
-    match &ctyp.ctyp_desc {
-        TypedCoreTypeDesc::Ttyp_arrow(args, ret) => {
-            args.iter()
-                .any(|arg| typed_core_type_uses_opened_modtype_name(arena, &arg.typ, names))
-                || typed_core_type_uses_opened_modtype_name(arena, ret, names)
-        }
-        TypedCoreTypeDesc::Ttyp_tuple(items) => items
-            .iter()
-            .any(|item| typed_core_type_uses_opened_modtype_name(arena, item, names)),
-        TypedCoreTypeDesc::Ttyp_constr(_, _, args) => args
-            .iter()
-            .any(|arg| typed_core_type_uses_opened_modtype_name(arena, arg, names)),
-        TypedCoreTypeDesc::Ttyp_object(fields, _) => {
-            fields.iter().any(|field| match &field.of_desc {
-                crate::types::typedtree::ObjectFieldDesc::OTtag(_, ty)
-                | crate::types::typedtree::ObjectFieldDesc::OTinherit(ty) => {
-                    typed_core_type_uses_opened_modtype_name(arena, ty, names)
-                }
-            })
-        }
-        TypedCoreTypeDesc::Ttyp_poly(_, body) | TypedCoreTypeDesc::Ttyp_alias(body, _) => {
-            typed_core_type_uses_opened_modtype_name(arena, body, names)
-        }
-        TypedCoreTypeDesc::Ttyp_variant(rows, _, _) => rows.iter().any(|row| match &row.rf_desc {
-            crate::types::typedtree::RowFieldDesc::Rtag(_, _, args) => args
-                .iter()
-                .any(|arg| typed_core_type_uses_opened_modtype_name(arena, arg, names)),
-            crate::types::typedtree::RowFieldDesc::Rinherit(ty) => {
-                typed_core_type_uses_opened_modtype_name(arena, ty, names)
-            }
-        }),
-        TypedCoreTypeDesc::Ttyp_package(package) => {
-            names.contains(package.pack_path.last())
-                || package
-                    .pack_fields
-                    .iter()
-                    .any(|(_, ty)| typed_core_type_uses_opened_modtype_name(arena, ty, names))
-        }
-        TypedCoreTypeDesc::Ttyp_var(_) => false,
-    }
-}
-
-fn module_type_uses_opened_modtype_name(
-    arena: &ParseArena,
-    module_type: &ModuleType,
-    names: &HashSet<String>,
-) -> bool {
-    match &module_type.mty_desc {
-        crate::types::typedtree::ModuleTypeDesc::Tmty_ident(_, lid)
-        | crate::types::typedtree::ModuleTypeDesc::Tmty_alias(_, lid) => {
-            lid_unqualified_name_in(arena, lid, names)
-        }
-        crate::types::typedtree::ModuleTypeDesc::Tmty_signature(signature) => signature
-            .sig_items
-            .iter()
-            .any(|item| signature_item_uses_opened_modtype_name(arena, item, names)),
-        crate::types::typedtree::ModuleTypeDesc::Tmty_functor(_, _, arg, body) => {
-            arg.as_ref()
-                .is_some_and(|arg| module_type_uses_opened_modtype_name(arena, arg, names))
-                || module_type_uses_opened_modtype_name(arena, body, names)
-        }
-        crate::types::typedtree::ModuleTypeDesc::Tmty_with(inner, constraints) => {
-            module_type_uses_opened_modtype_name(arena, inner, names)
-                || constraints
-                    .iter()
-                    .any(|(_, _, constraint)| match constraint {
-                        crate::types::typedtree::WithConstraint::Twith_type(decl)
-                        | crate::types::typedtree::WithConstraint::Twith_typesubst(decl) => {
-                            decl.typ_manifest.as_ref().is_some_and(|ty| {
-                                typed_core_type_uses_opened_modtype_name(arena, ty, names)
-                            })
-                        }
-                        crate::types::typedtree::WithConstraint::Twith_module(_, _)
-                        | crate::types::typedtree::WithConstraint::Twith_modsubst(_, _) => false,
-                    })
-        }
-        crate::types::typedtree::ModuleTypeDesc::Tmty_typeof(module_expr) => {
-            module_expr_uses_opened_modtype_name(arena, module_expr, names)
-        }
-        crate::types::typedtree::ModuleTypeDesc::Tmty_placeholder => false,
-    }
-}
-
-fn module_expr_uses_opened_modtype_name(
-    arena: &ParseArena,
-    module_expr: &ModuleExpr,
-    names: &HashSet<String>,
-) -> bool {
-    match &module_expr.mod_desc {
-        ModuleExprDesc::Tmod_structure(structure) => structure
-            .str_items
-            .iter()
-            .any(|item| structure_item_uses_opened_modtype_name(arena, item, names)),
-        ModuleExprDesc::Tmod_apply(func, arg, _) => {
-            module_expr_uses_opened_modtype_name(arena, func, names)
-                || module_expr_uses_opened_modtype_name(arena, arg, names)
-        }
-        ModuleExprDesc::Tmod_functor(_, _, arg, body) => {
-            arg.as_ref()
-                .is_some_and(|arg| module_type_uses_opened_modtype_name(arena, arg, names))
-                || module_expr_uses_opened_modtype_name(arena, body, names)
-        }
-        ModuleExprDesc::Tmod_constraint(inner, _, constraint, _) => {
-            module_expr_uses_opened_modtype_name(arena, inner, names)
-                || match constraint {
-                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(mty) => {
-                        module_type_uses_opened_modtype_name(arena, mty, names)
-                    }
-                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit => false,
-                }
-        }
-        ModuleExprDesc::Tmod_unpack(expr, _) => {
-            expression_uses_opened_modtype_name(arena, expr, names)
-        }
-        ModuleExprDesc::Tmod_ident(_, _) => false,
-    }
-}
-
-fn expression_uses_opened_modtype_name(
-    arena: &ParseArena,
-    expr: &Expression,
-    names: &HashSet<String>,
-) -> bool {
-    if expr.exp_extra.iter().any(|(extra, _, _)| match extra {
-        crate::types::typedtree::ExpExtra::Texp_constraint(ctyp)
-        | crate::types::typedtree::ExpExtra::Texp_coerce(ctyp) => {
-            typed_core_type_uses_opened_modtype_name(arena, ctyp, names)
-        }
-        crate::types::typedtree::ExpExtra::Texp_open(_, _, _, _)
-        | crate::types::typedtree::ExpExtra::Texp_newtype(_) => false,
-    }) {
-        return true;
-    }
-
-    match &expr.exp_desc {
-        crate::types::typedtree::ExpressionDesc::Texp_let(_, bindings, body) => {
-            bindings
-                .iter()
-                .any(|binding| expression_uses_opened_modtype_name(arena, &binding.vb_expr, names))
-                || expression_uses_opened_modtype_name(arena, body, names)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_function { body, .. } => {
-            expression_uses_opened_modtype_name(arena, body, names)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_apply { funct, args, .. } => {
-            expression_uses_opened_modtype_name(arena, funct, names)
-                || args.iter().any(|arg| {
-                    arg.expression
-                        .as_ref()
-                        .is_some_and(|expr| expression_uses_opened_modtype_name(arena, expr, names))
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_match(
-            scrutinee,
-            value_cases,
-            exn_cases,
-            _,
-        ) => {
-            expression_uses_opened_modtype_name(arena, scrutinee, names)
-                || value_cases.iter().chain(exn_cases.iter()).any(|case| {
-                    case.c_guard.as_ref().is_some_and(|guard| {
-                        expression_uses_opened_modtype_name(arena, guard, names)
-                    }) || expression_uses_opened_modtype_name(arena, &case.c_rhs, names)
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_try(body, cases) => {
-            expression_uses_opened_modtype_name(arena, body, names)
-                || cases.iter().any(|case| {
-                    case.c_guard.as_ref().is_some_and(|guard| {
-                        expression_uses_opened_modtype_name(arena, guard, names)
-                    }) || expression_uses_opened_modtype_name(arena, &case.c_rhs, names)
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_tuple(items)
-        | crate::types::typedtree::ExpressionDesc::Texp_array(items)
-        | crate::types::typedtree::ExpressionDesc::Texp_construct(_, _, items) => items
-            .iter()
-            .any(|item| expression_uses_opened_modtype_name(arena, item, names)),
-        crate::types::typedtree::ExpressionDesc::Texp_variant(_, payload) => payload
-            .as_deref()
-            .is_some_and(|expr| expression_uses_opened_modtype_name(arena, expr, names)),
-        crate::types::typedtree::ExpressionDesc::Texp_record {
-            fields,
-            extended_expression,
-        }
-        | crate::types::typedtree::ExpressionDesc::Texp_record_sparse {
-            fields,
-            extended_expression,
-            ..
-        } => {
-            fields.iter().any(|(_, _, definition, _)| {
-                matches!(
-                    definition,
-                    crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr)
-                        if expression_uses_opened_modtype_name(arena, expr, names)
-                )
-            }) || extended_expression
-                .as_deref()
-                .is_some_and(|expr| expression_uses_opened_modtype_name(arena, expr, names))
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_field(base, _, _)
-        | crate::types::typedtree::ExpressionDesc::Texp_assert(base) => {
-            expression_uses_opened_modtype_name(arena, base, names)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_setfield(base, _, _, value) => {
-            expression_uses_opened_modtype_name(arena, base, names)
-                || expression_uses_opened_modtype_name(arena, value, names)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_ifthenelse(cond, then_expr, else_expr) => {
-            expression_uses_opened_modtype_name(arena, cond, names)
-                || expression_uses_opened_modtype_name(arena, then_expr, names)
-                || else_expr
-                    .as_deref()
-                    .is_some_and(|expr| expression_uses_opened_modtype_name(arena, expr, names))
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_sequence(first, second)
-        | crate::types::typedtree::ExpressionDesc::Texp_while(first, second)
-        | crate::types::typedtree::ExpressionDesc::Texp_for_of(_, _, first, second)
-        | crate::types::typedtree::ExpressionDesc::Texp_for_await_of(_, _, first, second) => {
-            expression_uses_opened_modtype_name(arena, first, names)
-                || expression_uses_opened_modtype_name(arena, second, names)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_for(_, _, start, stop, _, body) => {
-            expression_uses_opened_modtype_name(arena, start, names)
-                || expression_uses_opened_modtype_name(arena, stop, names)
-                || expression_uses_opened_modtype_name(arena, body, names)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_send(receiver, _, arg) => {
-            expression_uses_opened_modtype_name(arena, receiver, names)
-                || arg
-                    .as_deref()
-                    .is_some_and(|expr| expression_uses_opened_modtype_name(arena, expr, names))
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
-            module_expr_uses_opened_modtype_name(arena, module_expr, names)
-                || expression_uses_opened_modtype_name(arena, body, names)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_letexception(_, body) => {
-            expression_uses_opened_modtype_name(arena, body, names)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_pack(module_expr) => {
-            module_expr_uses_opened_modtype_name(arena, module_expr, names)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_ident(_, _, _)
-        | crate::types::typedtree::ExpressionDesc::Texp_constant(_)
-        | crate::types::typedtree::ExpressionDesc::Texp_break
-        | crate::types::typedtree::ExpressionDesc::Texp_continue
-        | crate::types::typedtree::ExpressionDesc::Texp_extension_constructor(_, _) => false,
-    }
-}
-
-fn signature_item_uses_opened_modtype_name(
-    arena: &ParseArena,
-    item: &crate::types::typedtree::TypedSignatureItem,
-    names: &HashSet<String>,
-) -> bool {
-    match &item.sig_desc {
-        crate::types::typedtree::TypedSignatureItemDesc::Tsig_value(desc) => {
-            typed_core_type_uses_opened_modtype_name(arena, &desc.val_desc, names)
-        }
-        crate::types::typedtree::TypedSignatureItemDesc::Tsig_type(_, decls) => {
-            decls.iter().any(|decl| {
-                decl.typ_manifest
-                    .as_ref()
-                    .is_some_and(|ty| typed_core_type_uses_opened_modtype_name(arena, ty, names))
-            })
-        }
-        crate::types::typedtree::TypedSignatureItemDesc::Tsig_module(decl) => {
-            module_type_uses_opened_modtype_name(arena, &decl.md_type, names)
-        }
-        crate::types::typedtree::TypedSignatureItemDesc::Tsig_recmodule(decls) => decls
-            .iter()
-            .any(|decl| module_type_uses_opened_modtype_name(arena, &decl.md_type, names)),
-        crate::types::typedtree::TypedSignatureItemDesc::Tsig_modtype(decl) => decl
-            .mtd_type
-            .as_ref()
-            .is_some_and(|mty| module_type_uses_opened_modtype_name(arena, mty, names)),
-        crate::types::typedtree::TypedSignatureItemDesc::Tsig_include(include) => {
-            module_type_uses_opened_modtype_name(arena, &include.incl_mod, names)
-        }
-        crate::types::typedtree::TypedSignatureItemDesc::Tsig_typext(_)
-        | crate::types::typedtree::TypedSignatureItemDesc::Tsig_exception(_)
-        | crate::types::typedtree::TypedSignatureItemDesc::Tsig_open(_)
-        | crate::types::typedtree::TypedSignatureItemDesc::Tsig_attribute(_) => false,
-    }
-}
-
-fn structure_item_uses_opened_modtype_name(
-    arena: &ParseArena,
-    item: &StructureItem,
-    names: &HashSet<String>,
-) -> bool {
-    match &item.str_desc {
-        StructureItemDesc::Tstr_eval(expr, _) => {
-            expression_uses_opened_modtype_name(arena, expr, names)
-        }
-        StructureItemDesc::Tstr_value(_, bindings) => bindings
-            .iter()
-            .any(|binding| expression_uses_opened_modtype_name(arena, &binding.vb_expr, names)),
-        StructureItemDesc::Tstr_primitive(desc) => {
-            typed_core_type_uses_opened_modtype_name(arena, &desc.val_desc, names)
-        }
-        StructureItemDesc::Tstr_type(_, decls) => decls.iter().any(|decl| {
-            decl.typ_manifest
-                .as_ref()
-                .is_some_and(|ty| typed_core_type_uses_opened_modtype_name(arena, ty, names))
-        }),
-        StructureItemDesc::Tstr_module(binding) => {
-            module_expr_uses_opened_modtype_name(arena, &binding.mb_expr, names)
-        }
-        StructureItemDesc::Tstr_recmodule(bindings) => bindings
-            .iter()
-            .any(|binding| module_expr_uses_opened_modtype_name(arena, &binding.mb_expr, names)),
-        StructureItemDesc::Tstr_modtype(decl) => decl
-            .mtd_type
-            .as_ref()
-            .is_some_and(|mty| module_type_uses_opened_modtype_name(arena, mty, names)),
-        StructureItemDesc::Tstr_include(include) => {
-            module_expr_uses_opened_modtype_name(arena, &include.incl_mod, names)
-        }
-        StructureItemDesc::Tstr_typext(_)
-        | StructureItemDesc::Tstr_exception(_)
-        | StructureItemDesc::Tstr_open(_)
-        | StructureItemDesc::Tstr_attribute(_) => false,
-    }
 }
 
 fn structure_item_uses_module_ident(
@@ -10409,27 +8653,6 @@ fn report_unused_top_level_value_warnings(
         final_values_are_used,
         &mut warnings,
     );
-    report_delayed_warnings(tctx, warnings, Some(item_seqs));
-}
-
-fn report_unused_top_level_value_and_open_warnings(
-    tctx: &mut TypeCheckContext<'_>,
-    arena: &ParseArena,
-    typed_items: &[StructureItem],
-    value_checks: &[TopLevelValueUseCheck],
-    open_checks: &[OpenUseCheck],
-    final_values_are_used: bool,
-    item_seqs: &[u64],
-) {
-    let mut warnings = Vec::new();
-    collect_unused_top_level_value_warnings(
-        arena,
-        typed_items,
-        value_checks,
-        final_values_are_used,
-        &mut warnings,
-    );
-    collect_unused_open_warnings(open_checks, &mut warnings);
     report_delayed_warnings(tctx, warnings, Some(item_seqs));
 }
 
@@ -16391,6 +14614,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
         }
         PMtyDesc::Pmty_ident(lid) => {
             let longident = tctx.resolve_lid(lid.txt).clone();
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Modtype);
             let path = lookup_modtype_path_or_error(
                 &longident,
                 lid.loc,
@@ -16553,6 +14777,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
         PMtyDesc::Pmty_alias(lid) => {
             check_recursive_module_reference_lid(lid, arena, env)?;
             let longident = tctx.resolve_lid(lid.txt).clone();
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module);
             let path = lookup_module_path_by_lid(
                 &longident,
                 arena,
@@ -16667,7 +14892,25 @@ fn approx_type_decls(
         .collect()
 }
 
+/// OCaml `approx_modtype env smty = Warnings.without_warnings (fun () ->
+/// approx_modtype env smty)` (typemod.ml:585-586).
 fn approx_modtype<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    mty: &crate::parser::ast::ModuleType,
+) -> TypeModResult<crate::types::decl::ModuleType> {
+    tctx.drain_open_slot_uses();
+    let mut disabled = tctx.warning_config.clone();
+    disabled.disable_all();
+    let saved = std::mem::replace(&mut tctx.warning_config, disabled);
+    let result = approx_modtype_rec(tctx, env, arena, mty);
+    tctx.drain_open_slot_uses();
+    tctx.warning_config = saved;
+    result
+}
+
+fn approx_modtype_rec<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     arena: &'a ParseArena,
@@ -16751,6 +14994,13 @@ fn approx_modtype<'a>(
                 }
                 PSigDesc::Psig_open(od) => {
                     let open_lid = arena.get_longident(od.popen_lid.txt);
+                    crate::types::typecore::mark_open_lid_use(
+                        tctx.type_ctx,
+                        &sig_env,
+                        arena,
+                        open_lid,
+                        crate::types::env::OpenLookupKind::Module,
+                    );
                     let lookup_env = sig_env.clone_preserve_id();
                     if crate::types::typecore::open_module_lid_components_into_env(
                         open_lid,
@@ -16801,6 +15051,7 @@ fn approx_modtype<'a>(
     match &*mty.pmty_desc {
         PMtyDesc::Pmty_ident(lid) => {
             let longident = tctx.resolve_lid(lid.txt).clone();
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Modtype);
             let path = lookup_modtype_path_or_error(
                 &longident,
                 lid.loc,
@@ -16814,6 +15065,7 @@ fn approx_modtype<'a>(
         PMtyDesc::Pmty_alias(lid) => {
             check_recursive_module_reference_lid(lid, arena, env)?;
             let longident = tctx.resolve_lid(lid.txt).clone();
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module);
             let path = lookup_module_path_by_lid(
                 &longident,
                 arena,
@@ -19080,6 +17332,7 @@ fn type_module_expr_with_alias_inner<'a>(
             // Module identifier: M
             // Look up the module path in the environment
             let longident = tctx.resolve_lid(lid.txt).clone();
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module);
             let path =
                 lookup_module_path_for_module_expr(tctx, env, arena, &longident, !alias, loc)?;
             let aliasable = !env.is_functor_arg_path(&path);
@@ -19893,6 +18146,7 @@ fn type_module_type_of_expr_raw<'a>(
     match &*mod_expr.pmod_desc {
         ParsedModuleExprDesc::Pmod_ident(lid) => {
             let longident = tctx.resolve_lid(lid.txt).clone();
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module);
             // `Typetexp.find_module` (typetexp.ml:86-96 via env.ml:1022-1036)
             // reports a recursive module still bound to its placeholder.
             if let Longident::Lident(mod_idx) = &longident
@@ -20004,6 +18258,7 @@ fn transl_modtype<'a>(
     let desc = match &*smty.pmty_desc {
         PMtyDesc::Pmty_ident(lid) => {
             let longident = tctx.resolve_lid(lid.txt).clone();
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Modtype);
             let path = lookup_modtype_path_or_error(
                 &longident,
                 lid.loc,
@@ -20084,6 +18339,7 @@ fn transl_modtype<'a>(
         PMtyDesc::Pmty_alias(lid) => {
             check_recursive_module_reference_lid(lid, arena, env)?;
             let longident = tctx.resolve_lid(lid.txt).clone();
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module);
             let path = lookup_module_path_by_lid(
                 &longident,
                 arena,
@@ -20138,8 +18394,6 @@ pub fn transl_signature<'a>(
     // for subsequent items (matching OCaml's transl_signature behavior).
     let mut sig_env = env.clone();
     let mut names = Names::default();
-    let mut unused_open_checks = Vec::new();
-    let mut open_shadow_identifier_checks = Vec::new();
 
     for item in items {
         check_signature_item_names(&mut names, arena, item)?;
@@ -20335,6 +18589,15 @@ pub fn transl_signature<'a>(
                 loc = od.popen_loc;
                 let longident = tctx.resolve_lid(od.popen_lid.txt).clone();
                 let open_lid = arena.get_longident(od.popen_lid.txt);
+                crate::types::typecore::mark_open_lid_use(
+                    tctx.type_ctx,
+                    &sig_env,
+                    arena,
+                    open_lid,
+                    crate::types::env::OpenLookupKind::Module,
+                );
+                let slot = tctx.open_signature_slot(od.popen_override, od.popen_loc);
+                sig_env.set_pending_open_slot(slot);
                 // Resolve the module and extend the environment with opened bindings.
                 // This matches OCaml's transl_signature which calls type_open/Env.open_signature.
                 let path = if let Some(path) = open_direct_persistent_module(
@@ -20371,8 +18634,11 @@ pub fn transl_signature<'a>(
                     );
                     resolved_path
                 } else {
+                    sig_env.set_pending_open_slot(None);
                     open_failure_path(tctx, &sig_env, arena, &longident, od.popen_lid.loc)?
                 };
+                sig_env.set_pending_open_slot(None);
+                tctx.set_open_slot_root(slot, &path);
                 TSigDesc::Tsig_open(crate::types::typedtree::OpenDeclaration {
                     open_path: path,
                     open_txt: od.popen_lid.clone(),
@@ -20405,48 +18671,8 @@ pub fn transl_signature<'a>(
             sig_env: EnvRef(0),
             sig_loc: loc,
         };
-        if let TSigDesc::Tsig_open(open) = &typed_item.sig_desc
-            && is_fresh_open(open)
-        {
-            let opened_names = opened_names_for_open(&env_before_item, &sig_env);
-            collect_open_shadow_identifier_use_checks(
-                &env_before_item,
-                &sig_env,
-                &opened_names,
-                typed_item.sig_loc,
-                item_index,
-                &mut open_shadow_identifier_checks,
-            );
-            collect_open_use_check(
-                open,
-                typed_item.sig_loc,
-                item_index,
-                opened_names,
-                &mut unused_open_checks,
-            );
-        }
-        mark_open_uses_for_signature_item(
-            tctx.type_ctx,
-            arena,
-            item_index,
-            &typed_item,
-            &mut unused_open_checks,
-        );
-        report_open_shadow_identifier_warnings_for_signature_item(
-            tctx,
-            arena,
-            item_index,
-            &typed_item,
-            &mut open_shadow_identifier_checks,
-            &mut unused_open_checks,
-            warnings_before_item,
-        );
         typed_items.push(typed_item);
     }
-
-    let mut delayed_warnings = Vec::new();
-    collect_unused_open_warnings(&unused_open_checks, &mut delayed_warnings);
-    report_delayed_warnings(tctx, delayed_warnings, None);
 
     Ok(crate::types::typedtree::TypedSignature {
         sig_items: typed_items,
@@ -20564,9 +18790,6 @@ pub fn type_structure<'a>(
     let mut current_env = env.clone_preserve_id();
     let mut names = Names::default();
     let mut unused_value_checks = Vec::new();
-    let mut unused_open_checks = Vec::new();
-    let mut open_shadow_identifier_checks = Vec::new();
-    let mut open_shadow_label_constructor_checks = Vec::new();
     let mut item_seqs: Vec<u64> = Vec::new();
 
     for item in items {
@@ -20584,61 +18807,6 @@ pub fn type_structure<'a>(
         let item_index = typed_items.len();
         item_seqs.push(item_seq);
         collect_top_level_value_use_checks(&typed_item, item_index, &mut unused_value_checks);
-        if let StructureItemDesc::Tstr_open(open) = &typed_item.str_desc
-            && is_fresh_open(open)
-        {
-            let opened_names = opened_names_for_open(&current_env, &new_env);
-            collect_open_shadow_identifier_use_checks(
-                &current_env,
-                &new_env,
-                &opened_names,
-                typed_item.str_loc,
-                item_index,
-                &mut open_shadow_identifier_checks,
-            );
-            collect_open_shadow_label_constructor_use_checks(
-                &current_env,
-                &new_env,
-                &opened_names,
-                typed_item.str_loc,
-                item_index,
-                &mut open_shadow_label_constructor_checks,
-            );
-            collect_open_use_check(
-                open,
-                typed_item.str_loc,
-                item_index,
-                opened_names,
-                &mut unused_open_checks,
-            );
-        }
-        mark_open_uses_for_item(
-            tctx.type_ctx,
-            arena,
-            item_index,
-            &typed_item,
-            &mut unused_open_checks,
-        );
-        // Both helpers insert before diagnostics produced while typing this item.
-        // Run label/constructor checks first so the later identifier insertion
-        // appears first, matching Env's identifier-before-constructor callbacks.
-        report_open_shadow_label_constructor_warnings_for_item(
-            tctx,
-            &current_env,
-            item_index,
-            &typed_item,
-            &mut open_shadow_label_constructor_checks,
-            warnings_before_item,
-        );
-        report_open_shadow_identifier_warnings_for_item(
-            tctx,
-            arena,
-            item_index,
-            &typed_item,
-            &mut open_shadow_identifier_checks,
-            &mut unused_open_checks,
-            warnings_before_item,
-        );
         if !rescript_hide_structure_item(&typed_item.str_desc, arena) {
             sig_items.extend(item_sig);
         }
@@ -20914,12 +19082,11 @@ pub fn type_structure<'a>(
         );
     }
 
-    report_unused_top_level_value_and_open_warnings(
+    report_unused_top_level_value_warnings(
         tctx,
         arena,
         &typed_items,
         &unused_value_checks,
-        &unused_open_checks,
         true,
         &item_seqs,
     );
@@ -24617,6 +22784,13 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_open(open_desc) => {
             // Open declaration: open M
             let longident = tctx.resolve_lid(open_desc.popen_lid.txt).clone();
+            crate::types::typecore::mark_open_lid_use(
+                tctx.type_ctx,
+                env,
+                arena,
+                &longident,
+                crate::types::env::OpenLookupKind::Module,
+            );
             // OCaml `type_open_` (compiler/ml/typemod.ml:88-89) starts with
             // `Typetexp.lookup_module ~load:true`, which raises for an unbound module.
             let Some(fallback_path) = lookup_module_path_by_lid(
@@ -24640,6 +22814,8 @@ fn type_structure_item<'a>(
             // same alias-rewritten module resolution path as value lookup.
             let open_lid = arena.get_longident(open_desc.popen_lid.txt);
             let mut new_env = env.clone();
+            let slot = tctx.open_signature_slot(open_desc.popen_override, open_desc.popen_loc);
+            new_env.set_pending_open_slot(slot);
             let path = if let Some(path) = open_direct_persistent_module(
                 &mut new_env,
                 open_lid,
@@ -24692,6 +22868,8 @@ fn type_structure_item<'a>(
                 }
                 fallback_path
             };
+            new_env.set_pending_open_slot(None);
+            tctx.set_open_slot_root(slot, &path);
 
             let desc = StructureItemDesc::Tstr_open(OpenDeclaration {
                 open_path: path,
