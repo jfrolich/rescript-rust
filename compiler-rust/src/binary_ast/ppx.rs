@@ -1842,6 +1842,13 @@ fn collect_raw_js_warnings_from_expr(
         ExpressionDesc::Pexp_extension(ext) => {
             let (ext_name, payload) = &**ext;
             match arena.get_string(ext_name.txt) {
+                // ast_exp_extension.ml:35 `Location.prerr_warning e.pexp_loc (Bs_todo ...)`.
+                "todo" => warnings.push(PpxWarning {
+                    loc: expr.pexp_loc,
+                    warning: Warning::BsTodo {
+                        message: todo_payload_message(payload, arena),
+                    },
+                }),
                 "raw" => push_raw_js_expression_warning(payload, arena, warnings),
                 "re" => push_raw_re_warning(payload, arena, warnings),
                 "ffi" => push_ffi_function_warning(payload, arena, warnings),
@@ -5483,12 +5490,85 @@ fn handle_extension(
     let ext_loc = ext_name.loc;
 
     match name {
+        "todo" => handle_todo(payload, arena, ext_loc),
         "raw" => handle_raw(expr, payload, arena, arena.prim_raw_expr(), ext_loc),
         "ffi" => handle_ffi(expr, payload, arena, ext_loc),
         "re" => handle_re(expr, payload, arena, ext_loc),
         "debugger" => handle_debugger(expr, payload, arena, ext_loc),
         "obj" => handle_obj(expr, payload, arena),
         _ => expr.clone(),
+    }
+}
+
+/// `Ast_payload.is_single_string`: the text of a single string-literal
+/// payload.
+fn todo_payload_message(payload: &Payload, arena: &ParseArena) -> Option<String> {
+    let Payload::PStr(items) = payload else {
+        return None;
+    };
+    let [item] = items.as_slice() else {
+        return None;
+    };
+    let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
+        return None;
+    };
+    let ExpressionDesc::Pexp_constant(constant) = &*arena.get_expr(eval.0).pexp_desc else {
+        return None;
+    };
+    let Constant::String(message, _) = &**constant else {
+        return None;
+    };
+    Some(message.to_string())
+}
+
+/// `%todo` (ast_exp_extension.ml:29-58): `JsError.throwWithMessage` applied
+/// to `"<file>:<line>:<start>-<end> - Todo[: message]"`, located at the
+/// extension name. The warning is emitted by the warning pre-pass.
+fn handle_todo(payload: &Payload, arena: &mut ParseArena, loc: LocIdx) -> Expression {
+    let todo_message = todo_payload_message(payload, arena);
+    let start = arena.loc_start(loc);
+    let end = arena.loc_end(loc);
+    let mut text = format!(
+        "{}:{}:{}-{}",
+        arena.get_string(start.file_name),
+        start.line,
+        start.cnum,
+        end.cnum
+    );
+    match &todo_message {
+        None => text.push_str(" - Todo"),
+        Some(msg) => {
+            text.push_str(" - Todo: ");
+            text.push_str(msg);
+        }
+    }
+    let js_error = arena.push_lident("JsError");
+    let throw_lid = arena.push_ldot(js_error, "throwWithMessage");
+    let funct = Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
+            txt: throw_lid,
+            loc,
+        })),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    };
+    let argument = Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
+            Cow::Owned(text),
+            None,
+        )))),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    };
+    Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            funct: arena.push_expr(funct),
+            args: vec![(ArgLabel::Nolabel, arena.push_expr(argument))],
+            partial: false,
+            transformed_jsx: false,
+        }))),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
     }
 }
 

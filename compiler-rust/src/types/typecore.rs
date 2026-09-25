@@ -37,7 +37,7 @@ use crate::parser::ast::{
 use crate::parser::longident::Longident;
 use crate::types::type_expr::TypeExprRefSet;
 use crate::types::typedtree::{
-    ApplyArg, ArrowArg, Constant, EnvRef, ExpExtra, Expression, ExpressionDesc, FunctionParam,
+    ArrowArg, Constant, EnvRef, ExpExtra, Expression, ExpressionDesc, FunctionParam,
     ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeConstraint, ModuleTypeDesc, PatExtra,
     Pattern, PatternDesc, StructureItem, StructureItemDesc, TypedSignatureItem,
     TypedSignatureItemDesc, ValueBinding,
@@ -17158,48 +17158,6 @@ fn type_letexception(
     ))
 }
 
-fn todo_payload_message(
-    arena: &ParseArena,
-    payload: &crate::parser::ast::Payload,
-) -> Option<String> {
-    let crate::parser::ast::Payload::PStr(items) = payload else {
-        return None;
-    };
-    let [item] = items.as_slice() else {
-        return None;
-    };
-    let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
-        return None;
-    };
-    let expr = arena.get_expr(eval.0);
-    let crate::parser::ast::ExpressionDesc::Pexp_constant(constant) = &*expr.pexp_desc else {
-        return None;
-    };
-    let crate::parser::ast::Constant::String(message, _) = &**constant else {
-        return None;
-    };
-    Some(message.to_string())
-}
-
-fn todo_runtime_message(
-    arena: &ParseArena,
-    extension_loc: LocIdx,
-    message: Option<&str>,
-) -> String {
-    let start = arena.loc_start(extension_loc);
-    let end = arena.loc_end(extension_loc);
-    let file_name = arena.get_string(start.file_name);
-    let mut text = format!(
-        "{}:{}:{}-{} - Todo",
-        file_name, start.line, start.cnum, end.cnum
-    );
-    if let Some(message) = message {
-        text.push_str(": ");
-        text.push_str(message);
-    }
-    text
-}
-
 /// Type check extension expression.
 fn type_extension_expr(
     tctx: &mut TypeCheckContext<'_>,
@@ -17263,72 +17221,6 @@ fn type_extension_expr(
             ExpressionDesc::Texp_extension_constructor(constructor_lid, path),
             loc,
             ty,
-            ctx.store_typed_env(env),
-            attributes.to_vec().into(),
-        ));
-    }
-
-    if extension_name == "todo" {
-        let todo_message = todo_payload_message(tctx.arena, &extension.1);
-        tctx.report_warning(
-            loc,
-            Warning::BsTodo {
-                message: todo_message.clone(),
-            },
-        );
-
-        let runtime_message =
-            todo_runtime_message(tctx.arena, extension.0.loc, todo_message.as_deref());
-        let Some((throw_path, throw_desc)) = lookup_module_value_by_name(
-            env,
-            "JsError",
-            "throwWithMessage",
-            &mut tctx.persistent_env,
-            tctx.type_ctx,
-        ) else {
-            return Err(TypeCoreError::Other(
-                "Unbound value JsError.throwWithMessage".to_string(),
-            ));
-        };
-
-        let ctx = tctx.type_ctx;
-        let throw_ty = crate::types::instance(ctx, throw_desc.val_type);
-        let throw_lid = Located {
-            txt: find_existing_lident_idx(tctx.arena, "throwWithMessage")
-                .or_else(|| find_existing_lident_idx(tctx.arena, "todo"))
-                .unwrap_or_default(),
-            loc: extension.0.loc,
-        };
-        let throw_expr = Expression::new(
-            ExpressionDesc::Texp_ident(throw_path, throw_lid, throw_desc),
-            extension.0.loc,
-            throw_ty,
-            ctx.store_typed_env(env),
-            Attributes::new(),
-        );
-
-        let argument = Constant::String(runtime_message, None);
-        let argument_ty = type_constant(ctx, env, &argument);
-        let argument_expr = Expression::new(
-            ExpressionDesc::Texp_constant(argument),
-            extension.0.loc,
-            argument_ty,
-            ctx.store_typed_env(env),
-            Attributes::new(),
-        );
-
-        return Ok(Expression::new(
-            ExpressionDesc::Texp_apply {
-                funct: Box::new(throw_expr),
-                args: vec![ApplyArg {
-                    label: crate::types::asttypes::ArgLabel::Nolabel,
-                    expression: Some(argument_expr),
-                }],
-                partial: false,
-                transformed_jsx: false,
-            },
-            loc,
-            expected_ty,
             ctx.store_typed_env(env),
             attributes.to_vec().into(),
         ));
