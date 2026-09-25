@@ -1776,106 +1776,39 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             let tag: Label = Cow::Owned(super::core::parse_hash_ident(p, hash_start_idx).0);
 
             // Check for argument
+            // OCaml compiler/syntax/src/res_core.ml:4272-4297.
             let arg = if p.token == Token::Lparen && !p.has_newline_before() {
                 let lparen_pos_idx = p.start_pos_idx();
-                p.next();
-                // Handle empty parens: #tag() is a variant with unit argument
-                if p.token == Token::Rparen {
-                    p.next();
-                    // OCaml uses the full () location for both the expression and the longident
-                    let unit_loc = p.mk_loc_idx_to_prev_end(lparen_pos_idx);
-                    let lid_idx = p.push_lident_static("()");
+                let mut args = parse_constructor_args(p);
+                let rparen_pos_idx = p.prev_end_pos_idx();
+                let paren_loc = p.mk_loc_idx(lparen_pos_idx, rparen_pos_idx);
+                if args.len() == 1 {
+                    let single = args.pop().unwrap();
+                    if matches!(*single.pexp_desc, ExpressionDesc::Pexp_tuple(_))
+                        && p.mode != ParserMode::ParseForTypeChecker
+                    {
+                        // #a((1, 2)) for printer
+                        let single_idx = p.arena_mut().push_expr(single);
+                        Some(p.arena_mut().push_expr(Expression {
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(vec![
+                                single_idx,
+                            ]))),
+                            pexp_loc: paren_loc,
+                            pexp_attributes: Attributes::new(),
+                        }))
+                    } else {
+                        Some(p.arena_mut().push_expr(single))
+                    }
+                } else {
+                    let exprs_idx: Vec<ExprIdx> = args
+                        .into_iter()
+                        .map(|e| p.arena_mut().push_expr(e))
+                        .collect();
                     Some(p.arena_mut().push_expr(Expression {
-                        pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
-                            with_loc(lid_idx, unit_loc.clone()),
-                            None,
-                        )),
-                        pexp_loc: unit_loc,
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(exprs_idx))),
+                        pexp_loc: paren_loc,
                         pexp_attributes: Attributes::new(),
                     }))
-                } else {
-                    // Parse first expression
-                    let first_expr = parse_expr(p);
-                    // Check for more comma-separated expressions (tuple)
-                    if p.token == Token::Comma {
-                        // OCaml includes the ( in the tuple location
-                        let tuple_start_idx = lparen_pos_idx;
-                        let mut exprs = vec![first_expr];
-                        while p.token == Token::Comma {
-                            p.next();
-                            if p.token == Token::Rparen {
-                                // Trailing comma
-                                break;
-                            }
-                            exprs.push(parse_expr(p));
-                        }
-                        p.expect(Token::Rparen);
-                        let rparen_pos_idx = p.prev_end_pos_idx();
-                        let paren_loc = p.mk_loc_idx(lparen_pos_idx, rparen_pos_idx);
-
-                        // OCaml wraps polymorphic variant args differently based on mode:
-                        // - For multiple args #a(1, 2), both modes create Pexp_tuple(Box::new([1, 2]))
-                        // - For single tuple arg #a((1, 2)), printer mode wraps in extra tuple
-                        if exprs.len() == 1 {
-                            // Single expression (possibly with trailing comma)
-                            let single = exprs.into_iter().next().unwrap();
-                            // Check if it's a tuple that needs extra wrapping in printer mode
-                            // This handles #a((1, 2)) case where inner parens create a tuple
-                            if p.mode != ParserMode::ParseForTypeChecker {
-                                if matches!(*single.pexp_desc, ExpressionDesc::Pexp_tuple(_)) {
-                                    // Wrap the tuple in another tuple for printer mode
-                                    let single_idx = p.arena_mut().push_expr(single);
-                                    Some(p.arena_mut().push_expr(Expression {
-                                        pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(
-                                            vec![single_idx],
-                                        ))),
-                                        pexp_loc: paren_loc,
-                                        pexp_attributes: Attributes::new(),
-                                    }))
-                                } else {
-                                    Some(p.arena_mut().push_expr(single))
-                                }
-                            } else {
-                                Some(p.arena_mut().push_expr(single))
-                            }
-                        } else {
-                            // Multiple expressions - just wrap in a single tuple (no extra wrapping)
-                            let tuple_loc = p.mk_loc_idx(tuple_start_idx, rparen_pos_idx);
-                            let exprs_idx: Vec<ExprIdx> = exprs
-                                .into_iter()
-                                .map(|e| p.arena_mut().push_expr(e))
-                                .collect();
-                            Some(p.arena_mut().push_expr(Expression {
-                                pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(
-                                    exprs_idx,
-                                ))),
-                                pexp_loc: tuple_loc,
-                                pexp_attributes: Attributes::new(),
-                            }))
-                        }
-                    } else {
-                        p.expect(Token::Rparen);
-                        let rparen_pos_idx = p.prev_end_pos_idx();
-                        // Single expression without comma - check if it's a tuple that needs wrapping
-                        // This handles #a((1, 2)) case - inner parens create tuple, wrap for printer
-                        if p.mode != ParserMode::ParseForTypeChecker {
-                            if matches!(*first_expr.pexp_desc, ExpressionDesc::Pexp_tuple(_)) {
-                                let paren_loc = p.mk_loc_idx(lparen_pos_idx, rparen_pos_idx);
-                                let first_expr_idx = p.arena_mut().push_expr(first_expr);
-                                Some(p.arena_mut().push_expr(Expression {
-                                    pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(
-                                        vec![first_expr_idx],
-                                    ))),
-                                    pexp_loc: paren_loc,
-                                    pexp_attributes: Attributes::new(),
-                                }))
-                            } else {
-                                Some(p.arena_mut().push_expr(first_expr))
-                            }
-                        } else {
-                            Some(p.arena_mut().push_expr(first_expr))
-                        }
-                    }
                 }
             } else {
                 None
@@ -2340,10 +2273,12 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                 if p.prev_end_pos.line < p.start_pos.line {
                     break;
                 }
+                // res_core.ml:2317-2328: the template ends the primary
+                // expression (it is not fed back into `loop`).
                 match &*expr.pexp_desc {
                     ExpressionDesc::Pexp_ident(lid) => {
                         let prefix = (lid.txt.clone(), lid.loc.clone());
-                        expr = parse_template_literal_with_prefix(p, Some(prefix));
+                        return parse_template_literal_with_prefix(p, Some(prefix));
                     }
                     _ => {
                         // OCaml: only bare names are valid as tagged template tags
@@ -2355,7 +2290,7 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                                  myTagFunction`foo ${bar}`.",
                             ),
                         );
-                        expr = parse_template_literal_with_prefix(p, None);
+                        return parse_template_literal_with_prefix(p, None);
                     }
                 }
             }
@@ -3132,94 +3067,75 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     // OCaml: parse_comma_delimited_region ~grammar:DictRows ~closing:Rbrace
     //        ~f:parse_dict_expr_part.
 
-    let mut parts: Vec<DictPart> = vec![];
-    p.leave_breadcrumb(Grammar::DictRows);
-    while p.token != Token::Rbrace && p.token != Token::Eof {
-        let part = if p.token == Token::DotDotDot {
-            p.next();
-            let spread_expr = parse_constrained_or_coerced_expr(p);
-            Some(DictPart::Spread(spread_expr))
-        } else {
-            match &p.token {
-                Token::String(s) => {
-                    let key = extend_cow_lifetime(s.clone());
-                    let key_start_idx = p.start_pos_idx();
-                    p.next();
-                    let key_loc = p.mk_loc_idx_to_prev_end(key_start_idx);
-                    let value = match p.token {
-                        Token::Colon => {
-                            p.next();
-                            parse_expr(p)
-                        }
-                        Token::Equal => {
-                            p.err_at(
-                                p.start_pos,
-                                p.end_pos,
-                                DiagnosticCategory::message(
-                                    "Dict entries use `:` to separate keys from values. Example: `{\"k\": v}`",
-                                ),
-                            );
-                            p.next();
-                            parse_expr(p)
-                        }
-                        _ => {
-                            let lid_idx = p.push_lident(key.as_ref());
-                            Expression {
-                                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(
-                                    lid_idx, key_loc,
-                                ))),
-                                pexp_loc: key_loc,
-                                pexp_attributes: Attributes::new(),
-                            }
-                        }
-                    };
-                    let value_end_idx = p.loc_end_idx(value.pexp_loc);
-                    let key_expr = Expression {
-                        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
-                            Constant::String(key, None),
-                        ))),
-                        pexp_loc: key_loc,
-                        pexp_attributes: Attributes::new(),
-                    };
-                    let tuple_loc = p.mk_loc_idx_full(key_start_idx, value_end_idx);
-                    let key_expr_idx = p.arena_mut().push_expr(key_expr);
-                    let value_idx = p.arena_mut().push_expr(value);
-                    let tuple = Expression {
-                        pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(vec![
-                            key_expr_idx,
-                            value_idx,
-                        ]))),
-                        pexp_loc: tuple_loc,
-                        pexp_attributes: Attributes::new(),
-                    };
-                    Some(DictPart::Row(tuple))
-                }
-                _ => None,
-            }
-        };
-
-        match part {
-            Some(part) => {
-                parts.push(part);
-                if p.token == Token::Comma {
-                    p.next();
-                } else if p.token == Token::Rbrace || p.token == Token::Eof {
-                    break;
-                } else if grammar::is_list_element(&Grammar::DictRows, &p.token) {
-                    p.expect(Token::Comma);
-                } else if !recover::should_abort_list_parse(p) {
-                    p.expect(Token::Comma);
-                    if p.token == Token::Semicolon {
+    let parts: Vec<DictPart> = super::core::parse_comma_delimited_region(
+        p,
+        Grammar::DictRows,
+        Token::Rbrace,
+        |p| {
+            if p.token == Token::DotDotDot {
+                p.next();
+                let spread_expr = parse_constrained_or_coerced_expr(p);
+                Some(DictPart::Spread(spread_expr))
+            } else {
+                match &p.token {
+                    Token::String(s) => {
+                        let key = extend_cow_lifetime(s.clone());
+                        let key_start_idx = p.start_pos_idx();
                         p.next();
+                        let key_loc = p.mk_loc_idx_to_prev_end(key_start_idx);
+                        let value = match p.token {
+                            Token::Colon => {
+                                p.next();
+                                parse_expr(p)
+                            }
+                            Token::Equal => {
+                                p.err_at(
+                                    p.start_pos,
+                                    p.end_pos,
+                                    DiagnosticCategory::message(
+                                        "Dict entries use `:` to separate keys from values. Example: `{\"k\": v}`",
+                                    ),
+                                );
+                                p.next();
+                                parse_expr(p)
+                            }
+                            _ => {
+                                let lid_idx = p.push_lident(key.as_ref());
+                                Expression {
+                                    pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(
+                                        lid_idx, key_loc,
+                                    ))),
+                                    pexp_loc: key_loc,
+                                    pexp_attributes: Attributes::new(),
+                                }
+                            }
+                        };
+                        let value_end_idx = p.loc_end_idx(value.pexp_loc);
+                        let key_expr = Expression {
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
+                                Constant::String(key, None),
+                            ))),
+                            pexp_loc: key_loc,
+                            pexp_attributes: Attributes::new(),
+                        };
+                        let tuple_loc = p.mk_loc_idx_full(key_start_idx, value_end_idx);
+                        let key_expr_idx = p.arena_mut().push_expr(key_expr);
+                        let value_idx = p.arena_mut().push_expr(value);
+                        let tuple = Expression {
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(vec![
+                                key_expr_idx,
+                                value_idx,
+                            ]))),
+                            pexp_loc: tuple_loc,
+                            pexp_attributes: Attributes::new(),
+                        };
+                        Some(DictPart::Row(tuple))
                     }
-                } else {
-                    break;
+                    _ => None,
                 }
             }
-            None => break,
-        };
-    }
-    p.eat_breadcrumb();
+        },
+    );
 
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
@@ -4727,18 +4643,29 @@ fn parse_for_rest(
             }
             p.next();
             let start_expr = parse_expr(p);
+            // res_core.ml:3853-3864: any other token is `unexpected` and the
+            // direction defaults to `Upto`; the token is then consumed unless
+            // it is the end of the file.
             let direction = if matches!(&p.token, Token::Lident(s) if s == "to") {
-                p.next();
                 DirectionFlag::Upto
             } else if matches!(&p.token, Token::Lident(s) if s == "downto") {
-                p.next();
                 DirectionFlag::Downto
             } else {
-                p.err(DiagnosticCategory::Message(
-                    "Expected 'to' or 'downto'".to_string(),
-                ));
+                p.err_unexpected();
                 DirectionFlag::Upto
             };
+            if p.token == Token::Eof {
+                p.err_at(
+                    p.start_pos,
+                    p.end_pos,
+                    DiagnosticCategory::Unexpected {
+                        token: p.token.clone().into_owned(),
+                        context: p.breadcrumbs().to_vec(),
+                    },
+                );
+            } else {
+                p.next();
+            }
             let end_expr = parse_expr_with_context(p, ExprContext::When);
             let body = parse_for_loop_body(p, has_opening_paren);
             p.eat_breadcrumb();
