@@ -16125,12 +16125,13 @@ fn attributes_include_jsx_component_props(attrs: &[crate::types::decl::Attribute
         .any(|attr| attr.attr_name.txt == "res.jsxComponentProps")
 }
 
+/// `Error_message_utils.path_to_jsx_component_name` (error_message_utils.ml:888-891):
+/// the path segment before a final `props`.
 fn jsx_component_name_from_props_path(path: &Path) -> Option<String> {
-    match path {
-        Path::Pdot(parent, name, _) if name == "props" => Some(parent.head_name().to_string()),
-        Path::Pdot(parent, name, _) if name == "fragmentProps" => {
-            Some(format!("{}.Fragment", parent.head_name()))
-        }
+    let name = path.name();
+    let mut segments = name.split('.').rev();
+    match (segments.next(), segments.next()) {
+        (Some("props"), Some(component_name)) => Some(component_name.to_string()),
         _ => None,
     }
 }
