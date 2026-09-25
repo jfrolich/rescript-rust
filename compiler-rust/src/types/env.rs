@@ -192,6 +192,106 @@ pub enum EnvSummary {
 // Binding Tables
 // ============================================================================
 
+fn id_open_table<T>(components: Vec<(Ident, T, i32)>) -> OpenedMap<(Ident, T, i32)> {
+    let mut table = OpenedMap::with_capacity_and_hasher(components.len(), Default::default());
+    for (id, value, pos) in components {
+        table.insert(id.name_smol().clone(), (id, value, pos));
+    }
+    table
+}
+
+fn tycomp_open_table<T>(components: Vec<(Ident, T)>) -> OpenedMap<Vec<(Ident, T)>> {
+    let mut table: OpenedMap<Vec<(Ident, T)>> =
+        OpenedMap::with_capacity_and_hasher(components.len(), Default::default());
+    for (id, value) in components {
+        let name = id.name_smol().clone();
+        match table.get_mut(&name) {
+            Some(entries) => entries.insert(0, (id, value)),
+            None => {
+                table.insert(name, vec![(id, value)]);
+            }
+        }
+    }
+    table
+}
+
+/// The layer tables that opening one signature adds to an Env. Built once
+/// and attachable to any number of Envs (see `Env::add_prebuilt_open_layers`).
+#[derive(Debug)]
+pub(crate) struct OpenedLayers {
+    values: Arc<OpenedMap<(Ident, Arc<ValueDescription>, i32)>>,
+    types: Arc<OpenedMap<(Ident, Arc<TypeDeclaration>, i32)>>,
+    constrs: Arc<OpenedMap<Vec<(Ident, Arc<ConstructorDescription>)>>>,
+    labels: Arc<OpenedMap<Vec<(Ident, Arc<LabelDescription>)>>>,
+    modules: Arc<OpenedMap<(Ident, Arc<ModuleDeclaration>, i32)>>,
+    module_components:
+        Arc<OpenedMap<(Ident, Arc<super::env_lazy::StoredModuleComponents>, i32)>>,
+    modtypes: Arc<OpenedMap<(Ident, Arc<ModtypeDeclaration>, i32)>>,
+}
+
+impl OpenedLayers {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build(
+        values: Vec<(Ident, ValueDescription, i32)>,
+        types: Vec<(Ident, Arc<TypeDeclaration>)>,
+        constructors: Vec<(Ident, ConstructorDescription)>,
+        labels: Vec<(Ident, LabelDescription)>,
+        modules: Vec<(Ident, ModuleDeclaration, i32)>,
+        module_components: Vec<(Ident, Arc<super::env_lazy::StoredModuleComponents>, i32)>,
+        modtypes: Vec<(Ident, ModtypeDeclaration)>,
+    ) -> Self {
+        OpenedLayers {
+            values: Arc::new(id_open_table(
+                values
+                    .into_iter()
+                    .map(|(id, desc, pos)| (id, Arc::new(desc), pos))
+                    .collect(),
+            )),
+            types: Arc::new(id_open_table(
+                types
+                    .into_iter()
+                    .map(|(id, decl)| (id, decl, crate::types::path::NOPOS))
+                    .collect(),
+            )),
+            constrs: Arc::new(tycomp_open_table(
+                constructors
+                    .into_iter()
+                    .map(|(id, desc)| (id, Arc::new(desc)))
+                    .collect(),
+            )),
+            labels: Arc::new(tycomp_open_table(
+                labels
+                    .into_iter()
+                    .map(|(id, desc)| (id, Arc::new(desc)))
+                    .collect(),
+            )),
+            modules: Arc::new(id_open_table(
+                modules
+                    .into_iter()
+                    .map(|(id, decl, pos)| (id, Arc::new(decl), pos))
+                    .collect(),
+            )),
+            module_components: Arc::new(id_open_table(module_components)),
+            modtypes: Arc::new(id_open_table(
+                modtypes
+                    .into_iter()
+                    .map(|(id, decl)| (id, Arc::new(decl), crate::types::path::NOPOS))
+                    .collect(),
+            )),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.values.is_empty()
+            && self.types.is_empty()
+            && self.constrs.is_empty()
+            && self.labels.is_empty()
+            && self.modules.is_empty()
+            && self.module_components.is_empty()
+            && self.modtypes.is_empty()
+    }
+}
+
 /// Symbolic opened layer for identifier-indexed tables.
 ///
 /// Mirrors OCaml `Env.IdTbl.opened`: one open layer contains the opened
@@ -200,7 +300,7 @@ pub enum EnvSummary {
 #[derive(Debug, Clone)]
 struct IdOpened<T> {
     root: Option<Path>,
-    components: OpenedMap<(Ident, T, i32)>,
+    components: Arc<OpenedMap<(Ident, T, i32)>>,
     next: Arc<IdTbl<T>>,
 }
 
@@ -238,20 +338,20 @@ impl<T: Clone> IdTbl<T> {
     }
 
     pub fn add_open_layer(&mut self, root: Path, components: Vec<(Ident, T, i32)>) {
+        self.add_open_layer_table(root, Arc::new(id_open_table(components)));
+    }
+
+    /// Open a prebuilt layer table (possibly shared with other Envs).
+    fn add_open_layer_table(&mut self, root: Path, components: Arc<OpenedMap<(Ident, T, i32)>>) {
         if components.is_empty() {
             return;
         }
         let next = std::mem::take(self);
-        let mut opened_components: OpenedMap<(Ident, T, i32)> =
-            OpenedMap::with_capacity_and_hasher(components.len(), Default::default());
-        for (id, value, pos) in components {
-            opened_components.insert(id.name_smol().clone(), (id, value, pos));
-        }
         *self = Self {
             current: PersistentHashMap::default(),
             opened: Some(Arc::new(IdOpened {
                 root: Some(root),
-                components: opened_components,
+                components,
                 next: Arc::new(next),
             })),
         };
@@ -386,7 +486,7 @@ impl<T: Clone> IdTbl<T> {
 
         if let Some(opened) = self.opened.as_mut() {
             let opened = Arc::make_mut(opened);
-            if let Some((id, value, _)) = opened.components.get_mut(name) {
+            if let Some((id, value, _)) = Arc::make_mut(&mut opened.components).get_mut(name) {
                 let updated = f(value);
                 *value = updated.clone();
                 return Some((id.clone(), updated));
@@ -467,7 +567,7 @@ impl<T: Clone> Default for IdTbl<T> {
 
 #[derive(Debug, Clone)]
 struct TycompOpened<T> {
-    components: OpenedMap<Vec<(Ident, T)>>,
+    components: Arc<OpenedMap<Vec<(Ident, T)>>>,
     next: Arc<TycompTbl<T>>,
 }
 
@@ -501,25 +601,19 @@ impl<T: Clone> TycompTbl<T> {
     }
 
     pub fn add_open_layer(&mut self, components: Vec<(Ident, T)>) {
+        self.add_open_layer_table(Arc::new(tycomp_open_table(components)));
+    }
+
+    /// Open a prebuilt layer table (possibly shared with other Envs).
+    fn add_open_layer_table(&mut self, components: Arc<OpenedMap<Vec<(Ident, T)>>>) {
         if components.is_empty() {
             return;
         }
         let next = std::mem::take(self);
-        let mut opened_components: OpenedMap<Vec<(Ident, T)>> =
-            OpenedMap::with_capacity_and_hasher(components.len(), Default::default());
-        for (id, value) in components {
-            let name = id.name_smol().clone();
-            match opened_components.get_mut(&name) {
-                Some(entries) => entries.insert(0, (id, value)),
-                None => {
-                    opened_components.insert(name, vec![(id, value)]);
-                }
-            }
-        }
         *self = Self {
             current: PersistentHashMap::default(),
             opened: Some(Arc::new(TycompOpened {
-                components: opened_components,
+                components,
                 next: Arc::new(next),
             })),
         };
@@ -1377,6 +1471,7 @@ impl Env {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_opened_component_layers(
         &mut self,
         root: Path,
@@ -1388,61 +1483,34 @@ impl Env {
         module_components: Vec<(Ident, Arc<super::env_lazy::StoredModuleComponents>, i32)>,
         modtypes: Vec<(Ident, ModtypeDeclaration)>,
     ) {
-        let has_bindings = !values.is_empty()
-            || !types.is_empty()
-            || !constructors.is_empty()
-            || !labels.is_empty()
-            || !modules.is_empty()
-            || !module_components.is_empty()
-            || !modtypes.is_empty();
-        if !has_bindings {
+        let layers = OpenedLayers::build(
+            values,
+            types,
+            constructors,
+            labels,
+            modules,
+            module_components,
+            modtypes,
+        );
+        self.add_prebuilt_open_layers(root, &layers);
+    }
+
+    /// Open `layers` (the component tables of one signature) under `root`.
+    pub(crate) fn add_prebuilt_open_layers(&mut self, root: Path, layers: &OpenedLayers) {
+        if layers.is_empty() {
             return;
         }
-
         self.bump_scope();
         self.invalidate_module_alias_caches();
-        self.data_mut().values.add_open_layer(
-            root.clone(),
-            values
-                .into_iter()
-                .map(|(id, desc, pos)| (id, Arc::new(desc), pos))
-                .collect(),
-        );
-        self.data_mut().types.add_open_layer(
-            root.clone(),
-            types
-                .into_iter()
-                .map(|(id, decl)| (id, decl, crate::types::path::NOPOS))
-                .collect(),
-        );
-        self.data_mut().constrs.add_open_layer(
-            constructors
-                .into_iter()
-                .map(|(id, desc)| (id, Arc::new(desc)))
-                .collect(),
-        );
-        self.data_mut().labels.add_open_layer(
-            labels
-                .into_iter()
-                .map(|(id, desc)| (id, Arc::new(desc)))
-                .collect(),
-        );
-        self.data_mut().modules.add_open_layer(
-            root.clone(),
-            modules
-                .into_iter()
-                .map(|(id, decl, pos)| (id, Arc::new(decl), pos))
-                .collect(),
-        );
-        self.data_mut().module_components
-            .add_open_layer(root.clone(), module_components);
-        self.data_mut().modtypes.add_open_layer(
-            root,
-            modtypes
-                .into_iter()
-                .map(|(id, decl)| (id, Arc::new(decl), crate::types::path::NOPOS))
-                .collect(),
-        );
+        let data = self.data_mut();
+        data.values.add_open_layer_table(root.clone(), layers.values.clone());
+        data.types.add_open_layer_table(root.clone(), layers.types.clone());
+        data.constrs.add_open_layer_table(layers.constrs.clone());
+        data.labels.add_open_layer_table(layers.labels.clone());
+        data.modules.add_open_layer_table(root.clone(), layers.modules.clone());
+        data.module_components
+            .add_open_layer_table(root.clone(), layers.module_components.clone());
+        data.modtypes.add_open_layer_table(root, layers.modtypes.clone());
     }
 
     /// Find a module by name.

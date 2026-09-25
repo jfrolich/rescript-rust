@@ -30,7 +30,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 /// First node id handed out by a store. Compilation-local ids start at the
 /// `IdGenerator` base and never reach this range in practice.
@@ -51,6 +51,20 @@ static BUILD_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// next lease.
 pub fn begin_build() {
     BUILD_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+/// First binder stamp handed out to identifiers created while building shared
+/// store data. Compilation-local stamps restart per unit and stay far below
+/// this range, so a shared binder can never be `Ident::same` as a local one.
+const STORE_STAMP_BASE: i32 = 1 << 29;
+
+/// Binder stamps of shared store data, unique across all workers of the
+/// process (shared data never leaves its worker, but a unit's published
+/// signature could mention one of these stamps).
+static STORE_STAMP: AtomicI32 = AtomicI32::new(STORE_STAMP_BASE);
+
+pub(crate) fn next_store_stamp() -> i32 {
+    STORE_STAMP.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 /// Dependency signature internalized once into the store.
@@ -100,6 +114,18 @@ pub(crate) struct ThreadTypeStore {
     /// Component-table name indexes of store-owned signatures, keyed by the
     /// signature's address (kept alive by `pers`).
     signature_indexes: RefCell<HashMap<usize, Arc<crate::types::env_lazy::SignatureIndex>>>,
+    /// Component views of persistent-rooted module paths built as store
+    /// builds, with the replay record of building them (OCaml builds such a
+    /// view once per process, from `Env.empty`: compiler/ml/env.ml:669-678).
+    shared_components: RefCell<
+        HashMap<
+            crate::types::context::QualifiedModuleComponentsCacheKey,
+            (
+                Arc<crate::types::env_lazy::QualifiedModuleComponents>,
+                Arc<crate::types::context::StorePiece>,
+            ),
+        >,
+    >,
     /// Synthetic longident component names used by store `Tpackage` nodes.
     longident_names: RefCell<HashMap<u32, String>>,
     next_longident_idx: Cell<u32>,
@@ -120,6 +146,7 @@ impl ThreadTypeStore {
             type_decl_arcs: RefCell::new(HashMap::new()),
             sig_type_registrations: RefCell::new(HashMap::new()),
             signature_indexes: RefCell::new(HashMap::new()),
+            shared_components: RefCell::new(HashMap::new()),
             longident_names: RefCell::new(HashMap::new()),
             next_longident_idx: Cell::new(STORE_LONGIDENT_IDX_BASE),
             generation: BUILD_GENERATION.load(Ordering::SeqCst),
@@ -198,6 +225,28 @@ impl ThreadTypeStore {
         built
     }
 
+    pub(crate) fn shared_components(
+        &self,
+        key: &crate::types::context::QualifiedModuleComponentsCacheKey,
+    ) -> Option<(
+        Arc<crate::types::env_lazy::QualifiedModuleComponents>,
+        Arc<crate::types::context::StorePiece>,
+    )> {
+        self.shared_components.borrow().get(key).cloned()
+    }
+
+    pub(crate) fn publish_shared_components(
+        &self,
+        key: crate::types::context::QualifiedModuleComponentsCacheKey,
+        components: Arc<crate::types::env_lazy::QualifiedModuleComponents>,
+        piece: Arc<crate::types::context::StorePiece>,
+    ) {
+        self.shared_components
+            .borrow_mut()
+            .entry(key)
+            .or_insert((components, piece));
+    }
+
     pub(crate) fn pers_struct_count(&self) -> usize {
         self.pers.borrow().len()
     }
@@ -238,6 +287,26 @@ impl ThreadTypeStore {
         self.next_type_id
             .set(id.checked_add(1).expect("thread store type id exhausted"));
         TypeExprRef::from_store_index(self.types.push_raw(TypeExpr::new(desc, level, id)))
+    }
+
+    /// Write the descriptor of a store node that is still being built by the
+    /// current compilation (see `TypeContext::build_in_store`).
+    pub(crate) fn set_desc_backing(&self, r: TypeExprRef, desc: TypeDesc) {
+        self.node(r).set_desc(desc);
+    }
+
+    /// Write the level of a store node that is still being built.
+    pub(crate) fn set_level_backing(&self, r: TypeExprRef, level: i32) {
+        self.node(r).set_level(level);
+    }
+
+    pub(crate) fn row_field_count(&self) -> usize {
+        self.row_fields.borrow().len()
+    }
+
+    /// Write a store row-field cell that is still being built.
+    pub(crate) fn set_row_field_backing(&self, rf: RowFieldRef, field: Option<RowField>) {
+        self.row_fields.borrow_mut()[rf.store_index()] = field;
     }
 
     pub(crate) fn abbrev(&self, memo: AbbrevMemoRef) -> AbbrevMemo {
@@ -295,6 +364,20 @@ impl ThreadTypeStore {
         layouts.push(layout);
         LayoutRef::from_store_index(idx)
     }
+}
+
+thread_local! {
+    /// Depth of `TypeContext::build_in_store` on this thread, so lazily built
+    /// structures can record at construction whether they are store-resident.
+    static STORE_BUILD_ACTIVE: Cell<u32> = const { Cell::new(0) };
+}
+
+pub(crate) fn store_build_active() -> bool {
+    STORE_BUILD_ACTIVE.with(|depth| depth.get() != 0)
+}
+
+pub(crate) fn set_store_build_depth(depth: u32) {
+    STORE_BUILD_ACTIVE.with(|active| active.set(depth));
 }
 
 thread_local! {

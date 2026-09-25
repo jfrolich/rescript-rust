@@ -31657,16 +31657,48 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<'a, R>(
         return Some(result);
     }
 
+    // A persistent-rooted view is the same for every compilation (OCaml
+    // builds `ps_comps` from `Env.empty`, compiler/ml/env.ml:669-678), so it
+    // is built once per worker as a store build and shared.
+    let shared_key = module_key
+        .as_ref()
+        .filter(|key| {
+            cache_mode.publishes()
+                && ctx.persistent_env_is_in_process()
+                && key.is_worker_shareable()
+                && shared_components_enabled()
+        })
+        .cloned();
     if let Some(module_key) = module_key.as_ref() {
-        if let Some(result) = ctx.with_qualified_module_components(module_key, |components| {
-            (f.take()
-                .expect("qualified module components callback reused"))(components)
-        }) {
+        let unit_hit = if ctx.in_store_build() && shared_key.is_some() {
+            // A store build must not read this compilation's cache; the
+            // shared cache below answers for the same key.
+            None
+        } else {
+            ctx.with_qualified_module_components(module_key, |components| {
+                (f.take()
+                    .expect("qualified module components callback reused"))(components)
+            })
+        };
+        if let Some(result) = unit_hit {
             return Some(result);
         }
     }
+    if let Some(shared_key) = shared_key.as_ref()
+        && let Some((components, piece)) = ctx.thread_store().shared_components(shared_key)
+    {
+        if crate::types::context::store_debug_enabled() {
+            eprintln!("[store-hit] {}", module_path.name());
+        }
+        ctx.touch_store_piece(&piece);
+        let result = (f
+            .take()
+            .expect("qualified module components callback reused"))(&components);
+        ctx.register_qualified_module_components_arc(shared_key.clone(), components);
+        return Some(result);
+    }
 
-    let components =
+    let build = |pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>| {
         build_module_components_from_parent_path(module_path, env, pers_env, ctx, cache_mode)
             .or_else(|| {
                 build_functor_application_components(module_path, env, pers_env, ctx, cache_mode)
@@ -31680,7 +31712,17 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<'a, R>(
                     sig,
                     ctx,
                 ))
-            })?;
+            })
+    };
+    let (components, piece) = if shared_key.is_some() {
+        ctx.build_in_store(|| build(pers_env))
+    } else {
+        (build(pers_env), None)
+    };
+    let components = Arc::new(components?);
+    if shared_key.is_some() && piece.is_none() {
+        components.make_private();
+    }
     let result = (f
         .take()
         .expect("qualified module components callback reused"))(&components);
@@ -31691,9 +31733,23 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<'a, R>(
     if let Some(module_key) = module_key
         && cache_mode.publishes()
     {
-        ctx.register_qualified_module_components(module_key, components);
+        if crate::types::context::store_debug_enabled() && shared_key.is_some() {
+            eprintln!("[store-build] {} published={}", module_path.name(), piece.is_some());
+        }
+        if let (Some(shared_key), Some(piece)) = (shared_key, piece) {
+            ctx.thread_store()
+                .publish_shared_components(shared_key, components.clone(), piece);
+        }
+        ctx.register_qualified_module_components_arc(module_key, components);
     }
     Some(result)
+}
+
+/// `RESCRIPT_NO_SHARED_COMPONENTS=1` disables worker-shared component views
+/// (for A/B measurements and bisecting).
+pub(crate) fn shared_components_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RESCRIPT_NO_SHARED_COMPONENTS").is_none())
 }
 
 pub(crate) fn with_resolved_module_components_for_path<'a, R>(

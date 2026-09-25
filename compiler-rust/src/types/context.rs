@@ -146,6 +146,19 @@ impl QualifiedModuleComponentsCacheKey {
             env_id,
         }
     }
+
+    /// Whether the view for this key is the same in every compilation: a
+    /// path rooted at a persistent unit, not scoped to one environment.
+    pub(crate) fn is_worker_shareable(&self) -> bool {
+        fn persistent_root(path: &Path) -> bool {
+            match path {
+                Path::Pident(id) => id.is_persistent(),
+                Path::Pdot(parent, _, _) => persistent_root(parent),
+                Path::Papply(_, _) => false,
+            }
+        }
+        self.env_id.is_none() && persistent_root(&self.path.0)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -298,6 +311,22 @@ pub struct TypeContext {
     store_abbrev_overlay: RefCell<super::thread_store::PagedOverlay<AbbrevMemo>>,
     /// This compilation's writes to row field cells of store rows.
     store_row_field_overlay: RefCell<super::thread_store::PagedOverlay<Option<RowField>>>,
+
+    /// Nesting depth of `build_in_store`; allocations go to the worker store
+    /// while it is non-zero.
+    store_build_depth: Cell<u32>,
+    /// Store arena lengths when the outermost store build started: nodes and
+    /// row fields at or above these are still being built and are written in
+    /// place.
+    store_build_type_start: Cell<usize>,
+    store_build_row_start: Cell<usize>,
+    /// The current store build read compilation-local state, so its result
+    /// must stay private to this compilation.
+    store_build_poisoned: Cell<bool>,
+    /// Effects of the current store build on this compilation.
+    store_build_effects: RefCell<Vec<StoreEffect>>,
+    /// Shared pieces whose effects this compilation has already applied.
+    touched_store_pieces: RefCell<ahash::AHashSet<u64>>,
 
     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
     compiler_counters_enabled: bool,
@@ -579,6 +608,49 @@ pub struct TypeContext {
     typed_envs_by_id: RefCell<ahash::AHashMap<u64, EnvRef>>,
 }
 
+/// Effect of building shared store data on the state of the compilation that
+/// built it. Another compilation that reuses the data replays these effects
+/// the first time it touches the data, so its own state (identifier stamps,
+/// forced pieces) evolves exactly as if it had built the data itself.
+#[derive(Debug, Clone)]
+pub(crate) enum StoreEffect {
+    /// Local identifier stamps consumed.
+    Stamps(i32),
+    /// A shared piece forced while building this one.
+    Piece(Arc<StorePiece>),
+    /// A component view registered in this compilation's component cache.
+    RegisterComponents(
+        QualifiedModuleComponentsCacheKey,
+        Arc<super::env_lazy::QualifiedModuleComponents>,
+    ),
+    /// `PersistentEnv::find_pers_struct` for this unit, which prepares the
+    /// module for the compilation on first use.
+    PreparePers(smol_str::SmolStr),
+    /// `trigger_module_sig_rename`: forces the lazy rename of a persistent
+    /// signature (reserving its binder stamps) in this compilation.
+    TriggerRename(smol_str::SmolStr),
+    /// Registrations in this compilation's declaration and alias tables.
+    RegisterTypeDecl(smol_str::SmolStr, Arc<super::decl::TypeDeclaration>),
+    RegisterTypeDeclByStamp(i32, Arc<super::decl::TypeDeclaration>),
+    RegisterAliasSource(Path, Path),
+    RegisterQualifiedModuleDecl(Path, smol_str::SmolStr, Ident, Arc<super::decl::ModuleDeclaration>),
+}
+
+/// Replay record of one piece of shared store data (see
+/// `TypeContext::build_in_store`).
+#[derive(Debug)]
+pub(crate) struct StorePiece {
+    id: u64,
+    effects: Vec<StoreEffect>,
+}
+
+pub(crate) fn store_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RESCRIPT_STORE_DEBUG").is_some())
+}
+
+static NEXT_STORE_PIECE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// One registration for the global type-declaration maps.
 #[derive(Debug)]
 enum TypeDeclRegistration {
@@ -676,6 +748,12 @@ impl TypeContext {
             store_level_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             store_abbrev_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             store_row_field_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            store_build_depth: Cell::new(0),
+            store_build_type_start: Cell::new(0),
+            store_build_row_start: Cell::new(0),
+            store_build_poisoned: Cell::new(false),
+            store_build_effects: RefCell::new(Vec::new()),
+            touched_store_pieces: RefCell::new(ahash::AHashSet::new()),
             compiler_counters_enabled: crate::perf_counters::enabled(),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
@@ -747,6 +825,8 @@ impl TypeContext {
     }
 
     pub fn pending_variant_layout(&self) -> super::variant_runtime::LayoutRef {
+        // A pending layout is completed later by this compilation.
+        self.poison_store_build();
         let mut layouts = self.variant_layouts.borrow_mut();
         let layout_ref = super::variant_runtime::LayoutRef::from_usize(layouts.len());
         layouts.push(RefCell::new(super::variant_runtime::LayoutState::Pending));
@@ -816,6 +896,7 @@ impl TypeContext {
 
     /// Store a typedtree environment snapshot and return a stable reference.
     pub fn store_typed_env(&self, env: &Env) -> EnvRef {
+        self.poison_store_build_for("store_typed_env");
         if let Some(existing) = self.typed_envs_by_id.borrow().get(&env.id()).copied() {
             return existing;
         }
@@ -842,6 +923,7 @@ impl TypeContext {
 
     /// Intern a CMI longident component and return a synthetic StrIdx.
     pub fn intern_cmi_longident_name(&self, name: &str) -> StrIdx {
+        self.poison_store_build_for("intern_cmi_longident_name");
         let raw = self.next_cmi_longident_idx.get();
         self.next_cmi_longident_idx.set(raw.wrapping_add(1));
         self.cmi_longident_names
@@ -889,6 +971,7 @@ impl TypeContext {
     }
 
     pub(crate) fn register_arena_longident_names(&self, arena: &crate::parse_arena::ParseArena) {
+        self.poison_store_build_for("register_arena_longident_names");
         let mut names = self.arena_longident_names.borrow_mut();
         for raw in 0..arena.string_count() {
             let idx = StrIdx::from_raw(raw as u32);
@@ -918,6 +1001,7 @@ impl TypeContext {
 
     /// Import synthetic CMI longident names from a portable signature.
     pub fn import_cmi_longident_names(&self, names: &[(u32, String)]) {
+        self.poison_store_build_for("import_cmi_longident_names");
         let mut table = self.cmi_longident_names.borrow_mut();
         let mut next = self.next_cmi_longident_idx.get();
         for (raw, name) in names {
@@ -940,6 +1024,9 @@ impl TypeContext {
         name: &str,
         decl: Arc<super::decl::TypeDeclaration>,
     ) {
+        if self.in_store_build() {
+            self.record_store_effect(StoreEffect::RegisterTypeDecl(name.into(), decl.clone()));
+        }
         self.type_decl_log
             .borrow_mut()
             .push(TypeDeclRegistration::Name(smol_str::SmolStr::new(name), decl));
@@ -952,6 +1039,7 @@ impl TypeContext {
         &self,
         registrations: &Arc<[super::thread_store::SigTypeRegistration]>,
     ) {
+        self.poison_store_build_for("register_sig_type_registrations");
         self.type_decl_log
             .borrow_mut()
             .push(TypeDeclRegistration::Batch(registrations.clone()));
@@ -1066,6 +1154,9 @@ impl TypeContext {
         stamp: i32,
         decl: Arc<super::decl::TypeDeclaration>,
     ) {
+        if self.in_store_build() {
+            self.record_store_effect(StoreEffect::RegisterTypeDeclByStamp(stamp, decl.clone()));
+        }
         self.type_decl_log
             .borrow_mut()
             .push(TypeDeclRegistration::Stamp(stamp, decl));
@@ -1073,6 +1164,7 @@ impl TypeContext {
 
     /// Match OCaml `Ctype.get_new_abstract_name`.
     pub(crate) fn next_reified_abstract_name(&self, prefix: &str) -> String {
+        self.poison_store_build_for("next_reified_abstract_name");
         let mut counters = self.reified_var_counters.borrow_mut();
         let index = counters.get(prefix).map_or(0, |previous| previous + 1);
         counters.insert(prefix.to_string(), index);
@@ -1133,6 +1225,7 @@ impl TypeContext {
         path: &str,
         decl: Arc<super::decl::TypeDeclaration>,
     ) {
+        self.poison_store_build_for("register_shared_type_decl_by_path");
         self.type_decl_log
             .borrow_mut()
             .push(TypeDeclRegistration::Path(smol_str::SmolStr::new(path), decl));
@@ -1148,6 +1241,7 @@ impl TypeContext {
         path: Path,
         decl: Arc<super::decl::TypeDeclaration>,
     ) {
+        self.poison_store_build_for("register_shared_type_decl_by_exact_path");
         self.type_decl_log
             .borrow_mut()
             .push(TypeDeclRegistration::Exact(path, decl));
@@ -1159,6 +1253,7 @@ impl TypeContext {
         id: Ident,
         decl: super::decl::TypeDeclaration,
     ) {
+        self.poison_store_build_for("register_type_item_by_path");
         self.type_item_by_path
             .borrow_mut()
             .insert(path.to_string(), (id, decl));
@@ -1172,6 +1267,7 @@ impl TypeContext {
     }
 
     pub(crate) fn register_missing_type_item_by_path(&self, path: &str) {
+        self.poison_store_build_for("register_missing_type_item_by_path");
         self.missing_type_item_by_path
             .borrow_mut()
             .insert(path.to_string());
@@ -1200,6 +1296,7 @@ impl TypeContext {
         access_path: Path,
         sig: Arc<super::decl::Signature>,
     ) {
+        self.poison_store_build_for("register_resolved_module_sig");
         self.resolved_module_sig_cache
             .borrow_mut()
             .insert(path.to_string(), (access_path, sig));
@@ -1210,15 +1307,38 @@ impl TypeContext {
         &self,
         path: &str,
     ) -> Option<(Path, Arc<super::decl::Signature>)> {
+        self.poison_store_build_for("read:find_resolved_module_sig");
         self.resolved_module_sig_cache.borrow().get(path).cloned()
     }
 
     /// Cache a lazily-built qualified module-components view.
+    /// Register a (possibly shared) component view in this compilation's
+    /// component cache.
+    pub(crate) fn register_qualified_module_components_arc(
+        &self,
+        key: QualifiedModuleComponentsCacheKey,
+        components: Arc<super::env_lazy::QualifiedModuleComponents>,
+    ) {
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_qualified_component_registered();
+        }
+        if self.in_store_build() {
+            self.record_store_effect(StoreEffect::RegisterComponents(
+                key.clone(),
+                components.clone(),
+            ));
+        }
+        self.qualified_module_components_cache
+            .borrow_mut()
+            .insert(key, components);
+    }
+
     pub(crate) fn register_qualified_module_components(
         &self,
         key: QualifiedModuleComponentsCacheKey,
         components: super::env_lazy::QualifiedModuleComponents,
     ) {
+        self.poison_store_build_for("register_qualified_module_components");
         if self.compiler_counters_enabled {
             crate::perf_counters::record_qualified_component_registered();
         }
@@ -1237,6 +1357,7 @@ impl TypeContext {
         key: &QualifiedModuleComponentsCacheKey,
         f: impl FnOnce(&super::env_lazy::QualifiedModuleComponents) -> R,
     ) -> Option<R> {
+        self.poison_store_build_for("read:with_qualified_module_components");
         let cache = self.qualified_module_components_cache.borrow();
         let Some(components) = cache.get(key) else {
             if self.compiler_counters_enabled {
@@ -1254,6 +1375,7 @@ impl TypeContext {
         &self,
         key: &QualifiedModuleComponentsCacheKey,
     ) -> bool {
+        self.poison_store_build_for("read:has_qualified_module_components");
         // OCaml compiler/ml/env.ml:781-793 lets `find_module_descr` reuse
         // `ps_comps` without forcing `ps_sig`; Rust stores that selected
         // component view explicitly, so later normalization can observe that
@@ -1284,6 +1406,12 @@ impl TypeContext {
     }
 
     pub(crate) fn register_component_alias_source(&self, component_path: Path, alias_source: Path) {
+        if self.in_store_build() {
+            self.record_store_effect(StoreEffect::RegisterAliasSource(
+                component_path.clone(),
+                alias_source.clone(),
+            ));
+        }
         // OCaml compiler/ml/env.ml:1440-1446 scrapes aliases by resolving the
         // target path through `find_module`; env.ml:1530 then prefixes the
         // selected component path. Record exactly that pair so later helpers
@@ -1383,6 +1511,7 @@ impl TypeContext {
         parent_path: &Path,
         module_name: &str,
     ) -> Option<Path> {
+        self.poison_store_build_for("read:find_module_alias_in_components");
         let key = QualifiedModuleComponentsCacheKey::new(parent_path.clone(), None);
         self.with_qualified_module_components(&key, |components| {
             let (_, _, md) = components.lookup_module(module_name)?;
@@ -1518,6 +1647,14 @@ impl TypeContext {
         id: Ident,
         md: Arc<super::decl::ModuleDeclaration>,
     ) {
+        if self.in_store_build() {
+            self.record_store_effect(StoreEffect::RegisterQualifiedModuleDecl(
+                parent_path.clone(),
+                child_name.into(),
+                id.clone(),
+                md.clone(),
+            ));
+        }
         let Some(head) = parent_path.head_opt() else {
             return;
         };
@@ -1627,6 +1764,7 @@ impl TypeContext {
         original_path: &Path,
         normalized_path: Path,
     ) {
+        self.poison_store_build_for("register_forced_normalized_path_full");
         self.forced_normalized_path_full_cache
             .borrow_mut()
             .insert((env_id, original_path.clone()), normalized_path);
@@ -1653,6 +1791,7 @@ impl TypeContext {
         right: &Path,
         same: bool,
     ) {
+        self.poison_store_build_for("register_forced_type_path_compare");
         let mut cache = self.forced_type_path_compare_cache.borrow_mut();
         cache.insert((env_id, left.clone(), right.clone()), same);
         cache.insert((env_id, right.clone(), left.clone()), same);
@@ -1751,6 +1890,10 @@ impl TypeContext {
         // A n-ary arrow owns exactly the parameters supplied by its syntax
         // node. Its return type may itself be an arrow (a sequential
         // application such as `f(a)(b)`); never flatten that nested boundary.
+        if self.in_store_build() {
+            self.check_store_desc(&desc);
+            return self.store.alloc_type(desc, level);
+        }
         let id = self.id_gen.next_type_id();
         self.types.push(TypeExpr::new(desc, level, id))
     }
@@ -1967,6 +2110,7 @@ impl TypeContext {
             }
             self.store.node(r)
         } else {
+            self.poison_store_build();
             self.types.get(r)
         }
     }
@@ -1997,6 +2141,7 @@ impl TypeContext {
                 .copied()
                 .unwrap_or_else(|| self.store.node(r).level());
         }
+        self.poison_store_build();
         self.types.get(r).level()
     }
 
@@ -2009,10 +2154,15 @@ impl TypeContext {
     #[inline]
     pub fn set_level(&self, r: TypeExprRef, level: i32) {
         if r.is_store() {
+            if self.store_build_owns(r) {
+                self.store.set_level_backing(r, level);
+                return;
+            }
             self.store_level_overlay
                 .borrow_mut()
                 .set(r.store_index(), level);
         } else {
+            self.poison_store_build();
             self.types.get(r).set_level(level);
         }
     }
@@ -2021,6 +2171,11 @@ impl TypeContext {
     #[inline]
     pub fn set_desc(&self, r: TypeExprRef, desc: TypeDesc) {
         if r.is_store() {
+            if self.store_build_owns(r) {
+                self.check_store_desc(&desc);
+                self.store.set_desc_backing(r, desc);
+                return;
+            }
             let index = self
                 .store_desc_overlay
                 .borrow()
@@ -2038,6 +2193,7 @@ impl TypeContext {
                     .set(r.store_index(), index);
             }
         } else {
+            self.poison_store_build();
             self.types.get(r).set_desc(desc);
         }
     }
@@ -2140,6 +2296,7 @@ impl TypeContext {
     /// Record that `new_ref` is an arity-updated version of `original_ref`.
     /// The sexp serializer will use `original_ref` as the dedup key for both.
     pub fn set_arity_alias(&self, new_ref: TypeExprRef, original_ref: TypeExprRef) {
+        self.poison_store_build_for("set_arity_alias");
         self.arity_aliases
             .borrow_mut()
             .insert(new_ref, original_ref);
@@ -2163,6 +2320,7 @@ impl TypeContext {
             Vec<super::decl::Attribute>,
         )>,
     ) {
+        self.poison_store_build_for("register_record_labels");
         self.record_labels_cache
             .borrow_mut()
             .insert(type_path.clone(), labels);
@@ -2190,6 +2348,7 @@ impl TypeContext {
         type_path: &Path,
         labels: Arc<Vec<super::decl::LabelDescription>>,
     ) {
+        self.poison_store_build_for("register_record_label_descriptions");
         let summary = Arc::new(RecordLabelDescriptionSummary::from_labels(&labels));
         self.record_label_descriptions_cache
             .borrow_mut()
@@ -2243,6 +2402,7 @@ impl TypeContext {
         lbl_pos: i32,
         label: super::decl::LabelDescription,
     ) {
+        self.poison_store_build_for("cache_qualified_record_label");
         self.qualified_record_label_cache.borrow_mut().insert(
             QualifiedRecordLabelCacheKey::new(type_path.clone(), env_id, lbl_pos),
             label,
@@ -2259,6 +2419,7 @@ impl TypeContext {
 
     /// Cache the lident chosen for a synthesized record field.
     pub fn cache_synthesized_record_lident(&self, label_name: String, lid: LidentIdx) {
+        self.poison_store_build_for("cache_synthesized_record_lident");
         self.synthesized_record_lidents
             .borrow_mut()
             .entry(label_name)
@@ -2276,6 +2437,7 @@ impl TypeContext {
             Vec<super::decl::Attribute>,
         )>,
     ) {
+        self.poison_store_build_for("set_dict_pattern_labels");
         *self.dict_pattern_labels_cache.borrow_mut() = labels;
     }
 
@@ -2578,6 +2740,17 @@ impl TypeContext {
 
     /// Allocate an abbreviation memo.
     pub fn alloc_abbrev(&self, memo: AbbrevMemo) -> AbbrevMemoRef {
+        if self.in_store_build() {
+            if let AbbrevMemo::Mcons {
+                abbrev, expansion, next, ..
+            } = &memo
+            {
+                self.check_store_ref(*abbrev);
+                self.check_store_ref(*expansion);
+                self.check_store_memo(*next);
+            }
+            return self.store.alloc_abbrev(memo);
+        }
         let mut abbrevs = self.abbrevs.borrow_mut();
         let idx = abbrevs.len();
         abbrevs.push(RefCell::new(memo));
@@ -2590,6 +2763,12 @@ impl TypeContext {
 
     /// Allocate a row field reference.
     pub fn alloc_row_field(&self, field: Option<RowField>) -> RowFieldRef {
+        if self.in_store_build() {
+            if let Some(field) = &field {
+                self.check_store_row_field(field);
+            }
+            return self.store.alloc_row_field(field);
+        }
         let mut row_fields = self.row_fields.borrow_mut();
         let idx = row_fields.len();
         row_fields.push(RefCell::new(field));
@@ -2619,6 +2798,11 @@ impl TypeContext {
             return;
         }
         if rf.is_store() {
+            if self.in_store_build() && rf.store_index() >= self.store_build_row_start.get() {
+                self.check_store_row_field(&field);
+                self.store.set_row_field_backing(rf, Some(field));
+                return;
+            }
             self.store_row_field_overlay
                 .borrow_mut()
                 .set(rf.store_index(), Some(field));
@@ -2636,6 +2820,10 @@ impl TypeContext {
             return;
         }
         if rf.is_store() {
+            if self.in_store_build() && rf.store_index() >= self.store_build_row_start.get() {
+                self.store.set_row_field_backing(rf, None);
+                return;
+            }
             self.store_row_field_overlay
                 .borrow_mut()
                 .set(rf.store_index(), None);
@@ -2653,6 +2841,10 @@ impl TypeContext {
 
     /// Allocate a field kind reference.
     fn alloc_field_kind(&self, kind: Option<FieldKind>) -> FieldKindRef {
+        if self.in_store_build() {
+            // Field-kind cells are never read back; `Fvar` links stay unchecked.
+            return self.store.alloc_field_kind(kind);
+        }
         let mut field_kinds = self.field_kinds.borrow_mut();
         let idx = field_kinds.len();
         field_kinds.push(RefCell::new(kind));
@@ -2759,6 +2951,7 @@ impl TypeContext {
     /// Register a raw module signature for lazy renaming.
     /// Called during load_pervasives to store sigs for normalize_path.
     pub fn register_raw_module_sig(&self, name: &str, sig: Arc<super::decl::Signature>) {
+        self.poison_store_build_for("register_raw_module_sig");
         self.raw_module_sigs
             .borrow_mut()
             .insert(name.to_string(), sig);
@@ -2769,6 +2962,7 @@ impl TypeContext {
         name: &str,
         sig: Arc<super::decl::Signature>,
     ) {
+        self.poison_store_build_for("register_gentype_raw_module_sig");
         self.gentype_raw_module_sigs
             .borrow_mut()
             .insert(name.to_string(), sig);
@@ -2779,6 +2973,7 @@ impl TypeContext {
         name: &str,
         pers_struct: Arc<crate::cmi::portable_types::PortablePersStruct>,
     ) {
+        self.poison_store_build_for("register_gentype_portable_raw_module_sig");
         self.gentype_portable_raw_module_sigs
             .borrow_mut()
             .insert(name.to_string(), pers_struct);
@@ -2805,6 +3000,7 @@ impl TypeContext {
     }
 
     pub fn has_raw_module_sig(&self, name: &str) -> bool {
+        self.poison_store_build_for("read:has_raw_module_sig");
         self.raw_module_sigs.borrow().contains_key(name)
     }
 
@@ -2829,6 +3025,7 @@ impl TypeContext {
         &self,
         module_name: &str,
     ) -> Option<Arc<super::decl::Signature>> {
+        self.poison_store_build_for("get_or_load_raw_module_sig");
         if let Some(sig) = self.raw_module_sigs.borrow().get(module_name).cloned() {
             return Some(sig);
         }
@@ -2858,6 +3055,11 @@ impl TypeContext {
     /// Matches OCaml's find_module → Lazy.force ps.ps_sig which renames
     /// bound idents the first time a module is accessed during normalize_path.
     pub fn trigger_module_sig_rename(&self, module_name: &str) {
+        if self.in_store_build() {
+            self.record_store_effect(StoreEffect::TriggerRename(module_name.into()));
+            self.suspend_store_build(|| self.trigger_module_sig_rename(module_name));
+            return;
+        }
         if self.renamed_module_sigs.borrow().contains_key(module_name) {
             return; // Already renamed
         }
@@ -2883,6 +3085,7 @@ impl TypeContext {
     }
 
     fn rename_one_module_sig(&self, module_name: &str) {
+        self.poison_store_build_for("rename_one_module_sig");
         let raw_sig = {
             let raw = self.raw_module_sigs.borrow();
             raw.get(module_name).cloned()
@@ -2970,6 +3173,9 @@ impl TypeContext {
 
     /// Create a new identifier using the typing context's shared stamp source.
     pub fn create_ident(&self, name: &str) -> Ident {
+        if self.in_store_build() {
+            return self.store_binder(&Ident::create_persistent(name));
+        }
         // OCaml compiler/ext/ident.ml:28-40 increments the active
         // currentstamp directly in `Ident.create`/`Ident.rename`; unrelated
         // helper-created local identifiers must not advance the typedtree
@@ -2977,8 +3183,295 @@ impl TypeContext {
         self.id_gen.create(name)
     }
 
+    /// Fresh binder for shared store data. The compilation's own stamp stream
+    /// advances exactly as it would have (and later users replay that), but
+    /// the binder gets a store stamp so it can never be `Ident::same` as an
+    /// identifier of another compilation.
+    fn store_binder(&self, id: &Ident) -> Ident {
+        self.id_gen.next_stamp();
+        let mut effects = self.store_build_effects.borrow_mut();
+        match effects.last_mut() {
+            Some(StoreEffect::Stamps(count)) => *count += 1,
+            _ => effects.push(StoreEffect::Stamps(1)),
+        }
+        let stamp = super::thread_store::next_store_stamp();
+        let mut fresh = id.with_stamp(stamp);
+        if id.is_persistent() {
+            fresh = Ident::new(id.name(), stamp, crate::ident::IdentFlags::NONE);
+        }
+        fresh
+    }
+
+    /// Whether allocations currently go to the worker store.
+    #[inline(always)]
+    pub(crate) fn in_store_build(&self) -> bool {
+        self.store_build_depth.get() != 0
+    }
+
+    /// Record that the current store build depends on compilation-local
+    /// state; its result is then kept private to this compilation.
+    #[inline(always)]
+    pub(crate) fn poison_store_build(&self) {
+        self.poison_store_build_for("local-read");
+    }
+
+    #[inline(always)]
+    pub(crate) fn poison_store_build_for(&self, reason: &'static str) {
+        if self.store_build_depth.get() != 0 {
+            self.poison_store_build_slow(reason);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn poison_store_build_slow(&self, reason: &'static str) {
+        if !self.store_build_poisoned.replace(true) && store_debug_enabled() {
+            eprintln!("[store-poison] {reason}");
+            if std::env::var_os("RESCRIPT_STORE_DEBUG_BT").is_some() {
+                let bt = std::backtrace::Backtrace::force_capture().to_string();
+                let frames: Vec<&str> = bt
+                    .lines()
+                    .filter(|l| l.contains("rescript_compiler::") && !l.contains("poison_store"))
+                    .take(8)
+                    .collect();
+                eprintln!(
+                    "[store-poison-bt] {reason} :: {}",
+                    frames.join(" <- ").replace("rescript_compiler::", "")
+                );
+            }
+        }
+    }
+
+    /// Whether `r` is a store node created by the current store build.
+    #[inline]
+    fn store_build_owns(&self, r: TypeExprRef) -> bool {
+        self.in_store_build() && r.store_index() >= self.store_build_type_start.get()
+    }
+
+    #[inline]
+    fn check_store_ref(&self, r: TypeExprRef) {
+        if !r.is_store() {
+            self.poison_store_build();
+        }
+    }
+
+    #[inline]
+    fn check_store_memo(&self, memo: AbbrevMemoRef) {
+        // Memo cells 0 (`Mnil`) and 1 (`simple_abbrevs`) have the same role in
+        // every compilation.
+        if !memo.is_store() && memo.0 > 1 {
+            self.poison_store_build();
+        }
+    }
+
+    fn check_store_row_field(&self, field: &RowField) {
+        match field {
+            RowField::Rpresent(Some(ty)) => self.check_store_ref(*ty),
+            RowField::Rpresent(None) | RowField::Rabsent => {}
+            RowField::Reither { types, link, .. } => {
+                for ty in types {
+                    self.check_store_ref(*ty);
+                }
+                if !link.is_null() && !link.is_store() {
+                    self.poison_store_build();
+                }
+            }
+        }
+    }
+
+    /// Poison the store build if `desc` refers to compilation-local cells.
+    fn check_store_desc(&self, desc: &TypeDesc) {
+        match desc {
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+            TypeDesc::Tarrow { args, ret } => {
+                for arg in args.iter() {
+                    self.check_store_ref(arg.typ);
+                }
+                self.check_store_ref(*ret);
+            }
+            TypeDesc::Ttuple(items) => {
+                for ty in items.iter() {
+                    self.check_store_ref(*ty);
+                }
+            }
+            TypeDesc::Tconstr { args, abbrev, .. } => {
+                for ty in args.iter() {
+                    self.check_store_ref(*ty);
+                }
+                self.check_store_memo(*abbrev);
+            }
+            TypeDesc::Tobject { fields, name } => {
+                self.check_store_ref(*fields);
+                if let Some((_, args)) = name {
+                    for ty in args.iter() {
+                        self.check_store_ref(*ty);
+                    }
+                }
+            }
+            TypeDesc::Tfield { typ, rest, .. } => {
+                self.check_store_ref(*typ);
+                self.check_store_ref(*rest);
+            }
+            TypeDesc::Tlink(ty) | TypeDesc::Tsubst(ty) => self.check_store_ref(*ty),
+            TypeDesc::Tvariant(row) => {
+                self.check_store_ref(row.row_more);
+                for (_, field) in row.row_fields.iter() {
+                    self.check_store_row_field(field);
+                }
+                if let Some((_, args)) = &row.row_name {
+                    for ty in args {
+                        self.check_store_ref(*ty);
+                    }
+                }
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                self.check_store_ref(*body);
+                for ty in vars.iter() {
+                    self.check_store_ref(*ty);
+                }
+            }
+            TypeDesc::Tpackage { args, .. } => {
+                for ty in args.iter() {
+                    self.check_store_ref(*ty);
+                }
+            }
+        }
+    }
+
+    /// Run `build` with every type-graph allocation going to the worker
+    /// store, so its result can be shared with later compilations on this
+    /// worker. Returns the replay record to publish with the result, or
+    /// `None` when the build read compilation-local state (the result is
+    /// then only valid in this compilation).
+    pub(crate) fn build_in_store<R>(&self, build: impl FnOnce() -> R) -> (R, Option<Arc<StorePiece>>) {
+        let depth = self.store_build_depth.get();
+        let outer_effects = std::mem::take(&mut *self.store_build_effects.borrow_mut());
+        let outer_poisoned = self.store_build_poisoned.replace(false);
+        if depth == 0 {
+            self.store_build_type_start.set(self.store.type_count());
+            self.store_build_row_start.set(self.store.row_field_count());
+        }
+        self.store_build_depth.set(depth + 1);
+        super::thread_store::set_store_build_depth(depth + 1);
+        let result = build();
+        self.store_build_depth.set(depth);
+        super::thread_store::set_store_build_depth(depth);
+        let effects = std::mem::replace(&mut *self.store_build_effects.borrow_mut(), outer_effects);
+        let poisoned = self.store_build_poisoned.replace(outer_poisoned);
+        if poisoned {
+            if depth > 0 {
+                // The enclosing build may hold this result.
+                self.store_build_poisoned.set(true);
+                self.store_build_effects.borrow_mut().extend(effects);
+            }
+            return (result, None);
+        }
+        let piece = Arc::new(StorePiece {
+            id: NEXT_STORE_PIECE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            effects,
+        });
+        self.touched_store_pieces.borrow_mut().insert(piece.id);
+        if depth > 0 {
+            self.store_build_effects
+                .borrow_mut()
+                .push(StoreEffect::Piece(piece.clone()));
+        }
+        (result, Some(piece))
+    }
+
+    /// Note that this compilation is using shared store data built by `piece`:
+    /// the first time, apply the effects that building it had.
+    pub(crate) fn touch_store_piece(&self, piece: &Arc<StorePiece>) {
+        if self.in_store_build() {
+            self.store_build_effects
+                .borrow_mut()
+                .push(StoreEffect::Piece(piece.clone()));
+        }
+        if self.touched_store_pieces.borrow().contains(&piece.id) {
+            return;
+        }
+        self.suspend_store_build(|| self.replay_store_piece(piece));
+    }
+
+    fn replay_store_piece(&self, piece: &StorePiece) {
+        if !self.touched_store_pieces.borrow_mut().insert(piece.id) {
+            return;
+        }
+        for effect in &piece.effects {
+            match effect {
+                StoreEffect::Stamps(count) => {
+                    self.id_gen.advance_stamp_by(*count);
+                }
+                StoreEffect::Piece(inner) => self.replay_store_piece(inner),
+                StoreEffect::RegisterComponents(key, components) => {
+                    self.qualified_module_components_cache
+                        .borrow_mut()
+                        .insert(key.clone(), components.clone());
+                }
+                StoreEffect::PreparePers(name) => {
+                    if let Some(mut pers) = self.persistent_env_clone() {
+                        let _ = pers.find_pers_struct(name, self);
+                    }
+                }
+                StoreEffect::TriggerRename(name) => self.trigger_module_sig_rename(name),
+                StoreEffect::RegisterTypeDecl(name, decl) => {
+                    self.register_shared_type_decl(name, decl.clone())
+                }
+                StoreEffect::RegisterTypeDeclByStamp(stamp, decl) => {
+                    self.register_shared_type_decl_by_stamp(*stamp, decl.clone())
+                }
+                StoreEffect::RegisterAliasSource(component, source) => {
+                    self.register_component_alias_source(component.clone(), source.clone())
+                }
+                StoreEffect::RegisterQualifiedModuleDecl(parent, name, id, md) => {
+                    self.register_qualified_module_decl(parent, name, id.clone(), md.clone())
+                }
+            }
+        }
+    }
+
+    /// Record an effect of the current store build on this compilation.
+    pub(crate) fn record_store_effect(&self, effect: StoreEffect) {
+        if !self.in_store_build() {
+            return;
+        }
+        let mut effects = self.store_build_effects.borrow_mut();
+        let duplicate = match &effect {
+            StoreEffect::PreparePers(name) => effects
+                .iter()
+                .any(|e| matches!(e, StoreEffect::PreparePers(other) if other == name)),
+            StoreEffect::TriggerRename(name) => effects
+                .iter()
+                .any(|e| matches!(e, StoreEffect::TriggerRename(other) if other == name)),
+            _ => false,
+        };
+        if !duplicate {
+            effects.push(effect);
+        }
+    }
+
+    /// Run `f` as this compilation (allocating locally), in the middle of a
+    /// store build: used for effects on the compilation that are journaled
+    /// separately.
+    pub(crate) fn suspend_store_build<R>(&self, f: impl FnOnce() -> R) -> R {
+        let depth = self.store_build_depth.replace(0);
+        super::thread_store::set_store_build_depth(0);
+        let result = f();
+        self.store_build_depth.set(depth);
+        super::thread_store::set_store_build_depth(depth);
+        result
+    }
+
     /// Rename an identifier using the typing context's shared stamp source.
     pub fn rename_ident(&self, id: &Ident) -> Ident {
+        if self.in_store_build() {
+            if self.reserved_rename_stamps.get().is_some() {
+                // A deferred rename uses stamps this compilation reserved.
+                self.poison_store_build();
+            } else {
+                return self.store_binder(id);
+            }
+        }
         if let Some((next, last)) = self.reserved_rename_stamps.get() {
             assert!(
                 next <= last,
@@ -3047,6 +3540,7 @@ impl TypeContext {
 
     /// Materialized renamed signature for `module_name`, if it was forced.
     pub(crate) fn renamed_module_sig(&self, module_name: &str) -> Option<Arc<super::decl::Signature>> {
+        self.poison_store_build_for("read:renamed_module_sig");
         let deferred = self.renamed_module_sigs.borrow().get(module_name).cloned()?;
         Some(self.materialize_renamed_sig(&deferred))
     }
@@ -3214,6 +3708,48 @@ impl TypeContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn store_build_allocates_shared_nodes_and_replays_stamps() {
+        let builder = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
+        let ((ty, binder), piece) = builder.build_in_store(|| {
+            let var = builder.new_generic_var(Some("a".into()));
+            let ty = builder.new_generic_type(TypeDesc::Ttuple(vec![var, var].into()));
+            let binder = builder.rename_ident(&Ident::create_persistent("t"));
+            (ty, binder)
+        });
+        let piece = piece.expect("store build stays shareable");
+        assert!(ty.is_store(), "store builds allocate in the worker store");
+        // The builder's own stamp stream advanced as for a local rename, but
+        // the binder is in the store range, disjoint from local stamps.
+        assert_eq!(builder.current_stamp(), 11);
+        assert!(binder.stamp() > super::super::thread_store::next_store_stamp() - 1000);
+        assert!(binder.stamp() >= 1 << 29);
+        drop(builder);
+
+        // A later compilation on the worker reuses the node and replays the
+        // stamp once, on first touch.
+        let user = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
+        user.touch_store_piece(&piece);
+        user.touch_store_piece(&piece);
+        assert_eq!(user.current_stamp(), 11);
+        match &*user.get_desc(ty) {
+            TypeDesc::Ttuple(items) => assert_eq!(items.len(), 2),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn store_build_reading_local_nodes_is_private() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let local = ctx.new_generic_var(None);
+        let (_, piece) = ctx.build_in_store(|| {
+            ctx.new_generic_type(TypeDesc::Ttuple(vec![local].into()))
+        });
+        assert!(piece.is_none(), "a build referring to a local node is not shared");
+        let (_, piece) = ctx.build_in_store(|| ctx.repr(local));
+        assert!(piece.is_none(), "a build reading a local node is not shared");
+    }
 
     #[test]
     fn downstream_id_generator_accessor_keeps_compilation_identity() {

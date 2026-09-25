@@ -73,6 +73,66 @@ impl SignatureIndex {
     }
 }
 
+/// In a store build, poison the build unless every type node reachable from
+/// `signature` is store-resident: a view built from, say, the current unit's
+/// in-memory signature is only valid in this compilation even though building
+/// the view itself reads no type node.
+fn check_signature_store_resident(signature: &[SignatureItem], ctx: &super::context::TypeContext) {
+    if !ctx.in_store_build() {
+        return;
+    }
+    fn module_type_roots(mty: &ModuleType, roots: &mut Vec<super::type_expr::TypeExprRef>) {
+        match mty {
+            ModuleType::MtySignature(items) => signature_roots(items, roots),
+            ModuleType::MtyFunctor {
+                param_type, result, ..
+            } => {
+                if let Some(param_type) = param_type {
+                    module_type_roots(param_type, roots);
+                }
+                module_type_roots(result, roots);
+            }
+            ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
+        }
+    }
+    fn signature_roots(items: &[SignatureItem], roots: &mut Vec<super::type_expr::TypeExprRef>) {
+        for item in items {
+            match item {
+                SignatureItem::SigValue(_, desc) => roots.push(desc.val_type),
+                SignatureItem::SigType(_, decl, _) => {
+                    roots.extend(decl.type_params.iter().copied());
+                    roots.extend(decl.type_manifest);
+                    super::btype::iter_type_expr_kind(&decl.type_kind, |ty| roots.push(ty));
+                }
+                SignatureItem::SigTypext(_, ext, _) => {
+                    roots.extend(ext.ext_type_params.iter().copied());
+                    super::btype::iter_type_expr_cstr_args(&ext.ext_args, |ty| roots.push(ty));
+                    roots.extend(ext.ext_ret_type);
+                }
+                SignatureItem::SigModule(_, md, _) => module_type_roots(&md.md_type, roots),
+                SignatureItem::SigModtype(_, mtd) => {
+                    if let Some(mty) = &mtd.mtd_type {
+                        module_type_roots(mty, roots);
+                    }
+                }
+                SignatureItem::SigClass | SignatureItem::SigClassType => {}
+            }
+        }
+    }
+    let mut stack = Vec::new();
+    signature_roots(signature, &mut stack);
+    let mut seen = ahash::AHashSet::new();
+    while let Some(ty) = stack.pop() {
+        if !ty.is_store() {
+            ctx.poison_store_build_for("unit-signature");
+            return;
+        }
+        if seen.insert(ty) {
+            super::btype::iter_type_expr(ctx, ty, |child| stack.push(child));
+        }
+    }
+}
+
 fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
     fn root_ident(path: &Path) -> Option<&Ident> {
         match path {
@@ -422,6 +482,22 @@ struct StructureComponentTables {
     // The component substitution for value lookups depends only on the
     // signature and access path; build it once per component table.
     value_subst_maps: RefCell<Option<Arc<crate::cmi::persistent_env::ValueSubstMaps>>>,
+    /// Built during a store build: the tables may be shared with later
+    /// compilations on this worker, so entries are forced as store builds and
+    /// carry the replay record of their forcing.
+    in_store: std::cell::Cell<bool>,
+    store_pieces: RefCell<HashMap<(ForcedKind, String), Arc<super::context::StorePiece>>>,
+    /// The layer tables `open` adds for this view, built on first open.
+    opened_layers: OnceCell<(Arc<super::env::OpenedLayers>, Option<Arc<super::context::StorePiece>>)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ForcedKind {
+    Value,
+    Constructors,
+    Labels,
+    ChildComponents,
+    QualifiedModule,
 }
 
 #[derive(Debug, Clone)]
@@ -584,6 +660,7 @@ impl QualifiedModuleComponents {
         child_component_scan_complete: bool,
         ctx: &super::context::TypeContext,
     ) -> Self {
+        check_signature_store_resident(&signature, ctx);
         let index = ctx.signature_index(&signature);
         let mut component_modtypes = HashMap::new();
         // Replay the per-item side effects in signature order.
@@ -658,6 +735,9 @@ impl QualifiedModuleComponents {
                     ChildComponentScanState::new()
                 }),
                 value_subst_maps: RefCell::new(None),
+                in_store: std::cell::Cell::new(super::thread_store::store_build_active()),
+                store_pieces: RefCell::new(HashMap::new()),
+                opened_layers: OnceCell::new(),
             }),
             compiler_counters_enabled: ctx.compiler_counters_enabled(),
             value_source_prefix: value_source_prefix.map(Arc::new),
@@ -666,6 +746,105 @@ impl QualifiedModuleComponents {
 
     pub(crate) fn access_path(&self) -> &Path {
         self.access_path.as_ref()
+    }
+
+    /// Force one lazily built entry of these tables. Store-resident tables
+    /// force it as a store build: the result is kept (with its replay record)
+    /// only when the build stayed independent of this compilation; later
+    /// users replay the record the first time they read the entry.
+    fn force_entry<R>(
+        &self,
+        kind: ForcedKind,
+        name: &str,
+        ctx: &super::context::TypeContext,
+        force: impl FnOnce() -> R,
+    ) -> R {
+        if !self.tables.in_store.get() {
+            return force();
+        }
+        let known = self
+            .tables
+            .store_pieces
+            .borrow()
+            .get(&(kind, name.to_string()))
+            .cloned();
+        if let Some(piece) = known {
+            ctx.touch_store_piece(&piece);
+            // A hit normally allocates nothing; run it as a store build anyway
+            // so a fall-through that does force cannot put compilation-local
+            // nodes into shared tables.
+            let (result, hit) = ctx.build_in_store(force);
+            if hit.is_none() {
+                self.forget_entry(kind, name);
+            }
+            return result;
+        }
+        let (result, piece) = ctx.build_in_store(force);
+        match piece {
+            Some(piece) => {
+                self.tables
+                    .store_pieces
+                    .borrow_mut()
+                    .insert((kind, name.to_string()), piece);
+            }
+            None => self.forget_entry(kind, name),
+        }
+        result
+    }
+
+    /// The layer tables that opening this view adds to an Env (OCaml
+    /// compiler/ml/env.ml:1841-1877 opens the component table as is), built
+    /// once per view by `build`.
+    pub(crate) fn opened_layers(
+        &self,
+        ctx: &super::context::TypeContext,
+        build: impl FnOnce() -> super::env::OpenedLayers,
+    ) -> Arc<super::env::OpenedLayers> {
+        if let Some((layers, piece)) = self.tables.opened_layers.get() {
+            if let Some(piece) = piece {
+                ctx.touch_store_piece(piece);
+            }
+            return layers.clone();
+        }
+        if self.tables.in_store.get() {
+            let (layers, piece) = ctx.build_in_store(build);
+            let layers = Arc::new(layers);
+            if let Some(piece) = piece {
+                let _ = self.tables.opened_layers.set((layers.clone(), Some(piece)));
+            }
+            return layers;
+        }
+        let layers = Arc::new(build());
+        let _ = self.tables.opened_layers.set((layers.clone(), None));
+        layers
+    }
+
+    /// Keep these tables private to this compilation (their build read
+    /// compilation-local state): later entries are forced locally.
+    pub(crate) fn make_private(&self) {
+        self.tables.in_store.set(false);
+    }
+
+    /// Drop an entry forced from compilation-local state so that other
+    /// compilations sharing these tables force it themselves.
+    fn forget_entry(&self, kind: ForcedKind, name: &str) {
+        match kind {
+            ForcedKind::Value => {
+                self.tables.component_values.borrow_mut().remove(name);
+            }
+            ForcedKind::Constructors => {
+                self.tables.constructors.borrow_mut().remove(name);
+            }
+            ForcedKind::Labels => {
+                self.tables.labels.borrow_mut().remove(name);
+            }
+            ForcedKind::QualifiedModule => {
+                self.tables.qualified_modules.borrow_mut().remove(name);
+            }
+            // Scanning children allocates no type nodes; the scanned entries
+            // are the same for every compilation.
+            ForcedKind::ChildComponents => {}
+        }
     }
 
     pub(crate) fn signature(&self) -> &[SignatureItem] {
@@ -710,7 +889,11 @@ impl QualifiedModuleComponents {
         }
     }
 
-    pub(crate) fn lookup_value_for_access(
+    pub(crate) fn lookup_value_for_access(&self, name: &str, ctx: &super::context::TypeContext) -> Option<(usize, Ident, ValueDescription)> {
+        self.force_entry(ForcedKind::Value, name, ctx, || self.lookup_value_for_access_inner(name, ctx))
+    }
+
+    fn lookup_value_for_access_inner(
         &self,
         name: &str,
         ctx: &super::context::TypeContext,
@@ -763,7 +946,11 @@ impl QualifiedModuleComponents {
         result
     }
 
-    pub(crate) fn lookup_constructors(
+    pub(crate) fn lookup_constructors(&self, name: &str, ctx: &super::context::TypeContext) -> Arc<Vec<ConstructorDescription>> {
+        self.force_entry(ForcedKind::Constructors, name, ctx, || self.lookup_constructors_inner(name, ctx))
+    }
+
+    fn lookup_constructors_inner(
         &self,
         name: &str,
         ctx: &super::context::TypeContext,
@@ -802,7 +989,11 @@ impl QualifiedModuleComponents {
         built
     }
 
-    pub(crate) fn lookup_labels(
+    pub(crate) fn lookup_labels(&self, name: &str, ctx: &super::context::TypeContext) -> Arc<Vec<LabelDescription>> {
+        self.force_entry(ForcedKind::Labels, name, ctx, || self.lookup_labels_inner(name, ctx))
+    }
+
+    fn lookup_labels_inner(
         &self,
         name: &str,
         ctx: &super::context::TypeContext,
@@ -857,7 +1048,16 @@ impl QualifiedModuleComponents {
     pub(crate) fn lookup_child_components(
         &self,
         name: &str,
-        _ctx: &super::context::TypeContext,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(usize, Arc<StoredModuleComponents>)> {
+        self.force_entry(ForcedKind::ChildComponents, name, ctx, || {
+            self.lookup_child_components_inner(name)
+        })
+    }
+
+    fn lookup_child_components_inner(
+        &self,
+        name: &str,
     ) -> Option<(usize, Arc<StoredModuleComponents>)> {
         if let Some(cached) = self.tables.child_components.borrow().get(name).cloned() {
             if self.compiler_counters_enabled {
@@ -895,7 +1095,11 @@ impl QualifiedModuleComponents {
         built
     }
 
-    pub(crate) fn lookup_qualified_module_shared(
+    pub(crate) fn lookup_qualified_module_shared(&self, name: &str, ctx: &super::context::TypeContext) -> Option<(usize, Ident, Arc<ModuleDeclaration>)> {
+        self.force_entry(ForcedKind::QualifiedModule, name, ctx, || self.lookup_qualified_module_shared_inner(name, ctx))
+    }
+
+    fn lookup_qualified_module_shared_inner(
         &self,
         name: &str,
         ctx: &super::context::TypeContext,
@@ -1567,8 +1771,13 @@ pub(crate) struct StoredModuleComponents {
     module_decl: ModuleDeclaration,
     parent_context: Option<(Path, Arc<Signature>)>,
     cached: OnceCell<Arc<QualifiedModuleComponents>>,
+    /// Built during a store build (see `StructureComponentTables::in_store`).
+    in_store: bool,
+    cached_piece: OnceCell<Arc<super::context::StorePiece>>,
     functor_component_result: OnceCell<ModuleType>,
-    functor_result_subst_cache: OnceCell<RefCell<HashMap<Path, ModuleType>>>,
+    functor_component_piece: OnceCell<Arc<super::context::StorePiece>>,
+    functor_result_subst_cache:
+        OnceCell<RefCell<HashMap<Path, (ModuleType, Option<Arc<super::context::StorePiece>>)>>>,
 }
 
 impl StoredModuleComponents {
@@ -1592,7 +1801,10 @@ impl StoredModuleComponents {
             module_decl,
             parent_context,
             cached: OnceCell::new(),
+            in_store: super::thread_store::store_build_active(),
+            cached_piece: OnceCell::new(),
             functor_component_result: OnceCell::new(),
+            functor_component_piece: OnceCell::new(),
             functor_result_subst_cache: OnceCell::new(),
         }
     }
@@ -1608,30 +1820,25 @@ impl StoredModuleComponents {
             if ctx.compiler_counters_enabled() {
                 crate::perf_counters::record_stored_component_cached();
             }
+            if let Some(piece) = self.cached_piece.get() {
+                ctx.touch_store_piece(piece);
+            }
             return Some(f(components.as_ref()));
         }
 
-        let parent_substitution_context =
-            self.parent_context
-                .as_ref()
-                .map(|(parent_access_path, parent_sig)| {
-                    (parent_access_path, parent_sig.as_ref().as_slice())
-                });
-        let components = Arc::new(build_local_module_components(
-            self.seed_env.as_ref(),
-            &self.access_path,
-            &self.module_decl,
-            parent_substitution_context,
-            pers_env,
-            ctx,
-            cache_mode,
-        )?);
-        if ctx.compiler_counters_enabled() {
-            crate::perf_counters::record_stored_component_build(
-                cache_mode.counter_name(),
-                cache_mode.publishes(),
-            );
+        if self.in_store {
+            let (components, piece) = ctx.build_in_store(|| self.build_components(pers_env, ctx, cache_mode));
+            let components = Arc::new(components?);
+            if let Some(piece) = piece
+                && cache_mode.publishes()
+                && self.cached.set(components.clone()).is_ok()
+            {
+                let _ = self.cached_piece.set(piece);
+            }
+            return Some(f(components.as_ref()));
         }
+
+        let components = Arc::new(self.build_components(pers_env, ctx, cache_mode)?);
         if cache_mode.publishes() {
             if self.cached.set(components.clone()).is_err()
                 && let Some(cached) = self.cached.get().cloned()
@@ -1642,6 +1849,36 @@ impl StoredModuleComponents {
         Some(f(components.as_ref()))
     }
 
+    fn build_components(
+        &self,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &super::context::TypeContext,
+        cache_mode: super::typecore::ComponentLookupApi,
+    ) -> Option<QualifiedModuleComponents> {
+        let parent_substitution_context =
+            self.parent_context
+                .as_ref()
+                .map(|(parent_access_path, parent_sig)| {
+                    (parent_access_path, parent_sig.as_ref().as_slice())
+                });
+        let components = build_local_module_components(
+            self.seed_env.as_ref(),
+            &self.access_path,
+            &self.module_decl,
+            parent_substitution_context,
+            pers_env,
+            ctx,
+            cache_mode,
+        )?;
+        if ctx.compiler_counters_enabled() {
+            crate::perf_counters::record_stored_component_build(
+                cache_mode.counter_name(),
+                cache_mode.publishes(),
+            );
+        }
+        Some(components)
+    }
+
     pub(crate) fn instantiate_functor_result_for_application(
         &self,
         arg_path: &Path,
@@ -1650,16 +1887,23 @@ impl StoredModuleComponents {
         let ModuleType::MtyFunctor { param, result, .. } = &self.module_decl.md_type else {
             return None;
         };
+        // A store-resident component is shared with later compilations: its
+        // cached results must be store builds, and a result for an argument
+        // path local to this compilation is not cached at all.
+        let shareable_arg = path_non_apply_root_is_persistent_or_global(arg_path);
         if let Some(cache) = self.functor_result_subst_cache.get()
-            && let Some(cached) = cache.borrow().get(arg_path).cloned()
+            && let Some((cached, piece)) = cache.borrow().get(arg_path).cloned()
         {
+            if let Some(piece) = piece {
+                ctx.touch_store_piece(&piece);
+            }
             return Some(cached);
         }
         let parent_context = self
             .parent_context
             .as_ref()
             .map(|(path, sig)| (path, sig.as_ref().as_slice()));
-        let component_result = self.functor_component_result.get_or_init(|| {
+        let compute_component_result = || {
             // OCaml compiler/ml/env.ml:1595-1602 stores `fcomp_res =
             // Subst.modtype sub ty_res` in `Functor_comps` when the functor
             // component table is forced. compiler/ml/env.ml:1744-1756 then
@@ -1670,17 +1914,50 @@ impl StoredModuleComponents {
                 parent_context,
                 ctx,
             )
-        });
-        let substituted = crate::cmi::persistent_env::substitute_functor_result_module_path(
-            component_result,
-            param,
-            arg_path,
-            ctx,
-        );
-        self.functor_result_subst_cache
-            .get_or_init(|| RefCell::new(HashMap::new()))
-            .borrow_mut()
-            .insert(arg_path.clone(), substituted.clone());
+        };
+        let component_result = if let Some(cached) = self.functor_component_result.get() {
+            if let Some(piece) = self.functor_component_piece.get() {
+                ctx.touch_store_piece(piece);
+            }
+            cached.clone()
+        } else if self.in_store {
+            let (computed, piece) = ctx.build_in_store(compute_component_result);
+            if let Some(piece) = piece
+                && self.functor_component_result.set(computed.clone()).is_ok()
+            {
+                let _ = self.functor_component_piece.set(piece);
+            }
+            computed
+        } else {
+            self.functor_component_result
+                .get_or_init(compute_component_result)
+                .clone()
+        };
+        let substitute = || {
+            crate::cmi::persistent_env::substitute_functor_result_module_path(
+                &component_result,
+                param,
+                arg_path,
+                ctx,
+            )
+        };
+        let (substituted, piece, cacheable) = if self.in_store {
+            if shareable_arg {
+                let (substituted, piece) = ctx.build_in_store(substitute);
+                let cacheable = piece.is_some();
+                (substituted, piece, cacheable)
+            } else {
+                (substitute(), None, false)
+            }
+        } else {
+            (substitute(), None, true)
+        };
+        if cacheable {
+            self.functor_result_subst_cache
+                .get_or_init(|| RefCell::new(HashMap::new()))
+                .borrow_mut()
+                .insert(arg_path.clone(), (substituted.clone(), piece));
+        }
         Some(substituted)
     }
 }
