@@ -7244,14 +7244,41 @@ fn type_statement<'a>(
     let typed = type_exp(tctx, env, expr, None)?;
     ctx.end_def();
 
-    // Keep OCaml side effects from `expand_head env exp.exp_type`:
-    // this drives abbreviation memo/env synchronization in statement typing.
-    let _ = crate::types::ctype::expand_head(ctx, env, typed.exp_type);
+    // OCaml typecore.ml type_statement: warn when the statement's type is a
+    // variable generalizable past the current level (it never returns).
+    let ty = crate::types::ctype::expand_head(ctx, env, typed.exp_type);
+    let tv = ctx.new_var(None);
+    if matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(_)) && ctx.get_level(ty) > ctx.get_level(tv) {
+        let loc = final_subexpression(tctx.arena, expr).pexp_loc;
+        tctx.report_warning(loc, Warning::NonreturningStatement);
+    }
 
     let expected_ty = env.type_unit(ctx);
     let context = type_clash_context_in_statement(expr);
     unify_expression_types(tctx, typed.exp_loc, typed.exp_type, expected_ty, context)?;
     Ok(typed)
+}
+
+/// OCaml typecore.ml `final_subexpression`.
+fn final_subexpression<'e>(
+    arena: &'e crate::parse_arena::ParseArena,
+    mut sexp: &'e ParsedExpression,
+) -> &'e ParsedExpression {
+    use crate::parser::ast::ExpressionDesc as ED;
+    loop {
+        let next = match &*sexp.pexp_desc {
+            ED::Pexp_let(inner) => inner.2,
+            ED::Pexp_sequence(_, e) => *e,
+            ED::Pexp_try(inner) => inner.0,
+            ED::Pexp_ifthenelse(inner) => inner.1,
+            ED::Pexp_match(inner) => match inner.1.first() {
+                Some(case) => case.pc_rhs,
+                None => return sexp,
+            },
+            _ => return sexp,
+        };
+        sexp = arena.get_expr(next);
+    }
 }
 
 fn type_clash_context_in_statement(expr: &ParsedExpression) -> Option<TypeClashContext> {
@@ -7603,7 +7630,8 @@ fn type_expect_with_recarg_unscoped<'a>(
                 &typed_e1.exp_desc,
                 ExpressionDesc::Texp_break | ExpressionDesc::Texp_continue
             ) {
-                tctx.report_warning(typed_e1.exp_loc, Warning::NonreturningStatement);
+                let loc = final_subexpression(tctx.arena, e1).pexp_loc;
+                tctx.report_warning(loc, Warning::NonreturningStatement);
             }
 
             // e2 has the expected type
