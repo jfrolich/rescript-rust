@@ -4246,9 +4246,10 @@ fn parse_if_let_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     let cond_idx = p.arena_mut().push_expr(condition_expr);
     let pattern_idx = p.arena_mut().push_pat(pattern);
     let then_expr_idx = p.arena_mut().push_expr(then_expr);
+    // OCaml `Ast_helper.Pat.any ()` uses the default (none) location.
     let any_pat = Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_any),
-        ppat_loc: loc,
+        ppat_loc: LocIdx::none(),
         ppat_attributes: Attributes::new(),
     };
     let any_pat_idx = p.arena_mut().push_pat(any_pat);
@@ -4315,10 +4316,11 @@ fn parse_if_let_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
 }
 
 /// Create the @warning "-4" attribute to suppress fragile match warnings.
+/// OCaml `suppress_fragile_match_warning_attr` (res_core.ml:269-275) is built
+/// once with `Location.mknoloc` and default-location helpers.
 fn suppress_fragile_match_warning_attr(p: &mut Parser<'_>) -> Attribute {
     use super::ast::*;
-    let cur_start = p.start_pos_idx();
-    let loc = p.mk_loc_idx_to_prev_end(cur_start);
+    let loc = LocIdx::none();
     let warning_str_idx = p.arena_mut().intern("warning");
     let warning_expr = Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
