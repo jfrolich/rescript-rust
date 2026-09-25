@@ -5624,10 +5624,19 @@ fn type_pattern_record(
 
     // OCaml: dict patterns are forced to type dict<'a>, independent of expected_ty shape.
     // This enables field-label disambiguation through the dict magic field.
+    // OCaml Ppat_record (typecore.ml:1502-1511): `opath`/`record_ty` come
+    // from `extract_concrete_record env expected_ty`; a non-record expected
+    // type gives `(None, newvar ())`, unified with `expected_ty` after the
+    // labels (typecore.ml:1560).
+    let record_is_concrete = has_dict_pattern_attr
+        || extract_concrete_record_type_info(expected_ty, env, &mut tctx.persistent_env, ctx)
+            .is_some();
     let record_ty = if has_dict_pattern_attr {
         ctx.new_constr(crate::types::predef::path_dict(), vec![ctx.new_var(None)])
-    } else {
+    } else if record_is_concrete {
         expected_ty
+    } else {
+        ctx.new_var(None)
     };
 
     struct PendingRecordPatternField {
@@ -5643,6 +5652,29 @@ fn type_pattern_record(
     for (idx, field) in fields.iter().enumerate() {
         let resolved_lid = tctx.resolve_lid(field.lid.txt).clone();
         let field_name = tctx.longident_last_name(&resolved_lid);
+        // `process_label` (typecore.ml:1028-1029): with no `opath`, a label
+        // with nothing in scope is unbound.
+        if !record_is_concrete
+            && matches!(resolved_lid, Longident::Lident(_))
+            && env.find_all_labels(&field_name).is_empty()
+            && !tctx
+                .generated_pattern_labels
+                .iter()
+                .any(|(name, _)| name == &field_name)
+        {
+            return Err(TypeCoreError::UnboundRecordField {
+                loc: field.lid.loc,
+                field_name: tctx.longident_to_string(&resolved_lid),
+                from_type: None,
+                alternatives: unbound_label_alternatives(
+                    tctx.arena,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                    &resolved_lid,
+                ),
+            });
+        }
 
         // Try to look up the label from the environment for type info
         let disambiguated = tctx
