@@ -10159,6 +10159,12 @@ fn collect_deriving_not_applicable_warnings(
 }
 
 /// Parse @deriving attribute to extract derive actions
+fn has_deriving_attribute(attrs: &[Attribute], arena: &ParseArena) -> bool {
+    attrs
+        .iter()
+        .any(|(name, _)| arena.get_string(name.txt) == "deriving")
+}
+
 fn parse_deriving_actions(
     attrs: &[Attribute],
     arena: &ParseArena,
@@ -12013,7 +12019,9 @@ fn handle_deriving_type(
     let last_tdcl = tdcls.last().unwrap();
     let (actions, new_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
 
-    if actions.is_empty() {
+    // `process_derive_type` gives `bs_deriving = Some actions` for any
+    // `@deriving`, even with no actions (ast_tdcls.ml:76-105).
+    if !has_deriving_attribute(&last_tdcl.ptype_attributes, arena) {
         // No @deriving, but still rewrite type declarations for string transformations in attributes
         let rewritten_tdcls: Vec<TypeDeclaration> = tdcls
             .iter()
@@ -12811,7 +12819,9 @@ fn validate_obj_extension_payload_error(
     let Some(fields) = payload_single_record_fields_without_spread(payload, arena) else {
         return Err(PpxError::at_loc(ext_loc, "Expect a record expression here"));
     };
-    for field in fields {
+    // `Ast_util.record_as_js_object` folds the labels with
+    // `Ext_list.fold_right` (ast_util.ml:31-39): the last one is checked first.
+    for field in fields.iter().rev() {
         let lid = arena.get_longident(field.lid.txt);
         if !matches!(lid, Longident::Lident(_)) {
             return Err(PpxError::at_loc(field.lid.loc, "invalid js label "));
