@@ -13082,6 +13082,9 @@ fn type_function_nary_with_newtypes(
                         type_path: None,
                     },
                 );
+                // `Env.enter_type` registers the unused-type check here (env.ml:1593-1597,
+                // 1562-1572); it is a delayed check, only forced if typing succeeds.
+                let unused_type_seq = tctx.reserve_delayed_check_seq();
                 ctx.init_def(ctx.current_stamp());
 
                 let typed_body = peel(
@@ -13135,8 +13138,13 @@ fn type_function_nary_with_newtypes(
                     &mut seen,
                     &mut used,
                 );
-                if !used {
-                    tctx.report_warning(
+                if !used
+                    && !tctx.arena.to_location(loc).loc_ghost
+                    && !name_str.starts_with(['_', '#'])
+                {
+                    tctx.add_delayed_warning(
+                        unused_type_seq,
+                        0,
                         loc,
                         Warning::UnusedTypeDeclaration {
                             name: name_str.clone(),
@@ -17222,6 +17230,9 @@ fn type_newtype(
                 type_path: None,
             },
         );
+        // `Env.enter_type` registers the unused-type check here (env.ml:1593-1597,
+        // 1562-1572); it is a delayed check, only forced if typing succeeds.
+        let unused_type_seq = tctx.reserve_delayed_check_seq();
         ctx.init_def(ctx.current_stamp());
 
         // OCaml types the newtype body with type_exp (no expected type).
@@ -17277,8 +17288,13 @@ fn type_newtype(
             &mut seen,
             &mut used,
         );
-        if !used {
-            tctx.report_warning(
+        if !used
+            && !tctx.arena.to_location(loc).loc_ghost
+            && !name_str.starts_with(['_', '#'])
+        {
+            tctx.add_delayed_warning(
+                unused_type_seq,
+                0,
                 loc,
                 Warning::UnusedTypeDeclaration {
                     name: name_str.clone(),
