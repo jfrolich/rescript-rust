@@ -12566,6 +12566,8 @@ pub fn typecheck_interface_source(
     {
         return Err(persistent_env_error_to_anyhow(error, filename));
     }
+    // js_implementation.ml:64 `Delayed_checks.force_delayed_checks ()`.
+    tctx.flush_value_usage_checks();
     emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
     if ppx_warnings_have_errors || type_warnings_have_errors(&tctx.warnings) {
         return Err(UserDiagnostic::new(String::new(), 2).into());

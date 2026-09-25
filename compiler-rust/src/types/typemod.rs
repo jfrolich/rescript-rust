@@ -10327,10 +10327,24 @@ fn collect_unused_top_level_value_warnings(
     }
 }
 
-fn report_delayed_warnings(tctx: &mut TypeCheckContext<'_>, mut warnings: Vec<DelayedWarning>) {
+/// Queue delayed-check warnings (`Delayed_checks.add_delayed_check`, forced
+/// at the end of the unit by typemod.ml:1757/1772). `item_seqs` holds the
+/// registration slot reserved before each item was typed; without it the
+/// checks are registered now.
+fn report_delayed_warnings(
+    tctx: &mut TypeCheckContext<'_>,
+    mut warnings: Vec<DelayedWarning>,
+    item_seqs: Option<&[u64]>,
+) {
     warnings.sort_by_key(|warning| (warning.item_index, warning.order));
-    for warning in warnings {
-        tctx.report_warning(warning.loc, warning.warning);
+    let fallback_seq = item_seqs.is_none().then(|| tctx.reserve_delayed_check_seq());
+    for (index, warning) in warnings.into_iter().enumerate() {
+        let (seq, sub) = match (item_seqs.and_then(|seqs| seqs.get(warning.item_index)), fallback_seq) {
+            (Some(seq), _) => (*seq, warning.order as u32),
+            (None, Some(seq)) => (seq, index as u32),
+            (None, None) => (tctx.reserve_delayed_check_seq(), 0),
+        };
+        tctx.add_delayed_warning(seq, sub, warning.loc, warning.warning);
     }
 }
 
@@ -10340,6 +10354,7 @@ fn report_unused_top_level_value_warnings(
     typed_items: &[StructureItem],
     checks: &[TopLevelValueUseCheck],
     final_values_are_used: bool,
+    item_seqs: &[u64],
 ) {
     let mut warnings = Vec::new();
     collect_unused_top_level_value_warnings(
@@ -10349,7 +10364,7 @@ fn report_unused_top_level_value_warnings(
         final_values_are_used,
         &mut warnings,
     );
-    report_delayed_warnings(tctx, warnings);
+    report_delayed_warnings(tctx, warnings, Some(item_seqs));
 }
 
 fn report_unused_top_level_value_and_open_warnings(
@@ -10359,6 +10374,7 @@ fn report_unused_top_level_value_and_open_warnings(
     value_checks: &[TopLevelValueUseCheck],
     open_checks: &[OpenUseCheck],
     final_values_are_used: bool,
+    item_seqs: &[u64],
 ) {
     let mut warnings = Vec::new();
     collect_unused_top_level_value_warnings(
@@ -10369,7 +10385,7 @@ fn report_unused_top_level_value_and_open_warnings(
         &mut warnings,
     );
     collect_unused_open_warnings(open_checks, &mut warnings);
-    report_delayed_warnings(tctx, warnings);
+    report_delayed_warnings(tctx, warnings, Some(item_seqs));
 }
 
 #[derive(Debug, Default)]
@@ -11115,7 +11131,7 @@ fn report_unused_items_hidden_by_module_constraint(
             });
         }
     }
-    report_delayed_warnings(tctx, hidden_warnings);
+    report_delayed_warnings(tctx, hidden_warnings, None);
 }
 
 fn push_sig_values_from_env_pattern(
@@ -20396,7 +20412,7 @@ pub fn transl_signature<'a>(
 
     let mut delayed_warnings = Vec::new();
     collect_unused_open_warnings(&unused_open_checks, &mut delayed_warnings);
-    report_delayed_warnings(tctx, delayed_warnings);
+    report_delayed_warnings(tctx, delayed_warnings, None);
 
     Ok(crate::types::typedtree::TypedSignature {
         sig_items: typed_items,
@@ -20517,6 +20533,7 @@ pub fn type_structure<'a>(
     let mut unused_open_checks = Vec::new();
     let mut open_shadow_identifier_checks = Vec::new();
     let mut open_shadow_label_constructor_checks = Vec::new();
+    let mut item_seqs: Vec<u64> = Vec::new();
 
     for item in items {
         check_structure_item_names(&mut names, arena, item)?;
@@ -20524,12 +20541,14 @@ pub fn type_structure<'a>(
         ctx.init_def(ctx.current_stamp());
         tctx.set_unify_env(&current_env);
         let warnings_before_item = tctx.warnings.len();
+        let item_seq = tctx.reserve_delayed_check_seq();
         let (typed_item, item_sig, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
         if let StructureItemDesc::Tstr_include(incl) = &typed_item.str_desc {
             // OCaml compiler/ml/typemod.ml:1579.
             check_included_signature_names(&mut names, item.pstr_loc, &incl.incl_type)?;
         }
         let item_index = typed_items.len();
+        item_seqs.push(item_seq);
         collect_top_level_value_use_checks(&typed_item, item_index, &mut unused_value_checks);
         if let StructureItemDesc::Tstr_open(open) = &typed_item.str_desc
             && is_fresh_open(open)
@@ -20851,6 +20870,7 @@ pub fn type_structure<'a>(
             str_env: crate::types::typedtree::EnvRef(0),
         });
         let item_index = typed_items.len() - 1;
+        item_seqs.push(tctx.reserve_delayed_check_seq());
         collect_top_level_value_use_checks(
             typed_items
                 .last()
@@ -20867,6 +20887,7 @@ pub fn type_structure<'a>(
         &unused_value_checks,
         &unused_open_checks,
         true,
+        &item_seqs,
     );
 
     let structure = Structure {
@@ -20991,17 +21012,20 @@ fn type_structure_no_export<'a>(
     // type_structure, so name uniqueness is still checked.
     let mut names = Names::default();
 
+    let mut item_seqs: Vec<u64> = Vec::new();
     for item in items {
         check_structure_item_names(&mut names, arena, item)?;
         let ctx = tctx.type_ctx;
         ctx.init_def(ctx.current_stamp());
         tctx.set_unify_env(&current_env);
+        let item_seq = tctx.reserve_delayed_check_seq();
         let (typed_item, item_sig, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
         if let StructureItemDesc::Tstr_include(incl) = &typed_item.str_desc {
             // OCaml compiler/ml/typemod.ml:1579.
             check_included_signature_names(&mut names, item.pstr_loc, &incl.incl_type)?;
         }
         let item_index = typed_items.len();
+        item_seqs.push(item_seq);
         collect_top_level_value_use_checks(&typed_item, item_index, &mut unused_value_checks);
         if !rescript_hide_structure_item(&typed_item.str_desc, arena) {
             sig_items.extend(item_sig);
@@ -21010,7 +21034,14 @@ fn type_structure_no_export<'a>(
         current_env = new_env;
     }
 
-    report_unused_top_level_value_warnings(tctx, arena, &typed_items, &unused_value_checks, false);
+    report_unused_top_level_value_warnings(
+        tctx,
+        arena,
+        &typed_items,
+        &unused_value_checks,
+        false,
+        &item_seqs,
+    );
 
     let inner_structure = Structure {
         str_items: typed_items,

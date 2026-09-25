@@ -1192,6 +1192,9 @@ pub struct TypeCheckContext<'a> {
     value_usage_checks: Vec<ValueUsageCheck>,
     /// Unused-case checks run when delayed checks are flushed.
     delayed_unused_checks: Vec<DelayedUnusedCheck>,
+    /// Delayed checks whose outcome Rust computes after the fact, keyed by
+    /// their `Delayed_checks.add_delayed_check` registration order.
+    delayed_warnings: Vec<((u64, u32), TypeCoreWarning)>,
     /// Registration counter shared by all delayed checks, so they are forced
     /// in registration order like `Delayed_checks.force_delayed_checks`.
     delayed_check_seq: u64,
@@ -1308,6 +1311,7 @@ impl<'a> TypeCheckContext<'a> {
             warnings: Vec::new(),
             value_usage_checks: Vec::new(),
             delayed_unused_checks: Vec::new(),
+            delayed_warnings: Vec::new(),
             delayed_check_seq: 0,
             conv_name_counter: 0,
             generated_pattern_constructors: Vec::new(),
@@ -1433,6 +1437,29 @@ impl<'a> TypeCheckContext<'a> {
         self.delayed_check_seq
     }
 
+    /// Reserve the `Delayed_checks` registration slot for checks registered
+    /// now whose result is known later.
+    pub(crate) fn reserve_delayed_check_seq(&mut self) -> u64 {
+        self.next_delayed_check_seq()
+    }
+
+    /// Queue the warning of a delayed check registered at `seq`; `sub` orders
+    /// the checks registered together.
+    pub(crate) fn add_delayed_warning(&mut self, seq: u64, sub: u32, loc: LocIdx, warning: Warning) {
+        if !self.warning_config.is_active(&warning) {
+            return;
+        }
+        let is_error = self.warning_config.is_error(&warning);
+        self.delayed_warnings.push((
+            (seq, sub),
+            TypeCoreWarning {
+                loc,
+                warning,
+                is_error,
+            },
+        ));
+    }
+
     /// `Delayed_checks.force_delayed_checks`: run value-usage and unused-case
     /// checks in registration order.
     pub fn flush_value_usage_checks(&mut self) {
@@ -1440,13 +1467,23 @@ impl<'a> TypeCheckContext<'a> {
         let mut unused = std::mem::take(&mut self.delayed_unused_checks)
             .into_iter()
             .peekable();
+        let mut resolved = std::mem::take(&mut self.delayed_warnings);
+        resolved.sort_by_key(|(key, _)| *key);
+        let mut resolved = resolved.into_iter().peekable();
         loop {
-            let take_usage = match (usage.peek(), unused.peek()) {
-                (Some(u), Some(c)) => u.seq < c.seq,
-                (Some(_), None) => true,
-                (None, Some(_)) => false,
-                (None, None) => break,
+            let usage_key = usage.peek().map(|u| (u.seq, 0));
+            let unused_key = unused.peek().map(|c| (c.seq, 0));
+            let resolved_key = resolved.peek().map(|(key, _)| *key);
+            let Some(min_key) = [usage_key, unused_key, resolved_key].into_iter().flatten().min()
+            else {
+                break;
             };
+            if resolved_key == Some(min_key) {
+                let (_, warning) = resolved.next().expect("peeked");
+                self.warnings.push(warning);
+                continue;
+            }
+            let take_usage = usage_key == Some(min_key);
             if take_usage {
                 let check = usage.next().expect("peeked");
                 if !check.used {
@@ -7145,7 +7182,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             // pre-body position so nested generated lets, such as optional
             // default argument rewrites from typecore.ml:2516-2555, report in
             // the same outer-to-inner order.
-            let local_warning_index = tctx.warnings.len();
+            let local_warning_seq = tctx.reserve_delayed_check_seq();
 
             // Type check body in extended environment
             let body = tctx.arena.get_expr(*body_idx);
@@ -7155,7 +7192,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             if !is_fake_optional_arg_let(tctx.arena, bindings) {
                 report_unused_local_let_warnings(
                     tctx,
-                    local_warning_index,
+                    local_warning_seq,
                     *rec_flag,
                     &typed_bindings,
                     &typed_body,
@@ -20587,12 +20624,12 @@ fn is_fake_optional_arg_let(
 
 fn report_unused_local_let_warnings(
     tctx: &mut TypeCheckContext<'_>,
-    insert_index: usize,
+    delayed_seq: u64,
     rec_flag: RecFlag,
     typed_bindings: &[ValueBinding],
     typed_body: &Expression,
 ) {
-    let mut warning_index = insert_index;
+    let mut sub = 0u32;
     let mut body_uses = HashSet::default();
     collect_typed_expression_pident_uses(typed_body, &mut body_uses);
     let mut recursive_rhs_uses = HashSet::default();
@@ -20628,9 +20665,8 @@ fn report_unused_local_let_warnings(
                     name: name.to_string(),
                 }
             };
-            if tctx.report_warning_at(warning_index, loc, warning) {
-                warning_index += 1;
-            }
+            tctx.add_delayed_warning(delayed_seq, sub, loc, warning);
+            sub += 1;
         }
     }
 }
