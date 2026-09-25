@@ -1,0 +1,220 @@
+//! The usage tables of OCaml `Env` (compiler/ml/env.ml:27-53).
+//!
+//! A declaration is identified by its name and location. `Env.check_usage`
+//! (env.ml:1562-1576) registers a callback for it when the declaration enters
+//! the environment with `~check:true`; lookups (`Env.lookup_type`,
+//! `Env.lookup_module`, ...) and inclusion tests (`Includemod`) call the
+//! callback through `Env.mark_*_used`. The unused warnings are delayed checks
+//! reading the flag the callback sets.
+//!
+//! Callbacks are closures in OCaml; here they are the closed set of shapes the
+//! type checker installs.
+
+use std::collections::HashMap;
+
+use crate::location::Location;
+
+/// A `used` flag (`let used = ref false`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UsedCell(u32);
+
+/// A recursive-definition slot (`let slot = ref []`, typedecl.ml:1486).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeSlot(u32);
+
+/// An entry of `Env.used_constructors` (`constructor_usages`, env.ml:40-47).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConstructorUsageCell(u32);
+
+/// `Env.constructor_usage` (env.ml:38).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstructorUsage {
+    Positive,
+    Pattern,
+    Privatize,
+}
+
+/// `Env.constructor_usages` (env.ml:39-43).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConstructorUsages {
+    pub cu_positive: bool,
+    pub cu_pattern: bool,
+    pub cu_privatize: bool,
+}
+
+#[derive(Debug, Clone)]
+enum TypeCallback {
+    /// `fun () -> used := true` (env.ml:1568).
+    SetUsed(UsedCell),
+    /// The callback `Typedecl.transl_type_decl` installs for a recursive
+    /// definition (typedecl.ml:1489-1496): while a declaration of the group
+    /// is translated, uses are recorded in its slot; afterwards a use marks
+    /// the recorded declarations and runs the previous callback.
+    RecSlot {
+        name: String,
+        loc: Location,
+        slot: TypeSlot,
+        old: Box<TypeCallback>,
+    },
+}
+
+#[derive(Debug, Default)]
+pub struct UsageTables {
+    type_declarations: HashMap<(String, Location), TypeCallback>,
+    module_declarations: HashMap<(String, Location), UsedCell>,
+    used_constructors: HashMap<(String, Location, String), ConstructorUsageCell>,
+    cells: Vec<bool>,
+    constructor_usages: Vec<ConstructorUsages>,
+    type_slots: Vec<Vec<(String, Location)>>,
+    /// `current_slot` of `Typedecl.transl_type_decl` (typedecl.ml:1479).
+    current_type_slot: Option<TypeSlot>,
+}
+
+/// Whether `check_usage` registers a delayed warning for `name`
+/// (env.ml:1569).
+pub fn warns_for_name(name: &str) -> bool {
+    !(name.is_empty() || name.starts_with('_') || name.starts_with('#'))
+}
+
+impl UsageTables {
+    fn new_cell(&mut self) -> UsedCell {
+        self.cells.push(false);
+        UsedCell(self.cells.len() as u32 - 1)
+    }
+
+    pub fn is_used(&self, cell: UsedCell) -> bool {
+        self.cells[cell.0 as usize]
+    }
+
+    pub fn constructor_usages(&self, cell: ConstructorUsageCell) -> ConstructorUsages {
+        self.constructor_usages[cell.0 as usize]
+    }
+
+    /// `check_usage loc id warn type_declarations` (env.ml:1562-1576) once the
+    /// ghost/active guard passed: registers `(name, loc)` unless present.
+    /// Returns the flag of a new registration.
+    pub fn check_type_usage(&mut self, name: &str, loc: Location) -> Option<UsedCell> {
+        let key = (name.to_string(), loc);
+        if self.type_declarations.contains_key(&key) {
+            return None;
+        }
+        let cell = self.new_cell();
+        self.type_declarations.insert(key, TypeCallback::SetUsed(cell));
+        Some(cell)
+    }
+
+    /// `check_usage loc id warn module_declarations`.
+    pub fn check_module_usage(&mut self, name: &str, loc: Location) -> Option<UsedCell> {
+        let key = (name.to_string(), loc);
+        if self.module_declarations.contains_key(&key) {
+            return None;
+        }
+        let cell = self.new_cell();
+        self.module_declarations.insert(key, cell);
+        Some(cell)
+    }
+
+    /// The constructor registration of `store_type`/`store_extension`
+    /// (env.ml:1606-1620, 1650-1665).
+    pub fn check_constructor_usage(
+        &mut self,
+        ty_name: &str,
+        loc: Location,
+        cstr_name: &str,
+    ) -> Option<ConstructorUsageCell> {
+        let key = (ty_name.to_string(), loc, cstr_name.to_string());
+        if self.used_constructors.contains_key(&key) {
+            return None;
+        }
+        self.constructor_usages.push(ConstructorUsages::default());
+        let cell = ConstructorUsageCell(self.constructor_usages.len() as u32 - 1);
+        self.used_constructors.insert(key, cell);
+        Some(cell)
+    }
+
+    /// `Env.mark_type_used` (env.ml:1130-1133) without the implicit-coercion
+    /// guard, which callers apply.
+    pub fn mark_type_used(&mut self, name: &str, loc: Location) {
+        let Some(callback) = self.type_declarations.get(&(name.to_string(), loc)).cloned() else {
+            return;
+        };
+        self.run_type_callback(callback);
+    }
+
+    fn run_type_callback(&mut self, callback: TypeCallback) {
+        match callback {
+            TypeCallback::SetUsed(cell) => self.cells[cell.0 as usize] = true,
+            TypeCallback::RecSlot {
+                name,
+                loc,
+                slot,
+                old,
+            } => match self.current_type_slot {
+                Some(current) => self.type_slots[current.0 as usize].push((name, loc)),
+                None => {
+                    // `List.iter mark_type_used (get_ref slot); old_callback ()`.
+                    let recorded = std::mem::take(&mut self.type_slots[slot.0 as usize]);
+                    for (name, loc) in recorded {
+                        self.mark_type_used(&name, loc);
+                    }
+                    self.run_type_callback(*old);
+                }
+            },
+        }
+    }
+
+    /// `Env.set_type_used_callback name td` with the recursive-slot callback
+    /// of typedecl.ml:1489-1496. Returns the new slot.
+    pub fn set_type_rec_slot_callback(&mut self, name: &str, loc: Location) -> Option<TypeSlot> {
+        if loc.loc_ghost {
+            return None;
+        }
+        let key = (name.to_string(), loc);
+        let old = self.type_declarations.get(&key).cloned()?;
+        self.type_slots.push(Vec::new());
+        let slot = TypeSlot(self.type_slots.len() as u32 - 1);
+        self.type_declarations.insert(
+            key,
+            TypeCallback::RecSlot {
+                name: name.to_string(),
+                loc,
+                slot,
+                old: Box::new(old),
+            },
+        );
+        Some(slot)
+    }
+
+    /// `current_slot := slot` in `Typedecl.transl_type_decl`.
+    pub fn set_current_type_slot(&mut self, slot: Option<TypeSlot>) {
+        self.current_type_slot = slot;
+    }
+
+    /// `Env.mark_module_used` (env.ml:996-998) without the implicit-coercion
+    /// guard.
+    pub fn mark_module_used(&mut self, name: &str, loc: Location) {
+        if let Some(cell) = self.module_declarations.get(&(name.to_string(), loc)) {
+            self.cells[cell.0 as usize] = true;
+        }
+    }
+
+    /// `Env.mark_constructor_used`/`mark_extension_used` (env.ml:1135-1144)
+    /// without the implicit-coercion guard.
+    pub fn mark_constructor_used(
+        &mut self,
+        usage: ConstructorUsage,
+        ty_name: &str,
+        loc: Location,
+        cstr_name: &str,
+    ) {
+        let key = (ty_name.to_string(), loc, cstr_name.to_string());
+        if let Some(cell) = self.used_constructors.get(&key) {
+            let cu = &mut self.constructor_usages[cell.0 as usize];
+            match usage {
+                ConstructorUsage::Positive => cu.cu_positive = true,
+                ConstructorUsage::Pattern => cu.cu_pattern = true,
+                ConstructorUsage::Privatize => cu.cu_privatize = true,
+            }
+        }
+    }
+}

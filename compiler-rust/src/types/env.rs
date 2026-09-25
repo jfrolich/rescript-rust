@@ -960,9 +960,37 @@ pub struct EnvFlags {
     pub check_dependency: bool,
     /// Allow hiding of bindings.
     pub allow_hiding: bool,
+    /// `in_signature_flag` (env.ml:388).
+    pub in_signature: bool,
+    /// `implicit_coercion_flag` (env.ml:389).
+    pub implicit_coercion: bool,
 }
 
 impl Env {
+    /// `Env.in_signature b env` (env.ml:495-499).
+    pub fn in_signature(&self, b: bool) -> Env {
+        let mut env = self.clone();
+        env.flags.in_signature = b;
+        env
+    }
+
+    /// `Env.implicit_coercion env` (env.ml:502-503).
+    pub fn implicit_coercion(&self) -> Env {
+        let mut env = self.clone();
+        env.flags.implicit_coercion = true;
+        env
+    }
+
+    /// `Env.is_in_signature` (env.ml:505).
+    pub fn is_in_signature(&self) -> bool {
+        self.flags.in_signature
+    }
+
+    /// `Env.is_implicit_coercion` (env.ml:506).
+    pub fn is_implicit_coercion(&self) -> bool {
+        self.flags.implicit_coercion
+    }
+
     /// Create an empty environment.
     pub fn empty() -> Self {
         Env {

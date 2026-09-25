@@ -1231,6 +1231,9 @@ pub struct TypeCheckContext<'a> {
     /// Mirrors OCaml Env.check_usage/Delayed_checks: lookup marks a binding as
     /// used, and the warning is emitted only when delayed checks are forced.
     value_usage_checks: Vec<ValueUsageCheck>,
+    /// Type, module, constructor and extension usage checks (`Env.store_*`
+    /// with `~check:true`).
+    env_usage_checks: Vec<EnvUsageCheck>,
     /// Unused-case checks run when delayed checks are flushed.
     delayed_unused_checks: Vec<DelayedUnusedCheck>,
     /// Delayed checks whose outcome Rust computes after the fact, keyed by
@@ -1332,6 +1335,35 @@ pub struct TypeCoreWarning {
 }
 
 #[derive(Debug, Clone)]
+/// A delayed check registered by `Env.check_usage`, `store_type` or
+/// `store_extension` (env.ml:1562-1576, 1606-1665). The warning state is the
+/// one current at registration (`Delayed_checks.add_delayed_check` saves it).
+struct EnvUsageCheck {
+    seq: u64,
+    loc: LocIdx,
+    is_error: bool,
+    kind: EnvUsageCheckKind,
+}
+
+#[derive(Debug, Clone)]
+enum EnvUsageCheckKind {
+    Declaration {
+        cell: crate::types::usage::UsedCell,
+        warning: Warning,
+    },
+    Constructor {
+        cell: crate::types::usage::ConstructorUsageCell,
+        name: String,
+        in_signature: bool,
+    },
+    Extension {
+        cell: crate::types::usage::ConstructorUsageCell,
+        name: String,
+        is_exception: bool,
+        in_signature: bool,
+    },
+}
+
 struct ValueUsageCheck {
     name: String,
     val_loc: Location,
@@ -1354,6 +1386,7 @@ impl<'a> TypeCheckContext<'a> {
             diagnostics: Vec::new(),
             warnings: Vec::new(),
             value_usage_checks: Vec::new(),
+            env_usage_checks: Vec::new(),
             delayed_unused_checks: Vec::new(),
             delayed_warnings: Vec::new(),
             delayed_check_seq: 0,
@@ -1553,6 +1586,179 @@ impl<'a> TypeCheckContext<'a> {
         });
     }
 
+    /// `check_usage loc id (fun s -> Unused_type_declaration s)
+    /// type_declarations` from `Env.store_type ~check:true` (env.ml:1595-1598).
+    pub(crate) fn check_type_usage(&mut self, name: &str, loc: Location, warning_loc: LocIdx) {
+        let warning = Warning::UnusedTypeDeclaration {
+            name: name.to_string(),
+        };
+        if loc.loc_ghost || !self.warning_config.is_active(&warning) {
+            return;
+        }
+        let Some(cell) = self.type_ctx.usage().check_type_usage(name, loc) else {
+            return;
+        };
+        if crate::types::usage::warns_for_name(name) {
+            self.push_env_usage_check(warning_loc, &warning.clone(), EnvUsageCheckKind::Declaration {
+                cell,
+                warning,
+            });
+        }
+    }
+
+    /// `check_usage loc id (fun s -> Unused_module s) module_declarations`
+    /// from `Env.store_module ~check:true` (env.ml:1675-1677).
+    pub(crate) fn check_module_usage(&mut self, name: &str, loc: Location, warning_loc: LocIdx) {
+        let warning = Warning::UnusedModule {
+            name: name.to_string(),
+        };
+        if loc.loc_ghost || !self.warning_config.is_active(&warning) {
+            return;
+        }
+        let Some(cell) = self.type_ctx.usage().check_module_usage(name, loc) else {
+            return;
+        };
+        if crate::types::usage::warns_for_name(name) {
+            self.push_env_usage_check(warning_loc, &warning.clone(), EnvUsageCheckKind::Declaration {
+                cell,
+                warning,
+            });
+        }
+    }
+
+    /// The constructor checks of `Env.store_type ~check:true`
+    /// (env.ml:1600-1620).
+    pub(crate) fn check_constructor_usages(
+        &mut self,
+        ty_name: &str,
+        loc: Location,
+        warning_loc: LocIdx,
+        constructors: &[String],
+        in_signature: bool,
+    ) {
+        let probe = Warning::UnusedConstructor {
+            name: String::new(),
+            used_in_pattern: false,
+            is_private: false,
+        };
+        if loc.loc_ghost || !self.warning_config.is_active(&probe) {
+            return;
+        }
+        for name in constructors {
+            let Some(cell) = self.type_ctx.usage().check_constructor_usage(ty_name, loc, name) else {
+                continue;
+            };
+            if !(ty_name.is_empty() || ty_name.starts_with('_')) {
+                self.push_env_usage_check(warning_loc, &probe, EnvUsageCheckKind::Constructor {
+                    cell,
+                    name: name.clone(),
+                    in_signature,
+                });
+            }
+        }
+    }
+
+    /// The check of `Env.store_extension ~check:true` (env.ml:1646-1665).
+    pub(crate) fn check_extension_usage(
+        &mut self,
+        ty_name: &str,
+        name: &str,
+        is_exception: bool,
+        loc: Location,
+        warning_loc: LocIdx,
+        in_signature: bool,
+    ) {
+        let probe = Warning::UnusedExtension {
+            name: String::new(),
+            is_exception: false,
+            used_in_pattern: false,
+            is_private: false,
+        };
+        if loc.loc_ghost || !self.warning_config.is_active(&probe) {
+            return;
+        }
+        let Some(cell) = self.type_ctx.usage().check_constructor_usage(ty_name, loc, name) else {
+            return;
+        };
+        self.push_env_usage_check(warning_loc, &probe, EnvUsageCheckKind::Extension {
+            cell,
+            name: name.to_string(),
+            is_exception,
+            in_signature,
+        });
+    }
+
+    fn push_env_usage_check(&mut self, loc: LocIdx, warning: &Warning, kind: EnvUsageCheckKind) {
+        let is_error = self.warning_config.is_error(warning);
+        let seq = self.next_delayed_check_seq();
+        self.env_usage_checks.push(EnvUsageCheck {
+            seq,
+            loc,
+            is_error,
+            kind,
+        });
+    }
+
+    /// Evaluate the env usage checks, whose flags are final once delayed
+    /// checks are forced.
+    fn resolve_env_usage_checks(&mut self) {
+        let checks = std::mem::take(&mut self.env_usage_checks);
+        let usage = self.type_ctx.usage();
+        let mut resolved = Vec::new();
+        for check in checks {
+            let warning = match check.kind {
+                EnvUsageCheckKind::Declaration { cell, warning } => {
+                    if usage.is_used(cell) {
+                        continue;
+                    }
+                    warning
+                }
+                EnvUsageCheckKind::Constructor {
+                    cell,
+                    name,
+                    in_signature,
+                } => {
+                    let cu = usage.constructor_usages(cell);
+                    if in_signature || cu.cu_positive {
+                        continue;
+                    }
+                    Warning::UnusedConstructor {
+                        name,
+                        used_in_pattern: cu.cu_pattern,
+                        is_private: cu.cu_privatize,
+                    }
+                }
+                EnvUsageCheckKind::Extension {
+                    cell,
+                    name,
+                    is_exception,
+                    in_signature,
+                } => {
+                    let cu = usage.constructor_usages(cell);
+                    if in_signature || cu.cu_positive {
+                        continue;
+                    }
+                    Warning::UnusedExtension {
+                        name,
+                        is_exception,
+                        used_in_pattern: cu.cu_pattern,
+                        is_private: cu.cu_privatize,
+                    }
+                }
+            };
+            resolved.push((
+                (check.seq, 0),
+                TypeCoreWarning {
+                    loc: check.loc,
+                    warning,
+                    is_error: check.is_error,
+                },
+            ));
+        }
+        drop(usage);
+        self.delayed_warnings.extend(resolved);
+    }
+
     pub fn mark_value_used(&mut self, name: &str, val_loc: Location) {
         for check in &mut self.value_usage_checks {
             if check.name == name && check.val_loc == val_loc {
@@ -1593,6 +1799,7 @@ impl<'a> TypeCheckContext<'a> {
     /// checks in registration order.
     pub fn flush_value_usage_checks(&mut self) {
         self.drain_open_slot_uses();
+        self.resolve_env_usage_checks();
         for check in std::mem::take(&mut self.delayed_open_checks) {
             let used = self.type_ctx.with_open_slot(check.slot, |state| {
                 let used = state.used;
@@ -5349,6 +5556,15 @@ fn type_pattern_construct(
         }
     };
 
+    // typecore.ml:1392: `Env.mark_constructor Env.Pattern !env (Longident.last
+    // lid.txt) constr`.
+    mark_constructor(
+        tctx.type_ctx,
+        env,
+        crate::types::usage::ConstructorUsage::Pattern,
+        &lid_name,
+        &cstr_desc,
+    );
     if !allow_existentials && !cstr_desc.cstr_existentials.is_empty() {
         return Err(TypeCoreError::UnexpectedExistential { loc });
     }
@@ -5857,6 +6073,20 @@ fn type_pattern_record(
             });
         }
 
+        // `Label.disambiguate` with the expected type's path: a qualified
+        // label of another type raises `Name_type_mismatch`
+        // (typecore.ml:925-939).
+        if let Some(err) = qualified_label_name_type_mismatch(
+            field.lid.loc,
+            &resolved_lid,
+            tctx.arena,
+            env,
+            &mut tctx.persistent_env,
+            ctx,
+            record_ty,
+        ) {
+            return Err(err);
+        }
         // Try to look up the label from the environment for type info
         let disambiguated = tctx
             .generated_pattern_labels
@@ -13134,9 +13364,9 @@ fn type_function_nary_with_newtypes(
                         type_path: None,
                     },
                 );
-                // `Env.enter_type` registers the unused-type check here (env.ml:1593-1597,
-                // 1562-1572); it is a delayed check, only forced if typing succeeds.
-                let unused_type_seq = tctx.reserve_delayed_check_seq();
+                // `Env.enter_type` registers the unused-type check (env.ml:1593-1597,
+                // 1562-1572); lookups of the type mark it used.
+                tctx.check_type_usage(&name_str, convert_loc(loc, tctx.arena), loc);
                 ctx.init_def(ctx.current_stamp());
 
                 let typed_body = peel(
@@ -13190,19 +13420,6 @@ fn type_function_nary_with_newtypes(
                     &mut seen,
                     &mut used,
                 );
-                if !used
-                    && !tctx.arena.to_location(loc).loc_ghost
-                    && !name_str.starts_with(['_', '#'])
-                {
-                    tctx.add_delayed_warning(
-                        unused_type_seq,
-                        0,
-                        loc,
-                        Warning::UnusedTypeDeclaration {
-                            name: name_str.clone(),
-                        },
-                    );
-                }
                 Ok(Expression {
                     exp_loc: loc,
                     exp_type: rewritten_ty,
@@ -13997,6 +14214,15 @@ fn type_construct(
         }
     };
 
+    // typecore.ml:4228: `Env.mark_constructor Env.Positive env (Longident.last
+    // lid.txt) constr`.
+    mark_constructor(
+        tctx.type_ctx,
+        env,
+        crate::types::usage::ConstructorUsage::Positive,
+        tctx.longident_last_name_str(&longident),
+        &cstr_desc,
+    );
     let provided_arity = match arg {
         None => 0,
         Some(arg_expr) => match &*arg_expr.pexp_desc {
@@ -17302,9 +17528,9 @@ fn type_newtype(
                 type_path: None,
             },
         );
-        // `Env.enter_type` registers the unused-type check here (env.ml:1593-1597,
-        // 1562-1572); it is a delayed check, only forced if typing succeeds.
-        let unused_type_seq = tctx.reserve_delayed_check_seq();
+        // `Env.enter_type` registers the unused-type check (env.ml:1593-1597,
+        // 1562-1572); lookups of the type mark it used.
+        tctx.check_type_usage(&name_str, convert_loc(loc, tctx.arena), loc);
         ctx.init_def(ctx.current_stamp());
 
         // OCaml types the newtype body with type_exp (no expected type).
@@ -17360,19 +17586,6 @@ fn type_newtype(
             &mut seen,
             &mut used,
         );
-        if !used
-            && !tctx.arena.to_location(loc).loc_ghost
-            && !name_str.starts_with(['_', '#'])
-        {
-            tctx.add_delayed_warning(
-                unused_type_seq,
-                0,
-                loc,
-                Warning::UnusedTypeDeclaration {
-                    name: name_str.clone(),
-                },
-            );
-        }
 
         // OCaml: rue { ... exp_type = ety; ... }
         rue_unify(tctx, loc, rewritten_ty, expected_ty, None)?;
@@ -18244,6 +18457,10 @@ pub(crate) fn find_type_for_lid(
     longident: &Longident,
 ) -> TypeCoreResult<(Path, crate::types::decl::TypeDeclaration)> {
     let (path, type_decl) = resolve_type_constructor_path(tctx, env, longident);
+    // `Env.lookup_type` marks the declaration used (env.ml:1174-1177).
+    if let Some(decl) = type_decl.as_ref() {
+        mark_type_used(tctx.type_ctx, env, tctx.longident_last_name_str(longident), decl.type_loc);
+    }
     let Some(decl) = type_decl else {
         if let Some(error) = unbound_module_prefix_error(tctx, env, loc, longident) {
             return Err(error);
@@ -25459,8 +25676,70 @@ enum ConstructorDisambiguationSource {
     ExpectedType { tpath: Path },
 }
 
-/// The `use ()` callback of a chosen in-scope constructor candidate
-/// (`TycompTbl.mk_callback` then `Env.check_shadowing`, env.ml:198-204,
+/// `Env.mark_type_used` (env.ml:1130-1133).
+pub(crate) fn mark_type_used(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    name: &str,
+    type_loc: Location,
+) {
+    if !env.is_implicit_coercion() {
+        ctx.usage().mark_type_used(name, type_loc);
+    }
+}
+
+/// `Env.mark_constructor usage env name desc` (env.ml:1210-1224).
+pub(crate) fn mark_constructor(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    usage: crate::types::usage::ConstructorUsage,
+    name: &str,
+    desc: &crate::types::decl::ConstructorDescription,
+) {
+    if env.is_implicit_coercion() {
+        return;
+    }
+    let path = match &*ctx.get_desc(ctx.repr(desc.cstr_res)) {
+        TypeDesc::Tconstr { path, .. } => path.clone(),
+        _ => return,
+    };
+    let loc = match &desc.cstr_kind {
+        crate::types::decl::ConstructorKind::Extension(_) => Some(desc.cstr_loc),
+        crate::types::decl::ConstructorKind::Ordinary(_) => {
+            crate::types::ctype::lookup_type_decl_for_path(ctx, env, &path).map(|decl| decl.type_loc)
+        }
+    };
+    if let Some(loc) = loc {
+        ctx.usage().mark_constructor_used(usage, path.last(), loc, name);
+    }
+}
+
+/// `Env.mark_type_path` (env.ml:1180-1184).
+pub(crate) fn mark_type_path(ctx: &crate::types::context::TypeContext, env: &Env, path: &Path) {
+    let type_loc =
+        crate::types::ctype::lookup_type_decl_for_path(ctx, env, path).map(|decl| decl.type_loc);
+    if let Some(type_loc) = type_loc {
+        mark_type_used(ctx, env, path.last(), type_loc);
+    }
+}
+
+/// `Env.mark_type_path env (ty_path ty)` on the result type of a
+/// constructor or label.
+pub(crate) fn mark_type_path_of(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    ty: TypeExprRef,
+) {
+    let path = match &*ctx.get_desc(ctx.repr(ty)) {
+        TypeDesc::Tconstr { path, .. } => path.clone(),
+        _ => return,
+    };
+    mark_type_path(ctx, env, &path);
+}
+
+/// The `use ()` callback of a chosen in-scope constructor candidate: the
+/// `wrap_use` of `Env.lookup_all_constructors` (env.ml:1197-1206) around
+/// `TycompTbl.mk_callback` then `Env.check_shadowing` (env.ml:198-204,
 /// 457-460).
 fn use_constructor_candidate(
     ctx: &crate::types::context::TypeContext,
@@ -25469,6 +25748,7 @@ fn use_constructor_candidate(
     desc: &crate::types::decl::ConstructorDescription,
     mark: Option<(u32, Option<&crate::types::decl::ConstructorDescription>)>,
 ) {
+    mark_type_path_of(ctx, env, desc.cstr_res);
     if let Some((slot, hidden)) = mark {
         let shadowed = hidden.is_some_and(|hidden| {
             !crate::types::ctype::same_constr(ctx, env, desc.cstr_res, hidden.cstr_res)
@@ -25477,7 +25757,8 @@ fn use_constructor_candidate(
     }
 }
 
-/// The `use ()` callback of a chosen in-scope label candidate.
+/// The `use ()` callback of a chosen in-scope label candidate, with the
+/// `wrap_use` of `Env.lookup_all_labels` (env.ml:1230-1238).
 fn use_label_candidate(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
@@ -25485,6 +25766,7 @@ fn use_label_candidate(
     desc: &crate::types::decl::LabelDescription,
     mark: Option<(u32, Option<&crate::types::decl::LabelDescription>)>,
 ) {
+    mark_type_path_of(ctx, env, desc.lbl_res);
     if let Some((slot, hidden)) = mark {
         let shadowed = hidden.is_some_and(|hidden| {
             !crate::types::ctype::same_constr(ctx, env, desc.lbl_res, hidden.lbl_res)
@@ -26249,6 +26531,8 @@ fn lookup_label_by_expected_type<'a>(
         if label_path.same(&visible_path)
             || compare_type_paths_for_disambiguation(&label_path, &visible_path, env, pers_env, ctx)
         {
+            // `disambiguate_by_type` then `use ()`.
+            mark_type_path(ctx, env, &label_path);
             let mut selected = (*env_label).clone();
             if !label_path.same(&visible_path) {
                 selected.lbl_res = ctx.new_generic_constr(visible_path.clone(), label_args);
@@ -26260,11 +26544,13 @@ fn lookup_label_by_expected_type<'a>(
         }
     }
 
-    let Some((_concrete_path, _actual_args, type_decl)) =
+    let Some((concrete_path, _actual_args, type_decl)) =
         extract_concrete_record_type_info(record_ty, env, pers_env, ctx)
     else {
         return None;
     };
+    // `lookup_from_type` marks the type used (typecore.ml:852-854).
+    mark_type_used(ctx, env, concrete_path.last(), type_decl.type_loc);
     let (labels, repr) = match &type_decl.type_kind {
         crate::types::TypeKind::TypeRecord(labels, repr) => (labels, repr),
         _ => return None,
@@ -27183,6 +27469,8 @@ fn lookup_constructor_by_expected_type<'b>(
         ctx,
     )?;
 
+    // `lookup_from_type` marks the type used (typecore.ml:852-854).
+    mark_type_path(ctx, env, &type_path);
     if let Some(result) =
         lookup_constructor_from_type_descrs(cstr_name, &type_path, env, pers_env, ctx)
     {

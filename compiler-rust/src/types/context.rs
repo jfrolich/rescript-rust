@@ -409,6 +409,9 @@ pub struct TypeContext {
     /// warning state current at the lookup.
     open_slot_events: RefCell<Vec<OpenSlotEvent>>,
 
+    /// OCaml `Env`'s usage tables (env.ml:27-53).
+    usage: RefCell<super::usage::UsageTables>,
+
     /// Stable forward references for canonical variant layouts. Entries are
     /// allocated before translating a recursive declaration group and completed
     /// exactly once after the group is available in the environment.
@@ -679,6 +682,7 @@ impl TypeContext {
             trace_expansions: RefCell::new(ahash::AHashMap::new()),
             open_slots: RefCell::new(Vec::new()),
             open_slot_events: RefCell::new(Vec::new()),
+            usage: RefCell::new(super::usage::UsageTables::default()),
             variant_layouts: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
@@ -1856,6 +1860,11 @@ impl TypeContext {
     }
 
     /// Take the recorded `using` calls in call order.
+    /// The usage tables of OCaml `Env` (env.ml:27-53).
+    pub(crate) fn usage(&self) -> std::cell::RefMut<'_, super::usage::UsageTables> {
+        self.usage.borrow_mut()
+    }
+
     pub(crate) fn take_open_slot_events(&self) -> Vec<OpenSlotEvent> {
         std::mem::take(&mut *self.open_slot_events.borrow_mut())
     }

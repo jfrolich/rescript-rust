@@ -86,6 +86,31 @@ fn core_type_has_row_var(arena: &ParseArena, core_type: &crate::parser::ast::Cor
     }
 }
 
+/// The usage checks `Env.store_type ~check:true` (env.ml:1592-1620)
+/// registers for declarations added to the environment through
+/// `List.fold_right`: the type, then its constructors.
+fn register_type_declaration_usage_checks(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    decls: &[TypedTypeDeclaration],
+) {
+    for decl in decls.iter().rev() {
+        let name = decl.typ_id.name();
+        tctx.check_type_usage(name, decl.typ_type.type_loc, decl.typ_loc);
+        if let crate::types::TypeKind::TypeVariant(constructors, _) = &decl.typ_type.type_kind {
+            let names: Vec<String> =
+                constructors.iter().map(|cd| cd.cd_id.name().to_string()).collect();
+            tctx.check_constructor_usages(
+                name,
+                decl.typ_type.type_loc,
+                decl.typ_loc,
+                &names,
+                env.is_in_signature(),
+            );
+        }
+    }
+}
+
 fn type_decl_is_fixed_type(
     arena: &ParseArena,
     decl: &crate::parser::ast::TypeDeclaration,
@@ -9566,14 +9591,10 @@ fn report_unused_items_hidden_by_module_constraint(
 
     let mut value_checks = Vec::new();
     let mut module_checks = Vec::new();
-    let mut type_checks = Vec::new();
-    let mut constructor_checks = Vec::new();
     let mut extension_checks = Vec::new();
     for (item_index, item) in structure.str_items.iter().enumerate() {
         collect_top_level_value_use_checks(item, item_index, &mut value_checks);
         collect_top_level_module_use_checks(item, item_index, &mut module_checks);
-        collect_top_level_type_use_checks(item, item_index, &mut type_checks);
-        collect_top_level_constructor_use_checks(arena, item, item_index, &mut constructor_checks);
         collect_top_level_extension_use_checks(arena, item, item_index, &mut extension_checks);
     }
 
@@ -9656,74 +9677,6 @@ fn report_unused_items_hidden_by_module_constraint(
                 loc: check.loc,
                 warning: Warning::UnusedModule {
                     name: check.name.clone(),
-                },
-            });
-        }
-    }
-
-    let mut final_visible_types = HashMap::new();
-    for (index, check) in type_checks.iter().enumerate() {
-        final_visible_types.insert(check.name.clone(), index);
-    }
-
-    for (check_index, check) in type_checks.iter().enumerate() {
-        if !should_warn_unused_name(&check.name)
-            || arena.to_location(check.loc).loc_ghost
-            || final_visible_types.get(&check.name) != Some(&check_index)
-            || exported_names.types.contains(&check.name)
-        {
-            continue;
-        }
-
-        // `Typedecl.transl_type_decl` registers the usage checks with the
-        // final environment, after the declarations were typed against a
-        // temporary one, so references inside the item never count.
-        let used = structure
-            .str_items
-            .iter()
-            .skip(check.item_index + 1)
-            .any(|item| structure_item_uses_type_ident(ctx, item, &check.id));
-        if !used {
-            hidden_warnings.push(DelayedWarning {
-                item_index: check.item_index,
-                order: 0,
-                loc: check.loc,
-                warning: Warning::UnusedTypeDeclaration {
-                    name: check.name.clone(),
-                },
-            });
-        }
-    }
-
-    for check in &constructor_checks {
-        let exported_private = exported_names
-            .constructors
-            .get(&(check.type_name.clone(), check.name.clone()))
-            .copied();
-        if matches!(exported_private, Some(crate::types::PrivateFlag::Public)) {
-            continue;
-        }
-
-        let start_index = check.item_index + 1;
-        let mut usage = ConstructorUseFlags::default();
-        usage.privatize = matches!(exported_private, Some(crate::types::PrivateFlag::Private));
-        for item in structure.str_items.iter().skip(start_index) {
-            usage.merge(structure_item_constructor_usage(ctx, item, &|ctx, desc| {
-                constructor_matches_type_check(ctx, desc, check)
-            }));
-            if usage.positive {
-                break;
-            }
-        }
-        if !usage.positive {
-            hidden_warnings.push(DelayedWarning {
-                item_index: check.item_index,
-                order: check.order + 1,
-                loc: check.loc,
-                warning: Warning::UnusedConstructor {
-                    name: check.name.clone(),
-                    used_in_pattern: usage.pattern,
-                    is_private: usage.privatize,
                 },
             });
         }
@@ -17892,9 +17845,11 @@ fn type_module_expr_with_alias_inner<'a>(
                 let simplified =
                     crate::types::decl::ModuleType::MtySignature(simplified_structure_sig);
                 let mut inclusion_warnings = Vec::new();
+                // typemod.ml:1279-1281: `wrap_constraint (Env.implicit_coercion
+                // env)`, so the inclusion marks nothing used.
                 let coercion_result = crate::types::includemod::modtypes_with_warnings(
                     tctx.type_ctx,
-                    env,
+                    &env.implicit_coercion(),
                     &md.mod_type,
                     &simplified,
                     &mut inclusion_warnings,
@@ -20325,6 +20280,42 @@ fn type_structure_item<'a>(
             // `begin_def` for the declarations.
             ctx.init_def(ctx.current_stamp());
             ctx.begin_def();
+            // typedecl.ml:1476 `enter_type` adds the placeholders with
+            // `Env.add_type ~check:true` (typedecl.ml:108), registering their
+            // usage checks: fixed rows first, then a recursive group.
+            for row_id in &fixed_row_type_ids {
+                let row_loc = decls[row_id.decl_idx].ptype_loc;
+                tctx.check_type_usage(&row_id.name, arena.to_location(row_loc), row_loc);
+            }
+            if needs_placeholder {
+                for decl in decls.iter() {
+                    let name = arena.get_string(decl.ptype_name.txt);
+                    tctx.check_type_usage(name, arena.to_location(decl.ptype_loc), decl.ptype_loc);
+                }
+            }
+            // typedecl.ml:1478-1498: in a recursive group, a use of one of its
+            // types while a declaration is translated only records a
+            // dependency in that declaration's slot.
+            let warn_unused_types = tctx.warning_config.is_active(&Warning::UnusedTypeDeclaration {
+                name: String::new(),
+            });
+            let rec_slot = |tctx: &mut TypeCheckContext<'_>, name: &str, loc: LocIdx| {
+                if needs_placeholder && warn_unused_types {
+                    tctx.type_ctx
+                        .usage()
+                        .set_type_rec_slot_callback(name, arena.to_location(loc))
+                } else {
+                    None
+                }
+            };
+            let row_slots: Vec<_> = fixed_row_type_ids
+                .iter()
+                .map(|row_id| rec_slot(tctx, &row_id.name, decls[row_id.decl_idx].ptype_loc))
+                .collect();
+            let decl_slots: Vec<_> = decls
+                .iter()
+                .map(|decl| rec_slot(tctx, arena.get_string(decl.ptype_name.txt), decl.ptype_loc))
+                .collect();
 
             // OCaml: temp_env is the environment used for translating type bodies.
             // For Recursive, it has abstract placeholders so types can self-reference.
@@ -20333,7 +20324,8 @@ fn type_structure_item<'a>(
             // new_env accumulates the final declarations and is returned.
             let temp_env = new_env.clone();
 
-            for row_id in &fixed_row_type_ids {
+            for (row_index, row_id) in fixed_row_type_ids.iter().enumerate() {
+                tctx.type_ctx.usage().set_current_type_slot(row_slots[row_index]);
                 let typed_row_decl = translate_fixed_row_type_declaration(
                     tctx,
                     &temp_env,
@@ -20357,6 +20349,7 @@ fn type_structure_item<'a>(
             }
 
             for (decl_idx, decl) in decls.iter().enumerate() {
+                tctx.type_ctx.usage().set_current_type_slot(decl_slots[decl_idx]);
                 let type_name = decl.ptype_name.txt;
                 let type_name_str = arena.get_string(type_name);
                 let type_id = declared_type_ids[decl_idx].clone();
@@ -21435,9 +21428,15 @@ fn type_structure_item<'a>(
                 tctx.type_variables = saved_type_variables;
             }
 
+            // typedecl.ml:1530: `current_slot := None`.
+            tctx.type_ctx.usage().set_current_type_slot(None);
             // OCaml Typedecl.check_duplicates runs after translating the
             // declaration group and before final env construction/end_def.
             check_type_declaration_duplicate_definitions(tctx, arena, decls);
+            // typedecl.ml:1534-1538: the final env adds the declarations with
+            // `Env.add_type ~check:true` through `List.fold_right`, registering
+            // the remaining type and constructor usage checks last to first.
+            register_type_declaration_usage_checks(tctx, env, &typed_tree_decls);
 
             // OCaml: Ctype.end_def() + generalize_decl for each declaration
             ctx.end_def();

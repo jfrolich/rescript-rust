@@ -2260,6 +2260,11 @@ fn check_paired_signature_items<'a>(
                 ) {
                     warnings.push(warning);
                 }
+                // includemod.ml:399: `Env.mark_module_used env (Ident.name
+                // id1) md1.md_loc`.
+                if !env.is_implicit_coercion() {
+                    type_ctx.usage().mark_module_used(impl_id.name(), impl_mod_decl.md_loc);
+                }
                 // Match compiler/ml/includemod.ml:396-413:
                 // `module_declarations` always strengthens the implementation
                 // module type and recurses through `modtypes` with the current
@@ -3350,6 +3355,28 @@ pub(crate) fn type_declarations<'a>(
     sig_decl: &TypeDeclaration,
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<()> {
+    // includemod.ml:66-67: `Env.mark_type_used env (Ident.name id) decl1`.
+    crate::types::typecore::mark_type_used(type_ctx, env, id.name(), impl_decl.type_loc);
+    // includecore.ml:384-398 marks the implementation's constructors when both
+    // declarations are variants.
+    if let (
+        crate::types::TypeKind::TypeVariant(impl_cstrs, _),
+        crate::types::TypeKind::TypeVariant(_, _),
+    ) = (&impl_decl.type_kind, &sig_decl.type_kind)
+        && !env.is_implicit_coercion()
+    {
+        let usage = if impl_decl.type_private == crate::types::PrivateFlag::Private
+            || sig_decl.type_private == crate::types::PrivateFlag::Public
+        {
+            crate::types::usage::ConstructorUsage::Positive
+        } else {
+            crate::types::usage::ConstructorUsage::Privatize
+        };
+        let mut usage_tables = type_ctx.usage();
+        for cstr in impl_cstrs {
+            usage_tables.mark_constructor_used(usage, id.name(), impl_decl.type_loc, cstr.cd_id.name());
+        }
+    }
     if let Some(warning) = deprecated_inclusion_warning(
         id.name(),
         &impl_decl.type_attributes,
