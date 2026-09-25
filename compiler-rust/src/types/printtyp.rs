@@ -63,6 +63,81 @@ pub(crate) enum OutType {
     Otyp_variant(bool, OutVariant, bool, Option<Vec<String>>),
     Otyp_poly(Vec<String>, Box<OutType>),
     Otyp_module(String, Vec<String>, Vec<OutType>),
+    /// `(name, args, gadt result, @as representation)` constructors.
+    Otyp_sum(Vec<OutConstructor>),
+}
+
+/// One `Otyp_sum` constructor.
+pub(crate) type OutConstructor = (String, Vec<OutType>, Option<OutType>, Option<String>);
+
+/// `Outcometree.out_rec_status`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum OutRecStatus {
+    Orec_not,
+    Orec_first,
+    Orec_next,
+}
+
+/// `Outcometree.out_ext_status`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum OutExtStatus {
+    Oext_first,
+    Oext_next,
+    Oext_exception,
+}
+
+/// `Outcometree.out_type_decl`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OutTypeDecl {
+    pub name: String,
+    pub params: Vec<(String, (bool, bool))>,
+    pub typ: OutType,
+    pub private: bool,
+    pub immediate: bool,
+    pub unboxed: bool,
+    pub cstrs: Vec<(OutType, OutType)>,
+}
+
+/// `Outcometree.out_extension_constructor`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OutExtensionConstructor {
+    pub name: String,
+    pub type_name: String,
+    pub type_params: Vec<String>,
+    pub args: Vec<OutType>,
+    pub ret_type: Option<OutType>,
+    pub repr: Option<String>,
+    pub private: bool,
+}
+
+/// `Outcometree.out_val_decl` (`oval_attributes` is always empty here).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OutValDecl {
+    pub name: String,
+    pub typ: OutType,
+    pub prims: Vec<String>,
+}
+
+/// `Outcometree.out_module_type`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum OutModuleType {
+    Omty_abstract,
+    Omty_functor(String, Option<Box<OutModuleType>>, Box<OutModuleType>),
+    Omty_ident(OutIdent),
+    Omty_signature(Vec<OutSigItem>),
+    Omty_alias(OutIdent),
+}
+
+/// `Outcometree.out_sig_item` (class items print as nothing).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum OutSigItem {
+    Osig_typext(OutExtensionConstructor, OutExtStatus),
+    Osig_modtype(String, OutModuleType),
+    Osig_module(String, OutModuleType, OutRecStatus),
+    Osig_type(OutTypeDecl, OutRecStatus),
+    Osig_value(OutValDecl),
+    Osig_ellipsis,
+    Osig_class,
 }
 
 // ============================================================================
@@ -89,6 +164,11 @@ pub(crate) struct Printtyp<'a> {
     /// `non_shadowed_pervasive_or_stdlib`; `None` stands for `Env.empty`,
     /// where every lookup fails.
     printing_env_lookup_type: Option<Box<dyn Fn(&str) -> Option<Path> + 'a>>,
+    /// Types added to the printing environment by `tree_of_signature_rec`
+    /// (`Env.add_signature`), most recent last.
+    signature_types: Vec<(String, Path)>,
+    /// `printing_context.inlined_types` while printing a type declaration.
+    inlined_types: Option<Vec<crate::types::decl::TypeInlinedType>>,
 }
 
 impl<'a> Printtyp<'a> {
@@ -106,6 +186,8 @@ impl<'a> Printtyp<'a> {
             delayed: Vec::new(),
             unique_names: Vec::new(),
             printing_env_lookup_type: None,
+            signature_types: Vec::new(),
+            inlined_types: None,
         }
     }
 
@@ -127,6 +209,9 @@ impl<'a> Printtyp<'a> {
         };
         if !(id.is_persistent() && matches!(id.name(), "Pervasives" | "Stdlib")) {
             return false;
+        }
+        if let Some((_, found)) = self.signature_types.iter().rev().find(|(name, _)| name == s) {
+            return path.same(found);
         }
         match &self.printing_env_lookup_type {
             None => true,
@@ -547,6 +632,13 @@ impl<'a> Printtyp<'a> {
                     OutType::Otyp_arrow(args, Box::new(this.tree_of_typexp(sch, *ret)))
                 }
                 TypeDesc::Ttuple(tyl) => OutType::Otyp_tuple(this.tree_of_typlist(sch, tyl)),
+                TypeDesc::Tconstr { path, .. } if this.find_inlined_type(&path.name()).is_some() => {
+                    // Inlined records print as record structures (printtyp.ml:633-642).
+                    let crate::types::decl::TypeInlinedType::Record { labels, .. } =
+                        this.find_inlined_type(&path.name()).cloned().expect("inlined type");
+                    let labels = labels.iter().map(|l| this.tree_of_label(l)).collect();
+                    OutType::Otyp_record(labels)
+                }
                 TypeDesc::Tconstr { path, args, .. } => {
                     OutType::Otyp_constr(this.tree_of_path(path), this.tree_of_typlist(sch, args))
                 }
@@ -735,7 +827,11 @@ impl<'a> Printtyp<'a> {
         match args {
             crate::types::decl::ConstructorArguments::CstrTuple(l) => self.tree_of_typlist(false, l),
             crate::types::decl::ConstructorArguments::CstrRecord(l) => {
+                // `Cstr_record l -> [Otyp_record (List.map tree_of_label l)]`
+                // drops the printing context.
+                let saved = self.inlined_types.take();
                 let labels = l.iter().map(|l| self.tree_of_label(l)).collect();
+                self.inlined_types = saved;
                 vec![OutType::Otyp_record(labels)]
             }
         }
@@ -761,12 +857,550 @@ impl<'a> Printtyp<'a> {
         let tree = self.tree_of_typexp(true, ty);
         print_out_type(&tree)
     }
+}
 
-    /// `type_scheme ppf ty`.
-    pub(crate) fn type_scheme(&mut self, ty: TypeExprRef) -> String {
-        self.reset_and_mark_loops(ty);
-        self.type_sch(ty)
+// ============================================================================
+// Declarations and signatures (compiler/ml/printtyp.ml:571-1180)
+// ============================================================================
+
+impl<'a> Printtyp<'a> {
+    fn find_inlined_type(&self, name: &str) -> Option<&crate::types::decl::TypeInlinedType> {
+        self.inlined_types.as_ref()?.iter().find(|inlined| match inlined {
+            crate::types::decl::TypeInlinedType::Record { type_name, .. } => type_name == name,
+        })
     }
+
+    /// `filter_params` (printtyp.ml:573-582): repeated parameters become
+    /// fresh `Tsubst` nodes.
+    fn filter_params(&self, tyl: &[TypeExprRef]) -> Vec<TypeExprRef> {
+        let mut params: Vec<TypeExprRef> = Vec::with_capacity(tyl.len());
+        for ty in tyl {
+            let ty = self.ctx.repr(*ty);
+            if params.contains(&ty) {
+                params.push(self.ctx.new_generic_type(TypeDesc::Tsubst(ty)));
+            } else {
+                params.push(ty);
+            }
+        }
+        params
+    }
+
+    /// `Ctype.free_variables` without an environment (ctype.ml:370-409).
+    fn free_variables(&self, ty: TypeExprRef) -> Vec<TypeExprRef> {
+        fn go(
+            ctx: &TypeContext,
+            visited: &mut Vec<TypeExprRef>,
+            vars: &mut Vec<TypeExprRef>,
+            ty: TypeExprRef,
+        ) {
+            let ty = ctx.repr(ty);
+            if visited.contains(&ty) {
+                return;
+            }
+            visited.push(ty);
+            let desc = (*ctx.get_desc(ty)).clone();
+            match desc {
+                TypeDesc::Tvar(_) => vars.push(ty),
+                TypeDesc::Tobject { fields, .. } => go(ctx, visited, vars, fields),
+                TypeDesc::Tfield { typ, rest, .. } => {
+                    go(ctx, visited, vars, typ);
+                    go(ctx, visited, vars, rest);
+                }
+                TypeDesc::Tvariant(row) => {
+                    let row = btype::row_repr(ctx, &row);
+                    let mut children = Vec::new();
+                    btype::iter_row(ctx, &row, |t| children.push(t));
+                    for t in children {
+                        go(ctx, visited, vars, t);
+                    }
+                    if !btype::static_row(ctx, &row) {
+                        go(ctx, visited, vars, row.row_more);
+                    }
+                }
+                _ => {
+                    let mut children = Vec::new();
+                    btype::iter_type_expr(ctx, ty, |t| children.push(t));
+                    for t in children {
+                        go(ctx, visited, vars, t);
+                    }
+                }
+            }
+        }
+        let mut vars = Vec::new();
+        go(self.ctx, &mut Vec::new(), &mut vars, ty);
+        vars
+    }
+
+    fn mark_loops_constructor_arguments(&mut self, args: &crate::types::decl::ConstructorArguments) {
+        match args {
+            crate::types::decl::ConstructorArguments::CstrTuple(l) => {
+                for ty in l {
+                    self.mark_loops(*ty);
+                }
+            }
+            crate::types::decl::ConstructorArguments::CstrRecord(l) => {
+                for label in l {
+                    self.mark_loops(label.ld_type);
+                }
+            }
+        }
+    }
+
+    /// `tree_of_type_decl` (printtyp.ml:789-930).
+    pub(crate) fn tree_of_type_decl(
+        &mut self,
+        id: &crate::ident::Ident,
+        decl: &crate::types::decl::TypeDeclaration,
+    ) -> OutTypeDecl {
+        use crate::types::decl::TypeKind;
+        use crate::types::PrivateFlag;
+        self.reset();
+        let saved_inlined = self.inlined_types.replace(decl.type_inlined_types.clone());
+        let params = self.filter_params(&decl.type_params);
+
+        if let Some(ty) = decl.type_manifest {
+            let vars = self.free_variables(ty);
+            for param in &params {
+                let is_underscore =
+                    matches!(&*self.ctx.borrow_desc(*param), TypeDesc::Tvar(Some(name)) if name == "_");
+                if is_underscore && vars.contains(param) {
+                    self.ctx.set_desc(*param, TypeDesc::Tvar(None));
+                }
+            }
+        }
+
+        for param in &params {
+            self.add_alias(*param);
+        }
+        for param in &params {
+            self.mark_loops(*param);
+        }
+        for param in &params {
+            let px = self.proxy(*param);
+            self.check_name_of_type(px);
+        }
+        let ty_manifest = decl.type_manifest.map(|ty| {
+            // Special hack to hide variant name.
+            let repr = self.ctx.repr(ty);
+            let desc = (*self.ctx.get_desc(repr)).clone();
+            let ty = match desc {
+                TypeDesc::Tvariant(row) => {
+                    let row = btype::row_repr(self.ctx, &row);
+                    match &row.row_name {
+                        Some((Path::Pident(id2), _)) if id2.same(id) => self
+                            .ctx
+                            .new_generic_type(TypeDesc::Tvariant(RowDesc { row_name: None, ..row })),
+                        _ => ty,
+                    }
+                }
+                _ => ty,
+            };
+            self.mark_loops(ty);
+            ty
+        });
+        match &decl.type_kind {
+            TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
+            TypeKind::TypeVariant(cstrs, _) => {
+                for c in cstrs {
+                    self.mark_loops_constructor_arguments(&c.cd_args);
+                    if let Some(res) = c.cd_res {
+                        self.mark_loops(res);
+                    }
+                }
+            }
+            TypeKind::TypeRecord(labels, _) => {
+                for l in labels {
+                    self.mark_loops(l.ld_type);
+                }
+            }
+        }
+
+        let abstr = match &decl.type_kind {
+            TypeKind::TypeAbstract => {
+                decl.type_manifest.is_none() || decl.type_private == PrivateFlag::Private
+            }
+            TypeKind::TypeRecord(..) => decl.type_private == PrivateFlag::Private,
+            TypeKind::TypeVariant(cstrs, _) => {
+                decl.type_private == PrivateFlag::Private || cstrs.iter().any(|cd| cd.cd_res.is_some())
+            }
+            TypeKind::TypeOpen => decl.type_manifest.is_none(),
+        };
+        let vari: Vec<(bool, bool)> = decl
+            .type_params
+            .iter()
+            .zip(decl.type_variance.iter())
+            .map(|(ty, v)| {
+                if abstr || !btype::is_tvar(self.ctx, *ty) {
+                    v.get_upper()
+                } else {
+                    (true, true)
+                }
+            })
+            .collect();
+        let args: Vec<(String, (bool, bool))> = params
+            .iter()
+            .zip(vari)
+            .map(|(ty, cocn)| {
+                let name = match self.tree_of_typexp(false, *ty) {
+                    OutType::Otyp_var(_, id) => id,
+                    _ => "?".to_string(),
+                };
+                (name, cocn)
+            })
+            .collect();
+
+        let constraints = self.tree_of_constraints(&params);
+        let tree_of_manifest = |this: &mut Self, ty1: OutType| match ty_manifest {
+            None => ty1,
+            Some(ty) => OutType::Otyp_manifest(Box::new(this.tree_of_typexp(false, ty)), Box::new(ty1)),
+        };
+        let boxed_unboxed = decl.type_representation == crate::types::TypeRepresentation::Unboxed;
+        let (typ, private, unboxed) = match &decl.type_kind {
+            TypeKind::TypeAbstract => match ty_manifest {
+                None => (OutType::Otyp_abstract, false, boxed_unboxed),
+                Some(ty) => (
+                    self.tree_of_typexp(false, ty),
+                    decl.type_private == PrivateFlag::Private,
+                    boxed_unboxed,
+                ),
+            },
+            TypeKind::TypeVariant(cstrs, layout_ref) => {
+                let layout = self.ctx.variant_layout(*layout_ref).clone();
+                let unboxed = boxed_unboxed || layout.configuration().unboxed;
+                let constructors = cstrs
+                    .iter()
+                    .enumerate()
+                    .map(|(position, cd)| self.tree_of_constructor(cd, Some(&layout), position))
+                    .collect();
+                (
+                    tree_of_manifest(self, OutType::Otyp_sum(constructors)),
+                    decl.type_private == PrivateFlag::Private,
+                    unboxed,
+                )
+            }
+            TypeKind::TypeRecord(labels, _) => {
+                let labels = labels.iter().map(|l| self.tree_of_label(l)).collect();
+                (
+                    tree_of_manifest(self, OutType::Otyp_record(labels)),
+                    decl.type_private == PrivateFlag::Private,
+                    boxed_unboxed,
+                )
+            }
+            TypeKind::TypeOpen => (
+                tree_of_manifest(self, OutType::Otyp_open),
+                decl.type_private == PrivateFlag::Private,
+                boxed_unboxed,
+            ),
+        };
+        let immediate = decl
+            .type_attributes
+            .iter()
+            .any(|attr| matches!(attr.attr_name.txt.as_str(), "immediate" | "ocaml.immediate"));
+        self.inlined_types = saved_inlined;
+        OutTypeDecl {
+            name: id.name().to_string(),
+            params: args,
+            typ,
+            private,
+            immediate,
+            unboxed,
+            cstrs: constraints,
+        }
+    }
+
+    /// `tree_of_constructor` (printtyp.ml:936-964).
+    fn tree_of_constructor(
+        &mut self,
+        cd: &crate::types::decl::ConstructorDeclaration,
+        layout: Option<&crate::types::VariantLayout>,
+        position: usize,
+    ) -> OutConstructor {
+        use crate::types::decl::ConstructorArguments;
+        let name = cd.cd_id.name().to_string();
+        let nullary = matches!(&cd.cd_args, ConstructorArguments::CstrTuple(args) if args.is_empty());
+        let repr = if !nullary {
+            None
+        } else {
+            let tag_type = layout.and_then(|layout| match layout.constructors.get(position) {
+                Some(crate::types::VariantConstructorCase::Constant(tag)) => tag.tag_type.clone(),
+                Some(crate::types::VariantConstructorCase::Block(block)) => {
+                    block.runtime.tag.tag_type.clone()
+                }
+                None => None,
+            });
+            match tag_type {
+                Some(crate::types::VariantTagType::Null) => Some("@as(null)".to_string()),
+                Some(crate::types::VariantTagType::Undefined) => Some("@as(undefined)".to_string()),
+                Some(crate::types::VariantTagType::String(s)) => {
+                    Some(format!("@as(\"{}\")", ocaml_string_escaped(&s)))
+                }
+                Some(crate::types::VariantTagType::Int(i)) => Some(format!("@as({i})")),
+                Some(crate::types::VariantTagType::Float(f)) => Some(format!("@as({f})")),
+                Some(crate::types::VariantTagType::Bool(b)) => Some(format!("@as({b})")),
+                Some(crate::types::VariantTagType::BigInt(s)) => Some(format!("@as({s}n)")),
+                Some(crate::types::VariantTagType::Untagged(_)) | None => None,
+            }
+        };
+        match cd.cd_res {
+            None => {
+                let args = self.tree_of_constructor_arguments(&cd.cd_args);
+                (name, args, None, repr)
+            }
+            Some(res) => {
+                let nm = std::mem::take(&mut self.names);
+                let ret = self.tree_of_typexp(false, res);
+                let args = self.tree_of_constructor_arguments(&cd.cd_args);
+                self.names = nm;
+                (name, args, Some(ret), repr)
+            }
+        }
+    }
+
+    /// `tree_of_constraints` (printtyp.ml:979-987).
+    fn tree_of_constraints(&mut self, params: &[TypeExprRef]) -> Vec<(OutType, OutType)> {
+        let mut list = Vec::new();
+        for ty in params.iter().rev() {
+            let ty2 = self.unalias(*ty);
+            if self.proxy(*ty) != self.proxy(ty2) {
+                let tr = self.tree_of_typexp(true, *ty);
+                let tr2 = self.tree_of_typexp(true, ty2);
+                list.insert(0, (tr, tr2));
+            }
+        }
+        list
+    }
+
+    /// `tree_of_type_declaration id decl rs` (printtyp.ml:1007-1008).
+    pub(crate) fn tree_of_type_declaration(
+        &mut self,
+        id: &crate::ident::Ident,
+        decl: &crate::types::decl::TypeDeclaration,
+        rs: crate::types::decl::RecStatus,
+    ) -> OutSigItem {
+        OutSigItem::Osig_type(self.tree_of_type_decl(id, decl), tree_of_rec(rs))
+    }
+
+    /// `tree_of_extension_constructor` (printtyp.ml:1019-1064).
+    pub(crate) fn tree_of_extension_constructor(
+        &mut self,
+        id: &crate::ident::Ident,
+        ext: &crate::types::decl::ExtensionConstructor,
+        es: crate::types::decl::ExtStatus,
+    ) -> OutSigItem {
+        use crate::types::decl::ExtStatus;
+        self.reset();
+        let ty_name = ext.ext_type_path.name();
+        let ty_params = self.filter_params(&ext.ext_type_params);
+        for param in &ty_params {
+            self.add_alias(*param);
+        }
+        for param in &ty_params {
+            self.mark_loops(*param);
+        }
+        for param in &ty_params {
+            let px = self.proxy(*param);
+            self.check_name_of_type(px);
+        }
+        self.mark_loops_constructor_arguments(&ext.ext_args);
+        if let Some(ret) = ext.ext_ret_type {
+            self.mark_loops(ret);
+        }
+        let ty_params = ty_params
+            .iter()
+            .map(|ty| match self.tree_of_typexp(false, *ty) {
+                OutType::Otyp_var(_, id) => id,
+                _ => "?".to_string(),
+            })
+            .collect();
+        let (args, ret) = match ext.ext_ret_type {
+            None => (self.tree_of_constructor_arguments(&ext.ext_args), None),
+            Some(res) => {
+                let nm = std::mem::take(&mut self.names);
+                let ret = self.tree_of_typexp(false, res);
+                let args = self.tree_of_constructor_arguments(&ext.ext_args);
+                self.names = nm;
+                (args, Some(ret))
+            }
+        };
+        let out = OutExtensionConstructor {
+            name: id.name().to_string(),
+            type_name: ty_name,
+            type_params: ty_params,
+            args,
+            ret_type: ret,
+            repr: None,
+            private: ext.ext_private == crate::types::PrivateFlag::Private,
+        };
+        let es = match es {
+            ExtStatus::TextFirst => OutExtStatus::Oext_first,
+            ExtStatus::TextNext => OutExtStatus::Oext_next,
+            ExtStatus::TextException => OutExtStatus::Oext_exception,
+        };
+        OutSigItem::Osig_typext(out, es)
+    }
+
+    /// `tree_of_value_description` (printtyp.ml:1071-1083) with `Primitive.print`.
+    pub(crate) fn tree_of_value_description(
+        &mut self,
+        id: &crate::ident::Ident,
+        decl: &crate::types::decl::ValueDescription,
+    ) -> OutSigItem {
+        self.reset_and_mark_loops(decl.val_type);
+        let typ = self.tree_of_typexp(true, decl.val_type);
+        let prims = match &decl.val_kind {
+            crate::types::decl::ValueKind::ValPrim(p) => {
+                if p.prim_native_name.is_empty() {
+                    vec![p.prim_name.clone()]
+                } else {
+                    vec![p.prim_name.clone(), p.prim_native_name.clone()]
+                }
+            }
+            crate::types::decl::ValueKind::ValReg => Vec::new(),
+        };
+        OutSigItem::Osig_value(OutValDecl {
+            name: id.name().to_string(),
+            typ,
+            prims,
+        })
+    }
+
+    /// `tree_of_modtype ~ellipsis` (printtyp.ml:1127-1143).
+    pub(crate) fn tree_of_modtype(
+        &mut self,
+        mty: &crate::types::decl::ModuleType,
+        ellipsis: bool,
+    ) -> OutModuleType {
+        use crate::types::decl::ModuleType;
+        match mty {
+            ModuleType::MtyIdent(p) => OutModuleType::Omty_ident(self.tree_of_path(p)),
+            ModuleType::MtySignature(sg) => OutModuleType::Omty_signature(if ellipsis {
+                vec![OutSigItem::Osig_ellipsis]
+            } else {
+                self.tree_of_signature(sg)
+            }),
+            ModuleType::MtyFunctor {
+                param,
+                param_type,
+                result,
+            } => {
+                let res = self.tree_of_modtype(result, ellipsis);
+                let arg = param_type
+                    .as_ref()
+                    .map(|mty| Box::new(self.tree_of_modtype(mty, false)));
+                OutModuleType::Omty_functor(param.name().to_string(), arg, Box::new(res))
+            }
+            ModuleType::MtyAlias(_, p) => OutModuleType::Omty_alias(self.tree_of_path(p)),
+        }
+    }
+
+    /// `tree_of_signature` (printtyp.ml:1145-1165): each item is printed in
+    /// the environment extended with the items before it; the members of a
+    /// recursive type group after the first see the environment of the
+    /// group start.
+    pub(crate) fn tree_of_signature(
+        &mut self,
+        sg: &[crate::types::decl::SignatureItem],
+    ) -> Vec<OutSigItem> {
+        use crate::types::decl::{RecStatus, SignatureItem};
+        let saved = self.signature_types.clone();
+        let mut env_types = saved.clone();
+        let mut in_type_group = false;
+        let mut trees = Vec::new();
+        for item in sg {
+            in_type_group = match (in_type_group, item) {
+                (true, SignatureItem::SigType(_, _, RecStatus::TrecNext)) => true,
+                (_, SignatureItem::SigType(_, _, RecStatus::TrecNot | RecStatus::TrecFirst)) => {
+                    self.signature_types = env_types.clone();
+                    true
+                }
+                _ => {
+                    self.signature_types = env_types.clone();
+                    false
+                }
+            };
+            if let Some(tree) = self.tree_of_sigitem(item) {
+                trees.push(tree);
+            }
+            if let SignatureItem::SigType(id, _, _) = item {
+                env_types.push((id.name().to_string(), Path::Pident(id.clone())));
+            }
+        }
+        self.signature_types = saved;
+        trees
+    }
+
+    /// `trees_of_sigitem` (printtyp.ml:1167-1182).
+    fn tree_of_sigitem(&mut self, item: &crate::types::decl::SignatureItem) -> Option<OutSigItem> {
+        use crate::types::decl::SignatureItem;
+        match item {
+            SignatureItem::SigValue(id, decl) => Some(self.tree_of_value_description(id, decl)),
+            SignatureItem::SigType(id, _, _) if btype::is_row_name(id.name()) => None,
+            SignatureItem::SigType(id, decl, rs) => Some(self.tree_of_type_declaration(id, decl, *rs)),
+            SignatureItem::SigTypext(id, ext, es) => {
+                Some(self.tree_of_extension_constructor(id, ext, *es))
+            }
+            SignatureItem::SigModule(id, md, rs) => {
+                let ellipsis = md.md_attributes.iter().any(|attr| {
+                    attr.attr_name.txt == "..."
+                        && matches!(attr.attr_payload, crate::types::decl::AttributePayload::Empty)
+                });
+                Some(self.tree_of_module(id, &md.md_type, *rs, ellipsis))
+            }
+            SignatureItem::SigModtype(id, decl) => Some(self.tree_of_modtype_declaration(id, decl)),
+            SignatureItem::SigClass | SignatureItem::SigClassType => Some(OutSigItem::Osig_class),
+        }
+    }
+
+    /// `tree_of_modtype_declaration` (printtyp.ml:1184-1189).
+    pub(crate) fn tree_of_modtype_declaration(
+        &mut self,
+        id: &crate::ident::Ident,
+        decl: &crate::types::decl::ModtypeDeclaration,
+    ) -> OutSigItem {
+        let mty = match &decl.mtd_type {
+            None => OutModuleType::Omty_abstract,
+            Some(mty) => self.tree_of_modtype(mty, false),
+        };
+        OutSigItem::Osig_modtype(id.name().to_string(), mty)
+    }
+
+    /// `tree_of_module` (printtyp.ml:1191-1192).
+    pub(crate) fn tree_of_module(
+        &mut self,
+        id: &crate::ident::Ident,
+        mty: &crate::types::decl::ModuleType,
+        rs: crate::types::decl::RecStatus,
+        ellipsis: bool,
+    ) -> OutSigItem {
+        OutSigItem::Osig_module(id.name().to_string(), self.tree_of_modtype(mty, ellipsis), tree_of_rec(rs))
+    }
+}
+
+/// `tree_of_rec` (printtyp.ml:100-103).
+fn tree_of_rec(rs: crate::types::decl::RecStatus) -> OutRecStatus {
+    match rs {
+        crate::types::decl::RecStatus::TrecNot => OutRecStatus::Orec_not,
+        crate::types::decl::RecStatus::TrecFirst => OutRecStatus::Orec_first,
+        crate::types::decl::RecStatus::TrecNext => OutRecStatus::Orec_next,
+    }
+}
+
+/// OCaml `String.escaped`, as used by `Printf "%S"`.
+fn ocaml_string_escaped(s: &str) -> String {
+    let mut out = String::new();
+    for byte in s.bytes() {
+        match byte {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b'\n' => out.push_str("\\n"),
+            b'\t' => out.push_str("\\t"),
+            b'\r' => out.push_str("\\r"),
+            8 => out.push_str("\\b"),
+            32..=126 => out.push(byte as char),
+            _ => out.push_str(&format!("\\{byte:03}")),
+        }
+    }
+    out
 }
 
 /// `Ctype.flatten_fields` (compiler/ml/ctype.ml): the chain is accumulated
@@ -917,6 +1551,7 @@ pub(crate) fn print_out_type_doc(out_type: &OutType) -> Doc {
             print_out_type_doc(out_type),
         ])),
         OutType::Otyp_arrow(..) => print_out_arrow_type(out_type),
+        OutType::Otyp_sum(constructors) => print_out_constructors_doc(constructors),
         OutType::Otyp_module(mod_name, string_list, out_types) => {
             let package_type_doc = if string_list.is_empty() && out_types.is_empty() {
                 Doc::nil()
@@ -1112,6 +1747,410 @@ fn print_record_declaration_doc(inline: bool, rows: &[(String, bool, bool, OutTy
         Doc::rbrace(),
     ]);
     if inline { content } else { Doc::group(content) }
+}
+
+/// `print_out_constructors_doc` (res_outcome_printer.ml:374-390).
+fn print_out_constructors_doc(constructors: &[OutConstructor]) -> Doc {
+    Doc::group(Doc::indent(Doc::concat(vec![
+        Doc::soft_line(),
+        Doc::join(
+            Doc::line(),
+            constructors
+                .iter()
+                .enumerate()
+                .map(|(i, constructor)| {
+                    Doc::concat(vec![
+                        if i > 0 {
+                            Doc::text("| ")
+                        } else {
+                            Doc::if_breaks(Doc::text("| "), Doc::nil())
+                        },
+                        print_out_constructor_doc(constructor),
+                    ])
+                })
+                .collect(),
+        ),
+    ])))
+}
+
+/// `print_out_constructor_doc` (res_outcome_printer.ml:392-437).
+fn print_out_constructor_doc((name, args, gadt, repr): &OutConstructor) -> Doc {
+    let repr_doc = match repr {
+        None => Doc::nil(),
+        Some(s) => Doc::text(format!("{s} ")),
+    };
+    let gadt_doc = match gadt {
+        Some(out_type) => Doc::concat(vec![Doc::text(": "), print_out_type_doc(out_type)]),
+        None => Doc::nil(),
+    };
+    let args_doc = match args.as_slice() {
+        [] => Doc::nil(),
+        [OutType::Otyp_record(record)] => Doc::concat(vec![
+            Doc::lparen(),
+            Doc::indent(print_record_declaration_doc(true, record)),
+            Doc::rparen(),
+        ]),
+        _ => Doc::indent(Doc::concat(vec![
+            Doc::lparen(),
+            Doc::indent(Doc::concat(vec![
+                Doc::soft_line(),
+                Doc::join(
+                    Doc::concat(vec![Doc::comma(), Doc::line()]),
+                    args.iter().map(print_out_type_doc).collect(),
+                ),
+            ])),
+            Doc::trailing_comma(),
+            Doc::soft_line(),
+            Doc::rparen(),
+        ])),
+    };
+    Doc::group(Doc::concat(vec![repr_doc, Doc::text(name.clone()), args_doc, gadt_doc]))
+}
+
+/// `print_type_parameter_doc` (res_outcome_printer.ml:474-479).
+fn print_type_parameter_doc((typ, (co, cn)): &(String, (bool, bool))) -> Doc {
+    Doc::concat(vec![
+        if !cn {
+            Doc::text("+")
+        } else if !co {
+            Doc::text("-")
+        } else {
+            Doc::nil()
+        },
+        if typ == "_" {
+            Doc::text("_")
+        } else {
+            Doc::text(format!("'{typ}"))
+        },
+    ])
+}
+
+fn print_type_params_doc(params: Vec<Doc>, trailing_comma: bool) -> Doc {
+    if params.is_empty() {
+        return Doc::nil();
+    }
+    Doc::group(Doc::concat(vec![
+        Doc::less_than(),
+        Doc::indent(Doc::concat(vec![
+            Doc::soft_line(),
+            Doc::join(Doc::concat(vec![Doc::comma(), Doc::line()]), params),
+        ])),
+        if trailing_comma {
+            Doc::trailing_comma()
+        } else {
+            Doc::nil()
+        },
+        Doc::soft_line(),
+        Doc::greater_than(),
+    ]))
+}
+
+/// `print_out_sig_item_doc ~print_name_as_is:false` (res_outcome_printer.ml:481-655).
+pub(crate) fn print_out_sig_item_doc(item: &OutSigItem) -> Doc {
+    match item {
+        OutSigItem::Osig_class => Doc::nil(),
+        OutSigItem::Osig_ellipsis => Doc::dotdotdot(),
+        OutSigItem::Osig_value(value_decl) => {
+            let prims_doc = if value_decl.prims.is_empty() {
+                Doc::nil()
+            } else {
+                Doc::indent(Doc::concat(vec![
+                    Doc::text(" ="),
+                    Doc::line(),
+                    Doc::group(Doc::join(
+                        Doc::line(),
+                        value_decl
+                            .prims
+                            .iter()
+                            .map(|prim| {
+                                // '\132' is the marshalled FFI payload marker.
+                                let prim = if prim.as_bytes().first() == Some(&132)
+                                    || prim.chars().next().map(|c| c as u32) == Some(132)
+                                {
+                                    "#rescript-external"
+                                } else {
+                                    prim.as_str()
+                                };
+                                Doc::text(format!("\"{prim}\""))
+                            })
+                            .collect(),
+                    )),
+                ]))
+            };
+            Doc::group(Doc::concat(vec![
+                Doc::text(if value_decl.prims.is_empty() {
+                    "let "
+                } else {
+                    "external "
+                }),
+                Doc::text(value_decl.name.clone()),
+                Doc::text(":"),
+                Doc::space(),
+                print_out_type_doc(&value_decl.typ),
+                prims_doc,
+            ]))
+        }
+        OutSigItem::Osig_typext(ext, _) => print_out_extension_constructor_doc(ext),
+        OutSigItem::Osig_modtype(name, OutModuleType::Omty_signature(items)) if items.is_empty() => {
+            Doc::concat(vec![Doc::text("module type "), Doc::text(name.clone())])
+        }
+        OutSigItem::Osig_modtype(name, mty) => Doc::group(Doc::concat(vec![
+            Doc::text("module type "),
+            Doc::text(name.clone()),
+            Doc::text(" = "),
+            print_out_module_type_doc(mty),
+        ])),
+        OutSigItem::Osig_module(name, OutModuleType::Omty_alias(ident), _) => {
+            Doc::group(Doc::concat(vec![
+                Doc::text("module "),
+                Doc::text(name.clone()),
+                Doc::text(" ="),
+                Doc::line(),
+                print_out_ident_doc(true, ident),
+            ]))
+        }
+        OutSigItem::Osig_module(name, mty, rec_status) => Doc::group(Doc::concat(vec![
+            Doc::text(match rec_status {
+                OutRecStatus::Orec_not => "module ",
+                OutRecStatus::Orec_first => "module rec ",
+                OutRecStatus::Orec_next => "and ",
+            }),
+            Doc::text(name.clone()),
+            Doc::text(": "),
+            print_out_module_type_doc(mty),
+        ])),
+        OutSigItem::Osig_type(decl, rec_status) => {
+            let attrs = match (decl.immediate, decl.unboxed) {
+                (false, false) => Doc::nil(),
+                (true, false) => Doc::concat(vec![Doc::text("@immediate"), Doc::line()]),
+                (false, true) => Doc::concat(vec![Doc::text("@unboxed"), Doc::line()]),
+                (true, true) => Doc::concat(vec![Doc::text("@immediate @unboxed"), Doc::line()]),
+            };
+            let kw = Doc::text(match rec_status {
+                OutRecStatus::Orec_not => "type ",
+                OutRecStatus::Orec_first => "type rec ",
+                OutRecStatus::Orec_next => "and ",
+            });
+            let type_params =
+                print_type_params_doc(decl.params.iter().map(print_type_parameter_doc).collect(), true);
+            let private_doc = if decl.private {
+                Doc::text("private ")
+            } else {
+                Doc::nil()
+            };
+            let kind = match &decl.typ {
+                OutType::Otyp_open => {
+                    Doc::concat(vec![Doc::text(" = "), private_doc, Doc::text("..")])
+                }
+                OutType::Otyp_abstract => Doc::nil(),
+                OutType::Otyp_record(record) => Doc::concat(vec![
+                    Doc::text(" = "),
+                    private_doc,
+                    print_record_declaration_doc(false, record),
+                ]),
+                typ => Doc::concat(vec![Doc::text(" = "), print_out_type_doc(typ)]),
+            };
+            let constraints = if decl.cstrs.is_empty() {
+                Doc::nil()
+            } else {
+                Doc::group(Doc::indent(Doc::concat(vec![
+                    Doc::hard_line(),
+                    Doc::join(
+                        Doc::line(),
+                        decl.cstrs
+                            .iter()
+                            .map(|(typ1, typ2)| {
+                                Doc::group(Doc::concat(vec![
+                                    Doc::text("constraint "),
+                                    print_out_type_doc(typ1),
+                                    Doc::text(" ="),
+                                    Doc::space(),
+                                    print_out_type_doc(typ2),
+                                ]))
+                            })
+                            .collect(),
+                    ),
+                ])))
+            };
+            Doc::group(Doc::concat(vec![
+                attrs,
+                Doc::group(Doc::concat(vec![
+                    kw,
+                    print_ident_like(&decl.name, false, false),
+                    type_params,
+                    kind,
+                ])),
+                constraints,
+            ]))
+        }
+    }
+}
+
+/// `print_out_module_type_doc` (res_outcome_printer.ml:657-713).
+pub(crate) fn print_out_module_type_doc(mty: &OutModuleType) -> Doc {
+    match mty {
+        OutModuleType::Omty_abstract => Doc::nil(),
+        OutModuleType::Omty_ident(ident) => print_out_ident_doc(true, ident),
+        OutModuleType::Omty_functor(..) => {
+            // `collect_functor_args` (res_outcome_printer.ml:88-94).
+            let mut args: Vec<(&String, &Option<Box<OutModuleType>>)> = Vec::new();
+            let mut current = mty;
+            while let OutModuleType::Omty_functor(lbl, arg, result) = current {
+                args.push((lbl, arg));
+                current = result;
+            }
+            let args_doc = match args.as_slice() {
+                [(_, None)] => Doc::text("()"),
+                _ => Doc::group(Doc::concat(vec![
+                    Doc::lparen(),
+                    Doc::indent(Doc::concat(vec![
+                        Doc::soft_line(),
+                        Doc::join(
+                            Doc::concat(vec![Doc::comma(), Doc::line()]),
+                            args.iter()
+                                .map(|(lbl, arg)| {
+                                    Doc::group(Doc::concat(vec![
+                                        Doc::text((*lbl).clone()),
+                                        match arg {
+                                            None => Doc::nil(),
+                                            Some(arg) => Doc::concat(vec![
+                                                Doc::text(": "),
+                                                print_out_module_type_doc(arg),
+                                            ]),
+                                        },
+                                    ]))
+                                })
+                                .collect(),
+                        ),
+                    ])),
+                    Doc::trailing_comma(),
+                    Doc::soft_line(),
+                    Doc::rparen(),
+                ])),
+            };
+            Doc::group(Doc::concat(vec![
+                args_doc,
+                Doc::text(" => "),
+                print_out_module_type_doc(current),
+            ]))
+        }
+        OutModuleType::Omty_signature(items) if items.is_empty() => Doc::nil(),
+        OutModuleType::Omty_signature(items) => Doc::breakable_group(
+            Doc::concat(vec![
+                Doc::lbrace(),
+                Doc::indent(Doc::concat(vec![Doc::line(), print_out_signature_doc(items)])),
+                Doc::soft_line(),
+                Doc::rbrace(),
+            ]),
+            true,
+        ),
+        OutModuleType::Omty_alias(_) => Doc::nil(),
+    }
+}
+
+/// `print_out_signature_doc` (res_outcome_printer.ml:715-751).
+pub(crate) fn print_out_signature_doc(items: &[OutSigItem]) -> Doc {
+    let mut docs = Vec::new();
+    let mut index = 0;
+    while index < items.len() {
+        match &items[index] {
+            OutSigItem::Osig_typext(ext, OutExtStatus::Oext_first) => {
+                // Gather together the extension constructors.
+                let mut constructors =
+                    vec![(ext.name.clone(), ext.args.clone(), ext.ret_type.clone(), ext.repr.clone())];
+                index += 1;
+                while let Some(OutSigItem::Osig_typext(next, OutExtStatus::Oext_next)) =
+                    items.get(index)
+                {
+                    constructors.push((
+                        next.name.clone(),
+                        next.args.clone(),
+                        next.ret_type.clone(),
+                        next.repr.clone(),
+                    ));
+                    index += 1;
+                }
+                docs.push(print_out_type_extension_doc(
+                    &ext.type_name,
+                    &ext.type_params,
+                    &constructors,
+                    ext.private,
+                ));
+            }
+            item => {
+                docs.push(print_out_sig_item_doc(item));
+                index += 1;
+            }
+        }
+    }
+    if docs.len() == 1 {
+        docs.pop().expect("one doc")
+    } else {
+        Doc::breakable_group(Doc::join(Doc::line(), docs), true)
+    }
+}
+
+fn print_extension_type_params_doc(params: &[String]) -> Doc {
+    print_type_params_doc(
+        params
+            .iter()
+            .map(|ty| Doc::text(if ty == "_" { ty.clone() } else { format!("'{ty}") }))
+            .collect(),
+        false,
+    )
+}
+
+/// `print_out_extension_constructor_doc` (res_outcome_printer.ml:753-794).
+fn print_out_extension_constructor_doc(ext: &OutExtensionConstructor) -> Doc {
+    Doc::group(Doc::concat(vec![
+        Doc::text("type "),
+        print_ident_like(&ext.type_name, false, false),
+        print_extension_type_params_doc(&ext.type_params),
+        Doc::text(" += "),
+        Doc::line(),
+        if ext.private {
+            Doc::text("private ")
+        } else {
+            Doc::nil()
+        },
+        print_out_constructor_doc(&(
+            ext.name.clone(),
+            ext.args.clone(),
+            ext.ret_type.clone(),
+            ext.repr.clone(),
+        )),
+    ]))
+}
+
+/// `print_out_type_extension_doc` (res_outcome_printer.ml:796-833).
+fn print_out_type_extension_doc(
+    name: &str,
+    params: &[String],
+    constructors: &[OutConstructor],
+    private: bool,
+) -> Doc {
+    Doc::group(Doc::concat(vec![
+        Doc::text("type "),
+        print_ident_like(name, false, false),
+        print_extension_type_params_doc(params),
+        Doc::text(" += "),
+        if private {
+            Doc::text("private ")
+        } else {
+            Doc::nil()
+        },
+        print_out_constructors_doc(constructors),
+    ]))
+}
+
+/// `print_out_sig_item`: the doc rendered at width 80.
+pub(crate) fn print_out_sig_item(item: &OutSigItem) -> String {
+    print_out_sig_item_doc(item).to_string(80)
+}
+
+/// `print_out_module_type`: the doc rendered at width 80.
+pub(crate) fn print_out_module_type(mty: &OutModuleType) -> String {
+    print_out_module_type_doc(mty).to_string(80)
 }
 
 /// `print_out_type`: the doc rendered at width 80.

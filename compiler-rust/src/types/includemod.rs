@@ -660,215 +660,6 @@ fn should_elide_type_declaration_module_mismatch(
         && (has_hidden_tag_layout || actual.len() + expected.len() > 80)
 }
 
-pub(crate) fn format_module_type(type_ctx: &TypeContext, mty: &ModuleType) -> String {
-    format_module_type_with_options(type_ctx, mty, false, false)
-}
-
-pub(crate) fn format_module_type_show_weak(type_ctx: &TypeContext, mty: &ModuleType) -> String {
-    format_module_type_with_options(type_ctx, mty, true, false)
-}
-
-pub(crate) fn format_module_type_full_paths(type_ctx: &TypeContext, mty: &ModuleType) -> String {
-    format_module_type_with_options(type_ctx, mty, false, true)
-}
-
-fn format_module_type_with_options(
-    type_ctx: &TypeContext,
-    mty: &ModuleType,
-    weak_names: bool,
-    full_paths: bool,
-) -> String {
-    match mty {
-        ModuleType::MtyIdent(path) => path.name(),
-        // Res_outcome_printer prints a bare `Omty_alias` as nothing
-        // (res_outcome_printer.ml:713); signature items print their alias.
-        ModuleType::MtyAlias(_, _) => String::new(),
-        ModuleType::MtySignature(sig) => {
-            if sig.is_empty() {
-                String::new()
-            } else {
-                let items = sig
-                    .iter()
-                    .map(|item| {
-                        indent_lines(
-                            &format_signature_item(type_ctx, item, weak_names, full_paths),
-                            "  ",
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                format!("{{\n{items}\n}}")
-            }
-        }
-        ModuleType::MtyFunctor { .. } => {
-            // res_outcome_printer.ml:88-94 (`collect_functor_args`) and
-            // res_outcome_printer.ml:662-702: the parameters form one group
-            // that breaks (one per line, trailing comma) when a parameter
-            // type contains a forced break or the group does not fit.
-            let mut args = Vec::new();
-            let mut current = mty;
-            while let ModuleType::MtyFunctor {
-                param,
-                param_type,
-                result,
-            } = current
-            {
-                let param_type = param_type.as_ref().map(|mty| {
-                    format_module_type_with_options(type_ctx, mty, weak_names, full_paths)
-                });
-                args.push((param.name().to_string(), param_type));
-                current = result;
-            }
-            let result = format_module_type_with_options(type_ctx, current, weak_names, full_paths);
-            let args_doc = if args.len() == 1 && args[0].1.is_none() {
-                "()".to_string()
-            } else {
-                let items = args
-                    .into_iter()
-                    .map(|(label, param_type)| match param_type {
-                        Some(param_type) => format!("{label}: {param_type}"),
-                        None => label,
-                    })
-                    .collect::<Vec<_>>();
-                let flat = format!("({})", items.join(", "));
-                if flat.contains('\n') || flat.len() > 80 {
-                    let items = items
-                        .iter()
-                        .map(|item| indent_lines(item, "  "))
-                        .collect::<Vec<_>>()
-                        .join(",\n");
-                    format!("(\n{items},\n)")
-                } else {
-                    flat
-                }
-            };
-            format!("{args_doc} => {result}")
-        }
-    }
-}
-
-fn format_signature_item(
-    type_ctx: &TypeContext,
-    item: &SignatureItem,
-    weak_names: bool,
-    full_paths: bool,
-) -> String {
-    match item {
-        SignatureItem::SigType(id, decl, rec_status) => {
-            format_signature_type_declaration_with_options(
-                type_ctx,
-                id,
-                decl,
-                *rec_status,
-                weak_names,
-                full_paths,
-            )
-        }
-        SignatureItem::SigValue(id, desc) => {
-            format_value_description_with_options(type_ctx, id, desc, weak_names, full_paths)
-        }
-        SignatureItem::SigModule(id, decl, _) => match &decl.md_type {
-            ModuleType::MtyAlias(_, path) => {
-                format!("module {} = {}", id.name(), path.name())
-            }
-            mty => {
-                let rendered =
-                    format_module_type_with_options(type_ctx, mty, weak_names, full_paths);
-                if rendered.is_empty() {
-                    format!("module {}:", id.name())
-                } else {
-                    format!("module {}: {}", id.name(), rendered)
-                }
-            }
-        },
-        SignatureItem::SigModtype(id, decl) => match &decl.mtd_type {
-            Some(mty) => format!(
-                "module type {} = {}",
-                id.name(),
-                format_module_type_with_options(type_ctx, mty, weak_names, full_paths)
-            ),
-            None => format!("module type {}", id.name()),
-        },
-        SignatureItem::SigTypext(id, ext, _) => {
-            format_type_extension_item_with_options(type_ctx, id, ext, weak_names, full_paths)
-        }
-        SignatureItem::SigClass => "class ...".to_string(),
-        SignatureItem::SigClassType => "class type ...".to_string(),
-    }
-}
-
-fn format_modtype_declaration(
-    type_ctx: &TypeContext,
-    id: &Ident,
-    decl: &ModtypeDeclaration,
-) -> String {
-    match &decl.mtd_type {
-        Some(mty) => format!(
-            "module type {} = {}",
-            id.name(),
-            format_module_type(type_ctx, mty)
-        ),
-        None => format!("module type {}", id.name()),
-    }
-}
-
-fn indent_lines(text: &str, prefix: &str) -> String {
-    text.lines()
-        .map(|line| format!("{prefix}{line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn format_value_description(type_ctx: &TypeContext, id: &Ident, desc: &ValueDescription) -> String {
-    format_value_description_with_options(type_ctx, id, desc, false, false)
-}
-
-fn format_value_description_with_weak_names(
-    type_ctx: &TypeContext,
-    id: &Ident,
-    desc: &ValueDescription,
-    weak_names: bool,
-) -> String {
-    format_value_description_with_options(type_ctx, id, desc, weak_names, false)
-}
-
-fn format_value_description_with_options(
-    type_ctx: &TypeContext,
-    id: &Ident,
-    desc: &ValueDescription,
-    weak_names: bool,
-    full_paths: bool,
-) -> String {
-    // `tree_of_value_description` prints the type with `tree_of_type_scheme`
-    // (printtyp.ml): reset, mark loops, then `typexp true`.
-    let _ = (weak_names, full_paths);
-    let ty = crate::types::printtyp::Printtyp::new(type_ctx).type_scheme(desc.val_type);
-    match &desc.val_kind {
-        // printtyp.ml:1053-1065 + primitive.ml:57-62: primitives print their
-        // name (and non-empty native name) through res_outcome_printer.ml:486-515,
-        // which hides marshalled FFI payloads as "#rescript-external".
-        ValueKind::ValPrim(prim) => {
-            let mut prims = vec![prim.prim_name.as_str()];
-            if !prim.prim_native_name.is_empty() {
-                prims.push(prim.prim_native_name.as_str());
-            }
-            let prims = prims
-                .into_iter()
-                .map(|prim| {
-                    if prim.chars().next().map(|c| c as u32) == Some(132) {
-                        "\"#rescript-external\"".to_string()
-                    } else {
-                        format!("\"{prim}\"")
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            format!("external {}: {} = {}", id.name(), ty, prims)
-        }
-        _ => format!("let {}: {}", id.name(), ty),
-    }
-}
-
 /// Whether an `@[<hv>` box at column 2 holding `parts` separated by break
 /// hints stays on one line under the Format margin. Multi-line parts contain
 /// forced breaks, so the box cannot be horizontal.
@@ -893,136 +684,70 @@ fn hv_fits_on_one_line(parts: &[&str]) -> bool {
     !buf.contains(&b'\n')
 }
 
+// Declarations and module types print through `Printtyp`'s outcome trees and
+// `Res_outcome_printer` (printtyp.ml:1007-1192, res_outcome_printer.ml:481-842),
+// each rendered as one Doc string at width 80.
+
+pub(crate) fn format_module_type(type_ctx: &TypeContext, mty: &ModuleType) -> String {
+    let tree = crate::types::printtyp::Printtyp::new(type_ctx).tree_of_modtype(mty, false);
+    crate::types::printtyp::print_out_module_type(&tree)
+}
+
+pub(crate) fn format_module_type_show_weak(type_ctx: &TypeContext, mty: &ModuleType) -> String {
+    format_module_type(type_ctx, mty)
+}
+
+pub(crate) fn format_module_type_full_paths(type_ctx: &TypeContext, mty: &ModuleType) -> String {
+    format_module_type(type_ctx, mty)
+}
+
+fn format_modtype_declaration(
+    type_ctx: &TypeContext,
+    id: &Ident,
+    decl: &ModtypeDeclaration,
+) -> String {
+    let tree =
+        crate::types::printtyp::Printtyp::new(type_ctx).tree_of_modtype_declaration(id, decl);
+    crate::types::printtyp::print_out_sig_item(&tree)
+}
+
+fn indent_lines(text: &str, prefix: &str) -> String {
+    text.lines()
+        .map(|line| format!("{prefix}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_value_description(type_ctx: &TypeContext, id: &Ident, desc: &ValueDescription) -> String {
+    let tree = crate::types::printtyp::Printtyp::new(type_ctx).tree_of_value_description(id, desc);
+    crate::types::printtyp::print_out_sig_item(&tree)
+}
+
+fn format_value_description_with_weak_names(
+    type_ctx: &TypeContext,
+    id: &Ident,
+    desc: &ValueDescription,
+    _weak_names: bool,
+) -> String {
+    format_value_description(type_ctx, id, desc)
+}
+
 fn format_type_declaration(type_ctx: &TypeContext, id: &Ident, decl: &TypeDeclaration) -> String {
-    format_type_declaration_with_options(type_ctx, id, decl, false, false)
+    let tree = crate::types::printtyp::Printtyp::new(type_ctx).tree_of_type_declaration(
+        id,
+        decl,
+        RecStatus::TrecNot,
+    );
+    crate::types::printtyp::print_out_sig_item(&tree)
 }
 
 fn format_type_declaration_with_weak_names(
     type_ctx: &TypeContext,
     id: &Ident,
     decl: &TypeDeclaration,
-    weak_names: bool,
+    _weak_names: bool,
 ) -> String {
-    format_type_declaration_with_options(type_ctx, id, decl, weak_names, false)
-}
-
-fn format_type_declaration_with_options(
-    type_ctx: &TypeContext,
-    id: &Ident,
-    decl: &TypeDeclaration,
-    weak_names: bool,
-    full_paths: bool,
-) -> String {
-    format_type_declaration_with_options_and_rec(type_ctx, id, decl, weak_names, full_paths, false)
-}
-
-fn format_signature_type_declaration_with_options(
-    type_ctx: &TypeContext,
-    id: &Ident,
-    decl: &TypeDeclaration,
-    rec_status: RecStatus,
-    weak_names: bool,
-    full_paths: bool,
-) -> String {
-    format_type_declaration_with_options_and_rec(
-        type_ctx,
-        id,
-        decl,
-        weak_names,
-        full_paths,
-        rec_status == RecStatus::TrecFirst,
-    )
-}
-
-fn format_type_declaration_with_options_and_rec(
-    type_ctx: &TypeContext,
-    id: &Ident,
-    decl: &TypeDeclaration,
-    weak_names: bool,
-    full_paths: bool,
-    type_rec: bool,
-) -> String {
-    let mut printer = TypeExprErrorPrinter::new_with_options(type_ctx, weak_names, full_paths);
-    let name = id.name();
-    // printtyp.ml:841-858: `abstr` decides whether variances are printed;
-    // non-variable parameters always show theirs.
-    let abstr = match &decl.type_kind {
-        TypeKind::TypeAbstract => {
-            decl.type_manifest.is_none() || decl.type_private == crate::types::PrivateFlag::Private
-        }
-        TypeKind::TypeRecord(..) => decl.type_private == crate::types::PrivateFlag::Private,
-        TypeKind::TypeVariant(constructors, _) => {
-            decl.type_private == crate::types::PrivateFlag::Private
-                || constructors.iter().any(|cd| cd.cd_res.is_some())
-        }
-        TypeKind::TypeOpen => decl.type_manifest.is_none(),
-    };
-    let shown_variances: Vec<Option<crate::types::Variance>> = decl
-        .type_params
-        .iter()
-        .enumerate()
-        .map(|(index, param)| {
-            if abstr || !crate::types::btype::is_tvar(type_ctx, *param) {
-                decl.type_variance.get(index).copied()
-            } else {
-                None
-            }
-        })
-        .collect();
-    let params = format_type_params_with_variances(&mut printer, &decl.type_params, &shown_variances);
-    let unboxed = decl
-        .variant_layout_ref()
-        .map(|layout_ref| {
-            decl.type_representation == crate::types::TypeRepresentation::Unboxed
-                || type_ctx.variant_layout(layout_ref).configuration().unboxed
-        })
-        .unwrap_or(decl.type_representation == crate::types::TypeRepresentation::Unboxed);
-    let prefix = if unboxed {
-        "@unboxed "
-    } else if type_decl_has_attr(decl, "immediate") || type_decl_has_attr(decl, "ocaml.immediate") {
-        "@immediate "
-    } else {
-        ""
-    };
-    let type_keyword = if type_rec { "type rec" } else { "type" };
-    let head = if params.is_empty() {
-        format!("{prefix}{type_keyword} {name}")
-    } else {
-        format!("{prefix}{type_keyword} {name}<{params}>")
-    };
-
-    match &decl.type_kind {
-        TypeKind::TypeAbstract => match decl.type_manifest {
-            Some(manifest) => format!("{head} = {}", printer.format(manifest)),
-            None => head,
-        },
-        TypeKind::TypeRecord(labels, _) => {
-            let mut fields = Vec::with_capacity(labels.len());
-            for label in labels {
-                fields.push(format_label_declaration(&mut printer, label));
-            }
-            let fields = fields.join(", ");
-            format!("{head} = {{{fields}}}")
-        }
-        TypeKind::TypeVariant(constructors, layout_ref) => {
-            if constructors.is_empty() {
-                format!("{head} = |")
-            } else {
-                let layout = type_ctx.variant_layout(*layout_ref);
-                let mut formatted_constructors = Vec::with_capacity(constructors.len());
-                for (position, constructor) in constructors.iter().enumerate() {
-                    formatted_constructors.push(format_constructor_declaration(
-                        &mut printer,
-                        constructor,
-                        Some(&layout.constructors[position]),
-                    ));
-                }
-                let constructors = formatted_constructors.join(" | ");
-                format!("{head} = {constructors}")
-            }
-        }
-        TypeKind::TypeOpen => format!("{head} = .."),
-    }
+    format_type_declaration(type_ctx, id, decl)
 }
 
 fn format_extension_constructor(
@@ -1030,362 +755,12 @@ fn format_extension_constructor(
     id: &Ident,
     ext: &ExtensionConstructor,
 ) -> String {
-    format_type_extension(type_ctx, id, ext, "  ", false)
-}
-
-fn format_type_extension_item(
-    type_ctx: &TypeContext,
-    id: &Ident,
-    ext: &ExtensionConstructor,
-) -> String {
-    format_type_extension_item_with_options(type_ctx, id, ext, false, false)
-}
-
-fn format_type_extension_item_with_options(
-    type_ctx: &TypeContext,
-    id: &Ident,
-    ext: &ExtensionConstructor,
-    _weak_names: bool,
-    full_paths: bool,
-) -> String {
-    format_type_extension(type_ctx, id, ext, " ", full_paths)
-}
-
-fn format_type_extension(
-    type_ctx: &TypeContext,
-    id: &Ident,
-    ext: &ExtensionConstructor,
-    spacing: &str,
-    full_paths: bool,
-) -> String {
-    let mut printer = TypeExprErrorPrinter::new_with_options(type_ctx, false, full_paths);
-    let rendered_constructor = match &ext.ext_args {
-        ConstructorArguments::CstrTuple(args) if args.is_empty() => id.name().to_string(),
-        ConstructorArguments::CstrTuple(args) => {
-            let args = args
-                .iter()
-                .map(|arg| printer.format(*arg))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{}({args})", id.name())
-        }
-        ConstructorArguments::CstrRecord(labels) => {
-            let fields = labels
-                .iter()
-                .map(|label| format_label_declaration(&mut printer, label))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{}({{{fields}}})", id.name())
-        }
-    };
-    let constructor = match ext.ext_ret_type {
-        Some(ret) => format!("{rendered_constructor}: {}", printer.format(ret)),
-        None => rendered_constructor,
-    };
-    let params = format_type_params(&mut printer, &ext.ext_type_params, &[], false);
-    let type_name = ext.ext_type_path.last();
-    let type_head = if params.is_empty() {
-        format!("type {type_name}")
-    } else {
-        format!("type {type_name}<{params}>")
-    };
-    format!("{type_head} +={spacing}{constructor}")
-}
-
-fn format_constructor_declaration(
-    printer: &mut TypeExprErrorPrinter<'_>,
-    constructor: &ConstructorDeclaration,
-    representation: Option<&crate::types::VariantConstructorCase>,
-) -> String {
-    let constructor_prefix = format_constructor_representation(constructor, representation);
-    let rendered_constructor = match &constructor.cd_args {
-        ConstructorArguments::CstrTuple(args) if args.is_empty() => {
-            format!("{constructor_prefix}{}", constructor.cd_id.name())
-        }
-        ConstructorArguments::CstrTuple(args) => {
-            let mut formatted_args = Vec::with_capacity(args.len());
-            for arg in args {
-                formatted_args.push(printer.format(*arg));
-            }
-            let args = formatted_args.join(", ");
-            format!("{constructor_prefix}{}({args})", constructor.cd_id.name())
-        }
-        ConstructorArguments::CstrRecord(labels) => {
-            let mut fields = Vec::with_capacity(labels.len());
-            for label in labels {
-                fields.push(format_label_declaration(printer, label));
-            }
-            let fields = fields.join(", ");
-            format!(
-                "{constructor_prefix}{}({{{fields}}})",
-                constructor.cd_id.name()
-            )
-        }
-    };
-    match constructor.cd_res {
-        Some(res) => format!("{rendered_constructor}: {}", printer.format(res)),
-        None => rendered_constructor,
-    }
-}
-
-fn format_constructor_representation(
-    constructor: &ConstructorDeclaration,
-    representation: Option<&crate::types::VariantConstructorCase>,
-) -> String {
-    if !constructor_is_nullary(constructor) {
-        return String::new();
-    }
-    let Some(crate::types::VariantConstructorCase::Constant(tag)) = representation else {
-        return String::new();
-    };
-    let Some(tag) = &tag.tag_type else {
-        return String::new();
-    };
-    let payload = match tag {
-        crate::types::VariantTagType::String(value) => format!("\"{value}\""),
-        crate::types::VariantTagType::Int(value) => value.to_string(),
-        crate::types::VariantTagType::Float(value) => value.clone(),
-        crate::types::VariantTagType::BigInt(value) => format!("{value}n"),
-        crate::types::VariantTagType::Bool(value) => value.to_string(),
-        crate::types::VariantTagType::Null => "null".to_string(),
-        crate::types::VariantTagType::Undefined => "undefined".to_string(),
-        crate::types::VariantTagType::Untagged(_) => return String::new(),
-    };
-    format!("@as({payload}) ")
-}
-
-fn format_type_params_with_variances(
-    printer: &mut TypeExprErrorPrinter<'_>,
-    params: &[TypeExprRef],
-    variances: &[Option<crate::types::Variance>],
-) -> String {
-    params
-        .iter()
-        .enumerate()
-        .map(|(index, param)| {
-            let variance = match variances.get(index).copied().flatten() {
-                Some(variance) => match variance.get_upper() {
-                    (true, false) => "+",
-                    (false, true) => "-",
-                    _ => "",
-                },
-                None => "",
-            };
-            format!("{variance}{}", printer.format(*param))
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn format_type_params(
-    printer: &mut TypeExprErrorPrinter<'_>,
-    params: &[TypeExprRef],
-    variances: &[crate::types::Variance],
-    show_variance: bool,
-) -> String {
-    params
-        .iter()
-        .enumerate()
-        .map(|(index, param)| {
-            let variance = if show_variance {
-                variances.get(index).map(|variance| {
-                    let (may_pos, may_neg) = variance.get_upper();
-                    if may_pos && !may_neg {
-                        "+"
-                    } else if !may_pos && may_neg {
-                        "-"
-                    } else {
-                        ""
-                    }
-                })
-            } else {
-                None
-            }
-            .unwrap_or("");
-            format!("{variance}{}", printer.format(*param))
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn format_label_declaration(
-    printer: &mut TypeExprErrorPrinter<'_>,
-    label: &LabelDeclaration,
-) -> String {
-    let mutable_prefix = if label.ld_mutable == crate::types::MutableFlag::Mutable {
-        "mutable "
-    } else {
-        ""
-    };
-    let optional = if label.ld_optional { "?" } else { "" };
-    let field_type = if label.ld_optional {
-        optional_field_payload_type(printer.type_ctx, label.ld_type)
-    } else {
-        label.ld_type
-    };
-    format!(
-        "{}{}{}: {}",
-        mutable_prefix,
-        label.ld_id.name(),
-        optional,
-        printer.format(field_type)
-    )
-}
-
-fn optional_field_payload_type(type_ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
-    let repr = type_ctx.repr(ty);
-    match &*type_ctx.get_desc(repr) {
-        TypeDesc::Tconstr { path, args, .. } if path.last() == "option" && args.len() == 1 => {
-            args[0]
-        }
-        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
-            optional_field_payload_type(type_ctx, *next)
-        }
-        _ => ty,
-    }
-}
-
-struct TypeExprErrorPrinter<'a> {
-    type_ctx: &'a TypeContext,
-    vars: HashMap<TypeExprRef, String>,
-    weak_vars: HashMap<TypeExprRef, String>,
-    next_var: usize,
-    next_weak_var: usize,
-    weak_names: bool,
-    full_paths: bool,
-}
-
-impl<'a> TypeExprErrorPrinter<'a> {
-    fn new(type_ctx: &'a TypeContext) -> Self {
-        Self::new_with_weak_names(type_ctx, false)
-    }
-
-    fn new_with_weak_names(type_ctx: &'a TypeContext, weak_names: bool) -> Self {
-        Self::new_with_options(type_ctx, weak_names, false)
-    }
-
-    fn new_with_options(type_ctx: &'a TypeContext, weak_names: bool, full_paths: bool) -> Self {
-        Self {
-            type_ctx,
-            vars: HashMap::new(),
-            weak_vars: HashMap::new(),
-            next_var: 0,
-            next_weak_var: 1,
-            weak_names,
-            full_paths,
-        }
-    }
-
-    fn format(&mut self, ty: TypeExprRef) -> String {
-        let repr = self.type_ctx.repr(ty);
-        match &*self.type_ctx.get_desc(repr) {
-            TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => self.format_type_var(repr, name),
-            TypeDesc::Tarrow { .. } => self.format_arrow(repr),
-            TypeDesc::Ttuple(types) => {
-                let parts = types.iter().map(|ty| self.format(*ty)).collect::<Vec<_>>();
-                format!("({})", parts.join(", "))
-            }
-            TypeDesc::Tconstr { path, args, .. } => {
-                let name = if self.full_paths {
-                    self.format_path_name(path)
-                } else {
-                    path.last().to_string()
-                };
-                if args.is_empty() {
-                    name
-                } else {
-                    let args = args.iter().map(|ty| self.format(*ty)).collect::<Vec<_>>();
-                    format!("{name}<{}>", args.join(", "))
-                }
-            }
-            TypeDesc::Tobject { .. } => "<object>".to_string(),
-            TypeDesc::Tfield { .. } => "<object-field>".to_string(),
-            TypeDesc::Tnil => "<object-end>".to_string(),
-            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => self.format(*next),
-            TypeDesc::Tvariant(_) => "<variant>".to_string(),
-            TypeDesc::Tpoly { body, .. } => self.format(*body),
-            TypeDesc::Tpackage { path, .. } => format!("module({})", path.name()),
-        }
-    }
-
-    fn format_path_name(&self, path: &Path) -> String {
-        let name = path.name();
-        let name = name
-            .strip_prefix("Pervasives.")
-            .or_else(|| name.strip_prefix("Stdlib."))
-            .or_else(|| name.strip_prefix("Pervasives_"))
-            .or_else(|| name.strip_prefix("Stdlib_"))
-            .unwrap_or(&name)
-            .to_string();
-        if name.starts_with('$') {
-            format!("\\\"{name}\"")
-        } else {
-            name
-        }
-    }
-
-    fn format_arrow(&mut self, ty: TypeExprRef) -> String {
-        let (params, ret) = match &*self.type_ctx.get_desc(self.type_ctx.repr(ty)) {
-            TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
-            _ => unreachable!("format_arrow called for a non-arrow type"),
-        };
-        let args = params
-            .iter()
-            .map(|arg| self.format_arrow_arg(arg.label(), arg.typ))
-            .collect::<Vec<_>>();
-        let ret = self.format(ret);
-        if args.len() == 1 {
-            format!("{} => {ret}", args[0])
-        } else {
-            format!("({}) => {ret}", args.join(", "))
-        }
-    }
-
-    fn format_arrow_arg(&mut self, label: &ArgLabel, ty: TypeExprRef) -> String {
-        let ty = self.format(ty);
-        match label {
-            ArgLabel::Nolabel => ty,
-            ArgLabel::Labelled(label) => format!("~{}: {ty}", label.txt),
-            ArgLabel::Optional(label) => format!("~{}?: {ty}", label.txt),
-        }
-    }
-
-    fn format_type_var(&mut self, ty: TypeExprRef, name: &Option<String>) -> String {
-        if self.weak_names && self.type_ctx.get_level(ty) != crate::types::GENERIC_LEVEL {
-            if let Some(existing) = self.weak_vars.get(&ty) {
-                return existing.clone();
-            }
-            let name = format!("'_weak{}", self.next_weak_var);
-            self.next_weak_var += 1;
-            self.weak_vars.insert(ty, name.clone());
-            return name;
-        }
-
-        if let Some(name) = name
-            && !name.is_empty()
-            && name != "_"
-        {
-            return format!("'{name}");
-        }
-
-        if let Some(existing) = self.vars.get(&ty) {
-            return existing.clone();
-        }
-
-        let name = generated_type_var_name(self.next_var);
-        self.next_var += 1;
-        self.vars.insert(ty, name.clone());
-        name
-    }
-}
-
-fn generated_type_var_name(idx: usize) -> String {
-    let letter = (b'a' + (idx % 26) as u8) as char;
-    if idx < 26 {
-        format!("'{letter}")
-    } else {
-        format!("'{letter}{}", idx / 26)
-    }
+    let tree = crate::types::printtyp::Printtyp::new(type_ctx).tree_of_extension_constructor(
+        id,
+        ext,
+        crate::types::decl::ExtStatus::TextFirst,
+    );
+    crate::types::printtyp::print_out_sig_item(&tree)
 }
 
 #[derive(Clone, Default)]
