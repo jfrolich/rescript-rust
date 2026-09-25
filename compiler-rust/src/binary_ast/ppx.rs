@@ -460,12 +460,14 @@ fn classify_recovered_arrow_function_arity(code: &str) -> Option<usize> {
     let trimmed = code.trim();
     let arrow_pos = trimmed.find("=>")?;
     let after_arrow = trimmed.get(arrow_pos + 2..)?.trim();
-    let completed = if after_arrow.is_empty() {
-        format!("{trimmed} undefined")
-    } else if after_arrow == "{" {
+    // Flow recovers an arrow function whose body has parse errors and
+    // Classify_function.classify_exp still sees the arrow root
+    // (compiler/ml/ast_payload.ml:134-150); classify the parameter list with a
+    // placeholder body.
+    let completed = if after_arrow == "{" {
         format!("{trimmed}}}")
     } else {
-        return None;
+        format!("{} undefined", &trimmed[..arrow_pos + 2])
     };
 
     match classify_js_exp(&completed) {
@@ -722,6 +724,13 @@ fn flow_like_raw_js_expression_parse_warning(
             start_offset,
             end_offset,
         );
+    }
+
+    if oxc_message == "Unexpected token"
+        && start_offset < code.trim_end().len()
+        && let Some(token) = code.get(start_offset..).and_then(|s| s.chars().next())
+    {
+        return (format!("Unexpected token `{token}`"), start_offset, end_offset);
     }
 
     (
