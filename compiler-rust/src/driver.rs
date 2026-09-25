@@ -3182,7 +3182,6 @@ fn type_mod_error_to_anyhow_styled(
             loc,
             lid,
             trace,
-            record_literal,
         }) => {
             UserDiagnostic::new(
                 format_label_mismatch_report(
@@ -3193,7 +3192,6 @@ fn type_mod_error_to_anyhow_styled(
                     *loc,
                     lid,
                     trace,
-                    *record_literal,
                 ),
                 2,
             )
@@ -6908,30 +6906,20 @@ fn format_label_mismatch_report(
     loc: LocIdx,
     lid: &Longident,
     trace: &[(TypeExprRef, TypeExprRef)],
-    record_literal: bool,
 ) -> String {
     let Some((actual, expected)) = trace.first().copied() else {
         return format_compiler_error_report(arena, source, filename, loc, "Type error.");
     };
 
-    let message = if record_literal {
-        const ERROR: &str = "\x1b[1;31m";
-        const INFO: &str = "\x1b[1;33m";
-        const RESET: &str = "\x1b[0m";
-        format!(
-            "The record field {} belongs to the type {ERROR}{}{RESET}\nbut is mixed here with fields of type {INFO}{}{RESET}",
-            format_longident_for_report(arena, lid),
-            format_type_expr(type_ctx, actual),
-            format_type_expr(type_ctx, expected)
-        )
-    } else {
-        format!(
-            "The field {} belongs to the record type {}\nbut a field was expected belonging to the record type {}",
-            format_longident_for_report(arena, lid),
-            format_type_expr(type_ctx, actual),
-            format_type_expr(type_ctx, expected)
-        )
-    };
+    const ERROR: &str = "\x1b[1;31m";
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+    let message = format!(
+        "The record field {} belongs to the type {ERROR}{}{RESET}\nbut is mixed here with fields of type {INFO}{}{RESET}",
+        format_longident_for_report(arena, lid),
+        format_type_expr(type_ctx, actual),
+        format_type_expr(type_ctx, expected)
+    );
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 

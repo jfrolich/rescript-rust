@@ -476,7 +476,6 @@ pub enum TypeCoreError {
         loc: LocIdx,
         lid: Longident,
         trace: Vec<(TypeExprRef, TypeExprRef)>,
-        record_literal: bool,
     },
 
     /// Pattern type clash.
@@ -6025,19 +6024,13 @@ fn type_pattern_record(
             if vars.is_empty() {
                 ctx.end_def();
             }
+            // OCaml typecore.ml:1538 `unify_pat_types loc !env ty_res
+            // record_ty` raises `Pattern_type_clash` at the record pattern.
             if let Err(err) = unify_pattern_types(tctx, loc, ty_res, record_ty) {
                 if !vars.is_empty() {
                     ctx.end_def();
                 }
-                return Err(match err {
-                    TypeCoreError::PatternTypeClash { trace, .. } => TypeCoreError::LabelMismatch {
-                        loc: field.lid.loc,
-                        lid: field_lid_for_error,
-                        trace,
-                        record_literal: false,
-                    },
-                    err => err,
-                });
+                return Err(err);
             }
             (env_label, ty_arg, vars, true)
         } else {
@@ -15314,7 +15307,6 @@ fn type_record(
                             loc: field.lid.loc,
                             lid: tctx.arena.get_longident(field.lid.txt).clone(),
                             trace,
-                            record_literal: true,
                         });
                     }
                     let ty_arg = crate::types::ctype::instance(ctx, ty_arg0);
@@ -16755,6 +16747,15 @@ fn type_setfield(
     if let Some(label) = env_label.as_mut() {
         qualify_label_description_paths(label, env, &mut tctx.persistent_env, ctx);
     }
+    // OCaml typecore.ml:2948: `let ty_record = if opath = None then newvar ()
+    // else record.exp_type`, where `opath` is the receiver's concrete record
+    // path (`type_label_access`).
+    let ty_record =
+        if extract_concrete_record_type_info(ty_exp, env, &mut tctx.persistent_env, ctx).is_some() {
+            ty_exp
+        } else {
+            ctx.new_var(None)
+        };
     // OCaml compiler/ml/typecore.ml:3703-3743 (`type_label_exp`) opens a
     // definition scope before `instance_label` and keeps it open through
     // `type_argument`; setfield values must see the same raised level as record
@@ -16815,12 +16816,21 @@ fn type_setfield(
                 }
 
                 // OCaml compiler/ml/typecore.ml:3717-3721 unifies an instance of the
-                // label result with the expected record type, then instances the field
+                // label result with the expected record type (raising
+                // `Label_mismatch` at the label), then instances the field
                 // argument before typing the assigned value.
                 let ty_res = crate::types::ctype::instance(ctx, ty_res0);
-                let expected_record_ty = crate::types::ctype::instance(ctx, record_ty);
+                let expected_record_ty = crate::types::ctype::instance(ctx, ty_record);
                 let label_result_unify =
-                    unify_expression_types(tctx, loc, ty_res, expected_record_ty, None);
+                    crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_record_ty)
+                        .map_err(|err| TypeCoreError::LabelMismatch {
+                            loc: field_lid.loc,
+                            lid: resolved_lid.clone(),
+                            trace: match err {
+                                TypeError::Unify(trace) => trace,
+                                _ => vec![(ty_res, expected_record_ty)],
+                            },
+                        });
                 let field_ty = crate::types::ctype::instance(ctx, ty_arg0);
 
                 if separate {
@@ -16883,6 +16893,8 @@ fn type_setfield(
     // OCaml compiler/ml/typecore.ml:3779 returns `{arg with exp_type =
     // instance env arg.exp_type}` from `type_label_exp`.
     typed_value.exp_type = crate::types::ctype::instance(ctx, typed_value.exp_type);
+    // OCaml typecore.ml:2953: `unify_exp env record ty_record`.
+    unify_expression_types(tctx, typed_record.exp_loc, typed_record.exp_type, ty_record, None)?;
 
     if label_desc.lbl_mut == crate::types::MutableFlag::Immutable {
         return Err(TypeCoreError::LabelNotMutable {
