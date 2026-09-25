@@ -63,37 +63,42 @@ fn seek_2_lines_after(src: &str, pos: &Position) -> (usize, i32) {
     (current_char, current_line)
 }
 
-/// Count leading spaces in a string.
-fn leading_space_count(s: &str) -> usize {
-    s.chars().take_while(|&c| c == ' ').count()
+/// Count leading spaces in a byte string (`leading_space_count`).
+fn leading_space_count(s: &[u8]) -> usize {
+    s.iter().take_while(|&&c| c == b' ').count()
 }
 
-fn char_len(s: &str) -> usize {
-    s.chars().count()
-}
-
-fn char_slice(s: &str, start: usize, end: usize) -> &str {
-    let start_byte = char_to_byte_idx(s, start);
-    let end_byte = char_to_byte_idx(s, end);
-    &s[start_byte..end_byte]
-}
-
-/// Break a long line into chunks of max_width characters.
-/// Matches OCaml's `break_long_line` in code_frame.ml.
-fn break_long_line(max_width: usize, line: &str) -> Vec<&str> {
-    if max_width == 0 || line.is_empty() {
-        return vec![line];
+/// `String.get_utf_8_uchar line pos |> Uchar.utf_decode_length`: the length
+/// of the UTF-8 sequence at `pos`, or of the invalid prefix that decoding
+/// consumed.
+fn utf_8_decode_length(s: &[u8], pos: usize) -> usize {
+    let rest = &s[pos..];
+    match std::str::from_utf8(&rest[..rest.len().min(4)]) {
+        Ok(text) => text.chars().next().map_or(1, char::len_utf8),
+        Err(err) if err.valid_up_to() > 0 => std::str::from_utf8(&rest[..err.valid_up_to()])
+            .ok()
+            .and_then(|text| text.chars().next())
+            .map_or(1, char::len_utf8),
+        Err(err) => err.error_len().unwrap_or(rest.len()).max(1),
     }
+}
+
+/// Break a long line into chunks of `max_width` characters
+/// (compiler/ml/code_frame.ml `break_long_line`).
+fn break_long_line(max_width: usize, line: &[u8]) -> Vec<&[u8]> {
+    let line_length = line.len();
     let mut result = Vec::new();
     let mut pos = 0;
-    let len = char_len(line);
-    while pos < len {
-        let chunk_length = max_width.min(len - pos);
-        result.push(char_slice(line, pos, pos + chunk_length));
-        pos += chunk_length;
-    }
-    if result.is_empty() {
-        result.push(line);
+    while pos < line_length {
+        let mut chunk_end = pos;
+        let mut remaining_width = max_width;
+        while chunk_end < line_length && remaining_width > 0 {
+            chunk_end += utf_8_decode_length(line, chunk_end);
+            remaining_width -= 1;
+        }
+        let chunk_end = chunk_end.min(line_length);
+        result.push(&line[pos..chunk_end]);
+        pos = chunk_end;
     }
     result
 }
@@ -105,17 +110,18 @@ enum Gutter {
     Elided,
 }
 
-/// A highlighted portion of a line.
-struct HighlightedString {
-    s: String,
-    start: usize,
-    end: usize,
+/// A highlighted portion of a line. `start`/`end_` are byte indices into `s`
+/// computed from `pos_cnum - pos_bol` (UTF-16 columns), exactly as OCaml does.
+struct HighlightedString<'a> {
+    s: &'a [u8],
+    start: isize,
+    end_: isize,
 }
 
 /// A line with gutter and content.
-struct Line {
+struct Line<'a> {
     gutter: Gutter,
-    content: Vec<HighlightedString>,
+    content: Vec<HighlightedString<'a>>,
 }
 
 #[derive(Clone, Copy)]
@@ -280,16 +286,6 @@ fn source_for_display(src: &str) -> Cow<'_, str> {
     }
 }
 
-fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
-    if char_idx == 0 {
-        return 0;
-    }
-    s.char_indices()
-        .nth(char_idx)
-        .map(|(idx, _)| idx)
-        .unwrap_or(s.len())
-}
-
 /// Print a code frame with source context around an error.
 ///
 /// This formats source code with:
@@ -324,11 +320,11 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
     // 3 for separator + the 2 spaces around it
     let line_width = 78 - max_line_digits - indent - 3;
 
-    // Extract the relevant portion of source
-    let lines: Vec<(Gutter, &str)> = if start_offset < end_offset && end_offset <= src.len() {
-        let snippet = &src[start_offset..end_offset];
-        snippet
-            .split('\n')
+    // `String.sub src start (end - start) |> String.split_on_char '\n'`.
+    let bytes = src.as_bytes();
+    let lines: Vec<(Gutter, &[u8])> = if start_offset <= end_offset && end_offset <= bytes.len() {
+        bytes[start_offset..end_offset]
+            .split(|&c| c == b'\n')
             .enumerate()
             .filter_map(|(i, line)| {
                 let line_number = first_shown_line + i as i32;
@@ -351,19 +347,15 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
         vec![]
     };
 
-    // Calculate leading space to strip (minimum non-empty line indentation)
-    let leading_space_to_cut = lines
-        .iter()
-        .filter_map(|(_, line)| {
-            let spaces = leading_space_count(line);
-            if char_len(line) == spaces {
-                None // Line is all spaces, don't count
-            } else {
-                Some(spaces)
-            }
-        })
-        .min()
-        .unwrap_or(0);
+    let leading_space_to_cut = lines.iter().fold(99999usize, |current_max, (_, line)| {
+        let leading_spaces = leading_space_count(line);
+        if line.len() == leading_spaces {
+            // the line's nothing but spaces. Doesn't count
+            current_max
+        } else {
+            current_max.min(leading_spaces)
+        }
+    });
 
     let separator = if leading_space_to_cut == 0 {
         "│"
@@ -371,73 +363,63 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
         "┆"
     };
 
-    // Process lines with highlighting info, breaking long lines into chunks
-    let processed_lines: Vec<Line> = lines
+    let highlight_line_start_offset = start_pos.cnum as isize - start_pos.bol as isize;
+    let highlight_line_end_offset = end_pos.cnum as isize - end_pos.bol as isize;
+    let leading_cut = leading_space_to_cut as isize;
+    let processed_lines: Vec<Line<'_>> = lines
         .iter()
         .map(|(gutter, line)| {
-            let stripped = if char_len(line) > leading_space_to_cut {
-                char_slice(line, leading_space_to_cut, char_len(line))
+            let content: Vec<HighlightedString<'_>> = if line.len() <= leading_space_to_cut {
+                vec![HighlightedString {
+                    s: &[],
+                    start: 0,
+                    end_: 0,
+                }]
             } else {
-                ""
-            };
-
-            // Break long lines into chunks matching OCaml's break_long_line
-            let chunks = break_long_line(line_width, stripped);
-
-            let content: Vec<HighlightedString> = chunks
-                .iter()
-                .enumerate()
-                .map(|(chunk_idx, chunk)| match gutter {
-                    Gutter::Elided => HighlightedString {
-                        s: chunk.to_string(),
-                        start: 0,
-                        end: 0,
-                    },
-                    Gutter::Number(line_number) => {
-                        // Keep this policy aligned with compiler/ml/code_frame.ml.
-                        let highlight_line_start_offset =
-                            start_pos.cnum.saturating_sub(start_pos.bol) as isize;
-                        let highlight_line_end_offset =
-                            end_pos.cnum.saturating_sub(end_pos.bol) as isize;
-                        let leading_cut = leading_space_to_cut as isize;
-                        let chunk_len = chunk.chars().count() as isize;
-
-                        let start = if chunk_idx == 0 && *line_number == highlight_line_start {
-                            highlight_line_start_offset - leading_cut
-                        } else {
-                            0
-                        };
-
-                        let end = if *line_number < highlight_line_start {
-                            0
-                        } else if *line_number == highlight_line_start
-                            && *line_number == highlight_line_end
-                        {
-                            highlight_line_end_offset - leading_cut
-                        } else if *line_number == highlight_line_start {
-                            chunk_len
-                        } else if *line_number > highlight_line_start
-                            && *line_number < highlight_line_end
-                        {
-                            chunk_len
-                        } else if *line_number == highlight_line_end {
-                            highlight_line_end_offset - leading_cut
-                        } else {
-                            0
-                        };
-
-                        let start = start.clamp(0, chunk_len) as usize;
-                        let end = end.clamp(0, chunk_len) as usize;
-
-                        HighlightedString {
-                            s: chunk.to_string(),
-                            start,
-                            end,
+                break_long_line(line_width, &line[leading_space_to_cut..])
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, chunk)| match gutter {
+                        Gutter::Elided => HighlightedString {
+                            s: chunk,
+                            start: 0,
+                            end_: 0,
+                        },
+                        Gutter::Number(line_number) => {
+                            let line_number = *line_number;
+                            // OCaml measures `String.length line` of the
+                            // chunk here.
+                            let chunk_len = chunk.len() as isize;
+                            let start = if i == 0 && line_number == highlight_line_start {
+                                highlight_line_start_offset - leading_cut
+                            } else {
+                                0
+                            };
+                            let end_ = if line_number < highlight_line_start {
+                                0
+                            } else if line_number == highlight_line_start
+                                && line_number == highlight_line_end
+                            {
+                                highlight_line_end_offset - leading_cut
+                            } else if line_number == highlight_line_start
+                                || (line_number > highlight_line_start
+                                    && line_number < highlight_line_end)
+                            {
+                                chunk_len
+                            } else if line_number == highlight_line_end {
+                                highlight_line_end_offset - leading_cut
+                            } else {
+                                0
+                            };
+                            HighlightedString {
+                                s: chunk,
+                                start,
+                                end_,
+                            }
                         }
-                    }
-                })
-                .collect();
-
+                    })
+                    .collect()
+            };
             Line {
                 gutter: gutter.clone(),
                 content,
@@ -446,8 +428,8 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
         .collect();
 
     // `Code_frame.print`'s drawing (compiler/ml/code_frame.ml:222-298): every
-    // character goes through `add_ch`, which emits an ANSI sequence only
-    // when the color differs from the previous character's (across lines).
+    // byte goes through `add_ch`, which emits an ANSI sequence only when the
+    // color differs from the previous byte's (across lines).
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FrameColor {
         NoColor,
@@ -455,53 +437,50 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
         Emphasis,
     }
     struct Frame {
-        buf: String,
+        buf: Vec<u8>,
         last: FrameColor,
         use_color: bool,
         emphasis: &'static str,
     }
     impl Frame {
-        fn add_ch(&mut self, color: FrameColor, ch: char) {
+        fn add_ch(&mut self, color: FrameColor, ch: u8) {
             if !self.use_color || self.last == color {
                 self.buf.push(ch);
                 return;
             }
-            match (self.last, color) {
-                (FrameColor::NoColor, FrameColor::Dim) => self.buf.push_str(ANSI_DIM),
-                (FrameColor::NoColor, FrameColor::Emphasis) => self.buf.push_str(self.emphasis),
-                (_, FrameColor::NoColor) => self.buf.push_str(ANSI_RESET),
-                (_, FrameColor::Dim) => {
-                    self.buf.push_str(ANSI_RESET);
-                    self.buf.push_str(ANSI_DIM);
-                }
-                (_, FrameColor::Emphasis) => {
-                    self.buf.push_str(ANSI_RESET);
-                    self.buf.push_str(self.emphasis);
-                }
+            let ansi: &[&str] = match (self.last, color) {
+                (FrameColor::NoColor, FrameColor::Dim) => &[ANSI_DIM],
+                (FrameColor::NoColor, FrameColor::Emphasis) => &[self.emphasis],
+                (_, FrameColor::NoColor) => &[ANSI_RESET],
+                (_, FrameColor::Dim) => &[ANSI_RESET, ANSI_DIM],
+                (_, FrameColor::Emphasis) => &[ANSI_RESET, self.emphasis],
+            };
+            for part in ansi {
+                self.buf.extend_from_slice(part.as_bytes());
             }
             self.buf.push(ch);
             self.last = color;
         }
 
         fn add_str(&mut self, color: FrameColor, s: &str) {
-            for ch in s.chars() {
+            for &ch in s.as_bytes() {
                 self.add_ch(color, ch);
             }
         }
 
         fn draw_gutter(&mut self, width: usize, color: FrameColor, s: &str, separator: &str) {
             for _ in 0..width.saturating_sub(s.len()) {
-                self.add_ch(FrameColor::NoColor, ' ');
+                self.add_ch(FrameColor::NoColor, b' ');
             }
             self.add_str(color, s);
-            self.add_ch(FrameColor::NoColor, ' ');
+            self.add_ch(FrameColor::NoColor, b' ');
             self.add_str(FrameColor::Dim, separator);
-            self.add_ch(FrameColor::NoColor, ' ');
+            self.add_ch(FrameColor::NoColor, b' ');
         }
     }
 
     let mut frame = Frame {
-        buf: String::with_capacity(1024),
+        buf: Vec::with_capacity(1024),
         last: FrameColor::NoColor,
         use_color,
         emphasis: emphasis_ansi(emphasis),
@@ -512,7 +491,7 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
             Gutter::Elided => {
                 frame.draw_gutter(gutter_width, FrameColor::Dim, ".", separator);
                 frame.add_str(FrameColor::Dim, "...");
-                frame.add_ch(FrameColor::NoColor, '\n');
+                frame.add_ch(FrameColor::NoColor, b'\n');
             }
             Gutter::Number(line_number) => {
                 for (i, hs) in line.content.iter().enumerate() {
@@ -530,21 +509,28 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
                         FrameColor::NoColor
                     };
                     frame.draw_gutter(gutter_width, gutter_color, &gutter_content, separator);
-                    for (ii, ch) in hs.s.chars().enumerate() {
-                        let color = if ii >= hs.start && ii < hs.end {
+                    for (ii, &ch) in hs.s.iter().enumerate() {
+                        let ii = ii as isize;
+                        let color = if ii >= hs.start && ii < hs.end_ {
                             FrameColor::Emphasis
                         } else {
                             FrameColor::NoColor
                         };
                         frame.add_ch(color, ch);
                     }
-                    frame.add_ch(FrameColor::NoColor, '\n');
+                    frame.add_ch(FrameColor::NoColor, b'\n');
                 }
             }
         }
     }
 
-    frame.buf
+    // OCaml writes these bytes as-is; a highlight boundary can fall inside a
+    // multi-byte character. A Rust `String` cannot carry the split sequence,
+    // so such bytes decode to U+FFFD.
+    match String::from_utf8(frame.buf) {
+        Ok(text) => text,
+        Err(err) => String::from_utf8_lossy(err.as_bytes()).into_owned(),
+    }
 }
 
 /// Format a location as "filename:line:col" or "filename:line:col-endcol"
@@ -616,10 +602,10 @@ mod tests {
 
     #[test]
     fn test_leading_space_count() {
-        assert_eq!(leading_space_count(""), 0);
-        assert_eq!(leading_space_count("hello"), 0);
-        assert_eq!(leading_space_count("  hello"), 2);
-        assert_eq!(leading_space_count("    "), 4);
+        assert_eq!(leading_space_count(b""), 0);
+        assert_eq!(leading_space_count(b"hello"), 0);
+        assert_eq!(leading_space_count(b"  hello"), 2);
+        assert_eq!(leading_space_count(b"    "), 4);
     }
 
     #[test]
