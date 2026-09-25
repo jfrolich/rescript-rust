@@ -5020,7 +5020,18 @@ fn type_pattern_construct(
             &mut tctx.persistent_env,
             tctx.type_ctx,
         ) {
-            Some(resolution) => {
+            Err(tpath) => {
+                return Err(wrong_constructor_name_error(
+                    tctx,
+                    env,
+                    lid.loc,
+                    expected_ty,
+                    tpath,
+                    &lid_name,
+                    "This variant pattern is expected to have",
+                ));
+            }
+            Ok(Some(resolution)) => {
                 if !resolution.ambiguous_types.is_empty() {
                     tctx.report_warning(
                         lid.loc,
@@ -5042,7 +5053,7 @@ fn type_pattern_construct(
                 }
                 (resolution.desc, resolution.path)
             }
-            None => {
+            Ok(None) => {
                 match lookup_constructor_in_module(
                     lid_txt,
                     tctx.arena,
@@ -13404,7 +13415,18 @@ fn type_construct(
             &mut tctx.persistent_env,
             tctx.type_ctx,
         ) {
-            Some(resolution) => {
+            Err(tpath) => {
+                return Err(wrong_constructor_name_error(
+                    tctx,
+                    env,
+                    lid.loc,
+                    expected_ty,
+                    tpath,
+                    &lid_name,
+                    "This variant expression is expected to have",
+                ));
+            }
+            Ok(Some(resolution)) => {
                 if !resolution.ambiguous_types.is_empty() {
                     tctx.report_warning(
                         lid.loc,
@@ -13417,7 +13439,7 @@ fn type_construct(
                 }
                 (resolution.path, resolution.desc)
             }
-            None => {
+            Ok(None) => {
                 match lookup_constructor_in_module(
                     &longident,
                     tctx.arena,
@@ -24896,7 +24918,7 @@ fn disambiguate_constructor<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
-) -> Option<DisambiguatedConstructor> {
+) -> Result<Option<DisambiguatedConstructor>, Path> {
     // Step 1: Try to extract the variant type path from the expected type
     let opath = extract_variant_type_path_from_expected_with_persistent_env(
         expected_ty,
@@ -24910,14 +24932,22 @@ fn disambiguate_constructor<'a>(
 
     if all_constrs.is_empty() {
         // No constructors found in env - try type-directed lookup
-        let (path, desc) =
-            lookup_constructor_by_expected_type(cstr_name, expected_ty, env, pers_env, ctx)?;
-        return Some(DisambiguatedConstructor {
-            path,
-            desc,
-            source: ConstructorDisambiguationSource::ExpectedType { tpath: opath? },
-            ambiguous_types: Vec::new(),
-        });
+        let Some(target_path) = opath else {
+            return Ok(None);
+        };
+        return match lookup_constructor_by_expected_type(cstr_name, expected_ty, env, pers_env, ctx)
+        {
+            Some((path, desc)) => Ok(Some(DisambiguatedConstructor {
+                path,
+                desc,
+                source: ConstructorDisambiguationSource::ExpectedType { tpath: target_path },
+                ambiguous_types: Vec::new(),
+            })),
+            None if expected_type_constructor_names(&target_path, env, pers_env, ctx).is_some() => {
+                Err(target_path)
+            }
+            None => Ok(None),
+        };
     }
 
     // Step 3: If we have a target type path, try to disambiguate
@@ -24945,12 +24975,12 @@ fn disambiguate_constructor<'a>(
                     ctx,
                 ) {
                     let path = Path::pident(Ident::create_persistent(cstr_name));
-                    return Some(DisambiguatedConstructor {
+                    return Ok(Some(DisambiguatedConstructor {
                         path,
                         desc: (*cstr).clone(),
                         source: ConstructorDisambiguationSource::InScope,
                         ambiguous_types: Vec::new(),
-                    });
+                    }));
                 }
             }
         }
@@ -24960,14 +24990,19 @@ fn disambiguate_constructor<'a>(
             lookup_constructor_by_expected_type(cstr_name, expected_ty, env, pers_env, ctx)
         {
             let (path, desc) = result;
-            return Some(DisambiguatedConstructor {
+            return Ok(Some(DisambiguatedConstructor {
                 path,
                 desc,
                 source: ConstructorDisambiguationSource::ExpectedType {
                     tpath: target_path.clone(),
                 },
                 ambiguous_types: Vec::new(),
-            });
+            }));
+        }
+        // OCaml `lookup_from_type` (typecore.ml:852-877) raises `Wrong_name`
+        // when the expected type's descriptors do not contain the name.
+        if expected_type_constructor_names(target_path, env, pers_env, ctx).is_some() {
+            return Err(target_path.clone());
         }
     }
 
@@ -24984,12 +25019,55 @@ fn disambiguate_constructor<'a>(
         ctx,
     );
     let path = Path::pident(Ident::create_persistent(cstr_name));
-    Some(DisambiguatedConstructor {
+    Ok(Some(DisambiguatedConstructor {
         path,
         desc: (*cstr).clone(),
         source: ConstructorDisambiguationSource::InScope,
         ambiguous_types,
+    }))
+}
+
+/// Constructor names of the expected variant type for OCaml `lookup_from_type`'s
+/// `Wrong_name` (typecore.ml:852-877); `None` when the declaration is not found.
+fn expected_type_constructor_names(
+    tpath: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+) -> Option<Vec<String>> {
+    let decl = lookup_type_decl_for_path(tpath, env, pers_env, ctx)?;
+    Some(match &decl.type_kind {
+        crate::types::TypeKind::TypeVariant(cstrs, _) => {
+            cstrs.iter().map(|c| c.cd_id.name().to_string()).collect()
+        }
+        _ => Vec::new(),
     })
+}
+
+/// OCaml `wrap_disambiguate kind ty (Constructor.disambiguate ...)` turning
+/// `lookup_from_type`'s `Wrong_name` into a located error.
+fn wrong_constructor_name_error(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    expected_ty: TypeExprRef,
+    tpath: Path,
+    name: &str,
+    expected: &str,
+) -> TypeCoreError {
+    let alternatives =
+        expected_type_constructor_names(&tpath, env, &mut tctx.persistent_env, tctx.type_ctx)
+            .unwrap_or_default();
+    TypeCoreError::WrongName {
+        loc,
+        kind: "constructor".to_string(),
+        ty: expected_ty,
+        expected: expected.to_string(),
+        path: tpath,
+        name: name.to_string(),
+        alternatives,
+        jsx_component_info: None,
+    }
 }
 
 fn force_constructor_disambiguate_by_type_compare<'a>(
