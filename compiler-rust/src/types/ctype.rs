@@ -6097,7 +6097,17 @@ fn unify_after_expansion<'a>(
         }
     }
     if !t1_changed && !t2_changed {
-        return unify(ctx, state, t1_expanded, t2_expanded);
+        // OCaml's unify2 calls unify3 directly here (ctype.ml:2169); the
+        // pair the nested `unify` adds to a failure trace is not part of
+        // OCaml's trace.
+        let (e1, e2) = (ctx.repr(t1_expanded), ctx.repr(t2_expanded));
+        return match unify(ctx, state, t1_expanded, t2_expanded) {
+            Err(TypeError::Unify(mut trace)) if trace.first() == Some(&(e1, e2)) => {
+                trace.remove(0);
+                Err(TypeError::Unify(trace))
+            }
+            other => other,
+        };
     }
 
     {
@@ -6162,7 +6172,15 @@ fn unify_after_expansion<'a>(
         }
     }
 
-    let unify_result = swap_trace(unify(ctx, state, lhs, rhs));
+    // OCaml runs unify3 on the expanded pair without a trace entry of its
+    // own (ctype.ml:2169-2173); drop the pair the nested `unify` adds.
+    let unify_result = swap_trace(match unify(ctx, state, lhs, rhs) {
+        Err(TypeError::Unify(mut trace)) if trace.first() == Some(&(lhs, rhs)) => {
+            trace.remove(0);
+            Err(TypeError::Unify(trace))
+        }
+        other => other,
+    });
     unify_result?;
 
     if state.mode != crate::types::UnifyMode::Pattern {
@@ -6321,7 +6339,7 @@ fn unify_types<'a>(
             // does not expand constructor heads after the
             // compiler/ml/ctype.ml:2302 deep-occur special case has failed.
             if occur_check(ctx, state.env(), state.mode, t1, t2).is_err() {
-                return Err(TypeError::Unify(vec![(t1, t2)]));
+                return Err(TypeError::Unify(vec![]));
             }
             if let Some(env) = state.env() {
                 occur_univar(ctx, env, t2)?;
@@ -6336,7 +6354,7 @@ fn unify_types<'a>(
 
             // Symmetric `unify1_var` case from compiler/ml/ctype.ml:2304.
             if occur_check(ctx, state.env(), state.mode, t2, t1).is_err() {
-                return Err(TypeError::Unify(vec![(t1, t2)]));
+                return Err(TypeError::Unify(vec![]));
             }
             if let Some(env) = state.env() {
                 occur_univar(ctx, env, t1)?;
@@ -6398,7 +6416,7 @@ fn unify_types<'a>(
             if tl1.len() != tl2.len() {
                 drop(desc1);
                 drop(desc2);
-                return Err(TypeError::Unify(vec![(t1, t2)]));
+                return Err(TypeError::Unify(vec![]));
             }
 
             let original_desc1 = (*desc1).clone();
@@ -6587,13 +6605,13 @@ fn unify_types<'a>(
                 if state.mode == UnifyMode::Pattern {
                     return unify_pattern_constructor_mismatch(ctx, state, t1, t2);
                 }
-                return Err(TypeError::Unify(vec![(t1, t2)]));
+                return Err(TypeError::Unify(vec![]));
             }
 
             if args1.len() != args2.len() {
                 drop(desc1);
                 drop(desc2);
-                return Err(TypeError::Unify(vec![(t1, t2)]));
+                return Err(TypeError::Unify(vec![]));
             }
 
             let same_path = path1.clone();
@@ -6671,7 +6689,7 @@ fn unify_types<'a>(
             if vars1.len() != vars2.len() {
                 drop(desc1);
                 drop(desc2);
-                return Err(TypeError::Unify(vec![(t1, t2)]));
+                return Err(TypeError::Unify(vec![]));
             }
 
             let original_desc1 = (*desc1).clone();
@@ -6776,7 +6794,7 @@ fn unify_types<'a>(
             if n1 != n2 {
                 drop(desc1);
                 drop(desc2);
-                return Err(TypeError::Unify(vec![(t1, t2)]));
+                return Err(TypeError::Unify(vec![]));
             }
 
             let typ1 = *typ1;
@@ -6830,7 +6848,7 @@ fn unify_types<'a>(
                 &lids1,
             );
             if !labels_1_complete || !labels_2_complete {
-                return Err(TypeError::Unify(vec![(t1, t2)]));
+                return Err(TypeError::Unify(vec![]));
             }
 
             let package_paths_equivalent = path1.same(&path2)
@@ -6843,15 +6861,15 @@ fn unify_types<'a>(
                     norm1.same(&norm2)
                 });
             if !package_paths_equivalent {
-                return Err(TypeError::Unify(vec![(t1, t2)]));
+                return Err(TypeError::Unify(vec![]));
             }
 
             if args1.len() != args2.len() {
-                return Err(TypeError::Unify(vec![(t1, t2)]));
+                return Err(TypeError::Unify(vec![]));
             }
 
             if lids1.len() != args1.len() || lids2.len() != args2.len() {
-                return Err(TypeError::Unify(vec![(t1, t2)]));
+                return Err(TypeError::Unify(vec![]));
             }
 
             let pairs: Vec<_> = args1
@@ -7009,7 +7027,7 @@ fn unify_types<'a>(
             if (is_constr1 || is_constr2) && state.mode == UnifyMode::Pattern {
                 return unify_pattern_constructor_mismatch(ctx, state, t1, t2);
             }
-            Err(TypeError::Unify(vec![(t1, t2)]))
+            Err(TypeError::Unify(vec![]))
         }
     }
 }
@@ -7243,9 +7261,10 @@ fn unify_rows<'a>(
             super::btype::row_field_is_absent(ctx, f1) || super::btype::row_field_is_absent(ctx, f2)
         });
         if (empty(&r1) || row2.row_closed) && (empty(&r2) || row1.row_closed) && all_absent {
+            // ctype.ml:2432 `raise (Unify [(mkvariant [] true, mkvariant [] true)])`.
             return Err(TypeError::Unify(vec![(
-                snapshot_row_type_for_trace(ctx, row1),
-                snapshot_row_type_for_trace(ctx, row2),
+                mkvariant(ctx, Vec::new(), true),
+                mkvariant(ctx, Vec::new(), true),
             )]));
         }
     }
@@ -7281,6 +7300,7 @@ fn unify_rows<'a>(
     let set_more = |ctx: &'a TypeContext,
                     state: &mut UnifyState,
                     row: &RowDesc,
+                    is_row1: bool,
                     rest: &[RowFieldEntryRef<'_>]|
      -> TypeResult<()> {
         let row_is_fixed = row_fixed(ctx, row);
@@ -7295,7 +7315,10 @@ fn unify_rows<'a>(
         if (!rest.is_empty() && (row.row_closed || row_is_fixed))
             || (closed && row_is_fixed && !row.row_closed)
         {
-            return Err(TypeError::Unify(vec![]));
+            // ctype.ml:2463-2464.
+            let t1 = mkvariant(ctx, Vec::new(), true);
+            let t2 = mkvariant(ctx, rest, false);
+            return Err(TypeError::Unify(vec![if is_row1 { (t1, t2) } else { (t2, t1) }]));
         }
         let rm = row_more(ctx, row);
         if row_is_fixed {
@@ -7327,10 +7350,23 @@ fn unify_rows<'a>(
         (*desc).clone()
     };
     let result = (|| -> TypeResult<()> {
-        set_more(ctx, state, &row2, &r1)?;
-        set_more(ctx, state, &row1, &r2)?;
+        set_more(ctx, state, &row2, false, &r1)?;
+        set_more(ctx, state, &row1, true, &r2)?;
         for (label, f1, f2) in &pairs {
-            unify_row_field(ctx, state, fixed1, fixed2, more, label, f1, f2)?;
+            // ctype.ml:2485-2491 prefixes the single-field variants.
+            if let Err(err) = unify_row_field(ctx, state, fixed1, fixed2, more, label, f1, f2) {
+                return Err(match err {
+                    TypeError::Unify(trace) => {
+                        let mut new_trace = vec![(
+                            mkvariant(ctx, vec![((*label).into(), (*f1).clone())], true),
+                            mkvariant(ctx, vec![((*label).into(), (*f2).clone())], true),
+                        )];
+                        new_trace.extend(trace);
+                        TypeError::Unify(new_trace)
+                    }
+                    err => err,
+                });
+            }
         }
         if super::btype::static_row(ctx, &row1) {
             let rm = row_more(ctx, &row1);
@@ -7345,59 +7381,22 @@ fn unify_rows<'a>(
     if let Err(err) = result {
         ctx.set_desc(rm1, md1.clone());
         ctx.set_desc(rm2, md2.clone());
-        return match err {
-            TypeError::Unify(trace) if trace.is_empty() => Err(TypeError::Unify(vec![(
-                snapshot_row_type_for_trace(ctx, row1),
-                snapshot_row_type_for_trace(ctx, row2),
-            )])),
-            err => Err(err),
-        };
+        return Err(err);
     }
     Ok(())
 }
 
-fn snapshot_row_type_for_trace(ctx: &TypeContext, row: &RowDesc) -> TypeExprRef {
-    let row = row_repr_ref(ctx, row);
-    let row = row.as_ref();
-    let mut cache = HashMap::new();
-    let row_more = copy_type_deep(ctx, row.row_more, &mut cache);
-    let row_fields = row
-        .row_fields
-        .iter()
-        .map(|(label, field)| {
-            let field = super::btype::row_field_repr(ctx, field);
-            let field = match field {
-                RowField::Rpresent(Some(ty)) => {
-                    RowField::Rpresent(Some(copy_type_deep(ctx, ty, &mut cache)))
-                }
-                RowField::Reither {
-                    constant,
-                    types,
-                    matched,
-                    ..
-                } => RowField::Reither {
-                    constant,
-                    types: types
-                        .iter()
-                        .map(|ty| copy_type_deep(ctx, *ty, &mut cache))
-                        .collect(),
-                    matched,
-                    link: ctx.alloc_row_field(None),
-                },
-                RowField::Rpresent(None) => RowField::Rpresent(None),
-                RowField::Rabsent => RowField::Rabsent,
-            };
-            (label.clone(), field)
-        })
-        .collect();
-
-    ctx.new_variant(RowDesc {
-        row_fields,
+/// `mkvariant fields closed` (ctype.ml): a generic row with a fresh row
+/// variable, used for unification traces.
+fn mkvariant(ctx: &TypeContext, fields: Vec<(Label, RowField)>, closed: bool) -> TypeExprRef {
+    let row_more = ctx.new_var(None);
+    ctx.new_generic_type(TypeDesc::Tvariant(RowDesc {
+        row_fields: fields,
         row_more,
-        row_closed: row.row_closed,
-        row_fixed: row.row_fixed,
-        row_name: row.row_name.clone(),
-    })
+        row_closed: closed,
+        row_fixed: false,
+        row_name: None,
+    }))
 }
 
 /// Unify two row fields.
