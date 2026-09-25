@@ -14024,27 +14024,31 @@ fn select_record_type_for_fields<'a>(
         }
     }
 
+    // OCaml compiler/ml/typecore.ml:981-1005 `disambiguate_label_by_ids`
+    // keeps the labels in scope whose record has every field (`labels'`),
+    // then those satisfying the closed-record check (`labels''`), falling back
+    // to the previous list when a filter leaves nothing; `Label.disambiguate`
+    // (typecore.ml:900-918) then takes the first remaining label.
     let first_name = *field_names.first()?;
-    let mut matching: Vec<(Option<Path>, TypeExprRef)> = Vec::new();
     let candidates = env.find_all_labels(first_name);
+    let mut with_ids = Vec::new();
+    let mut closed = Vec::new();
     for label in candidates {
         if let Some(info) = build_record_label_descriptions_info(label.lbl_res, env, pers_env, ctx)
         {
+            if !field_names
+                .iter()
+                .all(|name| info.summary.contains_label(name))
+            {
+                continue;
+            }
+            with_ids.push(label.lbl_res);
             if info.matches_field_names(field_names, closed_record) {
-                let key = extract_type_path_from_expected(label.lbl_res, env, ctx);
-                if matching.iter().any(|(existing, _)| *existing == key) {
-                    continue;
-                }
-                matching.push((key, label.lbl_res));
+                closed.push(label.lbl_res);
             }
         }
     }
-
-    if matching.len() == 1 {
-        Some(matching[0].1)
-    } else {
-        None
-    }
+    closed.first().or_else(|| with_ids.first()).copied()
 }
 
 fn select_record_type_from_qualified_label_scope<'a>(
