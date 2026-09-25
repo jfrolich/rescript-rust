@@ -5781,9 +5781,12 @@ fn type_pattern_record(
     // compiler/ml/typecore.ml uses Open for the missing-field check whenever a
     // rest binding is present, while retaining the parsed closed flag in the
     // typed tree.
+    // `check_recordpat_labels` (typecore.ml:1113-1117) does nothing for an
+    // empty label list.
     if closed_flag == crate::parser::ast::ClosedFlag::Closed
         && !has_dict_pattern_attr
         && record_rest.is_none()
+        && !typed_fields.is_empty()
     {
         let mut present = HashSet::new();
         for (_, label_desc, _, _) in &typed_fields {
