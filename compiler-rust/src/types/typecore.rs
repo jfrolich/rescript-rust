@@ -483,6 +483,8 @@ pub enum TypeCoreError {
     PatternTypeClash {
         loc: Option<LocIdx>,
         trace: Vec<(TypeExprRef, TypeExprRef)>,
+        /// The environment of the failed unification (OCaml's `Error` env).
+        env: Option<EnvRef>,
     },
 
     /// Or-pattern type clash.
@@ -490,6 +492,8 @@ pub enum TypeCoreError {
         loc: LocIdx,
         id: Ident,
         trace: Vec<(TypeExprRef, TypeExprRef)>,
+        /// The environment of the failed unification (OCaml's `Error` env).
+        env: Option<EnvRef>,
     },
 
     /// Variable bound multiple times.
@@ -2791,6 +2795,7 @@ fn transl_type_inner(
                         .map_err(|_| TypeCoreError::PatternTypeClash {
                             loc: Some(loc),
                             trace: vec![(fallback_alias_ty, inner_ty)],
+                            env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
                         })?;
                     (inner_ctyp, inner_ty)
                 } else {
@@ -2912,6 +2917,7 @@ fn transl_type_inner(
                 .map_err(|_| TypeCoreError::PatternTypeClash {
                     loc: Some(loc),
                     trace: vec![(scope_var, poly_ty)],
+                    env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
                 })?;
 
             let ctyp = TypedCoreType {
@@ -4522,6 +4528,7 @@ fn unify_pattern_types(
             } else {
                 trace
             },
+            env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
         }),
         Err(TypeError::RecursiveAbbrev) => Err(TypeCoreError::RecursiveLocalConstraint {
             loc: _loc,
@@ -4530,6 +4537,7 @@ fn unify_pattern_types(
         Err(_) => Err(TypeCoreError::PatternTypeClash {
             loc: Some(_loc),
             trace: vec![(ty1, ty2)],
+            env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
         }),
     }
 }
@@ -4574,6 +4582,7 @@ fn unify_pattern_types_gadt(
             } else {
                 trace
             },
+            env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
         }),
         Err(TypeError::RecursiveAbbrev) => Err(TypeCoreError::RecursiveLocalConstraint {
             loc: _loc,
@@ -4582,6 +4591,7 @@ fn unify_pattern_types_gadt(
         Err(_) => Err(TypeCoreError::PatternTypeClash {
             loc: Some(_loc),
             trace: vec![(ty1, ty2)],
+            env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
         }),
     }
 }
@@ -4914,6 +4924,7 @@ fn merge_or_pattern_variables(
                                 } else {
                                     trace
                                 },
+                                env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
                             });
                         }
                         Err(_) => {
@@ -4921,6 +4932,7 @@ fn merge_or_pattern_variables(
                                 loc,
                                 id: v1.id.clone(),
                                 trace: vec![(v1.ty, v2.ty)],
+                                env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
                             });
                         }
                     }
@@ -18487,6 +18499,7 @@ fn type_letmodule(
                 return Err(TypeCoreError::PatternTypeClash {
                     loc: Some(loc),
                     trace,
+                    env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
                 });
             }
             return Err(TypeCoreError::ExprTypeClash {

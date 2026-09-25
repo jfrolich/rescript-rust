@@ -1272,3 +1272,155 @@ pub(super) fn print_not_subtype(
     }));
     printer.report_subtyping_error(ppf, &tr1, "is not a subtype of", &tr2, context);
 }
+
+/// `Typetexp.report_error`'s `Constructor_mismatch (ty, ty')`
+/// (typetexp.ml:804-809).
+pub(super) fn print_constructor_mismatch(ppf: &mut Ppf<'_>, ctx: &TypeContext, ty: TypeExprRef, ty2: TypeExprRef) {
+    let mut printer = Printtyp::new(ctx);
+    printer.reset_and_mark_loops_list(&[ty, ty2]);
+    ppf.open_box(BoxKind::HOV, 0);
+    ppf.str("This variant type contains a constructor");
+    ppf.str(" ");
+    printer.pp_type_expr(ppf, ty);
+    ppf.space();
+    ppf.str("which should be");
+    ppf.space();
+    printer.pp_type_expr(ppf, ty2);
+    ppf.close_box();
+}
+
+/// `Typetexp.report_error`'s `Not_a_variant ty` (typetexp.ml:810-816).
+pub(super) fn print_not_a_variant(ppf: &mut Ppf<'_>, ctx: &TypeContext, ty: TypeExprRef) {
+    let mut printer = Printtyp::new(ctx);
+    printer.reset_and_mark_loops(ty);
+    ppf.open_box(BoxKind::Box, 0);
+    ppf.str("The type ");
+    printer.pp_type_expr(ppf, ty);
+    ppf.space();
+    ppf.str("does not expand to a polymorphic variant type");
+    ppf.close_box();
+    // `Misc.did_you_mean ppf (fun () -> ["`" ^ s])` (PR#7012).
+    if let TypeDesc::Tvar(Some(name)) = &*ctx.get_desc(ctx.repr(ty)) {
+        let name = name.clone();
+        ppf.flush();
+        ppf.newline();
+        ppf.str(&format!("Hint: Did you mean `{name}?"));
+        ppf.flush();
+    }
+}
+
+/// `Typetexp.report_error`'s `Method_mismatch (l, ty, ty')`
+/// (typetexp.ml:833-837).
+pub(super) fn print_method_mismatch(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    label: &str,
+    ty: TypeExprRef,
+    ty2: TypeExprRef,
+) {
+    let mut printer = Printtyp::new(ctx);
+    printer.reset_and_mark_loops_list(&[ty, ty2]);
+    ppf.open_box(BoxKind::HOV, 0);
+    ppf.str(&format!("Method '{label}' has type "));
+    printer.pp_type_expr(ppf, ty);
+    ppf.str(",");
+    ppf.space();
+    ppf.str("which should be ");
+    printer.pp_type_expr(ppf, ty2);
+    ppf.close_box();
+}
+
+/// `Error_message_utils.print_contextual_unification_error`
+/// (error_message_utils.ml:859-882), the `print_extra_info` of pattern type
+/// clashes.
+fn print_contextual_unification_error(ppf: &mut Ppf<'_>, ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) {
+    let option = predef::path_option();
+    let path_of = |t: TypeExprRef| match &*ctx.borrow_desc(t) {
+        TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+        _ => None,
+    };
+    let (Some(p1), Some(p2)) = (path_of(t1), path_of(t2)) else {
+        return;
+    };
+    if p1.same(&option) && !p2.same(&option) {
+        ppf.cut();
+        ppf.newline();
+        ppf.open_box(BoxKind::V, 0);
+        ppf.str("You're expecting the value you're pattern matching on to be an ");
+        tagged(ppf, TAG_INFO, "option");
+        ppf.str(", but the value is actually not an option.");
+        ppf.space();
+        ppf.str("Change your pattern match to work on the concrete value (remove ");
+        tagged(ppf, TAG_ERROR, "Some(_)");
+        ppf.str(" or ");
+        tagged(ppf, TAG_ERROR, "None");
+        ppf.str(" from the pattern) to make it work.");
+        ppf.close_box();
+    } else if p2.same(&option) && !p1.same(&option) {
+        ppf.cut();
+        ppf.newline();
+        ppf.open_box(BoxKind::V, 0);
+        ppf.str("The value you're pattern matching on here is wrapped in an ");
+        tagged(ppf, TAG_INFO, "option");
+        ppf.str(", but you're trying to match on the actual value.");
+        ppf.space();
+        ppf.str("Wrap the highlighted pattern in ");
+        tagged(ppf, TAG_INFO, "Some()");
+        ppf.str(" to make it work.");
+        ppf.close_box();
+    }
+}
+
+fn printer_with_env<'c>(ctx: &'c TypeContext, env: &Env) -> Printtyp<'c> {
+    let mut printer = Printtyp::new(ctx);
+    let lookup_env = env.clone();
+    printer.set_printing_env(Box::new(move |name| {
+        lookup_env.find_type_with_path(name).ok().map(|(p, _)| p)
+    }));
+    printer
+}
+
+/// `Typecore.report_error`'s `Pattern_type_clash trace`
+/// (typecore.ml:4855-4863).
+pub(super) fn print_pattern_type_clash(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    env: &Env,
+    raw_trace: &[(TypeExprRef, TypeExprRef)],
+) {
+    let tr = expand_trace(ctx, raw_trace);
+    let mut printer = printer_with_env(ctx, env);
+    let mut extra = |ppf: &mut Ppf<'_>, _: &mut Printtyp<'_>, t1: TypeExprRef, t2: TypeExprRef| {
+        print_contextual_unification_error(ppf, ctx, t1, t2)
+    };
+    printer.super_unification_error(
+        ppf,
+        true,
+        &tr,
+        &mut |ppf| ppf.str("This pattern matches values of type"),
+        &mut |ppf| ppf.str("but a pattern was expected which matches values of type"),
+        Some(&mut extra),
+    );
+}
+
+/// `Typecore.report_error`'s `Or_pattern_type_clash (id, trace)`
+/// (typecore.ml:4864-4872).
+pub(super) fn print_or_pattern_type_clash(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    env: &Env,
+    name: &str,
+    raw_trace: &[(TypeExprRef, TypeExprRef)],
+) {
+    let tr = expand_trace(ctx, raw_trace);
+    let mut printer = printer_with_env(ctx, env);
+    let first = format!("The variable {name} on the left-hand side of this or-pattern has type");
+    printer.super_unification_error(
+        ppf,
+        true,
+        &tr,
+        &mut |ppf| ppf.str(&first),
+        &mut |ppf| ppf.str("but on the right-hand side it has type"),
+        None,
+    );
+}

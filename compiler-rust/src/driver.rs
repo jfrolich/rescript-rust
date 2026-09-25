@@ -2588,17 +2588,21 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
-        TypeModError::CoreError(TypeCoreError::OrPatternTypeClash { loc, id, trace }) => {
+        TypeModError::CoreError(TypeCoreError::OrPatternTypeClash {
+            loc,
+            id,
+            trace,
+            env,
+        }) => {
+            let env = env
+                .and_then(|env| type_ctx.get_typed_env(env))
+                .map(|env| (*env).clone())
+                .unwrap_or_else(crate::types::Env::empty);
+            let message = type_clash::render_error_message(|ppf| {
+                type_clash::print_or_pattern_type_clash(ppf, type_ctx, &env, id.name(), trace)
+            });
             UserDiagnostic::new(
-                format_or_pattern_type_clash_report(
-                    type_ctx,
-                    arena,
-                    source,
-                    filename,
-                    *loc,
-                    id,
-                    trace,
-                ),
+                format_compiler_error_report_formatted(arena, source, filename, *loc, &message),
                 2,
             )
             .into()
@@ -3087,11 +3091,26 @@ fn type_mod_error_to_anyhow(
         TypeModError::CoreError(TypeCoreError::PatternTypeClash {
             loc: Some(loc),
             trace,
-        }) => UserDiagnostic::new(
-            format_pattern_type_clash_report(type_ctx, arena, source, filename, *loc, trace),
-            2,
-        )
-        .into(),
+            env,
+        }) => {
+            let env = env
+                .and_then(|env| type_ctx.get_typed_env(env))
+                .map(|env| (*env).clone())
+                .unwrap_or_else(crate::types::Env::empty);
+            let message = type_clash::render_error_message(|ppf| {
+                type_clash::print_pattern_type_clash(ppf, type_ctx, &env, trace)
+            });
+            let mut report =
+                format_compiler_error_report_formatted(arena, source, filename, *loc, &message);
+            if suppress_info_style {
+                report = report
+                    .replace("\x1b[1;31m", "")
+                    .replace("\x1b[1;33m", "")
+                    .replace("\x1b[2m", "")
+                    .replace("\x1b[0m", "");
+            }
+            UserDiagnostic::new(report, 2).into()
+        }
         TypeModError::CoreError(TypeCoreError::RecursiveLocalConstraint { loc, trace }) => {
             UserDiagnostic::new(
                 format_recursive_local_constraint_report(
@@ -5268,19 +5287,10 @@ fn format_constructor_mismatch_report(
     actual: TypeExprRef,
     expected: TypeExprRef,
 ) -> String {
-    let mut printer = TypeExprPrinter::new(type_ctx);
-    let actual = printer.format(actual);
-    let expected = printer.format(expected);
-    format_compiler_error_report(
-        arena,
-        source,
-        filename,
-        loc,
-        &format!(
-            "This variant type contains a constructor {} which should be\n{}",
-            actual, expected
-        ),
-    )
+    let message = type_clash::render_error_message(|ppf| {
+        type_clash::print_constructor_mismatch(ppf, type_ctx, actual, expected)
+    });
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn format_not_a_variant_report(
@@ -5291,21 +5301,9 @@ fn format_not_a_variant_report(
     loc: LocIdx,
     ty: TypeExprRef,
 ) -> String {
-    let message = format!(
-        "The type {} does not expand to a polymorphic variant type",
-        format_type_expr(type_ctx, ty)
-    );
-    if let TypeDesc::Tvar(Some(name)) = &*type_ctx.get_desc(type_ctx.repr(ty)) {
-        return format_compiler_error_report_with_unindented_break(
-            arena,
-            source,
-            filename,
-            loc,
-            &message,
-            &format!("Hint: Did you mean `{name}?"),
-        );
-    }
-    format_compiler_error_report(arena, source, filename, loc, &message)
+    let message =
+        type_clash::render_error_message(|ppf| type_clash::print_not_a_variant(ppf, type_ctx, ty));
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn format_method_mismatch_report(
@@ -5318,16 +5316,10 @@ fn format_method_mismatch_report(
     actual: TypeExprRef,
     expected: TypeExprRef,
 ) -> String {
-    let mut printer = TypeExprPrinter::new(type_ctx);
-    let actual = printer.format(actual);
-    let expected = printer.format(expected);
-    format_compiler_error_report(
-        arena,
-        source,
-        filename,
-        loc,
-        &format!("Method '{label}' has type {actual}, which should be {expected}"),
-    )
+    let message = type_clash::render_error_message(|ppf| {
+        type_clash::print_method_mismatch(ppf, type_ctx, label, actual, expected)
+    });
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn format_type_mismatch_report(
