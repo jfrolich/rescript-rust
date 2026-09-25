@@ -16829,10 +16829,9 @@ fn type_setfield(
         tctx.report_warning(field_lid.loc, warning);
     }
 
-    // OCaml: rue { ... exp_type = instance_def Predef.type_unit; ... }
-    // Keep original argument order to preserve Tlink direction.
-    let inst_expected = instance_if_generic(tctx.type_ctx, expected_ty);
-    unify_expression_types(tctx, loc, inst_expected, unit_ty, context)?;
+    // OCaml typecore.ml:2961-2969: `rue { ... exp_type = instance_def
+    // Predef.type_unit }`, i.e. `unify_exp env exp (instance env ty_expected)`.
+    rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
 
     Ok(Expression::new(
         ExpressionDesc::Texp_setfield(
@@ -25623,32 +25622,6 @@ fn constructor_result_path<'a>(
     match &*desc {
         TypeDesc::Tconstr { path, .. } => Some(path.clone()),
         _ => None,
-    }
-}
-
-fn force_constructor_ambiguous_type_side_effects<'a, 'b, I>(
-    selected: &crate::types::decl::ConstructorDescription,
-    others: I,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext,
-) where
-    I: IntoIterator<Item = &'b crate::types::decl::ConstructorDescription>,
-{
-    let Some(selected_path) = constructor_result_path(ctx, selected) else {
-        return;
-    };
-    for other in others {
-        let Some(other_path) = constructor_result_path(ctx, other) else {
-            continue;
-        };
-        let _ = compare_type_paths_for_constructor_disambiguation(
-            &selected_path,
-            &other_path,
-            env,
-            pers_env,
-            ctx,
-        );
     }
 }
 
