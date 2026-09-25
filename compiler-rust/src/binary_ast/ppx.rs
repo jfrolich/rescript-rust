@@ -2021,8 +2021,10 @@ fn collect_raw_js_warnings_from_structure(
     arena: &mut ParseArena,
     warnings: &mut Vec<PpxWarning>,
 ) {
-    for item in structure {
-        collect_raw_js_warnings_from_structure_item(item, arena, warnings);
+    // Warnings are emitted while `Bs_builtin_ppx.structure_mapper` maps the
+    // items, i.e. in its (mostly right-to-left) order.
+    for index in structure_mapper_order(structure, arena) {
+        collect_raw_js_warnings_from_structure_item(&structure[index], arena, warnings);
     }
 }
 
