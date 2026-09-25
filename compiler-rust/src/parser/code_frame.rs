@@ -534,7 +534,17 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
 }
 
 /// Format a location as "filename:line:col" or "filename:line:col-endcol"
+/// Whether `Location.normalize_range` (location.ml:53-73) gives a range: a
+/// column of -1 (a dummy position) prints the file name alone, with no code
+/// frame.
+pub fn has_printable_range(start_pos: &Position, end_pos: &Position) -> bool {
+    start_pos.cnum - start_pos.bol != -1 && end_pos.cnum - end_pos.bol != -1
+}
+
 pub fn format_location(filename: &str, start_pos: &Position, end_pos: &Position) -> String {
+    if !has_printable_range(start_pos, end_pos) {
+        return filename.to_string();
+    }
     // OCaml uses 1-indexed columns: col = pos_cnum - pos_bol + 1
     let start_col = start_pos.cnum - start_pos.bol + 1;
     let end_col = end_pos.cnum - end_pos.bol; // OCaml doesn't add +1 for end (it's exclusive)
@@ -571,10 +581,12 @@ pub fn format_error(
     result.push_str(&colorize_location(&format_location(filename, start_pos, end_pos)));
     result.push_str("\n\n");
 
-    // Code frame
-    result.push_str(&print(src, start_pos, end_pos));
-    // Extra blank line after code frame
-    result.push_str("\n");
+    // Code frame, printed only for a normalized range (location.ml:95-120).
+    if has_printable_range(start_pos, end_pos) {
+        result.push_str(&print(src, start_pos, end_pos));
+        // Extra blank line after code frame
+        result.push_str("\n");
+    }
 
     // Message
     result.push_str("  ");

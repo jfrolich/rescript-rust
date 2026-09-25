@@ -4590,7 +4590,7 @@ fn push_compiler_error_report_header_from_location(
     loc: &Location,
 ) {
     push_compiler_report_intro(output, "We've found a bug for you!");
-    if loc.loc_ghost && loc.loc_start.cnum < 0 && loc.loc_end.cnum < 0 {
+    if !code_frame::has_printable_range(&loc.loc_start, &loc.loc_end) {
         push_compiler_report_location(output, filename);
     } else {
         let location = code_frame::format_location(filename, &loc.loc_start, &loc.loc_end);
@@ -4610,7 +4610,7 @@ fn push_compiler_error_report_header(
     push_compiler_report_intro(output, "We've found a bug for you!");
     let start_pos = arena.loc_start(loc);
     let end_pos = arena.loc_end(loc);
-    if arena.loc_ghost(loc) && start_pos.cnum < 0 && end_pos.cnum < 0 {
+    if !code_frame::has_printable_range(start_pos, end_pos) {
         push_compiler_report_location(output, filename);
     } else {
         let location = code_frame::format_location(filename, start_pos, end_pos);
@@ -4647,7 +4647,7 @@ fn push_compiler_error_report_header_from_external_location(
     loc: &Location,
 ) {
     push_compiler_report_intro(output, "We've found a bug for you!");
-    if loc.loc_ghost && loc.loc_start.cnum < 0 && loc.loc_end.cnum < 0 {
+    if !code_frame::has_printable_range(&loc.loc_start, &loc.loc_end) {
         push_compiler_report_location(output, filename);
     } else {
         let location = code_frame::format_location(filename, &loc.loc_start, &loc.loc_end);
@@ -5586,7 +5586,7 @@ fn format_compiler_warning_report(
     }
     output.push('\n');
     output.push_str("  ");
-    if arena.loc_ghost(warning.loc) && start_pos.cnum < 0 && end_pos.cnum < 0 {
+    if !code_frame::has_printable_range(start_pos, end_pos) {
         output.push_str(&code_frame::colorize_location(filename));
         output.push_str("\n\n");
     } else {
