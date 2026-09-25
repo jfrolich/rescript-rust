@@ -131,14 +131,18 @@ pub(crate) struct TypeMutationSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct QualifiedModuleComponentsCacheKey {
-    path: Path,
+    // OCaml compiler/ml/path.ml:20-24 ignores `Pdot` positions in
+    // `Path.same`; component lookup in env.ml:781-793 keys module identity by
+    // that path equality while still carrying positions in the selected access
+    // path. `SamePathKey` compares and hashes with that equality directly.
+    path: SamePathKey,
     env_id: Option<u64>,
 }
 
 impl QualifiedModuleComponentsCacheKey {
     pub(crate) fn new(path: Path, env_id: Option<u64>) -> Self {
         Self {
-            path: normalize_component_cache_path(path),
+            path: SamePathKey(path),
             env_id,
         }
     }
@@ -146,7 +150,7 @@ impl QualifiedModuleComponentsCacheKey {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct QualifiedRecordLabelCacheKey {
-    path: Path,
+    path: SamePathKey,
     env_id: u64,
     lbl_pos: i32,
 }
@@ -154,7 +158,7 @@ struct QualifiedRecordLabelCacheKey {
 impl QualifiedRecordLabelCacheKey {
     fn new(path: Path, env_id: u64, lbl_pos: i32) -> Self {
         Self {
-            path: normalize_component_cache_path(path),
+            path: SamePathKey(path),
             env_id,
             lbl_pos,
         }
@@ -216,25 +220,6 @@ impl RecordLabelDescriptionSummary {
     }
 }
 
-fn normalize_component_cache_path(path: Path) -> Path {
-    match path {
-        Path::Pident(_) => path,
-        Path::Pdot(parent, name, _) => {
-            // OCaml compiler/ml/path.ml:20-24 ignores `Pdot` positions in
-            // `Path.same`; component lookup in env.ml:781-793 keys module
-            // identity by that path equality while still carrying positions in
-            // the selected access path. Mirror that only for Rust's cache key.
-            Path::pdot(
-                normalize_component_cache_path(parent.as_ref().clone()),
-                name,
-            )
-        }
-        Path::Papply(functor, arg) => Path::papply(
-            normalize_component_cache_path(functor.as_ref().clone()),
-            normalize_component_cache_path(arg.as_ref().clone()),
-        ),
-    }
-}
 
 /// Type checking context.
 ///

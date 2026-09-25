@@ -229,6 +229,16 @@ impl Path {
     /// Flatten this path to an identifier and list of component names.
     ///
     /// Returns `Err(())` if the path contains a `Papply`.
+    /// Whether `flatten` would fail, i.e. the non-`Pdot` root is a functor
+    /// application. Allocation-free.
+    pub fn has_apply_prefix(&self) -> bool {
+        match self {
+            Path::Pident(_) => false,
+            Path::Pdot(parent, _, _) => parent.has_apply_prefix(),
+            Path::Papply(_, _) => true,
+        }
+    }
+
     pub fn flatten(&self) -> Result<(&Ident, Vec<&str>), ()> {
         fn go<'a>(path: &'a Path, acc: &mut Vec<&'a str>) -> Result<&'a Ident, ()> {
             match path {

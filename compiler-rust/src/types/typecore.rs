@@ -31039,7 +31039,7 @@ fn module_components_cache_key(
     }
     // Match `Path.flatten` in compiler/ml/path.ml:63-69: dotted paths whose
     // parent is a functor application have no single stable cache head.
-    if module_path.flatten().is_err() {
+    if module_path.has_apply_prefix() {
         return None;
     }
     let env_id = match module_path {
