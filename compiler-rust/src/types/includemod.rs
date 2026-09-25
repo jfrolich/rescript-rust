@@ -3725,6 +3725,18 @@ fn compare_record_declarations_with_param_map(
     let mut prior_impl = impl_params.to_vec();
     let mut prior_sig = sig_params.to_vec();
     for (impl_label, sig_label) in impl_labels.iter().zip(sig_labels) {
+        // The slow pass re-runs `aux` (includecore.ml:284-312), so
+        // `check_deprecated_mutable_inclusion` warns again for each field up
+        // to the one that is blamed.
+        if let Some(warning) = deprecated_mutable_inclusion_warning(
+            impl_label.ld_id.name(),
+            &impl_label.ld_attributes,
+            &sig_label.ld_attributes,
+            &impl_label.ld_loc,
+            &sig_label.ld_loc,
+        ) {
+            warnings.push(warning);
+        }
         prior_impl.insert(0, impl_label.ld_type);
         prior_sig.insert(0, sig_label.ld_type);
         if !type_expr_lists_equal_for_inclusion(type_ctx, env, param_map, &prior_impl, &prior_sig) {
