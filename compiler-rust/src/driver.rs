@@ -5434,18 +5434,25 @@ fn format_inconsistent_constraint_report(
     loc: LocIdx,
     trace: &[(TypeExprRef, TypeExprRef)],
 ) -> String {
-    if let Some((actual, expected)) = trace.first().copied() {
+    if !trace.is_empty() {
+        // typedecl.ml:2171-2175: "The type constraints are not consistent.@."
+        // then `Printtyp.report_unification_error` from column 0.
+        let unification = type_clash::render_error_message_at_column0(|ppf| {
+            type_clash::print_report_unification_error(
+                ppf,
+                type_ctx,
+                trace,
+                "Type",
+                "is not compatible with type",
+            )
+        });
         format_compiler_error_report_with_unindented_break(
             arena,
             source,
             filename,
             loc,
             "The type constraints are not consistent.",
-            &format!(
-                "Type {} is not compatible with type {}",
-                format_type_expr(type_ctx, actual),
-                format_type_expr(type_ctx, expected)
-            ),
+            unification.trim_end_matches('\n'),
         )
     } else {
         format_compiler_error_report(
@@ -5467,17 +5474,10 @@ fn format_definition_mismatch_report(
     ty: TypeExprRef,
     detail: Option<&str>,
 ) -> String {
-    let mut message = format!(
-        "This variant or record definition does not match that of type {}",
-        format_type_expr(type_ctx, ty)
-    );
-    if let Some(detail) = detail {
-        if !detail.is_empty() {
-            message.push('\n');
-            message.push_str(detail);
-        }
-    }
-    format_compiler_error_report(arena, source, filename, loc, &message)
+    let message = type_clash::render_error_message(|ppf| {
+        type_clash::print_definition_mismatch(ppf, type_ctx, ty, detail)
+    });
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn variance_suffix(n: usize) -> &'static str {

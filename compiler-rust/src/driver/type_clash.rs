@@ -52,6 +52,18 @@ pub(super) fn render_error_message(f: impl FnOnce(&mut Ppf<'_>)) -> String {
     message
 }
 
+/// Render Format output that starts at column 0 with no enclosing box, as
+/// after a `@.` in an error message.
+pub(super) fn render_error_message_at_column0(f: impl FnOnce(&mut Ppf<'_>)) -> String {
+    let mut buf = Vec::new();
+    {
+        let mut ppf = Formatter::new(&mut buf);
+        f(&mut ppf);
+        ppf.flush();
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 /// `bottom_aliases` (typecore.ml:700-705).
 fn bottom_aliases(tr: &[TracePair]) -> Option<(TypeExprRef, TypeExprRef)> {
     match tr {
@@ -1804,4 +1816,30 @@ pub(super) fn print_undefined_method(
     if let Some(hint) = hint {
         did_you_mean(ppf, hint);
     }
+}
+
+/// `Typedecl.report_error`'s `Definition_mismatch (ty, errs)`
+/// (typedecl.ml:2153-2159); `detail` is the rendered
+/// `Includecore.report_type_mismatch` sentence, if any.
+pub(super) fn print_definition_mismatch(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    ty: TypeExprRef,
+    detail: Option<&str>,
+) {
+    let mut printer = Printtyp::new(ctx);
+    ppf.open_box(BoxKind::V, 0);
+    ppf.open_box(BoxKind::HOV, 0);
+    ppf.str("This variant or record definition");
+    ppf.space();
+    ppf.str("does not match that of type");
+    ppf.break_(1, 2);
+    typecore_type_expr(ppf, &mut printer, ty);
+    ppf.close_box();
+    if let Some(detail) = detail.filter(|detail| !detail.is_empty()) {
+        // `report_type_mismatch` prints each error as "@ %a.".
+        ppf.space();
+        ppf.str(detail);
+    }
+    ppf.close_box();
 }
