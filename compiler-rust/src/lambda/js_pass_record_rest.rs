@@ -16,8 +16,32 @@ pub(crate) fn apply_js_record_rest_pass(mut deps: DepsProgram) -> DepsProgram {
         crate::lambda::js_pass_flatten_and_mark_dead::max_ident_stamp_in_program(&deps.program)
             .max(Ident::current_local_stamp());
     Ident::set_current_time(start_stamp);
+    // Without a `RecordRest` expression the rewrite rebuilds the program
+    // unchanged and creates no identifiers.
+    let mut finder = RecordRestFinder::default();
+    crate::js_ir::walk::walk_block(&mut finder, &deps.program.block);
+    if !finder.found {
+        return deps;
+    }
     deps.program.block = rewrite_block(std::mem::take(&mut deps.program.block));
     deps
+}
+
+#[derive(Default)]
+struct RecordRestFinder {
+    found: bool,
+}
+
+impl<'a> crate::js_ir::walk::Visitor<'a> for RecordRestFinder {
+    fn visit_expression(&mut self, expression: &'a Expression) {
+        if matches!(expression.desc, ExpressionDesc::RecordRest(_, _)) {
+            self.found = true;
+        }
+    }
+
+    fn done(&self) -> bool {
+        self.found
+    }
 }
 
 fn field_ident_name(index: usize, label: &str) -> String {

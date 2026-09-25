@@ -39,7 +39,7 @@ pub(crate) fn apply_external_shadow_pass(mut deps: DepsProgram) -> DepsProgram {
     // program shares a name with any binding, the pass rebuilds the program
     // unchanged, so skip it.
     let mut names = ReferencedNames::default();
-    names.scan_block(&deps.program.block);
+    crate::js_ir::walk::walk_block(&mut names, &deps.program.block);
     if names
         .globals
         .iter()
@@ -472,160 +472,23 @@ fn global_this_field(name: &str) -> Expression {
 }
 
 /// Names of the JS globals a program references and of the variables it
-/// declares, gathered by one read-only walk.
+/// declares.
 #[derive(Default)]
 struct ReferencedNames<'a> {
     globals: HashSet<&'a str>,
     bindings: HashSet<&'a str>,
 }
 
-impl<'a> ReferencedNames<'a> {
-    fn scan_block(&mut self, block: &'a Block) {
-        for stmt in block {
-            self.scan_statement(stmt);
+impl<'a> crate::js_ir::walk::Visitor<'a> for ReferencedNames<'a> {
+    fn visit_expression(&mut self, expression: &'a Expression) {
+        if let ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) = &expression.desc
+            && id.is_global()
+        {
+            self.globals.insert(id.name());
         }
     }
 
-    fn scan_case_clause(&mut self, clause: &'a CaseClause) {
-        self.scan_block(&clause.body);
-    }
-
-    fn scan_statement(&mut self, stmt: &'a Statement) {
-        match &stmt.desc {
-            StatementDesc::Block(block) => self.scan_block(block),
-            StatementDesc::Variable(decl) => {
-                self.bindings.insert(decl.ident.name());
-                if let Some(value) = &decl.value {
-                    self.scan_expr(value);
-                }
-            }
-            StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
-                self.scan_expr(expr)
-            }
-            StatementDesc::If(cond, then_block, else_block) => {
-                self.scan_expr(cond);
-                self.scan_block(then_block);
-                self.scan_block(else_block);
-            }
-            StatementDesc::While(_, cond, body) => {
-                self.scan_expr(cond);
-                self.scan_block(body);
-            }
-            StatementDesc::ForRange(_, init, end, _, _, body) => {
-                if let Some(init) = init {
-                    self.scan_expr(init);
-                }
-                self.scan_expr(end);
-                self.scan_block(body);
-            }
-            StatementDesc::ForOf(_, _, iterable, body)
-            | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
-                self.scan_expr(iterable);
-                self.scan_block(body);
-            }
-            StatementDesc::Continue(_) | StatementDesc::Break(_) | StatementDesc::Debugger => {}
-            StatementDesc::IntSwitch(expr, clauses, default) => {
-                self.scan_expr(expr);
-                for (_, clause) in clauses {
-                    self.scan_case_clause(clause);
-                }
-                if let Some(block) = default {
-                    self.scan_block(block);
-                }
-            }
-            StatementDesc::StringSwitch(expr, clauses, default) => {
-                self.scan_expr(expr);
-                for clause in clauses {
-                    self.scan_case_clause(&clause.clause);
-                }
-                if let Some(block) = default {
-                    self.scan_block(block);
-                }
-            }
-            StatementDesc::Try(body, catch, finally) => {
-                self.scan_block(body);
-                if let Some((_, block)) = catch {
-                    self.scan_block(block);
-                }
-                if let Some(block) = finally {
-                    self.scan_block(block);
-                }
-            }
-        }
-    }
-
-    fn scan_expr(&mut self, expr: &'a Expression) {
-        match &expr.desc {
-            ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) => {
-                if id.is_global() {
-                    self.globals.insert(id.name());
-                }
-            }
-            ExpressionDesc::Var(_)
-            | ExpressionDesc::Bool(_)
-            | ExpressionDesc::Str { .. }
-            | ExpressionDesc::RawJsCode(_)
-            | ExpressionDesc::Number(_)
-            | ExpressionDesc::Undefined { .. }
-            | ExpressionDesc::Null => {}
-            ExpressionDesc::Length(inner, _)
-            | ExpressionDesc::IsNullOrUndefined(inner)
-            | ExpressionDesc::Typeof(inner)
-            | ExpressionDesc::JsNot(inner)
-            | ExpressionDesc::JsBnot(inner)
-            | ExpressionDesc::StaticIndex(inner, _, _)
-            | ExpressionDesc::OptionalBlock(inner, _)
-            | ExpressionDesc::CamlBlockTag(inner, _)
-            | ExpressionDesc::Await(inner)
-            | ExpressionDesc::Spread(inner)
-            | ExpressionDesc::RecordRest(_, inner) => self.scan_expr(inner),
-            ExpressionDesc::StringAppend(left, right)
-            | ExpressionDesc::In(left, right)
-            | ExpressionDesc::Seq(left, right)
-            | ExpressionDesc::Bin(_, left, right)
-            | ExpressionDesc::FlatCall(left, right)
-            | ExpressionDesc::StringIndex(left, right)
-            | ExpressionDesc::ArrayIndex(left, right) => {
-                self.scan_expr(left);
-                self.scan_expr(right);
-            }
-            ExpressionDesc::Cond(cond, then_, else_) => {
-                self.scan_expr(cond);
-                self.scan_expr(then_);
-                self.scan_expr(else_);
-            }
-            ExpressionDesc::Call(func, args, _) => {
-                self.scan_expr(func);
-                for arg in args {
-                    self.scan_expr(arg);
-                }
-            }
-            ExpressionDesc::TaggedTemplate(func, strings, values) => {
-                self.scan_expr(func);
-                for item in strings.iter().chain(values.iter()) {
-                    self.scan_expr(item);
-                }
-            }
-            ExpressionDesc::New(ctor, args) => {
-                self.scan_expr(ctor);
-                for arg in args.iter().flatten() {
-                    self.scan_expr(arg);
-                }
-            }
-            ExpressionDesc::Fun { body, .. } => self.scan_block(body),
-            ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _) => {
-                for item in items {
-                    self.scan_expr(item);
-                }
-            }
-            ExpressionDesc::Object(proto, props) => {
-                if let Some(proto) = proto {
-                    self.scan_expr(proto);
-                }
-                for (_, value) in props {
-                    self.scan_expr(value);
-                }
-            }
-        }
+    fn visit_declaration(&mut self, declaration: &'a VariableDeclaration) {
+        self.bindings.insert(declaration.ident.name());
     }
 }
