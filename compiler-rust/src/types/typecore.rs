@@ -3641,10 +3641,7 @@ fn build_or_pat(
     // OCaml build_or_pat uses Typetexp.find_type followed by one fresh
     // variable per declared type parameter, even when the source pattern omits
     // the arguments (for example `#...Shadow.t` where `t` has arity 1).
-    let (path, type_decl) = match resolve_type_constructor_path(tctx, env, &lid_txt) {
-        (path, Some(type_decl)) => (path, type_decl),
-        _ => return Err(TypeCoreError::NotAVariantType { loc, lid: lid_txt }),
-    };
+    let (path, type_decl) = find_type_for_lid(tctx, env, lid.loc, &lid_txt)?;
     let ctx = tctx.type_ctx;
     let args: Vec<_> = type_decl
         .type_params
@@ -3662,7 +3659,7 @@ fn build_or_pat(
         TypeDesc::Tvariant(row) if crate::types::btype::static_row(ctx, row) => {
             crate::types::btype::row_repr(ctx, row)
         }
-        _ => return Err(TypeCoreError::NotAVariantType { loc, lid: lid_txt }),
+        _ => return Err(TypeCoreError::NotAVariantType { loc: lid.loc, lid: lid_txt }),
     };
     drop(expanded_desc);
 
@@ -3773,17 +3770,7 @@ fn extract_type_from_pat_variant_spread(
 ) -> TypeCoreResult<(Path, Vec<crate::types::ConstructorDeclaration>, TypeExprRef)> {
     let ctx = tctx.type_ctx;
     let lid_txt = tctx.resolve_lid(lid.txt).clone();
-    let (spread_path, type_decl) = match resolve_type_constructor_path(tctx, env, &lid_txt) {
-        (path, Some(type_decl)) => (path, type_decl),
-        (_, None) => {
-            let alternatives = unbound_type_constructor_alternatives(tctx, env, &lid_txt);
-            return Err(TypeCoreError::UnboundTypeConstructor {
-                loc: lid.loc,
-                lid: lid_txt,
-                alternatives,
-            });
-        }
-    };
+    let (spread_path, type_decl) = find_type_for_lid(tctx, env, lid.loc, &lid_txt)?;
 
     let constructors = match &type_decl.type_kind {
         crate::types::TypeKind::TypeVariant(cstrs, _) => {
