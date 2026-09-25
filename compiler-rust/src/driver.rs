@@ -43,7 +43,7 @@ use crate::types::sexp_typedtree::{
 use crate::types::typecore::{BuiltinExtensionError, JsxPropKind, TypeCoreError, TypeCoreWarning};
 use crate::types::typemod::{TypeExtensionMismatch, TypeModError, UnboundTypeVarDetail};
 use crate::types::{
-    ArgLabel as TypeArgLabel, FieldKind, TypeCheckContext, TypeClashContext, TypeContext, TypeDesc,
+    ArgLabel as TypeArgLabel, TypeCheckContext, TypeClashContext, TypeContext, TypeDesc,
     TypeExprRef, initial_env, transl_signature, type_structure,
 };
 
@@ -6246,6 +6246,7 @@ fn format_expr_type_clash_report(
         collect_expected_function_arguments(type_ctx, expected)
     };
     let mut message = String::new();
+    let mut printer = type_clash_printer(type_ctx, trace);
 
     if !missing_parameters.is_empty() {
         if missing_parameters.len() == 1 {
@@ -6274,7 +6275,7 @@ fn format_expr_type_clash_report(
     if matches!(context, Some(TypeClashContext::Await)) {
         message.push_str("This has type: ");
         message.push_str(ERROR);
-        message.push_str(&format_type_expr(type_ctx, actual));
+        message.push_str(&printer.format(actual));
         message.push_str(RESET);
         message.push('\n');
         message.push_str("But you're using ");
@@ -6283,7 +6284,7 @@ fn format_expr_type_clash_report(
         message.push_str(RESET);
         message.push_str(" on this expression, so it is expected to be of type:\n  ");
         message.push_str(INFO);
-        message.push_str(&format_type_expr(type_ctx, expected));
+        message.push_str(&printer.format(expected));
         message.push_str(RESET);
         append_extra_type_clash_help(type_ctx, arena, source, loc, context, trace, &mut message);
         let message = format_await_type_clash_message(&message);
@@ -6394,8 +6395,6 @@ fn format_expr_type_clash_report(
             | Some(TypeClashContext::AssertCondition)
     );
 
-    let mut shared_type_printer =
-        plain_function_to_component.then(|| TypeExprPrinter::new(type_ctx));
     message.push_str(&error_text);
     if suppress_alias_expansion {
         append_type_clash_type_without_alias_expansion(
@@ -6406,7 +6405,7 @@ fn format_expr_type_clash_report(
             actual,
             &mut message,
         );
-    } else if let Some(printer) = shared_type_printer.as_mut() {
+    } else {
         append_type_clash_type_with_printer(
             type_ctx,
             trace,
@@ -6414,10 +6413,8 @@ fn format_expr_type_clash_report(
             ERROR,
             actual,
             &mut message,
-            printer,
+            &mut printer,
         );
-    } else {
-        append_type_clash_type(type_ctx, trace, true, ERROR, actual, &mut message);
     }
     message.push('\n');
     if let Some(TypeClashContext::RecordField {
@@ -6456,7 +6453,15 @@ fn format_expr_type_clash_report(
                 &mut message,
             );
         } else {
-            append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+            append_type_clash_type_with_printer(
+                type_ctx,
+                trace,
+                false,
+                INFO,
+                expected,
+                &mut message,
+                &mut printer,
+            );
         }
     } else if let Some(TypeClashContext::FunctionArgument { optional, name }) = context {
         message.push_str("But this");
@@ -6486,7 +6491,7 @@ fn format_expr_type_clash_report(
                 message.push_str(&field_name);
                 message.push('"');
                 message.push_str(": ");
-                message.push_str(&format_type_expr(type_ctx, expected_field_ty));
+                message.push_str(&printer.format(expected_field_ty));
                 message.push('}');
                 message.push_str(RESET);
                 append_extra_type_clash_help(
@@ -6513,38 +6518,30 @@ fn format_expr_type_clash_report(
         } else if !plain_function_to_component {
             message.push(' ');
         }
-        if let Some(printer) = shared_type_printer.as_mut() {
-            append_type_clash_type_with_printer(
-                type_ctx,
-                trace,
-                false,
-                INFO,
-                expected,
-                &mut message,
-                printer,
-            );
-        } else {
-            append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
-        }
+        append_type_clash_type_with_printer(
+            type_ctx,
+            trace,
+            false,
+            INFO,
+            expected,
+            &mut message,
+            &mut printer,
+        );
     } else {
         if plain_function_to_component {
             message.push_str("But it's expected to have type:\n  ");
         } else {
             message.push_str(&expected_text);
         }
-        if let Some(printer) = shared_type_printer.as_mut() {
-            append_type_clash_type_with_printer(
-                type_ctx,
-                trace,
-                false,
-                INFO,
-                expected,
-                &mut message,
-                printer,
-            );
-        } else {
-            append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
-        }
+        append_type_clash_type_with_printer(
+            type_ctx,
+            trace,
+            false,
+            INFO,
+            expected,
+            &mut message,
+            &mut printer,
+        );
         if plain_function_to_component {
             let inline = " \x1b[2m(defined as\x1b[0m \x1b[1;33mJsx.component";
             let multiline = " \x1b[2m(defined as\x1b[0m\n    \x1b[1;33mJsx.component";
@@ -6619,11 +6616,28 @@ fn format_pattern_type_clash_report(
     };
 
     let mut message = String::new();
+    let mut printer = type_clash_printer(type_ctx, trace);
     message.push_str("This pattern matches values of type ");
-    append_type_clash_type(type_ctx, trace, true, ERROR, actual, &mut message);
+    append_type_clash_type_with_printer(
+        type_ctx,
+        trace,
+        true,
+        ERROR,
+        actual,
+        &mut message,
+        &mut printer,
+    );
     message.push('\n');
     message.push_str("but a pattern was expected which matches values of type ");
-    append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+    append_type_clash_type_with_printer(
+        type_ctx,
+        trace,
+        false,
+        INFO,
+        expected,
+        &mut message,
+        &mut printer,
+    );
     if let Some(path) = type_clash_escape_constructor_path(type_ctx, trace) {
         message.push('\n');
         message.push_str("The type constructor ");
@@ -6657,11 +6671,28 @@ fn format_recursive_local_constraint_report(
     };
 
     let mut message = String::new();
+    let mut printer = type_clash_printer(type_ctx, trace);
     message.push_str("Recursive local constraint when unifying ");
-    append_type_clash_type(type_ctx, trace, true, ERROR, actual, &mut message);
+    append_type_clash_type_with_printer(
+        type_ctx,
+        trace,
+        true,
+        ERROR,
+        actual,
+        &mut message,
+        &mut printer,
+    );
     message.push('\n');
     message.push_str("with ");
-    append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+    append_type_clash_type_with_printer(
+        type_ctx,
+        trace,
+        false,
+        INFO,
+        expected,
+        &mut message,
+        &mut printer,
+    );
     append_incompatible_type_parts(type_ctx, trace, &mut message);
 
     format_compiler_error_report(arena, source, filename, loc, &message)
@@ -6684,13 +6715,30 @@ fn format_or_pattern_type_clash_report(
     };
 
     let mut message = String::new();
+    let mut printer = type_clash_printer(type_ctx, trace);
     message.push_str("The variable ");
     message.push_str(id.name());
     message.push_str(" on the left-hand side of this or-pattern has type ");
-    append_type_clash_type(type_ctx, trace, true, ERROR, left, &mut message);
+    append_type_clash_type_with_printer(
+        type_ctx,
+        trace,
+        true,
+        ERROR,
+        left,
+        &mut message,
+        &mut printer,
+    );
     message.push('\n');
     message.push_str("but on the right-hand side it has type ");
-    append_type_clash_type(type_ctx, trace, false, INFO, right, &mut message);
+    append_type_clash_type_with_printer(
+        type_ctx,
+        trace,
+        false,
+        INFO,
+        right,
+        &mut message,
+        &mut printer,
+    );
 
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
@@ -6820,6 +6868,23 @@ fn append_pattern_option_type_clash_help(
         message.push_str(RESET);
         message.push_str(" to make it work.");
     }
+}
+
+/// `Printtyp.super_unification_error` starts with `reset ()` and marks the
+/// loops of every type of the trace before printing any of them
+/// (compiler/ml/printtyp.ml:1542-1556), so the names of the whole report come
+/// from one session and source-named variables are reserved up front.
+fn type_clash_printer<'a>(
+    type_ctx: &'a TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> TypeExprPrinter<'a> {
+    let mut printer = TypeExprPrinter::new(type_ctx);
+    printer.reset();
+    for (actual, expected) in trace {
+        printer.mark_loops_once(*actual);
+        printer.mark_loops_once(*expected);
+    }
+    printer
 }
 
 fn append_type_clash_type(
@@ -11006,30 +11071,26 @@ fn format_non_generalizable_type_expr(type_ctx: &TypeContext, ty: TypeExprRef) -
     TypeExprPrinter::new_with_weak_names(type_ctx).format(ty)
 }
 
+/// A `Printtyp` naming session (compiler/ml/printtyp.ml): type variables
+/// keep their names across every type printed with the same printer.
 struct TypeExprPrinter<'a> {
     type_ctx: &'a TypeContext,
-    vars: ahash::AHashMap<TypeExprRef, String>,
-    weak_vars: ahash::AHashMap<TypeExprRef, String>,
-    recursive_aliases: ahash::AHashMap<TypeExprRef, String>,
-    active: AHashSet<TypeExprRef>,
-    rendered_aliases: AHashSet<TypeExprRef>,
-    next_var: usize,
-    next_weak_var: usize,
+    printtyp: crate::types::printtyp::Printtyp<'a>,
     weak_names: bool,
+    /// Types whose loops were marked since the last `reset`. OCaml's callers
+    /// mark each printed type once (`reset_and_mark_loops`,
+    /// `prepare_expansion`); marking an open object or row a second time
+    /// would alias it.
+    marked: Vec<TypeExprRef>,
 }
 
 impl<'a> TypeExprPrinter<'a> {
     fn new(type_ctx: &'a TypeContext) -> Self {
         Self {
             type_ctx,
-            vars: ahash::AHashMap::new(),
-            weak_vars: ahash::AHashMap::new(),
-            recursive_aliases: ahash::AHashMap::new(),
-            active: AHashSet::new(),
-            rendered_aliases: AHashSet::new(),
-            next_var: 0,
-            next_weak_var: 1,
+            printtyp: crate::types::printtyp::Printtyp::new(type_ctx),
             weak_names: false,
+            marked: Vec::new(),
         }
     }
 
@@ -11040,299 +11101,39 @@ impl<'a> TypeExprPrinter<'a> {
         }
     }
 
+    /// `Printtyp.reset`.
+    fn reset(&mut self) {
+        self.printtyp.reset();
+        self.marked.clear();
+    }
+
+    /// `Printtyp.mark_loops`.
+    fn mark_loops(&mut self, ty: TypeExprRef) {
+        self.marked.push(self.type_ctx.repr(ty));
+        self.printtyp.mark_loops(ty);
+    }
+
+    /// `Printtyp.mark_loops` unless the session already marked `ty`.
+    fn mark_loops_once(&mut self, ty: TypeExprRef) {
+        if !self.marked.contains(&self.type_ctx.repr(ty)) {
+            self.mark_loops(ty);
+        }
+    }
+
+    /// `Printtyp.type_expr` without marking.
+    fn print(&mut self, ty: TypeExprRef) -> String {
+        self.printtyp.type_expr(ty)
+    }
+
+    /// Print `ty` (marking its loops first if the session has not):
+    /// `type_expr`, or `type_sch` for a weak-name printer.
     fn format(&mut self, ty: TypeExprRef) -> String {
-        let repr = self.type_ctx.repr(ty);
-        if self.active.contains(&repr) {
-            return self.recursive_alias_for(repr);
-        }
-        if self.rendered_aliases.contains(&repr)
-            && let Some(alias) = self.recursive_aliases.get(&repr)
-        {
-            return alias.clone();
-        }
-
-        self.active.insert(repr);
-        let desc = (*self.type_ctx.get_desc(repr)).clone();
-        let rendered = match &desc {
-            TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => self.format_type_var(repr, name),
-            TypeDesc::Tarrow { .. } => self.format_arrow(repr),
-            TypeDesc::Ttuple(types) => {
-                let parts = types.iter().map(|ty| self.format(*ty)).collect::<Vec<_>>();
-                format!("({})", parts.join(", "))
-            }
-            TypeDesc::Tconstr { path, args, .. } => {
-                let name = self.format_path_name(path);
-                if args.is_empty() {
-                    name
-                } else {
-                    let args = args.iter().map(|ty| self.format(*ty)).collect::<Vec<_>>();
-                    format!("{name}<{}>", args.join(", "))
-                }
-            }
-            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => self.format(*next),
-            TypeDesc::Tpoly { body, .. } => self.format(*body),
-            TypeDesc::Tobject { fields, .. } => self.format_object(*fields),
-            TypeDesc::Tfield { .. } => self.format_object(repr),
-            TypeDesc::Tnil => "{}".to_string(),
-            TypeDesc::Tvariant(row) => self.format_variant(row),
-            TypeDesc::Tpackage { path, lids, args } => self.format_package(path, lids, args),
-        };
-        self.active.remove(&repr);
-
-        if let Some(alias) = self.recursive_aliases.get(&repr) {
-            self.rendered_aliases.insert(repr);
-            format!("({rendered} as {alias})")
+        self.mark_loops_once(ty);
+        if self.weak_names {
+            self.printtyp.type_sch(ty)
         } else {
-            rendered
+            self.printtyp.type_expr(ty)
         }
-    }
-
-    fn recursive_alias_for(&mut self, ty: TypeExprRef) -> String {
-        if let Some(alias) = self.recursive_aliases.get(&ty) {
-            return alias.clone();
-        }
-
-        let alias = generated_type_var_name(self.next_var);
-        self.next_var += 1;
-        self.recursive_aliases.insert(ty, alias.clone());
-        alias
-    }
-
-    fn format_package(
-        &mut self,
-        path: &crate::types::Path,
-        lids: &[Longident],
-        args: &[TypeExprRef],
-    ) -> String {
-        if lids.is_empty() {
-            return format!("module({})", path.name());
-        }
-
-        let constraints = lids
-            .iter()
-            .zip(args.iter())
-            .map(|(lid, arg)| {
-                format!(
-                    "type {} = {}",
-                    self.format_longident(lid),
-                    self.format(*arg)
-                )
-            })
-            .collect::<Vec<_>>();
-        format!("module({} with {})", path.name(), constraints.join(" and "))
-    }
-
-    fn format_longident(&self, lid: &Longident) -> String {
-        match lid {
-            Longident::Lident(name) => self
-                .type_ctx
-                .resolve_any_longident_component(*name)
-                .unwrap_or_else(|| format!("#{}", name.raw())),
-            Longident::Ldot(prefix, name) => {
-                let name = self
-                    .type_ctx
-                    .resolve_any_longident_component(*name)
-                    .unwrap_or_else(|| format!("#{}", name.raw()));
-                format!("{}.{}", self.format_longident(prefix), name)
-            }
-            Longident::Lapply(func, arg) => {
-                format!(
-                    "{}({})",
-                    self.format_longident(func),
-                    self.format_longident(arg)
-                )
-            }
-        }
-    }
-
-    fn format_path_name(&self, path: &crate::types::Path) -> String {
-        let name = self.format_path_name_raw(path);
-        let name = name
-            .strip_prefix("Pervasives.")
-            .or_else(|| name.strip_prefix("Stdlib."))
-            .or_else(|| name.strip_prefix("Pervasives_"))
-            .or_else(|| name.strip_prefix("Stdlib_"))
-            .unwrap_or(&name)
-            .to_string();
-        name
-    }
-
-    fn format_path_name_raw(&self, path: &crate::types::Path) -> String {
-        match path {
-            crate::types::Path::Pident(id) => self.format_path_component(id.name()),
-            crate::types::Path::Pdot(parent, name, _) => {
-                format!(
-                    "{}.{}",
-                    self.format_path_name_raw(parent),
-                    self.format_path_component(name)
-                )
-            }
-            crate::types::Path::Papply(functor, arg) => {
-                format!(
-                    "{}({})",
-                    self.format_path_name_raw(functor),
-                    self.format_path_name_raw(arg)
-                )
-            }
-        }
-    }
-
-    fn format_path_component(&self, name: &str) -> String {
-        if name.starts_with('$') || name.starts_with('%') {
-            format!("\\\"{name}\"")
-        } else {
-            name.to_string()
-        }
-    }
-
-    fn format_object(&mut self, fields: TypeExprRef) -> String {
-        let mut items = Vec::new();
-        let mut current = fields;
-        let mut seen = AHashSet::new();
-
-        loop {
-            let repr = self.type_ctx.repr(current);
-            if !seen.insert(repr) {
-                break;
-            }
-
-            match &*self.type_ctx.get_desc(repr) {
-                TypeDesc::Tfield {
-                    name,
-                    kind,
-                    typ,
-                    rest,
-                } => {
-                    if !matches!(kind, FieldKind::Fabsent) {
-                        items.push(format!("\"{}\": {}", name, self.format(*typ)));
-                    }
-                    current = *rest;
-                }
-                TypeDesc::Tobject { fields, .. } => current = *fields,
-                TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
-                TypeDesc::Tnil => break,
-                _ => break,
-            }
-        }
-
-        format!("{{{}}}", items.join(", "))
-    }
-
-    fn format_variant(&mut self, row: &crate::types::type_expr::RowDesc) -> String {
-        let row = crate::types::btype::row_repr(self.type_ctx, row);
-        let visible_fields = visible_polyvariant_fields(self.type_ctx, &row);
-        let all_present = visible_fields
-            .iter()
-            .all(|(_, field)| matches!(field, crate::types::type_expr::RowField::Rpresent(_)));
-        let fields = visible_fields
-            .iter()
-            .map(|(label, field)| self.format_variant_field(label.as_str(), field))
-            .collect::<Vec<_>>();
-        let prefix = if row.row_closed {
-            ""
-        } else if all_present {
-            "> "
-        } else {
-            "? "
-        };
-
-        if fields.is_empty() {
-            format!("[{}]", prefix.trim_end())
-        } else {
-            format!("[{}{}]", prefix, fields.join(" | "))
-        }
-    }
-
-    fn format_variant_field(
-        &mut self,
-        label: &str,
-        field: &crate::types::type_expr::RowField,
-    ) -> String {
-        use crate::types::type_expr::RowField;
-
-        let tag = format_polyvariant_tag(label);
-        match field {
-            RowField::Rpresent(Some(ty)) => format!("{tag}({})", self.format(*ty)),
-            RowField::Reither {
-                constant: false,
-                types,
-                ..
-            } if !types.is_empty() => {
-                let types = types.iter().map(|ty| self.format(*ty)).collect::<Vec<_>>();
-                format!("{tag}({})", types.join(" & "))
-            }
-            RowField::Rpresent(None) | RowField::Reither { .. } | RowField::Rabsent => tag,
-        }
-    }
-
-    fn format_arrow(&mut self, ty: TypeExprRef) -> String {
-        let (params, ret) = match &*self.type_ctx.get_desc(self.type_ctx.repr(ty)) {
-            TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
-            _ => unreachable!("format_arrow called for a non-arrow type"),
-        };
-        let args = params
-            .iter()
-            .map(|arg| {
-                (
-                    self.format_arrow_arg(arg.label(), arg.typ),
-                    !matches!(arg.label(), TypeArgLabel::Nolabel),
-                )
-            })
-            .collect::<Vec<_>>();
-        let ret = self.format(ret);
-        if let [(arg, true)] = args.as_slice() {
-            format!("({arg}) => {ret}")
-        } else if let [(arg, false)] = args.as_slice() {
-            format!("{arg} => {ret}")
-        } else {
-            let args = args
-                .into_iter()
-                .map(|(arg, _)| arg)
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("({args}) => {ret}")
-        }
-    }
-
-    fn format_arrow_arg(&mut self, label: &TypeArgLabel, ty: TypeExprRef) -> String {
-        match label {
-            TypeArgLabel::Nolabel => self.format(ty),
-            TypeArgLabel::Labelled(label) => format!("~{}: {}", label.txt, self.format(ty)),
-            TypeArgLabel::Optional(label) => {
-                let inner_ty = crate::types::ctype::extract_option_type(self.type_ctx, ty);
-                let ty = inner_ty
-                    .map(|inner_ty| self.format(inner_ty))
-                    .unwrap_or_else(|| "<hidden>".to_string());
-                format!("~{}: {}=?", label.txt, ty)
-            }
-        }
-    }
-
-    fn format_type_var(&mut self, ty: TypeExprRef, name: &Option<String>) -> String {
-        if self.weak_names && self.type_ctx.get_level(ty) != crate::types::GENERIC_LEVEL {
-            if let Some(existing) = self.weak_vars.get(&ty) {
-                return existing.clone();
-            }
-            let name = format!("'_weak{}", self.next_weak_var);
-            self.next_weak_var += 1;
-            self.weak_vars.insert(ty, name.clone());
-            return name;
-        }
-
-        if let Some(name) = name {
-            if !name.is_empty() && name != "_" {
-                return format!("'{name}");
-            }
-        }
-
-        if let Some(existing) = self.vars.get(&ty) {
-            return existing.clone();
-        }
-
-        let name = generated_type_var_name(self.next_var);
-        self.next_var += 1;
-        self.vars.insert(ty, name.clone());
-        name
     }
 }
 

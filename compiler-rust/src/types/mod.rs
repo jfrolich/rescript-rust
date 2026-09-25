@@ -44,6 +44,7 @@ pub mod includemod;
 pub(crate) mod parmatch;
 pub mod path;
 pub mod predef;
+pub mod printtyp;
 pub mod sexp_typedtree;
 pub mod type_expr;
 pub mod typecore;
