@@ -22,6 +22,15 @@ pub struct UsedCell(u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeSlot(u32);
 
+/// The `current_slot`/`rec_needed` refs of one `Typecore.type_let`
+/// (typecore.ml:4572-4573).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LetGroup(u32);
+
+/// A binding's `slot` in `Typecore.type_let` (typecore.ml:4605).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LetSlot(u32);
+
 /// An entry of `Env.used_constructors` (`constructor_usages`, env.ml:40-47).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConstructorUsageCell(u32);
@@ -58,8 +67,37 @@ enum TypeCallback {
     },
 }
 
+#[derive(Debug, Clone)]
+enum ValueCallback {
+    /// `fun () -> used := true` (env.ml:1568).
+    SetUsed(UsedCell),
+    /// The callback `Typecore.type_let` installs for a let-bound identifier
+    /// (typecore.ml:4619-4628): while a binding of a recursive group is
+    /// typed, record the identifier in its slot; otherwise mark the recorded
+    /// identifiers and the identifier used.
+    LetSlot {
+        name: String,
+        loc: Location,
+        group: LetGroup,
+        slot: LetSlot,
+        used: UsedCell,
+        some_used: UsedCell,
+    },
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct LetGroupState {
+    current_slot: Option<LetSlot>,
+    rec_needed: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct UsageTables {
+    /// `Env.value_declarations`; a key's callbacks run in registration order
+    /// (`set_value_used_callback` chains `old (); callback ()`).
+    value_declarations: HashMap<(String, Location), Vec<ValueCallback>>,
+    let_groups: Vec<LetGroupState>,
+    let_slots: Vec<Vec<(String, Location)>>,
     type_declarations: HashMap<(String, Location), TypeCallback>,
     module_declarations: HashMap<(String, Location), UsedCell>,
     used_constructors: HashMap<(String, Location, String), ConstructorUsageCell>,
@@ -77,9 +115,114 @@ pub fn warns_for_name(name: &str) -> bool {
 }
 
 impl UsageTables {
-    fn new_cell(&mut self) -> UsedCell {
+    pub fn new_cell(&mut self) -> UsedCell {
         self.cells.push(false);
         UsedCell(self.cells.len() as u32 - 1)
+    }
+
+    /// `check_usage loc id warn value_declarations` (env.ml:1562-1576) once the
+    /// ghost/active guard passed.
+    pub fn check_value_usage(&mut self, name: &str, loc: Location) -> Option<UsedCell> {
+        let key = (name.to_string(), loc);
+        if self.value_declarations.contains_key(&key) {
+            return None;
+        }
+        let cell = self.new_cell();
+        self.value_declarations.insert(key, vec![ValueCallback::SetUsed(cell)]);
+        Some(cell)
+    }
+
+    /// Drop a registration whose delayed check was rolled back with a
+    /// speculative typing attempt.
+    pub fn unregister_value_usage(&mut self, name: &str, loc: Location, cell: UsedCell) {
+        let key = (name.to_string(), loc);
+        if let Some(callbacks) = self.value_declarations.get_mut(&key) {
+            callbacks.retain(|cb| !matches!(cb, ValueCallback::SetUsed(c) if *c == cell));
+            if callbacks.is_empty() {
+                self.value_declarations.remove(&key);
+            }
+        }
+    }
+
+    /// `Env.mark_value_used` (env.ml:1125-1128) without the
+    /// implicit-coercion guard.
+    pub fn mark_value_used(&mut self, name: &str, loc: Location) {
+        let Some(callbacks) = self.value_declarations.get(&(name.to_string(), loc)).cloned() else {
+            return;
+        };
+        for callback in callbacks {
+            match callback {
+                ValueCallback::SetUsed(cell) => self.cells[cell.0 as usize] = true,
+                ValueCallback::LetSlot {
+                    name,
+                    loc,
+                    group,
+                    slot,
+                    used,
+                    some_used,
+                } => {
+                    let state = &mut self.let_groups[group.0 as usize];
+                    match state.current_slot {
+                        Some(current) => {
+                            state.rec_needed = true;
+                            self.let_slots[current.0 as usize].push((name, loc));
+                        }
+                        None => {
+                            let recorded = std::mem::take(&mut self.let_slots[slot.0 as usize]);
+                            for (name, loc) in recorded {
+                                self.mark_value_used(&name, loc);
+                            }
+                            self.cells[used.0 as usize] = true;
+                            self.cells[some_used.0 as usize] = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A new `type_let` (`current_slot`, `rec_needed`).
+    pub fn new_let_group(&mut self) -> LetGroup {
+        self.let_groups.push(LetGroupState::default());
+        LetGroup(self.let_groups.len() as u32 - 1)
+    }
+
+    pub fn new_let_slot(&mut self) -> LetSlot {
+        self.let_slots.push(Vec::new());
+        LetSlot(self.let_slots.len() as u32 - 1)
+    }
+
+    /// `current_slot := slot`.
+    pub fn set_let_current_slot(&mut self, group: LetGroup, slot: Option<LetSlot>) {
+        self.let_groups[group.0 as usize].current_slot = slot;
+    }
+
+    pub fn let_rec_needed(&self, group: LetGroup) -> bool {
+        self.let_groups[group.0 as usize].rec_needed
+    }
+
+    /// `Env.set_value_used_callback name vd callback` (env.ml:1146-1157)
+    /// with the callback of typecore.ml:4619-4628.
+    pub fn set_let_value_used_callback(
+        &mut self,
+        name: &str,
+        loc: Location,
+        group: LetGroup,
+        slot: LetSlot,
+        used: UsedCell,
+        some_used: UsedCell,
+    ) {
+        self.value_declarations
+            .entry((name.to_string(), loc))
+            .or_default()
+            .push(ValueCallback::LetSlot {
+                name: name.to_string(),
+                loc,
+                group,
+                slot,
+                used,
+                some_used,
+            });
     }
 
     pub fn is_used(&self, cell: UsedCell) -> bool {

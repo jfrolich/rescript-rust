@@ -12431,6 +12431,13 @@ pub fn typecheck_interface_source(
     {
         return Err(persistent_env_error_to_anyhow(error, filename));
     }
+    // js_implementation.ml:62: `ignore (Includemod.signatures initial_env sg
+    // sg)`, which marks the declarations of the interface used.
+    let sig_type =
+        crate::types::typemod::decl_signature_from_typed_signature(&typed_signature, parser.arena());
+    let _ = crate::types::includemod::compunit(
+        &type_ctx, &env, filename, &sig_type, filename, &sig_type,
+    );
     // js_implementation.ml:64 `Delayed_checks.force_delayed_checks ()`.
     tctx.flush_value_usage_checks();
     emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);

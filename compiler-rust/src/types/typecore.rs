@@ -1234,6 +1234,8 @@ pub struct TypeCheckContext<'a> {
     /// Type, module, constructor and extension usage checks (`Env.store_*`
     /// with `~check:true`).
     env_usage_checks: Vec<EnvUsageCheck>,
+    /// The unused-identifier checks of `type_let`.
+    let_value_checks: Vec<LetValueCheck>,
     /// Unused-case checks run when delayed checks are flushed.
     delayed_unused_checks: Vec<DelayedUnusedCheck>,
     /// Delayed checks whose outcome Rust computes after the fact, keyed by
@@ -1370,8 +1372,35 @@ struct ValueUsageCheck {
     warning_loc: LocIdx,
     warning: Warning,
     is_error: bool,
-    used: bool,
+    cell: crate::types::usage::UsedCell,
     seq: u64,
+}
+
+/// The delayed check `Typecore.type_let` registers for a let-bound
+/// identifier (typecore.ml:4613-4618): at force time, warn with `check_strict`
+/// when another identifier of the pattern was used, else with `check`. The
+/// warning state is the one of the binding's attributes at registration.
+struct LetValueCheck {
+    seq: u64,
+    loc: LocIdx,
+    used: crate::types::usage::UsedCell,
+    some_used: crate::types::usage::UsedCell,
+    /// `(warning, is_active, is_error)` for `check name`.
+    normal: (Warning, bool, bool),
+    /// `(warning, is_active, is_error)` for `check_strict name`.
+    strict: (Warning, bool, bool),
+}
+
+/// The `check`/`check_strict` pair of a `type_let` (typecore.ml:4523-4525).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LetCheck {
+    /// `Warnings.Unused_var`/`Unused_var_strict`.
+    Local,
+    /// `Typecore.type_binding`: `Unused_value_declaration` for both.
+    Toplevel,
+    /// The fake let of an optional-argument default: `check = check_strict`
+    /// (typecore.ml:4530-4546).
+    FakeOptional,
 }
 
 impl<'a> TypeCheckContext<'a> {
@@ -1387,6 +1416,7 @@ impl<'a> TypeCheckContext<'a> {
             warnings: Vec::new(),
             value_usage_checks: Vec::new(),
             env_usage_checks: Vec::new(),
+            let_value_checks: Vec::new(),
             delayed_unused_checks: Vec::new(),
             delayed_warnings: Vec::new(),
             delayed_check_seq: 0,
@@ -1556,7 +1586,11 @@ impl<'a> TypeCheckContext<'a> {
     }
 
     pub fn truncate_value_usage_checks(&mut self, checkpoint: usize) {
-        self.value_usage_checks.truncate(checkpoint);
+        for check in self.value_usage_checks.drain(checkpoint..) {
+            self.type_ctx
+                .usage()
+                .unregister_value_usage(&check.name, check.val_loc, check.cell);
+        }
     }
 
     pub fn add_value_usage_check(
@@ -1566,10 +1600,14 @@ impl<'a> TypeCheckContext<'a> {
         warning_loc: LocIdx,
         warning: Warning,
     ) {
-        if val_loc.loc_ghost
-            || !should_warn_unused_name(name)
-            || !self.warning_config.is_active(&warning)
-        {
+        // `Env.check_usage` (env.ml:1562-1576).
+        if val_loc.loc_ghost || !self.warning_config.is_active(&warning) {
+            return;
+        }
+        let Some(cell) = self.type_ctx.usage().check_value_usage(name, val_loc) else {
+            return;
+        };
+        if !should_warn_unused_name(name) {
             return;
         }
 
@@ -1581,7 +1619,7 @@ impl<'a> TypeCheckContext<'a> {
             warning_loc,
             warning,
             is_error,
-            used: false,
+            cell,
             seq,
         });
     }
@@ -1755,16 +1793,88 @@ impl<'a> TypeCheckContext<'a> {
                 },
             ));
         }
+        for check in std::mem::take(&mut self.let_value_checks) {
+            if usage.is_used(check.used) {
+                continue;
+            }
+            let (warning, active, is_error) = if usage.is_used(check.some_used) {
+                check.strict
+            } else {
+                check.normal
+            };
+            if active {
+                resolved.push((
+                    (check.seq, 0),
+                    TypeCoreWarning {
+                        loc: check.loc,
+                        warning,
+                        is_error,
+                    },
+                ));
+            }
+        }
         drop(usage);
         self.delayed_warnings.extend(resolved);
     }
 
-    pub fn mark_value_used(&mut self, name: &str, val_loc: Location) {
-        for check in &mut self.value_usage_checks {
-            if check.name == name && check.val_loc == val_loc {
-                check.used = true;
-            }
+    /// `Env.mark_value_used` (env.ml:1125-1128).
+    pub fn mark_value_used(&mut self, env: &Env, name: &str, val_loc: Location) {
+        if !env.is_implicit_coercion() {
+            self.type_ctx.usage().mark_value_used(name, val_loc);
         }
+    }
+
+    /// Register the `type_let` delayed check of a let-bound identifier.
+    pub(crate) fn add_let_value_check(
+        &mut self,
+        check: LetCheck,
+        name: &str,
+        loc: LocIdx,
+        used: crate::types::usage::UsedCell,
+        some_used: crate::types::usage::UsedCell,
+    ) {
+        let (normal, strict) = match check {
+            LetCheck::Local => (
+                Warning::UnusedVariable {
+                    name: name.to_string(),
+                },
+                Warning::UnusedVariableStrict {
+                    name: name.to_string(),
+                },
+            ),
+            LetCheck::Toplevel => (
+                Warning::UnusedValueDeclaration {
+                    name: name.to_string(),
+                },
+                Warning::UnusedValueDeclaration {
+                    name: name.to_string(),
+                },
+            ),
+            LetCheck::FakeOptional => (
+                Warning::UnusedVariableStrict {
+                    name: name.to_string(),
+                },
+                Warning::UnusedVariableStrict {
+                    name: name.to_string(),
+                },
+            ),
+        };
+        let snapshot = |config: &WarningConfig, w: Warning| {
+            let active = config.is_active(&w);
+            let error = config.is_error(&w);
+            (w, active, error)
+        };
+        let normal = snapshot(&self.warning_config, normal);
+        let strict = snapshot(&self.warning_config, strict);
+        let seq = self.next_delayed_check_seq();
+        self.let_value_checks.push(LetValueCheck {
+            seq,
+            loc,
+            used,
+            some_used,
+            normal,
+            strict,
+        });
     }
 
     fn next_delayed_check_seq(&mut self) -> u64 {
@@ -1842,7 +1952,7 @@ impl<'a> TypeCheckContext<'a> {
             let take_usage = usage_key == Some(min_key);
             if take_usage {
                 let check = usage.next().expect("peeked");
-                if !check.used {
+                if !self.type_ctx.usage().is_used(check.cell) {
                     self.warnings.push(TypeCoreWarning {
                         loc: check.warning_loc,
                         warning: check.warning,
@@ -7689,10 +7799,9 @@ fn type_expect_with_recarg_unscoped<'a>(
                 }
                 Err(err) => return Err(err),
             };
-            if !tctx.value_usage_checks.is_empty() {
-                let used_name = tctx.arena.get_string(longident.last_idx());
-                tctx.mark_value_used(used_name, desc.val_loc);
-            }
+            // `Env.lookup_value` marks the declaration used (env.ml:1169-1172).
+            let used_name = tctx.arena.get_string(longident.last_idx());
+            tctx.mark_value_used(env, used_name, desc.val_loc);
             if let Some(warning) = deprecated_warning_for_value(&path, &desc) {
                 tctx.report_warning(lid.loc, warning);
             }
@@ -7796,17 +7905,13 @@ fn type_expect_with_recarg_unscoped<'a>(
             // Let expression
             // OCaml does NOT reset typetexp.type_variables for local Pexp_let.
             // reset_type_variables happens at top-level expression/binding entry.
+            let let_check = if is_fake_optional_arg_let(tctx.arena, bindings) {
+                LetCheck::FakeOptional
+            } else {
+                LetCheck::Local
+            };
             let (typed_bindings, new_env, unpacks) =
-                type_let_bindings(tctx, env, *rec_flag, bindings, true)?;
-
-            // OCaml compiler/ml/typecore.ml:4625-4669 registers unused-local
-            // binding checks with Delayed_checks before typing the let body,
-            // and compiler/ml/delayed_checks.ml:3-13 later forces checks in
-            // registration order. Insert Rust's post-body result at this
-            // pre-body position so nested generated lets, such as optional
-            // default argument rewrites from typecore.ml:2516-2555, report in
-            // the same outer-to-inner order.
-            let local_warning_seq = tctx.reserve_delayed_check_seq();
+                type_let_bindings(tctx, env, *rec_flag, bindings, true, let_check)?;
 
             // Type check body in extended environment
             let body = tctx.arena.get_expr(*body_idx);
@@ -7816,15 +7921,6 @@ fn type_expect_with_recarg_unscoped<'a>(
             // OCaml typecore.ml:2452-2458 runs Rec_check after typing the body.
             if *rec_flag == RecFlag::Recursive {
                 check_recursive_bindings(tctx.type_ctx, &typed_bindings)?;
-            }
-            if !is_fake_optional_arg_let(tctx.arena, bindings) {
-                report_unused_local_let_warnings(
-                    tctx,
-                    local_warning_seq,
-                    *rec_flag,
-                    &typed_bindings,
-                    &typed_body,
-                );
             }
 
             Ok(Expression::new(
@@ -13593,20 +13689,23 @@ fn type_function_nary(
         }
         if let Some(default_binding) = default_binding {
             let let_env = body_env.clone_preserve_id();
+            let let_check =
+                if is_fake_optional_arg_let(tctx.arena, std::slice::from_ref(default_binding)) {
+                    LetCheck::FakeOptional
+                } else {
+                    LetCheck::Local
+                };
             let (typed_bindings, next_env, let_unpacks) = type_let_bindings(
                 tctx,
                 &body_env,
                 RecFlag::Nonrecursive,
                 std::slice::from_ref(default_binding),
                 true,
+                let_check,
             )?;
             body_env = next_env;
             unpacks.extend(let_unpacks);
-            // typecore.ml:3540-3586 turns the default into `let p = switch
-            // *opt_l* {...}`, typed by `type_let`, which registers its unused
-            // checks (typecore.ml:4600-4625) before the rest is typed.
-            let local_warning_seq = tctx.reserve_delayed_check_seq();
-            default_lets.push((typed_bindings, let_env, local_warning_seq));
+            default_lets.push((typed_bindings, let_env));
         }
         typed_patterns.push(typed);
     }
@@ -13627,14 +13726,7 @@ fn type_function_nary(
         Located::mknoloc(tctx.arena.default_attr_str()),
         crate::parser::ast::Payload::PStr(Box::new(vec![])),
     );
-    for (typed_bindings, _let_env, local_warning_seq) in default_lets.into_iter().rev() {
-        report_unused_local_let_warnings(
-            tctx,
-            local_warning_seq,
-            RecFlag::Nonrecursive,
-            &typed_bindings,
-            &typed_body,
-        );
+    for (typed_bindings, _let_env) in default_lets.into_iter().rev() {
         let body_type = typed_body.exp_type;
         typed_body = Expression::new(
             ExpressionDesc::Texp_let(RecFlag::Nonrecursive, typed_bindings, Box::new(typed_body)),
@@ -17962,7 +18054,8 @@ fn type_letexception(
         cstr_kind: crate::types::ConstructorKind::Extension(exn_path.clone()),
         cstr_generalized: false,
         cstr_private: crate::types::PrivateFlag::Public,
-        cstr_loc: crate::location::Location::none(),
+        // `Datarepr.extension_descr`: `cstr_loc = ext.ext_loc = pext_loc`.
+        cstr_loc: arena.to_location(ext_constr.pext_loc),
         cstr_attributes: vec![],
         cstr_inlined: cstr_inlined.clone(),
     };
@@ -17972,6 +18065,15 @@ fn type_letexception(
     // constructors through compiler/ml/datarepr.ml:190-214
     // `extension_descr`; inline-record labels stay in `cstr_inlined` and are
     // not inserted into `env.labels`.
+    // typedecl.ml:1863: `Env.add_extension ~check:true`.
+    tctx.check_extension_usage(
+        "exn",
+        &name_str,
+        true,
+        arena.to_location(ext_constr.pext_loc),
+        ext_constr.pext_loc,
+        env.is_in_signature(),
+    );
     new_env.add_constructor(id.clone(), cstr_desc);
 
     let typed_body = type_expect(tctx, &new_env, body, expected_ty, None)?;
@@ -17988,7 +18090,7 @@ fn type_letexception(
             ext_args,
             ext_ret_type: ext_ret_ty,
             ext_private: crate::types::PrivateFlag::Public,
-            ext_loc: arena.to_location(loc),
+            ext_loc: arena.to_location(ext_constr.pext_loc),
             ext_attributes: vec![],
             ext_is_exception: true,
         },
@@ -20552,248 +20654,6 @@ fn typed_signature_item_uses_ident(item: &TypedSignatureItem, target: &Ident) ->
     }
 }
 
-fn collect_typed_expression_pident_uses(expr: &Expression, used: &mut HashSet<Ident>) {
-    match &expr.exp_desc {
-        ExpressionDesc::Texp_ident(Path::Pident(id), _, _) => {
-            used.insert(id.clone());
-        }
-        ExpressionDesc::Texp_ident(_, _, _) => {}
-        ExpressionDesc::Texp_let(_, bindings, body) => {
-            for binding in bindings {
-                collect_typed_expression_pident_uses(&binding.vb_expr, used);
-            }
-            collect_typed_expression_pident_uses(body, used);
-        }
-        ExpressionDesc::Texp_function { body, .. } => {
-            collect_typed_expression_pident_uses(body, used);
-        }
-        ExpressionDesc::Texp_apply { funct, args, .. } => {
-            collect_typed_expression_pident_uses(funct, used);
-            for arg in args {
-                if let Some(expr) = &arg.expression {
-                    collect_typed_expression_pident_uses(expr, used);
-                }
-            }
-        }
-        ExpressionDesc::Texp_match(scrutinee, value_cases, exn_cases, _) => {
-            collect_typed_expression_pident_uses(scrutinee, used);
-            collect_typed_case_pident_uses(value_cases, used);
-            collect_typed_case_pident_uses(exn_cases, used);
-        }
-        ExpressionDesc::Texp_try(body, cases) => {
-            collect_typed_expression_pident_uses(body, used);
-            collect_typed_case_pident_uses(cases, used);
-        }
-        ExpressionDesc::Texp_tuple(items)
-        | ExpressionDesc::Texp_array(items)
-        | ExpressionDesc::Texp_construct(_, _, items) => {
-            for item in items {
-                collect_typed_expression_pident_uses(item, used);
-            }
-        }
-        ExpressionDesc::Texp_variant(_, payload) => {
-            if let Some(expr) = payload {
-                collect_typed_expression_pident_uses(expr, used);
-            }
-        }
-        ExpressionDesc::Texp_record {
-            fields,
-            extended_expression,
-        }
-        | ExpressionDesc::Texp_record_sparse {
-            fields,
-            extended_expression,
-            ..
-        } => {
-            for (_, _, definition, _) in fields {
-                if let crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) =
-                    definition
-                {
-                    collect_typed_expression_pident_uses(expr, used);
-                }
-            }
-            if let Some(expr) = extended_expression {
-                collect_typed_expression_pident_uses(expr, used);
-            }
-        }
-        ExpressionDesc::Texp_field(base, _, _) | ExpressionDesc::Texp_assert(base) => {
-            collect_typed_expression_pident_uses(base, used);
-        }
-        ExpressionDesc::Texp_setfield(base, _, _, value) => {
-            collect_typed_expression_pident_uses(base, used);
-            collect_typed_expression_pident_uses(value, used);
-        }
-        ExpressionDesc::Texp_ifthenelse(cond, then_expr, else_expr) => {
-            collect_typed_expression_pident_uses(cond, used);
-            collect_typed_expression_pident_uses(then_expr, used);
-            if let Some(expr) = else_expr {
-                collect_typed_expression_pident_uses(expr, used);
-            }
-        }
-        ExpressionDesc::Texp_sequence(first, second)
-        | ExpressionDesc::Texp_while(first, second)
-        | ExpressionDesc::Texp_for_of(_, _, first, second)
-        | ExpressionDesc::Texp_for_await_of(_, _, first, second) => {
-            collect_typed_expression_pident_uses(first, used);
-            collect_typed_expression_pident_uses(second, used);
-        }
-        ExpressionDesc::Texp_for(_, _, start, stop, _, body) => {
-            collect_typed_expression_pident_uses(start, used);
-            collect_typed_expression_pident_uses(stop, used);
-            collect_typed_expression_pident_uses(body, used);
-        }
-        ExpressionDesc::Texp_send(receiver, _, arg) => {
-            collect_typed_expression_pident_uses(receiver, used);
-            if let Some(expr) = arg {
-                collect_typed_expression_pident_uses(expr, used);
-            }
-        }
-        ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
-            collect_typed_module_expr_pident_uses(module_expr, used);
-            collect_typed_expression_pident_uses(body, used);
-        }
-        ExpressionDesc::Texp_letexception(_, body) => {
-            collect_typed_expression_pident_uses(body, used);
-        }
-        ExpressionDesc::Texp_pack(module_expr) => {
-            collect_typed_module_expr_pident_uses(module_expr, used);
-        }
-        ExpressionDesc::Texp_constant(_)
-        | ExpressionDesc::Texp_break
-        | ExpressionDesc::Texp_continue
-        | ExpressionDesc::Texp_extension_constructor(_, _) => {}
-    }
-}
-
-fn collect_typed_case_pident_uses(
-    cases: &[crate::types::typedtree::Case],
-    used: &mut HashSet<Ident>,
-) {
-    for case in cases {
-        if let Some(guard) = &case.c_guard {
-            collect_typed_expression_pident_uses(guard, used);
-        }
-        collect_typed_expression_pident_uses(&case.c_rhs, used);
-    }
-}
-
-fn collect_typed_module_expr_pident_uses(module_expr: &ModuleExpr, used: &mut HashSet<Ident>) {
-    match &module_expr.mod_desc {
-        ModuleExprDesc::Tmod_structure(structure) => {
-            for item in &structure.str_items {
-                collect_typed_structure_item_pident_uses(item, used);
-            }
-        }
-        ModuleExprDesc::Tmod_apply(func, arg, _) => {
-            collect_typed_module_expr_pident_uses(func, used);
-            collect_typed_module_expr_pident_uses(arg, used);
-        }
-        ModuleExprDesc::Tmod_functor(_, _, arg, body) => {
-            if let Some(arg) = arg {
-                collect_typed_module_type_pident_uses(arg, used);
-            }
-            collect_typed_module_expr_pident_uses(body, used);
-        }
-        ModuleExprDesc::Tmod_constraint(inner, _, constraint, _) => {
-            collect_typed_module_expr_pident_uses(inner, used);
-            if let ModuleTypeConstraint::Tmodtype_explicit(module_type) = constraint {
-                collect_typed_module_type_pident_uses(module_type, used);
-            }
-        }
-        ModuleExprDesc::Tmod_unpack(expr, _) => {
-            collect_typed_expression_pident_uses(expr, used);
-        }
-        ModuleExprDesc::Tmod_ident(_, _) => {}
-    }
-}
-
-fn collect_typed_module_type_pident_uses(module_type: &ModuleType, used: &mut HashSet<Ident>) {
-    match &module_type.mty_desc {
-        ModuleTypeDesc::Tmty_typeof(module_expr) => {
-            collect_typed_module_expr_pident_uses(module_expr, used);
-        }
-        ModuleTypeDesc::Tmty_functor(_, _, arg, body) => {
-            if let Some(arg) = arg {
-                collect_typed_module_type_pident_uses(arg, used);
-            }
-            collect_typed_module_type_pident_uses(body, used);
-        }
-        ModuleTypeDesc::Tmty_with(inner, _) => {
-            collect_typed_module_type_pident_uses(inner, used);
-        }
-        ModuleTypeDesc::Tmty_signature(signature) => {
-            for item in &signature.sig_items {
-                collect_typed_signature_item_pident_uses(item, used);
-            }
-        }
-        ModuleTypeDesc::Tmty_ident(_, _)
-        | ModuleTypeDesc::Tmty_alias(_, _)
-        | ModuleTypeDesc::Tmty_placeholder => {}
-    }
-}
-
-fn collect_typed_signature_item_pident_uses(item: &TypedSignatureItem, used: &mut HashSet<Ident>) {
-    match &item.sig_desc {
-        TypedSignatureItemDesc::Tsig_module(decl) => {
-            collect_typed_module_type_pident_uses(&decl.md_type, used);
-        }
-        TypedSignatureItemDesc::Tsig_recmodule(decls) => {
-            for decl in decls {
-                collect_typed_module_type_pident_uses(&decl.md_type, used);
-            }
-        }
-        TypedSignatureItemDesc::Tsig_modtype(decl) => {
-            if let Some(module_type) = &decl.mtd_type {
-                collect_typed_module_type_pident_uses(module_type, used);
-            }
-        }
-        TypedSignatureItemDesc::Tsig_include(include) => {
-            collect_typed_module_type_pident_uses(&include.incl_mod, used);
-        }
-        TypedSignatureItemDesc::Tsig_value(_)
-        | TypedSignatureItemDesc::Tsig_type(_, _)
-        | TypedSignatureItemDesc::Tsig_typext(_)
-        | TypedSignatureItemDesc::Tsig_exception(_)
-        | TypedSignatureItemDesc::Tsig_open(_)
-        | TypedSignatureItemDesc::Tsig_attribute(_) => {}
-    }
-}
-
-fn collect_typed_structure_item_pident_uses(item: &StructureItem, used: &mut HashSet<Ident>) {
-    match &item.str_desc {
-        StructureItemDesc::Tstr_eval(expr, _) => {
-            collect_typed_expression_pident_uses(expr, used);
-        }
-        StructureItemDesc::Tstr_value(_, bindings) => {
-            for binding in bindings {
-                collect_typed_expression_pident_uses(&binding.vb_expr, used);
-            }
-        }
-        StructureItemDesc::Tstr_module(binding) => {
-            collect_typed_module_expr_pident_uses(&binding.mb_expr, used);
-        }
-        StructureItemDesc::Tstr_recmodule(bindings) => {
-            for binding in bindings {
-                collect_typed_module_expr_pident_uses(&binding.mb_expr, used);
-            }
-        }
-        StructureItemDesc::Tstr_modtype(decl) => {
-            if let Some(module_type) = &decl.mtd_type {
-                collect_typed_module_type_pident_uses(module_type, used);
-            }
-        }
-        StructureItemDesc::Tstr_include(include) => {
-            collect_typed_module_expr_pident_uses(&include.incl_mod, used);
-        }
-        StructureItemDesc::Tstr_primitive(_)
-        | StructureItemDesc::Tstr_type(_, _)
-        | StructureItemDesc::Tstr_typext(_)
-        | StructureItemDesc::Tstr_exception(_)
-        | StructureItemDesc::Tstr_open(_)
-        | StructureItemDesc::Tstr_attribute(_) => {}
-    }
-}
-
 fn typed_structure_item_uses_ident(item: &StructureItem, target: &Ident) -> bool {
     match &item.str_desc {
         StructureItemDesc::Tstr_eval(expr, _) => typed_expression_uses_ident(expr, target),
@@ -21434,80 +21294,6 @@ fn is_fake_optional_arg_let(
     )
 }
 
-fn report_unused_local_let_warnings(
-    tctx: &mut TypeCheckContext<'_>,
-    delayed_seq: u64,
-    rec_flag: RecFlag,
-    typed_bindings: &[ValueBinding],
-    typed_body: &Expression,
-) {
-    let mut sub = 0u32;
-    let mut body_uses = HashSet::default();
-    collect_typed_expression_pident_uses(typed_body, &mut body_uses);
-    let mut recursive_rhs_uses = HashSet::default();
-    if rec_flag == RecFlag::Recursive {
-        for binding in typed_bindings {
-            collect_typed_expression_pident_uses(&binding.vb_expr, &mut recursive_rhs_uses);
-        }
-    }
-    for binding in typed_bindings {
-        let mut bound = Vec::new();
-        collect_typed_pattern_idents(&binding.vb_pat, &mut bound);
-        if bound.is_empty() {
-            continue;
-        }
-
-        let used = bound
-            .iter()
-            .map(|(id, _, _)| body_uses.contains(id) || recursive_rhs_uses.contains(id))
-            .collect::<Vec<_>>();
-        let some_used = used.iter().any(|used| *used);
-
-        for ((_, name, loc), used) in bound.into_iter().zip(used.into_iter()) {
-            if used || !should_warn_unused_name(name) {
-                continue;
-            }
-
-            let warning = if some_used {
-                Warning::UnusedVariableStrict {
-                    name: name.to_string(),
-                }
-            } else {
-                Warning::UnusedVariable {
-                    name: name.to_string(),
-                }
-            };
-            tctx.add_delayed_warning(delayed_seq, sub, loc, warning);
-            sub += 1;
-        }
-    }
-}
-
-fn report_unused_rec_flag_warning(
-    tctx: &mut TypeCheckContext<'_>,
-    typed_bindings: &[ValueBinding],
-) {
-    let Some(first_binding) = typed_bindings.first() else {
-        return;
-    };
-
-    let mut bound = Vec::new();
-    for binding in typed_bindings {
-        collect_typed_pattern_idents(&binding.vb_pat, &mut bound);
-    }
-
-    let mut recursive_rhs_uses = HashSet::default();
-    for binding in typed_bindings {
-        collect_typed_expression_pident_uses(&binding.vb_expr, &mut recursive_rhs_uses);
-    }
-    let rec_needed = bound
-        .iter()
-        .any(|(id, _, _)| recursive_rhs_uses.contains(id));
-    if !rec_needed {
-        tctx.report_warning(first_binding.vb_pat.pat_loc, Warning::UnusedRecFlag);
-    }
-}
-
 fn report_let_partial_match_warnings<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
@@ -21558,6 +21344,7 @@ fn type_let_bindings(
     rec_flag: RecFlag,
     bindings: &[crate::parser::ast::ValueBinding],
     allow_modules: bool,
+    let_check: LetCheck,
 ) -> TypeCoreResult<(Vec<ValueBinding>, Env, Vec<PatternVariable>)> {
     let previous_recursive_let_depth = tctx.recursive_let_depth;
     let previous_recursive_value_count = tctx.active_recursive_value_ids.len();
@@ -21716,14 +21503,109 @@ fn type_let_bindings(
         // typecore.ml:4569: `List.iter (fun f -> f ()) force`.
         run_globalize_forces(tctx, state.take_globalize_forces())?;
 
+        // typecore.ml:4572-4632: the unused-binding detection. Uses of a
+        // bound identifier call its callback; within a recursive group they
+        // only record a dependency in the slot of the binding being typed.
+        let is_recursive = rec_flag == RecFlag::Recursive;
+        let group = tctx.type_ctx.usage().new_let_group();
+        let (check_probe, check_strict_probe) = match let_check {
+            LetCheck::Local => (
+                Warning::UnusedVariable {
+                    name: String::new(),
+                },
+                Warning::UnusedVariableStrict {
+                    name: String::new(),
+                },
+            ),
+            LetCheck::Toplevel => (
+                Warning::UnusedValueDeclaration {
+                    name: String::new(),
+                },
+                Warning::UnusedValueDeclaration {
+                    name: String::new(),
+                },
+            ),
+            LetCheck::FakeOptional => (
+                Warning::UnusedVariableStrict {
+                    name: String::new(),
+                },
+                Warning::UnusedVariableStrict {
+                    name: String::new(),
+                },
+            ),
+        };
+        let arena = tctx.arena;
+        let mut warn_about_unused_bindings = false;
+        for binding in bindings {
+            let active = crate::types::typemod::with_warning_scope(
+                tctx,
+                arena,
+                &binding.pvb_attributes,
+                false,
+                |tctx| {
+                    Ok::<bool, TypeCoreError>(
+                        tctx.warning_config.is_active(&check_probe)
+                            || tctx.warning_config.is_active(&check_strict_probe)
+                            || (is_recursive
+                                && tctx.warning_config.is_active(&Warning::UnusedRecFlag)),
+                    )
+                },
+            )?;
+            if active {
+                warn_about_unused_bindings = true;
+                break;
+            }
+        }
+        let mut let_slots: Vec<Option<crate::types::usage::LetSlot>> = Vec::new();
+        for ((binding, typed_pat), pvars) in
+            bindings.iter().zip(typed_patterns.iter()).zip(all_pattern_vars.iter())
+        {
+            let slot = crate::types::typemod::with_warning_scope(
+                tctx,
+                arena,
+                &binding.pvb_attributes,
+                false,
+                |tctx| {
+                    if !warn_about_unused_bindings {
+                        return Ok::<_, TypeCoreError>(None);
+                    }
+                    let (some_used, slot) = {
+                        let mut usage = tctx.type_ctx.usage();
+                        (usage.new_cell(), usage.new_let_slot())
+                    };
+                    let mut bound = Vec::new();
+                    collect_typed_pattern_idents(typed_pat, &mut bound);
+                    for (id, name, _) in bound {
+                        let Some(pv) = pvars.iter().find(|pv| pv.id.same(id)) else {
+                            continue;
+                        };
+                        let used = tctx.type_ctx.usage().new_cell();
+                        if should_warn_unused_name(name) && !pv.loc.loc_ghost {
+                            tctx.add_let_value_check(let_check, name, pv.loc_idx, used, some_used);
+                        }
+                        tctx.type_ctx.usage().set_let_value_used_callback(
+                            name, pv.loc, group, slot, used, some_used,
+                        );
+                    }
+                    Ok(Some(slot))
+                },
+            )?;
+            let_slots.push(slot);
+        }
+
         // Type check expressions after recursive approximation unification.
         // OCaml typecore.ml type_let lines 4189-4211
         let mut typed_bindings = Vec::new();
-        for ((binding, typed_pat), ty) in bindings
+        for (((binding, typed_pat), ty), slot) in bindings
             .iter()
             .zip(typed_patterns.into_iter())
             .zip(binding_types.iter())
+            .zip(let_slots.iter())
         {
+            // typecore.ml:4641: `if is_recursive then current_slot := slot`.
+            if is_recursive {
+                tctx.type_ctx.usage().set_let_current_slot(group, *slot);
+            }
             // OCaml typecore.ml lines 4196-4209: Tpoly pattern types get special handling
             let pat_ty = typed_pat.pat_type;
             let pat_repr = ctx.repr(pat_ty);
@@ -21778,8 +21660,25 @@ fn type_let_bindings(
             ));
         }
 
-        if rec_flag == RecFlag::Recursive {
-            report_unused_rec_flag_warning(tctx, &typed_bindings);
+        // typecore.ml:4671-4680: `current_slot := None`, then the unused rec
+        // flag when no use was recorded while typing the group.
+        tctx.type_ctx.usage().set_let_current_slot(group, None);
+        if is_recursive
+            && !tctx.type_ctx.usage().let_rec_needed(group)
+            && tctx.warning_config.is_active(&Warning::UnusedRecFlag)
+            && let Some(first) = bindings.first()
+        {
+            let pat_loc = tctx.arena.get_pat(first.pvb_pat).ppat_loc;
+            crate::types::typemod::with_warning_scope(
+                tctx,
+                arena,
+                &first.pvb_attributes,
+                false,
+                |tctx| {
+                    tctx.report_warning(pat_loc, Warning::UnusedRecFlag);
+                    Ok::<(), TypeCoreError>(())
+                },
+            )?;
         }
 
         report_let_partial_match_warnings(tctx, env, &typed_bindings);
@@ -21988,7 +21887,7 @@ pub fn type_binding<'a>(
     // Match OCaml Typecore.type_binding -> Typetexp.reset_type_variables.
     tctx.reset_type_variables();
     let (typed_bindings, new_env, _unpacks) =
-        type_let_bindings(tctx, env, rec_flag, bindings, false)?;
+        type_let_bindings(tctx, env, rec_flag, bindings, false, LetCheck::Toplevel)?;
     // OCaml typemod.ml:1411-1415 runs Rec_check right after type_binding.
     if rec_flag == RecFlag::Recursive {
         check_recursive_bindings(tctx.type_ctx, &typed_bindings)?;
@@ -28177,6 +28076,89 @@ pub(crate) fn mark_open_lid_use(
     lid: &Longident,
     kind: crate::types::env::OpenLookupKind,
 ) {
+    // `Env.lookup_module` marks the module itself; every other lookup marks
+    // the modules of its prefix through `lookup_module_descr`.
+    match (lid, kind) {
+        (_, crate::types::env::OpenLookupKind::Module) => {
+            mark_module_lid_used(ctx, env, arena, lid);
+        }
+        (Longident::Ldot(prefix, _), _) => {
+            mark_module_lid_used(ctx, env, arena, prefix);
+        }
+        _ => {}
+    }
+    mark_open_lid_use_inner(ctx, env, arena, lid, kind);
+}
+
+/// The `mark_module_used` calls of `Env.lookup_module_descr` and
+/// `Env.lookup_module` (env.ml:996-1074) along a module longident: each
+/// component is marked with the location of its declaration (`comps.loc`,
+/// the `md_loc` the components were built from). Returns the module type of
+/// `lid` when it is a local module.
+fn mark_module_lid_used(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    arena: &ParseArena,
+    lid: &Longident,
+) -> Option<crate::types::decl::ModuleType> {
+    let (name, md_loc, md_type) = match lid {
+        Longident::Lident(idx) => {
+            let name = arena.get_string(*idx);
+            let (_, md) = env.find_module_with_path(name).ok()?;
+            (name, md.md_loc, md.md_type.clone())
+        }
+        Longident::Ldot(prefix, idx) => {
+            let parent = mark_module_lid_used(ctx, env, arena, prefix)?;
+            let name = arena.get_string(*idx);
+            let md = submodule_declaration(env, &parent, name, 0)?;
+            (name, md.md_loc, md.md_type)
+        }
+        Longident::Lapply(_, _) => return None,
+    };
+    if !env.is_implicit_coercion() {
+        ctx.usage().mark_module_used(name, md_loc);
+    }
+    Some(md_type)
+}
+
+/// The declaration of submodule `name` in the components of a local module
+/// type (`components_of_module_maker`, env.ml:1516-1578).
+fn submodule_declaration(
+    env: &Env,
+    mty: &crate::types::decl::ModuleType,
+    name: &str,
+    depth: usize,
+) -> Option<crate::types::decl::ModuleDeclaration> {
+    use crate::types::decl::{ModuleType, SignatureItem};
+    if depth > 32 {
+        return None;
+    }
+    match mty {
+        ModuleType::MtySignature(items) => items.iter().rev().find_map(|item| match item {
+            SignatureItem::SigModule(id, md, _) if id.name() == name => Some(md.clone()),
+            _ => None,
+        }),
+        ModuleType::MtyIdent(path) => {
+            let decl = env.lookup_modtype(path).ok()?;
+            let mty = decl.mtd_type.clone()?;
+            submodule_declaration(env, &mty, name, depth + 1)
+        }
+        ModuleType::MtyAlias(_, path) => {
+            let md = env.lookup_module(path).ok()?;
+            let mty = md.md_type.clone();
+            submodule_declaration(env, &mty, name, depth + 1)
+        }
+        _ => None,
+    }
+}
+
+fn mark_open_lid_use_inner(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    arena: &ParseArena,
+    lid: &Longident,
+    kind: crate::types::env::OpenLookupKind,
+) {
     match lid {
         Longident::Lident(idx) => mark_open_name_use(ctx, env, kind, arena.get_string(*idx)),
         Longident::Ldot(prefix, _) => {
@@ -28185,7 +28167,7 @@ pub(crate) fn mark_open_lid_use(
             {
                 return;
             }
-            mark_open_lid_use(
+            mark_open_lid_use_inner(
                 ctx,
                 env,
                 arena,
@@ -32265,21 +32247,22 @@ mod tests {
         let arena = ParseArena::new();
         let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
         let val_loc = Location::none();
+        let val_loc = Location {
+            loc_ghost: false,
+            ..val_loc
+        };
+        // `check_usage` registers a (name, loc) key once.
         for _ in 0..2 {
-            tctx.value_usage_checks.push(ValueUsageCheck {
-                name: "x".to_string(),
-                val_loc,
-                warning_loc: LocIdx::none(),
-                warning: Warning::UnusedArgument,
-                is_error: false,
-                used: false,
-                seq: 0,
-            });
+            tctx.add_value_usage_check("x", val_loc, LocIdx::none(), Warning::UnusedArgument);
         }
+        assert_eq!(tctx.value_usage_checks.len(), 1);
 
-        tctx.mark_value_used("x", val_loc);
+        tctx.mark_value_used(&Env::empty(), "x", val_loc);
 
-        assert!(tctx.value_usage_checks.iter().all(|check| check.used));
+        assert!(tctx
+            .value_usage_checks
+            .iter()
+            .all(|check| type_ctx.usage().is_used(check.cell)));
     }
 
     #[test]

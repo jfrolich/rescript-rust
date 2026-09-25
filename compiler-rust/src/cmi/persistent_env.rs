@@ -6464,7 +6464,8 @@ fn add_signature_to_env_with_options(
                     cstr_kind: ConstructorKind::Extension(slot_path(id.name(), ext_slot)),
                     cstr_generalized: ext.ext_ret_type.is_some(),
                     cstr_private: ext.ext_private,
-                    cstr_loc: crate::location::Location::none(),
+                    // `Datarepr.extension_descr`: `cstr_loc = ext.ext_loc`.
+                    cstr_loc: ext.ext_loc,
                     cstr_attributes: vec![],
                     cstr_inlined: None,
                 };

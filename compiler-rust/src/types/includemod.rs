@@ -2581,6 +2581,10 @@ fn value_descriptions<'a>(
     subst: &InclusionSubst,
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<ModuleCoercion> {
+    // includemod.ml:58: `Env.mark_value_used env (Ident.name id) vd1`.
+    if !env.is_implicit_coercion() {
+        type_ctx.usage().mark_value_used(id.name(), impl_desc.val_loc);
+    }
     if let Some(warning) = deprecated_inclusion_warning(
         id.name(),
         &impl_desc.val_attributes,
@@ -4888,6 +4892,23 @@ fn extension_constructors<'a>(
     subst: &InclusionSubst,
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<()> {
+    // includecore.ml:461-466: `Env.mark_extension_used usage env ext1
+    // (Ident.name id)`.
+    if !env.is_implicit_coercion() {
+        let usage = if impl_ext.ext_private == crate::types::PrivateFlag::Private
+            || sig_ext.ext_private == crate::types::PrivateFlag::Public
+        {
+            crate::types::usage::ConstructorUsage::Positive
+        } else {
+            crate::types::usage::ConstructorUsage::Privatize
+        };
+        type_ctx.usage().mark_constructor_used(
+            usage,
+            impl_ext.ext_type_path.last(),
+            impl_ext.ext_loc,
+            id.name(),
+        );
+    }
     let sig_ext = substitute_extension_constructor_paths(type_ctx, sig_ext, subst);
     let mismatch = || IncludeModError::ExtensionConstructorMismatch {
         name: id.clone(),
