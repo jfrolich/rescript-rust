@@ -18491,11 +18491,29 @@ fn find_unbound_type_var_in_type_decl(
     ctx: &crate::types::context::TypeContext,
     decl: &crate::types::TypeDeclaration,
 ) -> Option<TypeExprRef> {
-    let allowed: HashSet<TypeExprRef> = decl
-        .type_params
-        .iter()
-        .map(|ty_ref| ctx.repr(*ty_ref))
-        .collect();
+    // OCaml `Ctype.closed_type_decl` (ctype.ml) first runs `mark_type` on every
+    // parameter, which marks all nodes reachable from it; variables that a
+    // constraint unified into a parameter are therefore bound.
+    fn mark_type(
+        ctx: &crate::types::context::TypeContext,
+        ty: TypeExprRef,
+        marked: &mut HashSet<TypeExprRef>,
+    ) {
+        let ty = ctx.repr(ty);
+        if !marked.insert(ty) {
+            return;
+        }
+        let mut children = Vec::new();
+        crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
+        for child in children {
+            mark_type(ctx, child, marked);
+        }
+    }
+    let mut allowed: HashSet<TypeExprRef> = HashSet::new();
+    for param in &decl.type_params {
+        mark_type(ctx, *param, &mut allowed);
+    }
+    let allowed = allowed;
 
     match &decl.type_kind {
         crate::types::TypeKind::TypeVariant(constructors, _) => {
@@ -18787,12 +18805,42 @@ fn find_unbound_type_var_in_typed_type_decl_before_closed_decl(
     ctx: &crate::types::context::TypeContext,
     decl: &TypedTypeDeclaration,
 ) -> Option<(String, LocIdx)> {
-    let allowed: HashSet<TypeExprRef> = decl
+    let mut allowed: HashSet<TypeExprRef> = decl
         .typ_type
         .type_params
         .iter()
         .map(|ty_ref| ctx.repr(*ty_ref))
         .collect();
+    // OCaml typedecl.ml `transl_declaration` translates the constraints with
+    // `transl_simple_type env false` after the parameters, so the type
+    // variables they introduce are in the type-variable table when the kind
+    // and manifest are translated with the fixed policy.
+    fn collect_type_vars(
+        ctx: &crate::types::context::TypeContext,
+        ty: TypeExprRef,
+        visited: &mut HashSet<TypeExprRef>,
+        out: &mut HashSet<TypeExprRef>,
+    ) {
+        let ty = ctx.repr(ty);
+        if !visited.insert(ty) {
+            return;
+        }
+        if matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(_)) {
+            out.insert(ty);
+            return;
+        }
+        let mut children = Vec::new();
+        crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
+        for child in children {
+            collect_type_vars(ctx, child, visited, out);
+        }
+    }
+    let mut visited = HashSet::new();
+    for (cty, cty2, _) in &decl.typ_cstrs {
+        collect_type_vars(ctx, cty.ctyp_type, &mut visited, &mut allowed);
+        collect_type_vars(ctx, cty2.ctyp_type, &mut visited, &mut allowed);
+    }
+    let allowed = allowed;
     match &decl.typ_kind {
         TypedTypeKind::Ttype_variant(constructors) => constructors.iter().find_map(|cstr| {
             // OCaml Typedecl.make_constructor locally quantifies GADT
