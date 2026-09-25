@@ -278,6 +278,17 @@ pub fn parse_typ_expr(p: &mut Parser<'_>) -> CoreType {
     parse_type_alias(p, typ)
 }
 
+/// Run `f` as an OCaml `parse_typ_expr p` call without `?current_type_name_path`
+/// / `?inline_types_context`: no inline record context applies inside.
+fn without_inline_types_context<T>(p: &mut Parser<'_>, f: impl FnOnce(&mut Parser<'_>) -> T) -> T {
+    let old_path = p.current_type_name_path.take();
+    let old_found = p.inline_types_found.take();
+    let result = f(p);
+    p.current_type_name_path = old_path;
+    p.inline_types_found = old_found;
+    result
+}
+
 /// Parse a polymorphic type expression.
 /// Like parse_typ_expr but with special handling for `'a => T` patterns.
 /// OCaml's parse_poly_type_expr has a special case where single type vars
@@ -291,7 +302,7 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
         match vars.as_slice() {
             [_, _, ..] => {
                 p.expect(Token::Dot);
-                let body = parse_typ_expr(p);
+                let body = without_inline_types_context(p, parse_typ_expr);
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 let body_idx = p.arena_mut().push_core_type(body);
                 return CoreType {
@@ -303,7 +314,7 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
             [var] => match p.token {
                 Token::Dot => {
                     p.next();
-                    let body = parse_typ_expr(p);
+                    let body = without_inline_types_context(p, parse_typ_expr);
                     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                     let body_idx = p.arena_mut().push_core_type(body);
                     return CoreType {
@@ -320,7 +331,7 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
                         ptyp_loc: var.loc,
                         ptyp_attributes: Attributes::new(),
                     };
-                    let return_type = parse_typ_expr_inner(p, true);
+                    let return_type = without_inline_types_context(p, |p| parse_typ_expr_inner(p, true));
                     let typ_start_idx = p.loc_start_idx(typ.ptyp_loc);
                     let end_pos_idx = p.prev_end_pos_idx();
                     let loc = p.mk_loc_idx(typ_start_idx, end_pos_idx);
