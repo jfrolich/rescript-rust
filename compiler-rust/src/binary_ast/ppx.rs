@@ -1180,8 +1180,11 @@ fn is_valid_tag_as_payload(payload: &Payload, arena: &ParseArena) -> bool {
     };
     let expr = arena.get_expr(inner.0);
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(_) => true,
-        ExpressionDesc::Pexp_construct(lid, None) => matches!(
+        // `is_single_string`/`int`/`float`/`bigint`; a character is none of
+        // them.
+        ExpressionDesc::Pexp_constant(constant) => !matches!(&**constant, Constant::Char(_)),
+        // `is_single_bool` accepts `true`/`false` with any argument.
+        ExpressionDesc::Pexp_construct(lid, _) => matches!(
             arena.get_longident(lid.txt),
             crate::parser::longident::Longident::Lident(idx)
                 if matches!(arena.get_string(*idx), "true" | "false")
@@ -1381,20 +1384,27 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
         if self.stopped {
             return;
         }
-        // `Ast_untagged_variants.process_tag_type` marks a valid `@as` and
-        // raises for an invalid payload or a second `@as`.
-        let as_attrs: Vec<&Attribute> = cd
-            .pcd_attributes
-            .iter()
-            .filter(|attr| arena.get_string(attr.0.txt) == "as")
-            .collect();
-        match as_attrs.as_slice() {
-            [] => {}
-            [attr] if is_valid_tag_as_payload(&attr.1, arena) => arena.mark_used_attribute(attr),
-            _ => {
-                self.stopped = true;
+        // `Ast_untagged_variants.process_tag_type` (ast_untagged_variants.ml:
+        // 113-143) marks a valid `@as` and raises for an invalid payload or a
+        // second `@as`.
+        let mut seen_as = false;
+        for attr in cd.pcd_attributes.iter() {
+            if arena.get_string(attr.0.txt) != "as" {
+                continue;
+            }
+            if seen_as {
+                self.raise(attr.0.loc, "Duplicate @as annotation; only one @as is allowed here.");
                 return;
             }
+            if !is_valid_tag_as_payload(&attr.1, arena) {
+                self.raise(
+                    attr.0.loc,
+                    "A variant case annotation @as(...) must be a string, integer, boolean, null, or undefined.",
+                );
+                return;
+            }
+            seen_as = true;
+            arena.mark_used_attribute(attr);
         }
         let name = arena.get_string(cd.pcd_name.txt);
         if matches!(name, "false" | "true" | "()") {
