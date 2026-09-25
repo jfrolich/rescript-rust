@@ -5064,20 +5064,8 @@ fn format_with_makes_applicative_functor_ill_typed_report(
     message.push_str("  type ");
     message.push_str(&path.name());
     message.push_str(" ill-typed in the constrained signature:\n");
-    let mut include_error =
+    let include_error =
         crate::types::includemod::format_error_without_signature_header(type_ctx, filename, error);
-    include_error = include_error.replacen(
-        "  Modules do not match:\n    \n  is not included in\n    ",
-        "  Modules do not match:  is not included in ",
-        1,
-    );
-    if let Some(last_component) = lid_text.rsplit('.').next() {
-        include_error = include_error.replacen(
-            &format!("type {last_component} = {last_component}\n"),
-            &format!("type {last_component} = {lid_text}\n"),
-            1,
-        );
-    }
     message.push_str(&include_error);
     format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
 }
