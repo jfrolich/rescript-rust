@@ -696,17 +696,10 @@ impl<'src> Scanner<'src> {
                     self.scan_string_escape_digits(start_pos, 4, 16, 0x10FFFF);
                 }
             }
-            c if c == EOF_CHAR => {
-                let end_pos = self.position();
-                self.error(
-                    start_pos.clone(),
-                    end_pos,
-                    DiagnosticCategory::message("unclosed escape sequence"),
-                );
-            }
             _ => {
-                // Unknown escape - skip the character
-                self.next();
+                // OCaml `scan_string_escape_sequence` (res_scanner.ml:405-416):
+                // an unknown escape, or the end of input, is left to the
+                // string loop without a diagnostic.
             }
         }
     }
