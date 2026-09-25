@@ -285,6 +285,11 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn find_current_by_ident(&self, id: &Ident) -> Option<&T> {
+        // Opening a module starts a fresh, usually empty, local layer; skip
+        // hashing the name for those.
+        if self.current.is_empty() {
+            return None;
+        }
         let stamp = id.stamp();
         self.current.get(id.name()).and_then(|entries| {
             entries
@@ -302,7 +307,9 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn find_name_entry(&self, name: &str) -> Option<(&Ident, &T)> {
-        if let Some((id, value)) = self.current.get(name).and_then(|entries| entries.last()) {
+        if !self.current.is_empty()
+            && let Some((id, value)) = self.current.get(name).and_then(|entries| entries.last())
+        {
             return Some((id, value));
         }
 
@@ -325,7 +332,9 @@ impl<T: Clone> IdTbl<T> {
     }
 
     pub fn find_by_name_with_path(&self, name: &str) -> Option<(Path, &T)> {
-        if let Some((id, value)) = self.current.get(name).and_then(|entries| entries.last()) {
+        if !self.current.is_empty()
+            && let Some((id, value)) = self.current.get(name).and_then(|entries| entries.last())
+        {
             return Some((Path::pident(id.clone()), value));
         }
 
@@ -544,7 +553,9 @@ impl<T: Clone> TycompTbl<T> {
     }
 
     pub fn find_by_name(&self, name: &str) -> Option<&T> {
-        if let Some((_, value)) = self.current.get(name).and_then(|entries| entries.last()) {
+        if !self.current.is_empty()
+            && let Some((_, value)) = self.current.get(name).and_then(|entries| entries.last())
+        {
             return Some(value);
         }
         match &self.opened {
@@ -575,7 +586,8 @@ impl<T: Clone> TycompTbl<T> {
 
     pub fn find_by_ident(&self, id: &Ident) -> Option<&T> {
         let stamp = id.stamp();
-        if let Some(value) = self.current.get(id.name()).and_then(|entries| {
+        if !self.current.is_empty()
+            && let Some(value) = self.current.get(id.name()).and_then(|entries| {
             entries
                 .iter()
                 .rev()
