@@ -7603,6 +7603,10 @@ fn type_expect_with_recarg_unscoped<'a>(
             let typed_body =
                 type_expect_with_module_unpacks(tctx, &new_env, body, expected_ty, &unpacks, None)?;
             let body_type = typed_body.exp_type;
+            // OCaml typecore.ml:2452-2458 runs Rec_check after typing the body.
+            if *rec_flag == RecFlag::Recursive {
+                check_recursive_bindings(tctx.type_ctx, &typed_bindings)?;
+            }
             if !is_fake_optional_arg_let(tctx.arena, bindings) {
                 report_unused_local_let_warnings(
                     tctx,
@@ -21275,9 +21279,6 @@ fn report_unused_rec_flag_warning(
     for binding in typed_bindings {
         collect_typed_pattern_idents(&binding.vb_pat, &mut bound);
     }
-    if bound.is_empty() {
-        return;
-    }
 
     let mut recursive_rhs_uses = HashSet::default();
     for binding in typed_bindings {
@@ -21562,7 +21563,6 @@ fn type_let_bindings(
         }
 
         if rec_flag == RecFlag::Recursive {
-            check_recursive_bindings(tctx.type_ctx, &typed_bindings)?;
             report_unused_rec_flag_warning(tctx, &typed_bindings);
         }
 
@@ -21773,6 +21773,10 @@ pub fn type_binding<'a>(
     tctx.reset_type_variables();
     let (typed_bindings, new_env, _unpacks) =
         type_let_bindings(tctx, env, rec_flag, bindings, false)?;
+    // OCaml typemod.ml:1411-1415 runs Rec_check right after type_binding.
+    if rec_flag == RecFlag::Recursive {
+        check_recursive_bindings(tctx.type_ctx, &typed_bindings)?;
+    }
     Ok((typed_bindings, new_env))
 }
 
