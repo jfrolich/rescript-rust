@@ -13660,6 +13660,140 @@ fn specialize_functor_result_value_types(
     )
 }
 
+/// Resolve a module path to its (anchored) module type, following module
+/// aliases; the helper behind `scrape_alias_module_type` for `Mty_alias`.
+fn scrape_resolve_module_path<'b>(
+    path: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext,
+    visiting: &mut HashSet<Path>,
+    force_component_subst: bool,
+) -> Option<crate::types::decl::ModuleType> {
+    use crate::types::decl::ModuleType as DeclMty;
+    fn anchored(owner_path: &Path, mty: &DeclMty) -> DeclMty {
+        let mut mty = mty.clone();
+        anchor_local_module_aliases_to_owner(&mut mty, owner_path);
+        mty
+    }
+
+    if !visiting.insert(path.clone()) {
+        return None;
+    }
+
+    let resolved = match path {
+        Path::Pident(id) => {
+            let name = id.name();
+            if let Ok(md) = env.lookup_module(&Path::pident(id.clone())) {
+                match &md.md_type {
+                    DeclMty::MtyAlias(_, alias_path) => scrape_resolve_module_path(
+                        alias_path,
+                        env,
+                        pers_env,
+                        ctx,
+                        visiting,
+                        force_component_subst,
+                    ),
+                    // `Env.scrape_alias` expands a module type path with
+                    // `find_modtype_expansion` (env.ml:1396-1400).
+                    DeclMty::MtyIdent(mty_path) => {
+                        match find_modtype_expansion(mty_path, env, pers_env, ctx) {
+                            Some(expansion) => {
+                                scrape_alias_module_type(&expansion, env, pers_env, ctx)
+                            }
+                            None => Some(md.md_type.clone()),
+                        }
+                    }
+                    other => Some(anchored(&Path::pident(id.clone()), other)),
+                }
+            } else {
+                let persistent_path = Path::pident(Ident::create_persistent(name));
+                pers_env
+                    .as_mut()
+                    .and_then(|pers| pers.get_renamed_sig(name, ctx))
+                    .map(|sig| anchored(&persistent_path, &DeclMty::MtySignature(sig)))
+            }
+        }
+        Path::Pdot(parent, submod, _) => {
+            let resolved_component = if force_component_subst {
+                crate::types::typecore::with_resolved_module_components_for_path(
+                    parent,
+                    env,
+                    pers_env,
+                    ctx,
+                    |components| {
+                        // OCaml compiler/ml/env.ml:91-99 caches
+                        // EnvLazy.force, env.ml:1568-1569 stores component
+                        // modules as EnvLazy declarations, and
+                        // env.ml:876-880 forces them through that cache.
+                        // Force through lookup_qualified_module so alias
+                        // scraping shares the same cached Subst.modtype
+                        // result as later component lookups instead of
+                        // freshening the child signature twice.
+                        let (runtime_pos, _, md) =
+                            components.lookup_qualified_module_shared(submod.as_str(), ctx)?;
+                        let parent_access_path = components.access_path().clone();
+                        let owner_path = Path::pdot_pos(
+                            parent_access_path,
+                            submod.clone(),
+                            runtime_pos as i32,
+                        );
+                        Some((owner_path, md))
+                    },
+                )
+                .flatten()
+            } else {
+                crate::types::typecore::lookup_module_in_resolved_path(
+                    parent, submod, env, pers_env, ctx,
+                )
+                .map(|(_, owner_path, md)| (owner_path, std::sync::Arc::new(md)))
+            };
+
+            if let Some((owner_path, md)) = resolved_component {
+                match &md.md_type {
+                    DeclMty::MtyAlias(_, alias_path) => scrape_resolve_module_path(
+                        alias_path,
+                        env,
+                        pers_env,
+                        ctx,
+                        visiting,
+                        force_component_subst,
+                    ),
+                    // env.ml:1396-1400.
+                    DeclMty::MtyIdent(mty_path) => {
+                        match find_modtype_expansion(mty_path, env, pers_env, ctx) {
+                            Some(expansion) => {
+                                scrape_alias_module_type(&expansion, env, pers_env, ctx)
+                            }
+                            None => Some(md.md_type.clone()),
+                        }
+                    }
+                    other => Some(anchored(&owner_path, other)),
+                }
+            } else {
+                None
+            }
+        }
+        Path::Papply(_, _) => None,
+    };
+
+    visiting.remove(path);
+    resolved
+}
+
+
+/// The module type of the module at `path`, resolved through module aliases
+/// without strengthening.
+pub(crate) fn resolve_module_path_module_type(
+    path: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+) -> Option<crate::types::decl::ModuleType> {
+    let mut visiting = HashSet::new();
+    scrape_resolve_module_path(path, env, pers_env, ctx, &mut visiting, false)
+}
+
 /// Mirror OCaml `Env.scrape_alias` enough for functor-application typing:
 /// follow `Mty_alias`/`Mty_ident` module-type paths until reaching a
 /// concrete module type (for example `Mty_functor`).
@@ -13671,128 +13805,10 @@ pub(crate) fn scrape_alias_module_type<'b>(
 ) -> Option<crate::types::decl::ModuleType> {
     use crate::types::decl::ModuleType as DeclMty;
 
-    fn resolve_path<'b>(
-        path: &Path,
-        env: &Env,
-        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'b crate::types::context::TypeContext,
-        visiting: &mut HashSet<Path>,
-        force_component_subst: bool,
-    ) -> Option<DeclMty> {
-        fn anchored(owner_path: &Path, mty: &DeclMty) -> DeclMty {
-            let mut mty = mty.clone();
-            anchor_local_module_aliases_to_owner(&mut mty, owner_path);
-            mty
-        }
-
-        if !visiting.insert(path.clone()) {
-            return None;
-        }
-
-        let resolved = match path {
-            Path::Pident(id) => {
-                let name = id.name();
-                if let Ok(md) = env.lookup_module(&Path::pident(id.clone())) {
-                    match &md.md_type {
-                        DeclMty::MtyAlias(_, alias_path) => resolve_path(
-                            alias_path,
-                            env,
-                            pers_env,
-                            ctx,
-                            visiting,
-                            force_component_subst,
-                        ),
-                        // `Env.scrape_alias` expands a module type path with
-                        // `find_modtype_expansion` (env.ml:1396-1400).
-                        DeclMty::MtyIdent(mty_path) => {
-                            match find_modtype_expansion(mty_path, env, pers_env, ctx) {
-                                Some(expansion) => {
-                                    scrape_alias_module_type(&expansion, env, pers_env, ctx)
-                                }
-                                None => Some(md.md_type.clone()),
-                            }
-                        }
-                        other => Some(anchored(&Path::pident(id.clone()), other)),
-                    }
-                } else {
-                    let persistent_path = Path::pident(Ident::create_persistent(name));
-                    pers_env
-                        .as_mut()
-                        .and_then(|pers| pers.get_renamed_sig(name, ctx))
-                        .map(|sig| anchored(&persistent_path, &DeclMty::MtySignature(sig)))
-                }
-            }
-            Path::Pdot(parent, submod, _) => {
-                let resolved_component = if force_component_subst {
-                    crate::types::typecore::with_resolved_module_components_for_path(
-                        parent,
-                        env,
-                        pers_env,
-                        ctx,
-                        |components| {
-                            // OCaml compiler/ml/env.ml:91-99 caches
-                            // EnvLazy.force, env.ml:1568-1569 stores component
-                            // modules as EnvLazy declarations, and
-                            // env.ml:876-880 forces them through that cache.
-                            // Force through lookup_qualified_module so alias
-                            // scraping shares the same cached Subst.modtype
-                            // result as later component lookups instead of
-                            // freshening the child signature twice.
-                            let (runtime_pos, _, md) =
-                                components.lookup_qualified_module_shared(submod.as_str(), ctx)?;
-                            let parent_access_path = components.access_path().clone();
-                            let owner_path = Path::pdot_pos(
-                                parent_access_path,
-                                submod.clone(),
-                                runtime_pos as i32,
-                            );
-                            Some((owner_path, md))
-                        },
-                    )
-                    .flatten()
-                } else {
-                    crate::types::typecore::lookup_module_in_resolved_path(
-                        parent, submod, env, pers_env, ctx,
-                    )
-                    .map(|(_, owner_path, md)| (owner_path, std::sync::Arc::new(md)))
-                };
-
-                if let Some((owner_path, md)) = resolved_component {
-                    match &md.md_type {
-                        DeclMty::MtyAlias(_, alias_path) => resolve_path(
-                            alias_path,
-                            env,
-                            pers_env,
-                            ctx,
-                            visiting,
-                            force_component_subst,
-                        ),
-                        // env.ml:1396-1400.
-                        DeclMty::MtyIdent(mty_path) => {
-                            match find_modtype_expansion(mty_path, env, pers_env, ctx) {
-                                Some(expansion) => {
-                                    scrape_alias_module_type(&expansion, env, pers_env, ctx)
-                                }
-                                None => Some(md.md_type.clone()),
-                            }
-                        }
-                        other => Some(anchored(&owner_path, other)),
-                    }
-                } else {
-                    None
-                }
-            }
-            Path::Papply(_, _) => None,
-        };
-
-        visiting.remove(path);
-        resolved
-    }
-
     match mty {
         DeclMty::MtyAlias(_, path) => {
             let mut visiting = HashSet::new();
-            let resolved = resolve_path(path, env, pers_env, ctx, &mut visiting, true)?;
+            let resolved = scrape_resolve_module_path(path, env, pers_env, ctx, &mut visiting, true)?;
             // OCaml compiler/ml/env.ml:1435-1449 strengthens the concrete
             // module type found through an alias using the alias path, and
             // compiler/ml/mtype.ml:365-385 then removes aliases recursively.
@@ -17883,8 +17899,8 @@ fn type_module_expr_with_alias_inner<'a>(
                     crate::types::decl::AliasPresence::MtaAbsent,
                     path_clone.clone(),
                 );
-                let constrained_mod_type = scrape_alias_module_type(
-                    &crate::types::decl::ModuleType::MtyIdent(alias_target.clone()),
+                let constrained_mod_type = resolve_module_path_module_type(
+                    &alias_target,
                     env,
                     &mut tctx.persistent_env,
                     tctx.type_ctx,
