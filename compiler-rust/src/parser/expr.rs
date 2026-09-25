@@ -671,6 +671,13 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
             }
         }
         Token::Await => (parse_await_expression(p), false),
+        // OCaml res_core.ml:2377-2381: these are operands, not atomic
+        // expressions, so no unary operator or postfix applies to them.
+        Token::Try => (parse_try_expr(p), false),
+        Token::If => (parse_if_expr(p), false),
+        Token::For => (parse_for_expr(p), false),
+        Token::While => (parse_while_expr(p), false),
+        Token::Switch => (parse_switch_expr(p), false),
         Token::Assert => {
             // Handle assert directly to preserve attribute location in expr location
             p.next();
@@ -1540,135 +1547,45 @@ pub fn parse_binary_expr(
     min_prec: i32,
     context: ExprContext,
 ) -> Expression {
+    // OCaml `parse_binary_expr` (compiler/syntax/src/res_core.ml:2408-2458).
     let mut left = left;
-
     loop {
-        // Skip `|` as binary operator in switch case RHS - it's the case delimiter
-        if context == ExprContext::SwitchCaseRhs && p.token == Token::Bar {
-            break;
-        }
-
-        // Disambiguate `-`, `-.`, `<`, and `%` between binary and unary/new expression.
-        // When on a new line AND not surrounded by whitespace on both sides,
-        // these tokens start a new expression rather than being binary operators.
-        // Example:
-        //   x
-        //   -10  <- unary minus on new expression
-        // vs:
-        //   x - 10  <- binary subtraction
-        if matches!(
-            p.token,
+        let token = p.token.clone().into_owned();
+        let token_prec = match token {
+            // Can the minus be interpreted as a binary operator? Or is it a
+            // unary? See `Scanner.is_binary_op`.
             Token::Minus | Token::MinusDot | Token::LessThan | Token::Percent
-        ) && !p.is_binary_op()
-            && p.has_newline_before()
-        {
-            break;
-        }
-
-        // If a line starts with an extension (`%ext`) treat it as a new expression
-        // instead of a binary operator continuation.
-        if p.token == Token::Percent && p.prev_end_pos.line < p.start_pos.line {
-            let looks_like_extension = p.lookahead(|state| {
-                let percent_end = state.end_pos.clone();
-                state.next();
-                let adjacent = state.start_pos.cnum == percent_end.cnum;
-                let is_ident = matches!(state.token, Token::Lident(_) | Token::Uident(_))
-                    || state.token.is_keyword();
-                adjacent && is_ident
-            });
-            if looks_like_extension {
-                break;
+                if !p.is_binary_op() && p.start_pos.line > p.prev_end_pos.line =>
+            {
+                -1
             }
-        }
-
-        let (token, prec) = match get_operator_precedence(&p.token) {
-            Some((t, prec)) if prec >= min_prec => (t, prec),
-            _ => break,
+            ref token => token.precedence(),
         };
-
+        if token_prec < min_prec {
+            return left;
+        }
         p.leave_breadcrumb(Grammar::ExprBinaryAfterOp(token.clone()));
         let op_start_idx = p.start_pos_idx();
         p.next();
         let op_end_idx = p.prev_end_pos_idx();
-
-        // Handle special case for assignment
-        if token == Token::ColonEqual {
-            let right = parse_expr_with_context(p, context);
-            p.eat_breadcrumb();
-            let loc = p.mk_loc_spanning(left.pexp_loc, right.pexp_loc);
-            let op =
-                super::core::make_infix_operator(p, Token::ColonEqual, op_start_idx, op_end_idx);
-            left = ast_helper::make_apply(
-                p.arena_mut(),
-                op,
-                vec![(ArgLabel::Nolabel, left), (ArgLabel::Nolabel, right)],
-                loc,
-            );
-            continue;
-        }
-
-        let right = parse_operand_expr(p, context);
-
-        // Right-associative handling for ** and =>
-        let next_prec = if is_right_associative(&token) {
-            prec
+        // Exponentiation is right-associative.
+        let next_prec = if token == Token::Exponentiation {
+            token_prec
         } else {
-            prec + 1
+            token_prec + 1
         };
+        let right = parse_operand_expr(p, context);
         let right = parse_binary_expr(p, right, next_prec, context);
-        p.eat_breadcrumb();
-
         let loc = p.mk_loc_spanning(left.pexp_loc, right.pexp_loc);
-
-        // Build application expression
-        // Use make_infix_operator to handle special cases like `=` (should be `==`)
-        let op_expr = super::core::make_infix_operator(p, token.clone(), op_start_idx, op_end_idx);
+        let op_expr = super::core::make_infix_operator(p, token, op_start_idx, op_end_idx);
         left = ast_helper::make_apply(
             p.arena_mut(),
             op_expr,
             vec![(ArgLabel::Nolabel, left), (ArgLabel::Nolabel, right)],
             loc,
         );
+        p.eat_breadcrumb();
     }
-
-    left
-}
-
-/// Get the precedence of an operator token.
-fn get_operator_precedence(token: &Token<'_>) -> Option<(Token<'static>, i32)> {
-    let prec = match token {
-        Token::HashEqual | Token::ColonEqual => 1,
-        Token::Lor => 2,
-        Token::Land => 3,
-        Token::Bor => 4,
-        Token::Bxor => 5,
-        Token::Band => 6,
-        Token::Equal
-        | Token::EqualEqual
-        | Token::EqualEqualEqual
-        | Token::LessThan
-        | Token::GreaterThan
-        | Token::BangEqual
-        | Token::BangEqualEqual
-        | Token::LessEqual
-        | Token::GreaterEqual => 7,
-        Token::LeftShift | Token::RightShift | Token::RightShiftUnsigned => 8,
-        Token::Plus | Token::PlusDot | Token::Minus | Token::MinusDot | Token::PlusPlus => 9,
-        Token::Asterisk
-        | Token::AsteriskDot
-        | Token::Forwardslash
-        | Token::ForwardslashDot
-        | Token::Percent => 10,
-        Token::Exponentiation => 11,
-        Token::MinusGreater => 12, // Pipe operator - kept as infix, not desugared
-        _ => return None,
-    };
-    Some((token.clone().into_owned(), prec))
-}
-
-/// Check if an operator is right-associative.
-fn is_right_associative(token: &Token<'_>) -> bool {
-    matches!(token, Token::Exponentiation)
 }
 
 // ============================================================================
@@ -1892,40 +1809,6 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
         Token::Dict => {
             p.next();
             parse_dict_expr(p, start_pos_idx)
-        }
-        Token::If => parse_if_expr(p),
-        Token::Switch => parse_switch_expr(p),
-        Token::While => parse_while_expr(p),
-        Token::For => parse_for_expr(p),
-        Token::Try => parse_try_expr(p),
-        Token::Assert => {
-            p.next();
-            // Assert takes a full expression, not just an operand
-            let arg = parse_expr(p);
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            let arg_idx = p.arena_mut().push_expr(arg);
-            Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_assert(arg_idx)),
-                pexp_loc: loc,
-                pexp_attributes: Attributes::new(),
-            }
-        }
-        // Upstream #8348: break / continue as atomic expressions.
-        Token::Break => {
-            p.next();
-            Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_break),
-                pexp_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
-                pexp_attributes: Attributes::new(),
-            }
-        }
-        Token::Continue => {
-            p.next();
-            Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_continue),
-                pexp_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
-                pexp_attributes: Attributes::new(),
-            }
         }
         Token::Percent => {
             // Extension expression: %ext, %ext.with.dots, %ext(payload)
