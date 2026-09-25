@@ -1446,6 +1446,60 @@ fn update_level_expand_with_lookup_capture<'a>(
                     pending_type_expansion_paths,
                 );
             }
+            // compiler/ml/ctype.ml:1698-1714: non-static rows get a fresh
+            // abstract row variable (or recurse into the fixed row_more), then
+            // only the row's field types are visited through `iter_row`.
+            TypeDesc::Tvariant(row) => {
+                let row = super::btype::row_repr(ctx, row);
+                drop(desc);
+                if !super::btype::static_row(ctx, &row) {
+                    if row.row_fixed {
+                        iterator(
+                            ctx,
+                            env,
+                            newtype_level,
+                            visited,
+                            super::btype::row_more(ctx, &row),
+                        )?;
+                    } else {
+                        let m = ctx.repr(row.row_more);
+                        let TypeDesc::Tvar(name) = ctx.get_desc(m).clone() else {
+                            panic!("Ctype.reify: non-variable row_more in a non-static row");
+                        };
+                        let m_level = ctx.get_level(m);
+                        let t = create_reified_constr(ctx, env, newtype_level, m_level, name);
+                        let fixed_row = RowDesc {
+                            row_fields: Vec::new(),
+                            row_fixed: true,
+                            row_more: t,
+                            ..row.clone()
+                        };
+                        let fixed = ctx.alloc_type_at_level(TypeDesc::Tvariant(fixed_row), m_level);
+                        link_type(ctx, m, fixed);
+                        if m_level < newtype_level {
+                            let rhs = ctx.alloc_type_at_level(TypeDesc::Tvar(None), m_level);
+                            return Err(TypeError::Unify(vec![(t, rhs)]));
+                        }
+                    }
+                }
+                let mut children = Vec::new();
+                super::btype::iter_row(ctx, &row, |child| children.push(child));
+                for child in children {
+                    iterator(ctx, env, newtype_level, visited, child)?;
+                }
+                Ok(())
+            }
+            // compiler/ml/ctype.ml:1715-1716.
+            TypeDesc::Tconstr { path, .. } if path.head_name().starts_with('#') => {
+                drop(desc);
+                let expanded = full_expand(ctx, env, ty);
+                let mut children = Vec::new();
+                iter_type_expr(ctx, expanded, |child| children.push(child));
+                for child in children {
+                    iterator(ctx, env, newtype_level, visited, child)?;
+                }
+                Ok(())
+            }
             _ => {
                 drop(desc);
                 ctx.set_level(ty, level);

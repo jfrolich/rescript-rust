@@ -10795,6 +10795,7 @@ fn type_match_cases_sequential(
     body_ty: TypeExprRef,
     erase_either: bool,
     body_context: Option<TypeClashContext>,
+    lev: i32,
 ) -> TypeCoreResult<Vec<crate::types::typedtree::Case>> {
     // OCaml compiler/ml/typecore.ml:4420-4438 builds `pat_env_list` for all
     // cases before typecore.ml:4473-4505 types any case body. Keep the same
@@ -10810,6 +10811,7 @@ fn type_match_cases_sequential(
             scrutinee_ty,
             generic_scrutinee_ty,
             erase_either,
+            lev,
         )?);
     }
 
@@ -10983,6 +10985,10 @@ fn type_match_cases_batch_non_gadt<'a>(
     }
 
     let ctx = tctx.type_ctx;
+    // OCaml compiler/ml/typecore.ml:4396-4397: without GADTs, `lev` is the
+    // level before the propagation `begin_def`, and typecore.ml:4434 passes it
+    // to `type_pattern ~lev`.
+    let lev = ctx.current_level();
     let single_var_case = matches!(
         cases,
         [case] if is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(case.pc_lhs))
@@ -11018,13 +11024,16 @@ fn type_match_cases_batch_non_gadt<'a>(
             };
             let mut state = PatternState::new();
             state.reset(true);
-            let typed_pat = type_pattern(
+            let typed_pat = type_pattern_with_existentials_at_level(
                 tctx,
                 env,
                 tctx.arena.get_pat(case.pc_lhs),
                 case_scrutinee_ty,
                 PatternMode::Normal,
+                true,
                 &mut state,
+                lev,
+                0,
             )?;
             let mut case_env = if state.pattern_variables.is_empty() {
                 env.clone_preserve_id()
@@ -11332,15 +11341,19 @@ fn type_match(
 
     let value_usage_checkpoint = tctx.value_usage_check_checkpoint();
     let typed_val_cases_result = if has_generalized_value_patterns {
+        // OCaml compiler/ml/typecore.ml:4376-4378 replaces `ty_arg` with
+        // `correct_levels ty_arg` when the cases contain GADTs, and
+        // typecore.ml:4432 instances that corrected type for every pattern.
         type_match_cases_sequential(
             tctx,
             val_case_env,
             &val_caselist,
             ty_arg,
-            generic_scrutinee_ty,
+            ty_arg,
             ty_res,
             erase_either,
             body_context.clone(),
+            gadt_lev,
         )
     } else {
         match type_match_cases_batch_non_gadt(
@@ -12034,27 +12047,6 @@ fn duplicate_ident_types_for_gadt_cases(
     copied_env
 }
 
-/// Type check a single case.
-fn type_case(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    case: &crate::parser::ast::Case,
-    scrutinee_ty: TypeExprRef,
-    generic_scrutinee_ty: TypeExprRef,
-    body_ty: TypeExprRef,
-    erase_either: bool,
-) -> TypeCoreResult<crate::types::typedtree::Case> {
-    let pending = type_case_pattern(
-        tctx,
-        env,
-        case,
-        scrutinee_ty,
-        generic_scrutinee_ty,
-        erase_either,
-    )?;
-    type_pending_case_body(tctx, env, pending, body_ty, None)
-}
-
 fn shallow_copy_pattern_binding_type(
     ctx: &TypeContext,
     ty: TypeExprRef,
@@ -12174,6 +12166,7 @@ fn type_case_pattern<'a>(
     scrutinee_ty: TypeExprRef,
     generic_scrutinee_ty: TypeExprRef,
     erase_either: bool,
+    lev: i32,
 ) -> TypeCoreResult<PendingSequentialMatchCase<'a>> {
     let case_has_gadt =
         pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(case.pc_lhs));
@@ -12185,6 +12178,7 @@ fn type_case_pattern<'a>(
         generic_scrutinee_ty,
         erase_either,
         false,
+        lev,
     ) {
         Ok(case) => Ok(case),
         Err(TypeCoreError::PatternTypeClash { .. }) if !case_has_gadt => type_case_pattern_impl(
@@ -12195,6 +12189,7 @@ fn type_case_pattern<'a>(
             generic_scrutinee_ty,
             erase_either,
             true,
+            lev,
         ),
         Err(err) => Err(err),
     }
@@ -12208,6 +12203,7 @@ fn type_case_pattern_impl<'a>(
     generic_scrutinee_ty: TypeExprRef,
     erase_either: bool,
     force_case_local_constraints: bool,
+    lev: i32,
 ) -> TypeCoreResult<PendingSequentialMatchCase<'a>> {
     let mut case_env = env.clone();
     let case_has_gadt =
@@ -12242,13 +12238,19 @@ fn type_case_pattern_impl<'a>(
     } else {
         crate::types::instance(tctx.type_ctx, generic_scrutinee_ty)
     };
-    let typed_pat_result = type_pattern(
+    // OCaml compiler/ml/typecore.ml:4420-4434: `type_pattern ~lev`, where
+    // `lev` is the `init_env` level (typecore.ml:4387-4395), not the raised
+    // pattern level.
+    let typed_pat_result = type_pattern_with_existentials_at_level(
         tctx,
         &case_env,
         tctx.arena.get_pat(case.pc_lhs),
         case_scrutinee_ty,
         PatternMode::Normal,
+        true,
         &mut state,
+        lev,
+        0,
     );
     tctx.type_ctx.end_def();
     let typed_pat = match typed_pat_result {
