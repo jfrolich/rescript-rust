@@ -11969,6 +11969,16 @@ fn validate_payload_deriving_errors(payload: &Payload, arena: &mut ParseArena) -
     }
 }
 
+/// The part of an expression extension that `Ast_exp_extension.handle_extension`
+/// maps with the builtin mapper: only `%obj` record fields are visited; the
+/// payloads of other extensions are never traversed (ast_exp_extension.ml:26-83).
+fn expression_extension_mapped_payload<'e>(
+    extension: &'e current::Extension,
+    arena: &ParseArena,
+) -> Option<&'e Payload> {
+    (arena.get_string(extension.0.txt) == "obj").then_some(&extension.1)
+}
+
 fn is_config_attribute(attr: &Attribute, arena: &ParseArena) -> bool {
     arena.get_string(attr.0.txt) == "config"
 }
@@ -12527,7 +12537,10 @@ fn validate_expression_builtin_type_redefinition_errors(
             validate_expression_builtin_type_redefinition_errors(*body, arena)
         }
         ExpressionDesc::Pexp_extension(extension) => {
-            validate_payload_builtin_type_redefinition_errors(&extension.1, arena)
+            match expression_extension_mapped_payload(extension, arena) {
+                Some(payload) => validate_payload_builtin_type_redefinition_errors(payload, arena),
+                None => Ok(()),
+            }
         }
         ExpressionDesc::Pexp_comptime_field(inner) => {
             let (value, field) = &**inner;
@@ -13495,7 +13508,10 @@ fn validate_expression_method_attribute_errors(
         }
         ExpressionDesc::Pexp_extension(extension) => {
             validate_expression_extension_payload_error(extension, arena)?;
-            validate_payload_method_attribute_errors(&extension.1, arena)
+            match expression_extension_mapped_payload(extension, arena) {
+                Some(payload) => validate_payload_method_attribute_errors(payload, arena),
+                None => Ok(()),
+            }
         }
         ExpressionDesc::Pexp_jsx_element(jsx) => {
             validate_jsx_element_method_attribute_errors(jsx, arena)
@@ -14118,7 +14134,10 @@ fn validate_expression_js_string_errors(
             validate_expression_idx_js_string_errors(*body, arena)
         }
         ExpressionDesc::Pexp_extension(extension) => {
-            validate_payload_js_string_errors(&extension.1, arena)
+            match expression_extension_mapped_payload(extension, arena) {
+                Some(payload) => validate_payload_js_string_errors(payload, arena),
+                None => Ok(()),
+            }
         }
         ExpressionDesc::Pexp_jsx_element(jsx) => validate_jsx_element_js_string_errors(jsx, arena),
         ExpressionDesc::Pexp_inline_for(inner) => {
@@ -15054,7 +15073,9 @@ fn validate_expression_await_context(
             validate_expression_idx_await_context(*body, arena, async_context, false)?;
         }
         ExpressionDesc::Pexp_extension(extension) => {
-            validate_payload_await_errors(&extension.1, arena, async_context)?;
+            if let Some(payload) = expression_extension_mapped_payload(extension, arena) {
+                validate_payload_await_errors(payload, arena, async_context)?;
+            }
         }
         ExpressionDesc::Pexp_await(inner) => {
             validate_expression_idx_await_context(*inner, arena, async_context, false)?;
@@ -15324,10 +15345,12 @@ fn validate_expression_this_errors(expr: &Expression, arena: &mut ParseArena) ->
             let (_override, _lid, body) = &**inner;
             validate_expression_idx_this_errors(*body, arena)
         }
-        ExpressionDesc::Pexp_extension(extension) => match &extension.1 {
-            Payload::PStr(items) => validate_structure_this_errors(items, arena),
-            _ => Ok(()),
-        },
+        ExpressionDesc::Pexp_extension(extension) => {
+            match expression_extension_mapped_payload(extension, arena) {
+                Some(Payload::PStr(items)) => validate_structure_this_errors(items, arena),
+                _ => Ok(()),
+            }
+        }
         _ => Ok(()),
     }
 }
