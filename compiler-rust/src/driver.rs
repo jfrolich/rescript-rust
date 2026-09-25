@@ -11440,6 +11440,18 @@ pub fn run_implementation_frontend(
         }
         rewritten
     };
+    // js_implementation.ml:125-129: `after_parsing_impl` runs the second
+    // `Ast_config.process_str` after the builtin ppx.
+    for (warning, config) in &config_processing.late_warnings {
+        ppx_warnings_have_errors |= format_ppx_warnings_with_config(
+            parser.arena(),
+            source,
+            filename,
+            config,
+            std::slice::from_ref(warning),
+            out,
+        );
+    }
     Ok(ImplementationFrontend {
         structure,
         warnings_fatal: ppx_warnings_have_errors,
@@ -12449,6 +12461,17 @@ pub fn run_interface_frontend(
             return Err(ppx_error_to_anyhow(e, parser.arena(), source, filename));
         }
     }
+    // js_implementation.ml:36-38: the second `Ast_config.process_sig`.
+    for (warning, config) in &config_processing.late_warnings {
+        ppx_warnings_have_errors |= format_ppx_warnings_with_config(
+            parser.arena(),
+            source,
+            filename,
+            config,
+            std::slice::from_ref(warning),
+            out,
+        );
+    }
     Ok(InterfaceFrontend {
         signature,
         warnings_fatal: ppx_warnings_have_errors,
@@ -12860,7 +12883,11 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             parser.arena(),
             &warning_config_for_options_and_leading_attrs(options, &frontend_warning_specs),
         );
-        for (warning, config) in &config_processing.warnings {
+        for (warning, config) in config_processing
+            .warnings
+            .iter()
+            .chain(config_processing.late_warnings.iter())
+        {
             let _ = emit_ppx_warnings_with_config(
                 parser.arena(),
                 source,
@@ -14075,6 +14102,10 @@ struct FileConfigProcessing {
     overrides: FileConfigOverrides,
     /// Warnings together with the warning state they were emitted under.
     warnings: Vec<(ppx::PpxWarning, WarningConfig)>,
+    /// The warnings of the second `Ast_config.process_str`, which
+    /// `Js_implementation.after_parsing_impl` runs after the builtin ppx
+    /// (js_implementation.ml:125-129).
+    late_warnings: Vec<(ppx::PpxWarning, WarningConfig)>,
     error: Option<ConfigPayloadError>,
 }
 
@@ -14090,16 +14121,18 @@ fn process_file_config(
         return result;
     };
     let mut state = base.clone();
-    for _ in 0..runs {
+    for run in 0..runs {
+        let mut run_warnings: Vec<(ppx::PpxWarning, WarningConfig)> = Vec::new();
         let mut overrides = FileConfigOverrides::default();
         let mut payload_warnings = Vec::new();
         let actions = config_payload_actions(&attr.1, attr.0.loc, arena, &mut payload_warnings);
         for warning in payload_warnings {
-            result.warnings.push((warning, state.clone()));
+            run_warnings.push((warning, state.clone()));
         }
         let actions = match actions {
             Ok(actions) => actions,
             Err(err) => {
+                push_config_run_warnings(&mut result, run, run_warnings);
                 result.error = Some(err);
                 return result;
             }
@@ -14114,7 +14147,7 @@ fn process_file_config(
                 "flags" => match config_flags_strings(action.expr, arena) {
                     Ok(Some((flags, loc))) => {
                         if !run_file_level_flags(&flags, &mut overrides, &mut state) {
-                            result.warnings.push((
+                            run_warnings.push((
                                 ppx::PpxWarning {
                                     loc,
                                     warning: crate::diagnostics::Warning::Preprocessor {
@@ -14135,14 +14168,28 @@ fn process_file_config(
                 }),
             };
             if let Err(err) = outcome {
+                push_config_run_warnings(&mut result, run, run_warnings);
                 result.overrides = overrides;
                 result.error = Some(err);
                 return result;
             }
         }
+        push_config_run_warnings(&mut result, run, run_warnings);
         result.overrides = overrides;
     }
     result
+}
+
+fn push_config_run_warnings(
+    result: &mut FileConfigProcessing,
+    run: usize,
+    warnings: Vec<(ppx::PpxWarning, WarningConfig)>,
+) {
+    if run == 0 {
+        result.warnings.extend(warnings);
+    } else {
+        result.late_warnings.extend(warnings);
+    }
 }
 
 /// `iter_on_config_str`: only the first `@@config` among the leading
@@ -15627,7 +15674,11 @@ pub fn typecheck_interface_in_process(
         parser.arena(),
         &warning_config_for_options_and_leading_attrs(options, &frontend_warning_specs),
     );
-    for (warning, config) in &config_processing.warnings {
+    for (warning, config) in config_processing
+        .warnings
+        .iter()
+        .chain(config_processing.late_warnings.iter())
+    {
         let _ = emit_ppx_warnings_with_config(
             parser.arena(),
             source,
