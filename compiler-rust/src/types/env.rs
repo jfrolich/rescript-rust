@@ -1777,6 +1777,11 @@ impl Env {
 
     /// Find a local constraint.
     pub fn find_local_constraint(&self, path: &Path) -> Option<&TypeDeclaration> {
+        // Local constraints only exist under GADT pattern refinement; skip
+        // hashing the path in the common empty case.
+        if self.local_constraints.is_empty() {
+            return None;
+        }
         self.local_constraints.get(path).map(|d| d.as_ref())
     }
 
