@@ -1009,7 +1009,7 @@ fn print_extra_type_clash_help_by_types(
             if matches!(desc(t1), TypeDesc::Tvariant(_)) && matches!(desc(t2), TypeDesc::Tvariant(_)) {
                 false
             } else {
-                crate::types::ctype::subtype(ctx, env, t1, t2).is_ok()
+                crate::types::ctype::subtype_now(ctx, env, t1, t2).is_ok()
             }
         }
         None => false,
@@ -1250,4 +1250,25 @@ pub(super) fn expr_type_clash_arity_mismatch(
         }
         _ => None,
     }
+}
+
+/// `Typecore.report_error`'s `Not_subtype (tr1, tr2, ctx)`
+/// (typecore.ml:4994-4995): `report_subtyping_error ppf env tr1
+/// "is not a subtype of" tr2 ctx`.
+pub(super) fn print_not_subtype(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    env: &Env,
+    raw_trace1: &[(TypeExprRef, TypeExprRef)],
+    raw_trace2: &[(TypeExprRef, TypeExprRef)],
+    context: Option<&crate::types::SubtypeContext>,
+) {
+    let tr1 = expand_trace(ctx, raw_trace1);
+    let tr2 = expand_trace(ctx, raw_trace2);
+    let mut printer = Printtyp::new(ctx);
+    let lookup_env = env.clone();
+    printer.set_printing_env(Box::new(move |name| {
+        lookup_env.find_type_with_path(name).ok().map(|(p, _)| p)
+    }));
+    printer.report_subtyping_error(ppf, &tr1, "is not a subtype of", &tr2, context);
 }

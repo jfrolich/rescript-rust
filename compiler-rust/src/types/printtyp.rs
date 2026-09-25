@@ -1778,3 +1778,503 @@ fn path_binding_time(p: &Path) -> i32 {
         Path::Papply(p1, p2) => path_binding_time(p1).max(path_binding_time(p2)),
     }
 }
+
+// ============================================================================
+// Subtyping errors (printtyp.ml:1235-1252, 1569-1738)
+// ============================================================================
+
+impl<'a> Printtyp<'a> {
+    /// `type_expansion t ppf t'` (printtyp.ml:1235-1241).
+    fn type_expansion<W: std::io::Write>(&mut self, ppf: &mut Formatter<W>, t: TypeExprRef, t2: TypeExprRef) {
+        if self.same_path(t, t2) {
+            let proxy = self.proxy(t);
+            self.add_delayed(proxy);
+            self.pp_type_expr(ppf, t);
+        } else {
+            let t2 = if self.proxy(t) == self.proxy(t2) {
+                self.unalias(t2)
+            } else {
+                t2
+            };
+            ppf.open_box(BoxKind::Box, 2);
+            self.pp_type_expr(ppf, t);
+            ppf.space();
+            ppf.str("=");
+            ppf.space();
+            self.pp_type_expr(ppf, t2);
+            ppf.close_box();
+        }
+    }
+
+    /// The inner `trace fst txt ppf` (printtyp.ml:1247-1252).
+    fn plain_trace<W: std::io::Write>(&mut self, ppf: &mut Formatter<W>, fst: bool, txt: &str, tr: &[TracePair]) {
+        if let [(t1, t1e), (t2, t2e), rem @ ..] = tr {
+            if !fst {
+                ppf.cut();
+            }
+            ppf.open_box(BoxKind::Box, 0);
+            ppf.str("Type");
+            ppf.break_(1, 2);
+            self.type_expansion(ppf, *t1, *t1e);
+            ppf.space();
+            ppf.str(txt);
+            ppf.break_(1, 2);
+            self.type_expansion(ppf, *t2, *t2e);
+            ppf.close_box();
+            ppf.str(" ");
+            self.plain_trace(ppf, false, txt, rem);
+        }
+    }
+
+    /// `trace fst keep_last txt ppf tr` (printtyp.ml:1569-1577).
+    fn keep_last_trace<W: std::io::Write>(
+        &mut self,
+        ppf: &mut Formatter<W>,
+        fst: bool,
+        keep_last: bool,
+        txt: &str,
+        tr: &[TracePair],
+    ) {
+        self.trace_same_names(tr);
+        if let [t1, t2, rest @ ..] = tr {
+            if fst {
+                let mut kept = vec![*t1, *t2];
+                kept.extend(self.filter_trace(keep_last, rest));
+                self.plain_trace(ppf, fst, txt, &kept);
+            } else {
+                let kept = self.filter_trace(keep_last, tr);
+                self.plain_trace(ppf, fst, txt, &kept);
+            }
+        }
+    }
+
+    /// `report_subtyping_error ppf env tr1 txt1 tr2 ctx`
+    /// (printtyp.ml:1740-1813), after `wrap_printing_env env`.
+    pub(crate) fn report_subtyping_error<W: std::io::Write>(
+        &mut self,
+        ppf: &mut Formatter<W>,
+        tr1: &[TracePair],
+        txt1: &str,
+        tr2: &[TracePair],
+        context: Option<&crate::types::SubtypeContext>,
+    ) {
+        self.reset();
+        let tr1: Vec<TracePair> = tr1.iter().map(|&p| self.prepare_expansion(p)).collect();
+        let tr2: Vec<TracePair> = tr2.iter().map(|&p| self.prepare_expansion(p)).collect();
+        ppf.open_box(BoxKind::V, 0);
+        self.keep_last_trace(ppf, true, tr2.is_empty(), txt1, &tr1);
+        if tr2.is_empty() {
+            ppf.close_box();
+        } else {
+            let mis = self.mismatch(&tr2);
+            self.keep_last_trace(ppf, false, mis.is_none(), "is not compatible with type", &tr2);
+            if let Some((t3, t4)) = mis {
+                self.explanation(ppf, true, t3, t4);
+            }
+            ppf.close_box();
+        }
+        if let Some(context) = context {
+            ppf.cut();
+            ppf.cut();
+            ppf.open_box(BoxKind::V, 2);
+            print_subtype_context(ppf, context);
+        }
+    }
+}
+
+fn info<W: std::io::Write>(ppf: &mut Formatter<W>, text: &str) {
+    open_tag(ppf, TAG_INFO);
+    ppf.str(text);
+    close_tag(ppf);
+}
+
+fn error_tag<W: std::io::Write>(ppf: &mut Formatter<W>, text: &str) {
+    open_tag(ppf, TAG_ERROR);
+    ppf.str(text);
+    close_tag(ppf);
+}
+
+/// `Ast_untagged_variants.tag_type_to_user_visible_string`.
+fn as_payload_name(payload: crate::types::ctype::VariantConstructorAsPayload) -> &'static str {
+    use crate::types::ctype::VariantConstructorAsPayload as P;
+    match payload {
+        P::String => "string",
+        P::Int => "int",
+        P::Float => "float",
+        P::BigInt => "bigint",
+        P::Bool => "bool",
+        P::Null => "null",
+        P::Undefined => "undefined",
+    }
+}
+
+/// The `match ctx with Some ctx -> ...` part of `report_subtyping_error`.
+fn print_subtype_context<W: std::io::Write>(ppf: &mut Formatter<W>, context: &crate::types::SubtypeContext) {
+    use crate::types::SubtypeContext as C;
+    use crate::types::ctype::SubtypeTypeKind as K;
+    match context {
+        C::Generic { error_code } => {
+            ppf.str("Error: ");
+            ppf.str(error_code);
+        }
+        C::CoercionTargetVariantNotUnboxed {
+            variant_name,
+            primitive,
+        } => {
+            ppf.space();
+            ppf.str("The variant ");
+            info(ppf, &variant_name.name());
+            ppf.str(" is not unboxed, so it cannot be coerced to a ");
+            info(ppf, &primitive.name());
+            ppf.str(". ");
+            ppf.space();
+            ppf.str("Fix this by adding the ");
+            info(ppf, "@unboxed");
+            ppf.str(" attribute to the variant ");
+            info(ppf, &variant_name.name());
+            ppf.str(".");
+        }
+        C::CoercionTargetVariantDoesNotCoverType {
+            variant_name,
+            primitive,
+        } => {
+            let variant = variant_name.name();
+            let primitive = primitive.name();
+            let mut chars = primitive.chars();
+            let capitalized = match chars.next() {
+                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            };
+            ppf.space();
+            ppf.str("The variant ");
+            info(ppf, &variant);
+            ppf.str(" is unboxed, but has no catch-all case for the primitive ");
+            info(ppf, &primitive);
+            ppf.str(", and therefore does not cover all values of type ");
+            info(ppf, &primitive);
+            ppf.str(". ");
+            ppf.space();
+            ppf.str("Fix this by adding a catch-all for ");
+            info(ppf, &variant);
+            ppf.str(" to ");
+            info(ppf, &primitive);
+            ppf.str(", like ");
+            info(ppf, &format!("{capitalized}({primitive})"));
+            ppf.str(".");
+        }
+        C::VariantConstructorRuntimeRepresentationMismatch { variant_name, issues } => {
+            for issue in issues {
+                ppf.space();
+                print_variant_runtime_representation_issue(ppf, variant_name, issue);
+            }
+        }
+        C::VariantConfigurationsMismatch {
+            left_variant_name,
+            right_variant_name,
+            issue,
+        } => print_variant_configuration_issue(ppf, issue, left_variant_name, right_variant_name),
+        C::DifferentTypeKinds {
+            left_typename,
+            right_typename,
+            left_type_kind,
+            right_type_kind,
+        } => {
+            let kind = |k: &K| match k {
+                K::Abstract => "an abstract type",
+                K::Record => "a record",
+                K::Variant => "a variant",
+                K::Open => "an open type",
+            };
+            ppf.space();
+            ppf.str("The types of ");
+            info(ppf, &left_typename.name());
+            ppf.str(" and ");
+            info(ppf, &right_typename.name());
+            ppf.str(" are different:");
+            ppf.space();
+            ppf.str("- ");
+            info(ppf, &left_typename.name());
+            ppf.str(" is ");
+            ppf.str(kind(left_type_kind));
+            ppf.space();
+            ppf.str("- ");
+            info(ppf, &right_typename.name());
+            ppf.str(" is ");
+            ppf.str(kind(right_type_kind));
+        }
+        C::RecordFieldsMismatch {
+            left_record_name,
+            right_record_name,
+            issues,
+        } => {
+            ppf.space();
+            ppf.str("The record ");
+            info(ppf, &left_record_name.name());
+            ppf.str(" cannot be coerced to the record ");
+            info(ppf, &right_record_name.name());
+            ppf.str(" because:");
+            for issue in issues {
+                ppf.space();
+                ppf.str("- ");
+                print_record_field_subtype_violation(ppf, issue, left_record_name, right_record_name);
+            }
+        }
+    }
+}
+
+/// `print_variant_runtime_representation_issue` (printtyp.ml:1579-1628).
+fn print_variant_runtime_representation_issue<W: std::io::Write>(
+    ppf: &mut Formatter<W>,
+    variant_name: &Path,
+    issue: &crate::types::ctype::VariantRuntimeRepresentationIssue,
+) {
+    use crate::types::ctype::VariantRuntimeRepresentationIssue as I;
+    let variant = variant_name.name();
+    match issue {
+        I::CannotCoerceNonUnboxedWithPayload {
+            constructor_name,
+            expected_typename,
+        } => {
+            ppf.str("The constructor ");
+            info(ppf, constructor_name);
+            ppf.str(" of variant ");
+            info(ppf, &variant);
+            ppf.str(" has a payload, but the variant itself is not unboxed. ");
+            ppf.space();
+            ppf.str("This means that the constructor ");
+            info(ppf, constructor_name);
+            ppf.str(" will be encoded as an object at runtime, which is not compatible with ");
+            info(ppf, &expected_typename.name());
+            ppf.str(".");
+        }
+        I::InlineRecordCannotBeCoerced { constructor_name } => {
+            ppf.str("The constructor ");
+            info(ppf, constructor_name);
+            ppf.str(" of variant ");
+            info(ppf, &variant);
+            ppf.str(" has an inline record as payload. Currently, inline records cannot be coerced.");
+        }
+        I::AsPayloadNotEligibleForCoercion {
+            constructor_name,
+            as_payload,
+            expected_typename,
+        } => {
+            ppf.str("The constructor ");
+            info(ppf, constructor_name);
+            ppf.str(" of variant ");
+            info(ppf, &variant);
+            ppf.str(" has an ");
+            info(ppf, "@as");
+            ppf.str(" payload that has a runtime representation of ");
+            info(ppf, as_payload_name(*as_payload));
+            ppf.str(", which is not compatible with the expected ");
+            info(ppf, &expected_typename.name());
+            ppf.str(".");
+        }
+        I::MismatchedUnboxedPayload { .. } => {}
+        I::MismatchedAsPayload {
+            constructor_name,
+            expected_typename,
+            as_payload,
+        } => {
+            ppf.str("The constructor ");
+            info(ppf, constructor_name);
+            ppf.str(" of variant ");
+            info(ppf, &variant);
+            ppf.str(" has ");
+            match as_payload {
+                None => {
+                    ppf.str("no ");
+                    info(ppf, "@as");
+                    ppf.str(" payload, which makes it a ");
+                    info(ppf, "string");
+                    ppf.str(" at runtime.");
+                }
+                Some(payload) => {
+                    ppf.str("an ");
+                    info(ppf, "@as");
+                    ppf.str(" payload that gives it the runtime type of ");
+                    info(ppf, as_payload_name(*payload));
+                    ppf.str(".");
+                }
+            }
+            ppf.space();
+            ppf.str("That runtime representation is not compatible with the expected runtime representation of ");
+            info(ppf, &expected_typename.name());
+            ppf.str(".");
+            ppf.cut();
+            ppf.space();
+            ppf.str("Fix this by making sure all constructors in variant ");
+            info(ppf, &variant);
+            ppf.str(" has a runtime representation of ");
+            info(ppf, &expected_typename.name());
+            ppf.str(".");
+        }
+    }
+}
+
+/// `print_variant_configuration_issue` (printtyp.ml:1630-1698).
+fn print_variant_configuration_issue<W: std::io::Write>(
+    ppf: &mut Formatter<W>,
+    issue: &crate::types::ctype::VariantConfigurationIssue,
+    left_variant_name: &Path,
+    right_variant_name: &Path,
+) {
+    use crate::types::ctype::VariantConfigurationIssue as I;
+    match issue {
+        I::UnboxedConfigNotMatching {
+            left_unboxed,
+            right_unboxed,
+        } => {
+            ppf.space();
+            ppf.str("The variants have different ");
+            info(ppf, "@unboxed");
+            ppf.str(" configurations.");
+            for (unboxed, name) in [(*left_unboxed, left_variant_name), (*right_unboxed, right_variant_name)] {
+                ppf.space();
+                ppf.str("- Variant ");
+                info(ppf, &name.name());
+                ppf.str(" is ");
+                error_tag(ppf, if unboxed { "not " } else { "" });
+                ppf.str("unboxed.");
+            }
+            ppf.cut();
+            ppf.space();
+            ppf.str("Fix this by making sure the variants either both have, or don't have, the ");
+            info(ppf, "@unboxed");
+            ppf.str(" attribute.");
+        }
+        I::TagNameNotMatching { left_tag, right_tag } => {
+            ppf.space();
+            ppf.str("The variants have different ");
+            info(ppf, "@tag");
+            ppf.str(" configurations.");
+            for (tag, name) in [(left_tag, left_variant_name), (right_tag, right_variant_name)] {
+                ppf.space();
+                match tag {
+                    Some(tag) => {
+                        ppf.str("- ");
+                        info(ppf, &name.name());
+                        ppf.str(" has tag ");
+                        info(ppf, tag);
+                        ppf.str(".");
+                    }
+                    None => {
+                        ppf.str("- ");
+                        info(ppf, &name.name());
+                        ppf.str(" has no explicit tag.");
+                    }
+                }
+            }
+            ppf.cut();
+            ppf.space();
+            ppf.str("Fix this by making sure the variants either have the exact same ");
+            info(ppf, "@tag");
+            ppf.str(" configuration, or no ");
+            info(ppf, "@tag");
+            ppf.str(" at all.");
+        }
+        I::IncompatibleConstructorCount { constructor_names } => {
+            let total = constructor_names.len();
+            let printed = &constructor_names[..total.min(3)];
+            let not_printed = total - printed.len();
+            ppf.space();
+            info(ppf, &left_variant_name.name());
+            ppf.str(&format!(" has {total} constructor{} that ", if total == 1 { "" } else { "s" }));
+            info(ppf, &right_variant_name.name());
+            ppf.str(" does not have: ");
+            for (index, name) in printed.iter().enumerate() {
+                if index > 0 {
+                    ppf.str(", ");
+                }
+                info(ppf, name);
+            }
+            if not_printed > 0 {
+                ppf.str(&format!(" (+{not_printed} more)"));
+            }
+            ppf.space();
+            ppf.str("Therefore, it is not possible for ");
+            info(ppf, &right_variant_name.name());
+            ppf.str(" to represent ");
+            info(ppf, &left_variant_name.name());
+            ppf.str(".");
+        }
+    }
+}
+
+/// `print_record_field_subtype_violation` (printtyp.ml:1700-1738).
+fn print_record_field_subtype_violation<W: std::io::Write>(
+    ppf: &mut Formatter<W>,
+    issue: &crate::types::ctype::RecordFieldSubtypeViolation,
+    left_record_name: &Path,
+    right_record_name: &Path,
+) {
+    use crate::types::ctype::RecordFieldSubtypeViolation as V;
+    match issue {
+        V::OptionalMismatch {
+            label,
+            left_optional,
+            right_optional,
+        } => {
+            ppf.str("The field ");
+            info(ppf, label);
+            ppf.str(" ");
+            match (left_optional, right_optional) {
+                (true, false) => {
+                    ppf.str("is optional in record ");
+                    info(ppf, &left_record_name.name());
+                    ppf.str(", but is not optional in record ");
+                    info(ppf, &right_record_name.name());
+                }
+                (false, true) => {
+                    ppf.str("is not optional in record ");
+                    info(ppf, &left_record_name.name());
+                    ppf.str(", but is optional in record ");
+                    info(ppf, &right_record_name.name());
+                }
+                _ => {}
+            }
+        }
+        V::FieldRuntimeNameMismatch { label, left_as, right_as } => {
+            ppf.str("Field ");
+            info(ppf, label);
+            ppf.str(" runtime representation");
+            match left_as {
+                Some(as_name) => {
+                    ppf.str(" is configured to be ");
+                    info(ppf, &format!("\"{as_name}\""));
+                    ppf.str(" (via the @as attribute)");
+                }
+                None => {
+                    ppf.str(" is ");
+                    info(ppf, &format!("\"{label}\""));
+                }
+            }
+            ppf.str(" in record ");
+            info(ppf, &right_record_name.name());
+            ppf.str(", but in record ");
+            info(ppf, &left_record_name.name());
+            match right_as {
+                Some(as_name) => {
+                    ppf.str(" it is configured to be ");
+                    info(ppf, &format!("\"{as_name}\""));
+                    ppf.str(" (via the @as attribute).");
+                }
+                None => {
+                    ppf.str(" it is ");
+                    info(ppf, &format!("\"{label}\""));
+                    ppf.str(".");
+                }
+            }
+            ppf.str(" Runtime representations must match.");
+        }
+        V::FieldMissing { label } => {
+            ppf.str("The field ");
+            info(ppf, label);
+            ppf.str(" is missing in record ");
+            info(ppf, &right_record_name.name());
+            ppf.str(", but present in record ");
+            info(ppf, &left_record_name.name());
+        }
+    }
+}

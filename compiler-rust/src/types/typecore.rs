@@ -518,7 +518,11 @@ pub enum TypeCoreError {
     NotSubtype {
         loc: LocIdx,
         trace: Vec<(TypeExprRef, TypeExprRef)>,
+        /// The failed constraint's unification trace (OCaml's `tr2`).
+        trace2: Vec<(TypeExprRef, TypeExprRef)>,
         context: Option<crate::types::SubtypeContext>,
+        /// The environment of the error (OCaml's `Error` env).
+        env: Option<EnvRef>,
     },
 
     /// Applying non-function.
@@ -3709,23 +3713,8 @@ fn extract_type_from_pat_variant_spread(
     };
     let spread_ty = ctx.new_generic_constr(spread_path.clone(), vec![]);
 
-    crate::types::ctype::subtype(ctx, env, spread_ty, expected_ty).map_err(|err| match err {
-        TypeError::Subtype { trace, context } => TypeCoreError::NotSubtype {
-            loc: lid.loc,
-            trace,
-            context,
-        },
-        TypeError::Unify(trace) => TypeCoreError::NotSubtype {
-            loc: lid.loc,
-            trace,
-            context: None,
-        },
-        _ => TypeCoreError::NotSubtype {
-            loc: lid.loc,
-            trace: vec![(spread_ty, expected_ty)],
-            context: None,
-        },
-    })?;
+    crate::types::ctype::subtype_now(ctx, env, spread_ty, expected_ty)
+        .map_err(|err| not_subtype_error(tctx.type_ctx, env, lid.loc, err, spread_ty, expected_ty))?;
 
     Ok((spread_path, constructors, spread_ty))
 }
@@ -16665,25 +16654,12 @@ fn type_coerce(
         typed_inner
     };
 
-    crate::types::ctype::subtype(ctx, env, typed_inner.exp_type, to_ty).map_err(
-        |err| match err {
-            TypeError::Subtype { trace, context } => TypeCoreError::NotSubtype {
-                loc,
-                trace,
-                context,
-            },
-            TypeError::Unify(trace) => TypeCoreError::NotSubtype {
-                loc,
-                trace,
-                context: None,
-            },
-            _ => TypeCoreError::NotSubtype {
-                loc,
-                trace: vec![(typed_inner.exp_type, to_ty)],
-                context: None,
-            },
-        },
-    )?;
+    // OCaml typecore.ml:3283-3291: `let force' = subtype env arg.exp_type
+    // ty' in force (); force' ()`.
+    let subtype_cstrs = crate::types::ctype::subtype(ctx, env, typed_inner.exp_type, to_ty)
+        .map_err(|err| not_subtype_error(ctx, env, loc, err, typed_inner.exp_type, to_ty))?;
+    crate::types::ctype::force_subtype(ctx, env, subtype_cstrs)
+        .map_err(|err| not_subtype_error(ctx, env, loc, err, typed_inner.exp_type, to_ty))?;
 
     // OCaml `rue { exp_type = ty'; ... }` (typecore.ml:3295-3305, 2369-2371)
     // after the coercion check: `unify_exp` at the coercion's location
@@ -16828,6 +16804,32 @@ fn type_value_binding_expression(
     } else {
         let expression = tctx.arena.get_expr(binding.pvb_expr).clone();
         type_expect(tctx, env, &expression, expected_ty, None)
+    }
+}
+
+/// `Error (loc, env, Not_subtype (tr1, tr2, ctx))` from a `Ctype.Subtype`.
+fn not_subtype_error(
+    ctx: &TypeContext,
+    env: &Env,
+    loc: LocIdx,
+    err: TypeError,
+    ty1: TypeExprRef,
+    ty2: TypeExprRef,
+) -> TypeCoreError {
+    let (trace, trace2, context) = match err {
+        TypeError::Subtype {
+            trace,
+            trace2,
+            context,
+        } => (trace, trace2, context),
+        _ => (vec![(ty1, ty2)], Vec::new(), None),
+    };
+    TypeCoreError::NotSubtype {
+        loc,
+        trace,
+        trace2,
+        context,
+        env: Some(ctx.store_typed_env(env)),
     }
 }
 

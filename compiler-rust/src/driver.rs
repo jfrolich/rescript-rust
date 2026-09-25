@@ -3132,13 +3132,28 @@ fn type_mod_error_to_anyhow(
         TypeModError::CoreError(TypeCoreError::NotSubtype {
             loc,
             trace,
+            trace2,
             context,
+            env,
         }) => {
-            UserDiagnostic::new(
-                format_not_subtype_report(type_ctx, arena, source, filename, *loc, trace, context),
-                2,
-            )
-            .into()
+            let env = env
+                .and_then(|env| type_ctx.get_typed_env(env))
+                .map(|env| (*env).clone())
+                .unwrap_or_else(crate::types::Env::empty);
+            let message = type_clash::render_error_message(|ppf| {
+                type_clash::print_not_subtype(ppf, type_ctx, &env, trace, trace2, context.as_ref())
+            });
+            let mut report =
+                format_compiler_error_report_formatted(arena, source, filename, *loc, &message);
+            // See `ExprTypeClash`: style escapes follow `Color.color_enabled`.
+            if suppress_info_style {
+                report = report
+                    .replace("\x1b[1;31m", "")
+                    .replace("\x1b[1;33m", "")
+                    .replace("\x1b[2m", "")
+                    .replace("\x1b[0m", "");
+            }
+            UserDiagnostic::new(report, 2).into()
         }
         TypeModError::CoreError(TypeCoreError::LessGeneral { loc, kind, trace }) => {
             UserDiagnostic::new(
@@ -8761,7 +8776,7 @@ fn runtime_coercion_compatible(
     expected: TypeExprRef,
 ) -> bool {
     let env = crate::types::Env::empty();
-    crate::types::ctype::subtype(type_ctx, &env, actual, expected).is_ok()
+    crate::types::ctype::subtype_now(type_ctx, &env, actual, expected).is_ok()
         || runtime_record_coercion_compatible(type_ctx, actual, expected)
         || runtime_variant_to_primitive_coercion_compatible(type_ctx, actual, expected)
 }
@@ -8825,7 +8840,7 @@ fn runtime_field_type_compatible(
         || format_type_expr(type_ctx, actual) == format_type_expr(type_ctx, expected)
         || {
             let env = crate::types::Env::empty();
-            crate::types::ctype::subtype(type_ctx, &env, actual, expected).is_ok()
+            crate::types::ctype::subtype_now(type_ctx, &env, actual, expected).is_ok()
         }
 }
 

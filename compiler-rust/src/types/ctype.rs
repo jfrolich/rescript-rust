@@ -78,7 +78,12 @@ pub enum TypeError {
 
     /// Subtype constraint violated.
     Subtype {
+        /// OCaml's first trace (`expand_trace env (List.rev trace)`), as
+        /// unexpanded pairs.
         trace: Vec<TypePair>,
+        /// The unification trace of the failed constraint, without its
+        /// outermost pair.
+        trace2: Vec<TypePair>,
         context: Option<SubtypeContext>,
     },
 }
@@ -4230,28 +4235,6 @@ pub(crate) fn expand_head_opt<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprR
 /// accumulating the source/target pair for diagnostics. The Rust port does not
 /// yet model OCaml's delayed constraint closure, so variable constraints are
 /// forced immediately through ordinary unification.
-pub fn subtype(ctx: &TypeContext, env: &Env, ty1: TypeExprRef, ty2: TypeExprRef) -> TypeResult<()> {
-    let mut visited = HashSet::new();
-    subtype_rec(ctx, env, &mut visited, &[(ty1, ty2)], ty1, ty2)
-}
-
-fn subtype_error(trace: &[(TypeExprRef, TypeExprRef)]) -> TypeError {
-    TypeError::Subtype {
-        trace: trace.to_vec(),
-        context: None,
-    }
-}
-
-fn subtype_error_with_context(
-    trace: &[(TypeExprRef, TypeExprRef)],
-    context: SubtypeContext,
-) -> TypeError {
-    TypeError::Subtype {
-        trace: trace.to_vec(),
-        context: Some(context),
-    }
-}
-
 fn primitive_coercion_path(path: &Path) -> bool {
     path.same(&crate::types::predef::path_string())
         || path.same(&crate::types::predef::path_int())
@@ -4557,279 +4540,474 @@ fn variant_runtime_representation_issues(
         .collect()
 }
 
-fn subtype_rec(
+/// A constraint collected by `subtype_rec`: OCaml's
+/// `(trace, t1, t2, univar_pairs, ctx)` (ctype.ml:3435-3897). The trace is
+/// kept outermost first, i.e. OCaml's `List.rev trace`.
+#[derive(Debug, Clone)]
+pub struct SubtypeConstraint {
+    trace: Vec<TypePair>,
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+    context: Option<SubtypeContext>,
+}
+
+/// The constraint set built by [`subtype`]; [`force_subtype`] enforces it.
+#[derive(Debug, Clone, Default)]
+pub struct SubtypeConstraints(Vec<SubtypeConstraint>);
+
+/// OCaml `Ctype.subtype env ty1 ty2` (ctype.ml:3905-3923): build the
+/// constraint set, raising only the structural errors `subtype_rec` raises
+/// directly. The returned constraints are enforced by [`force_subtype`], the
+/// closure OCaml returns.
+pub fn subtype(
     ctx: &TypeContext,
     env: &Env,
-    visited: &mut HashSet<(u32, u32)>,
-    trace: &[(TypeExprRef, TypeExprRef)],
     ty1: TypeExprRef,
     ty2: TypeExprRef,
-) -> TypeResult<()> {
-    let ty1 = ctx.repr(ty1);
-    let ty2 = ctx.repr(ty2);
-    if ty1 == ty2 {
-        return Ok(());
+) -> TypeResult<SubtypeConstraints> {
+    let mut subtypes = HashSet::new();
+    let mut cstrs = Vec::new();
+    subtype_rec(ctx, env, &mut subtypes, &[(ty1, ty2)], ty1, ty2, &mut cstrs)?;
+    Ok(SubtypeConstraints(cstrs))
+}
+
+/// The closure returned by OCaml `Ctype.subtype`: unify each constraint in
+/// registration order (`List.rev cstrs`); a failure raises
+/// `Subtype (expand_trace env (List.rev trace0), List.tl (List.tl trace), ctx)`.
+pub fn force_subtype(ctx: &TypeContext, env: &Env, cstrs: SubtypeConstraints) -> TypeResult<()> {
+    for cstr in cstrs.0 {
+        let mut unify_state = UnifyState::new();
+        unify_state.set_env(env);
+        if let Err(err) = unify(ctx, &mut unify_state, cstr.t1, cstr.t2) {
+            let trace = match err {
+                TypeError::Unify(trace) => trace,
+                _ => Vec::new(),
+            };
+            record_trace_expansions(ctx, env, &cstr.trace);
+            // Rust traces hold one pair per level; OCaml's expanded trace has
+            // two entries per level, so `List.tl (List.tl trace)` drops one.
+            let trace2 = trace.get(1..).map(<[TypePair]>::to_vec).unwrap_or_default();
+            return Err(TypeError::Subtype {
+                trace: cstr.trace,
+                trace2,
+                context: cstr.context,
+            });
+        }
     }
+    Ok(())
+}
 
-    if !visited.insert((ty1.0, ty2.0)) {
-        return Ok(());
-    }
+/// `subtype env ty1 ty2 ()`: build and enforce the constraints at once.
+pub fn subtype_now(ctx: &TypeContext, env: &Env, ty1: TypeExprRef, ty2: TypeExprRef) -> TypeResult<()> {
+    let cstrs = subtype(ctx, env, ty1, ty2)?;
+    force_subtype(ctx, env, cstrs)
+}
 
-    let desc1 = (*ctx.get_desc(ty1)).clone();
-    let desc2 = (*ctx.get_desc(ty2)).clone();
-
-    match (&desc1, &desc2) {
-        (TypeDesc::Tvar(_) | TypeDesc::Tunivar(_), _)
-        | (_, TypeDesc::Tvar(_) | TypeDesc::Tunivar(_)) => {
-            let mut unify_state = UnifyState::new();
-            unify_state.set_env(env);
-            unify(ctx, &mut unify_state, ty1, ty2).map_err(|_| subtype_error(trace))
-        }
-        (
-            TypeDesc::Tarrow {
-                args: args1,
-                ret: ret1,
-            },
-            TypeDesc::Tarrow {
-                args: args2,
-                ret: ret2,
-            },
-        ) if args1.len() == args2.len()
-            && args1
-                .iter()
-                .zip(args2)
-                .all(|(a1, a2)| a1.label().same_label(a2.label())) =>
-        {
-            for (arg1, arg2) in args1.iter().zip(args2) {
-                let mut arg_trace = trace.to_vec();
-                arg_trace.push((arg2.typ, arg1.typ));
-                subtype_rec(ctx, env, visited, &arg_trace, arg2.typ, arg1.typ)?;
-            }
-            let mut ret_trace = trace.to_vec();
-            ret_trace.push((*ret1, *ret2));
-            subtype_rec(ctx, env, visited, &ret_trace, *ret1, *ret2)
-        }
-        (TypeDesc::Ttuple(items1), TypeDesc::Ttuple(items2)) if items1.len() == items2.len() => {
-            for (item1, item2) in items1.iter().zip(items2.iter()) {
-                let mut item_trace = trace.to_vec();
-                item_trace.push((*item1, *item2));
-                subtype_rec(ctx, env, visited, &item_trace, *item1, *item2)?;
-            }
-            Ok(())
-        }
-        (TypeDesc::Ttuple(_), TypeDesc::Ttuple(_)) => Err(subtype_error(trace)),
-        (
-            TypeDesc::Tconstr {
-                path: path1,
-                args: args1,
-                ..
-            },
-            TypeDesc::Tconstr {
-                path: path2,
-                args: args2,
-                ..
-            },
-        ) if path1.same(path2) && args1.is_empty() && args2.is_empty() => Ok(()),
-        (
-            TypeDesc::Tconstr {
-                path: path1,
-                args: args1,
-                ..
-            },
-            TypeDesc::Tconstr {
-                path: path2,
-                args: args2,
-                ..
-            },
-        ) if path1.same(path2) => {
-            subtype_same_constr_args(ctx, env, visited, trace, path1, args1, args2)
-        }
-        (
-            TypeDesc::Tconstr {
-                path: path1,
-                args: args1,
-                ..
-            },
-            TypeDesc::Tconstr {
-                path: path2,
-                args: args2,
-                ..
-            },
-        ) => {
-            if generic_private_abbrev(ctx, env, path1)
-                && let Some(expanded1) =
-                    try_expand_head_with_mode(ctx, env, ty1, ExpandHeadMode::Optimize)
-            {
-                // OCaml compiler/ml/ctype.ml:3712-3713 expands the left-hand
-                // private abbreviation with expand_abbrev_opt during subtype,
-                // allowing `private int :> int` while keeping construction
-                // restrictions elsewhere.
-                return subtype_rec(ctx, env, visited, trace, expanded1, ty2);
-            }
-
-            if path1.same(&crate::types::predef::path_int())
-                && path2.same(&crate::types::predef::path_float())
-                && args1.is_empty()
-                && args2.is_empty()
-            {
-                return Ok(());
-            }
-
-            if args1.is_empty()
-                && args2.is_empty()
-                && primitive_coercion_path(path1)
-                && let Some(decl2) = lookup_type_decl_for_path(ctx, env, path2)
-                && can_try_coerce_variant_to_primitive(path2, &decl2)
-                && let crate::types::TypeKind::TypeVariant(constructors, layout_ref) =
-                    &decl2.type_kind
-            {
-                if !variant_runtime_configuration(ctx, &decl2).unboxed {
-                    return Err(subtype_error_with_context(
-                        trace,
-                        SubtypeContext::CoercionTargetVariantNotUnboxed {
-                            variant_name: path2.clone(),
-                            primitive: path1.clone(),
-                        },
-                    ));
-                }
-                if constructors.iter().any(|constructor| {
-                    variant_constructor_covers_primitive(ctx, constructor, path1)
-                }) {
-                    return Ok(());
-                }
-                return Err(subtype_error_with_context(
-                    trace,
-                    SubtypeContext::CoercionTargetVariantDoesNotCoverType {
-                        variant_name: path2.clone(),
-                        primitive: path1.clone(),
-                    },
-                ));
-            }
-
-            if args1.is_empty()
-                && args2.is_empty()
-                && primitive_coercion_path(path2)
-                && let Some(decl1) = lookup_type_decl_for_path(ctx, env, path1)
-                && can_try_coerce_variant_to_primitive(path1, &decl1)
-                && let crate::types::TypeKind::TypeVariant(constructors, layout_ref) =
-                    &decl1.type_kind
-            {
-                let layout = ctx.variant_layout(*layout_ref);
-                let issues = variant_runtime_representation_issues(
-                    ctx,
-                    constructors,
-                    &layout,
-                    path2,
-                    variant_runtime_configuration(ctx, &decl1).unboxed,
-                );
-                if issues.is_empty() {
-                    return Ok(());
-                }
-                return Err(subtype_error_with_context(
-                    trace,
-                    SubtypeContext::VariantConstructorRuntimeRepresentationMismatch {
-                        variant_name: path1.clone(),
-                        issues,
-                    },
-                ));
-            }
-
-            if let Some(expanded1) = try_expand_head(ctx, env, ty1) {
-                return subtype_rec(ctx, env, visited, trace, expanded1, ty2);
-            }
-            if let Some(expanded2) = try_expand_head(ctx, env, ty2) {
-                return subtype_rec(ctx, env, visited, trace, ty1, expanded2);
-            }
-
-            if args1.is_empty()
-                && args2.is_empty()
-                && let Some(result) =
-                    subtype_concrete_type_declarations(ctx, env, visited, trace, path1, path2)
-            {
-                return result;
-            }
-
-            Err(subtype_error(trace))
-        }
-        (TypeDesc::Tconstr { .. }, _) => {
-            if let TypeDesc::Tconstr { path, .. } = &desc1
-                && generic_private_abbrev(ctx, env, path)
-                && let Some(expanded1) =
-                    try_expand_head_with_mode(ctx, env, ty1, ExpandHeadMode::Optimize)
-            {
-                // OCaml compiler/ml/ctype.ml:3712-3713.
-                return subtype_rec(ctx, env, visited, trace, expanded1, ty2);
-            }
-            if let Some(expanded1) = try_expand_head(ctx, env, ty1) {
-                subtype_rec(ctx, env, visited, trace, expanded1, ty2)
-            } else {
-                Err(subtype_error(trace))
-            }
-        }
-        (_, TypeDesc::Tconstr { .. }) => {
-            if let (TypeDesc::Tvariant(row), TypeDesc::Tconstr { path, args, .. }) =
-                (&desc1, &desc2)
-                && args.is_empty()
-            {
-                let row = row_repr(ctx, row);
-                if variant_row_is_subtype_of_primitive(ctx, &row, ty2) {
-                    // OCaml compiler/ml/ctype.ml:3986 runs the
-                    // Matching_polyfill.variant_is_subtype hook before
-                    // falling through to ordinary subtype failure.
-                    return Ok(());
-                }
-                if row.row_closed
-                    && let Some(decl2) = lookup_type_decl_for_path(ctx, env, path)
-                    && let crate::types::TypeKind::TypeVariant(constructors, layout_ref) =
-                        &decl2.type_kind
-                    && can_coerce_polyvariant_to_variant(
-                        ctx,
-                        &row,
-                        constructors,
-                        &ctx.variant_layout(*layout_ref),
-                        variant_runtime_configuration(ctx, &decl2).unboxed,
-                    )
-                {
-                    // OCaml compiler/ml/ctype.ml:3974-3988 handles closed
-                    // polymorphic variant rows before the generic
-                    // `variant_is_subtype` path when the target expands to a
-                    // concrete Type_variant declaration.
-                    return Ok(());
-                }
-            }
-            if let Some(expanded2) = try_expand_head(ctx, env, ty2) {
-                subtype_rec(ctx, env, visited, trace, ty1, expanded2)
-            } else {
-                Err(subtype_error(trace))
-            }
-        }
-        (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
-            subtype_variant_rows(ctx, env, visited, trace, row1, row2)
-        }
-        (TypeDesc::Tpoly { body: body1, .. }, TypeDesc::Tpoly { body: body2, .. }) => {
-            subtype_rec(ctx, env, visited, trace, *body1, *body2)
-        }
-        (TypeDesc::Tlink(next1) | TypeDesc::Tsubst(next1), _) => {
-            subtype_rec(ctx, env, visited, trace, *next1, ty2)
-        }
-        (_, TypeDesc::Tlink(next2) | TypeDesc::Tsubst(next2)) => {
-            subtype_rec(ctx, env, visited, trace, ty1, *next2)
-        }
-        _ => Err(subtype_error(trace)),
+/// OCaml `subtype_error env trace` (ctype.ml:3427-3428).
+fn subtype_error(ctx: &TypeContext, env: &Env, trace: &[TypePair]) -> TypeError {
+    record_trace_expansions(ctx, env, trace);
+    TypeError::Subtype {
+        trace: trace.to_vec(),
+        trace2: Vec::new(),
+        context: None,
     }
 }
 
-fn subtype_variant_rows(
+fn push_subtype_cstr(
+    cstrs: &mut Vec<SubtypeConstraint>,
+    trace: &[TypePair],
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+    context: Option<SubtypeContext>,
+) {
+    cstrs.push(SubtypeConstraint {
+        trace: trace.to_vec(),
+        t1,
+        t2,
+        context,
+    });
+}
+
+fn with_trace(trace: &[TypePair], t1: TypeExprRef, t2: TypeExprRef) -> Vec<TypePair> {
+    let mut trace = trace.to_vec();
+    trace.push((t1, t2));
+    trace
+}
+
+/// OCaml `generic_abbrev env path` (ctype.ml:1317-1321), through
+/// `Env.find_type_expansion` (env.ml:830-838).
+fn generic_abbrev(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
+    lookup_type_decl_for_path(ctx, env, path).is_some_and(|decl| {
+        decl.type_manifest.is_some_and(|body| {
+            (decl.type_private == PrivateFlag::Public
+                || !matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract)
+                || btype::has_constr_row(ctx, body))
+                && ctx.get_level(ctx.repr(body)) == GENERIC_LEVEL
+        })
+    })
+}
+
+/// OCaml `extract_concrete_typedecl env ty` (ctype.ml:1249-1261):
+/// `(p, p', decl)` for the path of `ty` and the first non-abstract
+/// declaration its expansion reaches.
+fn extract_concrete_typedecl(
     ctx: &TypeContext,
     env: &Env,
-    visited: &mut HashSet<(u32, u32)>,
-    trace: &[(TypeExprRef, TypeExprRef)],
+    ty: TypeExprRef,
+) -> Option<(Path, Path, crate::types::TypeDeclaration)> {
+    let ty = ctx.repr(ty);
+    let path = match &*ctx.get_desc(ty) {
+        TypeDesc::Tconstr { path, .. } => path.clone(),
+        _ => return None,
+    };
+    let decl = lookup_type_decl_for_path(ctx, env, &path)?;
+    if !matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract) {
+        return Some((path.clone(), path, decl.into_owned()));
+    }
+    let expanded = try_expand_head(ctx, env, ty)?;
+    let (_, concrete, decl) = extract_concrete_typedecl(ctx, env, expanded)?;
+    Some((path, concrete, decl))
+}
+
+/// `Variant_coercion.can_try_coerce_variant_to_primitive`
+/// (variant_coercion.ml:139-157): the concrete variant path, constructors,
+/// layout and unboxed flag of a parameterless variant other than `bool`.
+fn can_try_coerce_variant_to_primitive_opt(
+    ctx: &TypeContext,
+    concrete: Option<(Path, Path, crate::types::TypeDeclaration)>,
+) -> Option<(
+    Path,
+    Vec<crate::types::decl::ConstructorDeclaration>,
+    crate::types::VariantLayout,
+    bool,
+)> {
+    let (_, path, decl) = concrete?;
+    match &decl.type_kind {
+        crate::types::TypeKind::TypeVariant(constructors, layout_ref)
+            if decl.type_params.is_empty() && !path.same(&crate::types::predef::path_bool()) =>
+        {
+            let unboxed = variant_runtime_configuration(ctx, &decl).unboxed;
+            Some((path, constructors.clone(), ctx.variant_layout(*layout_ref), unboxed))
+        }
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn subtype_rec(
+    ctx: &TypeContext,
+    env: &Env,
+    subtypes: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    trace: &[TypePair],
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+    cstrs: &mut Vec<SubtypeConstraint>,
+) -> TypeResult<()> {
+    let t1 = ctx.repr(t1);
+    let t2 = ctx.repr(t2);
+    if t1 == t2 || !subtypes.insert((t1, t2)) {
+        return Ok(());
+    }
+    let desc1 = (*ctx.get_desc(t1)).clone();
+    let desc2 = (*ctx.get_desc(t2)).clone();
+    match (&desc1, &desc2) {
+        (TypeDesc::Tvar(_), _) | (_, TypeDesc::Tvar(_)) => {
+            push_subtype_cstr(cstrs, trace, t1, t2, None);
+            Ok(())
+        }
+        (TypeDesc::Tarrow { args: args1, ret: ret1 }, TypeDesc::Tarrow { args: args2, ret: ret2 })
+            if args1.len() == args2.len()
+                && args1
+                    .iter()
+                    .zip(args2)
+                    .all(|(a1, a2)| a1.label().same_label(a2.label())) =>
+        {
+            for (a1, a2) in args1.iter().zip(args2) {
+                subtype_rec(ctx, env, subtypes, &with_trace(trace, a2.typ, a1.typ), a2.typ, a1.typ, cstrs)?;
+            }
+            subtype_rec(ctx, env, subtypes, &with_trace(trace, *ret1, *ret2), *ret1, *ret2, cstrs)
+        }
+        (TypeDesc::Ttuple(tl1), TypeDesc::Ttuple(tl2)) => {
+            subtype_list(ctx, env, subtypes, trace, tl1, tl2, cstrs)
+        }
+        (
+            TypeDesc::Tconstr { path: p1, args: a1, .. },
+            TypeDesc::Tconstr { path: p2, args: a2, .. },
+        ) if a1.is_empty() && a2.is_empty() && p1.same(p2) => Ok(()),
+        (TypeDesc::Tconstr { path: p1, .. }, _)
+            if generic_abbrev(ctx, env, p1) && try_expand_head(ctx, env, t1).is_some() =>
+        {
+            let expanded = try_expand_head(ctx, env, t1).expect("checked by safe_abbrev");
+            subtype_rec(ctx, env, subtypes, trace, expanded, t2, cstrs)
+        }
+        (_, TypeDesc::Tconstr { path: p2, .. })
+            if generic_abbrev(ctx, env, p2) && try_expand_head(ctx, env, t2).is_some() =>
+        {
+            let expanded = try_expand_head(ctx, env, t2).expect("checked by safe_abbrev");
+            subtype_rec(ctx, env, subtypes, trace, t1, expanded, cstrs)
+        }
+        (
+            TypeDesc::Tconstr { path: p1, args: tl1, .. },
+            TypeDesc::Tconstr { path: p2, args: tl2, .. },
+        ) if p1.same(p2) => {
+            let Some(decl) = lookup_type_decl_for_path(ctx, env, p1) else {
+                push_subtype_cstr(cstrs, trace, t1, t2, None);
+                return Ok(());
+            };
+            for (variance, (&a1, &a2)) in decl.type_variance.iter().zip(tl1.iter().zip(tl2.iter())) {
+                let (co, cn) = variance.get_upper();
+                if co && cn {
+                    // Invariant argument: check both ways.
+                    let mut forward = Vec::new();
+                    subtype_rec(ctx, env, subtypes, &with_trace(trace, a1, a2), a1, a2, &mut forward)?;
+                    let mut backward = Vec::new();
+                    let both_empty = forward.is_empty() && {
+                        subtype_rec(ctx, env, subtypes, &with_trace(trace, a2, a1), a2, a1, &mut backward)?;
+                        backward.is_empty()
+                    };
+                    if !both_empty {
+                        let tuple1 = ctx.alloc_type_at_level(TypeDesc::Ttuple(vec![a1]), ctx.get_level(a1));
+                        let tuple2 = ctx.alloc_type_at_level(TypeDesc::Ttuple(vec![a2]), ctx.get_level(a2));
+                        push_subtype_cstr(cstrs, trace, tuple1, tuple2, None);
+                    }
+                } else if co {
+                    subtype_rec(ctx, env, subtypes, &with_trace(trace, a1, a2), a1, a2, cstrs)?;
+                } else if cn {
+                    subtype_rec(ctx, env, subtypes, &with_trace(trace, a2, a1), a2, a1, cstrs)?;
+                }
+            }
+            Ok(())
+        }
+        (TypeDesc::Tconstr { path: p1, .. }, _) if generic_private_abbrev(ctx, env, p1) => {
+            match try_expand_head_with_mode(ctx, env, t1, ExpandHeadMode::Optimize) {
+                Some(expanded) => subtype_rec(ctx, env, subtypes, trace, expanded, t2, cstrs),
+                None => {
+                    push_subtype_cstr(cstrs, trace, t1, t2, None);
+                    Ok(())
+                }
+            }
+        }
+        (
+            TypeDesc::Tconstr { path: p1, args: a1, .. },
+            TypeDesc::Tconstr { path: p2, args: a2, .. },
+        ) if a1.is_empty()
+            && a2.is_empty()
+            && p1.same(&crate::types::predef::path_int())
+            && p2.same(&crate::types::predef::path_float()) =>
+        {
+            // Int can always be coerced to float.
+            Ok(())
+        }
+        (
+            TypeDesc::Tconstr { path, args: a1, .. },
+            TypeDesc::Tconstr { args: a2, .. },
+        ) if a1.is_empty()
+            && a2.is_empty()
+            && primitive_coercion_path(path)
+            && can_try_coerce_variant_to_primitive_opt(ctx, extract_concrete_typedecl(ctx, env, t2))
+                .is_some() =>
+        {
+            // Primitive to an eligible unboxed variant.
+            let (p, constructors, _, unboxed) =
+                can_try_coerce_variant_to_primitive_opt(ctx, extract_concrete_typedecl(ctx, env, t2))
+                    .expect("checked above");
+            if !unboxed {
+                push_subtype_cstr(
+                    cstrs,
+                    trace,
+                    t1,
+                    t2,
+                    Some(SubtypeContext::CoercionTargetVariantNotUnboxed {
+                        variant_name: p,
+                        primitive: path.clone(),
+                    }),
+                );
+            } else if !constructors
+                .iter()
+                .any(|constructor| variant_constructor_covers_primitive(ctx, constructor, path))
+            {
+                push_subtype_cstr(
+                    cstrs,
+                    trace,
+                    t1,
+                    t2,
+                    Some(SubtypeContext::CoercionTargetVariantDoesNotCoverType {
+                        variant_name: p,
+                        primitive: path.clone(),
+                    }),
+                );
+            }
+            Ok(())
+        }
+        (
+            TypeDesc::Tconstr { args: a1, .. },
+            TypeDesc::Tconstr { path, args: a2, .. },
+        ) if a1.is_empty()
+            && a2.is_empty()
+            && primitive_coercion_path(path)
+            && can_try_coerce_variant_to_primitive_opt(ctx, extract_concrete_typedecl(ctx, env, t1))
+                .is_some() =>
+        {
+            // Variant to a primitive.
+            let (p, constructors, layout, unboxed) =
+                can_try_coerce_variant_to_primitive_opt(ctx, extract_concrete_typedecl(ctx, env, t1))
+                    .expect("checked above");
+            let issues = variant_runtime_representation_issues(ctx, &constructors, &layout, path, unboxed);
+            if !issues.is_empty() {
+                push_subtype_cstr(
+                    cstrs,
+                    trace,
+                    t1,
+                    t2,
+                    Some(SubtypeContext::VariantConstructorRuntimeRepresentationMismatch {
+                        variant_name: p,
+                        issues,
+                    }),
+                );
+            }
+            Ok(())
+        }
+        (TypeDesc::Tconstr { args: a1, .. }, TypeDesc::Tconstr { args: a2, .. })
+            if a1.is_empty() && a2.is_empty() =>
+        {
+            subtype_concrete_typedecls(ctx, env, subtypes, trace, t1, t2, cstrs)
+        }
+        (TypeDesc::Tobject { fields: f1, .. }, TypeDesc::Tobject { fields: f2, .. })
+            if matches!(&*ctx.get_desc(object_row_of_fields(ctx, *f1)), TypeDesc::Tvar(_))
+                && matches!(&*ctx.get_desc(object_row_of_fields(ctx, *f2)), TypeDesc::Tvar(_)) =>
+        {
+            // Same row variable implies same object.
+            push_subtype_cstr(cstrs, trace, t1, t2, None);
+            Ok(())
+        }
+        (TypeDesc::Tobject { fields: f1, .. }, TypeDesc::Tobject { fields: f2, .. }) => {
+            subtype_fields(ctx, env, subtypes, trace, *f1, *f2, cstrs)
+        }
+        (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
+            let mut row_cstrs = cstrs.clone();
+            match subtype_row(ctx, env, subtypes, trace, row1, row2, &mut row_cstrs)? {
+                true => *cstrs = row_cstrs,
+                false => push_subtype_cstr(cstrs, trace, t1, t2, None),
+            }
+            Ok(())
+        }
+        (TypeDesc::Tvariant(row), TypeDesc::Tconstr { args, .. })
+            if row_repr(ctx, row).row_closed
+                && args.is_empty()
+                && matches!(
+                    extract_concrete_typedecl(ctx, env, t2).map(|(_, _, decl)| decl.type_kind),
+                    Some(crate::types::TypeKind::TypeVariant(..))
+                ) =>
+        {
+            // Polymorphic variant to variant.
+            let row = row_repr(ctx, row);
+            if let Some((_, _, decl)) = extract_concrete_typedecl(ctx, env, t2)
+                && let crate::types::TypeKind::TypeVariant(constructors, layout_ref) = &decl.type_kind
+                && can_coerce_polyvariant_to_variant(
+                    ctx,
+                    &row,
+                    constructors,
+                    &ctx.variant_layout(*layout_ref),
+                    variant_runtime_configuration(ctx, &decl).unboxed,
+                )
+            {
+                return Ok(());
+            }
+            push_subtype_cstr(cstrs, trace, t1, t2, None);
+            Ok(())
+        }
+        (TypeDesc::Tvariant(row), _) if variant_row_is_subtype_of_primitive(ctx, row, t2) => Ok(()),
+        (TypeDesc::Tpoly { body: u1, vars: tl1 }, TypeDesc::Tpoly { body: u2, vars: tl2 })
+            if tl1.is_empty() && tl2.is_empty() =>
+        {
+            subtype_rec(ctx, env, subtypes, trace, *u1, *u2, cstrs)
+        }
+        (TypeDesc::Tpoly { body: u1, vars: tl1 }, TypeDesc::Tpoly { body: u2, vars: tl2 })
+            if tl2.is_empty() =>
+        {
+            let (_, u1) = instance_poly(ctx, false, false, tl1, *u1);
+            subtype_rec(ctx, env, subtypes, trace, u1, *u2, cstrs)
+        }
+        (TypeDesc::Tpoly { body: u1, vars: tl1 }, TypeDesc::Tpoly { body: u2, vars: tl2 }) => {
+            // `enter_poly` (ctype.ml:2003-2020) requires the same number of
+            // universal variables.
+            if tl1.len() == tl2.len() {
+                subtype_rec(ctx, env, subtypes, trace, *u1, *u2, cstrs)
+            } else {
+                push_subtype_cstr(cstrs, trace, t1, t2, None);
+                Ok(())
+            }
+        }
+        _ => {
+            push_subtype_cstr(cstrs, trace, t1, t2, None);
+            Ok(())
+        }
+    }
+}
+
+/// OCaml `subtype_list` (ctype.ml:3796-3800).
+fn subtype_list(
+    ctx: &TypeContext,
+    env: &Env,
+    subtypes: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    trace: &[TypePair],
+    tl1: &[TypeExprRef],
+    tl2: &[TypeExprRef],
+    cstrs: &mut Vec<SubtypeConstraint>,
+) -> TypeResult<()> {
+    if tl1.len() != tl2.len() {
+        return Err(subtype_error(ctx, env, trace));
+    }
+    for (&t1, &t2) in tl1.iter().zip(tl2) {
+        subtype_rec(ctx, env, subtypes, &with_trace(trace, t1, t2), t1, t2, cstrs)?;
+    }
+    Ok(())
+}
+
+/// OCaml `subtype_fields` (ctype.ml:3802-3831).
+fn subtype_fields(
+    ctx: &TypeContext,
+    env: &Env,
+    subtypes: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    trace: &[TypePair],
+    ty1: TypeExprRef,
+    ty2: TypeExprRef,
+    cstrs: &mut Vec<SubtypeConstraint>,
+) -> TypeResult<()> {
+    let (fields1, rest1) = flatten_fields(ctx, ty1);
+    let (fields2, rest2) = flatten_fields(ctx, ty2);
+    let (pairs, miss1, miss2) = associate_fields(fields1, fields2);
+    let rest2_is_nil = matches!(&*ctx.get_desc(ctx.repr(rest2)), TypeDesc::Tnil);
+    if !rest2_is_nil {
+        if miss1.is_empty() {
+            subtype_rec(ctx, env, subtypes, &with_trace(trace, rest1, rest2), rest1, rest2, cstrs)?;
+        } else {
+            let level = ctx.get_level(ctx.repr(ty1));
+            let built = build_fields(ctx, level, &miss1, rest1);
+            push_subtype_cstr(cstrs, trace, built, rest2, None);
+        }
+    }
+    if !miss2.is_empty() {
+        let level = ctx.get_level(ctx.repr(ty2));
+        let built = build_fields(ctx, level, &miss2, ctx.new_var(None));
+        push_subtype_cstr(cstrs, trace, rest1, built, None);
+    }
+    for (_, _, t1, _, t2) in pairs {
+        subtype_rec(ctx, env, subtypes, &with_trace(trace, t1, t2), t1, t2, cstrs)?;
+    }
+    Ok(())
+}
+
+/// OCaml `subtype_row` (ctype.ml:3833-3869); `Ok(false)` is its `Exit`.
+fn subtype_row(
+    ctx: &TypeContext,
+    env: &Env,
+    subtypes: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    trace: &[TypePair],
     row1: &RowDesc,
     row2: &RowDesc,
-) -> TypeResult<()> {
-    // OCaml compiler/ml/ctype.ml:3969-3971 dispatches variant rows to
-    // `subtype_row`; compiler/ml/ctype.ml:4064-4099 allows a closed source row
-    // with no extra labels to subtype a wider target row.
+    cstrs: &mut Vec<SubtypeConstraint>,
+) -> TypeResult<bool> {
     let row1 = row_repr(ctx, row1);
     let row2 = row_repr(ctx, row2);
     let (r1, r2, pairs) = merge_row_fields(&row1.row_fields, &row2.row_fields);
@@ -4837,351 +5015,231 @@ fn subtype_variant_rows(
     let more2 = ctx.repr(row_more(ctx, &row2));
     let more1_desc = (*ctx.get_desc(more1)).clone();
     let more2_desc = (*ctx.get_desc(more2)).clone();
-
     match (&more1_desc, &more2_desc) {
-        (TypeDesc::Tconstr { path: path1, .. }, TypeDesc::Tconstr { path: path2, .. })
-            if path1.same(path2) =>
-        {
-            let mut more_trace = trace.to_vec();
-            more_trace.push((more1, more2));
-            subtype_rec(ctx, env, visited, &more_trace, more1, more2)
+        (TypeDesc::Tconstr { path: p1, .. }, TypeDesc::Tconstr { path: p2, .. }) if p1.same(p2) => {
+            subtype_rec(ctx, env, subtypes, &with_trace(trace, more1, more2), more1, more2, cstrs)?;
+            Ok(true)
         }
         (
             TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. } | TypeDesc::Tnil,
             TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. } | TypeDesc::Tnil,
         ) if row1.row_closed && r1.is_empty() => {
-            for (_label, field1, field2) in pairs {
-                let field1 = btype::row_field_repr(ctx, field1);
-                let field2 = btype::row_field_repr(ctx, field2);
-                match (&field1, &field2) {
-                    (
-                        RowField::Rpresent(None) | RowField::Reither { constant: true, .. },
-                        RowField::Rpresent(None),
-                    )
+            for (_, f1, f2) in pairs {
+                match (btype::row_field_repr(ctx, f1), btype::row_field_repr(ctx, f2)) {
+                    (RowField::Rpresent(None) | RowField::Reither { constant: true, .. }, RowField::Rpresent(None))
                     | (RowField::Rabsent, _) => {}
-                    (RowField::Rpresent(Some(ty1)), RowField::Rpresent(Some(ty2))) => {
-                        let mut field_trace = trace.to_vec();
-                        field_trace.push((*ty1, *ty2));
-                        subtype_rec(ctx, env, visited, &field_trace, *ty1, *ty2)?;
+                    (RowField::Rpresent(Some(t1)), RowField::Rpresent(Some(t2))) => {
+                        subtype_rec(ctx, env, subtypes, &with_trace(trace, t1, t2), t1, t2, cstrs)?;
                     }
-                    (
-                        RowField::Reither {
-                            constant: false,
-                            types,
-                            ..
-                        },
-                        RowField::Rpresent(Some(ty2)),
-                    ) if !types.is_empty() => {
-                        let ty1 = types[0];
-                        let mut field_trace = trace.to_vec();
-                        field_trace.push((ty1, *ty2));
-                        subtype_rec(ctx, env, visited, &field_trace, ty1, *ty2)?;
+                    (RowField::Reither { constant: false, types, .. }, RowField::Rpresent(Some(t2)))
+                        if !types.is_empty() =>
+                    {
+                        let t1 = types[0];
+                        subtype_rec(ctx, env, subtypes, &with_trace(trace, t1, t2), t1, t2, cstrs)?;
                     }
-                    _ => return Err(subtype_error(trace)),
+                    _ => return Ok(false),
                 }
             }
-            Ok(())
+            Ok(true)
         }
         (TypeDesc::Tunivar(_), TypeDesc::Tunivar(_))
             if row1.row_closed == row2.row_closed && r1.is_empty() && r2.is_empty() =>
         {
-            let mut more_trace = trace.to_vec();
-            more_trace.push((more1, more2));
-            subtype_rec(ctx, env, visited, &more_trace, more1, more2)?;
-
-            for (_label, field1, field2) in pairs {
-                let field1 = btype::row_field_repr(ctx, field1);
-                let field2 = btype::row_field_repr(ctx, field2);
-                match (&field1, &field2) {
+            subtype_rec(ctx, env, subtypes, &with_trace(trace, more1, more2), more1, more2, cstrs)?;
+            for (_, f1, f2) in pairs {
+                match (btype::row_field_repr(ctx, f1), btype::row_field_repr(ctx, f2)) {
                     (RowField::Rpresent(None), RowField::Rpresent(None))
                     | (RowField::Rabsent, RowField::Rabsent) => {}
                     (
-                        RowField::Reither {
-                            constant: true,
-                            types: types1,
-                            ..
-                        },
-                        RowField::Reither {
-                            constant: true,
-                            types: types2,
-                            ..
-                        },
+                        RowField::Reither { constant: true, types: types1, .. },
+                        RowField::Reither { constant: true, types: types2, .. },
                     ) if types1.is_empty() && types2.is_empty() => {}
-                    (RowField::Rpresent(Some(ty1)), RowField::Rpresent(Some(ty2))) => {
-                        let mut field_trace = trace.to_vec();
-                        field_trace.push((*ty1, *ty2));
-                        subtype_rec(ctx, env, visited, &field_trace, *ty1, *ty2)?;
+                    (RowField::Rpresent(Some(t1)), RowField::Rpresent(Some(t2))) => {
+                        subtype_rec(ctx, env, subtypes, &with_trace(trace, t1, t2), t1, t2, cstrs)?;
                     }
                     (
-                        RowField::Reither {
-                            constant: false,
-                            types: types1,
-                            ..
-                        },
-                        RowField::Reither {
-                            constant: false,
-                            types: types2,
-                            ..
-                        },
+                        RowField::Reither { constant: false, types: types1, .. },
+                        RowField::Reither { constant: false, types: types2, .. },
                     ) if types1.len() == 1 && types2.len() == 1 => {
-                        let ty1 = types1[0];
-                        let ty2 = types2[0];
-                        let mut field_trace = trace.to_vec();
-                        field_trace.push((ty1, ty2));
-                        subtype_rec(ctx, env, visited, &field_trace, ty1, ty2)?;
+                        let (t1, t2) = (types1[0], types2[0]);
+                        subtype_rec(ctx, env, subtypes, &with_trace(trace, t1, t2), t1, t2, cstrs)?;
                     }
-                    _ => return Err(subtype_error(trace)),
+                    _ => return Ok(false),
                 }
             }
-            Ok(())
+            Ok(true)
         }
-        _ => Err(subtype_error(trace)),
+        _ => Ok(false),
     }
 }
 
-fn subtype_same_constr_args(
+/// The `Tconstr (_, [], _), Tconstr (_, [], _)` case of `subtype_rec`
+/// (ctype.ml:3760-3950): coercion between variants and between records.
+#[allow(clippy::too_many_arguments)]
+fn subtype_concrete_typedecls(
     ctx: &TypeContext,
     env: &Env,
-    visited: &mut HashSet<(u32, u32)>,
-    trace: &[(TypeExprRef, TypeExprRef)],
-    path: &Path,
-    args1: &[TypeExprRef],
-    args2: &[TypeExprRef],
+    subtypes: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    trace: &[TypePair],
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+    cstrs: &mut Vec<SubtypeConstraint>,
 ) -> TypeResult<()> {
-    if args1.len() != args2.len() {
-        return Err(subtype_error(trace));
-    }
-
-    let Some(decl) = lookup_type_decl_for_path(ctx, env, path) else {
-        return Err(subtype_error(trace));
+    let (Some((p1, _, decl1)), Some((p2, _, decl2))) =
+        (extract_concrete_typedecl(ctx, env, t1), extract_concrete_typedecl(ctx, env, t2))
+    else {
+        push_subtype_cstr(cstrs, trace, t1, t2, None);
+        return Ok(());
     };
-
-    for (variance, (arg1, arg2)) in decl
-        .type_variance
-        .iter()
-        .zip(args1.iter().zip(args2.iter()))
-    {
-        let (covariant, contravariant) = variance.get_upper();
-        if covariant {
-            let mut arg_trace = trace.to_vec();
-            arg_trace.push((*arg1, *arg2));
-            subtype_rec(ctx, env, visited, &arg_trace, *arg1, *arg2)?;
-        }
-        if contravariant {
-            let mut arg_trace = trace.to_vec();
-            arg_trace.push((*arg2, *arg1));
-            subtype_rec(ctx, env, visited, &arg_trace, *arg2, *arg1)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn subtype_constructor_arguments(
-    ctx: &TypeContext,
-    env: &Env,
-    visited: &mut HashSet<(u32, u32)>,
-    trace: &[(TypeExprRef, TypeExprRef)],
-    left: &crate::types::decl::ConstructorDeclaration,
-    right: &crate::types::decl::ConstructorDeclaration,
-    left_tag: &Option<crate::types::VariantTagType>,
-    right_tag: &Option<crate::types::VariantTagType>,
-) -> TypeResult<()> {
-    if left_tag != right_tag {
-        return Err(subtype_error(trace));
-    }
-    match (&left.cd_args, &right.cd_args) {
+    match (&decl1.type_kind, &decl2.type_kind) {
         (
-            crate::types::decl::ConstructorArguments::CstrTuple(left_args),
-            crate::types::decl::ConstructorArguments::CstrTuple(right_args),
-        ) if left_args.len() == right_args.len() => {
-            for (left_arg, right_arg) in left_args.iter().zip(right_args.iter()) {
-                let mut arg_trace = trace.to_vec();
-                arg_trace.push((*left_arg, *right_arg));
-                subtype_rec(ctx, env, visited, &arg_trace, *left_arg, *right_arg)?;
+            crate::types::TypeKind::TypeVariant(c1, layout_ref1),
+            crate::types::TypeKind::TypeVariant(c2, layout_ref2),
+        ) => {
+            if let Some(issue) = variant_configuration_issue(ctx, &decl1, &decl2) {
+                push_subtype_cstr(
+                    cstrs,
+                    trace,
+                    t1,
+                    t2,
+                    Some(SubtypeContext::VariantConfigurationsMismatch {
+                        left_variant_name: p1,
+                        right_variant_name: p2,
+                        issue,
+                    }),
+                );
+                return Ok(());
+            }
+            if c1.len() > c2.len() {
+                let c2_names: HashSet<&str> = c2.iter().map(|c| c.cd_id.name()).collect();
+                let constructor_names = c1
+                    .iter()
+                    .map(|c| c.cd_id.name())
+                    .filter(|name| !c2_names.contains(name))
+                    .map(str::to_string)
+                    .collect();
+                push_subtype_cstr(
+                    cstrs,
+                    trace,
+                    t1,
+                    t2,
+                    Some(SubtypeContext::VariantConfigurationsMismatch {
+                        left_variant_name: p1,
+                        right_variant_name: p2,
+                        issue: VariantConfigurationIssue::IncompatibleConstructorCount { constructor_names },
+                    }),
+                );
+                return Ok(());
+            }
+            let layout1 = ctx.variant_layout(*layout_ref1);
+            let layout2 = ctx.variant_layout(*layout_ref2);
+            let c2_by_name: HashMap<&str, (usize, &crate::types::decl::ConstructorDeclaration)> = c2
+                .iter()
+                .enumerate()
+                .map(|(position, c)| (c.cd_id.name(), (position, c)))
+                .collect();
+            let mut has_violation = false;
+            for (position1, c) in c1.iter().enumerate() {
+                let violation = match (&c.cd_args, c2_by_name.get(c.cd_id.name())) {
+                    (
+                        crate::types::decl::ConstructorArguments::CstrRecord(fields1),
+                        Some((position2, crate::types::decl::ConstructorDeclaration {
+                            cd_args: crate::types::decl::ConstructorArguments::CstrRecord(fields2),
+                            ..
+                        })),
+                    ) => {
+                        if variant_constructor_tag(&layout1, position1)
+                            == variant_constructor_tag(&layout2, *position2)
+                        {
+                            let (violations, mut tl1, mut tl2) = check_record_fields(fields1, fields2);
+                            if violations.is_empty() {
+                                tl1.reverse();
+                                tl2.reverse();
+                                let mut probe = cstrs.clone();
+                                match subtype_list(ctx, env, subtypes, trace, &tl1, &tl2, &mut probe) {
+                                    Ok(()) => probe.len() != cstrs.len(),
+                                    Err(_) => true,
+                                }
+                            } else {
+                                true
+                            }
+                        } else {
+                            true
+                        }
+                    }
+                    (
+                        crate::types::decl::ConstructorArguments::CstrTuple(tl1),
+                        Some((position2, crate::types::decl::ConstructorDeclaration {
+                            cd_args: crate::types::decl::ConstructorArguments::CstrTuple(tl2),
+                            ..
+                        })),
+                    ) => {
+                        if variant_constructor_tag(&layout1, position1)
+                            == variant_constructor_tag(&layout2, *position2)
+                        {
+                            let mut probe = cstrs.clone();
+                            match subtype_list(ctx, env, subtypes, trace, tl1, tl2, &mut probe) {
+                                Ok(()) => probe.len() != cstrs.len(),
+                                Err(_) => true,
+                            }
+                        } else {
+                            true
+                        }
+                    }
+                    _ => true,
+                };
+                has_violation |= violation;
+            }
+            if has_violation {
+                push_subtype_cstr(cstrs, trace, t1, t2, None);
             }
             Ok(())
         }
         (
-            crate::types::decl::ConstructorArguments::CstrRecord(left_fields),
-            crate::types::decl::ConstructorArguments::CstrRecord(right_fields),
-        ) => subtype_record_fields(
-            ctx,
-            env,
-            visited,
-            trace,
-            &Path::Pident(left.cd_id.clone()),
-            &Path::Pident(right.cd_id.clone()),
-            left_fields,
-            right_fields,
-        ),
-        _ => Err(subtype_error(trace)),
-    }
-}
-
-fn subtype_variant_constructors(
-    ctx: &TypeContext,
-    env: &Env,
-    visited: &mut HashSet<(u32, u32)>,
-    trace: &[(TypeExprRef, TypeExprRef)],
-    path1: &Path,
-    path2: &Path,
-    cstrs1: &[crate::types::decl::ConstructorDeclaration],
-    cstrs2: &[crate::types::decl::ConstructorDeclaration],
-    layout1: &crate::types::VariantLayout,
-    layout2: &crate::types::VariantLayout,
-) -> TypeResult<()> {
-    let cstrs2_by_name = cstrs2
-        .iter()
-        .enumerate()
-        .map(|(position, cstr)| (cstr.cd_id.name().to_string(), (position, cstr)))
-        .collect::<HashMap<_, _>>();
-    // OCaml compiler/ml/ctype.ml:3805-3827 only attaches
-    // Incompatible_constructor_count when the source variant has more
-    // constructors than the target. Equal-size variants with different
-    // constructor names fall through to the generic subtype failure below.
-    if cstrs1.len() > cstrs2.len() {
-        let missing = cstrs1
-            .iter()
-            .filter(|cstr| !cstrs2_by_name.contains_key(cstr.cd_id.name()))
-            .map(|cstr| cstr.cd_id.name().to_string())
-            .collect::<Vec<_>>();
-        return Err(subtype_error_with_context(
-            trace,
-            SubtypeContext::VariantConfigurationsMismatch {
-                left_variant_name: path1.clone(),
-                right_variant_name: path2.clone(),
-                issue: VariantConfigurationIssue::IncompatibleConstructorCount {
-                    constructor_names: missing,
-                },
-            },
-        ));
-    }
-
-    // OCaml compiler/ml/ctype.ml:3828-3904 builds a constructor map from the
-    // target variant, then checks each source constructor's representation and
-    // payload fields with subtype_list/Record_coercion.check_record_fields.
-    for (left_position, left) in cstrs1.iter().enumerate() {
-        let Some((right_position, right)) = cstrs2_by_name.get(left.cd_id.name()) else {
-            return Err(subtype_error(trace));
-        };
-        if subtype_constructor_arguments(
-            ctx,
-            env,
-            visited,
-            trace,
-            left,
-            right,
-            variant_constructor_tag(layout1, left_position),
-            variant_constructor_tag(layout2, *right_position),
-        )
-        .is_err()
-        {
-            // OCaml compiler/ml/ctype.ml:3863-3905 treats constructor payload
-            // subtyping as a boolean while checking variant-to-variant
-            // coercion, then records the root variant subtype failure with no
-            // nested Different_type_kinds context.
-            return Err(subtype_error(trace));
+            crate::types::TypeKind::TypeRecord(fields1, repr1),
+            crate::types::TypeKind::TypeRecord(fields2, repr2),
+        ) => {
+            if repr1 != repr2 {
+                push_subtype_cstr(cstrs, trace, t1, t2, None);
+                return Ok(());
+            }
+            let (violations, mut tl1, mut tl2) = check_record_fields(fields1, fields2);
+            if !violations.is_empty() {
+                push_subtype_cstr(
+                    cstrs,
+                    trace,
+                    t1,
+                    t2,
+                    Some(SubtypeContext::RecordFieldsMismatch {
+                        left_record_name: p1,
+                        right_record_name: p2,
+                        issues: violations,
+                    }),
+                );
+                return Ok(());
+            }
+            // Record_coercion.check_record_fields builds its type lists with
+            // cons during a left fold.
+            tl1.reverse();
+            tl2.reverse();
+            subtype_list(ctx, env, subtypes, trace, &tl1, &tl2, cstrs)
+        }
+        (kind1, kind2) => {
+            push_subtype_cstr(
+                cstrs,
+                trace,
+                t1,
+                t2,
+                Some(SubtypeContext::DifferentTypeKinds {
+                    left_typename: p1,
+                    right_typename: p2,
+                    left_type_kind: subtype_type_kind(kind1),
+                    right_type_kind: subtype_type_kind(kind2),
+                }),
+            );
+            Ok(())
         }
     }
-    Ok(())
-}
-
-fn subtype_concrete_type_declarations(
-    ctx: &TypeContext,
-    env: &Env,
-    visited: &mut HashSet<(u32, u32)>,
-    trace: &[(TypeExprRef, TypeExprRef)],
-    path1: &Path,
-    path2: &Path,
-) -> Option<TypeResult<()>> {
-    let decl1 = lookup_type_decl_for_path(ctx, env, path1)?;
-    let decl2 = lookup_type_decl_for_path(ctx, env, path2)?;
-
-    match (&decl1.type_kind, &decl2.type_kind) {
-        (
-            super::TypeKind::TypeRecord(fields1, repr1),
-            super::TypeKind::TypeRecord(fields2, repr2),
-        ) => Some(if repr1 == repr2 {
-            subtype_record_fields(ctx, env, visited, trace, path1, path2, fields1, fields2)
-        } else {
-            Err(subtype_error(trace))
-        }),
-        (
-            super::TypeKind::TypeVariant(cstrs1, layout_ref1),
-            super::TypeKind::TypeVariant(cstrs2, layout_ref2),
-        ) => Some(
-            if let Some(issue) = variant_configuration_issue(ctx, &decl1, &decl2) {
-                Err(subtype_error_with_context(
-                    trace,
-                    SubtypeContext::VariantConfigurationsMismatch {
-                        left_variant_name: path1.clone(),
-                        right_variant_name: path2.clone(),
-                        issue,
-                    },
-                ))
-            } else {
-                subtype_variant_constructors(
-                    ctx,
-                    env,
-                    visited,
-                    trace,
-                    path1,
-                    path2,
-                    cstrs1,
-                    cstrs2,
-                    &ctx.variant_layout(*layout_ref1),
-                    &ctx.variant_layout(*layout_ref2),
-                )
-            },
-        ),
-        (super::TypeKind::TypeAbstract, super::TypeKind::TypeAbstract)
-        | (super::TypeKind::TypeOpen, super::TypeKind::TypeOpen) => None,
-        _ => Some(Err(TypeError::Subtype {
-            trace: trace.to_vec(),
-            context: Some(SubtypeContext::DifferentTypeKinds {
-                left_typename: path1.clone(),
-                right_typename: path2.clone(),
-                left_type_kind: subtype_type_kind(&decl1.type_kind),
-                right_type_kind: subtype_type_kind(&decl2.type_kind),
-            }),
-        })),
-    }
-}
-
-fn subtype_record_fields(
-    ctx: &TypeContext,
-    env: &Env,
-    visited: &mut HashSet<(u32, u32)>,
-    trace: &[(TypeExprRef, TypeExprRef)],
-    path1: &Path,
-    path2: &Path,
-    fields1: &[LabelDeclaration],
-    fields2: &[LabelDeclaration],
-) -> TypeResult<()> {
-    let (issues, mut field_types1, mut field_types2) = check_record_fields(fields1, fields2);
-    if !issues.is_empty() {
-        return Err(subtype_error_with_context(
-            trace,
-            SubtypeContext::RecordFieldsMismatch {
-                left_record_name: path1.clone(),
-                right_record_name: path2.clone(),
-                issues,
-            },
-        ));
-    }
-
-    // OCaml's Record_coercion.check_record_fields builds these lists with
-    // cons during a left fold, so subtype_list sees target fields in reverse.
-    field_types1.reverse();
-    field_types2.reverse();
-    for (field_type1, field_type2) in field_types1.into_iter().zip(field_types2.into_iter()) {
-        let mut field_trace = trace.to_vec();
-        field_trace.push((field_type1, field_type2));
-        subtype_rec(ctx, env, visited, &field_trace, field_type1, field_type2)?;
-    }
-
-    Ok(())
 }
 
 fn check_record_fields(
