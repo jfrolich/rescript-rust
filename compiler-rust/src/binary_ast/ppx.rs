@@ -3217,9 +3217,10 @@ fn validate_bs_unwrap_type(typ: &CoreType) -> PpxResult<()> {
             "Not a valid type for @unwrap. Type must be an inline variant (closed), and\neach constructor must have an argument.",
         ));
     };
-    let (row_fields, closed, labels) = &**variant_inner;
+    // compiler/frontend/ast_external_process.ml:60-65 matches
+    // `Ptyp_variant (row_fields, Closed, _)`: lower-bound labels are allowed.
+    let (row_fields, closed, _) = &**variant_inner;
     if !matches!(closed, current::ClosedFlag::Closed)
-        || labels.is_some()
         || row_fields.is_empty()
         || !variant_can_unwrap(row_fields)
     {
