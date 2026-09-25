@@ -14431,6 +14431,12 @@ fn type_record(
     let expected_record_info =
         extract_concrete_record_type_info(expected_ty, env, &mut tctx.persistent_env, ctx);
     let mut record_opath_ty = expected_record_info.as_ref().map(|_| expected_ty);
+    // OCaml Pexp_record(None) (typecore.ml:2740-2746): `ty_record` is the
+    // expected type only when it is a concrete record, else `newvar ()`; it is
+    // unified with `instance env ty_expected` after the labels are typed.
+    if typed_base.is_none() && record_opath_ty.is_none() {
+        record_ty = ctx.new_var(None);
+    }
     // Match OCaml Pexp_record(Some exp):
     // when expected type does not reveal a concrete record path, but the base
     // expression does, use a fresh constructor instance from the base path as
@@ -14878,7 +14884,7 @@ fn type_record(
                     //   unify env (instance_def ty_res) (instance env ty_expected)
                     //   let ty_arg = instance_def ty_arg
                     let ty_res = crate::types::ctype::instance(ctx, ty_res0);
-                    let expected_record_ty = crate::types::ctype::instance(ctx, expected_ty);
+                    let expected_record_ty = crate::types::ctype::instance(ctx, record_ty);
                     if let Err(err) =
                         crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_record_ty)
                     {
@@ -14910,10 +14916,7 @@ fn type_record(
                     };
 
                     if env_label.lbl_private == crate::types::PrivateFlag::Private {
-                        return Err(TypeCoreError::PrivateType {
-                            loc,
-                            ty: expected_ty,
-                        });
+                        return Err(TypeCoreError::PrivateType { loc, ty: record_ty });
                     }
 
                     (
