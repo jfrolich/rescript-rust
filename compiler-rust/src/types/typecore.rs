@@ -21490,7 +21490,7 @@ fn type_let_bindings(
                 &binding.pvb_attributes,
                 true,
                 |tctx| match &*pat_desc {
-                    TypeDesc::Tpoly { body, vars } if !vars.is_empty() => {
+                    TypeDesc::Tpoly { body, vars } => {
                         let body = *body;
                         let vars = vars.clone();
                         drop(pat_desc);
