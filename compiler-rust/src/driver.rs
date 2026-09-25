@@ -4873,7 +4873,9 @@ fn format_typemod_module_type(
     type_ctx: &TypeContext,
     mty: &crate::types::decl::ModuleType,
 ) -> String {
-    crate::types::includemod::format_module_type(type_ctx, mty)
+    // `Printtyp.modtype` prints values with `tree_of_type_scheme`, which names
+    // non-generalized variables `'_weakN` (printtyp.ml).
+    crate::types::includemod::format_module_type_show_weak(type_ctx, mty)
 }
 
 fn format_with_mismatch_report(
