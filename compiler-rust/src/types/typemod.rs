@@ -7311,6 +7311,56 @@ fn collect_top_level_value_use_checks(
     }
 }
 
+/// Whether a top-level value binding is used, following `type_let`'s slot
+/// mechanism (typecore.ml:4570-4640): inside a recursive group, a use from a
+/// sibling definition only counts once that sibling is itself used.
+fn top_level_value_check_used(items: &[StructureItem], check: &TopLevelValueUseCheck) -> bool {
+    let used_later = |id: &Ident| {
+        items
+            .iter()
+            .skip(check.item_index + 1)
+            .any(|item| structure_item_uses_ident(item, id))
+    };
+    if check.rec_flag != RecFlag::Recursive {
+        return used_later(&check.id);
+    }
+    let Some(StructureItemDesc::Tstr_value(_, bindings)) =
+        items.get(check.item_index).map(|item| &item.str_desc)
+    else {
+        return used_later(&check.id);
+    };
+    let binding_ids: Vec<Vec<Ident>> = bindings
+        .iter()
+        .map(|binding| {
+            let mut idents = Vec::new();
+            collect_bound_pattern_idents_with_loc(&binding.vb_pat, &mut idents);
+            idents.into_iter().map(|(id, _, _)| id).collect()
+        })
+        .collect();
+    let group: Vec<&Ident> = binding_ids.iter().flatten().collect();
+    let mut used: Vec<&Ident> = group.iter().copied().filter(|id| used_later(id)).collect();
+    loop {
+        let mut changed = false;
+        for (binding, ids) in bindings.iter().zip(binding_ids.iter()) {
+            if !ids.iter().any(|id| used.iter().any(|u| u.same(id))) {
+                continue;
+            }
+            for id in &group {
+                if !used.iter().any(|u| u.same(id))
+                    && crate::types::typecore::typed_expression_uses_ident(&binding.vb_expr, id)
+                {
+                    used.push(id);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    used.iter().any(|u| u.same(&check.id))
+}
+
 fn collect_top_level_module_use_checks(
     item: &StructureItem,
     item_index: usize,
@@ -7367,7 +7417,10 @@ fn collect_top_level_constructor_use_checks(
         return;
     };
 
-    for decl in decls {
+    // `Typedecl.transl_type_decl` adds the declarations to the final
+    // environment with `List.fold_right`, so `Env.store_type` registers the
+    // constructor checks of the last declaration first.
+    for decl in decls.iter().rev() {
         let type_name = decl.typ_id.name().to_string();
         if !should_warn_unused_name(&type_name) || arena.to_location(decl.typ_loc).loc_ghost {
             continue;
@@ -10305,15 +10358,7 @@ fn collect_unused_top_level_value_warnings(
             continue;
         }
 
-        let start_index = if check.rec_flag == RecFlag::Recursive {
-            check.item_index
-        } else {
-            check.item_index + 1
-        };
-        let used = typed_items
-            .iter()
-            .skip(start_index)
-            .any(|item| structure_item_uses_ident(item, &check.id));
+        let used = top_level_value_check_used(typed_items, check);
         if !used {
             out.push(DelayedWarning {
                 item_index: check.item_index,
@@ -10950,16 +10995,7 @@ fn report_unused_items_hidden_by_module_constraint(
             continue;
         }
 
-        let start_index = if check.rec_flag == RecFlag::Recursive {
-            check.item_index
-        } else {
-            check.item_index + 1
-        };
-        let used = structure
-            .str_items
-            .iter()
-            .skip(start_index)
-            .any(|item| structure_item_uses_ident(item, &check.id));
+        let used = top_level_value_check_used(&structure.str_items, check);
         if !used {
             hidden_warnings.push(DelayedWarning {
                 item_index: check.item_index,
@@ -11041,15 +11077,13 @@ fn report_unused_items_hidden_by_module_constraint(
             continue;
         }
 
-        let start_index = if check.rec_flag == RecFlag::Recursive {
-            check.item_index
-        } else {
-            check.item_index + 1
-        };
+        // `Typedecl.transl_type_decl` registers the usage checks with the
+        // final environment, after the declarations were typed against a
+        // temporary one, so references inside the item never count.
         let used = structure
             .str_items
             .iter()
-            .skip(start_index)
+            .skip(check.item_index + 1)
             .any(|item| structure_item_uses_type_ident(ctx, item, &check.id));
         if !used {
             hidden_warnings.push(DelayedWarning {
