@@ -2325,13 +2325,6 @@ fn parse_type_declaration_body(
 
     let cstrs = parse_type_constraints(p);
 
-    // In type declarations with qualified type constructors (Ldot),
-    // OCaml creates a NEW location with the same positions as the longident.
-    // IMPORTANT: We must create a fresh LocIdx, NOT reuse lid.loc, because OCaml
-    // creates fresh Location objects (though positions inside may be shared).
-    // For unqualified (Lident), the CoreType uses full extent.
-    let manifest = manifest.map(|t| fix_type_manifest_location(p, t));
-
     // Use decl_start_idx for the start position to enable sharing with structure_item
     let loc = p.mk_loc_idx_to_prev_end(decl_start_idx);
     Some(TypeDeclaration {
@@ -2434,22 +2427,58 @@ fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
         state.next();
         state.token == Token::Dot
     });
-    if is_type_path {
-        let typ = typ::parse_typ_expr(p);
-        let manifest = Some(p.arena_mut().push_core_type(typ));
-        if p.token == Token::Equal {
-            p.next();
-            let (private, kind) = parse_type_representation(p, None, None);
-            (manifest, kind, private)
-        } else {
-            (manifest, TypeKind::Ptype_abstract, PrivateFlag::Public)
-        }
-    } else {
-        (
+    if !is_type_path {
+        return (
             None,
             TypeKind::Ptype_variant(parse_constructors_without_leading_bar(p)),
             PrivateFlag::Public,
-        )
+        );
+    }
+    let uident_start_pos_idx = p.start_pos_idx();
+    let Token::Uident(uident) = &p.token else {
+        unreachable!("parse_type_equation_or_constr_decl: expected Uident");
+    };
+    let uident = uident.to_string();
+    p.next();
+    p.next();
+    let typ = typ::parse_type_equation_constr(p, uident_start_pos_idx, uident);
+    match p.token {
+        Token::Equal => {
+            p.next();
+            let (private, kind) = parse_type_representation(p, None, None);
+            (Some(p.arena_mut().push_core_type(typ)), kind, private)
+        }
+        Token::EqualGreater => {
+            p.next();
+            let return_type = typ::parse_typ_expr_no_alias(p);
+            let loc = p.mk_loc_idx_to_prev_end(uident_start_pos_idx);
+            let param_idx = p.arena_mut().push_core_type(typ);
+            let ret_idx = p.arena_mut().push_core_type(return_type);
+            let arrow = CoreType {
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+                    Box::new(TypeArg {
+                        attrs: Attributes::new(),
+                        lbl: ArgLabel::Nolabel,
+                        typ: param_idx,
+                    }),
+                    ret_idx,
+                    p.static_arity_1(),
+                )))),
+                ptyp_loc: loc,
+                ptyp_attributes: Attributes::new(),
+            };
+            let typ = typ::parse_type_alias(p, arrow);
+            (
+                Some(p.arena_mut().push_core_type(typ)),
+                TypeKind::Ptype_abstract,
+                PrivateFlag::Public,
+            )
+        }
+        _ => (
+            Some(p.arena_mut().push_core_type(typ)),
+            TypeKind::Ptype_abstract,
+            PrivateFlag::Public,
+        ),
     }
 }
 
@@ -2544,81 +2573,6 @@ fn parse_type_representation(
     (private, kind)
 }
 
-
-/// Fix the location of a Ptyp_constr in a type manifest context.
-/// For qualified identifiers (Ldot), OCaml creates a NEW location with the same
-/// position values as the longident (but a separate Location object).
-/// IMPORTANT: We must NOT reuse lid.loc (same LocIdx) because that would cause
-/// sharing during marshal - OCaml writes a fresh Location block with shared
-/// positions INSIDE, but the Location itself is not shared.
-/// For unqualified (Lident), it uses full extent.
-/// EXCEPTION: When the type has attributes, OCaml keeps the full extent including
-/// type arguments (this allows the location to cover the entire attributed type).
-fn fix_type_manifest_location(p: &mut Parser<'_>, typ_idx: CoreTypeIdx) -> CoreTypeIdx {
-    let typ = p.arena().get_core_type(typ_idx).clone();
-    match &*typ.ptyp_desc {
-        CoreTypeDesc::Ptyp_constr(inner) => {
-            let (ref lid, _) = **inner;
-            // Only adjust for qualified identifiers (Ldot) WITHOUT attributes
-            // When there are attributes, OCaml keeps the full extent including type args
-            if p.arena().is_ldot(lid.txt) && typ.ptyp_attributes.is_empty() {
-                // Create a NEW LocIdx with the same positions as lid.loc
-                // This matches OCaml's behavior: fresh Location object, shared positions
-                let lid_loc = p.arena().get_location(lid.loc).clone();
-                let new_loc =
-                    p.arena_mut()
-                        .push_loc(lid_loc.loc_start, lid_loc.loc_end, lid_loc.loc_ghost);
-                let fixed = CoreType {
-                    ptyp_loc: new_loc,
-                    ..typ
-                };
-                p.arena_mut().push_core_type(fixed)
-            } else {
-                typ_idx
-            }
-        }
-        CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (ref arg, ret_idx, arity) = **inner;
-            let args = p.arena().nary_arrow_args(arg, arity).into_owned();
-            // Also adjust Ldot types in every arrow parameter position, but not
-            // in the return type: OCaml keeps type arguments in return locations.
-            let fixed_args = args
-                .into_iter()
-                .map(|arg| TypeArg {
-                    typ: fix_type_manifest_location(p, arg.typ),
-                    ..arg
-                })
-                .collect::<Vec<_>>();
-            let first = fixed_args[0].clone();
-            if fixed_args.len() > 1 {
-                p.arena_mut().set_nary_arrow_args(arity, fixed_args.clone());
-            }
-            let fixed = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-                    Box::new(first),
-                    ret_idx,
-                    arity,
-                )))),
-                ..typ
-            };
-            p.arena_mut().push_core_type(fixed)
-        }
-        CoreTypeDesc::Ptyp_alias(inner) => {
-            let (ref alias_ct_idx, ref alias_name) = **inner;
-            // Recurse into the aliased type (e.g., `Color.t<...> as 'rgb`)
-            let fixed_inner_idx = fix_type_manifest_location(p, *alias_ct_idx);
-            let fixed = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((
-                    fixed_inner_idx,
-                    alias_name.clone(),
-                )))),
-                ..typ
-            };
-            p.arena_mut().push_core_type(fixed)
-        }
-        _ => typ_idx,
-    }
-}
 
 
 /// OCaml `parse_type_param` (compiler/syntax/src/res_core.ml).

@@ -884,9 +884,59 @@ fn parse_type_constr_with_start(
     let lid_end_idx = p.prev_end_pos_idx();
     let lid_loc = p.mk_loc_idx(start_pos_idx, lid_end_idx);
 
-    // Parse optional type arguments
-    // OCaml: parse_type_constructor_args handles both < and ( as opening tokens
-    let args = if p.token == Token::LessThan || p.token == Token::Lparen {
+    let args = parse_type_constructor_args(p, lid_idx, &lid_loc);
+
+    // Check for multiple inline records in type constructor args (OCaml line 4462)
+    if let Some(ref inline_types) = p.inline_types_found {
+        // Collect inline type names first to avoid borrow conflict
+        let inline_names: Vec<StrIdx> = inline_types.iter().map(|(n, _, _, _)| *n).collect();
+        let count = args
+            .iter()
+            .filter(|arg| {
+                if let CoreTypeDesc::Ptyp_constr(constr_inner) = &*arg.ptyp_desc {
+                    let (ref lid, _) = **constr_inner;
+                    inline_names
+                        .iter()
+                        .any(|iname| p.arena().is_lident(lid.txt, p.arena().get_string(*iname)))
+                } else {
+                    false
+                }
+            })
+            .count();
+        if count > 1 {
+            p.err_at(
+                p.arena().get_position(start_pos_idx).clone(),
+                p.prev_end_pos.clone(),
+                DiagnosticCategory::Message(
+                    "Only one inline record definition is allowed per record field. This defines more than one inline record.".to_string(),
+                ),
+            );
+        }
+    }
+
+    // ptyp_loc includes the full extent (identifier + type args)
+    // Note: For Ldot types in certain contexts (type manifests, arrow parameters),
+    // the location is adjusted later to exclude type args.
+    // Reuse start_pos_idx for position sharing. End position uses caching -
+    // when there are no type args, it shares the same end as lid_loc.
+    let ptyp_end_idx = p.prev_end_pos_idx();
+    let ptyp_loc = p.mk_loc_idx(start_pos_idx, ptyp_end_idx);
+    let args_idx: Vec<CoreTypeIdx> = args
+        .into_iter()
+        .map(|a| p.arena_mut().push_core_type(a))
+        .collect();
+    ast_helper::make_type_constr(lid_idx, args_idx, lid_loc, ptyp_loc)
+}
+
+
+/// OCaml `parse_type_constructor_args ~constr_name` (res_core.ml:5140-5180).
+pub(super) fn parse_type_constructor_args(
+    p: &mut Parser<'_>,
+    lid_idx: crate::parse_arena::LidentIdx,
+    lid_loc: &LocIdx,
+) -> Vec<CoreType> {
+    let lid_loc = lid_loc.clone();
+    if p.token == Token::LessThan || p.token == Token::Lparen {
         let opening = p.token.clone();
         let opening_start_pos = p.start_pos.clone();
         p.set_diamond_mode();
@@ -937,48 +987,63 @@ fn parse_type_constr_with_start(
         args
     } else {
         vec![]
-    };
+    }
+}
 
-    // Check for multiple inline records in type constructor args (OCaml line 4462)
-    if let Some(ref inline_types) = p.inline_types_found {
-        // Collect inline type names first to avoid borrow conflict
-        let inline_names: Vec<StrIdx> = inline_types.iter().map(|(n, _, _, _)| *n).collect();
-        let count = args
-            .iter()
-            .filter(|arg| {
-                if let CoreTypeDesc::Ptyp_constr(constr_inner) = &*arg.ptyp_desc {
-                    let (ref lid, _) = **constr_inner;
-                    inline_names
-                        .iter()
-                        .any(|iname| p.arena().is_lident(lid.txt, p.arena().get_string(*iname)))
-                } else {
-                    false
-                }
-            })
-            .count();
-        if count > 1 {
-            p.err_at(
-                p.arena().get_position(start_pos_idx).clone(),
-                p.prev_end_pos.clone(),
-                DiagnosticCategory::Message(
-                    "Only one inline record definition is allowed per record field. This defines more than one inline record.".to_string(),
-                ),
-            );
+/// OCaml `parse_value_path_tail` (res_core.ml:786-804).
+fn parse_value_path_tail(
+    p: &mut Parser<'_>,
+    start_pos_idx: PosIdx,
+    mut parts: Vec<String>,
+) -> (Vec<String>, LocIdx) {
+    loop {
+        match &p.token {
+            Token::Lident(ident) => {
+                parts.push(ident.to_string());
+                p.next();
+                return (parts, p.mk_loc_idx_to_prev_end(start_pos_idx));
+            }
+            Token::Uident(ident) => {
+                parts.push(ident.to_string());
+                p.next();
+                p.expect(Token::Dot);
+            }
+            _ => {
+                p.err_unexpected();
+                parts.push("_".to_string());
+                return (parts, p.mk_loc_idx_to_prev_end(start_pos_idx));
+            }
         }
     }
+}
 
-    // ptyp_loc includes the full extent (identifier + type args)
-    // Note: For Ldot types in certain contexts (type manifests, arrow parameters),
-    // the location is adjusted later to exclude type args.
-    // Reuse start_pos_idx for position sharing. End position uses caching -
-    // when there are no type args, it shares the same end as lid_loc.
-    let ptyp_end_idx = p.prev_end_pos_idx();
-    let ptyp_loc = p.mk_loc_idx(start_pos_idx, ptyp_end_idx);
-    let args_idx: Vec<CoreTypeIdx> = args
-        .into_iter()
-        .map(|a| p.arena_mut().push_core_type(a))
-        .collect();
-    ast_helper::make_type_constr(lid_idx, args_idx, lid_loc, ptyp_loc)
+/// The qualified-path branch of OCaml `parse_type_equation_or_constr_decl`
+/// (res_core.ml:5825-5838), called after `Uident .` has been consumed:
+/// `parse_value_path_tail`, a constructor located before its arguments, then
+/// `parse_type_alias`. No inline-record context applies.
+pub(super) fn parse_type_equation_constr(
+    p: &mut Parser<'_>,
+    uident_start_pos_idx: PosIdx,
+    uident: String,
+) -> CoreType {
+    without_inline_types_context(p, |p| {
+        let (parts, lid_loc) = parse_value_path_tail(p, uident_start_pos_idx, vec![uident]);
+        let lid = super::core::build_longident(p.arena_mut(), &parts);
+        let lid_idx = p.push_longident(lid);
+        let loc = p.mk_loc_idx_to_prev_end(uident_start_pos_idx);
+        let args = parse_type_constructor_args(p, lid_idx, &lid_loc);
+        let args_idx: Vec<CoreTypeIdx> = args
+            .into_iter()
+            .map(|a| p.arena_mut().push_core_type(a))
+            .collect();
+        let typ = ast_helper::make_type_constr(lid_idx, args_idx, lid_loc, loc);
+        parse_type_alias(p, typ)
+    })
+}
+
+/// OCaml `parse_typ_expr ~alias:false p` with no inline-record context.
+pub(super) fn parse_typ_expr_no_alias(p: &mut Parser<'_>) -> CoreType {
+    without_inline_types_context(p, |p| parse_typ_expr_inner(p, true))
 }
 
 /// Parse a type constructor (path with optional type arguments).
