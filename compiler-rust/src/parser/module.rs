@@ -590,15 +590,28 @@ fn parse_type_params(p: &mut Parser<'_>, parent: &[String]) -> Vec<(CoreTypeIdx,
         parse_type_param,
     );
     if p.token == Token::Rparen && opening == Token::Lparen {
-        let suggested = format_type_with_angle_brackets(p, &parent.join("."), &params);
-        let end = p.end_pos.clone();
-        p.err_at(
-            opening_start,
-            end,
-            DiagnosticCategory::Message(format!(
-                "Type parameters require angle brackets:\n  {suggested}"
-            )),
+        // OCaml `parse_type_params` (res_core.ml:5762-5781): the message
+        // reprints the parent longident and `print_type_params`.
+        let parent_doc = super::doc::Doc::text(parent.join("."));
+        let params_doc = super::printer::print_type_params(
+            &super::printer::PrinterState::init(),
+            &params,
+            &mut super::comment_table::CommentTable::new(),
+            p.arena(),
         );
+        let msg = super::doc::Doc::breakable_group(
+            super::doc::Doc::concat(vec![
+                super::doc::Doc::text("Type parameters require angle brackets:"),
+                super::doc::Doc::indent(super::doc::Doc::concat(vec![
+                    super::doc::Doc::line(),
+                    super::doc::Doc::concat(vec![parent_doc, params_doc]),
+                ])),
+            ]),
+            true,
+        )
+        .to_string(80);
+        let end = p.end_pos.clone();
+        p.err_at(opening_start, end, DiagnosticCategory::Message(msg));
         p.next();
     } else {
         p.expect(Token::GreaterThan);
@@ -2865,34 +2878,6 @@ fn parse_type_param(p: &mut Parser<'_>) -> Option<(CoreTypeIdx, Variance)> {
     Some((p.arena_mut().push_core_type(typ), variance))
 }
 
-
-/// Format a type with angle bracket syntax for error suggestions.
-fn format_type_with_angle_brackets(
-    p: &Parser<'_>,
-    name: &str,
-    params: &[(CoreTypeIdx, Variance)],
-) -> String {
-    if params.is_empty() {
-        name.to_string()
-    } else {
-        let param_strs: Vec<String> = params
-            .iter()
-            .map(|(t, variance)| {
-                // `Res_printer.print_type_params`: variance, then the type.
-                let variance = match variance {
-                    Variance::Covariant => "+",
-                    Variance::Contravariant => "-",
-                    Variance::Invariant => "",
-                };
-                match &*p.arena().get_core_type(*t).ptyp_desc {
-                    CoreTypeDesc::Ptyp_var(v) => format!("{variance}'{v}"),
-                    _ => format!("{variance}_"),
-                }
-            })
-            .collect();
-        format!("{}<{}>", name, param_strs.join(", "))
-    }
-}
 
 
 

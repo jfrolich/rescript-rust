@@ -884,21 +884,37 @@ fn parse_type_constr_with_start(
         p.next();
         let args = parse_type_args(p);
         if p.token == Token::Rparen && opening == Token::Lparen {
-            // User wrote parens instead of angle brackets - emit helpful error
-            let path_str = path_parts.join(".");
-            let args_str: Vec<String> = args
+            // OCaml `parse_type_constructor_args` (res_core.ml:5150-5176):
+            // the message reprints `Typ.constr constr_name type_args`.
+            let arg_idxs: Vec<CoreTypeIdx> = args
                 .iter()
-                .map(|t| match &*t.ptyp_desc {
-                    CoreTypeDesc::Ptyp_var(v) => format!("'{}", v),
-                    _ => "_".to_string(),
-                })
+                .map(|arg| p.arena_mut().push_core_type(arg.clone()))
                 .collect();
-            let type_str = if args_str.is_empty() {
-                path_str
-            } else {
-                format!("{}<{}>", path_str, args_str.join(", "))
+            let typ = CoreType {
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+                    with_loc(lid_idx, lid_loc.clone()),
+                    arg_idxs,
+                )))),
+                ptyp_loc: LocIdx::none(),
+                ptyp_attributes: Attributes::new(),
             };
-            let msg = format!("Type parameters require angle brackets:\n  {}", type_str);
+            let printed = super::printer::print_typ_expr(
+                &super::printer::PrinterState::init(),
+                &typ,
+                &mut super::comment_table::CommentTable::new(),
+                p.arena(),
+            );
+            let msg = super::doc::Doc::breakable_group(
+                super::doc::Doc::concat(vec![
+                    super::doc::Doc::text("Type parameters require angle brackets:"),
+                    super::doc::Doc::indent(super::doc::Doc::concat(vec![
+                        super::doc::Doc::line(),
+                        printed,
+                    ])),
+                ]),
+                true,
+            )
+            .to_string(80);
             p.err_at(
                 opening_start_pos,
                 p.end_pos.clone(),

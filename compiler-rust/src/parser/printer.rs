@@ -7355,6 +7355,35 @@ fn print_with_constraint(
     }
 }
 
+/// OCaml `Res_printer.print_type_params` (res_printer.ml:1554-1578).
+pub fn print_type_params(
+    state: &PrinterState,
+    type_params: &[(CoreTypeIdx, Variance)],
+    cmt_tbl: &mut CommentTable,
+    arena: &ParseArena,
+) -> Doc {
+    if type_params.is_empty() {
+        return Doc::nil();
+    }
+    let params: Vec<Doc> = type_params
+        .iter()
+        .map(|(typ, variance)| {
+            let doc = print_type_param(state, typ, variance, cmt_tbl, arena);
+            print_comments(doc, cmt_tbl, arena.get_core_type(*typ).ptyp_loc, arena)
+        })
+        .collect();
+    Doc::group(Doc::concat(vec![
+        Doc::less_than(),
+        Doc::indent(Doc::concat(vec![
+            Doc::soft_line(),
+            Doc::join(Doc::concat(vec![Doc::comma(), Doc::line()]), params),
+        ])),
+        Doc::trailing_comma(),
+        Doc::soft_line(),
+        Doc::greater_than(),
+    ]))
+}
+
 /// Print a type parameter with variance (covariant +, contravariant -, or invariant).
 fn print_type_param(
     state: &PrinterState,
