@@ -1150,6 +1150,10 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     // parameter, so `(.)` is not an empty parameter list.
     let mut force_first_param = first_has_dot;
 
+    // `parse_comma_delimited_region ~grammar:Grammar.TypeParameters`
+    // (res_core.ml:4924-4940) keeps its breadcrumb while the parameters are
+    // parsed, so nested lists abort on tokens that continue this one.
+    p.leave_breadcrumb(Grammar::TypeParameters);
     while force_first_param || (p.token != Token::Rparen && p.token != Token::Eof) {
         force_first_param = false;
         // Capture position before the uncurried marker - OCaml includes . in argument type location
@@ -1501,6 +1505,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             }
         }
     }
+    p.eat_breadcrumb();
 
     p.expect(Token::Rparen);
     let rparen_end_idx = p.prev_end_pos_idx();
