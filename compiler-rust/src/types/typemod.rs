@@ -15763,12 +15763,13 @@ fn find_unbound_type_var_in_typed_type_decl(
     }
 
     if let Some(unbound) = find_unbound_type_var_in_type_decl(ctx, &decl.typ_type) {
-        let detail = find_unbound_type_var_detail_in_type_decl(ctx, &decl.typ_type, unbound)
-            .unwrap_or(UnboundTypeVarDetail::Type { ty: unbound });
+        // typedecl.ml:2182-2201: no explanation when no constructor, field or
+        // manifest mentions the variable.
+        let detail = find_unbound_type_var_detail_in_type_decl(ctx, &decl.typ_type, unbound);
         return Some((
             type_var_report_name_from_type_expr(ctx, unbound),
             decl.typ_loc,
-            Some(detail),
+            detail,
             Some(unbound),
         ));
     }

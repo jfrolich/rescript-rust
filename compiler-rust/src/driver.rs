@@ -4290,7 +4290,7 @@ fn type_mod_error_to_anyhow_styled(
             loc,
             name,
             detail: None,
-            ..
+            var: None,
         } => UserDiagnostic::new(
             format_unbound_type_variable_report(arena, source, filename, *loc, name),
             2,
@@ -4299,7 +4299,7 @@ fn type_mod_error_to_anyhow_styled(
         TypeModError::UnboundTypeVar {
             loc,
             name,
-            detail: Some(detail),
+            detail,
             var,
         } => UserDiagnostic::new(
             format_unbound_type_declaration_variable_report(
@@ -4309,7 +4309,7 @@ fn type_mod_error_to_anyhow_styled(
                 filename,
                 *loc,
                 name,
-                Some(detail),
+                detail.as_ref(),
                 *var,
             ),
             2,
@@ -5198,7 +5198,9 @@ fn format_unbound_type_declaration_variable_report(
     detail: Option<&UnboundTypeVarDetail>,
     var: Option<TypeExprRef>,
 ) -> String {
-    let mut message = String::from("  A type variable is unbound in this type declaration.");
+    // typedecl.ml:2182-2201: the period starts `explain_unbound_gen`'s
+    // explanation (".@.@[In ...").
+    let mut message = String::from("  A type variable is unbound in this type declaration");
     if let Some(detail) = detail {
         if let UnboundTypeVarDetail::Constructor {
             name: case_name,
@@ -5229,7 +5231,7 @@ fn format_unbound_type_declaration_variable_report(
                 Some(var) => printer.print(var),
                 None => name.to_string(),
             };
-            message.push_str("\nIn case ");
+            message.push_str(".\nIn case ");
             message.push_str(case_name);
             message.push_str(" of ");
             message.push_str(&args_text);
@@ -5282,7 +5284,7 @@ fn format_unbound_type_declaration_variable_report(
             Some(var) => printer.print(var),
             None => name.to_string(),
         };
-        message.push_str("\nIn ");
+        message.push_str(".\nIn ");
         message.push_str(kwd);
         message.push(' ');
         message.push_str(&label);
