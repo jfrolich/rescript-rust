@@ -1349,17 +1349,100 @@ fn check_constant(loc: LocIdx, constant: &Constant, warnings: &mut Vec<PpxWarnin
     }
 }
 
-/// The unused-attribute part of OCaml `Bs_ast_invariant.emit_external_warnings`
-/// (bs_ast_invariant.ml:68-160), run over the rewritten tree.
+/// OCaml `Bs_ast_invariant.emit_external_warnings` (bs_ast_invariant.ml:68-148),
+/// run over the rewritten tree. The sweep stops at the first error it raises;
+/// warnings emitted before it are printed first.
 struct UnusedAttributeSweep<'w> {
     warnings: &'w mut Vec<PpxWarning>,
     /// Set when OCaml's sweep would raise (invalid/duplicated constructor
     /// `@as` in `process_tag_type`); later warnings are never reached. The
     /// error itself is reported by the type checker.
     stopped: bool,
+    /// An error raised by the sweep (`Location.raise_errorf`).
+    error: Option<PpxError>,
+}
+
+impl UnusedAttributeSweep<'_> {
+    fn raise(&mut self, loc: LocIdx, message: impl Into<String>) {
+        if !self.stopped {
+            self.stopped = true;
+            self.error = Some(PpxError::at_loc(loc, message));
+        }
+    }
 }
 
 impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
+    fn type_declaration(&mut self, arena: &ParseArena, td: &TypeDeclaration) {
+        if self.stopped {
+            return;
+        }
+        let name = arena.get_string(td.ptype_name.txt);
+        if is_builtin_rank0_type_name(name) {
+            self.raise(
+                td.ptype_loc,
+                format!("built-in type `{name}` can not be redefined "),
+            );
+            return;
+        }
+        super::ast_iter::walk_type_declaration(self, arena, td);
+    }
+
+    fn structure_item(&mut self, arena: &ParseArena, item: &StructureItem) {
+        if self.stopped {
+            return;
+        }
+        // `Pstr_type (Nonrecursive, [{ptype_kind = Ptype_variant ({pcd_res =
+        // Some _} :: _)}])` raises (bs_ast_invariant.ml:81-89).
+        if let StructureItemDesc::Pstr_type(inner) = &*item.pstr_desc {
+            let (rec_flag, decls) = &**inner;
+            if *rec_flag == RecFlag::Nonrecursive
+                && let [decl] = decls.as_slice()
+                && let TypeKind::Ptype_variant(cstrs) = &decl.ptype_kind
+                && cstrs.first().is_some_and(|cd| cd.pcd_res.is_some())
+            {
+                self.raise(
+                    item.pstr_loc,
+                    "GADTs require recursive type syntax.\nDefine your type using `type rec` instead of `type`.\nExample: type rec t = ...",
+                );
+                return;
+            }
+        }
+        super::ast_iter::walk_structure_item(self, arena, item);
+    }
+
+    fn value_description(&mut self, arena: &ParseArena, vd: &ValueDescription) {
+        if self.stopped {
+            return;
+        }
+        // bs_ast_invariant.ml:119-142.
+        if let [byte_name] = vd.pval_prim.as_slice() {
+            let byte_name = arena.get_string(*byte_name);
+            if matches!(byte_name, "%identity" | "%component_identity")
+                && !core_type_is_arity_one(vd.pval_type, arena)
+            {
+                self.raise(
+                    vd.pval_loc,
+                    format!("{byte_name} expects a function type of the form 'a => 'b (arity 1)"),
+                );
+                return;
+            }
+            let safe = byte_name
+                .as_bytes()
+                .first()
+                .is_some_and(|c| matches!(c, b'%' | b'#' | b'?'));
+            if !safe {
+                self.warnings.push(PpxWarning {
+                    loc: vd.pval_loc,
+                    warning: Warning::BsFfiWarning {
+                        message: format!("{byte_name} such externals are unsafe"),
+                    },
+                });
+                return;
+            }
+        }
+        super::ast_iter::walk_value_description(self, arena, vd);
+    }
+
     fn attribute(&mut self, arena: &ParseArena, attr: &Attribute) {
         // `attribute = fun _ attr -> warn_unused_attribute attr`: payloads are
         // not traversed.
@@ -1391,7 +1474,15 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
                 }
             }
             ExpressionDesc::Pexp_variant(inner)
-                if inner.1.is_none() && is_valid_hash_number(&inner.0) => {}
+                if inner.1.is_none() && is_valid_hash_number(&inner.0) =>
+            {
+                if inner.0.parse::<i32>().is_err() {
+                    self.raise(
+                        expr.pexp_loc,
+                        "Integer literal exceeds int32 range. Use float or BigInt if larger values are required.",
+                    );
+                }
+            }
             _ => super::ast_iter::walk_expr(self, arena, idx),
         }
     }
@@ -1436,6 +1527,11 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
                 return;
             }
         }
+        let name = arena.get_string(cd.pcd_name.txt);
+        if matches!(name, "false" | "true" | "()") {
+            self.raise(cd.pcd_name.loc, format!("{name} can not be redefined "));
+            return;
+        }
         super::ast_iter::walk_constructor_declaration(self, arena, cd);
     }
 }
@@ -1475,30 +1571,37 @@ pub fn mark_config_attributes_signature(items: &[SignatureItem], arena: &ParseAr
     mark_leading_config_signature(items, arena);
 }
 
+/// OCaml `Bs_ast_invariant.emit_external_warnings_on_structure`: the warnings
+/// in traversal order, and the error the sweep raised (if any).
 pub fn collect_unused_attribute_warnings_structure(
     items: &[StructureItem],
     arena: &ParseArena,
-) -> Vec<PpxWarning> {
+) -> (Vec<PpxWarning>, Option<PpxError>) {
     let mut warnings = Vec::new();
     let mut sweep = UnusedAttributeSweep {
         warnings: &mut warnings,
         stopped: false,
+        error: None,
     };
     super::ast_iter::walk_structure(&mut sweep, arena, items);
-    warnings
+    let error = sweep.error.take();
+    (warnings, error)
 }
 
+/// OCaml `Bs_ast_invariant.emit_external_warnings_on_signature`.
 pub fn collect_unused_attribute_warnings_signature(
     items: &[SignatureItem],
     arena: &ParseArena,
-) -> Vec<PpxWarning> {
+) -> (Vec<PpxWarning>, Option<PpxError>) {
     let mut warnings = Vec::new();
     let mut sweep = UnusedAttributeSweep {
         warnings: &mut warnings,
         stopped: false,
+        error: None,
     };
     super::ast_iter::walk_signature(&mut sweep, arena, items);
-    warnings
+    let error = sweep.error.take();
+    (warnings, error)
 }
 
 fn collect_unused_bs_attributes(
@@ -9997,9 +10100,9 @@ fn parse_deriving_actions(
                             .is_some_and(|expr| check_new_type_config(arena.get_expr(expr), arena)),
                     }),
                     "abstract" => actions.push(DeriveAction::Abstract {
-                        light: config
-                            .config
-                            .is_some_and(|expr| check_abstract_light_config(arena.get_expr(expr), arena)),
+                        light: config.config.is_some_and(|expr| {
+                            check_abstract_light_config(arena.get_expr(expr), arena)
+                        }),
                     }),
                     _ => {}
                 }
@@ -12187,20 +12290,6 @@ fn is_builtin_rank0_type_name(name: &str) -> bool {
     )
 }
 
-fn validate_type_declaration_builtin_type_redefinition_error(
-    tdcl: &TypeDeclaration,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    let name = arena.get_string(tdcl.ptype_name.txt);
-    if is_builtin_rank0_type_name(name) {
-        return Err(PpxError::at_loc(
-            tdcl.ptype_loc,
-            format!("built-in type `{name}` can not be redefined "),
-        ));
-    }
-    Ok(())
-}
-
 fn core_type_get_uncurry_arity_aux(typ_idx: CoreTypeIdx, acc: i32, arena: &ParseArena) -> i32 {
     let typ = arena.get_core_type(typ_idx);
     match &*typ.ptyp_desc {
@@ -12231,412 +12320,6 @@ fn core_type_get_curry_arity(typ_idx: CoreTypeIdx, arena: &ParseArena) -> i32 {
 
 fn core_type_is_arity_one(typ_idx: CoreTypeIdx, arena: &ParseArena) -> bool {
     core_type_get_curry_arity(typ_idx, arena) == 1
-}
-
-fn validate_value_description_identity_arity_error(
-    vd: &ValueDescription,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    let [byte_name] = vd.pval_prim.as_slice() else {
-        return Ok(());
-    };
-    if arena.get_string(*byte_name) == "%identity" && !core_type_is_arity_one(vd.pval_type, arena) {
-        return Err(PpxError::at_loc(
-            vd.pval_loc,
-            "%identity expects a function type of the form 'a => 'b (arity 1)",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_with_constraint_builtin_type_redefinition_errors(
-    constraint: &WithConstraint,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
-    match constraint {
-        WithConstraint::Pwith_type(_, tdcl) | WithConstraint::Pwith_typesubst(_, tdcl) => {
-            validate_type_declaration_builtin_type_redefinition_error(tdcl, arena)
-        }
-        WithConstraint::Pwith_module(_, _) | WithConstraint::Pwith_modsubst(_, _) => Ok(()),
-    }
-}
-
-fn validate_payload_builtin_type_redefinition_errors(
-    payload: &Payload,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
-    match payload {
-        Payload::PStr(items) => validate_structure_builtin_type_redefinition_errors(items, arena),
-        Payload::PSig(items) => validate_signature_builtin_type_redefinition_errors(items, arena),
-        Payload::PTyp(_) | Payload::PPat(_) => Ok(()),
-    }
-}
-
-fn validate_structure_builtin_type_redefinition_errors(
-    structure: &[StructureItem],
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
-    for item in structure {
-        match &*item.pstr_desc {
-            StructureItemDesc::Pstr_type(inner) => {
-                let (_rec_flag, tdcls) = &**inner;
-                for tdcl in tdcls {
-                    validate_type_declaration_builtin_type_redefinition_error(tdcl, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_module(mb) => {
-                let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
-                validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)?;
-            }
-            StructureItemDesc::Pstr_recmodule(mbs) => {
-                for mb in mbs.iter() {
-                    let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
-                    validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_modtype(mtd) => {
-                if let Some(mod_type_idx) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type_idx).clone();
-                    validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_include(incl) => {
-                let mod_expr = arena.get_mod_expr(incl.pincl_mod).clone();
-                validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)?;
-            }
-            // Bs_builtin_ppx.structure_item_mapper leaves `@@config`
-            // untouched (bs_builtin_ppx.ml:633).
-            StructureItemDesc::Pstr_attribute(attr) if is_config_attribute(attr, arena) => {}
-            StructureItemDesc::Pstr_attribute(attr) => {
-                validate_payload_builtin_type_redefinition_errors(&attr.1, arena)?;
-            }
-            StructureItemDesc::Pstr_extension(inner) => {
-                let (extension, _attrs) = &**inner;
-                validate_payload_builtin_type_redefinition_errors(&extension.1, arena)?;
-            }
-            StructureItemDesc::Pstr_primitive(vd) => {
-                validate_value_description_identity_arity_error(vd, arena)?;
-            }
-            StructureItemDesc::Pstr_eval(inner) => {
-                let (expr_idx, _attrs) = &**inner;
-                validate_expression_builtin_type_redefinition_errors(*expr_idx, arena)?;
-            }
-            StructureItemDesc::Pstr_value(inner) => {
-                let (_rec_flag, bindings) = &**inner;
-                for binding in bindings {
-                    validate_expression_builtin_type_redefinition_errors(binding.pvb_expr, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_typext(_)
-            | StructureItemDesc::Pstr_exception(_)
-            | StructureItemDesc::Pstr_open(_) => {}
-        }
-    }
-    Ok(())
-}
-
-fn validate_signature_builtin_type_redefinition_errors(
-    signature: &[SignatureItem],
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
-    for item in signature {
-        match &*item.psig_desc {
-            SignatureItemDesc::Psig_type(inner) => {
-                let (_rec_flag, tdcls) = &**inner;
-                for tdcl in tdcls {
-                    validate_type_declaration_builtin_type_redefinition_error(tdcl, arena)?;
-                }
-            }
-            SignatureItemDesc::Psig_module(md) => {
-                let mod_type = arena.get_mod_type(md.pmd_type).clone();
-                validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
-            }
-            SignatureItemDesc::Psig_recmodule(mds) => {
-                for md in mds.iter() {
-                    let mod_type = arena.get_mod_type(md.pmd_type).clone();
-                    validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
-                }
-            }
-            SignatureItemDesc::Psig_modtype(mtd) => {
-                if let Some(mod_type_idx) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type_idx).clone();
-                    validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
-                }
-            }
-            SignatureItemDesc::Psig_include(incl) => {
-                let mod_type = arena.get_mod_type(incl.pincl_mod).clone();
-                validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
-            }
-            SignatureItemDesc::Psig_attribute(attr) => {
-                validate_payload_builtin_type_redefinition_errors(&attr.1, arena)?;
-            }
-            SignatureItemDesc::Psig_extension(inner) => {
-                let (extension, _attrs) = &**inner;
-                validate_payload_builtin_type_redefinition_errors(&extension.1, arena)?;
-            }
-            SignatureItemDesc::Psig_value(vd) => {
-                validate_value_description_identity_arity_error(vd, arena)?;
-            }
-            SignatureItemDesc::Psig_typext(_)
-            | SignatureItemDesc::Psig_exception(_)
-            | SignatureItemDesc::Psig_open(_) => {}
-        }
-    }
-    Ok(())
-}
-
-fn validate_module_expr_builtin_type_redefinition_errors(
-    mod_expr: &ModuleExpr,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
-    match &*mod_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(items) => {
-            validate_structure_builtin_type_redefinition_errors(items, arena)
-        }
-        ModuleExprDesc::Pmod_functor(inner) => {
-            let (_name, param_type, body) = &**inner;
-            if let Some(param_type_idx) = *param_type {
-                let param_type = arena.get_mod_type(param_type_idx).clone();
-                validate_module_type_builtin_type_redefinition_errors(&param_type, arena)?;
-            }
-            let body = arena.get_mod_expr(*body).clone();
-            validate_module_expr_builtin_type_redefinition_errors(&body, arena)
-        }
-        ModuleExprDesc::Pmod_apply(left, right) => {
-            let left = arena.get_mod_expr(*left).clone();
-            validate_module_expr_builtin_type_redefinition_errors(&left, arena)?;
-            let right = arena.get_mod_expr(*right).clone();
-            validate_module_expr_builtin_type_redefinition_errors(&right, arena)
-        }
-        ModuleExprDesc::Pmod_constraint(inner, mod_type_idx) => {
-            let inner = arena.get_mod_expr(*inner).clone();
-            validate_module_expr_builtin_type_redefinition_errors(&inner, arena)?;
-            let mod_type = arena.get_mod_type(*mod_type_idx).clone();
-            validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)
-        }
-        ModuleExprDesc::Pmod_extension(extension) => {
-            validate_payload_builtin_type_redefinition_errors(&extension.1, arena)
-        }
-        ModuleExprDesc::Pmod_unpack(expr_idx) => {
-            validate_expression_builtin_type_redefinition_errors(*expr_idx, arena)
-        }
-        ModuleExprDesc::Pmod_ident(_) => Ok(()),
-    }
-}
-
-fn validate_expression_builtin_type_redefinition_errors(
-    expr_idx: ExprIdx,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
-    let expr = arena.get_expr(expr_idx).clone();
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_let(inner) => {
-            let (_rec_flag, bindings, body) = &**inner;
-            for binding in bindings {
-                validate_expression_builtin_type_redefinition_errors(binding.pvb_expr, arena)?;
-            }
-            validate_expression_builtin_type_redefinition_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_fun(fun) => {
-            if let Some(default) = fun.default {
-                validate_expression_builtin_type_redefinition_errors(default, arena)?;
-            }
-            validate_expression_builtin_type_redefinition_errors(fun.rhs, arena)
-        }
-        ExpressionDesc::Pexp_apply(apply) => {
-            validate_expression_builtin_type_redefinition_errors(apply.funct, arena)?;
-            for (_label, arg) in &apply.args {
-                validate_expression_builtin_type_redefinition_errors(*arg, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            let (scrutinee, cases) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*scrutinee, arena)?;
-            for case in cases {
-                if let Some(guard) = case.pc_guard {
-                    validate_expression_builtin_type_redefinition_errors(guard, arena)?;
-                }
-                validate_expression_builtin_type_redefinition_errors(case.pc_rhs, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
-            for item in items.iter() {
-                validate_expression_builtin_type_redefinition_errors(*item, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_construct(_, arg) => {
-            if let Some(arg) = arg {
-                validate_expression_builtin_type_redefinition_errors(*arg, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_variant(inner) => {
-            let (_label, arg) = &**inner;
-            if let Some(arg) = arg {
-                validate_expression_builtin_type_redefinition_errors(*arg, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_record(inner) => {
-            let (fields, spread) = &**inner;
-            for field in fields {
-                validate_expression_builtin_type_redefinition_errors(field.expr, arena)?;
-            }
-            if let Some(spread) = spread {
-                validate_expression_builtin_type_redefinition_errors(*spread, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_field(owner, _)
-        | ExpressionDesc::Pexp_assert(owner)
-        | ExpressionDesc::Pexp_await(owner)
-        | ExpressionDesc::Pexp_comptime_compile_error(owner)
-        | ExpressionDesc::Pexp_comptime_build_variant(owner)
-        | ExpressionDesc::Pexp_comptime_variant_case(owner)
-        | ExpressionDesc::Pexp_comptime_build_record(owner)
-        | ExpressionDesc::Pexp_comptime_record_field(owner) => {
-            validate_expression_builtin_type_redefinition_errors(*owner, arena)
-        }
-        ExpressionDesc::Pexp_setfield(inner) => {
-            let (owner, _field, value) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*owner, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*value, arena)
-        }
-        ExpressionDesc::Pexp_ifthenelse(inner) => {
-            let (condition, then_expr, else_expr) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*condition, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*then_expr, arena)?;
-            if let Some(else_expr) = else_expr {
-                validate_expression_builtin_type_redefinition_errors(*else_expr, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_sequence(first, second) => {
-            validate_expression_builtin_type_redefinition_errors(*first, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*second, arena)
-        }
-        ExpressionDesc::Pexp_while(condition, body) => {
-            validate_expression_builtin_type_redefinition_errors(*condition, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_for(inner) => {
-            let (_pat, start, stop, _direction, body) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*start, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*stop, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_for_of(inner)
-        | ExpressionDesc::Pexp_for_await_of(inner)
-        | ExpressionDesc::Pexp_inline_for(inner) => {
-            let (_pat, iterable, body) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*iterable, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_constraint(inner) => {
-            let (inner_expr, _typ) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*inner_expr, arena)
-        }
-        ExpressionDesc::Pexp_coerce(inner) => {
-            let (inner_expr, _from_typ, _to_typ) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*inner_expr, arena)
-        }
-        ExpressionDesc::Pexp_send(inner) => {
-            let (owner, _method) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*owner, arena)
-        }
-        ExpressionDesc::Pexp_letmodule(inner) => {
-            let (_name, mod_expr_idx, body) = &**inner;
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
-            validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_letexception(inner) => {
-            let (_extension, body) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_newtype(inner) => {
-            let (_name, body) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_pack(mod_expr_idx) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
-            validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)
-        }
-        ExpressionDesc::Pexp_open(inner) => {
-            let (_override_flag, _lid, body) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_extension(extension) => {
-            match expression_extension_mapped_payload(extension, arena) {
-                Some(payload) => validate_payload_builtin_type_redefinition_errors(payload, arena),
-                None => Ok(()),
-            }
-        }
-        ExpressionDesc::Pexp_comptime_field(inner) => {
-            let (value, field) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*value, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*field, arena)
-        }
-        ExpressionDesc::Pexp_comptime_record(inner) => {
-            let (_typ, fields) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*fields, arena)
-        }
-        ExpressionDesc::Pexp_comptime_variant(inner) => {
-            let (_typ, constructor, payload) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*constructor, arena)?;
-            if let Some(payload) = payload {
-                validate_expression_builtin_type_redefinition_errors(*payload, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_ident(_)
-        | ExpressionDesc::Pexp_constant(_)
-        | ExpressionDesc::Pexp_break
-        | ExpressionDesc::Pexp_continue
-        | ExpressionDesc::Pexp_jsx_element(_)
-        | ExpressionDesc::Pexp_comptime_typeinfo(_)
-        | ExpressionDesc::Pexp_comptime_typename(_) => Ok(()),
-    }
-}
-
-fn validate_module_type_builtin_type_redefinition_errors(
-    mod_type: &ModuleType,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
-    match &*mod_type.pmty_desc {
-        ModuleTypeDesc::Pmty_signature(items) => {
-            validate_signature_builtin_type_redefinition_errors(items, arena)
-        }
-        ModuleTypeDesc::Pmty_functor(inner) => {
-            let (_name, param_type, result_type) = &**inner;
-            if let Some(param_type_idx) = *param_type {
-                let param_type = arena.get_mod_type(param_type_idx).clone();
-                validate_module_type_builtin_type_redefinition_errors(&param_type, arena)?;
-            }
-            let result_type = arena.get_mod_type(*result_type).clone();
-            validate_module_type_builtin_type_redefinition_errors(&result_type, arena)
-        }
-        ModuleTypeDesc::Pmty_with(inner) => {
-            let (mod_type_idx, constraints) = &**inner;
-            let mod_type = arena.get_mod_type(*mod_type_idx).clone();
-            validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
-            for constraint in constraints {
-                validate_with_constraint_builtin_type_redefinition_errors(constraint, arena)?;
-            }
-            Ok(())
-        }
-        ModuleTypeDesc::Pmty_typeof(mod_expr_idx) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
-            validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)
-        }
-        ModuleTypeDesc::Pmty_extension(extension) => {
-            validate_payload_builtin_type_redefinition_errors(&extension.1, arena)
-        }
-        ModuleTypeDesc::Pmty_ident(_) | ModuleTypeDesc::Pmty_alias(_) => Ok(()),
-    }
 }
 
 fn validate_method_attribute_config_names<F>(
@@ -16643,9 +16326,7 @@ fn rewrite_structure_impl(
             Unit::Item(index) => {
                 let head_first = match &*structure[index].pstr_desc {
                     StructureItemDesc::Pstr_value(_) => true,
-                    StructureItemDesc::Pstr_module(mb) => {
-                        is_await_module_alias(mb, arena)
-                    }
+                    StructureItemDesc::Pstr_module(mb) => is_await_module_alias(mb, arena),
                     _ => false,
                 };
                 if head_first {
@@ -16715,9 +16396,7 @@ fn rewrite_structure_impl(
     }
     let result: Vec<StructureItem> = slots.into_iter().flatten().collect();
 
-    if validate_invariants {
-        validate_structure_builtin_type_redefinition_errors(&result, arena)?;
-    }
+    if validate_invariants {}
 
     Ok(result)
 }
@@ -17085,7 +16764,7 @@ pub fn rewrite_signature(
     validate_signature_js_string_errors(signature, arena)?;
     validate_signature_await_errors(signature, arena, true)?;
     let rewritten = with_deferred_ppx_error(try_rewrite_signature_items(signature, arena), arena)?;
-    validate_signature_builtin_type_redefinition_errors(&rewritten, arena)?;
+
     Ok(rewritten)
 }
 

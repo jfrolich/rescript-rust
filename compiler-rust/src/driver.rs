@@ -55,8 +55,6 @@ const LET_UNWRAP_FEATURE_NOT_ENABLED_MSG: &str = "Experimental feature not enabl
 const LET_UNWRAP_TOPLEVEL_MSG: &str = "`let?` is not allowed for top-level bindings.";
 const LET_UNWRAP_UNSUPPORTED_TYPE_MSG: &str =
     "`let?` is only supported in let bindings targeting the `result` or `option` type.";
-const POLYVARIANT_INT_TOO_LARGE_MSG: &str =
-    "Integer literal exceeds int32 range. Use float or BigInt if larger values are required.";
 const REACT_COMPONENT_DESTRUCTURE_MSG: &str = "JSX component calls cannot be destructured.";
 static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 static EXTERNAL_PPX_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -1950,264 +1948,6 @@ fn format_ppx_warnings_with_config(
         ));
     }
     has_error
-}
-
-fn reject_invalid_polyvariant_int_literals_in_structure(
-    structure: &Structure,
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-) -> Result<()> {
-    if let Some(loc) = polyvariant_int_literal_outside_i32_loc_in_structure(structure, arena) {
-        return Err(UserDiagnostic::new(
-            format_compiler_error_report(
-                arena,
-                source,
-                filename,
-                loc,
-                POLYVARIANT_INT_TOO_LARGE_MSG,
-            ),
-            2,
-        )
-        .into());
-    }
-    Ok(())
-}
-
-fn polyvariant_int_literal_outside_i32_loc_in_structure(
-    structure: &Structure,
-    arena: &ParseArena,
-) -> Option<LocIdx> {
-    for item in structure {
-        match &*item.pstr_desc {
-            StructureItemDesc::Pstr_eval(eval) => {
-                if let Some(loc) = polyvariant_int_literal_outside_i32_loc_in_expr(eval.0, arena) {
-                    return Some(loc);
-                }
-            }
-            StructureItemDesc::Pstr_value(value) => {
-                for binding in &value.1 {
-                    if let Some(loc) =
-                        polyvariant_int_literal_outside_i32_loc_in_expr(binding.pvb_expr, arena)
-                    {
-                        return Some(loc);
-                    }
-                }
-            }
-            StructureItemDesc::Pstr_module(module_binding) => {
-                if let Some(loc) = polyvariant_int_literal_outside_i32_loc_in_mod_expr(
-                    module_binding.pmb_expr,
-                    arena,
-                ) {
-                    return Some(loc);
-                }
-            }
-            StructureItemDesc::Pstr_recmodule(module_bindings) => {
-                for module_binding in module_bindings.iter() {
-                    if let Some(loc) = polyvariant_int_literal_outside_i32_loc_in_mod_expr(
-                        module_binding.pmb_expr,
-                        arena,
-                    ) {
-                        return Some(loc);
-                    }
-                }
-            }
-            StructureItemDesc::Pstr_include(include_decl) => {
-                if let Some(loc) = polyvariant_int_literal_outside_i32_loc_in_mod_expr(
-                    include_decl.pincl_mod,
-                    arena,
-                ) {
-                    return Some(loc);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn polyvariant_int_literal_outside_i32_loc_in_mod_expr(
-    mod_expr: ModExprIdx,
-    arena: &ParseArena,
-) -> Option<LocIdx> {
-    let mod_expr = arena.get_mod_expr(mod_expr);
-    match &*mod_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(items) => {
-            polyvariant_int_literal_outside_i32_loc_in_structure(items, arena)
-        }
-        ModuleExprDesc::Pmod_functor(functor) => {
-            polyvariant_int_literal_outside_i32_loc_in_mod_expr(functor.2, arena)
-        }
-        ModuleExprDesc::Pmod_apply(lhs, rhs) => {
-            polyvariant_int_literal_outside_i32_loc_in_mod_expr(*lhs, arena)
-                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_mod_expr(*rhs, arena))
-        }
-        ModuleExprDesc::Pmod_constraint(inner, _) => {
-            polyvariant_int_literal_outside_i32_loc_in_mod_expr(*inner, arena)
-        }
-        ModuleExprDesc::Pmod_unpack(expr) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(*expr, arena)
-        }
-        _ => None,
-    }
-}
-
-fn polyvariant_int_literal_outside_i32_loc_in_expr(
-    expr: ExprIdx,
-    arena: &ParseArena,
-) -> Option<LocIdx> {
-    let expr = arena.get_expr(expr);
-    if let ExpressionDesc::Pexp_variant(inner) = &*expr.pexp_desc
-        && inner.1.is_none()
-        && is_valid_hash_number_label(&inner.0)
-        && inner.0.parse::<i32>().is_err()
-    {
-        return Some(expr.pexp_loc);
-    }
-
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_let(inner) => inner
-            .1
-            .iter()
-            .find_map(|binding| {
-                polyvariant_int_literal_outside_i32_loc_in_expr(binding.pvb_expr, arena)
-            })
-            .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena)),
-        ExpressionDesc::Pexp_fun(fun) => fun
-            .default
-            .and_then(|expr| polyvariant_int_literal_outside_i32_loc_in_expr(expr, arena))
-            .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(fun.rhs, arena)),
-        ExpressionDesc::Pexp_apply(apply) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(apply.funct, arena).or_else(|| {
-                apply.args.iter().find_map(|(_, arg)| {
-                    polyvariant_int_literal_outside_i32_loc_in_expr(*arg, arena)
-                })
-            })
-        }
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena).or_else(|| {
-                inner.1.iter().find_map(|case| {
-                    case.pc_guard
-                        .and_then(|guard| {
-                            polyvariant_int_literal_outside_i32_loc_in_expr(guard, arena)
-                        })
-                        .or_else(|| {
-                            polyvariant_int_literal_outside_i32_loc_in_expr(case.pc_rhs, arena)
-                        })
-                })
-            })
-        }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => items
-            .iter()
-            .find_map(|item| polyvariant_int_literal_outside_i32_loc_in_expr(*item, arena)),
-        ExpressionDesc::Pexp_construct(_, payload) => {
-            payload.and_then(|expr| polyvariant_int_literal_outside_i32_loc_in_expr(expr, arena))
-        }
-        ExpressionDesc::Pexp_variant(inner) => inner
-            .1
-            .and_then(|expr| polyvariant_int_literal_outside_i32_loc_in_expr(expr, arena)),
-        ExpressionDesc::Pexp_record(record) => record
-            .0
-            .iter()
-            .find_map(|field| polyvariant_int_literal_outside_i32_loc_in_expr(field.expr, arena))
-            .or_else(|| {
-                record
-                    .1
-                    .and_then(|base| polyvariant_int_literal_outside_i32_loc_in_expr(base, arena))
-            }),
-        ExpressionDesc::Pexp_field(owner, _)
-        | ExpressionDesc::Pexp_assert(owner)
-        | ExpressionDesc::Pexp_await(owner)
-        | ExpressionDesc::Pexp_comptime_compile_error(owner)
-        | ExpressionDesc::Pexp_comptime_build_variant(owner)
-        | ExpressionDesc::Pexp_comptime_variant_case(owner)
-        | ExpressionDesc::Pexp_comptime_build_record(owner)
-        | ExpressionDesc::Pexp_comptime_record_field(owner) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(*owner, arena)
-        }
-        ExpressionDesc::Pexp_send(inner) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
-        }
-        ExpressionDesc::Pexp_setfield(inner) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
-                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena))
-        }
-        ExpressionDesc::Pexp_ifthenelse(inner) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
-                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena))
-                .or_else(|| {
-                    inner.2.and_then(|else_expr| {
-                        polyvariant_int_literal_outside_i32_loc_in_expr(else_expr, arena)
-                    })
-                })
-        }
-        ExpressionDesc::Pexp_sequence(lhs, rhs) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(*lhs, arena)
-                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(*rhs, arena))
-        }
-        ExpressionDesc::Pexp_while(cond, body) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(*cond, arena)
-                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(*body, arena))
-        }
-        ExpressionDesc::Pexp_for(inner) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena)
-                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena))
-                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.4, arena))
-        }
-        ExpressionDesc::Pexp_for_of(inner)
-        | ExpressionDesc::Pexp_for_await_of(inner)
-        | ExpressionDesc::Pexp_inline_for(inner) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena)
-                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena))
-        }
-        ExpressionDesc::Pexp_constraint(inner) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
-        }
-        ExpressionDesc::Pexp_coerce(inner) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
-        }
-        ExpressionDesc::Pexp_letmodule(inner) => {
-            polyvariant_int_literal_outside_i32_loc_in_mod_expr(inner.1, arena)
-                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena))
-        }
-        ExpressionDesc::Pexp_letexception(inner) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena)
-        }
-        ExpressionDesc::Pexp_newtype(inner) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena)
-        }
-        ExpressionDesc::Pexp_pack(mod_expr) => {
-            polyvariant_int_literal_outside_i32_loc_in_mod_expr(*mod_expr, arena)
-        }
-        ExpressionDesc::Pexp_open(inner) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena)
-        }
-        ExpressionDesc::Pexp_comptime_field(inner) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
-                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena))
-        }
-        ExpressionDesc::Pexp_comptime_record(inner) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena)
-        }
-        ExpressionDesc::Pexp_comptime_variant(inner) => {
-            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena).or_else(|| {
-                inner.2.and_then(|payload| {
-                    polyvariant_int_literal_outside_i32_loc_in_expr(payload, arena)
-                })
-            })
-        }
-        _ => None,
-    }
-}
-
-fn is_valid_hash_number_label(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    match bytes {
-        [] => false,
-        [b'0'..=b'9'] => true,
-        [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
-        _ => false,
-    }
 }
 
 pub fn parser_error_to_anyhow(parser: &Parser<'_>, source: &str, filename: &str) -> anyhow::Error {
@@ -4426,17 +4166,6 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
-        TypeModError::FrontendNonrecursiveGadt { loc } => UserDiagnostic::new(
-            format_compiler_error_report_raw_message(
-                arena,
-                source,
-                filename,
-                *loc,
-                "  GADTs require recursive type syntax.\nDefine your type using `type rec` instead of `type`.\nExample: type rec t = ...",
-            ),
-            2,
-        )
-        .into(),
         TypeModError::NonrecursiveGadt { loc } => UserDiagnostic::new(
             format_compiler_error_report_raw_message(
                 arena,
@@ -11657,12 +11386,6 @@ pub fn run_implementation_frontend(
         parser.arena_mut(),
         &structure,
     )?;
-    reject_invalid_polyvariant_int_literals_in_structure(
-        &structure,
-        parser.arena(),
-        source,
-        filename,
-    )?;
     let frontend_warnings =
         ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena());
     let frontend_warning_specs =
@@ -11772,7 +11495,7 @@ pub fn run_implementation_frontend(
             .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
         // OCaml `Bs_ast_invariant.emit_external_warnings_on_structure` runs over
         // the rewritten structure (compiler/frontend/ppx_entry.ml:60-63).
-        let unused_attribute_warnings =
+        let (unused_attribute_warnings, invariant_error) =
             ppx::collect_unused_attribute_warnings_structure(&rewritten, parser.arena());
         ppx_warnings_have_errors |= format_ppx_warnings_with_config(
             parser.arena(),
@@ -11782,6 +11505,9 @@ pub fn run_implementation_frontend(
             &unused_attribute_warnings,
             out,
         );
+        if let Some(e) = invariant_error {
+            return Err(ppx_error_to_anyhow(e, parser.arena(), source, filename));
+        }
         rewritten
     };
     Ok(ImplementationFrontend {
@@ -13340,7 +13066,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
             let rewritten = ppx::rewrite_structure(&structure, parser.arena_mut())
                 .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
-            let unused_attribute_warnings =
+            let (unused_attribute_warnings, invariant_error) =
                 ppx::collect_unused_attribute_warnings_structure(&rewritten, parser.arena());
             let _ = emit_ppx_warnings_with_config(
                 parser.arena(),
@@ -13349,6 +13075,9 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 &file_warning_config,
                 &unused_attribute_warnings,
             );
+            if let Some(e) = invariant_error {
+                return Err(ppx_error_to_anyhow(e, parser.arena(), source, filename));
+            }
             rewritten
         };
         parser.arena_mut().reserve_typecheck_synthetic_capacity();
