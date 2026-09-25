@@ -412,6 +412,19 @@ pub struct TypeContext {
     /// Forced declarations shared by persistent/global alias component views.
     /// Local component views keep their own thunk state in StructureComponentTables.
     qualified_module_decl_cache: RefCell<
+    /// Cached forward-only (unification) normalize_path results, keyed like
+    /// `normalized_path_full_cache`.
+    normalized_path_forward_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
+
+    /// `occur_univar` argument masks per (scope, constructor path): bit `i`
+    /// is set when argument `i` has a may-positive or may-negative variance;
+    /// `None` when the declaration is not found (every argument is visited).
+    occur_variance_masks: RefCell<ahash::AHashMap<(u64, Path), Option<u64>>>,
+
+    /// `Ctype.get_level` declaration levels per (scope, type path): the
+    /// `type_newtype_level` of the declaration `Env.find_type` returns.
+    type_newtype_levels: RefCell<ahash::AHashMap<(u64, Path), Option<i32>>>,
+
         ahash::AHashMap<
             Path,
             ahash::AHashMap<String, (Ident, Arc<super::decl::ModuleDeclaration>)>,
@@ -668,6 +681,9 @@ impl TypeContext {
             type_decl_store: RefCell::new(ahash::AHashMap::new()),
             type_decl_by_stamp: RefCell::new(ahash::AHashMap::new()),
             type_decl_by_path: RefCell::new(ahash::AHashMap::new()),
+            normalized_path_forward_cache: RefCell::new(ahash::AHashMap::new()),
+            occur_variance_masks: RefCell::new(ahash::AHashMap::new()),
+            type_newtype_levels: RefCell::new(ahash::AHashMap::new()),
             type_decl_by_exact_path: RefCell::new(ahash::AHashMap::new()),
             type_item_by_path: RefCell::new(ahash::AHashMap::new()),
             missing_type_item_by_path: RefCell::new(ahash::AHashSet::new()),
@@ -1421,6 +1437,54 @@ impl TypeContext {
             .borrow()
             .get(parent_path)
             .and_then(|modules| modules.get(child_name))
+    pub(crate) fn find_type_newtype_level(&self, scope_id: u64, path: &Path) -> Option<Option<i32>> {
+        self.type_newtype_levels
+            .borrow()
+            .get(&(scope_id, path.clone()))
+            .copied()
+    }
+
+    pub(crate) fn register_type_newtype_level(&self, scope_id: u64, path: &Path, level: Option<i32>) {
+        self.type_newtype_levels
+            .borrow_mut()
+            .insert((scope_id, path.clone()), level);
+    }
+
+    pub(crate) fn find_occur_variance_mask(&self, scope_id: u64, path: &Path) -> Option<Option<u64>> {
+        self.occur_variance_masks
+            .borrow()
+            .get(&(scope_id, path.clone()))
+            .copied()
+    }
+
+    pub(crate) fn register_occur_variance_mask(&self, scope_id: u64, path: &Path, mask: Option<u64>) {
+        self.occur_variance_masks
+            .borrow_mut()
+            .insert((scope_id, path.clone()), mask);
+    }
+
+    pub(crate) fn register_normalized_path_forward(
+        &self,
+        env_id: u64,
+        original_path: &Path,
+        normalized_path: Path,
+    ) {
+        self.normalized_path_forward_cache
+            .borrow_mut()
+            .insert((env_id, original_path.clone()), normalized_path);
+    }
+
+    pub(crate) fn find_normalized_path_forward(
+        &self,
+        env_id: u64,
+        original_path: &Path,
+    ) -> Option<Path> {
+        self.normalized_path_forward_cache
+            .borrow()
+            .get(&(env_id, original_path.clone()))
+            .cloned()
+    }
+
             .cloned()
     }
 

@@ -550,6 +550,12 @@ fn get_level_with_lookup_capture(
             paths.push(path.clone());
         }
     }
+    // `Env.find_type` answers from bindings fixed within one module scope, so
+    // repeated level checks of the same path reuse the first lookup.
+    let scope_id = env.scope_id();
+    if let Some(found_level) = ctx.find_type_newtype_level(scope_id, path) {
+        return found_level.unwrap_or_else(|| path_binding_time(path));
+    }
     let found_level = match path {
         Path::Pident(id) => env
             .find_type_by_ident(id)
@@ -575,6 +581,7 @@ fn get_level_with_lookup_capture(
         }
         Path::Papply(_, _) => None,
     };
+    ctx.register_type_newtype_level(scope_id, path, found_level);
     found_level.unwrap_or_else(|| path_binding_time(path))
 }
 
@@ -921,10 +928,36 @@ fn occur_univar(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeResult<()>
                 let path = path.clone();
                 let args: smallvec::SmallVec<[TypeExprRef; 8]> = args.iter().copied().collect();
                 drop(desc);
-                if let Some(decl) = lookup_type_decl_for_path(ctx, env, &path) {
-                    for (arg, variance) in args.iter().zip(decl.type_variance.iter()) {
-                        if variance.mem(VarianceFlag::MayPos) || variance.mem(VarianceFlag::MayNeg)
-                        {
+                // OCaml compiler/ml/ctype.ml occur_univar reads only the
+                // declaration's variances through `Env.find_type`, which is
+                // fixed within one module scope; memoize the visit mask.
+                let scope_id = env.scope_id();
+                let mask = match ctx.find_occur_variance_mask(scope_id, &path) {
+                    Some(mask) => mask,
+                    None => {
+                        let mask = lookup_type_decl_for_path(ctx, env, &path).map(|decl| {
+                            // A declaration with more than 64 parameters would
+                            // not fit the mask; visit every argument instead.
+                            if decl.type_variance.len() > 64 {
+                                return u64::MAX;
+                            }
+                            let mut mask = 0u64;
+                            for (index, variance) in decl.type_variance.iter().enumerate() {
+                                if variance.mem(VarianceFlag::MayPos)
+                                    || variance.mem(VarianceFlag::MayNeg)
+                                {
+                                    mask |= 1 << index;
+                                }
+                            }
+                            mask
+                        });
+                        ctx.register_occur_variance_mask(scope_id, &path, mask);
+                        mask
+                    }
+                };
+                if let Some(mask) = mask.filter(|mask| *mask != u64::MAX) {
+                    for (index, arg) in args.iter().enumerate().take(64) {
+                        if mask & (1 << index) != 0 {
                             occur_rec(ctx, env, bound, visited, *arg)?;
                         }
                     }
@@ -2632,7 +2665,17 @@ pub(crate) fn force_normalize_path_full_side_effects<'a>(
 }
 
 fn normalize_path_forward_only<'a>(ctx: &'a TypeContext, env: &Env, path: &Path) -> Path {
-    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false, false, None)
+    // Like `normalize_path_full`, this only reads module-level bindings, so
+    // memoize it per `Env::scope_id`; unification asks for the same abstract
+    // type heads many times per scope.
+    let env_id = env.scope_id();
+    if let Some(cached) = ctx.find_normalized_path_forward(env_id, path) {
+        return cached;
+    }
+    let normalized =
+        normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false, false, None);
+    ctx.register_normalized_path_forward(env_id, path, normalized.clone());
+    normalized
 }
 
 fn normalize_path_full_inner<'a>(
