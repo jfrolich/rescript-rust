@@ -5259,80 +5259,69 @@ fn unify_types<'a>(
         return Ok(());
     }
 
-    let desc1 = ctx.get_desc(t1);
-    let desc2 = ctx.get_desc(t2);
-
-    // Match on both descriptors
-    match (&*desc1, &*desc2) {
-        (TypeDesc::Tvar(_), TypeDesc::Tconstr { .. })
-            if state.env().is_some() && deep_occur(ctx, t1, t2) =>
-        {
-            // OCaml compiler/ml/ctype.ml:2302-2303 routes variable-vs-constructor
-            // pairs that syntactically contain the variable through unify2, so
-            // compiler/ml/ctype.ml:2338-2344 expands aliases before the occurs
-            // check. This accepts abbreviations like `type t<'a> = 'a` without
-            // treating the unexpanded `t<'a>` spelling as a recursive type.
+    // The type-variable cases below read only the two descriptors' variants;
+    // take them without cloning the descriptors (arms in the same order and
+    // with the same guards as the full match).
+    let (var1, constr1) = {
+        let desc = ctx.borrow_desc(t1);
+        (
+            matches!(&*desc, TypeDesc::Tvar(_)),
+            matches!(&*desc, TypeDesc::Tconstr { .. }),
+        )
+    };
+    let (var2, constr2) = {
+        let desc = ctx.borrow_desc(t2);
+        (
+            matches!(&*desc, TypeDesc::Tvar(_)),
+            matches!(&*desc, TypeDesc::Tconstr { .. }),
+        )
+    };
+    if var1 || var2 {
+        if var1 && constr2 && state.env().is_some() && deep_occur(ctx, t1, t2) {
+            // OCaml compiler/ml/ctype.ml:2302-2303: see the full match below.
             let env = state.env().expect("checked above");
             let exp1 = expand_head_unif(ctx, env, t1);
             let exp2 = expand_head_unif(ctx, env, t2);
-            drop(desc1);
-            drop(desc2);
-            unify_after_expansion(ctx, state, t1, exp1, t2, exp2)
+            return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
         }
-
-        (TypeDesc::Tconstr { .. }, TypeDesc::Tvar(_))
-            if state.env().is_some() && deep_occur(ctx, t2, t1) =>
-        {
-            // OCaml compiler/ml/ctype.ml:2302-2303 handles the symmetric
-            // constructor-vs-variable case through the same unify2 expansion
-            // path before any occurs check is allowed to fail.
+        if constr1 && var2 && state.env().is_some() && deep_occur(ctx, t2, t1) {
             let env = state.env().expect("checked above");
             let exp1 = expand_head_unif(ctx, env, t1);
             let exp2 = expand_head_unif(ctx, env, t2);
-            drop(desc1);
-            drop(desc2);
-            unify_after_expansion(ctx, state, t1, exp1, t2, exp2)
+            return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
         }
-
-        // Type variable on left - occurs check and link
-        (TypeDesc::Tvar(_), _) => {
-            drop(desc1);
-            drop(desc2);
-
-            // OCaml compiler/ml/ctype.ml:2280-2286 `unify1_var`
-            // does not expand constructor heads after the
-            // compiler/ml/ctype.ml:2302 deep-occur special case has failed.
+        if var1 {
+            // OCaml compiler/ml/ctype.ml:2280-2286 `unify1_var`.
             if occurs(ctx, t1, t2) {
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
             if let Some(env) = state.env() {
                 occur_univar(ctx, env, t2)?;
             }
-
             let t1_level = ctx.get_level(t1);
             update_level(ctx, t1_level, t2);
             link_type(ctx, t1, t2);
-            Ok(())
+            return Ok(());
         }
-
-        // Type variable on right - occurs check and link
-        (_, TypeDesc::Tvar(_)) => {
-            drop(desc1);
-            drop(desc2);
-
-            // Symmetric `unify1_var` case from compiler/ml/ctype.ml:2304.
-            if occurs(ctx, t2, t1) {
-                return Err(TypeError::Unify(vec![(t1, t2)]));
-            }
-            if let Some(env) = state.env() {
-                occur_univar(ctx, env, t1)?;
-            }
-
-            let t2_level = ctx.get_level(t2);
-            update_level(ctx, t2_level, t1);
-            link_type(ctx, t2, t1);
-            Ok(())
+        // Symmetric `unify1_var` case from compiler/ml/ctype.ml:2304.
+        if occurs(ctx, t2, t1) {
+            return Err(TypeError::Unify(vec![(t1, t2)]));
         }
+        if let Some(env) = state.env() {
+            occur_univar(ctx, env, t1)?;
+        }
+        let t2_level = ctx.get_level(t2);
+        update_level(ctx, t2_level, t1);
+        link_type(ctx, t2, t1);
+        return Ok(());
+    }
+
+    let desc1 = ctx.get_desc(t1);
+    let desc2 = ctx.get_desc(t2);
+
+    // Match on both descriptors
+    match (&*desc1, &*desc2) {
+        // Type-variable cases were handled above.
 
         // Universal type variables
         (TypeDesc::Tunivar(n1), TypeDesc::Tunivar(n2)) if n1 == n2 => {
