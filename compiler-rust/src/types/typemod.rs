@@ -4821,13 +4821,14 @@ fn coherence_definition_mismatch_detail(
     if !matches!(actual.type_kind, crate::types::decl::TypeKind::TypeAbstract)
         && expected_configuration.unboxed != actual_configuration.unboxed
     {
+        // typedecl.ml:2158 reports with `report_type_mismatch "the original" "this" "definition"`.
         let unboxed_decl = if actual_configuration.unboxed {
-            "the second"
+            "this"
         } else {
-            "the first"
+            "the original"
         };
         return Some(format!(
-            "Their internal representations differ:\n{unboxed_decl} declaration uses unboxed representation."
+            "Their internal representations differ:\n{unboxed_decl} definition uses unboxed representation."
         ));
     }
 

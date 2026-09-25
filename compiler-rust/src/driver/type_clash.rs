@@ -1843,8 +1843,12 @@ pub(super) fn print_definition_mismatch(
     ppf.close_box();
     if let Some(detail) = detail.filter(|detail| !detail.is_empty()) {
         // `report_type_mismatch` prints each error as "@ %a.".
-        ppf.space();
-        ppf.str(detail);
+        // Breaks inside an error ("Their internal representations differ:@ ...")
+        // are hints of the enclosing vertical box.
+        for line in detail.split('\n') {
+            ppf.space();
+            ppf.str(line);
+        }
     }
     ppf.close_box();
 }
