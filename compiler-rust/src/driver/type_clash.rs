@@ -1616,3 +1616,132 @@ pub(super) fn print_name_type_mismatch(
         &mut |ppf| ppf.str(&format!("but a {name} was expected belonging to the {kind} type")),
     );
 }
+
+/// `Misc.did_you_mean ppf choices` (misc.ml:259-270) with the choices
+/// already joined.
+fn did_you_mean(ppf: &mut Ppf<'_>, hint: Option<&str>) {
+    ppf.flush();
+    if let Some(hint) = hint {
+        ppf.newline();
+        ppf.str(&format!("Hint: Did you mean {hint}?"));
+        ppf.flush();
+    }
+}
+
+/// `Typetexp.report_error`'s `Unbound_label (lid, from_type)`
+/// (typetexp.ml:906-949), followed by its `spellcheck` hint.
+pub(super) fn print_unbound_label(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    lid: &str,
+    from_type: Option<TypeExprRef>,
+    hint: Option<&str>,
+) {
+    let from_path = from_type.and_then(|ty| match &*ctx.get_desc(ctx.repr(ty)) {
+        TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+        _ => None,
+    });
+    match from_path {
+        Some(path) if path.same(&predef::path_option()) => {
+            ppf.open_box(BoxKind::V, 0);
+            ppf.str("You're trying to access the record field ");
+            tagged(ppf, TAG_INFO, lid);
+            ppf.str(", but the value you're trying to access it on is an ");
+            tagged(ppf, TAG_INFO, "option");
+            ppf.str(".");
+            ppf.space();
+            ppf.str("You need to unwrap the option first before accessing the record field.");
+            ppf.cut();
+            ppf.newline();
+            ppf.str("Possible solutions:");
+            ppf.cut();
+            ppf.open_box(BoxKind::Box, 0);
+            ppf.str("- Use ");
+            tagged(ppf, TAG_INFO, "Option.map");
+            ppf.str(" to transform the option: ");
+            tagged(ppf, TAG_INFO, &format!("xx->Option.map(field => field.{lid})"));
+            ppf.close_box();
+            ppf.cut();
+            ppf.open_box(BoxKind::Box, 0);
+            ppf.str("- Or use ");
+            tagged(ppf, TAG_INFO, "Option.getOr");
+            ppf.str(" with a default: ");
+            tagged(ppf, TAG_INFO, &format!("xx->Option.getOr(defaultRecord).{lid}"));
+            ppf.close_box();
+            ppf.close_box();
+        }
+        Some(path) if path.same(&predef::path_array()) => {
+            ppf.open_box(BoxKind::V, 0);
+            ppf.str("You're trying to access the record field ");
+            tagged(ppf, TAG_INFO, lid);
+            ppf.str(", but the value you're trying to access it on is an ");
+            tagged(ppf, TAG_INFO, "array");
+            ppf.str(".");
+            ppf.space();
+            ppf.str(
+                "You need to access an individual element of the array if you want to access an individual record field.",
+            );
+            ppf.close_box();
+        }
+        Some(_) => {
+            let ty = from_type.expect("from_path implies from_type");
+            let mut printer = Printtyp::new(ctx);
+            ppf.open_box(BoxKind::V, 0);
+            ppf.str("You're trying to access the record field ");
+            tagged(ppf, TAG_INFO, lid);
+            ppf.str(", but the thing you're trying to access it on is not a record. ");
+            ppf.cut();
+            raw(ppf, "\n");
+            ppf.str("The type of the thing you're trying to access it on is:");
+            ppf.cut();
+            raw(ppf, "\n");
+            typecore_type_expr(ppf, &mut printer, ty);
+            ppf.cut();
+            raw(ppf, "\n");
+            ppf.cut();
+            ppf.str("Only records have fields that can be accessed with dot notation.");
+            ppf.close_box();
+        }
+        None => {
+            ppf.open_box(BoxKind::V, 0);
+            tagged(ppf, TAG_INFO, lid);
+            ppf.str(" refers to a record field, but no corresponding record type is in scope.");
+            ppf.cut();
+            ppf.cut();
+            ppf.str("If it's defined in another module or file, bring it into scope by:");
+            ppf.cut();
+            ppf.open_box(BoxKind::Box, 0);
+            ppf.str("- Prefixing the field name with the module name:");
+            ppf.space();
+            tagged(ppf, TAG_INFO, &format!("TheModule.{lid}"));
+            ppf.close_box();
+            ppf.cut();
+            ppf.open_box(BoxKind::Box, 0);
+            ppf.str("- Or specifying the record type explicitly:");
+            ppf.space();
+            tagged(ppf, TAG_INFO, &format!("let theValue: TheModule.theType = {{{lid}: VALUE}}"));
+            ppf.close_box();
+            ppf.close_box();
+        }
+    }
+    did_you_mean(ppf, hint);
+}
+
+/// `Wrong_name` for the field of a constructor's inline record
+/// (typecore.ml:4957-4961) followed by `spellcheck ppf name valid_names`.
+pub(super) fn print_wrong_name_inline_record_field(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    name: &str,
+    path: &Path,
+    hint: Option<&str>,
+) {
+    let printer = Printtyp::new(ctx);
+    ppf.open_box(BoxKind::Box, 0);
+    ppf.str(&format!(
+        "The field {name} is not part of the record argument for the {} constructor",
+        printer.path_text(path)
+    ));
+    ppf.close_box();
+    did_you_mean(ppf, hint);
+}

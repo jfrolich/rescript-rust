@@ -5748,16 +5748,17 @@ fn format_wrong_name_report(
     }
 
     if path.is_constructor_typath() {
-        return format_compiler_error_report(
-            arena,
-            source,
-            filename,
-            loc,
-            &format!(
-                "The field {name} is not part of the record argument for the {} constructor",
-                path
-            ),
-        );
+        let hint = spellcheck_hint(name, alternatives);
+        let message = type_clash::render_error_message(|ppf| {
+            type_clash::print_wrong_name_inline_record_field(
+                ppf,
+                type_ctx,
+                name,
+                path,
+                hint.as_deref(),
+            )
+        });
+        return format_compiler_error_report_formatted(arena, source, filename, loc, &message);
     }
 
     let label = if kind == "record" { "field" } else { kind };
@@ -10621,139 +10622,14 @@ fn format_unbound_record_field_report(
     from_type: Option<TypeExprRef>,
     alternatives: &[String],
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
-    let mut message = String::new();
-    let from_type_desc = from_type.map(|ty| {
-        let repr = type_ctx.repr(ty);
-        (repr, type_ctx.get_desc(repr).clone())
-    });
-
-    match from_type_desc {
-        Some((_, TypeDesc::Tconstr { path, .. })) if path.head_name() == "option" => {
-            message.push_str("You're trying to access the record field ");
-            message.push_str(INFO);
-            message.push_str(field_name);
-            message.push_str(RESET);
-            message.push_str(", but the value you're trying to access it on is an ");
-            message.push_str(INFO);
-            message.push_str("option");
-            message.push_str(RESET);
-            message.push_str(".\n");
-            message.push_str(
-                "You need to unwrap the option first before accessing the record field.\n",
-            );
-            message.push('\n');
-            message.push_str("Possible solutions:\n");
-            message.push_str("- Use ");
-            message.push_str(INFO);
-            message.push_str("Option.map");
-            message.push_str(RESET);
-            message.push_str(" to transform the option: ");
-            message.push_str(INFO);
-            message.push_str("xx->Option.map(field => field.");
-            message.push_str(field_name);
-            message.push(')');
-            message.push_str(RESET);
-            message.push('\n');
-            message.push_str("- Or use ");
-            message.push_str(INFO);
-            message.push_str("Option.getOr");
-            message.push_str(RESET);
-            message.push_str(" with a default: ");
-            message.push_str(INFO);
-            message.push_str("xx->Option.getOr(defaultRecord).");
-            message.push_str(field_name);
-            message.push_str(RESET);
-        }
-        Some((_, TypeDesc::Tconstr { path, .. })) if path.head_name() == "array" => {
-            message.push_str("You're trying to access the record field ");
-            message.push_str(INFO);
-            message.push_str(field_name);
-            message.push_str(RESET);
-            message.push_str(", but the value you're trying to access it on is an ");
-            message.push_str(INFO);
-            message.push_str("array");
-            message.push_str(RESET);
-            message.push_str(".\n");
-            message.push_str("You need to access an individual element of the array if you want to access an individual record field.");
-        }
-        Some((ty, TypeDesc::Tconstr { .. })) => {
-            let mut raw_message = String::new();
-            raw_message.push_str("  You're trying to access the record field ");
-            raw_message.push_str(INFO);
-            raw_message.push_str(field_name);
-            raw_message.push_str(RESET);
-            raw_message
-                .push_str(", but the thing you're trying to access it on is not a record. \n");
-            raw_message.push_str("  \n");
-            raw_message.push_str("The type of the thing you're trying to access it on is:\n");
-            raw_message.push_str("  \n");
-            raw_message.push_str(&format_type_expr(type_ctx, ty));
-            raw_message.push_str("\n  \n\n");
-            raw_message
-                .push_str("  Only records have fields that can be accessed with dot notation.");
-            if let Some(hint) = spellcheck_hint(
-                field_name.rsplit('.').next().unwrap_or(field_name),
-                alternatives,
-            ) {
-                raw_message.push('\n');
-                raw_message.push_str("Hint: Did you mean ");
-                raw_message.push_str(&hint);
-                raw_message.push('?');
-            }
-            return format_compiler_error_report_raw_message(
-                arena,
-                source,
-                filename,
-                loc,
-                &raw_message,
-            );
-        }
-        _ => {
-            message.push_str(INFO);
-            message.push_str(field_name);
-            message.push_str(RESET);
-            message.push_str(
-                " refers to a record field, but no corresponding record type is in scope.",
-            );
-            message.push_str("\n\n");
-            message
-                .push_str("If it's defined in another module or file, bring it into scope by:\n");
-            message.push_str("- Prefixing the field name with the module name: ");
-            message.push_str(INFO);
-            message.push_str("TheModule.");
-            message.push_str(field_name);
-            message.push_str(RESET);
-            message.push('\n');
-            message.push_str("- Or specifying the record type explicitly:\n");
-            message.push_str(INFO);
-            message.push_str("let theValue: TheModule.theType = {");
-            message.push_str(field_name);
-            message.push_str(": VALUE}");
-            message.push_str(RESET);
-        }
-    }
-
-    if let Some(hint) = spellcheck_hint(
+    let hint = spellcheck_hint(
         field_name.rsplit('.').next().unwrap_or(field_name),
         alternatives,
-    ) {
-        let mut raw_message = format_message_with_compiler_indentation(&message);
-        raw_message.push_str("Hint: Did you mean ");
-        raw_message.push_str(&hint);
-        raw_message.push('?');
-        return format_compiler_error_report_raw_message(
-            arena,
-            source,
-            filename,
-            loc,
-            &raw_message,
-        );
-    }
-
-    format_compiler_error_report(arena, source, filename, loc, &message)
+    );
+    let message = type_clash::render_error_message(|ppf| {
+        type_clash::print_unbound_label(ppf, type_ctx, field_name, from_type, hint.as_deref())
+    });
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn collect_expected_function_arguments(
