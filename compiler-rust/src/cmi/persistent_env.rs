@@ -5400,13 +5400,56 @@ fn rewrite_path_by_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path
     }
 }
 
-fn rewrite_path_by_path_prefixes(path: &Path, prefixes: &[(Path, Path)]) -> Option<Path> {
-    for (old_prefix, new_prefix) in prefixes {
-        if let Some(rewritten) = rewrite_path_by_path_prefix(path, old_prefix, new_prefix) {
-            return Some(rewritten);
+/// Prefix rewrites `(old, new)` tried in order, with an index from each old
+/// prefix (compared with `Path::same`) to its first position.
+struct PathPrefixes<'a> {
+    pairs: &'a [(Path, Path)],
+    index: Option<ahash::AHashMap<crate::types::context::SamePathKey, usize>>,
+}
+
+impl<'a> PathPrefixes<'a> {
+    fn new(pairs: &'a [(Path, Path)]) -> Self {
+        // A short list is cheaper to scan than to hash every ancestor.
+        let index = (pairs.len() > 4).then(|| {
+            let mut index = ahash::AHashMap::with_capacity(pairs.len());
+            for (position, (old_prefix, _)) in pairs.iter().enumerate() {
+                index
+                    .entry(crate::types::context::SamePathKey::new(old_prefix.clone()))
+                    .or_insert(position);
+            }
+            index
+        });
+        PathPrefixes { pairs, index }
+    }
+}
+
+fn rewrite_path_by_path_prefixes(path: &Path, prefixes: &PathPrefixes<'_>) -> Option<Path> {
+    let Some(index) = &prefixes.index else {
+        for (old_prefix, new_prefix) in prefixes.pairs {
+            if let Some(rewritten) = rewrite_path_by_path_prefix(path, old_prefix, new_prefix) {
+                return Some(rewritten);
+            }
+        }
+        return None;
+    };
+    // The scan above returns the first prefix, in list order, equal to the
+    // path or one of its `Pdot` ancestors. Find that prefix through the index,
+    // then rewrite with it exactly as the scan would.
+    let mut first: Option<usize> = None;
+    let mut ancestor = path;
+    loop {
+        if let Some(&position) =
+            index.get(&crate::types::context::SamePathKey::new(ancestor.clone()))
+        {
+            first = Some(first.map_or(position, |found| found.min(position)));
+        }
+        match ancestor {
+            Path::Pdot(inner, _, _) => ancestor = inner,
+            _ => break,
         }
     }
-    None
+    let (old_prefix, new_prefix) = &prefixes.pairs[first?];
+    rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
 }
 
 fn rewrite_module_type_by_path_prefix(
@@ -5649,7 +5692,7 @@ pub fn rewrite_type_expr_by_path_prefix_pub(
 
 fn rewrite_type_expr_by_path_prefixes(
     ty_ref: TypeExprRef,
-    prefixes: &[(Path, Path)],
+    prefixes: &PathPrefixes<'_>,
     ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
@@ -5860,6 +5903,14 @@ pub fn rewrite_sig_by_path_prefixes(
     if prefixes.is_empty() {
         return;
     }
+    rewrite_sig_by_path_prefix_index(sig_items, &PathPrefixes::new(prefixes), ctx);
+}
+
+fn rewrite_sig_by_path_prefix_index(
+    sig_items: &[SignatureItem],
+    prefixes: &PathPrefixes<'_>,
+    ctx: &TypeContext,
+) {
 
     let mut visited = HashSet::new();
 
@@ -5925,7 +5976,7 @@ pub fn rewrite_sig_by_path_prefixes(
             }
             SignatureItem::SigModule(_id, md, _) => {
                 if let ModuleType::MtySignature(sub_sig) = &md.md_type {
-                    rewrite_sig_by_path_prefixes(sub_sig, prefixes, ctx);
+                    rewrite_sig_by_path_prefix_index(sub_sig, prefixes, ctx);
                 }
             }
             _ => {}

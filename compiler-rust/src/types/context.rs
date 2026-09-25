@@ -595,6 +595,12 @@ enum TypeDeclRegistration {
 #[derive(Clone, Debug)]
 pub(crate) struct SamePathKey(Path);
 
+impl SamePathKey {
+    pub(crate) fn new(path: Path) -> Self {
+        SamePathKey(path)
+    }
+}
+
 impl PartialEq for SamePathKey {
     fn eq(&self, other: &Self) -> bool {
         self.0.same(&other.0)
