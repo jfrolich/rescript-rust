@@ -1154,7 +1154,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
         // OCaml: pattern var location includes ~ (from tilde_pos to end of name)
         let name_loc_with_tilde = p.mk_loc_idx_to_prev_end(tilde_pos_idx);
         let lbl = match &p.token {
-            Token::Comma | Token::Equal | Token::Rparen | Token::EqualGreater => {
+            Token::Comma | Token::Equal | Token::Rparen => {
                 // Just ~name
                 // OCaml (line 1855): Ast_helper.Pat.var ~attrs ~loc
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
@@ -1205,6 +1205,8 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
                 (ArgLabel::Labelled(lbl_located), pat, None)
             }
             _ => {
+                // res_core.ml:1937-1942: any other token is unexpected.
+                p.err_unexpected();
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 // Reuse the same StrIdx for sharing in marshal output
                 let mut pat = ast_helper::make_var_pat(lbl_str_idx, loc);
