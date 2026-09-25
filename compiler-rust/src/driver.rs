@@ -5646,7 +5646,8 @@ fn format_compiler_error_report_raw_message(
     let mut output = String::new();
 
     push_compiler_error_report_header(&mut output, arena, source, filename, loc);
-    output.push_str(message);
+    let message = code_frame::apply_message_styles(message);
+    output.push_str(&message);
     if !message.ends_with('\n') {
         output.push('\n');
     }
@@ -5727,66 +5728,54 @@ fn format_wrong_name_report(
 
     let label = if kind == "record" { "field" } else { kind };
     let type_text = format_type_expr(type_ctx, ty);
-    if let Some(multiline_type) = format_type_application_multiline(&type_text) {
-        let mut raw_message = String::new();
-        raw_message.push_str("  The ");
-        raw_message.push_str(label);
-        raw_message.push(' ');
-        raw_message.push_str(ERROR);
-        raw_message.push_str(name);
-        raw_message.push_str(RESET);
-        raw_message.push_str(" does not belong to type ");
-        raw_message.push_str(INFO);
-        raw_message.push_str(&path.to_string());
-        raw_message.push_str(RESET);
-        raw_message.push_str("\n  \n  ");
-        raw_message.push_str(expected);
-        raw_message.push_str(" type\n");
-        push_ocaml_multiline_type_application(&mut raw_message, INFO, RESET, &multiline_type);
-        if let Some(hint) = spellcheck_hint(name, alternatives) {
-            raw_message.push_str("Hint: Did you mean ");
-            raw_message.push_str(&hint);
-            raw_message.push_str("?\n");
+    // typecore.ml:4963-4971:
+    //   @[<v>@[<2>The %s @{<error>%s@} does not belong to type @{<info>%a@}@]@,@,
+    //   @[<2>%s type@ @{<info>%a@}@]@]
+    // The type is one Format string, measured by its byte length even when
+    // the outcome printer broke it over several lines.
+    let path_text = path.to_string();
+    let message = {
+        let mut buf = Vec::new();
+        {
+            use crate::parser::formatter::{BoxKind, Formatter};
+            // The report body sits in a box two columns in; raw newlines of
+            // the type string are not indented.
+            let mut ppf = Formatter::new(&mut buf);
+            ppf.set_margin(78);
+            ppf.str("  ");
+            ppf.open_box(BoxKind::V, 0);
+            ppf.open_box(BoxKind::Box, 2);
+            ppf.print(format_args!("The {label} "));
+            ppf.string_as(0, ERROR);
+            ppf.str(name);
+            ppf.string_as(0, RESET);
+            ppf.str(" does not belong to type ");
+            ppf.string_as(0, INFO);
+            ppf.str(&path_text);
+            ppf.string_as(0, RESET);
+            ppf.close_box();
+            ppf.cut();
+            ppf.cut();
+            ppf.open_box(BoxKind::Box, 2);
+            ppf.print(format_args!("{expected} type"));
+            ppf.space();
+            ppf.string_as(0, INFO);
+            ppf.string_as(type_text.len(), &type_text);
+            ppf.string_as(0, RESET);
+            ppf.close_box();
+            ppf.close_box();
+            ppf.flush();
         }
-        return format_compiler_error_report_raw_message(
-            arena,
-            source,
-            filename,
-            loc,
-            &raw_message,
-        );
-    }
-    let mut message = String::new();
-    message.push_str("The ");
-    message.push_str(label);
-    message.push(' ');
-    message.push_str(ERROR);
-    message.push_str(name);
-    message.push_str(RESET);
-    message.push_str(" does not belong to type ");
-    message.push_str(INFO);
-    message.push_str(&path.to_string());
-    message.push_str(RESET);
-    message.push_str("\n\n");
-    message.push_str(expected);
-    message.push_str(" type ");
-    message.push_str(INFO);
-    message.push_str(&type_text);
-    message.push_str(RESET);
+        String::from_utf8(buf).unwrap_or_default()
+    };
+    let mut raw_message = message;
+    raw_message.push('\n');
     if let Some(hint) = spellcheck_hint(name, alternatives) {
-        let mut raw_message = format_message_with_compiler_indentation(&message);
         raw_message.push_str("Hint: Did you mean ");
         raw_message.push_str(&hint);
         raw_message.push_str("?\n");
-        return format_compiler_error_report_raw_message(
-            arena,
-            source,
-            filename,
-            loc,
-            &raw_message,
-        );
     }
-    format_compiler_error_report(arena, source, filename, loc, &message)
+    format_compiler_error_report_raw_message(arena, source, filename, loc, &raw_message)
 }
 
 fn format_name_type_mismatch_report(
@@ -5867,40 +5856,6 @@ fn format_type_path_for_report(path: &crate::types::Path) -> String {
         .or_else(|| name.strip_prefix("Stdlib_"))
         .unwrap_or(&name)
         .to_string()
-}
-
-fn format_type_application_multiline(type_text: &str) -> Option<(String, Vec<String>)> {
-    let (head, rest) = type_text.split_once('<')?;
-    let args = rest.strip_suffix('>')?;
-    let args = args.split(", ").map(str::to_string).collect::<Vec<_>>();
-    if args.len() < 4
-        || args
-            .iter()
-            .any(|arg| arg.contains('<') || arg.contains('>'))
-    {
-        return None;
-    }
-    Some((head.to_string(), args))
-}
-
-fn push_ocaml_multiline_type_application(
-    output: &mut String,
-    info: &str,
-    reset: &str,
-    (head, args): &(String, Vec<String>),
-) {
-    output.push_str("    ");
-    output.push_str(info);
-    output.push_str(head);
-    output.push_str("<\n");
-    for arg in args {
-        output.push_str("  ");
-        output.push_str(arg);
-        output.push_str(",\n");
-    }
-    output.push('>');
-    output.push_str(reset);
-    output.push('\n');
 }
 
 fn compilation_unit_name(filename: &str) -> String {
