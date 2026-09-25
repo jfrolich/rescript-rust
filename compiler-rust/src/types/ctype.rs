@@ -7743,17 +7743,41 @@ fn unify_object_fields<'a>(
         ctx.alloc_type_at_level(TypeDesc::Tvar(None), min_level)
     };
 
+    // ctype.ml:2356-2377: on failure, restore the rest descriptions.
+    let d1 = (*ctx.get_desc(rest1)).clone();
+    let d2 = (*ctx.get_desc(rest2)).clone();
+    let result = unify_object_field_pairs(ctx, state, &pairs, &miss1, &miss2, l1, l2, va, rest1, rest2);
+    if result.is_err() {
+        ctx.set_desc(rest1, d1);
+        ctx.set_desc(rest2, d2);
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn unify_object_field_pairs<'a>(
+    ctx: &'a TypeContext,
+    state: &mut UnifyState,
+    pairs: &[(String, FieldKind, TypeExprRef, FieldKind, TypeExprRef)],
+    miss1: &[(String, FieldKind, TypeExprRef)],
+    miss2: &[(String, FieldKind, TypeExprRef)],
+    l1: i32,
+    l2: i32,
+    va: TypeExprRef,
+    rest1: TypeExprRef,
+    rest2: TypeExprRef,
+) -> TypeResult<()> {
     // Build extended field chains with surplus fields
     // unify(build_fields miss1 va, rest2) — rest2 must absorb miss1 fields
-    let extended1 = build_fields(ctx, l1, &miss1, va);
+    let extended1 = build_fields(ctx, l1, miss1, va);
     unify(ctx, state, extended1, rest2)?;
 
     // unify(rest1, build_fields miss2 va) — rest1 must absorb miss2 fields
-    let extended2 = build_fields(ctx, l2, &miss2, va);
+    let extended2 = build_fields(ctx, l2, miss2, va);
     unify(ctx, state, rest1, extended2)?;
 
     // Unify paired fields (matching names from both sides)
-    for (name, k1, t1, k2, t2) in &pairs {
+    for (name, k1, t1, k2, t2) in pairs {
         // OCaml also calls unify_kind here, but Rust FieldKind handling is simpler
         if let Err(err) = unify(ctx, state, *t1, *t2) {
             return Err(match err {
