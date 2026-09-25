@@ -5343,18 +5343,52 @@ fn format_type_arity_mismatch_report(
 ) -> String {
     let name = format_longident_for_report(arena, lid);
     let plural = |count: usize| if count == 1 { "" } else { "s" };
-    let message = if expected == 0 {
-        format!(
-            "The type `{name}` is not generic so expects no arguments,\nbut is here given {provided} argument{}.\nHave you tried removing the angular brackets `<` and `>` and the\narguments within them and just writing `{name}` instead? ",
-            plural(provided),
-        )
-    } else {
-        format!(
-            "The type constructor `{name}` expects {expected} type argument{}, but is given {provided}",
-            plural(expected),
-        )
-    };
+    // typetexp.ml:776-789: both messages are laid out in a Format box.
+    let message = format_boxed_message(|ppf| {
+        if expected == 0 {
+            ppf.print(format_args!(
+                "The type `{name}` is not generic so expects no arguments,"
+            ));
+            ppf.space();
+            ppf.print(format_args!(
+                "but is here given {provided} argument{}.",
+                plural(provided)
+            ));
+            ppf.space();
+            ppf.str("Have you tried removing the angular brackets `<` and `>` and the");
+            ppf.space();
+            ppf.print(format_args!(
+                "arguments within them and just writing `{name}` instead? "
+            ));
+        } else {
+            ppf.print(format_args!("The type constructor `{name}`"));
+            ppf.space();
+            ppf.print(format_args!(
+                "expects {expected} type argument{},",
+                plural(expected)
+            ));
+            ppf.space();
+            ppf.print(format_args!("but is given {provided}"));
+        }
+    });
     format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+/// Lay out a report message printed as `@[...@]` by OCaml: a `Pp_box` in the
+/// report body, whose two-column indent leaves a 76-column margin.
+fn format_boxed_message(
+    f: impl FnOnce(&mut crate::parser::formatter::Formatter<&mut Vec<u8>>),
+) -> String {
+    let mut buf = Vec::new();
+    {
+        let mut ppf = crate::parser::formatter::Formatter::new(&mut buf);
+        ppf.set_margin(76);
+        ppf.open_box(crate::parser::formatter::BoxKind::Box, 0);
+        f(&mut ppf);
+        ppf.close_box();
+        ppf.flush();
+    }
+    String::from_utf8(buf).unwrap_or_default()
 }
 
 fn format_inconsistent_constraint_report(
