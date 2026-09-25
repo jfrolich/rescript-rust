@@ -5669,6 +5669,20 @@ fn type_pattern_record(
         label: Option<crate::types::LabelDescription>,
     }
 
+    let field_name_strings: Vec<String> = fields
+        .iter()
+        .map(|field| {
+            let lid = tctx.arena.get_longident(field.lid.txt);
+            tctx.arena.get_string(lid.last_idx()).to_string()
+        })
+        .collect();
+    let field_names: Vec<&str> = field_name_strings.iter().map(String::as_str).collect();
+    let report_ambiguous_label_warnings = tctx.warning_config.is_active(&Warning::AmbiguousName {
+        names: Vec::new(),
+        types: Vec::new(),
+        is_label: true,
+    });
+    let mut ambiguous_label_warnings: Vec<(String, Vec<String>, Option<Path>)> = Vec::new();
     let mut pending_fields = Vec::new();
     for (idx, field) in fields.iter().enumerate() {
         let resolved_lid = tctx.resolve_lid(field.lid.txt).clone();
@@ -5747,6 +5761,51 @@ fn type_pattern_record(
                 env_label
             }
         });
+        // `Label.disambiguate ~warn` with no `opath` (typecore.ml:910-918),
+        // collected by `disambiguate_record_elem_list` (typecore.ml:1010-1016);
+        // record patterns pass `closed = false` (typecore.ml:1551).
+        if report_ambiguous_label_warnings
+            && !record_is_concrete
+            && let Some(label) = label.as_ref()
+        {
+            // `Typetexp.find_all_labels`: the labels in scope, or the
+            // qualifying module's labels for a qualified name.
+            let module_labels = match &resolved_lid {
+                Longident::Ldot(module_lid, _) => with_resolved_module_components_for_lid(
+                    module_lid,
+                    tctx.arena,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                    |components| components.lookup_labels(&field_name, ctx).as_ref().clone(),
+                )
+                .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let candidates: Vec<&crate::types::LabelDescription> = match &resolved_lid {
+                Longident::Ldot(..) => module_labels.iter().collect(),
+                _ => env.find_all_labels(&field_name),
+            };
+            if candidates.len() > 1
+                && let Some(candidates) = reduce_record_label_scope_by_ids(
+                    candidates,
+                    &field_names,
+                    false,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                )
+                && let Some((types, selected_path)) = ambiguous_record_label_warning_info(
+                    label,
+                    &candidates,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                )
+            {
+                ambiguous_label_warnings.push((field_name.clone(), types, selected_path));
+            }
+        }
 
         pending_fields.push(PendingRecordPatternField {
             lid: field.lid.clone(),
@@ -5756,6 +5815,10 @@ fn type_pattern_record(
             source_pos: idx as i32,
             label,
         });
+    }
+
+    if report_ambiguous_label_warnings {
+        emit_ambiguous_record_label_warnings(tctx, env, loc, ambiguous_label_warnings);
     }
 
     // OCaml compiler/ml/typecore.ml:1163-1200 resolves record labels, sorts
@@ -14169,6 +14232,99 @@ fn fast_exact_unqualified_opath_record_label<'a>(
     record_label_from_info(label_info, field_name).or_else(|| Some((*first_label).clone()))
 }
 
+/// The end of `disambiguate_record_elem_list` (typecore.ml:1037-1050): the
+/// `Ambiguous_name` warnings collected while disambiguating the labels are
+/// reported once for the record when all selected labels have the same type,
+/// `Label.disambiguate` with no `opath` (typecore.ml:910-918) warns
+/// `Ambiguous_name ([name], ambiguous_types env lbl rest, false)` at the
+/// label when the labels in scope belong to several types.
+fn warn_ambiguous_label_access(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    name: &str,
+    selected: &crate::types::LabelDescription,
+) {
+    let warning = Warning::AmbiguousName {
+        names: Vec::new(),
+        types: Vec::new(),
+        is_label: false,
+    };
+    if !tctx.warning_config.is_active(&warning) {
+        return;
+    }
+    let candidates = env.find_all_labels(name);
+    if candidates.len() <= 1 {
+        return;
+    }
+    if let Some((types, _)) = ambiguous_record_label_warning_info(
+        selected,
+        &candidates,
+        env,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+    ) {
+        tctx.report_warning(
+            loc,
+            Warning::AmbiguousName {
+                names: vec![name.to_string()],
+                types,
+                is_label: false,
+            },
+        );
+    }
+}
+
+/// else one per label, at the record's location.
+fn emit_ambiguous_record_label_warnings(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    ambiguous_label_warnings: Vec<(String, Vec<String>, Option<Path>)>,
+) {
+    let ctx = tctx.type_ctx;
+    let Some((_, first_types, first_path)) = ambiguous_label_warnings.first().cloned() else {
+        return;
+    };
+    let same_selected_path = ambiguous_label_warnings.iter().all(|(_, _, path)| {
+        match (first_path.as_ref(), path.as_ref()) {
+            (Some(first), Some(path)) => compare_type_paths_for_label_disambiguation(
+                first,
+                path,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+            ),
+            (None, None) => true,
+            _ => false,
+        }
+    });
+    if same_selected_path {
+        tctx.report_warning(
+            loc,
+            Warning::AmbiguousName {
+                names: ambiguous_label_warnings
+                    .iter()
+                    .map(|(name, _, _)| name.clone())
+                    .collect(),
+                types: first_types,
+                is_label: true,
+            },
+        );
+    } else {
+        for (name, types, _) in ambiguous_label_warnings {
+            tctx.report_warning(
+                loc,
+                Warning::AmbiguousName {
+                    names: vec![name],
+                    types,
+                    is_label: false,
+                },
+            );
+        }
+    }
+}
+
 fn ambiguous_record_label_warning_info<'a>(
     selected: &crate::types::LabelDescription,
     candidates: &[&crate::types::LabelDescription],
@@ -14193,7 +14349,9 @@ fn ambiguous_record_label_warning_info<'a>(
         return None;
     }
 
-    let types = paths.iter().map(Path::name).collect();
+    // `List.map Printtyp.string_of_path tpaths` (typecore.ml:888-891).
+    let printer = crate::types::printtyp::Printtyp::new(ctx);
+    let types = paths.iter().map(|path| printer.string_of_path(path)).collect();
     Some((types, Some(selected_path)))
 }
 
@@ -14808,46 +14966,8 @@ fn type_record(
             disambiguated,
         });
     }
-    if report_ambiguous_label_warnings
-        && let Some((_, first_types, first_path)) = ambiguous_label_warnings.first().cloned()
-    {
-        let same_selected_path = ambiguous_label_warnings.iter().all(|(_, _, path)| {
-            match (first_path.as_ref(), path.as_ref()) {
-                (Some(first), Some(path)) => compare_type_paths_for_label_disambiguation(
-                    first,
-                    path,
-                    env,
-                    &mut tctx.persistent_env,
-                    ctx,
-                ),
-                (None, None) => true,
-                _ => false,
-            }
-        });
-        if same_selected_path {
-            tctx.report_warning(
-                loc,
-                Warning::AmbiguousName {
-                    names: ambiguous_label_warnings
-                        .iter()
-                        .map(|(name, _, _)| name.clone())
-                        .collect(),
-                    types: first_types,
-                    is_label: true,
-                },
-            );
-        } else {
-            for (name, types, _) in ambiguous_label_warnings {
-                tctx.report_warning(
-                    loc,
-                    Warning::AmbiguousName {
-                        names: vec![name],
-                        types,
-                        is_label: false,
-                    },
-                );
-            }
-        }
+    if report_ambiguous_label_warnings {
+        emit_ambiguous_record_label_warnings(tctx, env, loc, ambiguous_label_warnings);
     }
     explicit_fields.sort_by_key(|entry| {
         entry
@@ -16253,6 +16373,12 @@ fn type_field(
             label_expected_record_ty.is_none(),
         )
     };
+    if label_expected_record_ty.is_none()
+        && matches!(resolved_lid, Longident::Lident(_))
+        && let Some(label) = env_label.as_ref()
+    {
+        warn_ambiguous_label_access(tctx, env, field_lid.loc, &field_name, label);
+    }
     let mut env_label = env_label;
     if needs_label_qualification && let Some(label) = env_label.as_mut() {
         qualify_label_description_paths(label, env, &mut tctx.persistent_env, tctx.type_ctx);
@@ -16410,6 +16536,12 @@ fn type_setfield(
             true,
         )
     });
+    if matches!(resolved_lid, Longident::Lident(_))
+        && let Some(label) = env_label.as_ref()
+        && extract_concrete_record_type_info(ty_exp, env, &mut tctx.persistent_env, ctx).is_none()
+    {
+        warn_ambiguous_label_access(tctx, env, field_lid.loc, &field_name, label);
+    }
     let mut env_label = env_label;
     if let Some(label) = env_label.as_mut() {
         qualify_label_description_paths(label, env, &mut tctx.persistent_env, ctx);
@@ -25429,7 +25561,9 @@ where
     if paths.len() <= 1 {
         Vec::new()
     } else {
-        paths.iter().map(Path::name).collect()
+        // `List.map Printtyp.string_of_path tpaths` (typecore.ml:888-891).
+        let printer = crate::types::printtyp::Printtyp::new(ctx);
+        paths.iter().map(|path| printer.string_of_path(path)).collect()
     }
 }
 

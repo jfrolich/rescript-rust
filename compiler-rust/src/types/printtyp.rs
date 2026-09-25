@@ -176,6 +176,20 @@ impl<'a> Printtyp<'a> {
         }
     }
 
+    /// `string_of_path` (printtyp.ml:89-96).
+    pub(crate) fn string_of_path(&self, path: &Path) -> String {
+        fn string_of_out_ident(ident: &OutIdent) -> String {
+            match ident {
+                OutIdent::Oide_ident(s) => s.clone(),
+                OutIdent::Oide_dot(id, s) => format!("{}.{}", string_of_out_ident(id), s),
+                OutIdent::Oide_apply(id1, id2) => {
+                    format!("{}({})", string_of_out_ident(id1), string_of_out_ident(id2))
+                }
+            }
+        }
+        string_of_out_ident(&self.tree_of_path(path))
+    }
+
     // ------------------------------------------------------------------
     // Names
     // ------------------------------------------------------------------
