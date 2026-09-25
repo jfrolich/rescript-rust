@@ -7436,12 +7436,17 @@ fn collect_open_shadow_identifier_use_checks(
     item_index: usize,
     out: &mut Vec<OpenShadowIdentifierUseCheck>,
 ) {
-    let mut seen = HashSet::new();
-    for (candidate_id, _) in env_before_open.iter_values() {
-        let name = candidate_id.name();
-        if !seen.insert(name.to_string()) {
-            continue;
-        }
+    // TODO(env usage port): OCaml reports these from the opened table's
+    // use callback in lookup order (compiler/ml/env.ml:1880-1908); until
+    // then, visit the candidates in a deterministic (name) order.
+    let mut candidate_names: Vec<String> = env_before_open
+        .iter_values()
+        .map(|(id, _)| id.name().to_string())
+        .collect();
+    candidate_names.sort();
+    candidate_names.dedup();
+    for name in &candidate_names {
+        let name = name.as_str();
         if !opened_names.values.contains(name) {
             continue;
         }
@@ -7464,12 +7469,17 @@ fn collect_open_shadow_identifier_use_checks(
         });
     }
 
-    seen.clear();
-    for (candidate_id, _) in env_before_open.iter_types() {
-        let name = candidate_id.name();
-        if !seen.insert(name.to_string()) {
-            continue;
-        }
+    // TODO(env usage port): OCaml reports these from the opened table's
+    // use callback in lookup order (compiler/ml/env.ml:1880-1908); until
+    // then, visit the candidates in a deterministic (name) order.
+    let mut candidate_names: Vec<String> = env_before_open
+        .iter_types()
+        .map(|(id, _)| id.name().to_string())
+        .collect();
+    candidate_names.sort();
+    candidate_names.dedup();
+    for name in &candidate_names {
+        let name = name.as_str();
         if !opened_names.types.contains(name) {
             continue;
         }
@@ -7492,12 +7502,17 @@ fn collect_open_shadow_identifier_use_checks(
         });
     }
 
-    seen.clear();
-    for (candidate_id, _) in env_before_open.iter_modules() {
-        let name = candidate_id.name();
-        if !seen.insert(name.to_string()) {
-            continue;
-        }
+    // TODO(env usage port): OCaml reports these from the opened table's
+    // use callback in lookup order (compiler/ml/env.ml:1880-1908); until
+    // then, visit the candidates in a deterministic (name) order.
+    let mut candidate_names: Vec<String> = env_before_open
+        .iter_modules()
+        .map(|(id, _)| id.name().to_string())
+        .collect();
+    candidate_names.sort();
+    candidate_names.dedup();
+    for name in &candidate_names {
+        let name = name.as_str();
         if !opened_names.modules.contains(name) {
             continue;
         }
@@ -7520,12 +7535,17 @@ fn collect_open_shadow_identifier_use_checks(
         });
     }
 
-    seen.clear();
-    for (candidate_id, _) in env_before_open.iter_modtypes() {
-        let name = candidate_id.name();
-        if !seen.insert(name.to_string()) {
-            continue;
-        }
+    // TODO(env usage port): OCaml reports these from the opened table's
+    // use callback in lookup order (compiler/ml/env.ml:1880-1908); until
+    // then, visit the candidates in a deterministic (name) order.
+    let mut candidate_names: Vec<String> = env_before_open
+        .iter_modtypes()
+        .map(|(id, _)| id.name().to_string())
+        .collect();
+    candidate_names.sort();
+    candidate_names.dedup();
+    for name in &candidate_names {
+        let name = name.as_str();
         if !opened_names.modtypes.contains(name) {
             continue;
         }
@@ -7573,12 +7593,17 @@ fn collect_open_shadow_label_constructor_use_checks(
     item_index: usize,
     out: &mut Vec<OpenShadowLabelConstructorUseCheck>,
 ) {
-    let mut seen = HashSet::new();
-    for (previous_id, _) in env_before_open.iter_constructors() {
-        let name = previous_id.name();
-        if !seen.insert(name.to_string()) {
-            continue;
-        }
+    // TODO(env usage port): OCaml reports these from the opened table's
+    // use callback in lookup order (compiler/ml/env.ml:1880-1908); until
+    // then, visit the candidates in a deterministic (name) order.
+    let mut candidate_names: Vec<String> = env_before_open
+        .iter_constructors()
+        .map(|(id, _)| id.name().to_string())
+        .collect();
+    candidate_names.sort();
+    candidate_names.dedup();
+    for name in &candidate_names {
+        let name = name.as_str();
         if !opened_names.constructors.contains(name) {
             continue;
         }
@@ -7607,12 +7632,17 @@ fn collect_open_shadow_label_constructor_use_checks(
         });
     }
 
-    seen.clear();
-    for (previous_id, _) in env_before_open.iter_labels() {
-        let name = previous_id.name();
-        if !seen.insert(name.to_string()) {
-            continue;
-        }
+    // TODO(env usage port): OCaml reports these from the opened table's
+    // use callback in lookup order (compiler/ml/env.ml:1880-1908); until
+    // then, visit the candidates in a deterministic (name) order.
+    let mut candidate_names: Vec<String> = env_before_open
+        .iter_labels()
+        .map(|(id, _)| id.name().to_string())
+        .collect();
+    candidate_names.sort();
+    candidate_names.dedup();
+    for name in &candidate_names {
+        let name = name.as_str();
         if !opened_names.labels.contains(name) {
             continue;
         }
