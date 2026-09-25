@@ -15245,18 +15245,6 @@ fn type_record(
             RecordLabelDefinition::Overridden(field.lid.clone(), final_expr),
             false, // OCaml Texp_record always uses false for this flag
         );
-        if let Some(Some((_prev_lid, prev_label_desc, _prev_def, _prev_opt))) =
-            explicit_entries.last()
-        {
-            if prev_label_desc.lbl_pos == label_desc.lbl_pos {
-                return Err(TypeCoreError::LabelMultiplyDefined {
-                    loc: field.lid.loc,
-                    label: prev_label_desc.lbl_name.clone(),
-                    jsx_component_info: jsx_component_error_info.clone(),
-                });
-            }
-        }
-
         let entry_idx = explicit_entries.len();
         explicit_entries.push(Some(entry));
         explicit_overrides.insert(label_desc.lbl_pos, entry_idx);
@@ -15363,6 +15351,20 @@ fn type_record(
     // OCaml: unify_exp_types ty_record (instance env ty_expected)
     let expected_inst_for_record = crate::types::instance(ctx, expected_ty);
     unify_expression_types(tctx, loc, record_ty, expected_inst_for_record, None)?;
+    // OCaml `check_duplicates` (compiler/ml/typecore.ml:2232-2245) runs after
+    // every field is typed and the record type is unified with the expected
+    // type (typecore.ml:2765-2766, 2876-2877), over the lbl_pos-sorted list.
+    for pair in explicit_entries.windows(2) {
+        if let [Some((_, lbl1, _, _)), Some((lid2, lbl2, _, _))] = pair {
+            if lbl1.lbl_pos == lbl2.lbl_pos {
+                return Err(TypeCoreError::LabelMultiplyDefined {
+                    loc: lid2.loc,
+                    label: lbl1.lbl_name.clone(),
+                    jsx_component_info: jsx_component_error_info.clone(),
+                });
+            }
+        }
+    }
     // OCaml special-case (typecore.ml, Pexp_record with no base):
     // for `{}` in a known record context, keep `Texp_record` fields empty when
     // all fields are optional; only error when required fields are missing.
