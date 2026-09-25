@@ -478,7 +478,11 @@ fn format_include_error(
                 + actual_text.len()
                 + " is not included in ".len()
                 + expected_text.len();
-            if !actual_text.contains('\n') && !expected_text.contains('\n') && inline_width <= 80 {
+            // includemod.ml:549-552 prints "@[<hv 2>Values do not match:@ %a@;<1
+            // -2>is not included in@ %a@]" from column 2; the hv box stays on
+            // one line only when it fits the report's margin (at most 77
+            // columns including the indentation).
+            if !actual_text.contains('\n') && !expected_text.contains('\n') && inline_width <= 77 {
                 output.push_str("  Values do not match: ");
                 output.push_str(&actual_text);
                 output.push_str(" is not included in ");
