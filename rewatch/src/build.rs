@@ -448,8 +448,13 @@ pub fn incremental_build_without_lock(
             let handle = std::thread::Builder::new()
                 .name("rewatch-runtime-precompile".to_string())
                 .stack_size(256 * 1024 * 1024)
-                .spawn_scoped(scope, || compile::pre_compile_runtime_modules(&registry, &runtime_root));
+                .spawn_scoped(scope, || {
+                    let result = compile::pre_compile_runtime_modules(&registry, &runtime_root);
+                    phase_mark("runtime-precompile-done");
+                    result
+                });
             let result_asts = parse::generate_asts(build_state, || pb.inc(1));
+            phase_mark("parse-asts-done");
             let precompile_result = match handle {
                 Ok(handle) => handle.join().unwrap_or_else(|panic| {
                     let msg = if let Some(s) = panic.downcast_ref::<String>() {
