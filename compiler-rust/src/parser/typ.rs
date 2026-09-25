@@ -797,8 +797,12 @@ fn parse_atomic_typ_expr_with_start(
             }
         }
         Token::Eof => {
+            // `Recover.default_type ()` carries no attributes
+            // (res_core.ml:4668-4670).
             p.err_unexpected();
-            recover::default_type(p.arena_mut())
+            let typ = recover::default_type(p.arena_mut());
+            p.eat_breadcrumb();
+            return typ;
         }
         _ => {
             let token = p.token.clone().into_owned();
@@ -821,13 +825,18 @@ fn parse_atomic_typ_expr_with_start(
                 p.end_pos,
                 DiagnosticCategory::Unexpected { token, context },
             );
-            recover::default_type(p.arena_mut())
+            let typ = recover::default_type(p.arena_mut());
+            p.eat_breadcrumb();
+            return typ;
         }
     };
 
-    // Attach any leading attributes to the type
+    // Every other branch passes `~attrs`; a parenthesized type gets
+    // `attrs @ t.ptyp_attributes` (res_core.ml:4622-4627).
     if !attrs.is_empty() {
-        typ.ptyp_attributes.extend(attrs);
+        let mut attributes = attrs;
+        attributes.extend(std::mem::take(&mut typ.ptyp_attributes));
+        typ.ptyp_attributes = attributes;
     }
 
     p.eat_breadcrumb();
