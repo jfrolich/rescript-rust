@@ -9046,60 +9046,149 @@ pub fn compute_variance_decl(
             .collect();
     }
 
-    // Map from TypeExprRef (repr of param) to accumulated variance
+    // OCaml typedecl.ml:1278-1312.
+    let mut mn: Vec<(bool, TypeExprRef)> = Vec::new();
+    if let Some(manifest) = decl.type_manifest {
+        mn.push((false, manifest));
+    }
+    let for_constr = |args: &super::decl::ConstructorArguments| -> Vec<(bool, TypeExprRef)> {
+        match args {
+            super::decl::ConstructorArguments::CstrTuple(tys) => {
+                tys.iter().map(|ty| (false, *ty)).collect()
+            }
+            super::decl::ConstructorArguments::CstrRecord(labels) => labels
+                .iter()
+                .map(|label| {
+                    (
+                        label.ld_mutable == super::asttypes::MutableFlag::Mutable,
+                        label.ld_type,
+                    )
+                })
+                .collect(),
+        }
+    };
+    let is_abstract = matches!(decl.type_kind, super::TypeKind::TypeAbstract);
+    match &decl.type_kind {
+        super::TypeKind::TypeAbstract | super::TypeKind::TypeOpen => compute_variance_type(
+            ctx,
+            env,
+            params,
+            is_abstract,
+            decl.type_private,
+            required,
+            &mn,
+        ),
+        super::TypeKind::TypeVariant(constructors, _)
+            if constructors.iter().all(|cstr| cstr.cd_res.is_none()) =>
+        {
+            let mut tyl = mn;
+            for cstr in constructors {
+                tyl.extend(for_constr(&cstr.cd_args));
+            }
+            compute_variance_type(ctx, env, params, is_abstract, decl.type_private, required, &tyl)
+        }
+        super::TypeKind::TypeVariant(constructors, _) => {
+            // `compute_variance_gadt` on the manifest and on each
+            // constructor, then the union of the results.
+            let mut tll: Vec<(Vec<(bool, TypeExprRef)>, Option<TypeExprRef>)> =
+                mn.into_iter().map(|field| (vec![field], None)).collect();
+            for cstr in constructors {
+                tll.push((for_constr(&cstr.cd_args), cstr.cd_res));
+            }
+            let mut varl: Option<Vec<Variance>> = None;
+            for (tl, ret_type) in &tll {
+                let vari = compute_variance_gadt(
+                    ctx,
+                    env,
+                    params,
+                    is_abstract,
+                    required,
+                    tl,
+                    *ret_type,
+                );
+                varl = Some(match varl {
+                    None => vari,
+                    Some(acc) => acc
+                        .iter()
+                        .zip(vari.iter())
+                        .map(|(a, b)| a.union(b))
+                        .collect(),
+                });
+            }
+            varl.unwrap_or_default()
+                .into_iter()
+                .map(|v| {
+                    if v.mem(VarianceFlag::Pos) && v.mem(VarianceFlag::Neg) {
+                        Variance::full()
+                    } else {
+                        v
+                    }
+                })
+                .collect()
+        }
+        super::TypeKind::TypeRecord(labels, _) => {
+            let mut tyl = mn;
+            for label in labels {
+                tyl.push((
+                    label.ld_mutable == super::asttypes::MutableFlag::Mutable,
+                    label.ld_type,
+                ));
+            }
+            compute_variance_type(ctx, env, params, is_abstract, decl.type_private, required, &tyl)
+        }
+    }
+}
+
+/// OCaml `compute_variance_gadt` (typedecl.ml:1235-1263): a constructor
+/// without a return type is computed as if the declaration were private; one
+/// with a return type `t<tyl>` uses `tyl` as the parameters.
+fn compute_variance_gadt(
+    ctx: &TypeContext,
+    env: &Env,
+    params: &[TypeExprRef],
+    is_abstract: bool,
+    required: &[(bool, bool, bool)],
+    tl: &[(bool, TypeExprRef)],
+    ret_type: Option<TypeExprRef>,
+) -> Vec<Variance> {
+    match ret_type {
+        None => compute_variance_type(ctx, env, params, is_abstract, PrivateFlag::Private, required, tl),
+        Some(ret_type) => {
+            let ret_type = ctx.repr(ret_type);
+            let tyl: Vec<TypeExprRef> = match &*ctx.get_desc(ret_type) {
+                TypeDesc::Tconstr { args, .. } => args.iter().map(|ty| ctx.repr(*ty)).collect(),
+                _ => params.to_vec(),
+            };
+            compute_variance_type(ctx, env, &tyl, is_abstract, PrivateFlag::Private, required, tl)
+        }
+    }
+}
+
+/// The occurrence walk and final per-parameter step of OCaml
+/// `compute_variance_type` (typedecl.ml:1121-1224) with `check = false`.
+fn compute_variance_type(
+    ctx: &TypeContext,
+    env: &Env,
+    params: &[TypeExprRef],
+    is_abstract: bool,
+    private: PrivateFlag,
+    required: &[(bool, bool, bool)],
+    tyl: &[(bool, TypeExprRef)],
+) -> Vec<Variance> {
+    let make = |p: bool, n: bool, i: bool| {
+        Variance::null()
+            .set(VarianceFlag::MayPos, p)
+            .set(VarianceFlag::MayNeg, n)
+            .set(VarianceFlag::MayWeak, n)
+            .set(VarianceFlag::Inj, i)
+    };
     let mut visited: HashMap<TypeExprRef, Variance> = HashMap::new();
     // OCaml compiler/ml/typedecl.ml:1128-1143 still walks the body of a
     // zero-parameter declaration to compute occurrences. That traversal has
     // observable `Env.find_type` lazy-forcing effects for constructor payloads
     // such as `Pervasives.ref`, so do not return early when `params` is empty.
     let param_reprs: Vec<TypeExprRef> = params.iter().map(|p| ctx.repr(*p)).collect();
-
-    // Collect (is_mutable, type) pairs from the type body
-    let mut fields: Vec<(bool, TypeExprRef)> = Vec::new();
-
-    // From manifest
-    if let Some(manifest) = decl.type_manifest {
-        fields.push((false, manifest));
-    }
-
-    // From type kind
-    match &decl.type_kind {
-        super::TypeKind::TypeRecord(labels, _) => {
-            for label in labels {
-                fields.push((
-                    label.ld_mutable == super::asttypes::MutableFlag::Mutable,
-                    label.ld_type,
-                ));
-            }
-        }
-        super::TypeKind::TypeVariant(constructors, _) => {
-            for cstr in constructors {
-                // Skip GADT constructors (cd_res != None) — their variance is more complex
-                if cstr.cd_res.is_some() {
-                    continue;
-                }
-                match &cstr.cd_args {
-                    super::decl::ConstructorArguments::CstrTuple(tys) => {
-                        for ty in tys {
-                            fields.push((false, *ty));
-                        }
-                    }
-                    super::decl::ConstructorArguments::CstrRecord(labels) => {
-                        for label in labels {
-                            fields.push((
-                                label.ld_mutable == super::asttypes::MutableFlag::Mutable,
-                                label.ld_type,
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-
-    // Compute variance for each field
-    for (is_mutable, ty) in &fields {
+    for (is_mutable, ty) in tyl {
         let initial_variance = if *is_mutable {
             Variance::FULL
         } else {
@@ -9109,11 +9198,11 @@ pub fn compute_variance_decl(
     }
 
     let is_type_var = |ty: TypeExprRef| matches!(&*ctx.get_desc(ctx.repr(ty)), TypeDesc::Tvar(_));
-    let is_concrete = !matches!(decl.type_kind, super::TypeKind::TypeAbstract);
+    let is_concrete = !is_abstract;
 
-    // Extract variance for each param. This mirrors OCaml typedecl.ml:1200-1224:
-    // occurrence variance is unioned with the parser-required row only where
-    // the declaration kind/private flag makes that row semantically relevant.
+    // OCaml typedecl.ml:1200-1224: occurrence variance is unioned with the
+    // required row only where the declaration kind/private flag makes that
+    // row semantically relevant.
     param_reprs
         .iter()
         .enumerate()
@@ -9127,12 +9216,12 @@ pub fn compute_variance_decl(
                 (true, true)
             };
             let is_tvar = is_type_var(*p);
-            let (pos, neg) = if decl.type_private == PrivateFlag::Private || !is_tvar {
+            let (pos, neg) = if private == PrivateFlag::Private || !is_tvar {
                 (required_pos, required_neg)
             } else {
                 (false, false)
             };
-            let inj = is_concrete || (required_inj && decl.type_private == PrivateFlag::Private);
+            let inj = is_concrete || (required_inj && private == PrivateFlag::Private);
             variance = variance.union(&make(pos, neg, inj));
             if is_concrete {
                 let (lower_pos, lower_neg, _, _) = variance.get_lower();
@@ -9151,9 +9240,7 @@ pub fn compute_variance_decl(
                     variance = variance.union(&required_variance);
                 }
             }
-            if matches!(decl.type_kind, super::TypeKind::TypeAbstract)
-                && decl.type_private == PrivateFlag::Public
-            {
+            if is_abstract && private == PrivateFlag::Public {
                 variance
             } else {
                 let (_, lower_neg, _, _) = variance.get_lower();
