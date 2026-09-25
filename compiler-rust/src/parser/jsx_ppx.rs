@@ -541,13 +541,14 @@ fn transform_react_component_binding(
     let fn_name_loc = get_fn_name_loc(&binding_pat);
     let original_binding_loc = binding.pvb_loc.clone();
 
+    // jsx_v4.ml:586-592: `modified_binding` (props must be labelled), then
+    // `recursively_transform_named_args_for_make (modified_binding_old binding)`.
     if let Some(loc) = component_props_need_labelled_error_loc(arena, binding.pvb_expr, false) {
         set_fatal_error(config, loc, COMPONENT_PROPS_NEED_LABELLED_MSG);
     } else if let Some(loc) = component_call_needs_function_error_loc(arena, binding.pvb_expr) {
         set_fatal_error(config, loc, COMPONENT_CALL_NEEDS_FUNCTION_MSG);
-    } else if let Some(loc) = component_ref_plain_args_error_loc(arena, binding.pvb_expr) {
-        set_fatal_error(config, loc, COMPONENT_REF_PLAIN_ARGS_MSG);
     }
+    let named_args_expr = modified_binding_old_expr(arena, binding.pvb_expr);
 
     // Check for sharedProps: @react.component(:sharedProps<T>)
     let core_type_of_attr = core_type_of_attrs(arena, &binding.pvb_attributes);
@@ -573,8 +574,8 @@ fn transform_react_component_binding(
         .collect();
 
     // Extract labeled arguments from the function (use inner expression to handle forwardRef)
-    let (args, mut newtypes, _, jsx_warnings, key_error_loc) =
-        recursively_extract_named_args(arena, &inner_expr);
+    let (args, mut newtypes, _, jsx_warnings, named_args_error) =
+        recursively_extract_named_args(arena, &named_args_expr);
     if let Some(constraint) = arena.value_constraint(binding.pvb_pat) {
         let mut constrained_newtypes = constraint
             .pvc_newtypes
@@ -586,8 +587,8 @@ fn transform_react_component_binding(
         newtypes = constrained_newtypes;
     }
     warnings.extend(jsx_warnings);
-    if let Some(loc) = key_error_loc {
-        set_fatal_error(config, loc, COMPONENT_KEY_PROP_MSG);
+    if let Some((loc, message)) = named_args_error {
+        set_fatal_error(config, loc, message);
     }
 
     // Build named type list for props
@@ -611,7 +612,7 @@ fn transform_react_component_binding(
     };
 
     // Build the internal expression pattern (use inner expression to handle forwardRef)
-    let (patterns_with_label, expression) =
+    let (patterns_with_label, patterns_with_nolabel, expression) =
         build_props_pattern_and_body(&inner_expr, &args, config, arena);
 
     // Create record pattern: {a, b, _}: props<'a, 'b>
@@ -711,86 +712,19 @@ fn transform_react_component_binding(
         ppat_attributes: Attributes::new(),
     };
 
-    // Determine arity based on forwardRef
-    let total_arity = if has_forward_ref { 2 } else { 1 };
-
-    // Create the function: (props: props<...>) => body
-    // For forwardRef: (props, ref) => body
-    let inner_func_expr = if has_forward_ref {
-        // Find ref arg and its alias from extracted args
-        let ref_arg = args.iter().find(|a| a.alias == "ref" || a.alias == "_ref");
-        let ref_alias = ref_arg
-            .map(|a| a.alias.clone())
-            .unwrap_or_else(|| "ref".to_string());
-        // OCaml uses the original location from the ref parameter
-        let ref_loc = ref_arg.map(|a| a.loc.clone()).unwrap_or_else(empty_loc);
-
-        // Create ref parameter - use actual alias and location from args
-        let ref_alias_idx = arena.push_interned_string(&ref_alias);
-        let base_ref_pattern = Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
-                txt: ref_alias_idx,
-                loc: ref_loc.clone(),
-            })),
-            ppat_loc: ref_loc.clone(),
-            ppat_attributes: Attributes::new(),
-        };
-
-        // OCaml (line 749-751): only add Stdlib.Nullable.t<'ref> constraint when the pattern is just
-        // Ppat_var {txt} (i.e., no existing constraint). If the original pattern already has a
-        // type constraint, preserve it.
-        let ref_pattern = if let Some(arg) = ref_arg {
-            // Check if the original pattern already has a type constraint
-            if matches!(*arg.pattern.ppat_desc, PatternDesc::Ppat_constraint(_)) {
-                // Preserve the original pattern with its type annotation
-                arg.pattern.clone()
-            } else if !ref_alias.starts_with('_') {
-                // No existing constraint, and not unused - add Stdlib.Nullable.t<'ref>
-                // OCaml calls ref_type Location.none, so inner Ptyp_var uses ghost location
-                let ref_type_var = CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Borrowed("ref")))),
-                    ptyp_loc: empty_loc(),
-                    ptyp_attributes: Attributes::new(),
-                };
-                let js_idx = arena.intern_string("Stdlib");
-                let nullable_idx = arena.intern_string("Nullable");
-                let t_idx = arena.intern_string("t");
-                let js_nullable_t_lid = arena.push_longident(Longident::Ldot(
-                    Box::new(Longident::Ldot(
-                        Box::new(Longident::Lident(js_idx)),
-                        nullable_idx,
-                    )),
-                    t_idx,
-                ));
-                let ref_type_var_idx = arena.push_core_type(ref_type_var);
-                let js_nullable_t = CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-                        Loc {
-                            txt: js_nullable_t_lid,
-                            loc: empty_loc(),
-                        },
-                        vec![ref_type_var_idx],
-                    )))),
-                    ptyp_loc: empty_loc(),
-                    ptyp_attributes: Attributes::new(),
-                };
-
-                // OCaml uses ghost location for the outer Ppat_constraint
-                let base_ref_pattern_idx = arena.push_pat(base_ref_pattern);
-                let js_nullable_t_idx = arena.push_core_type(js_nullable_t);
-                Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
-                        base_ref_pattern_idx,
-                        js_nullable_t_idx,
-                    )))),
-                    ppat_loc: empty_loc(),
-                    ppat_attributes: Attributes::new(),
-                }
-            } else {
-                base_ref_pattern
+    // jsx_v4.ml:754-790: `(props, ...nolabel_params) => expression`, where a
+    // `ref` variable parameter is constrained to `Stdlib.Nullable.t<'ref>`.
+    let nolabel_params: Vec<Pattern> = patterns_with_nolabel
+        .into_iter()
+        .map(|pattern| {
+            let is_ref_var = matches!(
+                &*pattern.ppat_desc,
+                PatternDesc::Ppat_var(name) if arena.get_string(name.txt) == "ref"
+            );
+            if !is_ref_var {
+                return pattern;
             }
-        } else if !ref_alias.starts_with('_') {
-            // No ref_arg found but alias doesn't start with "_" - add Stdlib.Nullable.t<'ref>
+            // `ref_type Location.none`.
             let ref_type_var = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Borrowed("ref")))),
                 ptyp_loc: empty_loc(),
@@ -818,75 +752,54 @@ fn transform_react_component_binding(
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: Attributes::new(),
             };
-            let base_ref_pattern_idx = arena.push_pat(base_ref_pattern);
+            let pattern_idx = arena.push_pat(pattern);
             let js_nullable_t_idx = arena.push_core_type(js_nullable_t);
             Pattern {
                 ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
-                    base_ref_pattern_idx,
+                    pattern_idx,
                     js_nullable_t_idx,
                 )))),
                 ppat_loc: empty_loc(),
                 ppat_attributes: Attributes::new(),
             }
-        } else {
-            base_ref_pattern
-        };
+        })
+        .collect();
 
-        // Forward-ref components are one direct n-ary function over props and ref.
-        let expression_idx = arena.push_expr(expression);
-        let constrained_pattern_idx = arena.push_pat(constrained_pattern);
-        let ref_pattern_idx = arena.push_pat(ref_pattern);
-        let arity = arena.push_arity(Some(total_arity as i32));
+    let total_arity = 1 + nolabel_params.len();
+    let expression_idx = arena.push_expr(expression);
+    let constrained_pattern_idx = arena.push_pat(constrained_pattern);
+    let arity = arena.push_arity(Some(total_arity as i32));
+    if !nolabel_params.is_empty() {
         let unknown_arity = arena.push_arity(None);
-        arena.set_nary_fun_params(
+        let mut params = vec![crate::parser::ast::FunParam {
+            p_attrs: Attributes::new(),
+            p_lbl: ArgLabel::Nolabel,
+            p_default: None,
+            p_pat: constrained_pattern_idx,
+        }];
+        for pattern in nolabel_params {
+            params.push(crate::parser::ast::FunParam {
+                p_attrs: Attributes::new(),
+                p_lbl: ArgLabel::Nolabel,
+                p_default: None,
+                p_pat: arena.push_pat(pattern),
+            });
+        }
+        arena.set_nary_fun_params(arity, params, unknown_arity);
+    }
+    // OCaml `Exp.fun_ ~async ~newtypes (props_param :: nolabel_params)` has no
+    // location or attributes of its own.
+    let inner_func_expr = Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+            arg_label: ArgLabel::Nolabel,
+            default: None,
+            lhs: constrained_pattern_idx,
+            rhs: expression_idx,
             arity,
-            vec![
-                crate::parser::ast::FunParam {
-                    p_attrs: Attributes::new(),
-                    p_lbl: ArgLabel::Nolabel,
-                    p_default: None,
-                    p_pat: constrained_pattern_idx,
-                },
-                crate::parser::ast::FunParam {
-                    p_attrs: Attributes::new(),
-                    p_lbl: ArgLabel::Nolabel,
-                    p_default: None,
-                    p_pat: ref_pattern_idx,
-                },
-            ],
-            unknown_arity,
-        );
-        Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                arg_label: ArgLabel::Nolabel,
-                default: None,
-                lhs: constrained_pattern_idx,
-                rhs: expression_idx,
-                arity,
-                is_async,
-            }))),
-            pexp_loc: empty_loc(),
-            pexp_attributes: Attributes::new(),
-        }
-    } else {
-        // Normal case without forwardRef
-        // OCaml: Exp.fun_ ~arity:(Some total_arity) ~async:is_async Nolabel None
-        // Note: OCaml line 765 does NOT pass ~attrs, so this inner expression has no attributes
-        let expression_idx = arena.push_expr(expression);
-        let constrained_pattern_idx = arena.push_pat(constrained_pattern);
-        Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                arg_label: ArgLabel::Nolabel,
-                default: None,
-                lhs: constrained_pattern_idx,
-                rhs: expression_idx,
-                arity: arena.push_arity(Some(total_arity as i32)),
-                is_async,
-            }))),
-            // OCaml uses ghost location for the inner Pexp_fun
-            pexp_loc: empty_loc(),
-            pexp_attributes: Attributes::new(),
-        }
+            is_async,
+        }))),
+        pexp_loc: empty_loc(),
+        pexp_attributes: Attributes::new(),
     };
 
     // Current Parsetree stores locally abstract types directly on the n-ary
@@ -1596,23 +1509,96 @@ fn strip_pattern_constraint(arena: &ParseArena, pat: &Pattern) -> Pattern {
     }
 }
 
-/// Build patterns for props record and the function body
+/// The parameters OCaml `returned_expression` (jsx_v4.ml:677-752) collects from
+/// the component function.
+#[derive(Default)]
+struct ReturnedParams {
+    /// Labelled/optional parameters, in source order: label, pattern, default.
+    with_label: Vec<(ArgLabel, Pattern, bool)>,
+    /// Unlabelled variable parameters (`ref`, ...), in source order.
+    with_nolabel: Vec<Pattern>,
+}
+
+/// OCaml `returned_expression`/`returned_expression_params`: walk the
+/// component function's parameters until a `()` parameter, collecting the
+/// labelled ones and the unlabelled variables, and return the remaining body
+/// (a function of the parameters after `()`, if any).
+fn returned_expression(
+    arena: &mut ParseArena,
+    expr: &Expression,
+    params_acc: &mut ReturnedParams,
+) -> Expression {
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_constraint(inner) => {
+            let inner = arena.get_expr(inner.0).clone();
+            returned_expression(arena, &inner, params_acc)
+        }
+        ExpressionDesc::Pexp_newtype(inner) => {
+            let body = arena.get_expr(inner.1).clone();
+            returned_expression(arena, &body, params_acc)
+        }
+        ExpressionDesc::Pexp_fun(fun) => {
+            let params = arena.nary_fun_params(fun).into_owned();
+            let body_idx = arena.nary_fun_body(fun);
+            for (index, param) in params.iter().enumerate() {
+                let pattern = arena.get_pat(param.p_pat).clone();
+                if matches!(
+                    &*pattern.ppat_desc,
+                    PatternDesc::Ppat_construct(lid, _) if arena.is_lident(lid.txt, "()")
+                ) {
+                    let rest = &params[index + 1..];
+                    if rest.is_empty() {
+                        return arena.get_expr(body_idx).clone();
+                    }
+                    // `Ast_helper.Exp.fun_ rest body`.
+                    let arity = arena.push_arity(Some(rest.len() as i32));
+                    let unknown_arity = arena.push_arity(None);
+                    arena.set_nary_fun_params(arity, rest.to_vec(), unknown_arity);
+                    return Expression {
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+                            arg_label: rest[0].p_lbl,
+                            default: rest[0].p_default,
+                            lhs: rest[0].p_pat,
+                            rhs: body_idx,
+                            arity,
+                            is_async: false,
+                        }))),
+                        pexp_loc: empty_loc(),
+                        pexp_attributes: Attributes::new(),
+                    };
+                }
+                if is_labelled(&param.p_lbl) || is_optional(&param.p_lbl) {
+                    params_acc
+                        .with_label
+                        .push((param.p_lbl, pattern, param.p_default.is_some()));
+                } else if pattern_is_plain_name_or_constraint(&pattern, arena) {
+                    params_acc.with_nolabel.push(pattern);
+                }
+            }
+            let body = arena.get_expr(body_idx).clone();
+            returned_expression(arena, &body, params_acc)
+        }
+        _ => expr.clone(),
+    }
+}
+
+/// Build the props record pattern fields, the unlabelled parameters and the
+/// body of the component implementation (jsx_v4.ml:677-790).
 fn build_props_pattern_and_body(
     expr: &Expression,
     args: &[ExtractedArg],
     config: &mut JsxConfig,
     arena: &mut ParseArena,
-) -> (Vec<PatternRecordField>, Expression) {
-    let mut patterns = vec![];
+) -> (Vec<PatternRecordField>, Vec<Pattern>, Expression) {
+    let mut params = ReturnedParams::default();
+    let body = returned_expression(arena, expr, &mut params);
 
-    for arg in args {
-        let label = get_label(arena, &arg.label);
-        if label.is_empty() {
-            continue;
-        }
+    let mut patterns = vec![];
+    for (arg_label, pattern, has_default) in &params.with_label {
+        let label = get_label(arena, arg_label);
 
         // OCaml strips constraint from pattern when building record field
-        let base_pat = strip_pattern_constraint(arena, &arg.pattern);
+        let base_pat = strip_pattern_constraint(arena, pattern);
 
         // For args with a default value, OCaml replaces the entire pattern
         // with a fresh `Pat.var "__<label>"` (jsx_v4.ml `pattern_with_safe_label`).
@@ -1620,7 +1606,7 @@ fn build_props_pattern_and_body(
         // record field bound to `__<label>` regardless of any `~name as alias`
         // renaming. The original pattern (alias and all) is bound later via
         // `add_default_value_matches`.
-        let mut pat = if arg.default.is_some() {
+        let mut pat = if *has_default {
             let prefixed_str_idx = arena.push_string(format!("__{}", label));
             Pattern {
                 ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
@@ -1639,22 +1625,20 @@ fn build_props_pattern_and_body(
         };
 
         // Preserve original pattern attributes (OCaml does: pattern_with_safe_label with ppat_attributes = pattern.ppat_attributes)
-        pat.ppat_attributes = arg.pattern.ppat_attributes.clone();
+        pat.ppat_attributes = pattern.ppat_attributes.clone();
 
         let label_str_idx = arena.push_interned_string(&label);
         patterns.push(PatternRecordField {
             lid: Loc {
                 txt: arena.push_longident(Longident::Lident(label_str_idx)),
-                loc: arg.loc.clone(),
+                loc: pattern.ppat_loc,
             },
             pat: arena.push_pat(pat),
-            opt: is_optional(&arg.label),
+            opt: is_optional(arg_label),
         });
     }
 
-    // Get the body expression (innermost non-fun expression)
-    let body = get_function_body(arena, expr);
-    let transformed_body = transform_expression(body.clone(), config, arena);
+    let transformed_body = transform_expression(body, config, arena);
 
     // Constrain return type to React.element
     let constrained_body = constrain_jsx_return(arena, transformed_body, config);
@@ -1662,7 +1646,7 @@ fn build_props_pattern_and_body(
     // Add default value handling
     let final_body = add_default_value_matches(arena, constrained_body, args);
 
-    (patterns, final_body)
+    (patterns, params.with_nolabel, final_body)
 }
 
 /// Add pattern matching for optional props with default values
@@ -2442,6 +2426,8 @@ fn is_forward_ref(arena: &ParseArena, expr: &Expression) -> bool {
     false
 }
 
+/// `check_invalid_forward_ref` in OCaml `map_binding`'s
+/// `@react.componentWithProps` case (jsx_v4.ml:814-836).
 fn component_with_props_forward_ref_error_loc(
     arena: &ParseArena,
     expr_idx: ExprIdx,
@@ -2450,14 +2436,14 @@ fn component_with_props_forward_ref_error_loc(
     let ExpressionDesc::Pexp_apply(apply) = &*expr.pexp_desc else {
         return None;
     };
-    if !is_forward_ref(arena, arena.get_expr(apply.funct)) {
-        return None;
+    match apply.args.as_slice() {
+        [(ArgLabel::Nolabel, func_expr)]
+            if is_forward_ref(arena, arena.get_expr(apply.funct)) =>
+        {
+            component_with_props_forward_ref_fun_error_loc(arena, *func_expr)
+        }
+        _ => None,
     }
-    apply.args.iter().find_map(|(label, arg)| {
-        matches!(label, ArgLabel::Nolabel)
-            .then(|| component_with_props_forward_ref_fun_error_loc(arena, *arg))
-            .flatten()
-    })
 }
 
 fn component_with_props_forward_ref_fun_error_loc(
@@ -2468,12 +2454,21 @@ fn component_with_props_forward_ref_fun_error_loc(
     let ExpressionDesc::Pexp_fun(fun) = &*expr.pexp_desc else {
         return None;
     };
-    match &fun.arg_label {
-        ArgLabel::Labelled(_) | ArgLabel::Optional(_) => Some(expr.pexp_loc),
-        ArgLabel::Nolabel => component_with_props_forward_ref_fun_error_loc(arena, fun.rhs),
+    let has_labelled = arena
+        .nary_fun_params(fun)
+        .iter()
+        .any(|param| !matches!(param.p_lbl, ArgLabel::Nolabel));
+    if has_labelled {
+        Some(expr.pexp_loc)
+    } else {
+        component_with_props_forward_ref_fun_error_loc(arena, arena.nary_fun_body(fun))
     }
 }
 
+/// The error of OCaml `modified_binding`'s `spelunk_for_fun_expression`
+/// (jsx_v4.ml:428-483): only the first parameter of the component function is
+/// inspected; an unlabelled one other than `()`/`_` is an error unless the
+/// function is wrapped in an application (`React.forwardRef`, `React.memo`).
 fn component_props_need_labelled_error_loc(
     arena: &ParseArena,
     expr_idx: ExprIdx,
@@ -2481,26 +2476,25 @@ fn component_props_need_labelled_error_loc(
 ) -> Option<Location> {
     let expr = arena.get_expr(expr_idx);
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_fun(fun) => match &fun.arg_label {
-            ArgLabel::Labelled(_) | ArgLabel::Optional(_) => {
-                let rhs = arena.get_expr(fun.rhs);
-                if matches!(&*rhs.pexp_desc, ExpressionDesc::Pexp_fun(_)) {
-                    component_props_need_labelled_error_loc(arena, fun.rhs, has_application)
-                } else {
-                    None
+        ExpressionDesc::Pexp_fun(fun) => {
+            let params = arena.nary_fun_params(fun);
+            let first = params.first()?;
+            match first.p_lbl {
+                ArgLabel::Labelled(_) | ArgLabel::Optional(_) => None,
+                ArgLabel::Nolabel => {
+                    let lhs = arena.get_pat(first.p_pat);
+                    if pattern_is_unit_or_any(arena, lhs) || has_application {
+                        None
+                    } else {
+                        Some(lhs.ppat_loc)
+                    }
                 }
             }
-            ArgLabel::Nolabel => {
-                let lhs = arena.get_pat(fun.lhs);
-                if pattern_is_unit_or_any(arena, lhs) {
-                    None
-                } else if has_application {
-                    None
-                } else {
-                    Some(lhs.ppat_loc)
-                }
-            }
-        },
+        }
+        ExpressionDesc::Pexp_newtype(inner) => {
+            let (_, body_idx) = &**inner;
+            component_props_need_labelled_error_loc(arena, *body_idx, has_application)
+        }
         ExpressionDesc::Pexp_let(inner) => {
             let (_, _, body_idx) = &**inner;
             component_props_need_labelled_error_loc(arena, *body_idx, has_application)
@@ -2514,6 +2508,24 @@ fn component_props_need_labelled_error_loc(
             component_props_need_labelled_error_loc(arena, *inner_idx, has_application)
         }
         _ => None,
+    }
+}
+
+/// OCaml `modified_binding_old` (jsx_v4.ml:391-417): the component function
+/// whose parameters define the props. When there is none (the
+/// `component_call_needs_function_error_loc` error), the expression itself.
+fn modified_binding_old_expr(arena: &ParseArena, expr_idx: ExprIdx) -> Expression {
+    let expr = arena.get_expr(expr_idx);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_let(inner) => modified_binding_old_expr(arena, inner.2),
+        ExpressionDesc::Pexp_apply(apply)
+            if apply.args.len() == 1 && matches!(apply.args[0].0, ArgLabel::Nolabel) =>
+        {
+            modified_binding_old_expr(arena, apply.args[0].1)
+        }
+        ExpressionDesc::Pexp_sequence(_, inner_idx) => modified_binding_old_expr(arena, *inner_idx),
+        ExpressionDesc::Pexp_constraint(inner) => modified_binding_old_expr(arena, inner.0),
+        _ => expr.clone(),
     }
 }
 
@@ -3081,6 +3093,8 @@ fn empty_loc() -> Location {
 }
 
 /// Recursively extract named arguments from a function expression
+/// OCaml `recursively_transform_named_args_for_make` (jsx_v4.ml:242-346).
+/// The first error it raises (key prop, non-plain ref argument) is returned.
 fn recursively_extract_named_args(
     arena: &ParseArena,
     expr: &Expression,
@@ -3089,21 +3103,14 @@ fn recursively_extract_named_args(
     Vec<(StringLoc, Attributes)>,
     Option<CoreType>,
     Vec<JsxPreprocessorWarning>,
-    Option<Location>,
+    Option<(Location, &'static str)>,
 ) {
     let mut args = vec![];
     let mut newtypes = vec![];
     let mut warnings = vec![];
-    let mut key_error_loc = None;
-    extract_args_rec(
-        arena,
-        expr,
-        &mut args,
-        &mut newtypes,
-        &mut warnings,
-        &mut key_error_loc,
-    );
-    (args, newtypes, None, warnings, key_error_loc)
+    let mut error = None;
+    extract_args_rec(arena, expr, &mut args, &mut newtypes, &mut warnings, &mut error);
+    (args, newtypes, None, warnings, error)
 }
 
 fn extract_args_rec(
@@ -3112,37 +3119,22 @@ fn extract_args_rec(
     args: &mut Vec<ExtractedArg>,
     newtypes: &mut Vec<(StringLoc, Attributes)>,
     warnings: &mut Vec<JsxPreprocessorWarning>,
-    key_error_loc: &mut Option<Location>,
+    error: &mut Option<(Location, &'static str)>,
 ) {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
             newtypes.extend(arena.nary_fun_newtypes(inner).iter().cloned());
             let params = arena.nary_fun_params(inner);
+            // `transform_params_for_make` (jsx_v4.ml:253-346).
             for param in params.iter() {
                 let arg_label = &param.p_lbl;
                 let default = &param.p_default;
                 let lhs_pat = arena.get_pat(param.p_pat);
-                let label_name = get_label(arena, arg_label);
-                if label_name == "key" {
-                    if key_error_loc.is_none() {
-                        *key_error_loc = Some(expr.pexp_loc);
-                    }
-                    return;
-                }
-                let is_unit_pattern = matches!(
-                    &*lhs_pat.ppat_desc,
-                    PatternDesc::Ppat_construct(loc, _) if arena.is_lident(loc.txt, "()")
-                );
-                // OCaml jsx_v4.ml:267-330 handles labelled parameters before
-                // the nolabel unit/wildcard stop case. In particular,
-                // `~priority as _` is still a prop even though its pattern is
-                // `Ppat_any` after parsing.
-                if !(is_labelled(arg_label) || is_optional(arg_label))
-                    && (is_unit_pattern || matches!(&*lhs_pat.ppat_desc, PatternDesc::Ppat_any))
-                {
-                    continue;
-                }
                 if is_labelled(arg_label) || is_optional(arg_label) {
+                    if get_label(arena, arg_label) == "key" {
+                        *error = Some((expr.pexp_loc, COMPONENT_KEY_PROP_MSG));
+                        return;
+                    }
                     if let Some(message) =
                         optional_argument_annotation_warning(arena, arg_label, default, lhs_pat)
                     {
@@ -3161,7 +3153,15 @@ fn extract_args_rec(
                         loc: lhs_pat.ppat_loc,
                         type_: get_type_from_pattern(arena, lhs_pat),
                     });
-                } else {
+                    continue;
+                }
+                // An unlabelled parameter ends the props: `()`/`_` and plain
+                // variables stop the walk (a `ref` variable becomes the ref
+                // prop of forwardRef); any other pattern is an error.
+                if pattern_is_unit_or_any(arena, lhs_pat) {
+                    return;
+                }
+                if pattern_is_plain_name_or_constraint(lhs_pat, arena) {
                     let alias = get_alias_from_pattern(arena, lhs_pat, arg_label);
                     if alias == "ref" || alias == "_ref" {
                         args.push(ExtractedArg {
@@ -3173,21 +3173,25 @@ fn extract_args_rec(
                             type_: get_type_from_pattern(arena, lhs_pat),
                         });
                     }
+                    return;
                 }
+                *error = Some((lhs_pat.ppat_loc, COMPONENT_REF_PLAIN_ARGS_MSG));
+                return;
             }
+            // All parameters consumed: keep walking into the body.
             let body = arena.get_expr(arena.nary_fun_body(inner));
-            extract_args_rec(arena, body, args, newtypes, warnings, key_error_loc);
+            extract_args_rec(arena, body, args, newtypes, warnings, error);
         }
         ExpressionDesc::Pexp_newtype(inner) => {
             let (ref name, ref body_idx) = **inner;
             newtypes.push((name.clone(), Attributes::new()));
             let body: &Expression = arena.get_expr(*body_idx);
-            extract_args_rec(arena, body, args, newtypes, warnings, key_error_loc);
+            extract_args_rec(arena, body, args, newtypes, warnings, error);
         }
         ExpressionDesc::Pexp_constraint(inner) => {
             let (ref inner_idx, _) = **inner;
             let inner: &Expression = arena.get_expr(*inner_idx);
-            extract_args_rec(arena, inner, args, newtypes, warnings, key_error_loc);
+            extract_args_rec(arena, inner, args, newtypes, warnings, error);
         }
         _ => {}
     }
