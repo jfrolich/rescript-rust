@@ -3482,6 +3482,29 @@ fn transl_type_inner(
             // through `transl_modtype_longident`. Preserve the selected
             // component path here: opened namespace modules are not local
             // `Pident`s, even when their source-level name is unqualified.
+            // Match OCaml Typetexp.create_package_mty (typetexp.ml:161-168),
+            // which runs before the package module type is resolved
+            // (typetexp.ml:548-554):
+            // - sort constraints by longident
+            // - reject duplicate constrained type names
+            let mut sorted_constraints: Vec<_> = constraints
+                .iter()
+                .map(|(field_lid, field_ty)| {
+                    (tctx.resolve_lid(field_lid.txt).clone(), field_lid, field_ty)
+                })
+                .collect();
+            sorted_constraints
+                .sort_by(|(left, _, _), (right, _, _)| compare_longident(tctx.arena, left, right));
+
+            for pair in sorted_constraints.windows(2) {
+                if compare_longident(tctx.arena, &pair[0].0, &pair[1].0) == Ordering::Equal {
+                    return Err(TypeCoreError::MultipleConstraintsOnType {
+                        loc,
+                        lid: pair[0].0.clone(),
+                    });
+                }
+            }
+
             let longident = tctx.resolve_lid(mod_lid.txt).clone();
             crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, tctx.arena, &longident, crate::types::env::OpenLookupKind::Modtype);
             let pack_path = match crate::types::typemod::lookup_modtype_path_by_lid(
@@ -3507,27 +3530,6 @@ fn transl_type_inner(
                     });
                 }
             };
-
-            // Match OCaml Typetexp.create_package_mty:
-            // - sort constraints by longident
-            // - reject duplicate constrained type names
-            let mut sorted_constraints: Vec<_> = constraints
-                .iter()
-                .map(|(field_lid, field_ty)| {
-                    (tctx.resolve_lid(field_lid.txt).clone(), field_lid, field_ty)
-                })
-                .collect();
-            sorted_constraints
-                .sort_by(|(left, _, _), (right, _, _)| compare_longident(tctx.arena, left, right));
-
-            for pair in sorted_constraints.windows(2) {
-                if compare_longident(tctx.arena, &pair[0].0, &pair[1].0) == Ordering::Equal {
-                    return Err(TypeCoreError::MultipleConstraintsOnType {
-                        loc,
-                        lid: pair[0].0.clone(),
-                    });
-                }
-            }
 
             let package_lids: Vec<_> = sorted_constraints
                 .iter()
