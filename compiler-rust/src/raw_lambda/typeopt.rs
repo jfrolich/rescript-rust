@@ -396,7 +396,7 @@ fn find_type_decl<'a>(
                         .map(|decl| crate::types::decl::TypeDeclarationRef::owned(decl.clone()))
                 })
                 .or_else(|| {
-                    ctx.find_resolved_pdot_type(&path.name())
+                    ctx.find_resolved_pdot_type_by_name(path)
                         .map(crate::types::decl::TypeDeclarationRef::Shared)
                 })
                 .or_else(|| {
@@ -411,7 +411,7 @@ fn find_type_decl<'a>(
         }
         _ => crate::types::ctype::lookup_type_decl_for_path(ctx, env, path)
             .or_else(|| {
-                ctx.find_resolved_pdot_type(&path.name())
+                ctx.find_resolved_pdot_type_by_name(path)
                     .map(crate::types::decl::TypeDeclarationRef::Shared)
             })
             .or_else(|| {

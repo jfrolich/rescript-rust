@@ -8917,6 +8917,15 @@ const fn unified_op_entry(
 }
 
 /// Check if a path (by name) is a unified op, returning its OCaml entry.
+/// `get_unified_op_entry` for the path `Pervasives.<op>`.
+fn get_unified_op_entry_for_op(op: &str) -> Option<UnifiedOpEntry> {
+    match op {
+        "~+" | "~-" | "~~~" | "+" | "-" | "*" | "/" | "%" | "mod" | "**" | "<<" | ">>" | "|||"
+        | "^^^" | "&&&" | ">>>" => get_unified_op_entry(&format!("Pervasives.{op}")),
+        _ => None,
+    }
+}
+
 fn get_unified_op_entry(path_name: &str) -> Option<UnifiedOpEntry> {
     use UnifiedOpForm::{Binary, Unary};
 
@@ -9002,9 +9011,19 @@ fn translate_unified_ops(
 ) -> Option<TypeCoreResult<Expression>> {
     use crate::types::typedtree::ApplyArg;
 
-    // Check if the function is a unified op
+    // Check if the function is a unified op (`Pervasives.<op>`).
     let path_name = match &typed_funct.exp_desc {
-        ExpressionDesc::Texp_ident(path, _, _) => path.name(),
+        ExpressionDesc::Texp_ident(path, _, _) => match path {
+            Path::Pdot(parent, op, _)
+                if matches!(parent.as_ref(), Path::Pident(id) if id.name() == "Pervasives") =>
+            {
+                if get_unified_op_entry_for_op(op).is_none() {
+                    return None;
+                }
+                path.name()
+            }
+            _ => return None,
+        },
         _ => return None,
     };
 
@@ -9166,11 +9185,18 @@ fn should_unify_expected_result_before_typing_lowered_apply(
     typed_funct: &Expression,
     args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
 ) -> bool {
-    let path_name = match &typed_funct.exp_desc {
-        ExpressionDesc::Texp_ident(path, _, _) => path.name(),
+    let path = match &typed_funct.exp_desc {
+        ExpressionDesc::Texp_ident(path, _, _) => path,
         _ => return false,
     };
-    match path_name.as_str() {
+    let path_name = if path.name_eq("Primitive_dict.make") {
+        "Primitive_dict.make"
+    } else if path.name_eq("Primitive_promise.unsafe_async") {
+        "Primitive_promise.unsafe_async"
+    } else {
+        return false;
+    };
+    match path_name {
         "Primitive_dict.make" => {
             args.len() == 1
                 && matches!(args[0].0, ArgLabel::Nolabel)
@@ -26439,7 +26465,6 @@ impl Env {
             }
             Longident::Ldot(prefix, idx) => {
                 let value_name = arena.get_string(*idx);
-                let lid_str = Self::longident_to_string(lid, arena);
 
                 // OCaml compiler/ml/env.ml:800-812 routes qualified value lookup
                 // through `find_module_descr` and the component value table; it
@@ -26512,7 +26537,7 @@ impl Env {
                     return Err(TypeCoreError::UndefinedMethod {
                         loc: None,
                         ty: TypeExprRef(0),
-                        method: lid_str,
+                        method: Self::longident_to_string(lid, arena),
                         alternatives: None,
                     });
                 }
@@ -26525,7 +26550,7 @@ impl Env {
                 Err(TypeCoreError::UndefinedMethod {
                     loc: None,
                     ty: TypeExprRef(0),
-                    method: lid_str,
+                    method: Self::longident_to_string(lid, arena),
                     alternatives: None,
                 })
             }
@@ -33139,14 +33164,15 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
     if let Path::Pdot(parent, type_name, _) = type_path {
         let mut deferred_self_manifest_decl: Option<Arc<crate::types::decl::TypeDeclaration>> =
             None;
-        let cache_key = path_cache_key(type_path);
-        let path_name = type_path.name();
+        // Cache by `Path::same` identity for paths without a functor
+        // application (the old printed-name key excluded those too).
+        let cache_key = (!type_path.has_apply_prefix()).then_some(type_path);
 
         // Check resolved-sig cache first to avoid re-creating fresh type copies.
         // This approximates OCaml's components_of_module_maker lazy caching.
         // Uses a separate cache from type_decl_by_path to avoid conflicts with
         // expand_head_once entries which have unqualified paths.
-        if let Some(cache_key) = cache_key.as_deref() {
+        if let Some(cache_key) = cache_key {
             if let Some(decl) = ctx.find_resolved_pdot_type(cache_key) {
                 return Some(decl);
             }
@@ -33280,7 +33306,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                                 )
                             {
                                 if cache_mode.publishes()
-                                    && let Some(cache_key) = cache_key.as_deref()
+                                    && let Some(cache_key) = cache_key
                                 {
                                     ctx.register_resolved_pdot_type(cache_key, decl.clone());
                                 }
@@ -33305,7 +33331,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                         .is_some_and(|stored_path| !stored_path.same(type_path))
                     {
                         if cache_mode.publishes()
-                            && let Some(cache_key) = cache_key.as_deref()
+                            && let Some(cache_key) = cache_key
                         {
                             ctx.register_resolved_pdot_type(cache_key, decl.clone());
                         }
@@ -33323,7 +33349,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                 // Pdot path reuse the same type nodes (matching OCaml's
                 // components_of_module_maker lazy caching).
                 if cache_mode.publishes()
-                    && let Some(cache_key) = cache_key.as_deref()
+                    && let Some(cache_key) = cache_key
                 {
                     ctx.register_resolved_pdot_type(cache_key, decl.clone());
                 }
@@ -33354,7 +33380,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                 )
             {
                 if cache_mode.publishes()
-                    && let Some(cache_key) = cache_key.as_deref()
+                    && let Some(cache_key) = cache_key
                 {
                     ctx.register_resolved_pdot_type(cache_key, decl.clone());
                 }
@@ -33394,7 +33420,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                                     components.lookup_type(type_name.as_str()).map(|(_, decl)| {
                                         let decl = decl.clone();
                                         if cache_mode.publishes()
-                                            && let Some(cache_key) = cache_key.as_deref()
+                                            && let Some(cache_key) = cache_key
                                         {
                                             ctx.register_resolved_pdot_type(
                                                 cache_key,
@@ -33425,7 +33451,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
         // exposing Sig_type entries; preferring substituted signatures first avoids
         // returning stale unqualified recursive paths (e.g. JSON.t self refs as Pident "t").
         if cache_key.is_some() {
-            if let Some(decl) = ctx.find_type_decl_by_path(&path_name) {
+            if let Some(decl) = ctx.find_type_decl_by_path(&type_path.name()) {
                 return Some(Arc::new(decl.clone()));
             }
         }

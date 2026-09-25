@@ -377,7 +377,7 @@ pub struct TypeContext {
     /// Separate from type_decl_by_path to avoid conflicts with expand_head_once
     /// entries which have unqualified paths. This approximates OCaml's
     /// components_of_module_maker lazy caching.
-    resolved_pdot_type_cache: RefCell<ahash::AHashMap<String, Arc<super::decl::TypeDeclaration>>>,
+    resolved_pdot_type_cache: RefCell<ahash::AHashMap<SamePathKey, Arc<super::decl::TypeDeclaration>>>,
 
     /// Cache for resolved module signatures. Keyed by module path name.
     /// OCaml `compiler/ml/env.ml:1513-1514,1516-1588` stores forced module
@@ -1278,15 +1278,46 @@ impl TypeContext {
     }
 
     /// Cache a type declaration resolved through module signatures (Pdot paths).
-    pub fn register_resolved_pdot_type(&self, path: &str, decl: Arc<super::decl::TypeDeclaration>) {
+    /// Keyed by `Path::same` identity; only paths without a functor
+    /// application are cached.
+    pub(crate) fn register_resolved_pdot_type(
+        &self,
+        path: &Path,
+        decl: Arc<super::decl::TypeDeclaration>,
+    ) {
         self.resolved_pdot_type_cache
             .borrow_mut()
-            .insert(path.to_string(), decl);
+            .insert(SamePathKey(path.clone()), decl);
     }
 
     /// Look up a cached resolved Pdot type declaration.
-    pub fn find_resolved_pdot_type(&self, path: &str) -> Option<Arc<super::decl::TypeDeclaration>> {
-        self.resolved_pdot_type_cache.borrow().get(path).cloned()
+    pub(crate) fn find_resolved_pdot_type(
+        &self,
+        path: &Path,
+    ) -> Option<Arc<super::decl::TypeDeclaration>> {
+        self.resolved_pdot_type_cache
+            .borrow()
+            .get(&SamePathKey(path.clone()))
+            .cloned()
+    }
+
+    /// Look up a cached resolved declaration by printed name: only paths
+    /// rooted at a persistent (stamp-0) identifier are reachable this way.
+    pub(crate) fn find_resolved_pdot_type_by_name(
+        &self,
+        path: &Path,
+    ) -> Option<Arc<super::decl::TypeDeclaration>> {
+        fn persistent_dotted(path: &Path) -> bool {
+            match path {
+                Path::Pident(id) => id.is_persistent() || id.stamp() == 0,
+                Path::Pdot(parent, _, _) => persistent_dotted(parent),
+                Path::Papply(_, _) => false,
+            }
+        }
+        if !matches!(path, Path::Pdot(..)) || !persistent_dotted(path) {
+            return None;
+        }
+        self.find_resolved_pdot_type(path)
     }
 
     /// Cache a resolved module signature.
