@@ -1224,9 +1224,13 @@ fn react_component_pattern_is_plain_name(
 }
 
 fn format_react_component_destructure_report(filename: &str) -> String {
+    // OCaml reports this through `Location.error` without a location, so the
+    // intro and the (module-name) file are printed with the error and
+    // filename styles (compiler/ml/location.ml:94-160).
     format!(
-        "\n  We've found a bug for you!\n  {}\n\n  {REACT_COMPONENT_DESTRUCTURE_MSG}\n\n",
-        module_name_from_source_filename(filename)
+        "\n  {}\n  {}\n\n  {REACT_COMPONENT_DESTRUCTURE_MSG}\n\n",
+        code_frame::colorize_intro("We've found a bug for you!", true),
+        code_frame::colorize_filename(&module_name_from_source_filename(filename))
     )
 }
 
@@ -3314,10 +3318,9 @@ fn type_mod_error_to_anyhow(
         }) => {
             let mut report =
                 format_expr_type_clash_report(type_ctx, arena, source, filename, *loc, trace, context);
-            // OCaml's warning printer leaves the formatter with styles disabled
-            // before a following type error (for example warning 41 followed by
-            // a coercion suggestion). Mirror that ordering rather than emitting
-            // embedded style escapes after an already-printed warning.
+            // Style escapes embedded in the message follow OCaml's
+            // `Color.color_enabled`, which a printed warning switches to the
+            // configured `-color` value (compiler/ext/misc.ml:337-392).
             if suppress_info_style {
                 report = report
                     .replace("\x1b[1;31m", "")
@@ -4576,6 +4579,7 @@ fn format_compiler_error_report_for_file(filename: &str, message: &str) -> Strin
     let mut output = String::new();
     push_compiler_report_intro(&mut output, "We've found a bug for you!");
     push_compiler_report_location(&mut output, filename);
+    let message = code_frame::apply_message_styles(message);
     for line in message.lines() {
         output.push_str("  ");
         output.push_str(line);
@@ -4632,7 +4636,26 @@ fn format_repeated_name_report(
         ppf.open_box(crate::parser::formatter::BoxKind::Box, 0);
         ppf.print(format_args!("Multiple definition of the {kind} name {name} "));
         ppf.space();
-        ppf.print(format_args!("at {repeated}"));
+        ppf.str("at ");
+        if code_frame::should_enable_color() {
+            // `@{<loc>...@}` around `Location.print_loc`, which prints
+            // `@{<filename>%s@}:@{<dim>%s@}` (compiler/ml/location.ml:75-93);
+            // semantic tag markers take no width (compiler/ext/misc.ml:327-350).
+            let (file, range) = repeated.split_once(':').unwrap_or((repeated.as_str(), ""));
+            ppf.string_as(0, "\x1b[1m");
+            ppf.string_as(0, "\x1b[36m");
+            ppf.str(file);
+            ppf.string_as(0, "\x1b[0m");
+            if !range.is_empty() {
+                ppf.str(":");
+                ppf.string_as(0, "\x1b[2m");
+                ppf.str(range);
+                ppf.string_as(0, "\x1b[0m");
+            }
+            ppf.string_as(0, "\x1b[0m");
+        } else {
+            ppf.str(&repeated);
+        }
         ppf.space();
         ppf.space();
         ppf.str("Names must be unique in a given structure or signature.");
@@ -4825,6 +4848,7 @@ fn format_compiler_error_report_from_location(
 
     push_compiler_error_report_header_from_location(&mut output, source, filename, loc);
 
+    let message = code_frame::apply_message_styles(message);
     for line in message.lines() {
         output.push_str("  ");
         output.push_str(line);
@@ -4893,6 +4917,7 @@ fn format_compiler_error_report(
 
     push_compiler_error_report_header(&mut output, arena, source, filename, loc);
 
+    let message = code_frame::apply_message_styles(message);
     for line in message.lines() {
         output.push_str("  ");
         output.push_str(line);
@@ -5708,6 +5733,7 @@ fn format_compiler_warning_report(
     let start_pos = arena.loc_start(warning.loc);
     let end_pos = arena.loc_end(warning.loc);
     let mut output = String::new();
+    code_frame::mark_color_setup();
 
     output.push_str("\n  ");
     output.push_str(&code_frame::colorize_intro(
@@ -11856,7 +11882,13 @@ fn compile_source_to_js_with_options_inner(
         match type_structure(&mut tctx, &env, parser.arena(), &structure) {
             Ok(result) => result,
             Err(e) => {
-                let suppress_info_style = !tctx.warnings.is_empty();
+                // OCaml compiler/ext/misc.ml:337-392: `Color.color_enabled`
+                // starts as `true` and takes the configured `-color` value at
+                // the first `Location.setup_colors` (location.ml:45-47), which
+                // printing a warning triggers. Messages formatted afterwards
+                // only carry style escapes when colors are enabled.
+                let suppress_info_style =
+                    !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
                 emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
                 if let Some(error) = tctx
                     .persistent_env
@@ -12847,7 +12879,9 @@ pub fn typecheck_interface_source(
     let typed_signature = match transl_signature(&mut tctx, &env, parser.arena(), &signature) {
         Ok(typed_signature) => typed_signature,
         Err(e) => {
-            let suppress_info_style = !tctx.warnings.is_empty();
+            // See the implementation path above (compiler/ext/misc.ml:337-392).
+            let suppress_info_style =
+                !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
             emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
             if let Some(error) = tctx
                 .persistent_env

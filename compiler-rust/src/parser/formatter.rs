@@ -569,6 +569,12 @@ impl<W: Write> Formatter<W> {
         self.enqueue_string_as(len, s.to_string());
     }
 
+    /// Print a string with an explicit width (OCaml `pp_print_as`). Semantic
+    /// tag markers such as color escapes are printed with width 0.
+    pub fn string_as(&mut self, size: usize, s: &str) {
+        self.enqueue_string_as(size as i32, s.to_string());
+    }
+
     /// Print a string slice (alias for string)
     pub fn str(&mut self, s: &str) {
         self.string(s);

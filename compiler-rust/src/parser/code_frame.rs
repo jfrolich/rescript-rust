@@ -7,7 +7,7 @@
 use crate::location::Position;
 use std::borrow::Cow;
 use std::io::IsTerminal;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 /// Count the number of digits in a number.
 fn digits_count(n: i32) -> usize {
@@ -145,6 +145,46 @@ impl Default for ColorMode {
 
 static COLOR_MODE: AtomicU8 = AtomicU8::new(ColorMode::Auto as u8);
 
+/// OCaml `Misc.Color.color_enabled` (compiler/ext/misc.ml:337-392) starts as
+/// `true` and takes the configured `-color` value at the first
+/// `Location.setup_colors`, which printing a located warning triggers. Error
+/// messages are formatted before the error itself is printed, so their
+/// embedded styles depend on whether a warning was printed first.
+static COLOR_SETUP: AtomicBool = AtomicBool::new(false);
+
+/// Record that a located report was printed (`Location.setup_colors`).
+pub fn mark_color_setup() {
+    COLOR_SETUP.store(true, Ordering::Relaxed);
+}
+
+/// Whether styles embedded in a formatted message are emitted.
+pub fn message_styles_enabled() -> bool {
+    !COLOR_SETUP.load(Ordering::Relaxed) || should_enable_color()
+}
+
+/// Remove SGR escape sequences from a formatted message when
+/// `message_styles_enabled` is false.
+pub fn apply_message_styles(message: &str) -> std::borrow::Cow<'_, str> {
+    if message_styles_enabled() || !message.contains('\x1b') {
+        return std::borrow::Cow::Borrowed(message);
+    }
+    let mut out = String::with_capacity(message.len());
+    let mut chars = message.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 pub fn parse_color_mode(value: &str) -> Option<ColorMode> {
     match value {
         "auto" => Some(ColorMode::Auto),
@@ -189,6 +229,14 @@ pub fn colorize_intro(intro: &str, is_error: bool) -> String {
     }
     let color = if is_error { ANSI_ERR } else { ANSI_WARN };
     format!("{color}{intro}{ANSI_RESET}")
+}
+
+/// `@{<filename>%s@}` (compiler/ext/misc.ml:334).
+pub fn colorize_filename(file: &str) -> String {
+    if !should_enable_color() {
+        return file.to_string();
+    }
+    format!("{ANSI_FILENAME}{file}{ANSI_RESET}")
 }
 
 pub fn colorize_location(location: &str) -> String {
@@ -255,6 +303,7 @@ pub fn print(src: &str, start_pos: &Position, end_pos: &Position) -> String {
 
 /// Print a code frame with warning highlighting.
 pub fn print_warning(src: &str, start_pos: &Position, end_pos: &Position) -> String {
+    mark_color_setup();
     print_impl(src, start_pos, end_pos, Emphasis::Warning)
 }
 
