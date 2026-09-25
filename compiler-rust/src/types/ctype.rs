@@ -688,6 +688,657 @@ fn local_non_recursive_abbrev(
 /// Add a GADT equation: source_path = destination type.
 /// Creates a local constraint with a manifest type declaration.
 /// Matches OCaml's `add_gadt_equation` in ctype.ml.
+// ============================================================================
+// Pattern compatibility (OCaml `mcomp`, compiler/ml/ctype.ml:1729-1964)
+// ============================================================================
+
+/// OCaml `in_current_module` (compiler/ml/ctype.ml:243-245).
+fn in_current_module(path: &Path) -> bool {
+    matches!(path, Path::Pident(_))
+}
+
+/// OCaml `non_aliasable` (compiler/ml/ctype.ml:1729-1731).
+fn non_aliasable(path: &Path, decl: &super::TypeDeclaration) -> bool {
+    in_current_module(path) && decl.type_newtype_level.is_none()
+}
+
+/// OCaml `Btype.is_datatype`.
+fn is_datatype(decl: &super::TypeDeclaration) -> bool {
+    matches!(
+        decl.type_kind,
+        super::TypeKind::TypeRecord(..) | super::TypeKind::TypeVariant(..) | super::TypeKind::TypeOpen
+    )
+}
+
+/// OCaml `expands_to_datatype` (compiler/ml/ctype.ml:1745-1754).
+fn expands_to_datatype(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
+    let ty = ctx.repr(ty);
+    let path = match &*ctx.borrow_desc(ty) {
+        TypeDesc::Tconstr { path, .. } => path.clone(),
+        _ => return false,
+    };
+    let Some(decl) = lookup_type_decl_for_path(ctx, env, &path) else {
+        return false;
+    };
+    if is_datatype(&decl) {
+        return true;
+    }
+    drop(decl);
+    match try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General) {
+        Some(expanded) => expands_to_datatype(ctx, env, expanded),
+        None => false,
+    }
+}
+
+/// OCaml `Types.same_record_representation` (compiler/ml/types.ml:303-315).
+fn same_record_representation(
+    left: &super::decl::RecordRepresentation,
+    right: &super::decl::RecordRepresentation,
+) -> bool {
+    use super::decl::RecordRepresentation as R;
+    match (left, right) {
+        (R::RecordRegular, R::RecordRegular)
+        | (R::RecordFloatUnused, R::RecordFloatUnused)
+        | (R::RecordExtension, R::RecordExtension) => true,
+        (R::RecordInlined { name: left, .. }, R::RecordInlined { name: right, .. }) => left == right,
+        (R::RecordUnboxed(left), R::RecordUnboxed(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// `univar_pairs` entry: each univar is paired with a shared slot (OCaml's
+/// `type_expr option ref`).
+type UnivarPairEntry = (Vec<(TypeExprRef, usize)>, Vec<(TypeExprRef, usize)>);
+
+struct McompState {
+    type_pairs: HashSet<(TypeExprRef, TypeExprRef)>,
+    /// OCaml `univar_pairs`, newest entry last.
+    univar_pairs: Vec<UnivarPairEntry>,
+    univar_slots: Vec<Option<TypeExprRef>>,
+}
+
+fn mcomp_fail() -> TypeResult<()> {
+    Err(TypeError::Unify(Vec::new()))
+}
+
+/// OCaml `mcomp env t1 t2` (compiler/ml/ctype.ml:1964): succeeds when `t1`
+/// and `t2` might be equal under some instantiation of abstract types.
+fn mcomp(ctx: &TypeContext, env: &Env, t1: TypeExprRef, t2: TypeExprRef) -> TypeResult<()> {
+    let mut state = McompState {
+        type_pairs: HashSet::new(),
+        univar_pairs: Vec::new(),
+        univar_slots: Vec::new(),
+    };
+    mcomp_rec(ctx, env, &mut state, t1, t2)
+}
+
+fn mcomp_rec(
+    ctx: &TypeContext,
+    env: &Env,
+    state: &mut McompState,
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+) -> TypeResult<()> {
+    if t1 == t2 {
+        return Ok(());
+    }
+    let t1 = ctx.repr(t1);
+    let t2 = ctx.repr(t2);
+    if t1 == t2 {
+        return Ok(());
+    }
+    {
+        let d1 = ctx.borrow_desc(t1);
+        let d2 = ctx.borrow_desc(t2);
+        match (&*d1, &*d2) {
+            (TypeDesc::Tvar(_), _) | (_, TypeDesc::Tvar(_)) => return Ok(()),
+            (
+                TypeDesc::Tconstr { path: p1, args: a1, .. },
+                TypeDesc::Tconstr { path: p2, args: a2, .. },
+            ) if a1.is_empty() && a2.is_empty() && p1.same(p2) => return Ok(()),
+            _ => {}
+        }
+    }
+    let t1p = ctx.repr(expand_head_opt(ctx, env, t1));
+    let t2p = ctx.repr(expand_head_opt(ctx, env, t2));
+    if t1p == t2p {
+        return Ok(());
+    }
+    if !state.type_pairs.insert((t1p, t2p)) {
+        return Ok(());
+    }
+    let d1 = ctx.get_desc(t1p).clone();
+    let d2 = ctx.get_desc(t2p).clone();
+    match (&d1, &d2) {
+        (TypeDesc::Tvar(_), TypeDesc::Tvar(_)) => {
+            panic!("Ctype.mcomp: unexpected pair of type variables")
+        }
+        (TypeDesc::Tarrow { args: params1, ret: ret1 }, TypeDesc::Tarrow { args: params2, ret: ret2 })
+            if params1.len() == params2.len()
+                && params1.iter().zip(params2.iter()).all(|(a1, a2)| {
+                    a1.label().same_label(a2.label())
+                        || !(a1.label().is_optional() || a2.label().is_optional())
+                }) =>
+        {
+            for (a1, a2) in params1.iter().zip(params2.iter()) {
+                mcomp_rec(ctx, env, state, a1.typ, a2.typ)?;
+            }
+            mcomp_rec(ctx, env, state, *ret1, *ret2)
+        }
+        (TypeDesc::Ttuple(tl1), TypeDesc::Ttuple(tl2)) => mcomp_list(ctx, env, state, tl1, tl2),
+        (TypeDesc::Tconstr { path: p1, args: tl1, .. }, TypeDesc::Tconstr { path: p2, args: tl2, .. }) => {
+            mcomp_type_decl(ctx, env, state, p1, p2, tl1, tl2)
+        }
+        (TypeDesc::Tconstr { path, .. }, _) | (_, TypeDesc::Tconstr { path, .. }) => {
+            match lookup_type_decl_for_path(ctx, env, path) {
+                Some(decl) if non_aliasable(path, &decl) || is_datatype(&decl) => mcomp_fail(),
+                _ => Ok(()),
+            }
+        }
+        (TypeDesc::Tpackage { .. }, TypeDesc::Tpackage { .. }) => Ok(()),
+        (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
+            mcomp_row(ctx, env, state, row1, row2)
+        }
+        (TypeDesc::Tobject { fields: fi1, .. }, TypeDesc::Tobject { fields: fi2, .. }) => {
+            mcomp_fields(ctx, env, state, *fi1, *fi2)
+        }
+        (TypeDesc::Tfield { .. }, TypeDesc::Tfield { .. }) => mcomp_fields(ctx, env, state, t1p, t2p),
+        (TypeDesc::Tnil, TypeDesc::Tnil) => Ok(()),
+        (TypeDesc::Tpoly { body: b1, vars: v1 }, TypeDesc::Tpoly { body: b2, vars: v2 })
+            if v1.is_empty() && v2.is_empty() =>
+        {
+            mcomp_rec(ctx, env, state, *b1, *b2)
+        }
+        (TypeDesc::Tpoly { body: b1, vars: v1 }, TypeDesc::Tpoly { body: b2, vars: v2 }) => {
+            mcomp_enter_poly(ctx, env, state, *b1, v1, *b2, v2)
+        }
+        (TypeDesc::Tunivar(_), TypeDesc::Tunivar(_)) => mcomp_unify_univar(ctx, state, t1p, t2p),
+        _ => mcomp_fail(),
+    }
+}
+
+/// OCaml `get_univar_family` (compiler/ml/ctype.ml:1517-1528).
+fn mcomp_univar_family(
+    ctx: &TypeContext,
+    pairs: &[UnivarPairEntry],
+    univars: &[TypeExprRef],
+) -> HashSet<TypeExprRef> {
+    let mut family = HashSet::new();
+    if univars.is_empty() {
+        return family;
+    }
+    family.extend(univars.iter().copied());
+    for (cl1, cl2) in pairs.iter().rev() {
+        if !cl2.is_empty() && cl1.iter().any(|(t1, _)| family.contains(&ctx.repr(*t1))) {
+            family.extend(cl2.iter().map(|(t, _)| ctx.repr(*t)));
+        }
+    }
+    family
+}
+
+/// OCaml `univars_escape` (compiler/ml/ctype.ml:1531-1558).
+fn mcomp_univars_escape(
+    ctx: &TypeContext,
+    env: &Env,
+    pairs: &[UnivarPairEntry],
+    vl: &[TypeExprRef],
+    body: TypeExprRef,
+    vars: &[TypeExprRef],
+) -> bool {
+    fn occur(
+        ctx: &TypeContext,
+        env: &Env,
+        family: &HashSet<TypeExprRef>,
+        visited: &mut HashSet<TypeExprRef>,
+        t: TypeExprRef,
+    ) -> bool {
+        let t = ctx.repr(t);
+        if !visited.insert(t) {
+            return false;
+        }
+        let desc = ctx.get_desc(t).clone();
+        match desc {
+            TypeDesc::Tpoly { body, vars } => {
+                if vars.iter().any(|v| family.contains(&ctx.repr(*v))) {
+                    false
+                } else {
+                    occur(ctx, env, family, visited, body)
+                }
+            }
+            TypeDesc::Tunivar(_) => family.contains(&t),
+            TypeDesc::Tconstr { args, .. } if args.is_empty() => false,
+            TypeDesc::Tconstr { path, args, .. } => {
+                match lookup_type_decl_for_path(ctx, env, &path).map(|d| d.into_owned()) {
+                    Some(td) => {
+                        if td.type_variance.len() != args.len() {
+                            panic!("Ctype.univars_escape: arity mismatch in List.iter2");
+                        }
+                        args.iter().zip(td.type_variance.iter()).any(|(&arg, v)| {
+                            (v.mem(VarianceFlag::MayPos) || v.mem(VarianceFlag::MayNeg))
+                                && occur(ctx, env, family, visited, arg)
+                        })
+                    }
+                    None => args.iter().any(|&arg| occur(ctx, env, family, visited, arg)),
+                }
+            }
+            _ => {
+                let mut children = Vec::new();
+                iter_type_expr(ctx, t, |c| children.push(c));
+                children
+                    .into_iter()
+                    .any(|c| occur(ctx, env, family, visited, c))
+            }
+        }
+    }
+    let family = mcomp_univar_family(ctx, pairs, vl);
+    let mut visited = HashSet::new();
+    // `newty (Tpoly (t, tl))`: the fresh wrapper is visited first.
+    if vars.iter().any(|v| family.contains(&ctx.repr(*v))) {
+        return false;
+    }
+    occur(ctx, env, &family, &mut visited, body)
+}
+
+/// OCaml `enter_poly` (compiler/ml/ctype.ml:1561-1584) specialised to `mcomp`.
+fn mcomp_enter_poly(
+    ctx: &TypeContext,
+    env: &Env,
+    state: &mut McompState,
+    body1: TypeExprRef,
+    vars1: &[TypeExprRef],
+    body2: TypeExprRef,
+    vars2: &[TypeExprRef],
+) -> TypeResult<()> {
+    let known: HashSet<TypeExprRef> = state
+        .univar_pairs
+        .iter()
+        .flat_map(|(cl, _)| cl.iter().map(|(t, _)| ctx.repr(*t)))
+        .collect();
+    let tl1: Vec<_> = vars1.iter().map(|&t| ctx.repr(t)).collect();
+    let tl2: Vec<_> = vars2.iter().map(|&t| ctx.repr(t)).collect();
+    if (tl1.iter().any(|t| known.contains(t))
+        && mcomp_univars_escape(ctx, env, &state.univar_pairs, &tl1, body2, &tl2))
+        || (tl2.iter().any(|t| known.contains(t))
+            && mcomp_univars_escape(ctx, env, &state.univar_pairs, &tl2, body1, &tl1))
+    {
+        return mcomp_fail();
+    }
+    let mut new_slot = |state: &mut McompState| {
+        state.univar_slots.push(None);
+        state.univar_slots.len() - 1
+    };
+    let cl1: Vec<_> = tl1.iter().map(|&t| (t, new_slot(state))).collect();
+    let cl2: Vec<_> = tl2.iter().map(|&t| (t, new_slot(state))).collect();
+    let saved = state.univar_pairs.len();
+    // OCaml: `(cl1, cl2) :: (cl2, cl1) :: old_univars` (newest last here).
+    state.univar_pairs.push((cl2.clone(), cl1.clone()));
+    state.univar_pairs.push((cl1, cl2));
+    let result = mcomp_rec(ctx, env, state, body1, body2);
+    state.univar_pairs.truncate(saved);
+    result
+}
+
+/// OCaml `unify_univar` (compiler/ml/ctype.ml:1449-1464).
+fn mcomp_unify_univar(
+    ctx: &TypeContext,
+    state: &mut McompState,
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+) -> TypeResult<()> {
+    for idx in (0..state.univar_pairs.len()).rev() {
+        let (cl1, cl2) = &state.univar_pairs[idx];
+        let r1 = cl1.iter().find(|(t, _)| ctx.repr(*t) == t1).map(|(_, r)| *r);
+        let r2 = cl2.iter().find(|(t, _)| ctx.repr(*t) == t2).map(|(_, r)| *r);
+        match (r1, r2) {
+            (Some(r1), Some(_))
+                if state.univar_slots[r1].is_some_and(|t| ctx.repr(t) == t2) =>
+            {
+                return Ok(());
+            }
+            (Some(r1), Some(r2))
+                if state.univar_slots[r1].is_none() && state.univar_slots[r2].is_none() =>
+            {
+                state.univar_slots[r1] = Some(t2);
+                state.univar_slots[r2] = Some(t1);
+                return Ok(());
+            }
+            (None, None) => continue,
+            _ => return mcomp_fail(),
+        }
+    }
+    mcomp_fail()
+}
+
+fn mcomp_list(
+    ctx: &TypeContext,
+    env: &Env,
+    state: &mut McompState,
+    tl1: &[TypeExprRef],
+    tl2: &[TypeExprRef],
+) -> TypeResult<()> {
+    if tl1.len() != tl2.len() {
+        return mcomp_fail();
+    }
+    for (&t1, &t2) in tl1.iter().zip(tl2.iter()) {
+        mcomp_rec(ctx, env, state, t1, t2)?;
+    }
+    Ok(())
+}
+
+fn object_row_of_fields(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
+    let mut current = ctx.repr(ty);
+    loop {
+        let next = match &*ctx.borrow_desc(current) {
+            TypeDesc::Tfield { rest, .. } => *rest,
+            _ => return current,
+        };
+        current = ctx.repr(next);
+    }
+}
+
+fn mcomp_fields(
+    ctx: &TypeContext,
+    env: &Env,
+    state: &mut McompState,
+    ty1: TypeExprRef,
+    ty2: TypeExprRef,
+) -> TypeResult<()> {
+    let concrete = |ty| !matches!(&*ctx.borrow_desc(object_row_of_fields(ctx, ty)), TypeDesc::Tvar(_));
+    if !(concrete(ty1) && concrete(ty2)) {
+        panic!("Ctype.mcomp_fields: non-concrete object");
+    }
+    let (fields2, rest2) = flatten_fields(ctx, ty2);
+    let (fields1, rest1) = flatten_fields(ctx, ty1);
+    let (pairs, miss1, miss2) = associate_fields(fields1, fields2);
+    let has_present = |miss: &[(String, FieldKind, TypeExprRef)]| {
+        miss.iter().any(|(_, k, _)| matches!(k, FieldKind::Fpresent))
+    };
+    mcomp_rec(ctx, env, state, rest1, rest2)?;
+    let row_is_nil = |ty| matches!(&*ctx.borrow_desc(object_row_of_fields(ctx, ty)), TypeDesc::Tnil);
+    if (has_present(&miss1) && row_is_nil(ty2)) || (has_present(&miss2) && row_is_nil(ty1)) {
+        return mcomp_fail();
+    }
+    for (_, k1, t1, k2, t2) in pairs {
+        if matches!(
+            (&k1, &k2),
+            (FieldKind::Fpresent, FieldKind::Fabsent) | (FieldKind::Fabsent, FieldKind::Fpresent)
+        ) {
+            return mcomp_fail();
+        }
+        mcomp_rec(ctx, env, state, t1, t2)?;
+    }
+    Ok(())
+}
+
+fn mcomp_row(
+    ctx: &TypeContext,
+    env: &Env,
+    state: &mut McompState,
+    row1: &RowDesc,
+    row2: &RowDesc,
+) -> TypeResult<()> {
+    let row1 = row_repr(ctx, row1);
+    let row2 = row_repr(ctx, row2);
+    let (r1, r2, pairs) = merge_row_fields(&row1.row_fields, &row2.row_fields);
+    let cannot_erase = |f: &RowField| matches!(btype::row_field_repr(ctx, f), RowField::Rpresent(_));
+    if (row1.row_closed && r2.iter().any(|(_, f)| cannot_erase(f)))
+        || (row2.row_closed && r1.iter().any(|(_, f)| cannot_erase(f)))
+    {
+        return mcomp_fail();
+    }
+    let pairs: Vec<(RowField, RowField)> = pairs
+        .into_iter()
+        .map(|(_, f1, f2)| (btype::row_field_repr(ctx, f1), btype::row_field_repr(ctx, f2)))
+        .collect();
+    for (f1, f2) in pairs {
+        match (&f1, &f2) {
+            (RowField::Rpresent(None), RowField::Rpresent(Some(_)) | RowField::Rabsent)
+            | (RowField::Rpresent(Some(_)), RowField::Rpresent(None) | RowField::Rabsent)
+            | (RowField::Rabsent, RowField::Rpresent(_)) => return mcomp_fail(),
+            (RowField::Rpresent(None), RowField::Reither { types, .. })
+            | (RowField::Reither { types, .. }, RowField::Rpresent(None))
+                if !types.is_empty() =>
+            {
+                return mcomp_fail();
+            }
+            (RowField::Rpresent(Some(_)), RowField::Reither { constant: true, .. })
+            | (RowField::Reither { constant: true, .. }, RowField::Rpresent(Some(_))) => {
+                return mcomp_fail();
+            }
+            (RowField::Rpresent(Some(t1)), RowField::Rpresent(Some(t2))) => {
+                mcomp_rec(ctx, env, state, *t1, *t2)?;
+            }
+            (RowField::Rpresent(Some(t1)), RowField::Reither { constant: false, types, .. }) => {
+                for &t2 in types {
+                    mcomp_rec(ctx, env, state, *t1, t2)?;
+                }
+            }
+            (RowField::Reither { constant: false, types, .. }, RowField::Rpresent(Some(t2))) => {
+                for &t1 in types {
+                    mcomp_rec(ctx, env, state, *t2, t1)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn mcomp_type_decl(
+    ctx: &TypeContext,
+    env: &Env,
+    state: &mut McompState,
+    p1: &Path,
+    p2: &Path,
+    tl1: &[TypeExprRef],
+    tl2: &[TypeExprRef],
+) -> TypeResult<()> {
+    let Some(decl) = lookup_type_decl_for_path(ctx, env, p1).map(|d| d.into_owned()) else {
+        return Ok(());
+    };
+    let Some(decl2) = lookup_type_decl_for_path(ctx, env, p2).map(|d| d.into_owned()) else {
+        return Ok(());
+    };
+    // compatible_paths (compiler/ml/ctype.ml:1743) is `Path.same`.
+    if p1.same(p2) {
+        let inj: Vec<bool> = if decl.type_variance.len() == tl1.len() {
+            decl.type_variance.iter().map(|v| v.mem(VarianceFlag::Inj)).collect()
+        } else {
+            vec![false; tl1.len()]
+        };
+        for (i, (&t1, &t2)) in inj.into_iter().zip(tl1.iter().zip(tl2.iter())) {
+            if i {
+                mcomp_rec(ctx, env, state, t1, t2)?;
+            }
+        }
+        return Ok(());
+    }
+    if non_aliasable(p1, &decl) && non_aliasable(p2, &decl2) {
+        return mcomp_fail();
+    }
+    use super::TypeKind as K;
+    match (&decl.type_kind, &decl2.type_kind) {
+        (K::TypeRecord(lst, r), K::TypeRecord(lst2, r2)) if same_record_representation(r, r2) => {
+            mcomp_list(ctx, env, state, tl1, tl2)?;
+            mcomp_record_description(ctx, env, state, lst, lst2)
+        }
+        (K::TypeVariant(v1, _), K::TypeVariant(v2, _)) => {
+            mcomp_list(ctx, env, state, tl1, tl2)?;
+            mcomp_variant_description(ctx, env, state, v1, v2)
+        }
+        (K::TypeOpen, K::TypeOpen) => mcomp_list(ctx, env, state, tl1, tl2),
+        (K::TypeAbstract, K::TypeAbstract) => Ok(()),
+        (K::TypeAbstract, _) if !non_aliasable(p1, &decl) => Ok(()),
+        (_, K::TypeAbstract) if !non_aliasable(p2, &decl2) => Ok(()),
+        _ => mcomp_fail(),
+    }
+}
+
+fn mcomp_variant_description(
+    ctx: &TypeContext,
+    env: &Env,
+    state: &mut McompState,
+    xs: &[super::decl::ConstructorDeclaration],
+    ys: &[super::decl::ConstructorDeclaration],
+) -> TypeResult<()> {
+    use super::decl::ConstructorArguments as A;
+    for (c1, c2) in xs.iter().zip(ys.iter()) {
+        match (c1.cd_res, c2.cd_res) {
+            (None, None) => {}
+            (Some(t), Some(t2)) => mcomp_rec(ctx, env, state, t, t2)?,
+            _ => return mcomp_fail(),
+        }
+        match (&c1.cd_args, &c2.cd_args) {
+            (A::CstrTuple(l1), A::CstrTuple(l2)) => mcomp_list(ctx, env, state, l1, l2)?,
+            (A::CstrRecord(l1), A::CstrRecord(l2)) => {
+                mcomp_record_description(ctx, env, state, l1, l2)?
+            }
+            _ => return mcomp_fail(),
+        }
+        if c1.cd_id.name() != c2.cd_id.name() {
+            return mcomp_fail();
+        }
+    }
+    if xs.len() != ys.len() {
+        return mcomp_fail();
+    }
+    Ok(())
+}
+
+fn mcomp_record_description(
+    ctx: &TypeContext,
+    env: &Env,
+    state: &mut McompState,
+    xs: &[LabelDeclaration],
+    ys: &[LabelDeclaration],
+) -> TypeResult<()> {
+    for (l1, l2) in xs.iter().zip(ys.iter()) {
+        mcomp_rec(ctx, env, state, l1.ld_type, l2.ld_type)?;
+        if !(l1.ld_id.name() == l2.ld_id.name()
+            && l1.ld_mutable == l2.ld_mutable
+            && l1.ld_optional == l2.ld_optional)
+        {
+            return mcomp_fail();
+        }
+    }
+    if xs.len() != ys.len() {
+        return mcomp_fail();
+    }
+    Ok(())
+}
+
+/// OCaml `unify3`'s same-path constructor case (compiler/ml/ctype.ml:2218-2245):
+/// argument unification depends on the unification mode, equation
+/// generation, and injectivity.
+fn unify_same_path_constructor_args(
+    ctx: &TypeContext,
+    state: &mut UnifyState,
+    t1_expanded: TypeExprRef,
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+    path: &Path,
+    pairs: Vec<(TypeExprRef, TypeExprRef)>,
+) -> TypeResult<()> {
+    if state.mode == UnifyMode::Expression || !state.generate_equations {
+        for (a, b) in pairs {
+            unify(ctx, state, a, b)?;
+        }
+        return Ok(());
+    }
+    if state.assume_injective {
+        let saved = (state.mode, state.generate_equations, state.assume_injective);
+        state.mode = UnifyMode::Pattern;
+        state.generate_equations = true;
+        state.assume_injective = false;
+        let result = pairs.into_iter().try_for_each(|(a, b)| unify(ctx, state, a, b));
+        (state.mode, state.generate_equations, state.assume_injective) = saved;
+        return result;
+    }
+    let datatype = match state.env() {
+        Some(env) => [t1_expanded, t1, t2]
+            .into_iter()
+            .any(|ty| expands_to_datatype(ctx, env, ty)),
+        None => false,
+    };
+    if in_current_module(path) || datatype {
+        for (a, b) in pairs {
+            unify(ctx, state, a, b)?;
+        }
+        return Ok(());
+    }
+    let inj: Vec<bool> = match state
+        .env()
+        .and_then(|env| lookup_type_decl_for_path(ctx, env, path).map(|d| d.into_owned()))
+    {
+        Some(decl) => {
+            if decl.type_variance.len() != pairs.len() {
+                panic!("Ctype.unify3: variance arity mismatch in List.iter2");
+            }
+            decl.type_variance.iter().map(|v| v.mem(VarianceFlag::Inj)).collect()
+        }
+        None => vec![false; pairs.len()],
+    };
+    for (injective, (a, b)) in inj.into_iter().zip(pairs) {
+        if injective {
+            unify(ctx, state, a, b)?;
+            continue;
+        }
+        let saved = (state.mode, state.generate_equations, state.assume_injective);
+        state.mode = UnifyMode::Pattern;
+        state.generate_equations = false;
+        state.assume_injective = false;
+        let snap = ctx.snapshot_type_state();
+        let result = unify(ctx, state, a, b);
+        let result = match result {
+            Err(TypeError::Unify(_)) => {
+                ctx.restore_type_state(snap);
+                reify_in_unify_state(ctx, state, a)
+                    .and_then(|()| reify_in_unify_state(ctx, state, b))
+            }
+            other => {
+                drop(snap);
+                other
+            }
+        };
+        (state.mode, state.generate_equations, state.assume_injective) = saved;
+        result?;
+    }
+    Ok(())
+}
+
+/// OCaml `reify env t` using the unifier's environment and newtype level.
+fn reify_in_unify_state(ctx: &TypeContext, state: &mut UnifyState, ty: TypeExprRef) -> TypeResult<()> {
+    let Some(newtype_level) = state.newtype_level else {
+        panic!("Ctype.reify: get_newtype_level called outside pattern unification");
+    };
+    match state.env_mut() {
+        Some(env) => reify(ctx, env, newtype_level, ty),
+        None => Ok(()),
+    }
+}
+
+/// OCaml `unify3` pattern-mode constructor mismatch
+/// (compiler/ml/ctype.ml:2266-2269): reify both sides and, when generating
+/// equations, accept the pair if `mcomp` finds it compatible.
+fn unify_pattern_constructor_mismatch(
+    ctx: &TypeContext,
+    state: &mut UnifyState,
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+) -> TypeResult<()> {
+    reify_in_unify_state(ctx, state, t1)?;
+    reify_in_unify_state(ctx, state, t2)?;
+    if state.generate_equations {
+        let Some(env) = state.env() else {
+            return Err(TypeError::Unify(vec![(t1, t2)]));
+        };
+        if mcomp(ctx, env, t1, t2).is_err() {
+            return Err(TypeError::Unify(vec![(t1, t2)]));
+        }
+    }
+    Ok(())
+}
+
 fn add_gadt_equation(
     ctx: &TypeContext,
     env: &mut Env,
@@ -809,6 +1460,60 @@ fn reify(ctx: &TypeContext, env: &mut Env, newtype_level: i32, ty: TypeExprRef) 
                 if level < newtype_level {
                     let rhs = ctx.alloc_type_at_level(TypeDesc::Tvar(None), level);
                     return Err(TypeError::Unify(vec![(reified, rhs)]));
+                }
+                Ok(())
+            }
+            // compiler/ml/ctype.ml:1698-1714: non-static rows get a fresh
+            // abstract row variable (or recurse into the fixed row_more), then
+            // only the row's field types are visited through `iter_row`.
+            TypeDesc::Tvariant(row) => {
+                let row = super::btype::row_repr(ctx, row);
+                drop(desc);
+                if !super::btype::static_row(ctx, &row) {
+                    if row.row_fixed {
+                        iterator(
+                            ctx,
+                            env,
+                            newtype_level,
+                            visited,
+                            super::btype::row_more(ctx, &row),
+                        )?;
+                    } else {
+                        let m = ctx.repr(row.row_more);
+                        let TypeDesc::Tvar(name) = ctx.get_desc(m).clone() else {
+                            panic!("Ctype.reify: non-variable row_more in a non-static row");
+                        };
+                        let m_level = ctx.get_level(m);
+                        let t = create_reified_constr(ctx, env, newtype_level, m_level, name);
+                        let fixed_row = RowDesc {
+                            row_fields: Vec::new(),
+                            row_fixed: true,
+                            row_more: t,
+                            ..row.clone()
+                        };
+                        let fixed = ctx.alloc_type_at_level(TypeDesc::Tvariant(fixed_row), m_level);
+                        link_type(ctx, m, fixed);
+                        if m_level < newtype_level {
+                            let rhs = ctx.alloc_type_at_level(TypeDesc::Tvar(None), m_level);
+                            return Err(TypeError::Unify(vec![(t, rhs)]));
+                        }
+                    }
+                }
+                let mut children = Vec::new();
+                super::btype::iter_row(ctx, &row, |child| children.push(child));
+                for child in children {
+                    iterator(ctx, env, newtype_level, visited, child)?;
+                }
+                Ok(())
+            }
+            // compiler/ml/ctype.ml:1715-1716.
+            TypeDesc::Tconstr { path, .. } if path.head_name().starts_with('#') => {
+                drop(desc);
+                let expanded = full_expand(ctx, env, ty);
+                let mut children = Vec::new();
+                iter_type_expr(ctx, expanded, |child| children.push(child));
+                for child in children {
+                    iterator(ctx, env, newtype_level, visited, child)?;
                 }
                 Ok(())
             }
@@ -1445,60 +2150,6 @@ fn update_level_expand_with_lookup_capture<'a>(
                     pending_type_lookup_paths,
                     pending_type_expansion_paths,
                 );
-            }
-            // compiler/ml/ctype.ml:1698-1714: non-static rows get a fresh
-            // abstract row variable (or recurse into the fixed row_more), then
-            // only the row's field types are visited through `iter_row`.
-            TypeDesc::Tvariant(row) => {
-                let row = super::btype::row_repr(ctx, row);
-                drop(desc);
-                if !super::btype::static_row(ctx, &row) {
-                    if row.row_fixed {
-                        iterator(
-                            ctx,
-                            env,
-                            newtype_level,
-                            visited,
-                            super::btype::row_more(ctx, &row),
-                        )?;
-                    } else {
-                        let m = ctx.repr(row.row_more);
-                        let TypeDesc::Tvar(name) = ctx.get_desc(m).clone() else {
-                            panic!("Ctype.reify: non-variable row_more in a non-static row");
-                        };
-                        let m_level = ctx.get_level(m);
-                        let t = create_reified_constr(ctx, env, newtype_level, m_level, name);
-                        let fixed_row = RowDesc {
-                            row_fields: Vec::new(),
-                            row_fixed: true,
-                            row_more: t,
-                            ..row.clone()
-                        };
-                        let fixed = ctx.alloc_type_at_level(TypeDesc::Tvariant(fixed_row), m_level);
-                        link_type(ctx, m, fixed);
-                        if m_level < newtype_level {
-                            let rhs = ctx.alloc_type_at_level(TypeDesc::Tvar(None), m_level);
-                            return Err(TypeError::Unify(vec![(t, rhs)]));
-                        }
-                    }
-                }
-                let mut children = Vec::new();
-                super::btype::iter_row(ctx, &row, |child| children.push(child));
-                for child in children {
-                    iterator(ctx, env, newtype_level, visited, child)?;
-                }
-                Ok(())
-            }
-            // compiler/ml/ctype.ml:1715-1716.
-            TypeDesc::Tconstr { path, .. } if path.head_name().starts_with('#') => {
-                drop(desc);
-                let expanded = full_expand(ctx, env, ty);
-                let mut children = Vec::new();
-                iter_type_expr(ctx, expanded, |child| children.push(child));
-                for child in children {
-                    iterator(ctx, env, newtype_level, visited, child)?;
-                }
-                Ok(())
             }
             _ => {
                 drop(desc);
@@ -5467,6 +6118,7 @@ fn unify_after_expansion<'a>(
             && path1.same(path2)
             && args1.len() == args2.len()
         {
+            let same_path = path1.clone();
             let pairs: Vec<_> = args1
                 .iter()
                 .zip(args2.iter())
@@ -5491,12 +6143,19 @@ fn unify_after_expansion<'a>(
                 }
             }
 
-            for (a, b) in pairs {
-                if let Err(err) = unify(ctx, state, a, b) {
-                    // ctype.ml:2321-2323 `with Unify trace -> t1'.desc <- d1`.
-                    ctx.set_desc(lhs, lhs_desc);
-                    return swap_trace(Err(err));
-                }
+            let original_lhs = if swap { t2 } else { t1 };
+            if let Err(err) = unify_same_path_constructor_args(
+                ctx,
+                state,
+                lhs,
+                original_lhs,
+                relink_target,
+                &same_path,
+                pairs,
+            ) {
+                // ctype.ml:2321-2323 `with Unify trace -> t1'.desc <- d1`.
+                ctx.set_desc(lhs, lhs_desc);
+                return swap_trace(Err(err));
             }
 
             return Ok(());
@@ -5925,6 +6584,9 @@ fn unify_types<'a>(
                     }
                 }
 
+                if state.mode == UnifyMode::Pattern {
+                    return unify_pattern_constructor_mismatch(ctx, state, t1, t2);
+                }
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
 
@@ -5934,6 +6596,7 @@ fn unify_types<'a>(
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
 
+            let same_path = path1.clone();
             let args1 = args1.clone();
             let args2 = args2.clone();
             drop(desc1);
@@ -5965,9 +6628,7 @@ fn unify_types<'a>(
                 .map(|(&a, &b)| (a, b))
                 .collect();
 
-            for (a, b) in pairs {
-                unify(ctx, state, a, b)?;
-            }
+            unify_same_path_constructor_args(ctx, state, t1, t1, t2, &same_path, pairs)?;
 
             if state.mode != crate::types::UnifyMode::Pattern {
                 let mut link_source = t1;
@@ -6345,6 +7006,9 @@ fn unify_types<'a>(
                 }
             }
 
+            if (is_constr1 || is_constr2) && state.mode == UnifyMode::Pattern {
+                return unify_pattern_constructor_mismatch(ctx, state, t1, t2);
+            }
             Err(TypeError::Unify(vec![(t1, t2)]))
         }
     }
