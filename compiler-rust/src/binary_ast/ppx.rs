@@ -1327,6 +1327,19 @@ fn is_valid_hash_number(value: &str) -> bool {
     }
 }
 
+/// OCaml `Bs_ast_invariant.check_constant` (bs_ast_invariant.ml:54-64): an
+/// integer literal without suffix that `Int32.of_string` rejects warns.
+fn check_constant(loc: LocIdx, constant: &Constant, warnings: &mut Vec<PpxWarning>) {
+    if let Constant::Integer(s, None) = constant {
+        if !crate::types::typecore::int32_literal_fits_ocaml(s) {
+            warnings.push(PpxWarning {
+                loc,
+                warning: Warning::BsIntegerLiteralOverflow,
+            });
+        }
+    }
+}
+
 /// The unused-attribute part of OCaml `Bs_ast_invariant.emit_external_warnings`
 /// (bs_ast_invariant.ml:68-160), run over the rewritten tree.
 struct UnusedAttributeSweep<'w> {
@@ -1361,8 +1374,13 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
         // `Pexp_constant` and hash-number `Pexp_variant (s, None)` only run
         // literal checks and do not call `super.expr`, so their attributes
         // are never swept (bs_ast_invariant.ml:90-100).
-        match &*arena.get_expr(idx).pexp_desc {
-            ExpressionDesc::Pexp_constant(_) => {}
+        let expr = arena.get_expr(idx);
+        match &*expr.pexp_desc {
+            ExpressionDesc::Pexp_constant(constant) => {
+                if !self.stopped {
+                    check_constant(expr.pexp_loc, constant, self.warnings);
+                }
+            }
             ExpressionDesc::Pexp_variant(inner)
                 if inner.1.is_none() && is_valid_hash_number(&inner.0) => {}
             _ => super::ast_iter::walk_expr(self, arena, idx),
@@ -1371,7 +1389,12 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
 
     fn pat(&mut self, arena: &ParseArena, idx: PatIdx) {
         // `Ppat_constant` only runs `check_constant` (bs_ast_invariant.ml:143-147).
-        if !matches!(&*arena.get_pat(idx).ppat_desc, PatternDesc::Ppat_constant(_)) {
+        let pat = arena.get_pat(idx);
+        if let PatternDesc::Ppat_constant(constant) = &*pat.ppat_desc {
+            if !self.stopped {
+                check_constant(pat.ppat_loc, constant, self.warnings);
+            }
+        } else {
             super::ast_iter::walk_pat(self, arena, idx);
         }
     }

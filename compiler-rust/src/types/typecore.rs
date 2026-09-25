@@ -1648,7 +1648,7 @@ fn wrap_to_ocaml_int(n: i64) -> i64 {
     (wrapped - half as i128) as i64
 }
 
-fn int32_literal_fits_ocaml(s: &str) -> bool {
+pub(crate) fn int32_literal_fits_ocaml(s: &str) -> bool {
     let stripped: String = s.chars().filter(|c| *c != '_').collect();
     let digits = stripped.as_str();
     let (negative, digits) = if let Some(rest) = digits.strip_prefix('-') {
@@ -1694,17 +1694,6 @@ fn int32_literal_fits_ocaml(s: &str) -> bool {
     value <= max
 }
 
-fn warn_integer_literal_overflow(
-    tctx: &mut TypeCheckContext<'_>,
-    loc: LocIdx,
-    cst: &crate::parser::ast::Constant,
-) {
-    if let crate::parser::ast::Constant::Integer(s, None) = cst {
-        if !int32_literal_fits_ocaml(s) {
-            tctx.report_warning(loc, Warning::BsIntegerLiteralOverflow);
-        }
-    }
-}
 
 /// Convert a parsed constant to a typed constant.
 pub fn convert_constant(
@@ -3891,7 +3880,6 @@ fn type_pattern_inner(
 
         PD::Ppat_constant(cst) => {
             // Constant pattern
-            warn_integer_literal_overflow(tctx, loc, cst);
             let constant = convert_constant(cst, loc)?;
             let ty = type_constant(ctx, env, &constant);
 
@@ -6673,8 +6661,6 @@ fn type_pattern_interval(
     let ctx = tctx.type_ctx;
 
     // Convert constants
-    warn_integer_literal_overflow(tctx, loc, c1);
-    warn_integer_literal_overflow(tctx, loc, c2);
     let constant1 = convert_constant(c1, loc)?;
     let constant2 = convert_constant(c2, loc)?;
 
@@ -7044,7 +7030,6 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_constant(cst) => {
             // Constant expression
-            warn_integer_literal_overflow(tctx, loc, cst);
             let constant = convert_constant(cst, loc)?;
             let ty = type_constant(ctx, env, &constant);
 
