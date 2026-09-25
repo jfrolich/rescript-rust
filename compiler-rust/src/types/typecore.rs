@@ -17815,25 +17815,32 @@ fn unbound_module_alternatives(
     lid: &Longident,
 ) -> Vec<String> {
     match lid {
-        Longident::Lident(_) => env
-            .iter_modules()
-            .map(|(id, _)| id.name().to_string())
-            .collect(),
-        Longident::Ldot(prefix, _) => env
-            .resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
-            .map(|(_, sig)| {
-                sig.iter()
-                    .filter_map(|item| match item {
-                        crate::types::decl::SignatureItem::SigModule(id, _, _) => {
-                            Some(id.name().to_string())
-                        }
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        Longident::Lident(_) => env.fold_module_names(),
+        Longident::Ldot(prefix, _) => tbl_fold_names_list(
+            env.resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
+                .map(|(_, sig)| {
+                    sig.iter()
+                        .filter_map(|item| match item {
+                            crate::types::decl::SignatureItem::SigModule(id, _, _) => {
+                                Some(id.name().to_string())
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
         Longident::Lapply(_, _) => Vec::new(),
     }
+}
+
+/// The name list a `Tbl.fold` over a structure's components builds by consing
+/// (compiler/ml/env.ml:1938-1945): one entry per name, visited in ascending
+/// name order, so the list is descending.
+fn tbl_fold_names_list(mut names: Vec<String>) -> Vec<String> {
+    names.sort_unstable_by(|a, b| b.as_bytes().cmp(a.as_bytes()));
+    names.dedup();
+    names
 }
 
 fn unbound_type_constructor_alternatives(
@@ -17842,23 +17849,21 @@ fn unbound_type_constructor_alternatives(
     lid: &Longident,
 ) -> Vec<String> {
     match lid {
-        Longident::Lident(_) => env
-            .iter_types()
-            .map(|(id, _)| id.name().to_string())
-            .collect(),
-        Longident::Ldot(prefix, _) => env
-            .resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
-            .map(|(_, sig)| {
-                sig.iter()
-                    .filter_map(|item| match item {
-                        crate::types::decl::SignatureItem::SigType(id, _, _) => {
-                            Some(id.name().to_string())
-                        }
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        Longident::Lident(_) => env.fold_type_names(),
+        Longident::Ldot(prefix, _) => tbl_fold_names_list(
+            env.resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
+                .map(|(_, sig)| {
+                    sig.iter()
+                        .filter_map(|item| match item {
+                            crate::types::decl::SignatureItem::SigType(id, _, _) => {
+                                Some(id.name().to_string())
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
         Longident::Lapply(_, _) => Vec::new(),
     }
 }
@@ -17869,34 +17874,32 @@ fn unbound_constructor_alternatives(
     lid: &Longident,
 ) -> Vec<String> {
     match lid {
-        Longident::Lident(_) => env
-            .iter_constructors()
-            .map(|(id, _)| id.name().to_string())
-            .collect(),
-        Longident::Ldot(prefix, _) => env
-            .resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
-            .map(|(_, sig)| {
-                sig.iter()
-                    .flat_map(|item| match item {
-                        crate::types::decl::SignatureItem::SigType(_, decl, _) => {
-                            match &decl.type_kind {
-                                crate::types::decl::TypeKind::TypeVariant(constructors, _) => {
-                                    constructors
-                                        .iter()
-                                        .map(|cstr| cstr.cd_id.name().to_string())
-                                        .collect::<Vec<_>>()
+        Longident::Lident(_) => env.fold_constructor_names(),
+        Longident::Ldot(prefix, _) => tbl_fold_names_list(
+            env.resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
+                .map(|(_, sig)| {
+                    sig.iter()
+                        .flat_map(|item| match item {
+                            crate::types::decl::SignatureItem::SigType(_, decl, _) => {
+                                match &decl.type_kind {
+                                    crate::types::decl::TypeKind::TypeVariant(constructors, _) => {
+                                        constructors
+                                            .iter()
+                                            .map(|cstr| cstr.cd_id.name().to_string())
+                                            .collect::<Vec<_>>()
+                                    }
+                                    _ => Vec::new(),
                                 }
-                                _ => Vec::new(),
                             }
-                        }
-                        crate::types::decl::SignatureItem::SigTypext(id, _, _) => {
-                            vec![id.name().to_string()]
-                        }
-                        _ => Vec::new(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+                            crate::types::decl::SignatureItem::SigTypext(id, _, _) => {
+                                vec![id.name().to_string()]
+                            }
+                            _ => Vec::new(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
         Longident::Lapply(_, _) => Vec::new(),
     }
 }
@@ -17924,14 +17927,12 @@ fn unbound_label_alternatives(
     lid: &Longident,
 ) -> Vec<String> {
     match lid {
-        Longident::Lident(_) => env
-            .iter_labels()
-            .map(|(id, _)| id.name().to_string())
-            .collect(),
-        Longident::Ldot(prefix, _) => env
-            .resolve_module_lid_raw(prefix, arena, pers_env, ctx)
-            .map(|(_, sig)| label_names_from_signature(&sig))
-            .unwrap_or_default(),
+        Longident::Lident(_) => env.fold_label_names(),
+        Longident::Ldot(prefix, _) => tbl_fold_names_list(
+            env.resolve_module_lid_raw(prefix, arena, pers_env, ctx)
+                .map(|(_, sig)| label_names_from_signature(&sig))
+                .unwrap_or_default(),
+        ),
         Longident::Lapply(_, _) => Vec::new(),
     }
 }
@@ -17970,23 +17971,21 @@ fn unbound_value_alternatives(
     lid: &Longident,
 ) -> Vec<String> {
     match lid {
-        Longident::Lident(_) => env
-            .iter_values()
-            .map(|(id, _)| id.name().to_string())
-            .collect(),
-        Longident::Ldot(prefix, _) => env
-            .resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
-            .map(|(_, sig)| {
-                sig.iter()
-                    .filter_map(|item| match item {
-                        crate::types::decl::SignatureItem::SigValue(id, _) => {
-                            Some(id.name().to_string())
-                        }
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        Longident::Lident(_) => env.fold_value_names(),
+        Longident::Ldot(prefix, _) => tbl_fold_names_list(
+            env.resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
+                .map(|(_, sig)| {
+                    sig.iter()
+                        .filter_map(|item| match item {
+                            crate::types::decl::SignatureItem::SigValue(id, _) => {
+                                Some(id.name().to_string())
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
         Longident::Lapply(_, _) => Vec::new(),
     }
 }

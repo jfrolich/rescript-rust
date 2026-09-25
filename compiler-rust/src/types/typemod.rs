@@ -11504,26 +11504,29 @@ pub(crate) fn unbound_modtype_alternatives<'b>(
     ctx: &'b crate::types::context::TypeContext,
 ) -> Vec<String> {
     match lid {
-        crate::parser::longident::Longident::Lident(_) => env
-            .iter_modtypes()
-            .map(|(id, _)| id.name().to_string())
-            .collect(),
+        crate::parser::longident::Longident::Lident(_) => env.fold_modtype_names(),
         crate::parser::longident::Longident::Ldot(prefix, _) => {
-            lookup_module_type_by_lid(prefix, arena, env, pers_env, ctx)
-                .and_then(|mty| match mty {
-                    crate::types::decl::ModuleType::MtySignature(sig) => Some(
-                        sig.iter()
-                            .filter_map(|item| match item {
-                                crate::types::decl::SignatureItem::SigModtype(id, _) => {
-                                    Some(id.name().to_string())
-                                }
-                                _ => None,
-                            })
-                            .collect(),
-                    ),
-                    _ => None,
-                })
-                .unwrap_or_default()
+            let mut names: Vec<String> =
+                lookup_module_type_by_lid(prefix, arena, env, pers_env, ctx)
+                    .and_then(|mty| match mty {
+                        crate::types::decl::ModuleType::MtySignature(sig) => Some(
+                            sig.iter()
+                                .filter_map(|item| match item {
+                                    crate::types::decl::SignatureItem::SigModtype(id, _) => {
+                                        Some(id.name().to_string())
+                                    }
+                                    _ => None,
+                                })
+                                .collect(),
+                        ),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+            // `Tbl.fold` visits the components in ascending name order and
+            // conses them (compiler/ml/env.ml:1938-1945).
+            names.sort_unstable_by(|a, b| b.as_bytes().cmp(a.as_bytes()));
+            names.dedup();
+            names
         }
         crate::parser::longident::Longident::Lapply(_, _) => Vec::new(),
     }

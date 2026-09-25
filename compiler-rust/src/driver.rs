@@ -4910,7 +4910,7 @@ fn format_unbound_type_constructor_report(
 
     let name = format_longident_for_report(arena, lid);
     let spellcheck_name = arena.get_string(lid.last_idx());
-    if let Some(hint) = spellcheck_hint(spellcheck_name, alternatives) {
+    if let Some(hint) = super_spellcheck_hint(spellcheck_name, alternatives) {
         return format_compiler_error_report(
             arena,
             source,
@@ -5048,7 +5048,7 @@ fn format_unbound_modtype_report(
         raw_message.push_str(&name);
         raw_message.push('\n');
         raw_message.push_str("Hint: Did you mean ");
-        raw_message.push_str(hint);
+        raw_message.push_str(&hint);
         raw_message.push('?');
         format_compiler_error_report_raw_message(arena, source, filename, loc, &raw_message)
     } else {
@@ -5620,7 +5620,7 @@ fn format_wrong_name_report(
         if let Some(hint) = spellcheck_hint(name, alternatives) {
             let mut raw_message = format_message_with_compiler_indentation(&message);
             raw_message.push_str("Hint: Did you mean ");
-            raw_message.push_str(hint);
+            raw_message.push_str(&hint);
             raw_message.push_str("?\n");
             return format_compiler_error_report_raw_message(
                 arena,
@@ -5666,7 +5666,7 @@ fn format_wrong_name_report(
         push_ocaml_multiline_type_application(&mut raw_message, INFO, RESET, &multiline_type);
         if let Some(hint) = spellcheck_hint(name, alternatives) {
             raw_message.push_str("Hint: Did you mean ");
-            raw_message.push_str(hint);
+            raw_message.push_str(&hint);
             raw_message.push_str("?\n");
         }
         return format_compiler_error_report_raw_message(
@@ -5697,7 +5697,7 @@ fn format_wrong_name_report(
     if let Some(hint) = spellcheck_hint(name, alternatives) {
         let mut raw_message = format_message_with_compiler_indentation(&message);
         raw_message.push_str("Hint: Did you mean ");
-        raw_message.push_str(hint);
+        raw_message.push_str(&hint);
         raw_message.push_str("?\n");
         return format_compiler_error_report_raw_message(
             arena,
@@ -5762,7 +5762,7 @@ fn format_undefined_method_report(
         raw_message.push_str(method);
         raw_message.push('\n');
         raw_message.push_str("Hint: Did you mean ");
-        raw_message.push_str(hint);
+        raw_message.push_str(&hint);
         raw_message.push('?');
         return format_compiler_error_report_raw_message(
             arena,
@@ -5861,7 +5861,7 @@ fn format_unbound_value_report(
         message.push_str(" can't be found");
     }
 
-    let spellcheck = spellcheck_hint(name, alternatives);
+    let spellcheck = super_spellcheck_hint(name, alternatives);
     if let Some(module_suggestion) = module_suggestion {
         let mut raw_message = String::new();
         raw_message.push_str("  ");
@@ -5872,7 +5872,7 @@ fn format_unbound_value_report(
             raw_message.push_str("  \n  ");
             raw_message.push_str(INFO);
             raw_message.push_str("Hint: Did you mean ");
-            raw_message.push_str(hint);
+            raw_message.push_str(&hint);
             raw_message.push('?');
             raw_message.push_str(RESET);
             raw_message.push_str("\n\n  Or did you mean");
@@ -5898,7 +5898,7 @@ fn format_unbound_value_report(
         message.push_str("\n\n");
         message.push_str(INFO);
         message.push_str("Hint: Did you mean ");
-        message.push_str(hint);
+        message.push_str(&hint);
         message.push('?');
         message.push_str(RESET);
     }
@@ -5941,12 +5941,12 @@ fn format_unbound_module_report(
         )
     };
     if name != "Str"
-        && let Some(hint) = spellcheck_hint(name, alternatives)
+        && let Some(hint) = super_spellcheck_hint(name, alternatives)
     {
         message.push_str("\n\n\n");
         message.push_str(INFO);
         message.push_str("Hint: Did you mean ");
-        message.push_str(hint);
+        message.push_str(&hint);
         message.push('?');
         message.push_str(RESET);
     } else if name != "Str" {
@@ -6010,7 +6010,7 @@ fn format_unbound_constructor_report(
     if let Some(hint) = spellcheck_hint(&name, alternatives) {
         message = format_message_with_compiler_indentation(&message);
         message.push_str("Hint: Did you mean ");
-        message.push_str(hint);
+        message.push_str(&hint);
         message.push('?');
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
     } else {
@@ -6028,48 +6028,91 @@ fn format_message_with_compiler_indentation(message: &str) -> String {
     output
 }
 
-fn spellcheck_hint<'a>(name: &str, alternatives: &'a [String]) -> Option<&'a str> {
+/// OCaml `Misc.spellcheck` + `Misc.did_you_mean` (compiler/ext/misc.ml:240-272):
+/// every alternative at the best edit distance within the cutoff, most recent
+/// tie first, rendered as "a, b or c".
+/// `Typetexp.super_spellcheck` + `Typetexp.did_you_mean`
+/// (compiler/ml/typetexp.ml:717-740): unlike `Misc.did_you_mean`, the head of
+/// the `Misc.spellcheck` result is printed last and the rest in reverse.
+fn super_spellcheck_hint(name: &str, alternatives: &[String]) -> Option<String> {
+    let choices = spellcheck_choices(name, alternatives);
+    let (last, rev_rest) = choices.split_first()?;
+    Some(if rev_rest.is_empty() {
+        (*last).to_string()
+    } else {
+        let rest: Vec<&str> = rev_rest.iter().rev().copied().collect();
+        format!("{} or {}", rest.join(", "), last)
+    })
+}
+
+/// `Misc.spellcheck` + `Misc.did_you_mean` (compiler/ext/misc.ml:240-272).
+fn spellcheck_hint(name: &str, alternatives: &[String]) -> Option<String> {
+    let best = spellcheck_choices(name, alternatives);
+    let (last, rest) = best.split_last()?;
+    Some(if rest.is_empty() {
+        (*last).to_string()
+    } else {
+        format!("{} or {}", rest.join(", "), last)
+    })
+}
+
+/// `Misc.spellcheck` (compiler/ext/misc.ml:240-257): the closest candidates,
+/// in the order of OCaml's prepend-on-tie fold.
+fn spellcheck_choices<'a>(name: &str, alternatives: &'a [String]) -> Vec<&'a str> {
     let cutoff = match name.len() {
         1 | 2 => 0,
         3 | 4 => 1,
         5 | 6 => 2,
         _ => 3,
     };
-    alternatives
-        .iter()
-        .filter_map(|candidate| {
-            let distance = edit_distance_at_most(name, candidate, cutoff)?;
-            Some((distance, candidate.as_str()))
-        })
-        .min_by_key(|(distance, candidate)| (*distance, candidate.len()))
-        .map(|(_, candidate)| candidate)
+    let mut best: Vec<&str> = Vec::new();
+    let mut best_dist = usize::MAX;
+    for candidate in alternatives {
+        let Some(dist) = ocaml_edit_distance(name, candidate, cutoff) else {
+            continue;
+        };
+        if dist < best_dist {
+            best = vec![candidate.as_str()];
+            best_dist = dist;
+        } else if dist == best_dist {
+            best.insert(0, candidate.as_str());
+        }
+    }
+    best
 }
 
-fn edit_distance_at_most(left: &str, right: &str, cutoff: usize) -> Option<usize> {
-    let left = left.as_bytes();
-    let right = right.as_bytes();
-    if left.len().abs_diff(right.len()) > cutoff {
+/// OCaml `Misc.edit_distance` (compiler/ext/misc.ml:195-238): Levenshtein
+/// distance with adjacent transpositions, bounded by `cutoff`.
+fn ocaml_edit_distance(a: &str, b: &str, cutoff: usize) -> Option<usize> {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let (la, lb) = (a.len(), b.len());
+    let cutoff = cutoff.min(la.max(lb));
+    if la.abs_diff(lb) > cutoff {
         return None;
     }
-
-    let mut prev: Vec<usize> = (0..=right.len()).collect();
-    let mut curr = vec![0; right.len() + 1];
-
-    for (i, left_byte) in left.iter().enumerate() {
-        curr[0] = i + 1;
-        let mut row_min = curr[0];
-        for (j, right_byte) in right.iter().enumerate() {
-            let cost = usize::from(left_byte != right_byte);
-            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
-            row_min = row_min.min(curr[j + 1]);
-        }
-        if row_min > cutoff {
-            return None;
-        }
-        std::mem::swap(&mut prev, &mut curr);
+    let mut m = vec![vec![cutoff + 1; lb + 1]; la + 1];
+    m[0][0] = 0;
+    for (i, row) in m.iter_mut().enumerate().skip(1) {
+        row[0] = i;
     }
-
-    (prev[right.len()] <= cutoff).then_some(prev[right.len()])
+    for j in 1..=lb {
+        m[0][j] = j;
+    }
+    for i in 1..=la {
+        let lo = 1.max(i.saturating_sub(cutoff + 1));
+        let hi = lb.min(i + cutoff + 1);
+        for j in lo..=hi {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut best = (1 + m[i - 1][j].min(m[i][j - 1])).min(m[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                best = best.min(m[i - 2][j - 2] + cost);
+            }
+            m[i][j] = best;
+        }
+    }
+    let result = m[la][lb];
+    (result <= cutoff).then_some(result)
 }
 
 fn format_label_multiply_defined_report(
@@ -6672,7 +6715,7 @@ fn format_orpat_vars_report(
     if let Some(hint) = spellcheck_hint(id.name(), &alternatives) {
         let mut raw_message = format_message_with_compiler_indentation(&message);
         raw_message.push_str("Hint: Did you mean ");
-        raw_message.push_str(hint);
+        raw_message.push_str(&hint);
         raw_message.push('?');
         return format_compiler_error_report_raw_message(
             arena,
@@ -10560,7 +10603,7 @@ fn format_unbound_record_field_report(
             ) {
                 raw_message.push('\n');
                 raw_message.push_str("Hint: Did you mean ");
-                raw_message.push_str(hint);
+                raw_message.push_str(&hint);
                 raw_message.push('?');
             }
             return format_compiler_error_report_raw_message(
@@ -10602,7 +10645,7 @@ fn format_unbound_record_field_report(
     ) {
         let mut raw_message = format_message_with_compiler_indentation(&message);
         raw_message.push_str("Hint: Did you mean ");
-        raw_message.push_str(hint);
+        raw_message.push_str(&hint);
         raw_message.push('?');
         return format_compiler_error_report_raw_message(
             arena,

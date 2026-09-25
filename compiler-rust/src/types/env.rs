@@ -197,6 +197,123 @@ struct IdOpened<T> {
     next: Arc<IdTbl<T>>,
 }
 
+/// A fold that conses every visited name (`fun x xs -> x :: xs`) returns
+/// them in reverse visit order.
+fn fold_names_list(order: Vec<&str>) -> Vec<String> {
+    order.into_iter().rev().map(str::to_string).collect()
+}
+
+/// Visit order of OCaml `Ident.fold_name` (compiler/ext/ident.ml:144-189)
+/// over a table whose names were first added in stamp order. `Ident.add`
+/// builds an AVL tree keyed by name (re-adding a name keeps the node), and
+/// `fold_aux` visits a node, then its right subtree, then the pending left
+/// subtrees.
+fn ident_tbl_fold_name_order<'a>(names: impl Iterator<Item = (&'a str, i32)>) -> Vec<&'a str> {
+    struct Node<'a> {
+        name: &'a str,
+        left: Option<usize>,
+        right: Option<usize>,
+        height: i32,
+    }
+    fn height(nodes: &[Node<'_>], n: Option<usize>) -> i32 {
+        n.map_or(0, |n| nodes[n].height)
+    }
+    fn mknode<'a>(
+        nodes: &mut Vec<Node<'a>>,
+        left: Option<usize>,
+        name: &'a str,
+        right: Option<usize>,
+    ) -> usize {
+        let (hl, hr) = (height(nodes, left), height(nodes, right));
+        nodes.push(Node {
+            name,
+            left,
+            right,
+            height: if hl >= hr { hl + 1 } else { hr + 1 },
+        });
+        nodes.len() - 1
+    }
+    fn balance<'a>(
+        nodes: &mut Vec<Node<'a>>,
+        l: Option<usize>,
+        d: &'a str,
+        r: Option<usize>,
+    ) -> usize {
+        let (hl, hr) = (height(nodes, l), height(nodes, r));
+        if hl > hr + 1 {
+            let l = l.expect("unbalanced left subtree");
+            let (ll, ld, lr) = (nodes[l].left, nodes[l].name, nodes[l].right);
+            if height(nodes, ll) >= height(nodes, lr) {
+                let right = mknode(nodes, lr, d, r);
+                mknode(nodes, ll, ld, Some(right))
+            } else {
+                let lr = lr.expect("unbalanced left-right subtree");
+                let (lrl, lrd, lrr) = (nodes[lr].left, nodes[lr].name, nodes[lr].right);
+                let left = mknode(nodes, ll, ld, lrl);
+                let right = mknode(nodes, lrr, d, r);
+                mknode(nodes, Some(left), lrd, Some(right))
+            }
+        } else if hr > hl + 1 {
+            let r = r.expect("unbalanced right subtree");
+            let (rl, rd, rr) = (nodes[r].left, nodes[r].name, nodes[r].right);
+            if height(nodes, rr) >= height(nodes, rl) {
+                let left = mknode(nodes, l, d, rl);
+                mknode(nodes, Some(left), rd, rr)
+            } else {
+                let rl = rl.expect("unbalanced right-left subtree");
+                let (rll, rld, rlr) = (nodes[rl].left, nodes[rl].name, nodes[rl].right);
+                let left = mknode(nodes, l, d, rll);
+                let right = mknode(nodes, rlr, rd, rr);
+                mknode(nodes, Some(left), rld, Some(right))
+            }
+        } else {
+            mknode(nodes, l, d, r)
+        }
+    }
+    fn add<'a>(nodes: &mut Vec<Node<'a>>, name: &'a str, tree: Option<usize>) -> usize {
+        let Some(t) = tree else {
+            return mknode(nodes, None, name, None);
+        };
+        let (l, k, r) = (nodes[t].left, nodes[t].name, nodes[t].right);
+        match name.as_bytes().cmp(k.as_bytes()) {
+            std::cmp::Ordering::Equal => t,
+            std::cmp::Ordering::Less => {
+                let l = add(nodes, name, l);
+                balance(nodes, Some(l), k, r)
+            }
+            std::cmp::Ordering::Greater => {
+                let r = add(nodes, name, r);
+                balance(nodes, l, k, Some(r))
+            }
+        }
+    }
+
+    let mut insertion: Vec<(&'a str, i32)> = names.collect();
+    insertion.sort_by_key(|&(_, stamp)| stamp);
+    let mut nodes = Vec::with_capacity(insertion.len() * 2);
+    let mut root = None;
+    for (name, _) in insertion {
+        root = Some(add(&mut nodes, name, root));
+    }
+    let mut order = Vec::new();
+    let mut stack = Vec::new();
+    let mut current = root;
+    loop {
+        match current {
+            Some(n) => {
+                order.push(nodes[n].name);
+                stack.push(nodes[n].left);
+                current = nodes[n].right;
+            }
+            None => match stack.pop() {
+                Some(next) => current = next,
+                None => break,
+            },
+        }
+    }
+    order
+}
+
 /// A table of bindings indexed by identifier.
 ///
 /// This matches OCaml `Env.IdTbl`: local bindings live in `current`, and each
@@ -410,6 +527,32 @@ impl<T: Clone> IdTbl<T> {
         }
     }
 
+    /// The names visited by OCaml `IdTbl.fold_name` (compiler/ml/env.ml:345-358),
+    /// in visit order: the current layer through `Ident.fold_name`, then the
+    /// opened components through `Tbl.fold`, then the next layer.
+    pub fn fold_name_order(&self) -> Vec<&str> {
+        let mut names = Vec::new();
+        self.collect_fold_name_order(&mut names);
+        names
+    }
+
+    fn collect_fold_name_order<'a>(&'a self, names: &mut Vec<&'a str>) {
+        names.extend(ident_tbl_fold_name_order(self.current.iter().map(
+            |(name, entries)| {
+                (
+                    name.as_str(),
+                    entries.first().map_or(0, |(id, _)| id.stamp()),
+                )
+            },
+        )));
+        if let Some(opened) = &self.opened {
+            let mut components: Vec<&str> = opened.components.keys().map(String::as_str).collect();
+            components.sort_unstable();
+            names.extend(components);
+            opened.next.collect_fold_name_order(names);
+        }
+    }
+
     pub fn visible_local_entries(&self) -> impl Iterator<Item = (&Ident, &T)> {
         let mut seen = HashSet::new();
         let mut items = Vec::new();
@@ -612,6 +755,39 @@ impl<T: Clone> TycompTbl<T> {
                 items.extend(entries.iter().map(|(id, value)| (id, value)));
             }
             opened.next.collect_iter(items);
+        }
+    }
+
+    /// The names of the descriptions visited by OCaml `TycompTbl.fold_name`
+    /// (compiler/ml/env.ml:221-228), in visit order.
+    pub fn fold_name_order(&self) -> Vec<&str> {
+        let mut names = Vec::new();
+        self.collect_fold_name_order(&mut names);
+        names
+    }
+
+    fn collect_fold_name_order<'a>(&'a self, names: &mut Vec<&'a str>) {
+        names.extend(ident_tbl_fold_name_order(self.current.iter().map(
+            |(name, entries)| {
+                (
+                    name.as_str(),
+                    entries.first().map_or(0, |(id, _)| id.stamp()),
+                )
+            },
+        )));
+        if let Some(opened) = &self.opened {
+            let mut components: Vec<(&str, usize)> = opened
+                .components
+                .iter()
+                .map(|(name, entries)| (name.as_str(), entries.len()))
+                .collect();
+            components.sort_unstable();
+            for (name, count) in components {
+                // `List.fold_right (fun desc -> f desc)` visits every
+                // description of the bucket.
+                names.extend(std::iter::repeat_n(name, count));
+            }
+            opened.next.collect_fold_name_order(names);
         }
     }
 }
@@ -1041,6 +1217,37 @@ impl Env {
     /// Iterate over visible type bindings.
     pub fn iter_types(&self) -> impl Iterator<Item = (&Ident, &TypeDeclaration)> {
         self.types.iter().map(|(id, decl)| (id, decl.as_ref()))
+    }
+
+    /// The name list OCaml builds with `Env.fold_types (fun x _ _ xs -> x :: xs)
+    /// None env []` (compiler/ml/env.ml:1932-1937, 2001).
+    pub fn fold_type_names(&self) -> Vec<String> {
+        fold_names_list(self.types.fold_name_order())
+    }
+
+    /// `Env.fold_values` with no module prefix (compiler/ml/env.ml:1992).
+    pub fn fold_value_names(&self) -> Vec<String> {
+        fold_names_list(self.values.fold_name_order())
+    }
+
+    /// `Env.fold_modules` over `env.modules` (compiler/ml/env.ml:1962-1970).
+    pub fn fold_module_names(&self) -> Vec<String> {
+        fold_names_list(self.modules.fold_name_order())
+    }
+
+    /// `Env.fold_modtypes` with no module prefix (compiler/ml/env.ml:2003).
+    pub fn fold_modtype_names(&self) -> Vec<String> {
+        fold_names_list(self.modtypes.fold_name_order())
+    }
+
+    /// `Env.fold_constructors` with no module prefix (compiler/ml/env.ml:1995).
+    pub fn fold_constructor_names(&self) -> Vec<String> {
+        fold_names_list(self.constrs.fold_name_order())
+    }
+
+    /// `Env.fold_labels` with no module prefix (compiler/ml/env.ml:1998).
+    pub fn fold_label_names(&self) -> Vec<String> {
+        fold_names_list(self.labels.fold_name_order())
     }
 
     pub(crate) fn find_type_by_ident(&self, id: &Ident) -> EnvResult<&TypeDeclaration> {
