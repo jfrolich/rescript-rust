@@ -35,6 +35,11 @@ use smol_str::SmolStr;
 
 type PersistentHashMap<K, V> = im_rc::HashMap<K, V, ahash::RandomState>;
 type PersistentHashSet<T> = im_rc::HashSet<T, ahash::RandomState>;
+/// Component table of one opened layer. Built once when the layer is opened
+/// and only read afterwards (a rare in-place update copies the layer), so a
+/// flat hash table replaces the persistent map: one allocation to build and
+/// to drop instead of a tree of reference-counted nodes.
+type OpenedMap<V> = ahash::AHashMap<SmolStr, V>;
 
 /// Collect free type variables (Tvar nodes) from a type expression.
 /// Matches OCaml's Datarepr.free_vars.
@@ -195,7 +200,7 @@ pub enum EnvSummary {
 #[derive(Debug, Clone)]
 struct IdOpened<T> {
     root: Option<Path>,
-    components: PersistentHashMap<String, (Ident, T, i32)>,
+    components: OpenedMap<(Ident, T, i32)>,
     next: Arc<IdTbl<T>>,
 }
 
@@ -237,10 +242,11 @@ impl<T: Clone> IdTbl<T> {
             return;
         }
         let next = std::mem::take(self);
-        let opened_components = components
-            .into_iter()
-            .map(|(id, value, pos)| (id.name().to_string(), (id, value, pos)))
-            .collect();
+        let mut opened_components: OpenedMap<(Ident, T, i32)> =
+            OpenedMap::with_capacity_and_hasher(components.len(), Default::default());
+        for (id, value, pos) in components {
+            opened_components.insert(id.name_smol().clone(), (id, value, pos));
+        }
         *self = Self {
             current: PersistentHashMap::default(),
             opened: Some(Arc::new(IdOpened {
@@ -257,19 +263,19 @@ impl<T: Clone> IdTbl<T> {
         let mut names = HashSet::new();
         for (name, count) in current_counts {
             if count > previous_counts.get(&name).copied().unwrap_or(0) {
-                names.insert(name.clone());
+                names.insert(name.to_string());
             }
         }
         names
     }
 
-    fn opened_name_counts(&self) -> HashMap<String, usize> {
+    fn opened_name_counts(&self) -> HashMap<SmolStr, usize> {
         let mut counts = HashMap::new();
         self.collect_opened_name_counts(&mut counts);
         counts
     }
 
-    fn collect_opened_name_counts(&self, counts: &mut HashMap<String, usize>) {
+    fn collect_opened_name_counts(&self, counts: &mut HashMap<SmolStr, usize>) {
         if let Some(opened) = &self.opened {
             for name in opened.components.keys() {
                 *counts.entry(name.clone()).or_default() += 1;
@@ -452,7 +458,7 @@ impl<T: Clone> Default for IdTbl<T> {
 
 #[derive(Debug, Clone)]
 struct TycompOpened<T> {
-    components: PersistentHashMap<String, Vec<(Ident, T)>>,
+    components: OpenedMap<Vec<(Ident, T)>>,
     next: Arc<TycompTbl<T>>,
 }
 
@@ -490,10 +496,10 @@ impl<T: Clone> TycompTbl<T> {
             return;
         }
         let next = std::mem::take(self);
-        let mut opened_components: PersistentHashMap<String, Vec<(Ident, T)>> =
-            PersistentHashMap::default();
+        let mut opened_components: OpenedMap<Vec<(Ident, T)>> =
+            OpenedMap::with_capacity_and_hasher(components.len(), Default::default());
         for (id, value) in components {
-            let name = id.name().to_string();
+            let name = id.name_smol().clone();
             match opened_components.get_mut(&name) {
                 Some(entries) => entries.insert(0, (id, value)),
                 None => {
@@ -516,19 +522,19 @@ impl<T: Clone> TycompTbl<T> {
         let mut names = HashSet::new();
         for (name, count) in current_counts {
             if count > previous_counts.get(&name).copied().unwrap_or(0) {
-                names.insert(name.clone());
+                names.insert(name.to_string());
             }
         }
         names
     }
 
-    fn opened_name_counts(&self) -> HashMap<String, usize> {
+    fn opened_name_counts(&self) -> HashMap<SmolStr, usize> {
         let mut counts = HashMap::new();
         self.collect_opened_name_counts(&mut counts);
         counts
     }
 
-    fn collect_opened_name_counts(&self, counts: &mut HashMap<String, usize>) {
+    fn collect_opened_name_counts(&self, counts: &mut HashMap<SmolStr, usize>) {
         if let Some(opened) = &self.opened {
             for (name, entries) in opened.components.iter() {
                 *counts.entry(name.clone()).or_default() += entries.len();
