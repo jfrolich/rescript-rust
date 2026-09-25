@@ -10120,7 +10120,7 @@ fn collect_deriving_not_applicable_warnings(
             },
         });
     }
-    if validate_deriving_accessors_for_tdcls(tdcls, arena).is_err() {
+    if validate_deriving_accessors_for_tdcls(tdcls, arena, context.runs_structure_gen()).is_err() {
         return;
     }
     let Some(last_tdcl) = tdcls.last() else {
@@ -12117,6 +12117,7 @@ fn handle_deriving_type(
 fn validate_deriving_accessors_for_tdcls(
     tdcls: &[TypeDeclaration],
     arena: &ParseArena,
+    in_structure: bool,
 ) -> PpxResult<()> {
     let Some(last_tdcl) = tdcls.last() else {
         return Ok(());
@@ -12154,23 +12155,42 @@ fn validate_deriving_accessors_for_tdcls(
             }
         }
     }
-    if !actions
-        .iter()
-        .any(|action| matches!(action, DeriveAction::Accessors))
-    {
-        return Ok(());
-    }
-
-    for tdcl in tdcls {
-        if let TypeKind::Ptype_variant(constructors) = &tdcl.ptype_kind {
-            for constructor in constructors {
-                if matches!(constructor.pcd_args, ConstructorArguments::Pcstr_record(_)) {
-                    return Err(PpxError::at_loc(
-                        constructor.pcd_loc,
-                        ACCESSORS_VARIANT_RECORD_ARG_ERROR,
-                    ));
+    // `Ast_derive.gen_structure` runs the derivers in payload order
+    // (bs_builtin_ppx.ml / ast_derive.ml).
+    for action in &actions {
+        match action {
+            DeriveAction::Accessors => {
+                for tdcl in tdcls {
+                    if let TypeKind::Ptype_variant(constructors) = &tdcl.ptype_kind {
+                        for constructor in constructors {
+                            if matches!(constructor.pcd_args, ConstructorArguments::Pcstr_record(_))
+                            {
+                                return Err(PpxError::at_loc(
+                                    constructor.pcd_loc,
+                                    ACCESSORS_VARIANT_RECORD_ARG_ERROR,
+                                ));
+                            }
+                        }
+                    }
                 }
             }
+            DeriveAction::JsConverter { .. } if in_structure => {
+                // Only `structure_gen` calls `Ast_derive_js_mapper.build_map` reads each tag's `@as` with
+                // `Ast_attributes.iter_process_bs_string_as`
+                // (ast_derive_js_mapper.ml:102-131).
+                for tdcl in tdcls {
+                    if let TypeKind::Ptype_abstract = &tdcl.ptype_kind
+                        && let Some(row_fields) = is_enum_polyvar(tdcl, arena)
+                    {
+                        for row_field in row_fields {
+                            if let RowField::Rtag(_, attrs, _, _) = row_field {
+                                validate_string_as_attrs(attrs, arena)?;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -12207,7 +12227,7 @@ fn validate_structure_deriving_errors(
         match &*item.pstr_desc {
             StructureItemDesc::Pstr_type(inner) => {
                 let (_rec_flag, tdcls) = &**inner;
-                validate_deriving_accessors_for_tdcls(tdcls, arena)?;
+                validate_deriving_accessors_for_tdcls(tdcls, arena, true)?;
             }
             StructureItemDesc::Pstr_module(mb) => {
                 let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
@@ -12259,7 +12279,7 @@ fn validate_signature_deriving_errors(
         match &*item.psig_desc {
             SignatureItemDesc::Psig_type(inner) => {
                 let (_rec_flag, tdcls) = &**inner;
-                validate_deriving_accessors_for_tdcls(tdcls, arena)?;
+                validate_deriving_accessors_for_tdcls(tdcls, arena, false)?;
             }
             SignatureItemDesc::Psig_module(md) => {
                 let mod_type = arena.get_mod_type(md.pmd_type).clone();
