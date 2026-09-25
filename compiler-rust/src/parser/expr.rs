@@ -2487,72 +2487,58 @@ fn parse_call_args(p: &mut Parser<'_>) -> (Vec<(ArgLabel, Expression)>, bool) {
     // OCaml's start_pos for empty args is the position after '(' is consumed
     let start_pos_idx = p.start_pos_idx();
 
-    // Leave breadcrumb for ArgumentList (matching OCaml's parse_comma_delimited_region)
+    // OCaml `parse_call_expr` (compiler/syntax/src/res_core.ml:4161-4175):
+    // `parse_comma_delimited_region ~grammar:ArgumentList ~closing:Rparen
+    // ~f:parse_argument` (res_core.ml:1068-1108), then an optional `...`
+    // partial-application marker after at least one argument.
+    p.leave_breadcrumb(Grammar::ExprCall);
     p.leave_breadcrumb(Grammar::ArgumentList);
-
-    // Uncurried call syntax: f(. x, y) or f(. x, y, . z)
-    // The dots are handled by parse_argument which consumes them
-
-    while p.token != Token::Rparen && p.token != Token::Eof {
-        // Check for partial application marker: f(a, ...)
-        if p.token == Token::DotDotDot {
-            p.next();
-            partial = true;
-            break;
-        }
-
-        // OCaml: parse_comma_delimited_region calls f() which returns None
-        // when the token can't start an argument. Check before parsing.
-        if !grammar::is_argument_start(&p.token) {
-            if recover::should_abort_list_parse(p) {
-                break;
+    loop {
+        if grammar::is_argument_start(&p.token) {
+            let (label, expr) = parse_argument(p);
+            args.push((label, expr));
+            match p.token {
+                Token::Comma => p.next(),
+                Token::Rparen | Token::Eof => break,
+                ref token if grammar::is_argument_start(token) => p.expect(Token::Comma),
+                _ => {
+                    if !(p.token == Token::Eof
+                        || p.token == Token::Rparen
+                        || recover::should_abort_list_parse(p))
+                    {
+                        p.expect(Token::Comma);
+                    }
+                    if p.token == Token::Semicolon {
+                        p.next();
+                    }
+                }
             }
+        } else if p.token == Token::Eof
+            || p.token == Token::Rparen
+            || recover::should_abort_list_parse(p)
+        {
+            break;
+        } else {
             p.err(DiagnosticCategory::unexpected(
                 p.token.clone().into_owned(),
                 p.breadcrumbs().to_vec(),
             ));
             p.next();
-            continue;
-        }
-
-        let (label, expr) = parse_argument(p);
-        args.push((label, expr));
-
-        if p.token == Token::Comma {
-            // Consume the comma and continue
-            p.next();
-        } else if p.token == Token::Rparen || p.token == Token::Eof {
-            // At closing token, done
-            break;
-        } else if grammar::is_argument_start(&p.token) {
-            // Token looks like another argument but no comma - missing comma case
-            // This matches OCaml: "is_list_element grammar p.token" check
-            p.expect(Token::Comma);
-            // Continue parsing (don't break)
-        } else if !recover::should_abort_list_parse(p) {
-            // Token is not argument start, not closing, not EOF,
-            // and should_abort_list_parse is false - expect comma
-            // This matches OCaml's behavior for unexpected tokens like ']' in arg list
-            p.expect(Token::Comma);
-            // Skip semicolons if present (OCaml does this)
-            if p.token == Token::Semicolon {
-                p.next();
-            }
-            // Continue parsing (don't break)
-        } else {
-            // should_abort_list_parse returned true - stop parsing
-            break;
         }
     }
-
     p.eat_breadcrumb();
+    if p.token == Token::DotDotDot && !args.is_empty() {
+        p.next();
+        partial = true;
+    }
     p.expect(Token::Rparen);
+    p.eat_breadcrumb();
     // Get prev_end_pos AFTER consuming ')' to match OCaml behavior
     let rparen_end_idx = p.prev_end_pos_idx();
 
     // If no arguments were parsed, treat f() as f(())
     // OCaml treats empty parens as a unit argument
-    if args.is_empty() && !partial {
+    if args.is_empty() {
         let unit_loc = p.mk_loc_idx(start_pos_idx, rparen_end_idx);
         let lid_idx = p.push_lident_static("()");
         let unit_expr = Expression {
