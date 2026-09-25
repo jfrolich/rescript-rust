@@ -3056,25 +3056,18 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
     let start_pos_idx = p.start_pos_idx();
     p.expect(Token::Lbracket);
 
-    // Track items with spread marker: (is_spread, expr)
-    let mut items: Vec<(bool, Expression)> = vec![];
-    while p.token != Token::Rbracket && p.token != Token::Eof {
-        let is_spread = p.token == Token::DotDotDot;
-        if is_spread {
-            p.next();
-        }
-        let expr = parse_constrained_or_coerced_expr(p);
-        items.push((is_spread, expr));
-        if !p.optional(&Token::Comma) {
-            break;
-        }
-    }
-
-    // OCaml: the old Reason syntax [|...|] leaves a trailing | before ].
-    // Skip it so we can properly close the array.
-    if p.token == Token::Bar {
-        p.next();
-    }
+    // OCaml res_core.ml:4498-4502: `parse_comma_delimited_reversed_list
+    // ~grammar:ExprList ~closing:Rbracket ~f:parse_spread_expr_region_with_loc`.
+    let mut items: Vec<(bool, Expression)> = super::core::parse_comma_delimited_reversed_list(
+        p,
+        Grammar::ExprList,
+        Token::Rbracket,
+        parse_spread_expr_region_with_loc,
+    )
+    .into_iter()
+    .map(|(is_spread, expr, _, _)| (is_spread, expr))
+    .collect();
+    items.reverse();
     p.expect(Token::Rbracket);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
@@ -3171,26 +3164,37 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
 /// - `list{1, 2, ...rest}` becomes `1 :: (2 :: rest)`
 /// - `list{...xs, ...ys}` becomes `Primitive_list.spread([xs, ys])`
 /// - `list{...xs, 1, ...ys}` becomes `Primitive_list.spread([xs, 1 :: ys])`
+/// OCaml `parse_spread_expr_region_with_loc` (res_core.ml:4334-4343).
+fn parse_spread_expr_region_with_loc(
+    p: &mut Parser<'_>,
+) -> Option<(bool, Expression, PosIdx, PosIdx)> {
+    let start_pos_idx = p.prev_end_pos_idx();
+    if p.token == Token::DotDotDot {
+        p.next();
+        let expr = parse_constrained_or_coerced_expr(p);
+        Some((true, expr, start_pos_idx, p.prev_end_pos_idx()))
+    } else if grammar::is_expr_start(&p.token) {
+        let expr = parse_constrained_or_coerced_expr(p);
+        Some((false, expr, start_pos_idx, p.prev_end_pos_idx()))
+    } else {
+        None
+    }
+}
+
 fn parse_list_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     // Token::List already consumed the opening '{'
     // Each item is (is_spread, expr, spread_start_pos)
     // For spread items, spread_start_pos is before `...`; for non-spread, it's at the expr start
-    let mut items: Vec<(bool, Expression, PosIdx, PosIdx)> = vec![];
-
-    while p.token != Token::Rbrace && p.token != Token::Eof {
-        let item_start_pos_idx = p.prev_end_pos_idx(); // OCaml: p.Parser.prev_end_pos
-        let is_spread = p.token == Token::DotDotDot;
-        if is_spread {
-            p.next();
-        }
-        let expr = parse_constrained_or_coerced_expr(p);
-        let item_end_pos_idx = p.prev_end_pos_idx();
-        items.push((is_spread, expr, item_start_pos_idx, item_end_pos_idx));
-
-        if !p.optional(&Token::Comma) {
-            break;
-        }
-    }
+    // OCaml res_core.ml:4370-4373: `parse_comma_delimited_reversed_list
+    // ~grammar:ListExpr ~closing:Rbrace ~f:parse_spread_expr_region_with_loc`.
+    let mut items: Vec<(bool, Expression, PosIdx, PosIdx)> =
+        super::core::parse_comma_delimited_reversed_list(
+            p,
+            Grammar::ListExpr,
+            Token::Rbrace,
+            parse_spread_expr_region_with_loc,
+        );
+    items.reverse();
 
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
