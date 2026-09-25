@@ -378,20 +378,29 @@ fn format_include_error(
             expected,
             detail,
         } => {
-            if matches!(detail, TypeDeclarationMismatchDetail::Variance) {
+            // includemod.ml:555-561:
+            // "@[<hv>%s:@;<1 2>%a@ %s@;<1 2>%a@]" -- one line when it fits.
+            let actual_text = format_type_declaration(type_ctx, name, actual);
+            let expected_text = format_type_declaration(type_ctx, name, expected);
+            if hv_fits_on_one_line(&[
+                "Type declarations do not match:",
+                &actual_text,
+                "is not included in",
+                &expected_text,
+            ]) {
                 output.push_str("  Type declarations do not match: ");
-                output.push_str(&format_type_declaration(type_ctx, name, actual));
+                output.push_str(&actual_text);
                 output.push_str(" is not included in ");
-                output.push_str(&format_type_declaration(type_ctx, name, expected));
+                output.push_str(&expected_text);
                 output.push('\n');
             } else {
                 output.push_str("  Type declarations do not match:\n");
                 output.push_str("    ");
-                output.push_str(&format_type_declaration(type_ctx, name, actual));
+                output.push_str(&actual_text);
                 output.push('\n');
                 output.push_str("  is not included in\n");
                 output.push_str("    ");
-                output.push_str(&format_type_declaration(type_ctx, name, expected));
+                output.push_str(&expected_text);
                 output.push('\n');
             }
             push_show_loc(
@@ -860,6 +869,30 @@ fn format_value_description_with_options(
     }
 }
 
+/// Whether an `@[<hv>` box at column 2 holding `parts` separated by break
+/// hints stays on one line under the Format margin. Multi-line parts contain
+/// forced breaks, so the box cannot be horizontal.
+fn hv_fits_on_one_line(parts: &[&str]) -> bool {
+    if parts.iter().any(|part| part.contains('\n')) {
+        return false;
+    }
+    let mut buf = Vec::new();
+    {
+        let mut ppf = crate::parser::formatter::Formatter::new(&mut buf);
+        ppf.string_as(2, "");
+        ppf.open_box(crate::parser::formatter::BoxKind::HV, 0);
+        for (index, part) in parts.iter().enumerate() {
+            if index > 0 {
+                ppf.break_(1, 2);
+            }
+            ppf.string_as(part.chars().count(), part);
+        }
+        ppf.close_box();
+        ppf.flush();
+    }
+    !buf.contains(&b'\n')
+}
+
 fn format_type_declaration(type_ctx: &TypeContext, id: &Ident, decl: &TypeDeclaration) -> String {
     format_type_declaration_with_options(type_ctx, id, decl, false, false)
 }
@@ -911,12 +944,32 @@ fn format_type_declaration_with_options_and_rec(
 ) -> String {
     let mut printer = TypeExprErrorPrinter::new_with_options(type_ctx, weak_names, full_paths);
     let name = id.name();
-    let params = format_type_params(
-        &mut printer,
-        &decl.type_params,
-        &decl.type_variance,
-        matches!(decl.type_kind, TypeKind::TypeAbstract),
-    );
+    // printtyp.ml:841-858: `abstr` decides whether variances are printed;
+    // non-variable parameters always show theirs.
+    let abstr = match &decl.type_kind {
+        TypeKind::TypeAbstract => {
+            decl.type_manifest.is_none() || decl.type_private == crate::types::PrivateFlag::Private
+        }
+        TypeKind::TypeRecord(..) => decl.type_private == crate::types::PrivateFlag::Private,
+        TypeKind::TypeVariant(constructors, _) => {
+            decl.type_private == crate::types::PrivateFlag::Private
+                || constructors.iter().any(|cd| cd.cd_res.is_some())
+        }
+        TypeKind::TypeOpen => decl.type_manifest.is_none(),
+    };
+    let shown_variances: Vec<Option<crate::types::Variance>> = decl
+        .type_params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| {
+            if abstr || !crate::types::btype::is_tvar(type_ctx, *param) {
+                decl.type_variance.get(index).copied()
+            } else {
+                None
+            }
+        })
+        .collect();
+    let params = format_type_params_with_variances(&mut printer, &decl.type_params, &shown_variances);
     let unboxed = decl
         .variant_layout_ref()
         .map(|layout_ref| {
@@ -1099,6 +1152,29 @@ fn format_constructor_representation(
         crate::types::VariantTagType::Untagged(_) => return String::new(),
     };
     format!("@as({payload}) ")
+}
+
+fn format_type_params_with_variances(
+    printer: &mut TypeExprErrorPrinter<'_>,
+    params: &[TypeExprRef],
+    variances: &[Option<crate::types::Variance>],
+) -> String {
+    params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| {
+            let variance = match variances.get(index).copied().flatten() {
+                Some(variance) => match variance.get_upper() {
+                    (true, false) => "+",
+                    (false, true) => "-",
+                    _ => "",
+                },
+                None => "",
+            };
+            format!("{variance}{}", printer.format(*param))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn format_type_params(
