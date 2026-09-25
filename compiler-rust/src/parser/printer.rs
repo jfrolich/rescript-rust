@@ -1659,6 +1659,12 @@ pub fn print_expression(
                 print_extension(state, ext, false, cmt_tbl, arena)
             }
         }
+        // res_printer.ml:3857-3859: an if-let prints as an if chain.
+        ExpressionDesc::Pexp_match(inner)
+            if inner.1.len() == 2 && parsetree_viewer::is_if_let_expr(arena, e) =>
+        {
+            print_if_chain(state, e, cmt_tbl, arena)
+        }
         // Match expression
         ExpressionDesc::Pexp_match(inner) => {
             let (ref expr_idx, ref cases) = **inner;

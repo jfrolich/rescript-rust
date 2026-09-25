@@ -986,7 +986,9 @@ pub fn fun_expr<'a>(
 // Attribute Processing
 // ============================================================================
 
-/// Filter out fragile match attributes (used internally).
+/// `Res_parsetree_viewer.filter_fragile_match_attributes`
+/// (res_parsetree_viewer.ml:506-521): drop the `@warning("-4")` that the
+/// parser attaches to if-let matches.
 pub fn filter_fragile_match_attributes<'a>(
     arena: &ParseArena,
     attrs: &'a Attributes,
@@ -994,8 +996,23 @@ pub fn filter_fragile_match_attributes<'a>(
     attrs
         .iter()
         .filter(|attr| {
-            let name = arena.get_string(attr.0.txt);
-            name != "res.braces" && name != "res.ternary"
+            if arena.get_string(attr.0.txt) != "warning" {
+                return true;
+            }
+            let Payload::PStr(items) = &attr.1 else {
+                return true;
+            };
+            let [item] = items.as_slice() else {
+                return true;
+            };
+            let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
+                return true;
+            };
+            !matches!(
+                &*arena.get_expr(inner.0).pexp_desc,
+                ExpressionDesc::Pexp_constant(constant)
+                    if matches!(&**constant, Constant::String(s, _) if s.as_ref() == "-4")
+            )
         })
         .collect()
 }
@@ -1120,8 +1137,9 @@ pub fn partition_printable_attributes<'a>(
 /// Check if expression has any attributes (excluding internal parsing ones).
 pub fn has_attributes(arena: &ParseArena, attrs: &Attributes) -> bool {
     attrs.iter().any(|attr| {
-        !matches!(
-            arena.get_string(attr.0.txt),
+        let name = arena.get_string(attr.0.txt);
+        if matches!(
+            name,
             "res.braces"
                 | "ns.braces"
                 | "res.iflet"
@@ -1129,8 +1147,34 @@ pub fn has_attributes(arena: &ParseArena, attrs: &Attributes) -> bool {
                 | "res.await"
                 | "res.template"
                 | "res.inlineRecordDefinition"
-        )
+        ) {
+            return false;
+        }
+        // res_parsetree_viewer.ml:395-405: the fragile-match warning of an
+        // if-let does not count.
+        if name == "warning" && is_fragile_match_warning_payload(arena, &attr.1) {
+            return !has_if_let_attribute(arena, attrs);
+        }
+        true
     })
+}
+
+/// `PStr [Pstr_eval (Pexp_constant (Pconst_string ("-4", None)), _)]`.
+fn is_fragile_match_warning_payload(arena: &ParseArena, payload: &Payload) -> bool {
+    let Payload::PStr(items) = payload else {
+        return false;
+    };
+    let [item] = items.as_slice() else {
+        return false;
+    };
+    let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
+        return false;
+    };
+    matches!(
+        &*arena.get_expr(inner.0).pexp_desc,
+        ExpressionDesc::Pexp_constant(constant)
+            if matches!(&**constant, Constant::String(s, None) if s.as_ref() == "-4")
+    )
 }
 
 /// Check if an attribute is the inline record definition marker.
