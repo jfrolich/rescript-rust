@@ -11442,7 +11442,12 @@ fn lookup_modtype_path_or_error<'b>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'b crate::types::context::TypeContext,
 ) -> TypeModResult<Path> {
-    if module_lid_references_recursive_placeholder(lid, arena, env) {
+    // `Env.lookup_modtype` (env.ml:1022-1036) only goes through
+    // `lookup_module_descr` for the module prefix of a dotted path; a bare
+    // name is looked up among module types.
+    if let crate::parser::longident::Longident::Ldot(prefix, _) = lid
+        && module_lid_references_recursive_placeholder(prefix, arena, env)
+    {
         return Err(TypeModError::CoreError(
             TypeCoreError::IllegalReferenceToRecursiveModule { loc },
         ));
