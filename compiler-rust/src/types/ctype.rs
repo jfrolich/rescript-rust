@@ -4195,6 +4195,35 @@ pub(crate) fn expand_abbrev_opt_once<'a>(
         .map(|expanded| ctx.repr(expanded))
 }
 
+/// OCaml `Ctype.cyclic_abbrev env id ty` (ctype.ml:3953-3968): whether the
+/// manifest `ty` of the declaration `id` expands back to `id` or loops.
+pub(crate) fn cyclic_abbrev(ctx: &TypeContext, env: &Env, id: &Ident, ty: TypeExprRef) -> bool {
+    let mut seen: Vec<TypeExprRef> = Vec::new();
+    let mut current = ty;
+    loop {
+        let ty = ctx.repr(current);
+        let path = match &*ctx.get_desc(ty) {
+            TypeDesc::Tconstr { path, .. } => path.clone(),
+            _ => return false,
+        };
+        if matches!(&path, Path::Pident(p) if p.same(id)) || seen.contains(&ty) {
+            return true;
+        }
+        match expand_abbrev_opt_once(ctx, env, ty) {
+            Some(expanded) => {
+                seen.push(ty);
+                current = expanded;
+            }
+            None => {
+                // `expand_abbrev_opt` still normalizes the path when
+                // `Env.find_type_expansion` fails (ctype.ml:1367-1372).
+                force_normalize_path_full_side_effects(ctx, env, &path);
+                return false;
+            }
+        }
+    }
+}
+
 /// OCaml `Ctype.same_constr` (ctype.ml:4259-4264): whether two types expand
 /// to constructors with the same path.
 pub fn same_constr(ctx: &TypeContext, env: &Env, t1: TypeExprRef, t2: TypeExprRef) -> bool {

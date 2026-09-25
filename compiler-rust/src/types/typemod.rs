@@ -21212,7 +21212,6 @@ fn type_structure_item<'a>(
                     } else {
                         transl_type(tctx, &temp_env, object_manifest)?
                     };
-                    touch_manifest_cyclic_abbrev_check(ctx, &temp_env, type_ref);
                     (Some(typed_manifest), Some(type_ref))
                 } else {
                     match &decl.ptype_manifest {
@@ -21229,7 +21228,6 @@ fn type_structure_item<'a>(
                                 } else {
                                     transl_type(tctx, &temp_env, manifest_ct)?
                                 };
-                            touch_manifest_cyclic_abbrev_check(ctx, &temp_env, type_ref);
                             if is_fixed_type {
                                 let row_id =
                                     fixed_row_type_id_for_decl(&fixed_row_type_ids, decl_idx)
@@ -21256,6 +21254,15 @@ fn type_structure_item<'a>(
                 // constraints before end_def/generalization, so constrained
                 // parameters are linked in the stored declaration.
                 unify_type_declaration_constraints(tctx, &typ_cstrs)?;
+                // OCaml typedecl.ml:724-730: `Ctype.cyclic_abbrev env id ty`.
+                if let Some(manifest) = manifest_type_ref
+                    && crate::types::ctype::cyclic_abbrev(ctx, &temp_env, &type_id, manifest)
+                {
+                    return Err(TypeModError::RecursiveAbbrev {
+                        loc: decl.ptype_loc,
+                        name: arena.get_string(decl.ptype_name.txt).to_string(),
+                    });
+                }
 
                 let type_attributes = parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
                 let type_representation = if decl_has_unboxed_attr && constructors.len() <= 1 {
@@ -23773,7 +23780,6 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                         } else {
                             transl_type(tctx, &temp_env, manifest_ct)?
                         };
-                    touch_manifest_cyclic_abbrev_check(ctx, &temp_env, manifest_ref);
                     if is_fixed_type {
                         let row_id = fixed_row_type_id_for_decl(&fixed_row_type_ids, decl_idx)
                             .expect("fixed private row type must have a synthetic row id");
@@ -23795,6 +23801,15 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
             // constraints before end_def/generalization, so constrained
             // parameters are linked in the stored declaration.
             unify_type_declaration_constraints(tctx, &typ_cstrs)?;
+            // OCaml typedecl.ml:724-730: `Ctype.cyclic_abbrev env id ty`.
+            if let Some(manifest) = manifest_type_ref
+                && crate::types::ctype::cyclic_abbrev(ctx, &temp_env, &type_id, manifest)
+            {
+                return Err(TypeModError::RecursiveAbbrev {
+                    loc: decl.ptype_loc,
+                    name: arena.get_string(decl.ptype_name.txt).to_string(),
+                });
+            }
 
             let typ_private = decl.ptype_private;
 
