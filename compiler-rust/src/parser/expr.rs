@@ -2499,6 +2499,13 @@ fn parse_argument(p: &mut Parser<'_>) -> (ArgLabel, Expression) {
 
     if p.token == Token::Tilde {
         p.next();
+        // OCaml `parse_argument2` (res_core.ml:4073-4157): a non-Lident token
+        // after `~` reports `Diagnostics.lident` without consuming it and
+        // yields a `Nolabel` expression hole.
+        if !matches!(p.token, Token::Lident(_)) {
+            p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
+            return (ArgLabel::Nolabel, recover::default_expr(p.arena_mut()));
+        }
         let (name, name_loc) = parse_lident(p);
         // Push a unique string (no global deduplication) - user identifiers should not be shared
         // with other uses of the same name elsewhere. The same StrIdx is reused for both label and
