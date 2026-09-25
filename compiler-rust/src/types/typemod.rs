@@ -17300,6 +17300,7 @@ pub fn type_structure<'a>(
 ) -> TypeModResult<(Structure, Env)> {
     tctx.drain_open_slot_uses();
     let previous_config = tctx.warning_config.clone();
+    tctx.type_ctx.note_report_warning_config(&previous_config);
     let result = type_structure_unscoped(tctx, env, arena, items);
     tctx.drain_open_slot_uses();
     tctx.warning_config = previous_config;

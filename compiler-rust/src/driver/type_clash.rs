@@ -257,6 +257,7 @@ fn extract_text_at_loc(arena: &ParseArena, source: &str, loc: LocIdx) -> String 
 /// `!Parser.parse_source` then `!Parser.reprint_source`, applied to the
 /// expression at `loc` after `mapper` (`Parser.reprint_expr_at_loc`).
 fn reprint_expr_at_loc(
+    ctx: &TypeContext,
     arena: &ParseArena,
     source: &str,
     loc: LocIdx,
@@ -265,6 +266,7 @@ fn reprint_expr_at_loc(
     let text = extract_text_at_loc(arena, source, loc);
     let mut parser = crate::parser::Parser::new("<none>", &text);
     let structure = crate::parser::module::parse_structure(&mut parser);
+    ctx.push_reparse_warnings(parser.warnings());
     let comments = parser.take_comments();
     let mut sub_arena = parser.into_arena();
     let [item] = structure.as_slice() else {
@@ -289,9 +291,10 @@ fn reprint_expr_at_loc(
 }
 
 /// `!Parser.parse_source text` followed by `!Parser.reprint_source`.
-fn parse_and_reprint(text: &str) -> Option<String> {
+fn parse_and_reprint(ctx: &TypeContext, text: &str) -> Option<String> {
     let mut parser = crate::parser::Parser::new("<none>", text);
     let structure = crate::parser::module::parse_structure(&mut parser);
+    ctx.push_reparse_warnings(parser.warnings());
     if structure.is_empty() {
         return None;
     }
@@ -306,9 +309,10 @@ fn parse_and_reprint(text: &str) -> Option<String> {
 }
 
 /// Whether `text` parses to a single constant expression.
-fn text_is_constant(text: &str) -> bool {
+fn text_is_constant(ctx: &TypeContext, text: &str) -> bool {
     let mut parser = crate::parser::Parser::new("<none>", text);
     let structure = crate::parser::module::parse_structure(&mut parser);
+    ctx.push_reparse_warnings(parser.warnings());
     let arena = parser.into_arena();
     match structure.as_slice() {
         [item] => match &*item.pstr_desc {
@@ -323,9 +327,10 @@ fn text_is_constant(text: &str) -> bool {
 }
 
 /// `extract_string_constant`.
-fn extract_string_constant(text: &str) -> Option<String> {
+fn extract_string_constant(ctx: &TypeContext, text: &str) -> Option<String> {
     let mut parser = crate::parser::Parser::new("<none>", text);
     let structure = crate::parser::module::parse_structure(&mut parser);
+    ctx.push_reparse_warnings(parser.warnings());
     let arena = parser.into_arena();
     let [item] = structure.as_slice() else {
         return None;
@@ -720,7 +725,7 @@ fn print_extra_type_clash_help_by_types(
         ppf.str(" where a ");
         tagged(ppf, TAG_INFO, "record");
         ppf.str(" is expected. Objects are written with quoted keys, and records with unquoted keys.");
-        let suggested = reprint_expr_at_loc(arena, source, loc, |a, exp| {
+        let suggested = reprint_expr_at_loc(ctx, arena, source, loc, |a, exp| {
             let crate::parser::ast::ExpressionDesc::Pexp_extension(ext) = &*exp.pexp_desc else {
                 return None;
             };
@@ -760,7 +765,7 @@ fn print_extra_type_clash_help_by_types(
     }
     // | _, Some ({desc = Tconstr (p1, _, _)}, {desc = Ttuple _}) when p1 = array
     if is(&p1, predef::path_array()) && matches!(d2, TypeDesc::Ttuple(_)) {
-        let suggested = reprint_expr_at_loc(arena, source, loc, |_, exp| {
+        let suggested = reprint_expr_at_loc(ctx, arena, source, loc, |_, exp| {
             let crate::parser::ast::ExpressionDesc::Pexp_array(items) = &*exp.pexp_desc else {
                 return None;
             };
@@ -893,7 +898,7 @@ fn print_extra_type_clash_help_by_types(
         && p2.is_some()
         && is_record_type(ctx, env, b2)
     {
-        let rewrite = reprint_expr_at_loc(arena, source, loc, |a, exp| {
+        let rewrite = reprint_expr_at_loc(ctx, arena, source, loc, |a, exp| {
             let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &*exp.pexp_desc else {
                 return None;
             };
@@ -935,10 +940,10 @@ fn print_extra_type_clash_help_by_types(
         && let TypeDesc::Tvariant(row) = &d2
     {
         let text = extract_text_at_loc(arena, source, loc);
-        if let Some(string_value) = extract_string_constant(&text) {
+        if let Some(string_value) = extract_string_constant(ctx, &text) {
             let variant_constructors: Vec<String> =
                 row.row_fields.iter().map(|(l, _)| l.to_string()).collect();
-            let reprinted = reprint_expr_at_loc(arena, source, loc, |_, exp| {
+            let reprinted = reprint_expr_at_loc(ctx, arena, source, loc, |_, exp| {
                 let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = &*exp.pexp_desc else {
                     return None;
                 };
@@ -968,7 +973,7 @@ fn print_extra_type_clash_help_by_types(
     // | _, Some ({desc = Tconstr (p1)}, ({desc = Tconstr _} as t2)) when p1 = string && is_variant_type t2
     if is(&p1, predef::path_string()) && p2.is_some() && is_variant_type(ctx, env, b2) {
         let text = extract_text_at_loc(arena, source, loc);
-        if let Some(string_value) = extract_string_constant(&text)
+        if let Some(string_value) = extract_string_constant(ctx, &text)
             && let Some(decl) = extract_concrete_typedecl(ctx, env, b2)
             && let crate::types::decl::TypeKind::TypeVariant(constructors, layout) = &decl.type_kind
         {
@@ -983,7 +988,7 @@ fn print_extra_type_clash_help_by_types(
                 (runtime_repr.as_deref() == Some(string_value.as_str())).then_some(constructor_name)
             });
             if let Some(constructor_name) = matching {
-                let reprinted = reprint_expr_at_loc(arena, source, loc, |a, exp| {
+                let reprinted = reprint_expr_at_loc(ctx, arena, source, loc, |a, exp| {
                     if !matches!(&*exp.pexp_desc, crate::parser::ast::ExpressionDesc::Pexp_constant(c)
                         if matches!(&**c, crate::parser::ast::Constant::String(..)))
                     {
@@ -1032,8 +1037,8 @@ fn print_extra_type_clash_help_by_types(
     };
     let target_expr_text = extract_text_at_loc(arena, source, loc);
     let suggested_rewrite =
-        parse_and_reprint(&format!("({target_expr_text} :> {target_type_string})"));
-    let is_constant = text_is_constant(&target_expr_text);
+        parse_and_reprint(ctx, &format!("({target_expr_text} :> {target_type_string})"));
+    let is_constant = text_is_constant(ctx, &target_expr_text);
     if can_show_coercion_message && !is_constant {
         ppf.cut();
         ppf.cut();

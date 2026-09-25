@@ -2525,6 +2525,21 @@ fn type_mod_error_to_anyhow(
 ) -> anyhow::Error {
     let error =
         type_mod_error_to_anyhow_styled(err, type_ctx, arena, source, filename, suppress_info_style);
+    // The snippets the report re-parsed printed their parser warnings first
+    // (`Error_message_utils.Parser.parse_source`, Location.prerr_warning).
+    let reparse_warnings = format_reparse_warnings(type_ctx);
+    let error = if reparse_warnings.is_empty() {
+        error
+    } else {
+        match error.downcast::<UserDiagnostic>() {
+            Ok(diagnostic) => UserDiagnostic {
+                output: format!("{reparse_warnings}{}", diagnostic.output),
+                exit_code: diagnostic.exit_code,
+            }
+            .into(),
+            Err(error) => error,
+        }
+    };
     if !suppress_info_style {
         return error;
     }
@@ -2539,6 +2554,51 @@ fn type_mod_error_to_anyhow(
         .into(),
         Err(error) => error,
     }
+}
+
+/// The parser warnings of the snippets an error report re-parsed, at their
+/// `<none>` locations (no code frame), as `Location.prerr_warning` prints
+/// them.
+fn format_reparse_warnings(type_ctx: &TypeContext) -> String {
+    let warnings = type_ctx.take_reparse_warnings();
+    if warnings.is_empty() {
+        return String::new();
+    }
+    let config = type_ctx.report_warning_config();
+    let mut output = String::new();
+    for parser_warning in warnings {
+        let warning = match parser_warning.kind {
+            crate::parser::ParserWarningKind::DeprecatedUncurriedDotSyntax => {
+                crate::diagnostics::Warning::Deprecated {
+                    message: "The `(. ...)` uncurried syntax is deprecated. Uncurried is now the default in ReScript — remove the leading dot.".to_string(),
+                    def_loc: crate::location::Location::none(),
+                    use_loc: crate::location::Location::none(),
+                    can_be_automigrated: false,
+                }
+            }
+        };
+        if !config.is_active(&warning) {
+            continue;
+        }
+        let is_error = config.is_error(&warning);
+        code_frame::mark_color_setup();
+        output.push_str("\n  ");
+        output.push_str(&code_frame::colorize_intro(
+            &format!("Warning number {}", warning.number()),
+            is_error,
+        ));
+        if is_error {
+            output.push_str(" (configured as error) ");
+        }
+        output.push_str("\n  ");
+        let location =
+            code_frame::format_location("<none>", &parser_warning.start_pos, &parser_warning.end_pos);
+        output.push_str(&code_frame::colorize_location(&location));
+        output.push_str("\n\n  ");
+        output.push_str(&warning.message());
+        output.push_str("\n\n");
+    }
+    output
 }
 
 fn type_mod_error_to_anyhow_styled(

@@ -412,6 +412,15 @@ pub struct TypeContext {
     /// OCaml `Env`'s usage tables (env.ml:27-53).
     usage: RefCell<super::usage::UsageTables>,
 
+    /// Parser warnings of the snippets error reports re-parse
+    /// (`Error_message_utils.Parser.parse_source`), printed before the error
+    /// like OCaml's immediate `Location.prerr_warning`.
+    reparse_warnings: RefCell<Vec<crate::parser::ParserWarning>>,
+    /// The warning state outside the implementation's structure, which is
+    /// current when an error is reported (`Typemod.type_structure`'s
+    /// `warning_scope` has been left).
+    report_warning_config: RefCell<Option<crate::diagnostics::WarningConfig>>,
+
     /// Stable forward references for canonical variant layouts. Entries are
     /// allocated before translating a recursive declaration group and completed
     /// exactly once after the group is available in the environment.
@@ -683,6 +692,8 @@ impl TypeContext {
             open_slots: RefCell::new(Vec::new()),
             open_slot_events: RefCell::new(Vec::new()),
             usage: RefCell::new(super::usage::UsageTables::default()),
+            reparse_warnings: RefCell::new(Vec::new()),
+            report_warning_config: RefCell::new(None),
             variant_layouts: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
@@ -1860,6 +1871,29 @@ impl TypeContext {
     }
 
     /// Take the recorded `using` calls in call order.
+    pub(crate) fn push_reparse_warnings(&self, warnings: &[crate::parser::ParserWarning]) {
+        self.reparse_warnings.borrow_mut().extend_from_slice(warnings);
+    }
+
+    pub(crate) fn take_reparse_warnings(&self) -> Vec<crate::parser::ParserWarning> {
+        std::mem::take(&mut *self.reparse_warnings.borrow_mut())
+    }
+
+    /// Record the warning state at the outermost structure entry.
+    pub(crate) fn note_report_warning_config(&self, config: &crate::diagnostics::WarningConfig) {
+        let mut slot = self.report_warning_config.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(config.clone());
+        }
+    }
+
+    pub(crate) fn report_warning_config(&self) -> crate::diagnostics::WarningConfig {
+        self.report_warning_config
+            .borrow()
+            .clone()
+            .unwrap_or_else(crate::diagnostics::WarningConfig::new)
+    }
+
     /// The usage tables of OCaml `Env` (env.ml:27-53).
     pub(crate) fn usage(&self) -> std::cell::RefMut<'_, super::usage::UsageTables> {
         self.usage.borrow_mut()
