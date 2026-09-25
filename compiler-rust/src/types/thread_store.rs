@@ -63,6 +63,7 @@ struct PersEntry {
 
 /// One type declaration of a store-owned signature, with the keys a unit's
 /// `TypeContext` registers it under.
+#[derive(Debug)]
 pub(crate) struct SigTypeRegistration {
     pub(crate) name: smol_str::SmolStr,
     pub(crate) stamp: i32,

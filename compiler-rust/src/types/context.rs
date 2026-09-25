@@ -334,6 +334,13 @@ pub struct TypeContext {
     type_decl_by_path: RefCell<ahash::AHashMap<smol_str::SmolStr, Arc<super::decl::TypeDeclaration>>>,
     /// Qualified declarations keyed by Path identity, preserving local stamps.
     type_decl_by_exact_path: RefCell<ahash::AHashMap<Path, Arc<super::decl::TypeDeclaration>>>,
+    /// Registrations for the four maps above, in registration order. Each map
+    /// replays the log up to the present only when it is read: modules
+    /// register every type of every loaded dependency but read these maps
+    /// rarely, and most registrations come as one shared batch per signature.
+    type_decl_log: RefCell<Vec<TypeDeclRegistration>>,
+    /// Log position each map has been replayed to: name, stamp, path, exact.
+    type_decl_log_replayed: [Cell<usize>; 4],
     type_item_by_path: RefCell<ahash::AHashMap<String, (Ident, super::decl::TypeDeclaration)>>,
     missing_type_item_by_path: RefCell<ahash::AHashSet<String>>,
 
@@ -397,19 +404,6 @@ pub struct TypeContext {
     /// Forced declarations shared by persistent/global alias component views.
     /// Local component views keep their own thunk state in StructureComponentTables.
     qualified_module_decl_cache: RefCell<
-    /// Cached forward-only (unification) normalize_path results, keyed like
-    /// `normalized_path_full_cache`.
-    normalized_path_forward_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
-
-    /// `occur_univar` argument masks per (scope, constructor path): bit `i`
-    /// is set when argument `i` has a may-positive or may-negative variance;
-    /// `None` when the declaration is not found (every argument is visited).
-    occur_variance_masks: RefCell<ahash::AHashMap<(u64, Path), Option<u64>>>,
-
-    /// `Ctype.get_level` declaration levels per (scope, type path): the
-    /// `type_newtype_level` of the declaration `Env.find_type` returns.
-    type_newtype_levels: RefCell<ahash::AHashMap<(u64, Path), Option<i32>>>,
-
         ahash::AHashMap<
             Path,
             ahash::AHashMap<String, (Ident, Arc<super::decl::ModuleDeclaration>)>,
@@ -424,6 +418,19 @@ pub struct TypeContext {
 
     /// Cached full normalize_path results keyed by environment identity.
     normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
+
+    /// Cached forward-only (unification) normalize_path results, keyed like
+    /// `normalized_path_full_cache`.
+    normalized_path_forward_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
+
+    /// `occur_univar` argument masks per (scope, constructor path): bit `i`
+    /// is set when argument `i` has a may-positive or may-negative variance;
+    /// `None` when the declaration is not found (every argument is visited).
+    occur_variance_masks: RefCell<ahash::AHashMap<(u64, Path), Option<u64>>>,
+
+    /// `Ctype.get_level` declaration levels per (scope, type path): the
+    /// `type_newtype_level` of the declaration `Env.find_type` returns.
+    type_newtype_levels: RefCell<ahash::AHashMap<(u64, Path), Option<i32>>>,
 
     /// Cached side-effectful normalize_path results keyed by environment identity.
     forced_normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
@@ -572,6 +579,17 @@ pub struct TypeContext {
     typed_envs_by_id: RefCell<ahash::AHashMap<u64, EnvRef>>,
 }
 
+/// One registration for the global type-declaration maps.
+#[derive(Debug)]
+enum TypeDeclRegistration {
+    /// Every type of a store-owned signature, for all four maps.
+    Batch(Arc<[super::thread_store::SigTypeRegistration]>),
+    Name(smol_str::SmolStr, Arc<super::decl::TypeDeclaration>),
+    Stamp(i32, Arc<super::decl::TypeDeclaration>),
+    Path(smol_str::SmolStr, Arc<super::decl::TypeDeclaration>),
+    Exact(Path, Arc<super::decl::TypeDeclaration>),
+}
+
 /// A map key that compares paths with `Path::same` (ignoring `Pdot`
 /// positions and comparing identifiers by stamp, or by name when persistent).
 #[derive(Clone, Debug)]
@@ -666,10 +684,9 @@ impl TypeContext {
             type_decl_store: RefCell::new(ahash::AHashMap::new()),
             type_decl_by_stamp: RefCell::new(ahash::AHashMap::new()),
             type_decl_by_path: RefCell::new(ahash::AHashMap::new()),
-            normalized_path_forward_cache: RefCell::new(ahash::AHashMap::new()),
-            occur_variance_masks: RefCell::new(ahash::AHashMap::new()),
-            type_newtype_levels: RefCell::new(ahash::AHashMap::new()),
             type_decl_by_exact_path: RefCell::new(ahash::AHashMap::new()),
+            type_decl_log: RefCell::new(Vec::new()),
+            type_decl_log_replayed: Default::default(),
             type_item_by_path: RefCell::new(ahash::AHashMap::new()),
             missing_type_item_by_path: RefCell::new(ahash::AHashSet::new()),
             resolved_pdot_type_cache: RefCell::new(ahash::AHashMap::new()),
@@ -684,6 +701,9 @@ impl TypeContext {
             qualified_module_decl_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_type_item_cache: RefCell::new(ahash::AHashMap::new()),
             normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
+            normalized_path_forward_cache: RefCell::new(ahash::AHashMap::new()),
+            occur_variance_masks: RefCell::new(ahash::AHashMap::new()),
+            type_newtype_levels: RefCell::new(ahash::AHashMap::new()),
             forced_normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
             forced_type_path_compare_cache: RefCell::new(ahash::AHashMap::new()),
             load_paths: RefCell::new(Arc::new(Vec::new())),
@@ -914,9 +934,9 @@ impl TypeContext {
         name: &str,
         decl: Arc<super::decl::TypeDeclaration>,
     ) {
-        self.type_decl_store
+        self.type_decl_log
             .borrow_mut()
-            .insert(smol_str::SmolStr::new(name), decl);
+            .push(TypeDeclRegistration::Name(smol_str::SmolStr::new(name), decl));
     }
 
     /// Install the type registrations of a store-owned signature, in order.
@@ -924,20 +944,110 @@ impl TypeContext {
     /// each entry.
     pub(crate) fn register_sig_type_registrations(
         &self,
-        registrations: &[super::thread_store::SigTypeRegistration],
+        registrations: &Arc<[super::thread_store::SigTypeRegistration]>,
     ) {
-        let mut by_name = self.type_decl_store.borrow_mut();
-        let mut by_stamp = self.type_decl_by_stamp.borrow_mut();
-        let mut by_path = self.type_decl_by_path.borrow_mut();
-        let mut by_exact_path = self.type_decl_by_exact_path.borrow_mut();
-        for registration in registrations {
-            by_name.insert(registration.name.clone(), registration.decl.clone());
-            if registration.stamp != 0 {
-                by_stamp.insert(registration.stamp, registration.decl.clone());
-            }
-            by_path.insert(registration.qualified_name.clone(), registration.decl.clone());
-            by_exact_path.insert(registration.qualified_path.clone(), registration.decl.clone());
+        self.type_decl_log
+            .borrow_mut()
+            .push(TypeDeclRegistration::Batch(registrations.clone()));
+    }
+
+    /// Bring map `map` (0 name, 1 stamp, 2 path, 3 exact) up to date with the
+    /// registration log.
+    fn replay_type_decl_log(&self, map: usize) {
+        let log = self.type_decl_log.borrow();
+        let start = self.type_decl_log_replayed[map].get();
+        if start == log.len() {
+            return;
         }
+        let pending = &log[start..];
+        // Upper bound on inserts, so the map grows once instead of rehashing
+        // repeatedly while a batch is replayed.
+        let additional: usize = pending
+            .iter()
+            .map(|entry| match entry {
+                TypeDeclRegistration::Batch(registrations) => registrations.len(),
+                _ => 1,
+            })
+            .sum();
+        match map {
+            0 => {
+                let mut by_name = self.type_decl_store.borrow_mut();
+                by_name.reserve(additional);
+                for entry in pending {
+                    match entry {
+                        TypeDeclRegistration::Batch(registrations) => {
+                            for registration in registrations.iter() {
+                                by_name.insert(registration.name.clone(), registration.decl.clone());
+                            }
+                        }
+                        TypeDeclRegistration::Name(name, decl) => {
+                            by_name.insert(name.clone(), decl.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            1 => {
+                let mut by_stamp = self.type_decl_by_stamp.borrow_mut();
+                by_stamp.reserve(additional);
+                for entry in pending {
+                    match entry {
+                        TypeDeclRegistration::Batch(registrations) => {
+                            for registration in registrations.iter() {
+                                if registration.stamp != 0 {
+                                    by_stamp.insert(registration.stamp, registration.decl.clone());
+                                }
+                            }
+                        }
+                        TypeDeclRegistration::Stamp(stamp, decl) => {
+                            by_stamp.insert(*stamp, decl.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            2 => {
+                let mut by_path = self.type_decl_by_path.borrow_mut();
+                by_path.reserve(additional);
+                for entry in pending {
+                    match entry {
+                        TypeDeclRegistration::Batch(registrations) => {
+                            for registration in registrations.iter() {
+                                by_path.insert(
+                                    registration.qualified_name.clone(),
+                                    registration.decl.clone(),
+                                );
+                            }
+                        }
+                        TypeDeclRegistration::Path(path, decl) => {
+                            by_path.insert(path.clone(), decl.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {
+                let mut by_exact_path = self.type_decl_by_exact_path.borrow_mut();
+                by_exact_path.reserve(additional);
+                for entry in pending {
+                    match entry {
+                        TypeDeclRegistration::Batch(registrations) => {
+                            for registration in registrations.iter() {
+                                by_exact_path.insert(
+                                    registration.qualified_path.clone(),
+                                    registration.decl.clone(),
+                                );
+                            }
+                        }
+                        TypeDeclRegistration::Exact(path, decl) => {
+                            by_exact_path.insert(path.clone(), decl.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        self.type_decl_log_replayed[map].set(log.len());
     }
 
     /// Register a type declaration by ident stamp for alias expansion.
@@ -950,7 +1060,9 @@ impl TypeContext {
         stamp: i32,
         decl: Arc<super::decl::TypeDeclaration>,
     ) {
-        self.type_decl_by_stamp.borrow_mut().insert(stamp, decl);
+        self.type_decl_log
+            .borrow_mut()
+            .push(TypeDeclRegistration::Stamp(stamp, decl));
     }
 
     /// Match OCaml `Ctype.get_new_abstract_name`.
@@ -970,6 +1082,7 @@ impl TypeContext {
         &self,
         name: &str,
     ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+        self.replay_type_decl_log(0);
         let store = self.type_decl_store.borrow();
         if store.contains_key(name) {
             Some(std::cell::Ref::map(store, |s| {
@@ -985,6 +1098,7 @@ impl TypeContext {
         &self,
         stamp: i32,
     ) -> Option<Arc<super::decl::TypeDeclaration>> {
+        self.replay_type_decl_log(1);
         self.type_decl_by_stamp.borrow().get(&stamp).cloned()
     }
 
@@ -992,6 +1106,7 @@ impl TypeContext {
         &self,
         stamp: i32,
     ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+        self.replay_type_decl_log(1);
         let store = self.type_decl_by_stamp.borrow();
         if store.contains_key(&stamp) {
             Some(std::cell::Ref::map(store, |s| {
@@ -1012,9 +1127,9 @@ impl TypeContext {
         path: &str,
         decl: Arc<super::decl::TypeDeclaration>,
     ) {
-        self.type_decl_by_path
+        self.type_decl_log
             .borrow_mut()
-            .insert(smol_str::SmolStr::new(path), decl);
+            .push(TypeDeclRegistration::Path(smol_str::SmolStr::new(path), decl));
     }
 
     /// Register a qualified declaration by exact Path identity.
@@ -1027,7 +1142,9 @@ impl TypeContext {
         path: Path,
         decl: Arc<super::decl::TypeDeclaration>,
     ) {
-        self.type_decl_by_exact_path.borrow_mut().insert(path, decl);
+        self.type_decl_log
+            .borrow_mut()
+            .push(TypeDeclRegistration::Exact(path, decl));
     }
 
     pub(crate) fn register_type_item_by_path(
@@ -1422,6 +1539,21 @@ impl TypeContext {
             .borrow()
             .get(parent_path)
             .and_then(|modules| modules.get(child_name))
+            .cloned()
+    }
+
+    /// Cache a normalized path for a specific environment identity.
+    pub(crate) fn register_normalized_path_full(
+        &self,
+        env_id: u64,
+        original_path: &Path,
+        normalized_path: Path,
+    ) {
+        self.normalized_path_full_cache
+            .borrow_mut()
+            .insert((env_id, original_path.clone()), normalized_path);
+    }
+
     pub(crate) fn find_type_newtype_level(&self, scope_id: u64, path: &Path) -> Option<Option<i32>> {
         self.type_newtype_levels
             .borrow()
@@ -1468,21 +1600,6 @@ impl TypeContext {
             .borrow()
             .get(&(env_id, original_path.clone()))
             .cloned()
-    }
-
-            .cloned()
-    }
-
-    /// Cache a normalized path for a specific environment identity.
-    pub(crate) fn register_normalized_path_full(
-        &self,
-        env_id: u64,
-        original_path: &Path,
-        normalized_path: Path,
-    ) {
-        self.normalized_path_full_cache
-            .borrow_mut()
-            .insert((env_id, original_path.clone()), normalized_path);
     }
 
     /// Look up a cached normalized path for a specific environment identity.
@@ -1592,6 +1709,7 @@ impl TypeContext {
         &self,
         path: &str,
     ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+        self.replay_type_decl_log(2);
         let store = self.type_decl_by_path.borrow();
         if store.contains_key(path) {
             Some(std::cell::Ref::map(store, |s| {
@@ -1607,6 +1725,7 @@ impl TypeContext {
         &self,
         path: &Path,
     ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+        self.replay_type_decl_log(3);
         let store = self.type_decl_by_exact_path.borrow();
         if store.contains_key(path) {
             Some(std::cell::Ref::map(store, |entries| {
