@@ -6873,16 +6873,17 @@ fn type_pattern_interval(
     let constant1 = convert_constant(c1, loc)?;
     let constant2 = convert_constant(c2, loc)?;
 
-    // Get type of first constant (both should have same type)
-    let const_ty = type_constant(ctx, env, &constant1);
-    unify_pattern_types(tctx, loc, const_ty, expected_ty)?;
-
-    // OCaml only supports character intervals in patterns.
+    // OCaml only supports character intervals in patterns, and raises
+    // `Invalid_interval` before typing anything (typecore.ml:1335-1347).
     let (start_val, end_val) = match (&constant1, &constant2) {
         (Constant::Char(c1), Constant::Char(c2)) if c1 <= c2 => (*c1, *c2),
         (Constant::Char(c1), Constant::Char(c2)) => (*c2, *c1),
         _ => return Err(TypeCoreError::InvalidInterval { loc }),
     };
+
+    // Get type of first constant (both should have same type)
+    let const_ty = type_constant(ctx, env, &constant1);
+    unify_pattern_types(tctx, loc, const_ty, expected_ty)?;
 
     let make_const = |val: i32| -> Constant { Constant::Char(val) };
 
