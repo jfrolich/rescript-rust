@@ -3365,16 +3365,18 @@ fn transl_type_inner(
                 }
             }
             let row_closed = *closed == crate::parser::ast::ClosedFlag::Closed;
-            // Keep an explicit row variable for now to avoid over-constraining
-            // polymorphic variant aliases in downstream application typing.
-            let row_more = ctx.new_var(None);
-            let variant_ty = ctx.new_variant(crate::types::type_expr::RowDesc {
+            let mut row = crate::types::type_expr::RowDesc {
                 row_fields,
-                row_more,
+                row_more: ctx.new_var(None),
                 row_closed,
                 row_fixed: false,
                 row_name,
-            });
+            };
+            // OCaml typetexp.ml:503-513: a static row ends in `Tnil`.
+            if crate::types::btype::static_row(ctx, &row) {
+                row.row_more = ctx.new_type(TypeDesc::Tnil);
+            }
+            let variant_ty = ctx.new_variant(row);
 
             let ctyp = TypedCoreType {
                 ctyp_desc: TypedCoreTypeDesc::Ttyp_variant(
