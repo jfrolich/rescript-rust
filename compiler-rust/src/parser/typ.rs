@@ -451,19 +451,11 @@ pub(super) fn parse_type_alias(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
     if p.token == Token::As {
         p.next();
         p.expect(Token::SingleQuote);
-        let var_name: Cow<'static, str> = match &p.token {
-            Token::Lident(name) | Token::Uident(name) => {
-                let name = extend_cow_lifetime(name.clone());
-                p.next();
-                name
-            }
-            _ => {
-                p.err(DiagnosticCategory::Message(
-                    "Expected type variable after 'as'".to_string(),
-                ));
-                Cow::Borrowed("a")
-            }
-        };
+        // OCaml `parse_type_alias` (res_core.ml:4792-4804).
+        let start_pos_idx = p.start_pos_idx();
+        let (ident, _loc) =
+            super::core::parse_ident(p, super::core::error_messages::TYPE_PARAM, start_pos_idx);
+        let var_name: Cow<'static, str> = Cow::Owned(ident);
         let typ_start_idx = p.loc_start_idx(typ.ptyp_loc);
         let end_pos_idx = p.prev_end_pos_idx();
         let loc = p.mk_loc_idx(typ_start_idx, end_pos_idx);
