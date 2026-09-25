@@ -7274,6 +7274,18 @@ fn collect_top_level_value_use_checks(
     item_index: usize,
     out: &mut Vec<TopLevelValueUseCheck>,
 ) {
+    // OCaml `Typedecl.transl_value_decl` enters externals with the same
+    // `Unused_value_declaration` check as let-bound values (typedecl.ml).
+    if let StructureItemDesc::Tstr_primitive(desc) = &item.str_desc {
+        out.push(TopLevelValueUseCheck {
+            id: desc.val_id.clone(),
+            name: desc.val_id.name().to_string(),
+            loc: desc.val_loc,
+            item_index,
+            rec_flag: RecFlag::Nonrecursive,
+        });
+        return;
+    }
     let StructureItemDesc::Tstr_value(rec_flag, bindings) = &item.str_desc else {
         return;
     };
