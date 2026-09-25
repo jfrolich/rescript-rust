@@ -18543,6 +18543,13 @@ fn type_structure_item<'a>(
 
             for (decl_idx, decl) in decls.iter().enumerate() {
                 tctx.type_ctx.usage().set_current_type_slot(decl_slots[decl_idx]);
+                // typedecl.ml:1500-1503: each declaration is translated in
+                // `Builtin_attributes.warning_scope ptype_attributes`.
+                tctx.drain_open_slot_uses();
+                let decl_warning_config = tctx.warning_config.clone();
+                for attr in decl.ptype_attributes.iter().rev() {
+                    apply_warning_attribute_with_ppwarning(tctx, arena, attr, true);
+                }
                 let type_name = decl.ptype_name.txt;
                 let type_name_str = arena.get_string(type_name);
                 let type_id = declared_type_ids[decl_idx].clone();
@@ -19619,6 +19626,8 @@ fn type_structure_item<'a>(
                     type_entry_is_synthetic_row.push(false);
                 }
                 tctx.type_variables = saved_type_variables;
+                tctx.drain_open_slot_uses();
+                tctx.warning_config = decl_warning_config;
             }
 
             // typedecl.ml:1530: `current_slot := None`.
@@ -21642,6 +21651,13 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         }
 
         for (decl_idx, decl) in decls.iter().enumerate() {
+            // typedecl.ml:1500-1503: `Builtin_attributes.warning_scope
+            // ptype_attributes` around each declaration.
+            tctx.drain_open_slot_uses();
+            let decl_warning_config = tctx.warning_config.clone();
+            for attr in decl.ptype_attributes.iter().rev() {
+                apply_warning_attribute_with_ppwarning(tctx, arena, attr, true);
+            }
             let type_name = decl.ptype_name.txt;
             let type_name_str = arena.get_string(type_name);
             let type_id = declared_type_ids[decl_idx].clone();
@@ -22194,6 +22210,8 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 type_entry_parser_indices.push(Some(decl_idx));
                 type_entry_is_synthetic_row.push(false);
             }
+            tctx.drain_open_slot_uses();
+            tctx.warning_config = decl_warning_config;
         }
         Ok(())
     })();
