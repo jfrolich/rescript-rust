@@ -5121,6 +5121,373 @@ fn check_unboxed_type_attributes(
     }
 }
 
+/// OCaml `Variant_type_spread.expand_variant_spreads`
+/// (variant_type_spread.ml:31-117): look up and validate each `...t` spread of
+/// a variant declaration. Returns, per constructor, the spread source's
+/// constructors (and whether the source path is qualified).
+#[allow(clippy::type_complexity)]
+fn resolve_variant_spread_sources(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    arena: &ParseArena,
+    decl: &crate::parser::ast::TypeDeclaration,
+    cstrs: &[crate::parser::ast::ConstructorDeclaration],
+) -> TypeModResult<Vec<Option<(Vec<crate::types::ConstructorDeclaration>, bool)>>> {
+    let mut sources = Vec::new();
+    let target_type_attributes =
+        parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
+    let target_unboxed = has_decl_attr(&target_type_attributes, "unboxed");
+    let mut all_constructor_names = HashSet::new();
+    for cstr in cstrs.iter() {
+        let cstr_name = arena.get_string(cstr.pcd_name.txt);
+        if cstr_name != "..." {
+            all_constructor_names.insert(cstr_name.to_string());
+        }
+    }
+    for cstr in cstrs.iter() {
+        let cstr_name_str = arena.get_string(cstr.pcd_name.txt);
+        if cstr_name_str != "..." {
+            sources.push(None);
+            continue;
+        }
+        // Type-check the spread source type to resolve qualified paths
+        let mut found = None;
+        let mut is_pdot = false;
+        if let crate::parser::ast::ConstructorArguments::Pcstr_tuple(
+            ref args,
+        ) = cstr.pcd_args
+        {
+            if let Some(spread_type_ct) = args.first() {
+                let spread_core_type = arena.get_core_type(*spread_type_ct);
+                let spread_loc = match &*spread_core_type.ptyp_desc {
+                    crate::parser::ast::CoreTypeDesc::Ptyp_constr(
+                        inner,
+                    ) => inner.0.loc,
+                    _ => spread_core_type.ptyp_loc,
+                };
+                let mut handle_source_decl =
+                    |source_decl: &crate::types::TypeDeclaration,
+                     variant_name: String|
+                     -> TypeModResult<
+                        Vec<crate::types::ConstructorDeclaration>,
+                    > {
+                        // Variant_type_spread.map_constructors (variant_type_spread.ml:44-50):
+                        // an empty or non-variant declaration is InvalidType before the
+                        // type-parameter check.
+                        let source_cstrs = match &source_decl.type_kind {
+                            crate::types::TypeKind::TypeVariant(cstrs, _) if !cstrs.is_empty() => cstrs.clone(),
+                            _ => {
+                                return Err(TypeModError::VariantSpreadInvalidType { loc: spread_loc });
+                            }
+                        };
+                        if !source_decl.type_params.is_empty() {
+                            return Err(TypeModError::VariantSpreadHasTypeParams { loc: spread_loc });
+                        }
+                        let source_unboxed = has_decl_attr(
+                            &source_decl.type_attributes,
+                            "unboxed",
+                        );
+                        if source_unboxed != target_unboxed {
+                            return Err(
+                                TypeModError::VariantSpreadUnboxedMismatch {
+                                    loc: spread_loc,
+                                    source_unboxed,
+                                },
+                            );
+                        }
+                        // Variant_coercion.variant_configuration_can_be_coerced_raises
+                        // (variant_coercion.ml:237-240) reads the tag
+                        // names only for a spread; the tuple is
+                        // evaluated right to left (target first).
+                        let target_tag_name = process_variant_tag_name(
+                            &target_type_attributes,
+                        )?;
+                        let source_tag_name = process_variant_tag_name(
+                            &source_decl.type_attributes,
+                        )?;
+                        if source_tag_name != target_tag_name {
+                            return Err(
+                                TypeModError::VariantSpreadTagMismatch {
+                                    loc: spread_loc,
+                                },
+                            );
+                        }
+                        for source_cstr in &source_cstrs {
+                            let source_name =
+                                source_cstr.cd_id.name().to_string();
+                            if all_constructor_names.contains(&source_name)
+                            {
+                                return Err(TypeModError::VariantSpreadDuplicateConstructor {
+                                    loc: spread_loc,
+                                    variant_name,
+                                    constructor_name: source_name,
+                                });
+                            }
+                        }
+                        for source_cstr in &source_cstrs {
+                            all_constructor_names.insert(
+                                source_cstr.cd_id.name().to_string(),
+                            );
+                        }
+                        Ok(source_cstrs)
+                    };
+                if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(
+                    inner,
+                ) = &*spread_core_type.ptyp_desc
+                {
+                    let spread_lid = tctx.resolve_lid(inner.0.txt).clone();
+                    let (path, source_decl) = resolve_type_constructor_path(
+                        tctx,
+                        env,
+                        &spread_lid,
+                    );
+                    if let Some(source_decl) = source_decl {
+                        is_pdot = matches!(path, Path::Pdot(..));
+                        found = Some(handle_source_decl(
+                            &source_decl,
+                            tctx.longident_to_string(&spread_lid),
+                        )?);
+                    } else {
+                        return Err(
+                            TypeModError::VariantSpreadCouldNotFindType {
+                                loc: spread_loc,
+                            },
+                        );
+                    }
+                } else {
+                    return Err(
+                        TypeModError::VariantSpreadCouldNotFindType {
+                            loc: spread_loc,
+                        },
+                    );
+                }
+            } else {
+                return Err(TypeModError::VariantSpreadCouldNotFindType {
+                    loc: cstr.pcd_loc,
+                });
+            }
+        } else {
+            return Err(TypeModError::VariantSpreadCouldNotFindType {
+                loc: cstr.pcd_loc,
+            });
+        }
+        sources.push(found.map(|cstrs| (cstrs, is_pdot)));
+    }
+    Ok(sources)
+}
+
+/// A constructor copied from a variant spread source (OCaml typedecl.ml:498-560).
+struct SpreadConstructor {
+    id: Ident,
+    name: String,
+    args: Vec<TypeExprRef>,
+    inlined_labels: Option<Vec<crate::types::LabelDeclaration>>,
+    internal: crate::types::ConstructorDeclaration,
+    typed: TypedConstructorDeclaration,
+}
+
+/// Build the declaration of one constructor copied from a variant spread
+/// source: the Types declaration reuses the source's arguments (fresh copies
+/// for a qualified source, like `Subst.type_declaration`), and the typed tree
+/// gets `Ttyp_any`-style placeholders carrying the real types.
+fn build_spread_constructor(
+    ctx: &crate::types::context::TypeContext,
+    arena: &ParseArena,
+    cstr: &crate::parser::ast::ConstructorDeclaration,
+    source_cstr: &crate::types::ConstructorDeclaration,
+    is_pdot_source: bool,
+    tag_attrs: &[crate::parser::ast::Attribute],
+) -> SpreadConstructor {
+    let sc_name = source_cstr.cd_id.name().to_string();
+    let sc_id = ctx.create_ident(&sc_name);
+    let spread_constructor_attr = (
+        Located::mknoloc(arena.constructor_from_spread_attr_str()),
+        crate::parser::ast::Payload::PStr(Box::new(vec![])),
+    );
+    let source_cd_loc =
+        find_existing_loc_idx(arena, &source_cstr.cd_loc)
+            .unwrap_or(cstr.pcd_loc);
+    // Use actual types from the source constructor (like OCaml's typedecl.ml lines 523-530)
+    // ctyp_desc = Ttyp_var(None) acts as Ttyp_any placeholder, ctyp_type = real type from source
+    let (
+        sc_args,
+        sc_internal_cd_args,
+        sc_typed_tree_cd_args,
+        sc_inlined_labels,
+    ) = match &source_cstr.cd_args {
+        crate::types::ConstructorArguments::CstrTuple(args) => {
+            // Use the actual types from the source, not fresh vars
+            // For Pdot sources (sub-module types), create fresh shallow copies
+            // to match OCaml's Subst.type_declaration behavior
+            let copied_args: Vec<TypeExprRef> = if is_pdot_source {
+                args.iter()
+                    .map(|&texpr| {
+                        ctx.new_type(ctx.get_desc(texpr).clone())
+                    })
+                    .collect()
+            } else {
+                args.clone()
+            };
+            let typed_tree_args: Vec<TypedCoreType> = copied_args
+                .iter()
+                .map(|&texpr| TypedCoreType {
+                    ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
+                    ctyp_type: texpr,
+                    ctyp_env: EnvRef(0),
+                    ctyp_loc: source_cd_loc,
+                    ctyp_attributes: decl_attrs_to_parser_attrs(
+                        arena,
+                        &source_cstr.cd_attributes,
+                    ),
+                })
+                .collect();
+            let internal_cd_args = if is_pdot_source {
+                crate::types::ConstructorArguments::CstrTuple(
+                    copied_args.clone(),
+                )
+            } else {
+                source_cstr.cd_args.clone()
+            };
+            (
+                copied_args,
+                internal_cd_args,
+                TypedConstructorArguments::Cstr_tuple(
+                    typed_tree_args,
+                ),
+                None,
+            )
+        }
+        crate::types::ConstructorArguments::CstrRecord(lbls) => {
+            // OCaml strips top-level Tpoly wrappers from
+            // internal spread label types (transl_labels lbls').
+            // For Pdot sources, create fresh type copies to match
+            // OCaml's Subst.type_declaration behavior.
+            let normalized_lbls = lbls
+                .iter()
+                .map(|l| {
+                    let mut normalized = l.clone();
+                    let unwrapped =
+                        unwrap_poly_type(ctx, l.ld_type);
+                    normalized.ld_type = if is_pdot_source {
+                        ctx.new_type(
+                            ctx.get_desc(unwrapped).clone(),
+                        )
+                    } else {
+                        unwrapped
+                    };
+                    normalized
+                })
+                .collect::<Vec<_>>();
+            let typed_lbls: Vec<TypedLabelDeclaration> = normalized_lbls
+                    .iter()
+                    .map(|l| TypedLabelDeclaration {
+                        ld_id: l.ld_id.clone(),
+                        ld_name: crate::parse_arena::Located {
+                            txt: l.ld_id.name().to_string(),
+                            loc: find_existing_loc_idx(
+                                arena,
+                                &l.ld_loc,
+                            )
+                            .unwrap_or(source_cd_loc),
+                        },
+                        ld_mutable: match l.ld_mutable {
+                            crate::types::asttypes::MutableFlag::Mutable => crate::parser::ast::MutableFlag::Mutable,
+                            crate::types::asttypes::MutableFlag::Immutable => crate::parser::ast::MutableFlag::Immutable,
+                        },
+                        ld_optional: l.ld_optional,
+                        ld_type: TypedCoreType {
+                            ctyp_desc: TypedCoreTypeDesc::Ttyp_var(
+                                None,
+                            ),
+                            ctyp_type: l.ld_type,
+                            ctyp_env: EnvRef(0),
+                            ctyp_loc: find_existing_loc_idx(
+                                arena,
+                                &l.ld_loc,
+                            )
+                            .unwrap_or(source_cd_loc),
+                            ctyp_attributes: Attributes::new(),
+                        },
+                        ld_loc: find_existing_loc_idx(
+                            arena,
+                            &l.ld_loc,
+                        )
+                        .unwrap_or(source_cd_loc),
+                        ld_attributes: decl_attrs_to_parser_attrs(
+                            arena,
+                            &l.ld_attributes,
+                        ),
+                    })
+                    .collect();
+            let args_vec = normalized_lbls
+                .iter()
+                .map(|l| l.ld_type)
+                .collect::<Vec<_>>();
+            let internal_cd_args = if is_pdot_source {
+                crate::types::ConstructorArguments::CstrRecord(
+                    normalized_lbls.clone(),
+                )
+            } else {
+                source_cstr.cd_args.clone()
+            };
+            (
+                args_vec,
+                internal_cd_args,
+                TypedConstructorArguments::Cstr_record(typed_lbls),
+                Some(normalized_lbls),
+            )
+        }
+    };
+
+
+    let internal = crate::types::ConstructorDeclaration {
+        cd_id: sc_id.clone(),
+        cd_args: sc_internal_cd_args,
+        cd_res: source_cstr.cd_res,
+        cd_loc: source_cstr.cd_loc.clone(),
+        cd_attributes: source_cstr.cd_attributes.clone(),
+    };
+    let spread_cd_res =
+        source_cstr.cd_res.map(|ty| TypedCoreType {
+            ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
+            ctyp_type: ty,
+            ctyp_env: EnvRef(0),
+            ctyp_loc: source_cd_loc,
+            ctyp_attributes: Attributes::new(),
+        });
+    let typed = TypedConstructorDeclaration {
+        cd_id: sc_id.clone(),
+        cd_name: crate::parse_arena::Located {
+            txt: sc_name.clone(),
+            loc: source_cd_loc,
+        },
+        cd_args: sc_typed_tree_cd_args,
+        cd_res: spread_cd_res,
+        cd_loc: source_cd_loc,
+        cd_attributes: {
+            let mut attrs = tag_attrs.to_vec();
+            attrs.push(spread_constructor_attr.clone());
+            attrs.extend(
+                decl_attrs_to_parser_attrs(
+                    arena,
+                    &source_cstr.cd_attributes,
+                )
+                .iter()
+                .cloned(),
+            );
+            Attributes::from_vec(attrs)
+        },
+    };
+    SpreadConstructor {
+        id: sc_id,
+        name: sc_name,
+        args: sc_args,
+        inlined_labels: sc_inlined_labels,
+        internal,
+        typed,
+    }
+}
+
 fn check_duplicate_constructor_declarations(
     arena: &ParseArena,
     loc: LocIdx,
@@ -20113,7 +20480,6 @@ fn type_structure_item<'a>(
                         vec![],
                     ),
                     crate::parser::ast::TypeKind::Ptype_variant(cstrs) => {
-                        check_duplicate_constructor_declarations(arena, decl.ptype_loc, cstrs)?;
                         // OCaml copies @unboxed and @tag attributes from the type decl
                         // to each constructor (copy_tag_attr_from_decl in typedecl.ml)
                         let tag_attrs: Vec<_> = decl
@@ -20131,159 +20497,12 @@ fn type_structure_item<'a>(
                         // Uses transl_type to resolve the spread source type (handles qualified paths like S.x).
                         // (constructors, is_pdot) - is_pdot=true means source is from a sub-module,
                         // where OCaml's Subst.type_declaration creates fresh type copies
-                        let spread_sources: Vec<
-                            Option<(Vec<crate::types::ConstructorDeclaration>, bool)>,
-                        > = {
-                            let mut sources = Vec::new();
-                            let target_type_attributes =
-                                parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
-                            let target_unboxed = has_decl_attr(&target_type_attributes, "unboxed");
-                            let mut all_constructor_names = HashSet::new();
-                            for cstr in cstrs.iter() {
-                                let cstr_name = arena.get_string(cstr.pcd_name.txt);
-                                if cstr_name != "..." {
-                                    all_constructor_names.insert(cstr_name.to_string());
-                                }
-                            }
-                            for cstr in cstrs.iter() {
-                                let cstr_name_str = arena.get_string(cstr.pcd_name.txt);
-                                if cstr_name_str != "..." {
-                                    sources.push(None);
-                                    continue;
-                                }
-                                // Type-check the spread source type to resolve qualified paths
-                                let mut found = None;
-                                let mut is_pdot = false;
-                                if let crate::parser::ast::ConstructorArguments::Pcstr_tuple(
-                                    ref args,
-                                ) = cstr.pcd_args
-                                {
-                                    if let Some(spread_type_ct) = args.first() {
-                                        let spread_core_type = arena.get_core_type(*spread_type_ct);
-                                        let spread_loc = match &*spread_core_type.ptyp_desc {
-                                            crate::parser::ast::CoreTypeDesc::Ptyp_constr(
-                                                inner,
-                                            ) => inner.0.loc,
-                                            _ => spread_core_type.ptyp_loc,
-                                        };
-                                        let mut handle_source_decl =
-                                            |source_decl: &crate::types::TypeDeclaration,
-                                             variant_name: String|
-                                             -> TypeModResult<
-                                                Vec<crate::types::ConstructorDeclaration>,
-                                            > {
-                                                if !source_decl.type_params.is_empty() {
-                                                    return Err(
-                                                        TypeModError::VariantSpreadHasTypeParams {
-                                                            loc: spread_loc,
-                                                        },
-                                                    );
-                                                }
-                                                let source_cstrs = match &source_decl.type_kind {
-                                                    crate::types::TypeKind::TypeVariant(
-                                                        cstrs,
-                                                        _,
-                                                    ) if !cstrs.is_empty() => cstrs.clone(),
-                                                    _ => {
-                                                        return Err(
-                                                            TypeModError::VariantSpreadInvalidType {
-                                                                loc: spread_loc,
-                                                            },
-                                                        );
-                                                    }
-                                                };
-                                                let source_unboxed = has_decl_attr(
-                                                    &source_decl.type_attributes,
-                                                    "unboxed",
-                                                );
-                                                if source_unboxed != target_unboxed {
-                                                    return Err(
-                                                        TypeModError::VariantSpreadUnboxedMismatch {
-                                                            loc: spread_loc,
-                                                            source_unboxed,
-                                                        },
-                                                    );
-                                                }
-                                                // Variant_coercion.variant_configuration_can_be_coerced_raises
-                                                // (variant_coercion.ml:237-240) reads the tag
-                                                // names only for a spread; the tuple is
-                                                // evaluated right to left (target first).
-                                                let target_tag_name = process_variant_tag_name(
-                                                    &target_type_attributes,
-                                                )?;
-                                                let source_tag_name = process_variant_tag_name(
-                                                    &source_decl.type_attributes,
-                                                )?;
-                                                if source_tag_name != target_tag_name {
-                                                    return Err(
-                                                        TypeModError::VariantSpreadTagMismatch {
-                                                            loc: spread_loc,
-                                                        },
-                                                    );
-                                                }
-                                                for source_cstr in &source_cstrs {
-                                                    let source_name =
-                                                        source_cstr.cd_id.name().to_string();
-                                                    if all_constructor_names.contains(&source_name)
-                                                    {
-                                                        return Err(TypeModError::VariantSpreadDuplicateConstructor {
-                                                            loc: spread_loc,
-                                                            variant_name,
-                                                            constructor_name: source_name,
-                                                        });
-                                                    }
-                                                }
-                                                for source_cstr in &source_cstrs {
-                                                    all_constructor_names.insert(
-                                                        source_cstr.cd_id.name().to_string(),
-                                                    );
-                                                }
-                                                Ok(source_cstrs)
-                                            };
-                                        if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(
-                                            inner,
-                                        ) = &*spread_core_type.ptyp_desc
-                                        {
-                                            let spread_lid = tctx.resolve_lid(inner.0.txt).clone();
-                                            let (path, source_decl) = resolve_type_constructor_path(
-                                                tctx,
-                                                env,
-                                                &spread_lid,
-                                            );
-                                            if let Some(source_decl) = source_decl {
-                                                is_pdot = matches!(path, Path::Pdot(..));
-                                                found = Some(handle_source_decl(
-                                                    &source_decl,
-                                                    tctx.longident_to_string(&spread_lid),
-                                                )?);
-                                            } else {
-                                                return Err(
-                                                    TypeModError::VariantSpreadCouldNotFindType {
-                                                        loc: spread_loc,
-                                                    },
-                                                );
-                                            }
-                                        } else {
-                                            return Err(
-                                                TypeModError::VariantSpreadCouldNotFindType {
-                                                    loc: spread_loc,
-                                                },
-                                            );
-                                        }
-                                    } else {
-                                        return Err(TypeModError::VariantSpreadCouldNotFindType {
-                                            loc: cstr.pcd_loc,
-                                        });
-                                    }
-                                } else {
-                                    return Err(TypeModError::VariantSpreadCouldNotFindType {
-                                        loc: cstr.pcd_loc,
-                                    });
-                                }
-                                sources.push(found.map(|cstrs| (cstrs, is_pdot)));
-                            }
-                            sources
-                        };
+                        let spread_sources =
+                            resolve_variant_spread_sources(tctx, env, arena, decl, cstrs)?;
+                        // OCaml typedecl.ml:1456 expands (and validates) variant
+                        // spreads before transl_declaration checks for duplicate
+                        // constructors (typedecl.ml:461-467).
+                        check_duplicate_constructor_declarations(arena, decl.ptype_loc, cstrs)?;
 
                         let mut internal_cstrs = Vec::new();
                         let mut typed_tree_cstrs = Vec::new();
@@ -20349,147 +20568,21 @@ fn type_structure_item<'a>(
                                 // Expand the source type's constructors into this type
                                 // The spread marker itself is NOT included in any output
                                 for source_cstr in source_cstrs {
-                                    let sc_name = source_cstr.cd_id.name().to_string();
-                                    let sc_id = ctx.create_ident(&sc_name);
-                                    let spread_constructor_attr = (
-                                        Located::mknoloc(arena.constructor_from_spread_attr_str()),
-                                        crate::parser::ast::Payload::PStr(Box::new(vec![])),
+                                    let SpreadConstructor {
+                                        id: sc_id,
+                                        name: sc_name,
+                                        args: sc_args,
+                                        inlined_labels: sc_inlined_labels,
+                                        internal,
+                                        typed,
+                                    } = build_spread_constructor(
+                                        ctx,
+                                        arena,
+                                        cstr,
+                                        source_cstr,
+                                        is_pdot_source,
+                                        &tag_attrs,
                                     );
-                                    let source_cd_loc =
-                                        find_existing_loc_idx(arena, &source_cstr.cd_loc)
-                                            .unwrap_or(cstr.pcd_loc);
-                                    // Use actual types from the source constructor (like OCaml's typedecl.ml lines 523-530)
-                                    // ctyp_desc = Ttyp_var(None) acts as Ttyp_any placeholder, ctyp_type = real type from source
-                                    let (
-                                        sc_args,
-                                        sc_internal_cd_args,
-                                        sc_typed_tree_cd_args,
-                                        sc_inlined_labels,
-                                    ) = match &source_cstr.cd_args {
-                                        crate::types::ConstructorArguments::CstrTuple(args) => {
-                                            // Use the actual types from the source, not fresh vars
-                                            // For Pdot sources (sub-module types), create fresh shallow copies
-                                            // to match OCaml's Subst.type_declaration behavior
-                                            let copied_args: Vec<TypeExprRef> = if is_pdot_source {
-                                                args.iter()
-                                                    .map(|&texpr| {
-                                                        ctx.new_type(ctx.get_desc(texpr).clone())
-                                                    })
-                                                    .collect()
-                                            } else {
-                                                args.clone()
-                                            };
-                                            let typed_tree_args: Vec<TypedCoreType> = copied_args
-                                                .iter()
-                                                .map(|&texpr| TypedCoreType {
-                                                    ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
-                                                    ctyp_type: texpr,
-                                                    ctyp_env: EnvRef(0),
-                                                    ctyp_loc: source_cd_loc,
-                                                    ctyp_attributes: decl_attrs_to_parser_attrs(
-                                                        arena,
-                                                        &source_cstr.cd_attributes,
-                                                    ),
-                                                })
-                                                .collect();
-                                            let internal_cd_args = if is_pdot_source {
-                                                crate::types::ConstructorArguments::CstrTuple(
-                                                    copied_args.clone(),
-                                                )
-                                            } else {
-                                                source_cstr.cd_args.clone()
-                                            };
-                                            (
-                                                copied_args,
-                                                internal_cd_args,
-                                                TypedConstructorArguments::Cstr_tuple(
-                                                    typed_tree_args,
-                                                ),
-                                                None,
-                                            )
-                                        }
-                                        crate::types::ConstructorArguments::CstrRecord(lbls) => {
-                                            // OCaml strips top-level Tpoly wrappers from
-                                            // internal spread label types (transl_labels lbls').
-                                            // For Pdot sources, create fresh type copies to match
-                                            // OCaml's Subst.type_declaration behavior.
-                                            let normalized_lbls = lbls
-                                                .iter()
-                                                .map(|l| {
-                                                    let mut normalized = l.clone();
-                                                    let unwrapped =
-                                                        unwrap_poly_type(ctx, l.ld_type);
-                                                    normalized.ld_type = if is_pdot_source {
-                                                        ctx.new_type(
-                                                            ctx.get_desc(unwrapped).clone(),
-                                                        )
-                                                    } else {
-                                                        unwrapped
-                                                    };
-                                                    normalized
-                                                })
-                                                .collect::<Vec<_>>();
-                                            let typed_lbls: Vec<TypedLabelDeclaration> = normalized_lbls
-                                                    .iter()
-                                                    .map(|l| TypedLabelDeclaration {
-                                                        ld_id: l.ld_id.clone(),
-                                                        ld_name: crate::parse_arena::Located {
-                                                            txt: l.ld_id.name().to_string(),
-                                                            loc: find_existing_loc_idx(
-                                                                arena,
-                                                                &l.ld_loc,
-                                                            )
-                                                            .unwrap_or(source_cd_loc),
-                                                        },
-                                                        ld_mutable: match l.ld_mutable {
-                                                            crate::types::asttypes::MutableFlag::Mutable => crate::parser::ast::MutableFlag::Mutable,
-                                                            crate::types::asttypes::MutableFlag::Immutable => crate::parser::ast::MutableFlag::Immutable,
-                                                        },
-                                                        ld_optional: l.ld_optional,
-                                                        ld_type: TypedCoreType {
-                                                            ctyp_desc: TypedCoreTypeDesc::Ttyp_var(
-                                                                None,
-                                                            ),
-                                                            ctyp_type: l.ld_type,
-                                                            ctyp_env: EnvRef(0),
-                                                            ctyp_loc: find_existing_loc_idx(
-                                                                arena,
-                                                                &l.ld_loc,
-                                                            )
-                                                            .unwrap_or(source_cd_loc),
-                                                            ctyp_attributes: Attributes::new(),
-                                                        },
-                                                        ld_loc: find_existing_loc_idx(
-                                                            arena,
-                                                            &l.ld_loc,
-                                                        )
-                                                        .unwrap_or(source_cd_loc),
-                                                        ld_attributes: decl_attrs_to_parser_attrs(
-                                                            arena,
-                                                            &l.ld_attributes,
-                                                        ),
-                                                    })
-                                                    .collect();
-                                            let args_vec = normalized_lbls
-                                                .iter()
-                                                .map(|l| l.ld_type)
-                                                .collect::<Vec<_>>();
-                                            let internal_cd_args = if is_pdot_source {
-                                                crate::types::ConstructorArguments::CstrRecord(
-                                                    normalized_lbls.clone(),
-                                                )
-                                            } else {
-                                                source_cstr.cd_args.clone()
-                                            };
-                                            (
-                                                args_vec,
-                                                internal_cd_args,
-                                                TypedConstructorArguments::Cstr_record(typed_lbls),
-                                                Some(normalized_lbls),
-                                            )
-                                        }
-                                    };
-
                                     let res_ty = ctx.new_constr(
                                         type_path.clone(),
                                         internal_type_params.clone(),
@@ -20499,45 +20592,8 @@ fn type_structure_item<'a>(
                                     // instance_constructor creates fresh copies.
                                     env_desc_types_for_generalize.push(res_ty);
                                     let sc_arity = sc_args.len() as i32;
-
-                                    internal_cstrs.push(crate::types::ConstructorDeclaration {
-                                        cd_id: sc_id.clone(),
-                                        cd_args: sc_internal_cd_args,
-                                        cd_res: source_cstr.cd_res,
-                                        cd_loc: source_cstr.cd_loc.clone(),
-                                        cd_attributes: source_cstr.cd_attributes.clone(),
-                                    });
-                                    let spread_cd_res =
-                                        source_cstr.cd_res.map(|ty| TypedCoreType {
-                                            ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
-                                            ctyp_type: ty,
-                                            ctyp_env: EnvRef(0),
-                                            ctyp_loc: source_cd_loc,
-                                            ctyp_attributes: Attributes::new(),
-                                        });
-                                    typed_tree_cstrs.push(TypedConstructorDeclaration {
-                                        cd_id: sc_id.clone(),
-                                        cd_name: crate::parse_arena::Located {
-                                            txt: sc_name.clone(),
-                                            loc: source_cd_loc,
-                                        },
-                                        cd_args: sc_typed_tree_cd_args,
-                                        cd_res: spread_cd_res,
-                                        cd_loc: source_cd_loc,
-                                        cd_attributes: {
-                                            let mut attrs = tag_attrs.clone();
-                                            attrs.push(spread_constructor_attr.clone());
-                                            attrs.extend(
-                                                decl_attrs_to_parser_attrs(
-                                                    arena,
-                                                    &source_cstr.cd_attributes,
-                                                )
-                                                .iter()
-                                                .cloned(),
-                                            );
-                                            Attributes::from_vec(attrs)
-                                        },
-                                    });
+                                    internal_cstrs.push(internal);
+                                    typed_tree_cstrs.push(typed);
                                     let (sc_desc_args, sc_desc_arity, sc_desc_inlined) =
                                         if let Some(inline_lbls) = &sc_inlined_labels {
                                             // Mirror OCaml datarepr.constructor_args for inline records:
@@ -23597,6 +23653,11 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                     )
                 }
                 crate::parser::ast::TypeKind::Ptype_variant(cstrs) => {
+                    // OCaml typedecl.ml:1456 expands variant spreads for
+                    // signatures too, before transl_declaration checks for
+                    // duplicate constructors (typedecl.ml:461-467).
+                    let spread_sources =
+                        resolve_variant_spread_sources(tctx, env, arena, decl, cstrs)?;
                     check_duplicate_constructor_declarations(arena, decl.ptype_loc, cstrs)?;
                     let mut internal_cstrs = Vec::with_capacity(cstrs.len());
                     let mut typed_tree_cstrs = Vec::with_capacity(cstrs.len());
@@ -23610,7 +23671,33 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                         .cloned()
                         .collect();
 
-                    for cstr in cstrs {
+                    for (cstr_idx, cstr) in cstrs.iter().enumerate() {
+                        if let Some((source_cstrs, is_pdot_source)) = &spread_sources[cstr_idx] {
+                            // typedecl.ml:477-500: the `...t` constructor gets an
+                            // ident and its argument is translated, then it is
+                            // replaced by the source's constructors.
+                            std::mem::drop(ctx.create_ident(arena.get_string(cstr.pcd_name.txt)));
+                            if let crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) =
+                                &cstr.pcd_args
+                            {
+                                for core_type in types {
+                                    transl_type(tctx, &temp_env, arena.get_core_type(*core_type))?;
+                                }
+                            }
+                            for source_cstr in source_cstrs {
+                                let spread = build_spread_constructor(
+                                    ctx,
+                                    arena,
+                                    cstr,
+                                    source_cstr,
+                                    *is_pdot_source,
+                                    &tag_attrs,
+                                );
+                                internal_cstrs.push(spread.internal);
+                                typed_tree_cstrs.push(spread.typed);
+                            }
+                            continue;
+                        }
                         let cstr_name = arena.get_string(cstr.pcd_name.txt);
                         // OCaml compiler/ml/typedecl.ml:481-484 creates
                         // the constructor id before make_constructor
