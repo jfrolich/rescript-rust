@@ -830,8 +830,10 @@ fn format_value_description_with_options(
     weak_names: bool,
     full_paths: bool,
 ) -> String {
-    let ty = TypeExprErrorPrinter::new_with_options(type_ctx, weak_names, full_paths)
-        .format(desc.val_type);
+    // `tree_of_value_description` prints the type with `tree_of_type_scheme`
+    // (printtyp.ml): reset, mark loops, then `typexp true`.
+    let _ = (weak_names, full_paths);
+    let ty = crate::types::printtyp::Printtyp::new(type_ctx).type_scheme(desc.val_type);
     match &desc.val_kind {
         // printtyp.ml:1053-1065 + primitive.ml:57-62: primitives print their
         // name (and non-empty native name) through res_outcome_printer.ml:486-515,
