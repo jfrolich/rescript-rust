@@ -5662,38 +5662,21 @@ fn parse_template_literal_with_prefix(
     // same sharing behavior.
     let mut text_start_pos_idx = p.start_pos_idx();
 
-    // Handle the case where we start with a backtick
-    if p.token == Token::Backtick {
-        // After backtick, switch to template literal scanning mode
-        p.next_template_literal_token();
-    }
-
+    // OCaml `parse_template_expr`'s `parse_parts` (res_core.ml:2503-2530):
+    // capture `start_pos`, scan the next template token, then take a tail,
+    // or a part followed by `parse_expr_block`; anything else is an
+    // unexpected token and drops the parts.
+    let mut first = true;
     loop {
+        if !first {
+            text_start_pos_idx = p.start_pos_idx();
+        }
+        if !first || p.token == Token::Backtick {
+            p.next_template_literal_token();
+        }
+        first = false;
         match &p.token {
-            Token::TemplatePart { text, pos } => {
-                // Part before an interpolation ${
-                let text = extend_cow_lifetime(text.clone());
-                let pos = pos.clone();
-                // OCaml uses the embedded last_pos from the token, not p.end_pos
-                let text_end_idx = p.push_pos(pos);
-                let text_loc = p.mk_loc_idx(text_start_pos_idx, text_end_idx);
-                let mut str_expr = ast_helper::make_constant(
-                    Constant::String(text, part_prefix.clone()),
-                    text_loc,
-                );
-                str_expr.pexp_attributes.push(template_literal_attr.clone());
-                p.next();
-                // Parse the interpolation expression
-                let expr = parse_expr(p);
-                parts.push((str_expr, Some(expr)));
-                // OCaml captures start_pos BEFORE next_template_literal_token
-                // At this point, p.start_pos is at the closing }
-                text_start_pos_idx = p.start_pos_idx();
-                // After the interpolation, switch back to template literal scanning
-                p.next_template_literal_token();
-            }
             Token::TemplateTail { text, pos } => {
-                // Final part or simple template string
                 let text = extend_cow_lifetime(text.clone());
                 let pos = pos.clone();
                 // OCaml uses the embedded last_pos from the token, not p.end_pos
@@ -5708,28 +5691,26 @@ fn parse_template_literal_with_prefix(
                 p.next();
                 break;
             }
-            Token::Backtick => {
-                // Empty template string
-                let text_loc = p.mk_loc_idx_to_end(text_start_pos_idx);
+            Token::TemplatePart { text, pos } => {
+                let text = extend_cow_lifetime(text.clone());
+                let pos = pos.clone();
+                let text_end_idx = p.push_pos(pos);
+                let text_loc = p.mk_loc_idx(text_start_pos_idx, text_end_idx);
                 let mut str_expr = ast_helper::make_constant(
-                    Constant::String(Cow::Borrowed(""), part_prefix.clone()),
+                    Constant::String(text, part_prefix.clone()),
                     text_loc,
                 );
                 str_expr.pexp_attributes.push(template_literal_attr.clone());
-                parts.push((str_expr, None));
                 p.next();
-                break;
-            }
-            Token::Eof => {
-                p.err(DiagnosticCategory::Message(
-                    "Unterminated template literal".to_string(),
-                ));
-                break;
+                let expr = parse_expr_block(p);
+                parts.push((str_expr, Some(expr)));
             }
             _ => {
-                // This shouldn't happen in well-formed template literals
-                p.err_unexpected();
-                p.next();
+                p.err(DiagnosticCategory::unexpected(
+                    p.token.clone().into_owned(),
+                    p.breadcrumbs().to_vec(),
+                ));
+                parts.clear();
                 break;
             }
         }
