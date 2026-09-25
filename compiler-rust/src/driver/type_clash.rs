@@ -1424,3 +1424,148 @@ pub(super) fn print_or_pattern_type_clash(
         None,
     );
 }
+
+/// `Typecore.report_error`'s `Apply_non_function typ` (typecore.ml:4895-4923).
+/// Typecore's `type_expr`: `Error_message_utils.type_expr`
+/// (error_message_utils.ml:72-75), which resets the printer and marks loops,
+/// normalizing the type, before printing it.
+fn typecore_type_expr(ppf: &mut Ppf<'_>, printer: &mut Printtyp<'_>, ty: TypeExprRef) {
+    printer.reset_and_mark_loops(ty);
+    printer.pp_type_expr(ppf, ty);
+}
+
+pub(super) fn print_apply_non_function(ppf: &mut Ppf<'_>, ctx: &TypeContext, typ: TypeExprRef) {
+    let mut printer = Printtyp::new(ctx);
+    let repr = ctx.repr(typ);
+    let desc = (*ctx.get_desc(repr)).clone();
+    match desc {
+        TypeDesc::Tarrow { args, ret } => {
+            let mut count = args.len();
+            let mut next = ret;
+            while let TypeDesc::Tarrow { args, ret } = &*ctx.borrow_desc(next) {
+                count += args.len();
+                next = *ret;
+            }
+            ppf.open_box(BoxKind::V, 0);
+            ppf.open_box(BoxKind::Box, 2);
+            ppf.str("This function has type");
+            ppf.space();
+            open_tag(ppf, TAG_INFO);
+            typecore_type_expr(ppf, &mut printer, typ);
+            close_tag(ppf);
+            ppf.close_box();
+            ppf.space();
+            ppf.open_box(BoxKind::Box, 0);
+            ppf.str(&format!(
+                "It only accepts {count} {}; here, it's called with more.",
+                if count == 1 { "argument" } else { "arguments" }
+            ));
+            ppf.close_box();
+            ppf.close_box();
+        }
+        TypeDesc::Tconstr { path, .. } if path.same(&predef::path_tagged_template()) => {
+            ppf.open_box(BoxKind::V, 0);
+            ppf.open_box(BoxKind::Box, 2);
+            ppf.str("This is a tagged-template tag of type");
+            ppf.space();
+            open_tag(ppf, TAG_INFO);
+            typecore_type_expr(ppf, &mut printer, typ);
+            close_tag(ppf);
+            ppf.close_box();
+            ppf.cut();
+            ppf.str("It can't be called like a function. Use it with backtick syntax instead, e.g. ");
+            tagged(ppf, TAG_INFO, "tag`SELECT ${id}`");
+            ppf.str(".");
+            ppf.close_box();
+        }
+        _ => {
+            ppf.open_box(BoxKind::V, 0);
+            ppf.open_box(BoxKind::Box, 2);
+            ppf.str("This can't be called, it's not a function.");
+            ppf.close_box();
+            ppf.cut();
+            ppf.str("It has type: ");
+            typecore_type_expr(ppf, &mut printer, typ);
+            ppf.close_box();
+        }
+    }
+}
+
+/// `Typecore.report_error`'s `Apply_wrong_label (l, ty)` (typecore.ml:4924-4932);
+/// `label` is `None` for `Nolabel`, else the prefixed label name.
+pub(super) fn print_apply_wrong_label(ppf: &mut Ppf<'_>, ctx: &TypeContext, label: Option<&str>, ty: TypeExprRef) {
+    let mut printer = Printtyp::new(ctx);
+    ppf.open_box(BoxKind::V, 0);
+    ppf.open_box(BoxKind::Box, 2);
+    match label {
+        None => ppf.str("The argument at this position should be labelled."),
+        Some(label) => {
+            ppf.str("This function does not take the argument ");
+            tagged(ppf, TAG_INFO, label);
+            ppf.str(".");
+        }
+    }
+    ppf.close_box();
+    ppf.cut();
+    ppf.str("This function has type: ");
+    typecore_type_expr(ppf, &mut printer, ty);
+    ppf.close_box();
+}
+
+/// `Typecore.report_error`'s `Abstract_wrong_label (l, ty)` (typecore.ml:4996-5003).
+pub(super) fn print_abstract_wrong_label(ppf: &mut Ppf<'_>, ctx: &TypeContext, label_mark: &str, ty: TypeExprRef) {
+    let mut printer = Printtyp::new(ctx);
+    ppf.open_box(BoxKind::V, 0);
+    ppf.open_box(BoxKind::Box, 2);
+    ppf.str("This function should have type");
+    ppf.space();
+    typecore_type_expr(ppf, &mut printer, ty);
+    ppf.close_box();
+    ppf.cut();
+    ppf.str(label_mark);
+    ppf.close_box();
+}
+
+/// `Typecore.report_error`'s `Field_not_optional (name, typ)` (typecore.ml:5222-5224).
+pub(super) fn print_field_not_optional(ppf: &mut Ppf<'_>, ctx: &TypeContext, name: &str, typ: TypeExprRef) {
+    let mut printer = Printtyp::new(ctx);
+    ppf.str("Field ");
+    tagged(ppf, TAG_INFO, name);
+    ppf.str(" is not optional in type ");
+    typecore_type_expr(ppf, &mut printer, typ);
+    ppf.str(". Use without ?");
+}
+
+/// `Typecore.report_error`'s `Tagged_template_non_tag typ` (typecore.ml:5237-5250).
+pub(super) fn print_tagged_template_non_tag(ppf: &mut Ppf<'_>, ctx: &TypeContext, typ: TypeExprRef) {
+    let mut printer = Printtyp::new(ctx);
+    ppf.open_box(BoxKind::V, 0);
+    ppf.str("This value is used with tagged template (backtick) syntax, but it has type");
+    ppf.space();
+    open_tag(ppf, TAG_INFO);
+    typecore_type_expr(ppf, &mut printer, typ);
+    close_tag(ppf);
+    ppf.space();
+    ppf.str("which is not a ");
+    tagged(ppf, TAG_INFO, "taggedTemplate");
+    ppf.str(".");
+    ppf.cut();
+    ppf.cut();
+    ppf.str("Tagged template syntax now requires a value of type ");
+    tagged(ppf, TAG_INFO, "taggedTemplate<'param, 'output>");
+    ppf.str(":");
+    ppf.cut();
+    ppf.cut();
+    ppf.str("  - To bind a JavaScript tag function, annotate the ");
+    tagged(ppf, TAG_INFO, "external");
+    ppf.str(" with ");
+    tagged(ppf, TAG_INFO, "taggedTemplate<...>");
+    ppf.str(" instead of using the removed ");
+    tagged(ppf, TAG_INFO, "@taggedTemplate");
+    ppf.str(" decorator.");
+    ppf.cut();
+    ppf.str("  - To use a ReScript function as a tag, lift it with ");
+    tagged(ppf, TAG_INFO, "TaggedTemplate.make");
+    ppf.str(".");
+    ppf.close_box();
+}

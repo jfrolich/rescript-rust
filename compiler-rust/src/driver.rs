@@ -10519,48 +10519,10 @@ fn format_apply_non_function_report(
     loc: LocIdx,
     typ: TypeExprRef,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
-    let repr = type_ctx.repr(typ);
-    let mut message = String::new();
-    match &*type_ctx.get_desc(repr) {
-        TypeDesc::Tarrow { args, ret } => {
-            let count = count_arrow_args(type_ctx, *ret, args.len());
-            message.push_str("This function has type ");
-            message.push_str(INFO);
-            message.push_str(&format_type_expr(type_ctx, typ));
-            message.push_str(RESET);
-            message.push('\n');
-            message.push_str("It only accepts ");
-            message.push_str(&count.to_string());
-            message.push(' ');
-            message.push_str(if count == 1 { "argument" } else { "arguments" });
-            message.push_str("; here, it's called with more.");
-        }
-        TypeDesc::Tconstr { path, .. }
-            if path.same(&crate::types::predef::path_tagged_template()) =>
-        {
-            message.push_str("This is a tagged-template tag of type ");
-            message.push_str(INFO);
-            message.push_str(&format_type_expr(type_ctx, typ));
-            message.push_str(RESET);
-            message.push_str(
-                "\nIt can't be called like a function. Use it with backtick syntax instead, e.g. ",
-            );
-            message.push_str(INFO);
-            message.push_str("tag`SELECT ${id}`");
-            message.push_str(RESET);
-            message.push('.');
-        }
-        _ => {
-            message.push_str("This can't be called, it's not a function.\n");
-            message.push_str("It has type: ");
-            message.push_str(&format_type_expr(type_ctx, typ));
-        }
-    }
-
-    format_compiler_error_report(arena, source, filename, loc, &message)
+    let message = type_clash::render_error_message(|ppf| {
+        type_clash::print_apply_non_function(ppf, type_ctx, typ)
+    });
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn format_tagged_template_non_tag_report(
@@ -10571,13 +10533,10 @@ fn format_tagged_template_non_tag_report(
     loc: LocIdx,
     typ: TypeExprRef,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-    let message = format!(
-        "This value is used with tagged template (backtick) syntax, but it has type\n{INFO}{}{RESET}\nwhich is not a {INFO}taggedTemplate{RESET}.\n\nTagged template syntax now requires a value of type {INFO}taggedTemplate<'param, 'output>{RESET}:\n\n  - To bind a JavaScript tag function, annotate the {INFO}external{RESET} with {INFO}taggedTemplate<...>{RESET} instead of using the removed {INFO}@taggedTemplate{RESET} decorator.\n  - To use a ReScript function as a tag, lift it with {INFO}TaggedTemplate.make{RESET}.",
-        format_type_expr(type_ctx, typ)
-    );
-    format_compiler_error_report(arena, source, filename, loc, &message)
+    let message = type_clash::render_error_message(|ppf| {
+        type_clash::print_tagged_template_non_tag(ppf, type_ctx, typ)
+    });
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn format_too_many_arguments_report(
@@ -10620,12 +10579,14 @@ fn format_abstract_wrong_label_report(
             format!("but its first argument is labelled ?{}", label.txt)
         }
     };
-    let message = format!(
-        "This function should have type {}\n{}",
-        format_type_expr(type_ctx, ty),
-        label_mark
-    );
-    format_compiler_error_report_from_location(source, filename, loc, &message)
+    let message = type_clash::render_error_message(|ppf| {
+        type_clash::print_abstract_wrong_label(ppf, type_ctx, &label_mark, ty)
+    });
+    let mut output = String::new();
+    push_compiler_error_report_header_from_location(&mut output, source, filename, loc);
+    output.push_str(&code_frame::apply_message_styles(&message));
+    output.push_str("\n\n");
+    output
 }
 
 fn format_apply_wrong_label_report(
@@ -10638,44 +10599,20 @@ fn format_apply_wrong_label_report(
     ty: TypeExprRef,
     suppress_info_style: bool,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
-    let mut message = String::new();
-    match label {
-        ParserArgLabel::Nolabel => {
-            message.push_str("The argument at this position should be labelled.");
-        }
-        ParserArgLabel::Labelled(loc) => {
-            message.push_str("This function does not take the argument ");
-            if !suppress_info_style {
-                message.push_str(INFO);
-            }
-            message.push('~');
-            message.push_str(arena.get_string(loc.txt));
-            if !suppress_info_style {
-                message.push_str(RESET);
-            }
-            message.push('.');
-        }
-        ParserArgLabel::Optional(loc) => {
-            message.push_str("This function does not take the argument ");
-            if !suppress_info_style {
-                message.push_str(INFO);
-            }
-            message.push('?');
-            message.push_str(arena.get_string(loc.txt));
-            if !suppress_info_style {
-                message.push_str(RESET);
-            }
-            message.push('.');
-        }
+    let label = match label {
+        ParserArgLabel::Nolabel => None,
+        ParserArgLabel::Labelled(loc) => Some(format!("~{}", arena.get_string(loc.txt))),
+        ParserArgLabel::Optional(loc) => Some(format!("?{}", arena.get_string(loc.txt))),
+    };
+    let message = type_clash::render_error_message(|ppf| {
+        type_clash::print_apply_wrong_label(ppf, type_ctx, label.as_deref(), ty)
+    });
+    let report = format_compiler_error_report_formatted(arena, source, filename, loc, &message);
+    if suppress_info_style {
+        report.replace("\x1b[1;33m", "").replace("\x1b[0m", "")
+    } else {
+        report
     }
-    message.push('\n');
-    message.push_str("This function has type: ");
-    message.push_str(&format_type_expr(type_ctx, ty));
-
-    format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
 fn format_field_not_optional_report(
@@ -10687,14 +10624,10 @@ fn format_field_not_optional_report(
     name: &str,
     typ: TypeExprRef,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
-    let message = format!(
-        "Field {INFO}{name}{RESET} is not optional in type {}. Use without ?",
-        format_type_expr(type_ctx, typ)
-    );
-    format_compiler_error_report(arena, source, filename, loc, &message)
+    let message = type_clash::render_error_message(|ppf| {
+        type_clash::print_field_not_optional(ppf, type_ctx, name, typ)
+    });
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn format_unbound_record_field_report(
