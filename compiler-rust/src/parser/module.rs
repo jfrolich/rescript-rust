@@ -4623,7 +4623,7 @@ pub fn parse_extension_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Located<
 }
 
 /// Parse an extension.
-fn parse_extension(p: &mut Parser<'_>) -> Extension {
+pub(super) fn parse_extension(p: &mut Parser<'_>) -> Extension {
     // Capture start position BEFORE consuming % or %% so extension location includes it
     let id_start_idx = p.start_pos_idx();
 

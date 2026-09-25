@@ -35,49 +35,68 @@ fn get_string_tag(p: &Parser<'_>) -> Option<Cow<'static, str>> {
 }
 
 /// Parse a constant value (number, string, char, etc).
+/// OCaml `parse_constant` (compiler/syntax/src/res_core.ml:1004-1043).
 pub fn parse_constant(p: &mut Parser<'_>) -> Constant {
-    match &p.token {
+    let is_negative = match p.token {
+        Token::Minus => {
+            p.next();
+            true
+        }
+        Token::Plus => {
+            p.next();
+            false
+        }
+        _ => false,
+    };
+    let constant = match &p.token {
         Token::Int { i, suffix } => {
-            let value = extend_cow_lifetime(i.clone());
             let s = *suffix;
-            if s == Some('n') && !is_valid_bigint_literal(&value) {
+            let i = extend_cow_lifetime(i.clone());
+            if s == Some('n') && !is_valid_bigint_literal(&i) {
                 p.err(DiagnosticCategory::Message(
                     "Invalid bigint literal. Only decimal literal is allowed for bigint."
                         .to_string(),
                 ));
             }
-            p.next();
+            let value = if is_negative {
+                Cow::Owned(format!("-{i}"))
+            } else {
+                i
+            };
             Constant::Integer(value, s)
         }
         Token::Float { f, suffix } => {
-            let value = extend_cow_lifetime(f.clone());
-            let s = *suffix;
-            p.next();
-            Constant::Float(value, s)
+            let value = if is_negative {
+                Cow::Owned(format!("-{f}"))
+            } else {
+                extend_cow_lifetime(f.clone())
+            };
+            Constant::Float(value, *suffix)
         }
         Token::String(s) => {
             let value = extend_cow_lifetime(s.clone());
             let tag = get_string_tag(p);
-            p.next();
             Constant::String(value, tag)
         }
         Token::Codepoint { c, original } => {
-            let value = *c;
-            let orig = extend_cow_lifetime(original.clone());
-            p.next();
             // When parsing for the printer (not type checker), preserve the original escape format
             // by encoding it as a string with a special prefix, like OCaml does.
             if p.mode == ParserMode::ParseForTypeChecker {
-                Constant::Char(value)
+                Constant::Char(*c)
             } else {
-                Constant::String(orig, Some(Cow::Borrowed("INTERNAL_RES_CHAR_CONTENTS")))
+                Constant::String(
+                    extend_cow_lifetime(original.clone()),
+                    Some(Cow::Borrowed("INTERNAL_RES_CHAR_CONTENTS")),
+                )
             }
         }
         _ => {
-            p.err(DiagnosticCategory::Message("Expected constant".to_string()));
-            Constant::Integer(Cow::Borrowed("0"), None)
+            p.err_unexpected();
+            Constant::String(Cow::Borrowed(""), None)
         }
-    }
+    };
+    p.next_unsafe();
+    constant
 }
 
 fn is_valid_bigint_literal(s: &str) -> bool {
@@ -4661,16 +4680,7 @@ fn parse_first_class_module_expr_inner(p: &mut Parser<'_>, start_pos_idx: PosIdx
         p.next();
         // Parse any attributes between : and the module identifier
         let attrs = parse_attributes(p);
-        let mut pkg_type = super::typ::parse_package_type(p);
-        // Update location to start at colon position
-        // Reuse the existing end PosIdx from pkg_type.ptyp_loc to match OCaml's sharing
-        let end_idx = p.loc_end_idx(pkg_type.ptyp_loc);
-        pkg_type.ptyp_loc = p.mk_loc_idx_full(colon_pos_idx, end_idx);
-        // Attach any attributes parsed
-        if !attrs.is_empty() {
-            pkg_type.ptyp_attributes.extend(attrs);
-        }
-        Some(pkg_type)
+        Some(super::typ::parse_package_type(p, colon_pos_idx, attrs))
     } else {
         None
     };

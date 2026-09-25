@@ -2340,8 +2340,8 @@ fn is_bar_or_doc_comment_then_bar(p: &mut Parser<'_>) -> bool {
 
 /// Parse a package type without leading paren: S [with type constraints].
 /// Used for first-class module constraints: module(Expr: S)
-pub fn parse_package_type(p: &mut Parser<'_>) -> CoreType {
-    let start_pos_idx = p.start_pos_idx();
+/// OCaml `parse_package_type ~start_pos ~attrs` (res_core.ml:4694-4704).
+pub fn parse_package_type(p: &mut Parser<'_>, start_pos_idx: PosIdx, attrs: Attributes) -> CoreType {
     let lid = parse_module_long_ident(p);
 
     // Parse optional constraints ("with" is not a keyword)
@@ -2357,7 +2357,7 @@ pub fn parse_package_type(p: &mut Parser<'_>) -> CoreType {
     CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_package(Box::new((lid, constraints)))),
         ptyp_loc: loc,
-        ptyp_attributes: Attributes::new(),
+        ptyp_attributes: attrs,
     }
 }
 
