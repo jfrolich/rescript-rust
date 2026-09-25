@@ -282,76 +282,20 @@ fn transform_placeholder_application(
 // Value and Constructor Parsing
 // ============================================================================
 
-/// Parse a value path after a dot (for field access).
-/// This parses things like `Lexing.pos_fname` into a Longident.
+/// OCaml `parse_value_path_after_dot` (res_core.ml:778-784).
 fn parse_value_path_after_dot(p: &mut Parser<'_>) -> Located<LidentIdx> {
     let start_pos_idx = p.start_pos_idx();
-
-    match &p.token {
-        Token::Uident(name) => {
-            let name = name.clone(); // Clone to release the borrow
-            let name_idx = p.arena_mut().push_interned_string(&name);
-            let mut path = Longident::Lident(name_idx);
-            p.next();
-
-            // Continue parsing the path: Module.Module.field
-            while p.token == Token::Dot {
-                p.next();
-                match &p.token {
-                    Token::Uident(name) => {
-                        let name = name.clone(); // Clone to release the borrow
-                        let name_idx = p.arena_mut().push_interned_string(&name);
-                        path = Longident::Ldot(Box::new(path), name_idx);
-                        p.next();
-                    }
-                    Token::Lident(name) => {
-                        let name = name.clone(); // Clone to release the borrow
-                        let name_idx = p.arena_mut().push_interned_string(&name);
-                        path = Longident::Ldot(Box::new(path), name_idx);
-                        p.next();
-                        break;
-                    }
-                    Token::String(name) => {
-                        // Quoted field: Module."switch"
-                        let name = name.clone(); // Clone to release the borrow
-                        let name_idx = p.arena_mut().push_interned_string(&name);
-                        path = Longident::Ldot(Box::new(path), name_idx);
-                        p.next();
-                        break;
-                    }
-                    _ => {
-                        // OCaml: parse_value_path_tail emits error and adds "_" for missing ident
-                        p.err_unexpected();
-                        let underscore_idx = p.arena_mut().intern_string("_");
-                        path = Longident::Ldot(Box::new(path), underscore_idx);
-                        break;
-                    }
-                }
-            }
-
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            let lid_idx = p.push_longident(path);
-            with_loc(lid_idx, loc)
-        }
-        Token::Lident(name) => {
-            let lid_idx = p.push_lident(&name.clone());
-            p.next();
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            with_loc(lid_idx, loc)
-        }
-        Token::String(name) => {
-            // Quoted field: ."switch"
-            let lid_idx = p.push_lident(&name.clone());
-            p.next();
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    match p.token {
+        Token::Lident(_) | Token::Uident(_) => {
+            let (parts, loc) = super::module::parse_value_path(p);
+            let lid = super::core::build_longident(p.arena_mut(), &parts);
+            let lid_idx = p.push_longident(lid);
             with_loc(lid_idx, loc)
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected identifier after dot".to_string(),
-            ));
+            p.err_unexpected();
+            let lid_idx = p.push_lident("_");
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            let lid_idx = p.push_lident_static("_");
             with_loc(lid_idx, loc)
         }
     }
@@ -2358,161 +2302,33 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
     loop {
         match &p.token {
             Token::Dot => {
+                // OCaml `parse_primary_expr` (res_core.ml:2296-2311).
                 p.next();
-                match &p.token {
-                    Token::Lident(name) => {
-                        let name = name.clone();
-                        let name_loc = p.mk_loc_current();
-                        let lid_idx = p.push_lident(&*name);
-                        p.next();
-
-                        // Check for field assignment: expr.field = value
-                        if p.token == Token::Equal {
-                            // OCaml: leave_breadcrumb ExprSetField
-                            p.leave_breadcrumb(Grammar::ExprSetField);
-                            p.next();
-                            let value = parse_expr(p);
-                            p.eat_breadcrumb();
-                            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                            expr = Expression {
-                                pexp_desc: {
-                                    let e_idx = p.arena_mut().push_expr(expr);
-                                    let v_idx = p.arena_mut().push_expr(value);
-                                    Box::new(ExpressionDesc::Pexp_setfield(Box::new((
-                                        e_idx,
-                                        with_loc(lid_idx, name_loc),
-                                        v_idx,
-                                    ))))
-                                },
-                                pexp_loc: loc,
-                                pexp_attributes: Attributes::new(),
-                            };
-                        } else {
-                            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                            expr = Expression {
-                                pexp_desc: {
-                                    let e_idx = p.arena_mut().push_expr(expr);
-                                    Box::new(ExpressionDesc::Pexp_field(
-                                        e_idx,
-                                        with_loc(lid_idx, name_loc),
-                                    ))
-                                },
-                                pexp_loc: loc,
-                                pexp_attributes: Attributes::new(),
-                            };
-                        }
-                    }
-                    Token::String(name) => {
-                        // Quoted field access: expr."switch"
-                        let name = name.clone();
-                        let name_loc = p.mk_loc_current();
-                        let lid_idx = p.push_lident(&*name);
-                        p.next();
-
-                        // Check for field assignment: expr."field" = value
-                        if p.token == Token::Equal {
-                            // OCaml: leave_breadcrumb ExprSetField
-                            p.leave_breadcrumb(Grammar::ExprSetField);
-                            p.next();
-                            let value = parse_expr(p);
-                            p.eat_breadcrumb();
-                            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                            expr = Expression {
-                                pexp_desc: {
-                                    let e_idx = p.arena_mut().push_expr(expr);
-                                    let v_idx = p.arena_mut().push_expr(value);
-                                    Box::new(ExpressionDesc::Pexp_setfield(Box::new((
-                                        e_idx,
-                                        with_loc(lid_idx, name_loc),
-                                        v_idx,
-                                    ))))
-                                },
-                                pexp_loc: loc,
-                                pexp_attributes: Attributes::new(),
-                            };
-                        } else {
-                            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                            expr = Expression {
-                                pexp_desc: {
-                                    let e_idx = p.arena_mut().push_expr(expr);
-                                    Box::new(ExpressionDesc::Pexp_field(
-                                        e_idx,
-                                        with_loc(lid_idx, name_loc),
-                                    ))
-                                },
-                                pexp_loc: loc,
-                                pexp_attributes: Attributes::new(),
-                            };
-                        }
-                    }
-                    Token::Uident(_) => {
-                        // Module-qualified field access: expr.Module.field
-                        // Parse the path (e.g., Lexing.pos_fname) and create
-                        // Pexp_field or Pexp_setfield.
-                        let field_path = parse_value_path_after_dot(p);
-                        if p.token == Token::Equal {
-                            p.leave_breadcrumb(Grammar::ExprSetField);
-                            p.next();
-                            let value = parse_expr(p);
-                            p.eat_breadcrumb();
-                            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                            expr = Expression {
-                                pexp_desc: {
-                                    let e_idx = p.arena_mut().push_expr(expr);
-                                    let v_idx = p.arena_mut().push_expr(value);
-                                    Box::new(ExpressionDesc::Pexp_setfield(Box::new((
-                                        e_idx, field_path, v_idx,
-                                    ))))
-                                },
-                                pexp_loc: loc,
-                                pexp_attributes: Attributes::new(),
-                            };
-                        } else {
-                            let end_idx = p.loc_end_idx(field_path.loc);
-                            let loc = p.mk_loc_idx_full(start_pos_idx, end_idx);
-                            expr = Expression {
-                                pexp_desc: {
-                                    let e_idx = p.arena_mut().push_expr(expr);
-                                    Box::new(ExpressionDesc::Pexp_field(e_idx, field_path))
-                                },
-                                pexp_loc: loc,
-                                pexp_attributes: Attributes::new(),
-                            };
-                        }
-                    }
-                    _ => {
-                        // OCaml `parse_value_path_after_dot` (res_core.ml:778-784):
-                        // report the token and use `_` as the field.
-                        let name_start_idx = p.start_pos_idx();
-                        p.err_unexpected();
-                        let name_loc = p.mk_loc_idx_to_prev_end(name_start_idx);
-                        let lid_idx = p.push_lident("_");
-                        let field = with_loc(lid_idx, name_loc);
-                        if p.token == Token::Equal && !no_call {
-                            p.leave_breadcrumb(Grammar::ExprSetField);
-                            p.next();
-                            let value = parse_expr(p);
-                            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                            p.eat_breadcrumb();
-                            let e_idx = p.arena_mut().push_expr(expr);
-                            let v_idx = p.arena_mut().push_expr(value);
-                            return Expression {
-                                pexp_desc: Box::new(ExpressionDesc::Pexp_setfield(Box::new((
-                                    e_idx, field, v_idx,
-                                )))),
-                                pexp_loc: loc,
-                                pexp_attributes: Attributes::new(),
-                            };
-                        }
-                        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                        let e_idx = p.arena_mut().push_expr(expr);
-                        expr = Expression {
-                            pexp_desc: Box::new(ExpressionDesc::Pexp_field(e_idx, field)),
-                            pexp_loc: loc,
-                            pexp_attributes: Attributes::new(),
-                        };
-                    }
+                let lident = parse_value_path_after_dot(p);
+                if p.token == Token::Equal && !no_call {
+                    p.leave_breadcrumb(Grammar::ExprSetField);
+                    p.next();
+                    let target_expr = parse_expr(p);
+                    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                    let e_idx = p.arena_mut().push_expr(expr);
+                    let v_idx = p.arena_mut().push_expr(target_expr);
+                    let setfield = Expression {
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_setfield(Box::new((
+                            e_idx, lident, v_idx,
+                        )))),
+                        pexp_loc: loc,
+                        pexp_attributes: Attributes::new(),
+                    };
+                    p.eat_breadcrumb();
+                    return setfield;
                 }
+                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                let e_idx = p.arena_mut().push_expr(expr);
+                expr = Expression {
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_field(e_idx, lident)),
+                    pexp_loc: loc,
+                    pexp_attributes: Attributes::new(),
+                };
             }
             Token::Lparen if !no_call => {
                 // Function call - but only if on the same line
