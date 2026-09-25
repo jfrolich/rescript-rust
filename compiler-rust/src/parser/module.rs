@@ -1442,62 +1442,37 @@ fn parse_functor_arg(p: &mut Parser<'_>) -> Option<FunctorArg> {
                 start_pos_idx,
             })
         }
-        Token::Lbrace => {
-            // Anonymous module signature: { ... } (punning for _ : { ... })
-            let mod_type = parse_module_type(p);
-            Some(FunctorArg {
-                attrs,
-                name: mknoloc(p.arena_mut().intern("_")),
-                mod_type: Some(mod_type),
-                start_pos_idx,
-            })
-        }
         _ => None,
     }
 }
 
 /// Parse functor arguments: ( arg1, arg2, ... )
+/// OCaml `parse_functor_args` (res_core.ml:6880-6893).
 fn parse_functor_args(p: &mut Parser<'_>) -> Vec<FunctorArg> {
-    // Capture position before ( - OCaml includes ( in the first arg's location
     let paren_start_pos_idx = p.start_pos_idx();
     p.expect(Token::Lparen);
-
-    let mut args = vec![];
-    let mut is_first = true;
-    while p.token != Token::Rparen && p.token != Token::Eof {
-        if let Some(mut arg) = parse_functor_arg(p) {
-            // For the first argument, OCaml includes the opening ( in the functor location
-            if is_first {
-                arg.start_pos_idx = paren_start_pos_idx;
-                is_first = false;
-            }
-            args.push(arg);
-        } else {
-            break;
-        }
-
-        // Handle comma
-        if p.token == Token::Comma {
-            p.next();
-        } else {
-            break;
-        }
-    }
-
+    let mut args = super::core::parse_comma_delimited_region(
+        p,
+        Grammar::FunctorArgs,
+        Token::Rparen,
+        parse_functor_arg,
+    );
     p.expect(Token::Rparen);
 
-    // If no args were parsed, treat as unit functor: ()
     if args.is_empty() {
         let star_idx = p.arena_mut().intern("*");
-        vec![FunctorArg {
+        return vec![FunctorArg {
             attrs: Attributes::new(),
             name: with_loc(star_idx, p.mk_loc_idx_to_prev_end(paren_start_pos_idx)),
             mod_type: None,
             start_pos_idx: paren_start_pos_idx,
-        }]
-    } else {
-        args
+        }];
     }
+    // The outermost functor built from these arguments is located from the
+    // opening parenthesis (`{mod_expr with pmod_loc = mk_loc start_pos
+    // end_pos}` in parse_functor_module_expr/parse_functor_module_type).
+    args[0].start_pos_idx = paren_start_pos_idx;
+    args
 }
 
 /// Parse a functor module expression: (args) => body
@@ -1619,19 +1594,34 @@ fn parse_module_type_no_with(p: &mut Parser<'_>) -> ModuleType {
 }
 
 fn parse_module_type_impl(p: &mut Parser<'_>, es6_arrow: bool, parse_with: bool) -> ModuleType {
-    // Parse attributes (e.g. `@attr module type of M`)
+    // OCaml `parse_module_type` (res_core.ml:7174-7192).
     let attrs = parse_attributes(p);
 
-    // Capture start position AFTER attributes - OCaml's module type locations
-    // don't include leading attributes
-    let _start_pos = p.start_pos.clone();
-    let start_pos_idx = p.start_pos_idx();
-
-    // Parse functor types first (if allowed), then fall back to primary module types.
-    let typ = if es6_arrow {
+    let typ = if es6_arrow && is_es6_arrow_functor(p) {
         parse_functor_module_type(p)
     } else {
-        parse_primary_module_type(p)
+        let modty = parse_primary_module_type(p);
+        if es6_arrow && p.token == Token::EqualGreater {
+            // `S => MT`: an unnamed functor parameter.
+            p.next();
+            let rhs = parse_module_type_no_with(p);
+            let start_idx = p.loc_start_idx(modty.pmty_loc);
+            let end_idx = p.prev_end_pos_idx();
+            let loc = p.mk_loc_idx(start_idx, end_idx);
+            let param_type_idx = p.arena_mut().push_mod_type(modty);
+            let rhs_idx = p.arena_mut().push_mod_type(rhs);
+            ModuleType {
+                pmty_desc: Box::new(ModuleTypeDesc::Pmty_functor(Box::new((
+                    mknoloc(p.arena_mut().intern("_")),
+                    Some(param_type_idx),
+                    rhs_idx,
+                )))),
+                pmty_loc: loc,
+                pmty_attributes: Attributes::new(),
+            }
+        } else {
+            modty
+        }
     };
 
     // OCaml attaches attributes to the inner module type BEFORE parsing `with` constraints.
@@ -1647,7 +1637,9 @@ fn parse_module_type_impl(p: &mut Parser<'_>, es6_arrow: bool, parse_with: bool)
     if parse_with && matches!(&p.token, Token::Lident(s) if s == "with") {
         p.next();
         let constraints = parse_with_constraints(p);
-        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+        // `mk_loc module_type.pmty_loc.loc_start p.prev_end_pos`.
+        let typ_start_idx = p.loc_start_idx(typ.pmty_loc);
+        let loc = p.mk_loc_idx_to_prev_end(typ_start_idx);
         let typ_idx = p.arena_mut().push_mod_type(typ);
         ModuleType {
             pmty_desc: Box::new(ModuleTypeDesc::Pmty_with(Box::new((typ_idx, constraints)))),
@@ -1659,227 +1651,29 @@ fn parse_module_type_impl(p: &mut Parser<'_>, es6_arrow: bool, parse_with: bool)
     }
 }
 
+/// OCaml `parse_functor_module_type` (res_core.ml:7144-7157).
 fn parse_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
-    // Parenthesized functor params: `() => MT` or `(_ : S, X: T) => MT`
-    if p.token == Token::Lparen && is_paren_functor_module_type(p) {
-        return parse_paren_functor_module_type(p);
-    }
-
-    // Sugar: `S => MT` (unnamed parameter)
     let start_pos_idx = p.start_pos_idx();
-    let param_type = parse_primary_module_type(p);
-    if p.token == Token::EqualGreater {
-        p.next();
-        // Use parse_module_type_no_with so `with` constraints apply to the outer functor
-        let body = parse_module_type_no_with(p);
-        let loc = p.mk_loc_idx_to_end_of(start_pos_idx, body.pmty_loc);
-        let param_type_idx = p.arena_mut().push_mod_type(param_type);
-        let body_idx = p.arena_mut().push_mod_type(body);
-        return ModuleType {
+    let args = parse_functor_args(p);
+    p.expect(Token::EqualGreater);
+    let rhs = parse_module_type(p);
+    let end_pos_idx = p.prev_end_pos_idx();
+    let mut mod_type = args.into_iter().rev().fold(rhs, |acc, arg| {
+        let loc = p.mk_loc_idx(arg.start_pos_idx, end_pos_idx);
+        let acc_idx = p.arena_mut().push_mod_type(acc);
+        let mod_type_idx = arg.mod_type.map(|mt| p.arena_mut().push_mod_type(mt));
+        ModuleType {
             pmty_desc: Box::new(ModuleTypeDesc::Pmty_functor(Box::new((
-                mknoloc(p.arena_mut().intern("_")),
-                Some(param_type_idx),
-                body_idx,
+                arg.name,
+                mod_type_idx,
+                acc_idx,
             )))),
             pmty_loc: loc,
-            pmty_attributes: Attributes::new(),
-        };
-    }
-
-    param_type
-}
-
-fn is_paren_functor_module_type(p: &mut Parser<'_>) -> bool {
-    p.lookahead(|state| {
-        let mut depth = 0;
-        while state.token != Token::Eof {
-            match state.token {
-                Token::Lparen => depth += 1,
-                Token::Rparen => {
-                    depth -= 1;
-                    if depth == 0 {
-                        state.next();
-                        break;
-                    }
-                }
-                _ => {}
-            }
-            state.next();
+            pmty_attributes: arg.attrs,
         }
-
-        state.token == Token::EqualGreater
-    })
-}
-
-fn parse_paren_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
-    let functor_start_idx = p.start_pos_idx();
-    p.expect(Token::Lparen);
-
-    #[derive(Debug)]
-    struct FunctorParam {
-        name: StringLoc,
-        param: Option<ModuleType>,
-        attrs: Attributes,
-        start_pos_idx: PosIdx,
-    }
-
-    let mut params = vec![];
-
-    if p.token == Token::Rparen {
-        // Unit parameter: `() => MT` - OCaml uses "*" as the name for generative functors
-        let start_pos_idx = functor_start_idx;
-        p.next();
-        // OCaml creates a location spanning the `()` for the `*` param name
-        let name_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-        let star_idx = p.arena_mut().intern("*");
-        params.push(FunctorParam {
-            name: with_loc(star_idx, name_loc),
-            param: None,
-            attrs: Attributes::new(),
-            start_pos_idx,
-        });
-    } else {
-        while p.token != Token::Rparen && p.token != Token::Eof {
-            let start_pos_idx = p.start_pos_idx();
-            // Parse parameter attributes like `@attr _: S` - attach to the functor type, not param
-            let param_attrs = parse_attributes(p);
-
-            match &p.token {
-                Token::Underscore => {
-                    p.next();
-                    // OCaml's arg_name location spans from start_pos (before attrs) to end of `_`
-                    let name_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                    let underscore_idx = p.arena_mut().intern("_");
-                    let name = with_loc(underscore_idx, name_loc);
-                    let param = if p.token == Token::Colon {
-                        p.next();
-                        Some(parse_module_type(p))
-                    } else {
-                        None
-                    };
-                    params.push(FunctorParam {
-                        name,
-                        param,
-                        attrs: param_attrs,
-                        start_pos_idx,
-                    });
-                }
-                Token::Lident(_) | Token::Uident(_) => {
-                    // `X: S` (named) or `S` (shorthand parameter type)
-                    let is_named = p.lookahead(|state| {
-                        state.next();
-                        state.token == Token::Colon
-                    });
-
-                    if is_named {
-                        let name = match &p.token {
-                            Token::Lident(n) | Token::Uident(n) => {
-                                let n = n.clone();
-                                let loc = p.mk_loc_current();
-                                p.next();
-                                let str_idx = p.arena_mut().push_interned_string(&n);
-                                with_loc(str_idx, loc)
-                            }
-                            _ => mknoloc(p.arena_mut().intern("_")),
-                        };
-                        p.expect(Token::Colon);
-                        let mty = parse_module_type(p);
-                        params.push(FunctorParam {
-                            name,
-                            param: Some(mty),
-                            attrs: param_attrs,
-                            start_pos_idx,
-                        });
-                    } else {
-                        // Shorthand: `(S, T) => U` (unnamed parameter types).
-                        // Match OCaml parse_functor_arg's Uident/no-colon path:
-                        // build Pmty_ident directly so longident.loc and pmty_loc
-                        // are the same location record.
-                        let lid = parse_module_long_ident(p);
-                        let loc = lid.loc;
-                        let param_ty = ModuleType {
-                            pmty_desc: Box::new(ModuleTypeDesc::Pmty_ident(lid)),
-                            pmty_loc: loc,
-                            pmty_attributes: Attributes::new(),
-                        };
-                        params.push(FunctorParam {
-                            name: mknoloc(p.arena_mut().intern("_")),
-                            param: Some(param_ty),
-                            attrs: param_attrs,
-                            start_pos_idx,
-                        });
-                    }
-                }
-                Token::Lparen => {
-                    // Allow `()` as a unit parameter in multi-arg functors, and `(S)` as shorthand.
-                    let is_unit = p.lookahead(|state| {
-                        state.next();
-                        state.token == Token::Rparen
-                    });
-                    if is_unit {
-                        p.next();
-                        p.expect(Token::Rparen);
-                        // OCaml creates a location spanning the `()` for the `*` param name
-                        let name_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                        let star_idx = p.arena_mut().intern("*");
-                        params.push(FunctorParam {
-                            name: with_loc(star_idx, name_loc),
-                            param: None,
-                            attrs: param_attrs,
-                            start_pos_idx,
-                        });
-                    } else {
-                        let param_ty = parse_module_type(p);
-                        params.push(FunctorParam {
-                            name: mknoloc(p.arena_mut().intern("_")),
-                            param: Some(param_ty),
-                            attrs: param_attrs,
-                            start_pos_idx,
-                        });
-                    }
-                }
-                _ => {
-                    break;
-                }
-            }
-
-            if !p.optional(&Token::Comma) {
-                break;
-            }
-        }
-        p.expect(Token::Rparen);
-    }
-
-    p.expect(Token::EqualGreater);
-    // Use parse_module_type_no_with so `with` constraints apply to the outer functor
-    let body = parse_module_type_no_with(p);
-    let end_pos_idx = p.loc_end_idx(body.pmty_loc);
-
-    // OCaml includes the opening `(` in the outermost Pmty_functor location
-    // For inner functors (in multi-param), use the param's start position
-    // After enumerate().rev(), idx==0 is the first param in original order
-    params
-        .into_iter()
-        .enumerate()
-        .rev()
-        .fold(body, |acc, (idx, param)| {
-            // First param in original order (idx==0) uses functor_start (opening paren)
-            let start_idx = if idx == 0 {
-                functor_start_idx
-            } else {
-                param.start_pos_idx
-            };
-            let loc = p.mk_loc_idx(start_idx, end_pos_idx);
-            let acc_idx = p.arena_mut().push_mod_type(acc);
-            let param_idx = param.param.map(|mt| p.arena_mut().push_mod_type(mt));
-            ModuleType {
-                pmty_desc: Box::new(ModuleTypeDesc::Pmty_functor(Box::new((
-                    param.name, param_idx, acc_idx,
-                )))),
-                pmty_loc: loc,
-                pmty_attributes: param.attrs,
-            }
-        })
+    });
+    mod_type.pmty_loc = p.mk_loc_idx(start_pos_idx, end_pos_idx);
+    mod_type
 }
 
 /// Parse a primary module type.
