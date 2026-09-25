@@ -8616,6 +8616,37 @@ fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
                         // Now desugar based on what f is
                         return desugar_pipe(expr, a, f, arena);
                     }
+                    if op == "##" {
+                        // ast_exp_apply.ml:135-153: `obj##name` becomes
+                        // `Ast_util.js_property loc obj name` (a Pexp_send).
+                        let rest = arena.get_expr(args[1].1);
+                        let name = match &*rest.pexp_desc {
+                            ExpressionDesc::Pexp_ident(lid) => match arena.get_longident(lid.txt) {
+                                Longident::Lident(name_idx) => {
+                                    Some(arena.get_string(*name_idx).to_string())
+                                }
+                                _ => None,
+                            },
+                            ExpressionDesc::Pexp_constant(c) => match &**c {
+                                Constant::String(name, None) => Some(name.to_string()),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some(name) = name {
+                            let obj_expr = arena.get_expr(args[0].1).clone();
+                            let obj = rewrite_expression(&obj_expr, arena);
+                            let obj_idx = arena.push_expr(obj);
+                            return Expression {
+                                pexp_desc: Box::new(ExpressionDesc::Pexp_send(Box::new((
+                                    obj_idx,
+                                    Located::new(Cow::Owned(name), expr.pexp_loc),
+                                )))),
+                                pexp_loc: expr.pexp_loc,
+                                pexp_attributes: expr.pexp_attributes.clone(),
+                            };
+                        }
+                    }
                     if op == "#=" {
                         // This is a setter: obj["prop"] = value
                         // OCaml transforms: Pexp_apply("#=", [Pexp_send(obj, name), value])
@@ -14714,6 +14745,67 @@ fn invalid_property_name_error(name: &str, loc: LocIdx) -> Option<PpxError> {
     }
 }
 
+/// The errors `Ast_exp_apply.app_exp_mapper` (ast_exp_apply.ml:75-208) raises
+/// for an infix application (`->`, `#=`, `##`) before mapping its arguments.
+fn app_exp_mapper_error(expr: &Expression, arena: &ParseArena) -> Option<PpxError> {
+    // `view_as_app e infix_ops` (ast_exp_apply.ml:66-71).
+    let ExpressionDesc::Pexp_apply(inner) = &*expr.pexp_desc else {
+        return None;
+    };
+    let PexpApply { funct, args, .. } = &**inner;
+    let op = ["->", "#=", "##"]
+        .into_iter()
+        .find(|op| expression_is_lident(*funct, op, arena))?;
+    let loc = expr.pexp_loc;
+    // `check_and_discard` (ast_exp_apply.ml:47-51): `Bs_syntaxerr.err_if_label`.
+    for (label, arg) in args {
+        if !matches!(label, ArgLabel::Nolabel) {
+            return Some(PpxError::at_loc(
+                arena.get_expr(*arg).pexp_loc,
+                "Label syntax is not supported in this position",
+            ));
+        }
+    }
+    match (op, args.len()) {
+        ("->", 2) => None,
+        ("##", 2) => {
+            let rest = arena.get_expr(args[1].1);
+            let name = match &*rest.pexp_desc {
+                ExpressionDesc::Pexp_ident(lid) => match arena.get_longident(lid.txt) {
+                    Longident::Lident(name_idx) => Some(arena.get_string(*name_idx).to_string()),
+                    _ => None,
+                },
+                ExpressionDesc::Pexp_constant(c) => match &**c {
+                    Constant::String(name, None) => Some(name.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            match name {
+                Some(name) => invalid_property_name_error(&name, rest.pexp_loc),
+                None => Some(PpxError::at_loc(loc, "invalid ## syntax")),
+            }
+        }
+        ("#=", 2) => {
+            if let Some(error) = hash_set_property_name_error(expr, arena) {
+                return Some(error);
+            }
+            invalid_hash_set_assignment(expr, arena)
+                .then(|| PpxError::at_loc(loc, "invalid #= assignment"))
+        }
+        ("->", _) => Some(PpxError::at_loc(
+            loc,
+            "Invalid pipe syntax. The pipe symbol (->) can only be used as a binary operator.",
+        )),
+        ("##", _) => Some(PpxError::at_loc(
+            loc,
+            "Js object ## expect syntax like obj##(paint (a,b)) ",
+        )),
+        // `Location.raise_errorf "invalid %s syntax" op` has no location.
+        (op, _) => Some(PpxError::message(format!("invalid {op} syntax"))),
+    }
+}
+
 fn hash_set_property_name_error(expr: &Expression, arena: &ParseArena) -> Option<PpxError> {
     let args = hash_set_apply_args(expr, arena)?;
     let lhs = arena.get_expr(args[0].1);
@@ -14790,12 +14882,10 @@ fn validate_expression_await_context(
             validate_expression_idx_await_context(body, arena, child_async_context, true)?;
         }
         ExpressionDesc::Pexp_apply(inner) => {
-            // Match ast_exp_apply.ml: #= only assigns to send expressions or ## property reads.
-            if let Some(error) = hash_set_property_name_error(expr, arena) {
+            // Ast_exp_apply.app_exp_mapper checks infix applications before
+            // mapping their arguments.
+            if let Some(error) = app_exp_mapper_error(expr, arena) {
                 return Err(error);
-            }
-            if invalid_hash_set_assignment(expr, arena) {
-                return Err(PpxError::at_loc(expr.pexp_loc, "invalid #= assignment"));
             }
             validate_expression_idx_await_context(inner.funct, arena, async_context, false)?;
             for (_label, arg) in &inner.args {
