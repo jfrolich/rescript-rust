@@ -5248,7 +5248,7 @@ fn type_pattern_construct(
             (desc, path)
         } else {
             // Module-qualified: use direct lookup
-            match lookup_constructor_in_module(
+            match lookup_constructor_in_module_with_ambiguity(
                 lid_txt,
                 tctx.arena,
                 env,
@@ -5256,7 +5256,18 @@ fn type_pattern_construct(
                 tctx.type_ctx,
                 Some(expected_ty),
             ) {
-                Some((path, desc)) => {
+                Some((path, desc, ambiguous_types)) => {
+                // `NameChoice.disambiguate` (typecore.ml:913-918).
+                if !ambiguous_types.is_empty() {
+                    tctx.report_warning(
+                        lid.loc,
+                        Warning::AmbiguousName {
+                            names: vec![desc.cstr_name.clone()],
+                            types: ambiguous_types,
+                            is_label: false,
+                        },
+                    );
+                }
                 if let Some((expected, alternatives)) = qualified_constructor_type_mismatch(
                     qualified_opath.as_ref(),
                     &desc,
@@ -13811,7 +13822,7 @@ fn type_construct(
             (path, desc)
         } else {
             // Module-qualified: use direct lookup
-            match lookup_constructor_in_module(
+            match lookup_constructor_in_module_with_ambiguity(
                 &longident,
                 tctx.arena,
                 env,
@@ -13819,7 +13830,19 @@ fn type_construct(
                 tctx.type_ctx,
                 Some(expected_ty),
             ) {
-                Some((path, desc)) => {
+                Some((path, desc, ambiguous_types)) => {
+                // `NameChoice.disambiguate` (typecore.ml:913-918) warns
+                // before the constructor is typed.
+                if !ambiguous_types.is_empty() {
+                    tctx.report_warning(
+                        lid.loc,
+                        Warning::AmbiguousName {
+                            names: vec![lid_name.clone()],
+                            types: ambiguous_types,
+                            is_label: false,
+                        },
+                    );
+                }
                 if let Some((expected, alternatives)) = qualified_constructor_type_mismatch(
                     qualified_opath.as_ref(),
                     &desc,
@@ -23988,6 +24011,21 @@ pub(crate) fn lookup_constructor_in_module<'b>(
     ctx: &'b crate::types::context::TypeContext,
     expected_ty: Option<TypeExprRef>,
 ) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
+    lookup_constructor_in_module_with_ambiguity(lid, arena, env, pers_env, ctx, expected_ty)
+        .map(|(path, desc, _)| (path, desc))
+}
+
+/// `lookup_constructor_in_module`, also returning the `ambiguous_types` that
+/// `NameChoice.disambiguate` reports as warning 41 when no expected variant
+/// path selects the constructor (typecore.ml:884-918).
+pub(crate) fn lookup_constructor_in_module_with_ambiguity<'b>(
+    lid: &Longident,
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext,
+    expected_ty: Option<TypeExprRef>,
+) -> Option<(Path, crate::types::decl::ConstructorDescription, Vec<String>)> {
     use crate::parser::longident::Longident;
     match lid {
         Longident::Ldot(module_lid, cstr_idx) => {
@@ -24047,7 +24085,7 @@ pub(crate) fn lookup_constructor_in_module<'b>(
                                     ctx,
                                 )
                             {
-                                return Some((path.clone(), desc.clone()));
+                                return Some((path.clone(), desc.clone(), Vec::new()));
                             }
                         }
                     }
@@ -24059,15 +24097,15 @@ pub(crate) fn lookup_constructor_in_module<'b>(
             // compare_type_path at typecore.ml:978/786-787 and may force
             // Env.normalize_path through compiler/ml/env.ml:903-914 before any
             // nested pattern binders are allocated.
-            let selected = candidates.first().cloned()?;
-            force_constructor_ambiguous_type_side_effects(
-                &selected.1,
+            let (selected_path, selected_desc) = candidates.first().cloned()?;
+            let ambiguous = ambiguous_constructor_warning_types(
+                &selected_desc,
                 candidates.iter().skip(1).map(|(_, desc)| desc),
                 env,
                 pers_env,
                 ctx,
             );
-            Some(selected)
+            Some((selected_path, selected_desc, ambiguous))
         }
         _ => None,
     }
