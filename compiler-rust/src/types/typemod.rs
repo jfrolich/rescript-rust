@@ -13694,15 +13694,23 @@ pub(crate) fn scrape_alias_module_type<'b>(
                 let name = id.name();
                 if let Ok(md) = env.lookup_module(&Path::pident(id.clone())) {
                     match &md.md_type {
-                        DeclMty::MtyAlias(_, alias_path) | DeclMty::MtyIdent(alias_path) => {
-                            resolve_path(
-                                alias_path,
-                                env,
-                                pers_env,
-                                ctx,
-                                visiting,
-                                force_component_subst,
-                            )
+                        DeclMty::MtyAlias(_, alias_path) => resolve_path(
+                            alias_path,
+                            env,
+                            pers_env,
+                            ctx,
+                            visiting,
+                            force_component_subst,
+                        ),
+                        // `Env.scrape_alias` expands a module type path with
+                        // `find_modtype_expansion` (env.ml:1396-1400).
+                        DeclMty::MtyIdent(mty_path) => {
+                            match find_modtype_expansion(mty_path, env, pers_env, ctx) {
+                                Some(expansion) => {
+                                    scrape_alias_module_type(&expansion, env, pers_env, ctx)
+                                }
+                                None => Some(md.md_type.clone()),
+                            }
                         }
                         other => Some(anchored(&Path::pident(id.clone()), other)),
                     }
@@ -13751,15 +13759,22 @@ pub(crate) fn scrape_alias_module_type<'b>(
 
                 if let Some((owner_path, md)) = resolved_component {
                     match &md.md_type {
-                        DeclMty::MtyAlias(_, alias_path) | DeclMty::MtyIdent(alias_path) => {
-                            resolve_path(
-                                alias_path,
-                                env,
-                                pers_env,
-                                ctx,
-                                visiting,
-                                force_component_subst,
-                            )
+                        DeclMty::MtyAlias(_, alias_path) => resolve_path(
+                            alias_path,
+                            env,
+                            pers_env,
+                            ctx,
+                            visiting,
+                            force_component_subst,
+                        ),
+                        // env.ml:1396-1400.
+                        DeclMty::MtyIdent(mty_path) => {
+                            match find_modtype_expansion(mty_path, env, pers_env, ctx) {
+                                Some(expansion) => {
+                                    scrape_alias_module_type(&expansion, env, pers_env, ctx)
+                                }
+                                None => Some(md.md_type.clone()),
+                            }
                         }
                         other => Some(anchored(&owner_path, other)),
                     }
@@ -13790,11 +13805,37 @@ pub(crate) fn scrape_alias_module_type<'b>(
             anchor_local_module_aliases_to_owner(&mut strengthened, path);
             Some(strengthened)
         }
-        DeclMty::MtyIdent(path) => {
-            let mut visiting = HashSet::new();
-            resolve_path(path, env, pers_env, ctx, &mut visiting, false)
-        }
+        // `Env.scrape_alias` (env.ml:1396-1400): `Mty_ident p` scrapes the
+        // module type's expansion, or stays as is when `p` is abstract.
+        DeclMty::MtyIdent(path) => match find_modtype_expansion(path, env, pers_env, ctx) {
+            Some(expansion) => scrape_alias_module_type(&expansion, env, pers_env, ctx),
+            None => Some(mty.clone()),
+        },
         other => Some(other.clone()),
+    }
+}
+
+/// `Env.find_modtype_expansion` (env.ml): the manifest of a module type path,
+/// or `None` for an abstract or unknown module type.
+fn find_modtype_expansion(
+    path: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+) -> Option<crate::types::decl::ModuleType> {
+    match path {
+        Path::Pident(_) => env.lookup_modtype(path).ok()?.mtd_type.clone(),
+        Path::Pdot(parent, name, _) => {
+            let (_, mtd) = crate::types::typecore::lookup_modtype_in_resolved_path(
+                parent,
+                name.as_str(),
+                env,
+                pers_env,
+                ctx,
+            )?;
+            mtd.mtd_type
+        }
+        Path::Papply(_, _) => None,
     }
 }
 
