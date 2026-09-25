@@ -12018,7 +12018,11 @@ pub(crate) fn copy_type_cached(
                     }
                     let marker_tuple =
                         ctx.new_generic_type(TypeDesc::Ttuple(vec![more_copy, placeholder]));
-                    let prev_marker = cache.row_more_markers.insert(
+                    // OCaml ctype.ml:853 `more.desc <- Tsubst (Ttuple [more'; t])`:
+                    // the marker stays until `cleanup_types` after the whole copy,
+                    // so every later variant sharing this row variable reuses `t`
+                    // (ctype.ml:786-791).
+                    cache.row_more_markers.insert(
                         more,
                         CopyRowMoreMarker {
                             tuple: marker_tuple,
@@ -12028,14 +12032,6 @@ pub(crate) fn copy_type_cached(
                     let row_for_copy = opened_row.as_ref().unwrap_or(row);
                     let mut row_copy =
                         copy_row_cached(ctx, row_for_copy, true, keep, more_copy, cache);
-                    match prev_marker {
-                        Some(prev) => {
-                            cache.row_more_markers.insert(more, prev);
-                        }
-                        None => {
-                            cache.row_more_markers.remove(&more);
-                        }
-                    }
 
                     // OCaml ctype.ml PR#6163: promote copied rows to fixed when
                     // copied row_more is a constructor.
