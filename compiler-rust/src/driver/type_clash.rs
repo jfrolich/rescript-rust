@@ -1843,3 +1843,30 @@ pub(super) fn print_definition_mismatch(
     }
     ppf.close_box();
 }
+
+/// `Typedecl.explain_unbound_gen` for `explain_unbound ppf tv tl (fun c -> c)
+/// "type" (fun _ -> "")` (typedecl.ml:2080-2094), without the leading ".@.":
+/// `@[<hov2>In type@ %a@;<1 -2>the variable %a is unbound@]`, where the
+/// types are marked together with `Tobject (tv, ref None)` to force aliasing.
+pub(super) fn print_explain_unbound_type(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    tv: TypeExprRef,
+    ti: TypeExprRef,
+) {
+    let mut printer = Printtyp::new(ctx);
+    let ty0 = ctx.new_generic_type(TypeDesc::Tobject {
+        fields: tv,
+        name: None,
+    });
+    printer.reset_and_mark_loops_list(&[ti, ty0]);
+    ppf.open_box(BoxKind::HOV, 2);
+    ppf.str("In type");
+    ppf.space();
+    printer.pp_type_expr(ppf, ti);
+    ppf.break_(1, -2);
+    ppf.str("the variable ");
+    printer.pp_type_expr(ppf, tv);
+    ppf.str(" is unbound");
+    ppf.close_box();
+}

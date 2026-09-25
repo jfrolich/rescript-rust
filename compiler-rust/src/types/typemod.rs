@@ -3634,6 +3634,14 @@ pub enum TypeModError {
         /// The unbound variable itself, printed by `explain_unbound`.
         var: Option<TypeExprRef>,
     },
+    /// `Typedecl.Unbound_type_var_ext`: `Ctype.closed_extension_constructor`
+    /// found the free variable `var` in the constructor arguments `args`.
+    UnboundTypeVarInExtension {
+        /// Extension constructor location.
+        loc: LocIdx,
+        var: TypeExprRef,
+        args: crate::types::ConstructorArguments,
+    },
     /// An extension constructor contains an unbound type variable.
     UnboundTypeVarExt {
         /// Extension constructor location.
@@ -17103,87 +17111,6 @@ fn type_var_report_name(name: &Option<String>) -> String {
         .unwrap_or_else(|| "_".to_string())
 }
 
-fn find_unbound_type_var_name(
-    ctx: &crate::types::context::TypeContext,
-    ty: TypeExprRef,
-    allowed: &HashSet<TypeExprRef>,
-    visited: &mut HashSet<TypeExprRef>,
-) -> Option<String> {
-    let ty = ctx.repr(ty);
-    if !visited.insert(ty) {
-        return None;
-    }
-
-    match &*ctx.get_desc(ty) {
-        TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => {
-            (!allowed.contains(&ty)).then(|| type_var_report_name(name))
-        }
-        TypeDesc::Tarrow { args, ret } => args
-            .iter()
-            .find_map(|arg| find_unbound_type_var_name(ctx, arg.typ, allowed, visited))
-            .or_else(|| find_unbound_type_var_name(ctx, *ret, allowed, visited)),
-        TypeDesc::Ttuple(types) => types
-            .iter()
-            .find_map(|ty| find_unbound_type_var_name(ctx, *ty, allowed, visited)),
-        TypeDesc::Tconstr { args, .. } | TypeDesc::Tpackage { args, .. } => args
-            .iter()
-            .find_map(|ty| find_unbound_type_var_name(ctx, *ty, allowed, visited)),
-        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
-            find_unbound_type_var_name(ctx, *next, allowed, visited)
-        }
-        TypeDesc::Tpoly { body, vars } => {
-            let mut allowed = allowed.clone();
-            allowed.extend(vars.iter().map(|var| ctx.repr(*var)));
-            find_unbound_type_var_name(ctx, *body, &allowed, visited)
-        }
-        TypeDesc::Tobject { fields, .. } => {
-            find_unbound_type_var_name(ctx, *fields, allowed, visited)
-        }
-        TypeDesc::Tfield { typ, rest, .. } => {
-            find_unbound_type_var_name(ctx, *typ, allowed, visited)
-                .or_else(|| find_unbound_type_var_name(ctx, *rest, allowed, visited))
-        }
-        TypeDesc::Tvariant(row) => {
-            // `free_vars_rec` skips the row variable of a static row
-            // (compiler/ml/ctype.ml:391-394).
-            let row = crate::types::btype::row_repr(ctx, row);
-            let field_name = row.row_fields.iter().find_map(|(_, field)| {
-                match crate::types::btype::row_field_repr(ctx, field) {
-                    crate::types::RowField::Rpresent(Some(ty)) => {
-                        find_unbound_type_var_name(ctx, ty, allowed, visited)
-                    }
-                    crate::types::RowField::Reither { types, .. } => types
-                        .iter()
-                        .find_map(|ty| find_unbound_type_var_name(ctx, *ty, allowed, visited)),
-                    _ => None,
-                }
-            });
-            field_name.or_else(|| {
-                (!crate::types::btype::static_row(ctx, &row))
-                    .then(|| find_unbound_type_var_name(ctx, row.row_more, allowed, visited))
-                    .flatten()
-            })
-        }
-        TypeDesc::Tnil => None,
-    }
-}
-
-fn find_unbound_type_var_name_in_constructor_args(
-    ctx: &crate::types::context::TypeContext,
-    args: &crate::types::ConstructorArguments,
-    allowed: &HashSet<TypeExprRef>,
-) -> Option<String> {
-    let mut visited = HashSet::new();
-    match args {
-        crate::types::ConstructorArguments::CstrTuple(types) => types
-            .iter()
-            .find_map(|ty| find_unbound_type_var_name(ctx, *ty, allowed, &mut visited)),
-        crate::types::ConstructorArguments::CstrRecord(labels) => labels.iter().find_map(|label| {
-            find_unbound_type_var_name(ctx, label.ld_type, allowed, &mut visited)
-        }),
-    }
-}
-
 // Mirrors OCaml `Ctype.closed_type_decl`/`closed_type` for declaration-level
 // unbound variables: declared params are marked as allowed, constructor payloads
 // and record fields are checked before the manifest, and each checked type
@@ -22146,15 +22073,18 @@ fn type_structure_item<'a>(
                         }
                     }
                 }
+                // `Ctype.closed_extension_constructor` (ctype.ml:454-464,
+                // typedecl.ml:1813-1818).
                 if ext_cstr.ext_type.ext_ret_type.is_none() {
-                    if let Some(name) = find_unbound_type_var_name_in_constructor_args(
+                    if let Some(var) = find_unbound_type_var_in_constructor_args(
                         ctx,
                         &ext_cstr.ext_type.ext_args,
                         &allowed_type_params,
                     ) {
-                        return Err(TypeModError::UnboundTypeVarExt {
+                        return Err(TypeModError::UnboundTypeVarInExtension {
                             loc: ext_cstr.ext_loc,
-                            name,
+                            var,
+                            args: ext_cstr.ext_type.ext_args.clone(),
                         });
                     }
                 }
@@ -22424,12 +22354,18 @@ fn type_structure_item<'a>(
                     ) {
                         return Err(TypeModError::UnboundTypeVarExt { loc, name });
                     }
-                    if let Some(name) = find_unbound_type_var_name_in_constructor_args(
+                    // `Ctype.closed_extension_constructor` (ctype.ml:454-464,
+                    // typedecl.ml:1857-1862).
+                    if let Some(var) = find_unbound_type_var_in_constructor_args(
                         ctx,
                         &ext_args,
                         &allowed_type_params,
                     ) {
-                        return Err(TypeModError::UnboundTypeVarExt { loc, name });
+                        return Err(TypeModError::UnboundTypeVarInExtension {
+                            loc,
+                            var,
+                            args: ext_args.clone(),
+                        });
                     }
                 }
             }

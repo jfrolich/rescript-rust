@@ -4253,6 +4253,37 @@ fn type_mod_error_to_anyhow_styled(
             2,
         )
         .into(),
+        TypeModError::UnboundTypeVarInExtension { loc, var, args } => {
+            // typedecl.ml:2202-2205: `tys_of_constr_args ext.ext_args`, then
+            // `explain_unbound` over the first argument containing `var`.
+            let tys: Vec<TypeExprRef> = match args {
+                crate::types::ConstructorArguments::CstrTuple(tys) => tys.clone(),
+                crate::types::ConstructorArguments::CstrRecord(labels) => {
+                    labels.iter().map(|l| l.ld_type).collect()
+                }
+            };
+            let first = "A type variable is unbound in this extension constructor";
+            let report = match tys
+                .iter()
+                .find(|ti| crate::types::ctype::deep_occur(type_ctx, *var, **ti))
+            {
+                Some(ti) => {
+                    let explanation = type_clash::render_error_message_at_column0(|ppf| {
+                        type_clash::print_explain_unbound_type(ppf, type_ctx, *var, *ti)
+                    });
+                    format_compiler_error_report_with_unindented_break(
+                        arena,
+                        source,
+                        filename,
+                        *loc,
+                        &format!("{first}."),
+                        explanation.trim_end_matches('\n'),
+                    )
+                }
+                None => format_compiler_error_report(arena, source, filename, *loc, first),
+            };
+            UserDiagnostic::new(report, 2).into()
+        }
         TypeModError::UnboundTypeVarExt { loc, name } => UserDiagnostic::new(
             format_unbound_type_variable_report(arena, source, filename, *loc, name),
             2,
