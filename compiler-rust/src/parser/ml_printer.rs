@@ -853,36 +853,12 @@ fn print_value_binding<W: Write>(
                 ref arity,
                 ref is_async,
             } = **inner;
-            // OCaml: pp f "%a@ %a" (simple_pattern ctxt) p pp_print_pexp_function x
-            // where pp_print_pexp_function does: pp f "%s%s%a@ %a" async_str arity_str param recurse
+            // OCaml `binding`: pp f "%a@ %a" (simple_pattern ctxt) p pp_print_pexp_function x
+            // (pprintast.ml:1063-1089).
             print_pattern(f, arena, pat);
-            f.space(); // @ between pattern and pp_print_pexp_function
-
-            if *is_async {
-                f.string("async ");
-            }
-
-            if let Some(n) = arena.get_arity(*arity) {
-                f.string(&format!("[arity:{}]", n));
-            }
-
-            let body = if let Some(params) = arena.stored_nary_fun_params(inner) {
-                for param in params {
-                    print_inline_param(
-                        f,
-                        arena,
-                        &param.p_lbl,
-                        &param.p_default,
-                        arena.get_pat(param.p_pat),
-                    );
-                    f.space();
-                }
-                arena.get_expr(*rhs)
-            } else {
-                print_inline_param(f, arena, arg_label, default, arena.get_pat(*lhs));
-                f.space(); // @ between param and next
-                print_remaining_inline_params(f, arena, arena.get_expr(*rhs))
-            };
+            f.space();
+            print_pexp_function_head(f, arena, inner);
+            let body = print_remaining_inline_params(f, arena, arena.get_expr(inner.rhs));
 
             // OCaml: pp f "=@;%a" (expression ctxt) x
             f.string("=");
@@ -1092,6 +1068,34 @@ fn print_remaining_inline_params<'a, W: Write>(
     print_remaining_inline_params_with_arity(f, arena, expr, false)
 }
 
+/// One `Pexp_fun` step of OCaml `pp_print_pexp_function` (pprintast.ml:1069-1086):
+/// "%s%a%s%a" async_str pp_newtypes newtypes arity_str pp_params params.
+fn print_pexp_function_head<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, inner: &PexpFun) {
+    if inner.is_async {
+        f.string("async ");
+    }
+    for (name, nt_attrs) in arena.nary_fun_newtypes(inner) {
+        print_attributes(f, arena, nt_attrs);
+        f.string("(type");
+        f.space();
+        f.string(arena.get_string(name.txt));
+        f.string(")");
+        f.space();
+    }
+    if let Some(n) = arena.get_arity(inner.arity) {
+        f.string(&format!("[arity:{}]", n));
+    }
+    if let Some(params) = arena.stored_nary_fun_params(inner) {
+        for param in params {
+            print_inline_param(f, arena, &param.p_lbl, &param.p_default, arena.get_pat(param.p_pat));
+            f.space();
+        }
+    } else {
+        print_inline_param(f, arena, &inner.arg_label, &inner.default, arena.get_pat(inner.lhs));
+        f.space();
+    }
+}
+
 /// Helper to print remaining inline params, optionally printing arity on first Pexp_fun
 fn print_remaining_inline_params_with_arity<'a, W: Write>(
     f: &mut Formatter<W>,
@@ -1105,22 +1109,8 @@ fn print_remaining_inline_params_with_arity<'a, W: Write>(
 
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
-            let PexpFun {
-                ref arg_label,
-                ref default,
-                ref lhs,
-                ref rhs,
-                ref arity,
-                ..
-            } = **inner;
-            // Print arity for each Pexp_fun that has an arity annotation
-            // (matching OCaml's pprintast: only print when explicitly set)
-            if let Some(n) = arena.get_arity(*arity) {
-                f.string(&format!("[arity:{}]", n));
-            }
-            print_inline_param(f, arena, arg_label, default, arena.get_pat(*lhs));
-            f.space(); // @ between param and next recursive call
-            print_remaining_inline_params_with_arity(f, arena, arena.get_expr(*rhs), false)
+            print_pexp_function_head(f, arena, inner);
+            print_remaining_inline_params_with_arity(f, arena, arena.get_expr(inner.rhs), false)
         }
         ExpressionDesc::Pexp_newtype(inner) => {
             let (ref name, ref inner_idx) = **inner;
@@ -1521,6 +1511,14 @@ fn print_expression_inner<W: Write>(
             }
             f.string("fun");
             f.space();
+            // OCaml `pp_newtypes`: "%a(type %s)@;" (pprintast.ml:633-638).
+            for (name, nt_attrs) in arena.nary_fun_newtypes(inner) {
+                print_attributes(f, arena, nt_attrs);
+                f.string("(type ");
+                f.string(arena.get_string(name.txt));
+                f.string(")");
+                f.space();
+            }
             if let Some(n) = arity_value {
                 f.string(&format!("[arity:{}]", n));
             }
