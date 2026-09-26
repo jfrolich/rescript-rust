@@ -1030,14 +1030,16 @@ fn parse_parameters(p: &mut Parser<'_>) -> Vec<super::core::FundefParameter> {
                     } else if grammar::is_parameter_start(&p.token) {
                         // Token looks like another param but no comma - missing comma case
                         p.expect(Token::Comma);
-                    } else if !recover::should_abort_list_parse(p) {
-                        // Unexpected token, not closing/EOF/abort - expect comma
-                        p.expect(Token::Comma);
+                    } else {
+                        // res_core.ml `parse_comma_delimited_region`: report a
+                        // missing comma unless the token ends/aborts the list,
+                        // skip a `;`, and keep looping either way.
+                        if !recover::should_abort_list_parse(p) {
+                            p.expect(Token::Comma);
+                        }
                         if p.token == Token::Semicolon {
                             p.next();
                         }
-                    } else {
-                        break;
                     }
                 }
                 p.eat_breadcrumb();
@@ -1069,14 +1071,16 @@ fn parse_parameters(p: &mut Parser<'_>) -> Vec<super::core::FundefParameter> {
                     } else if grammar::is_parameter_start(&p.token) {
                         // Token looks like another param but no comma - missing comma case
                         p.expect(Token::Comma);
-                    } else if !recover::should_abort_list_parse(p) {
-                        // Unexpected token, not closing/EOF/abort - expect comma
-                        p.expect(Token::Comma);
+                    } else {
+                        // res_core.ml `parse_comma_delimited_region`: report a
+                        // missing comma unless the token ends/aborts the list,
+                        // skip a `;`, and keep looping either way.
+                        if !recover::should_abort_list_parse(p) {
+                            p.expect(Token::Comma);
+                        }
                         if p.token == Token::Semicolon {
                             p.next();
                         }
-                    } else {
-                        break;
                     }
                 }
                 p.eat_breadcrumb();
@@ -1290,8 +1294,9 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
         ));
     }
 
-    // Regular pattern parameter
-    if grammar::is_pattern_start(&p.token) {
+    // Regular pattern parameter: res_core.ml:1940-1975 always parses a
+    // (constrained) pattern here, reporting any unexpected token itself.
+    {
         let pat = super::pattern::parse_pattern(p);
         // Handle constraint inline to allow full arrow types (unlike switch cases)
         // For function parameters like `(x: int => int)`, we want to parse
@@ -1377,8 +1382,6 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
             },
         ));
     }
-
-    None
 }
 
 /// Parse a list of lowercase identifiers.
