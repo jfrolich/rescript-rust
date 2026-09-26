@@ -150,11 +150,13 @@ impl ParserDiagnostic {
                 let base = explain_unexpected(token, context);
                 // OCaml: special handling for old data-last pipe |> and array syntax [|...|]
                 if let (Token::Bar, Some(source)) = (token, src) {
+                    // res_diagnostics.ml:140-160 indexes the raw source bytes,
+                    // i.e. the chars of the Latin-1 source view.
                     let idx_prev = self.start_pos.cnum.saturating_sub(1) as usize;
                     let idx_next = self.end_pos.cnum as usize;
-                    let bytes = source.as_bytes();
+                    let byte_at = |idx: usize| source.chars().nth(idx);
                     // Check for [| (old array literal syntax)
-                    if idx_prev < bytes.len() && bytes[idx_prev] == b'[' {
+                    if self.start_pos.cnum >= 1 && byte_at(idx_prev) == Some('[') {
                         return base
                             + "\n\n  Did you mean to write an array literal? \
                             Arrays are written with `[ ... ]` (not `[| ... |]`).\n  \
@@ -162,7 +164,7 @@ impl ParserDiagnostic {
                             Example: `[|1, 2, 3|]` -> `[1, 2, 3]`";
                     }
                     // Check for |> (old data-last pipe)
-                    if idx_next < bytes.len() && bytes[idx_next] == b'>' {
+                    if byte_at(idx_next) == Some('>') {
                         return base
                             + "\n\n  The old data-last pipe `|>` has been removed \
                             from the language.\n  Refactor to use a data-first `->` pipe instead.";
