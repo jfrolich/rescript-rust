@@ -19874,6 +19874,12 @@ fn type_expect_with_module_unpacks(
     // Match OCaml Env.enter_module: create one fresh ident used for
     // both the body environment binding and the Texp_letmodule node.
     let letmod_id = tctx.type_ctx.create_ident(unpack.id.name());
+    // The unpack's `Pexp_ident` is typed (typecore.ml:3357) before the body;
+    // `Env.lookup_value` marks the pattern variable used (env.ml:1169-1172).
+    if let Ok(desc) = env.find_value(unpack.id.name()) {
+        let val_loc = desc.val_loc.clone();
+        tctx.mark_value_used(env, unpack.id.name(), val_loc);
+    }
     // Note: OCaml applies prefix_idents/Subst.signature here via lazy
     // components_of_module_maker, rewriting Pident paths to Pdot(Reducer, ...).
     // This affects which path form becomes the representative after unification.
