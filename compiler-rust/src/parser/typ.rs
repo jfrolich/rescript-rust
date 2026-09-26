@@ -1425,8 +1425,10 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             }
         }
 
-        // Optional labeled args: `~x: t=?` (res_core.ml:4849-4853).
-        if p.token == Token::Equal {
+        // Optional labeled args: `~x: t=?` (res_core.ml:4849-4853). Only the
+        // labelled branches look for `=`; an unlabeled `t=` is left to the
+        // enclosing comma-delimited region.
+        if p.token == Token::Equal && matches!(label, ArgLabel::Labelled(_)) {
             p.next();
             p.expect(Token::Question);
             if let ArgLabel::Labelled(name) = label {
