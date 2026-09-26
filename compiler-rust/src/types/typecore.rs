@@ -6730,73 +6730,6 @@ fn record_rest_runtime_name_from_attrs(
         .unwrap_or_else(|| default.to_string())
 }
 
-/// Ctype.instance_declaration (compiler/ml/ctype.ml:962-972): copy the
-/// declaration's params, manifest and kind within one shared copy window.
-fn record_rest_instance_declaration(
-    ctx: &crate::types::context::TypeContext,
-    decl: &crate::types::decl::TypeDeclaration,
-) -> crate::types::decl::TypeDeclaration {
-    let mut cache = crate::types::ctype::CopyCache::new();
-    let mut copy = |ty: TypeExprRef| crate::types::ctype::copy_type_cached(ctx, ty, &mut cache);
-    let type_kind = match &decl.type_kind {
-        crate::types::TypeKind::TypeAbstract => crate::types::TypeKind::TypeAbstract,
-        crate::types::TypeKind::TypeRecord(labels, repr) => crate::types::TypeKind::TypeRecord(
-            labels
-                .iter()
-                .map(|label| crate::types::decl::LabelDeclaration {
-                    ld_id: label.ld_id.clone(),
-                    ld_mutable: label.ld_mutable,
-                    ld_optional: label.ld_optional,
-                    ld_type: copy(label.ld_type),
-                    ld_loc: label.ld_loc.clone(),
-                    ld_attributes: label.ld_attributes.clone(),
-                })
-                .collect(),
-            repr.clone(),
-        ),
-        crate::types::TypeKind::TypeVariant(constrs, layout) => {
-            crate::types::TypeKind::TypeVariant(
-                constrs
-                    .iter()
-                    .map(|cstr| {
-                        let mut cstr = cstr.clone();
-                        match &cstr.cd_args {
-                            crate::types::ConstructorArguments::CstrTuple(args) => {
-                                cstr.cd_args = crate::types::ConstructorArguments::CstrTuple(
-                                    args.iter().map(|arg| copy(*arg)).collect(),
-                                );
-                            }
-                            crate::types::ConstructorArguments::CstrRecord(labels) => {
-                                cstr.cd_args = crate::types::ConstructorArguments::CstrRecord(
-                                    labels
-                                        .iter()
-                                        .map(|label| {
-                                            let mut label = label.clone();
-                                            label.ld_type = copy(label.ld_type);
-                                            label
-                                        })
-                                        .collect(),
-                                );
-                            }
-                        }
-                        if let Some(res) = cstr.cd_res {
-                            cstr.cd_res = Some(copy(res));
-                        }
-                        cstr
-                    })
-                    .collect(),
-                *layout,
-            )
-        }
-        crate::types::TypeKind::TypeOpen => crate::types::TypeKind::TypeOpen,
-    };
-    crate::types::decl::TypeDeclaration {
-        type_params: decl.type_params.iter().map(|p| copy(*p)).collect(),
-        type_manifest: decl.type_manifest.map(copy),
-        type_kind,
-        ..decl.clone()
-    }
-}
 
 /// Ctype.extract_concrete_typedecl (compiler/ml/ctype.ml:1248-1261) followed by
 /// instance_declaration and param/arg unification
@@ -6836,7 +6769,7 @@ fn record_rest_extract_instantiated_concrete_typedecl(
                 _ => Vec::new(),
             };
             drop(ctx);
-            let inst = record_rest_instance_declaration(tctx.type_ctx, &decl);
+            let inst = crate::types::ctype::instance_declaration(tctx.type_ctx, &decl);
             if inst.type_params.len() == args.len() {
                 for (param, arg) in inst.type_params.iter().zip(args.iter()) {
                     unify_pattern_types(tctx, unify_loc, *param, *arg)?;
@@ -6981,7 +6914,7 @@ fn type_record_pat_rest(
         );
     };
     let rest_annotation_decl =
-        record_rest_instance_declaration(tctx.type_ctx, &rest_annotation_decl);
+        crate::types::ctype::instance_declaration(tctx.type_ctx, &rest_annotation_decl);
 
     // type_args_from_annotation.
     let ctx = tctx.type_ctx;

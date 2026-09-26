@@ -4084,6 +4084,74 @@ pub(crate) fn expand_abbrev_opt_once<'a>(
         .map(|expanded| ctx.repr(expanded))
 }
 
+/// Ctype.instance_declaration (compiler/ml/ctype.ml:962-972): copy the
+/// declaration's params, manifest and kind within one shared copy window.
+pub(crate) fn instance_declaration(
+    ctx: &crate::types::context::TypeContext,
+    decl: &crate::types::decl::TypeDeclaration,
+) -> crate::types::decl::TypeDeclaration {
+    let mut cache = CopyCache::new();
+    let mut copy = |ty: TypeExprRef| copy_type_cached(ctx, ty, &mut cache);
+    let type_kind = match &decl.type_kind {
+        crate::types::TypeKind::TypeAbstract => crate::types::TypeKind::TypeAbstract,
+        crate::types::TypeKind::TypeRecord(labels, repr) => crate::types::TypeKind::TypeRecord(
+            labels
+                .iter()
+                .map(|label| crate::types::decl::LabelDeclaration {
+                    ld_id: label.ld_id.clone(),
+                    ld_mutable: label.ld_mutable,
+                    ld_optional: label.ld_optional,
+                    ld_type: copy(label.ld_type),
+                    ld_loc: label.ld_loc.clone(),
+                    ld_attributes: label.ld_attributes.clone(),
+                })
+                .collect(),
+            repr.clone(),
+        ),
+        crate::types::TypeKind::TypeVariant(constrs, layout) => {
+            crate::types::TypeKind::TypeVariant(
+                constrs
+                    .iter()
+                    .map(|cstr| {
+                        let mut cstr = cstr.clone();
+                        match &cstr.cd_args {
+                            crate::types::ConstructorArguments::CstrTuple(args) => {
+                                cstr.cd_args = crate::types::ConstructorArguments::CstrTuple(
+                                    args.iter().map(|arg| copy(*arg)).collect(),
+                                );
+                            }
+                            crate::types::ConstructorArguments::CstrRecord(labels) => {
+                                cstr.cd_args = crate::types::ConstructorArguments::CstrRecord(
+                                    labels
+                                        .iter()
+                                        .map(|label| {
+                                            let mut label = label.clone();
+                                            label.ld_type = copy(label.ld_type);
+                                            label
+                                        })
+                                        .collect(),
+                                );
+                            }
+                        }
+                        if let Some(res) = cstr.cd_res {
+                            cstr.cd_res = Some(copy(res));
+                        }
+                        cstr
+                    })
+                    .collect(),
+                *layout,
+            )
+        }
+        crate::types::TypeKind::TypeOpen => crate::types::TypeKind::TypeOpen,
+    };
+    crate::types::decl::TypeDeclaration {
+        type_params: decl.type_params.iter().map(|p| copy(*p)).collect(),
+        type_manifest: decl.type_manifest.map(copy),
+        type_kind,
+        ..decl.clone()
+    }
+}
+
 /// OCaml `Ctype.cyclic_abbrev env id ty` (ctype.ml:3953-3968): whether the
 /// manifest `ty` of the declaration `id` expands back to `id` or loops.
 pub(crate) fn cyclic_abbrev(ctx: &TypeContext, env: &Env, id: &Ident, ty: TypeExprRef) -> bool {
