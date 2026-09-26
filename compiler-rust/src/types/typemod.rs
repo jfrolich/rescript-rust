@@ -17019,6 +17019,11 @@ pub fn transl_signature<'a>(
                 for td in &typed_decls {
                     sig_env.add_type(td.typ_id.clone(), td.typ_type.clone());
                 }
+                // typedecl.ml:1535-1538 adds them with `Env.add_type
+                // ~check:true`, which registers the unused-type checks in
+                // signatures too (exported ones are marked used by the final
+                // inclusion check).
+                register_type_declaration_usage_checks(tctx, &sig_env, &typed_decls);
                 TSigDesc::Tsig_type(*rec_flag, typed_decls)
             }
             PSigDesc::Psig_typext(ext) => {
