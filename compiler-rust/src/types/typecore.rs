@@ -13679,12 +13679,16 @@ fn type_function_nary(
         }
         if !state.pattern_variables.is_empty() {
             let mut next_env = body_env.clone();
+            // `unpacks_acc @ unpacks` (typecore.ml:3739), where a parameter's
+            // `unpacks` are its `module_variables`, latest first.
+            let mut param_unpacks = Vec::new();
             for variable in &state.pattern_variables {
                 add_pattern_variable_value(tctx, &mut next_env, variable);
                 if variable.is_module {
-                    unpacks.push(variable.clone());
+                    param_unpacks.insert(0, variable.clone());
                 }
             }
+            unpacks.extend(param_unpacks);
             body_env = next_env;
         }
         if let Some(default_binding) = default_binding {
@@ -19883,7 +19887,9 @@ fn type_expect_with_module_unpacks(
         arena.push_typecheck_lident(name)
     }
 
-    let Some((unpack, rest)) = unpacks.split_first() else {
+    // `wrap_unpacks` (typecore.ml:2097-2108) folds left over the unpacks, so
+    // the last one is the outermost `let module`.
+    let Some((unpack, rest)) = unpacks.split_last() else {
         return type_expect(tctx, env, body, expected_ty, context);
     };
 
