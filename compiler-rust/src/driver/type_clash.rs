@@ -251,7 +251,7 @@ fn error_expected_type_text(ppf: &mut Ppf<'_>, context: &Option<TypeClashContext
 fn extract_text_at_loc(arena: &ParseArena, source: &str, loc: LocIdx) -> String {
     let start = arena.loc_start(loc).cnum as usize;
     let end = arena.loc_end(loc).cnum as usize;
-    source.get(start..end).unwrap_or("").to_string()
+    crate::source_text::latin1_slice(source, start, end).unwrap_or("").to_string()
 }
 
 /// `!Parser.parse_source` then `!Parser.reprint_source`, applied to the

@@ -15,6 +15,22 @@ pub fn latin1_bytes_to_string(bytes: Vec<u8>) -> String {
     }
 }
 
+/// `String.sub src start (end - start)` on the compiler's Latin-1 view of the
+/// source: `start`/`end` are byte offsets (`pos_cnum`), which are char indices
+/// of the Latin-1 string.
+pub fn latin1_slice(source: &str, start: usize, end: usize) -> Option<&str> {
+    if source.is_ascii() {
+        return source.get(start..end);
+    }
+    if start > end {
+        return None;
+    }
+    let mut indices = source.char_indices().map(|(i, _)| i).chain(std::iter::once(source.len()));
+    let start_byte = indices.nth(start)?;
+    let end_byte = if end == start { start_byte } else { indices.nth(end - start - 1)? };
+    source.get(start_byte..end_byte)
+}
+
 /// Decode the compiler's Latin-1 view of source bytes for UTF-8 text output.
 ///
 /// The parser deliberately keeps one Rust `char` per source byte to preserve

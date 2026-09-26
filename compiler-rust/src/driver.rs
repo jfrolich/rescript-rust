@@ -8749,7 +8749,7 @@ fn append_optional_function_argument_help(
 fn source_text_at_loc(arena: &ParseArena, source: &str, loc: LocIdx) -> Option<String> {
     let start = arena.loc_start(loc).cnum as usize;
     let end = arena.loc_end(loc).cnum as usize;
-    source.get(start..end).map(str::trim).map(str::to_string)
+    crate::source_text::latin1_slice(source, start, end).map(str::trim).map(str::to_string)
 }
 
 fn append_runtime_coercion_help(
@@ -10322,7 +10322,7 @@ fn suggested_array_to_tuple_rewrite(
 ) -> Option<String> {
     let start = arena.loc_start(loc).cnum as usize;
     let end = arena.loc_end(loc).cnum as usize;
-    let text = source.get(start..end)?.trim();
+    let text = crate::source_text::latin1_slice(source, start, end)?.trim();
     let inner = text.strip_prefix('[')?.strip_suffix(']')?;
     Some(format!("({inner})"))
 }
@@ -10385,7 +10385,7 @@ fn source_loc_is_float_literal_with_trailing_dot(
 ) -> bool {
     let start = arena.loc_start(loc).cnum as usize;
     let end = arena.loc_end(loc).cnum as usize;
-    let Some(text) = source.get(start..end).map(str::trim) else {
+    let Some(text) = crate::source_text::latin1_slice(source, start, end).map(str::trim) else {
         return false;
     };
     let (text, loc_has_dot) = if let Some(text) = text.strip_suffix('.') {
