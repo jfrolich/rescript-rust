@@ -826,13 +826,14 @@ impl<'src> Scanner<'src> {
 
         // Content ends 2 bytes before current position (before closing */)
         // But we need to compute this in byte offsets
-        let content_end_off = if self.offset >= 2 {
-            // Walk back 2 characters from current byte offset
-            // Since */ is ASCII, we just subtract 2 bytes
-            self.offset - 2
-        } else {
-            0
-        };
+        // OCaml `scanner.offset - 2`: two source bytes back, i.e. two chars
+        // of the Latin-1 source view (each possibly two UTF-8 bytes here, when
+        // an unclosed comment ends at EOF on non-ASCII text).
+        let content_end_off = self.src[..self.offset.min(self.src.len())]
+            .char_indices()
+            .rev()
+            .nth(1)
+            .map_or(0, |(idx, _)| idx);
 
         let content: Cow<'src, str> =
             if content_start_off <= content_end_off && content_start_off < self.src.len() {
