@@ -914,6 +914,12 @@ pub fn fun_expr<'a>(
         match &*current.pexp_desc {
             ExpressionDesc::Pexp_fun(inner) => {
                 if let Some(source_params) = arena.stored_nary_fun_params(inner) {
+                    // A function with its own parameter list is a separate
+                    // `Pexp_fun` in the body (res_parsetree_viewer.ml:213-216
+                    // reads only the outer node's params).
+                    if n_fun > 0 {
+                        break;
+                    }
                     if !found_first_pexp_fun {
                         is_async = is_async || inner.is_async;
                     }
