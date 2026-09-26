@@ -11740,13 +11740,11 @@ fn compile_source_to_js_with_options_inner(
     let late_type_warnings = &tctx.warnings[post_type_warning_start..];
     emit_type_warnings(parser.arena(), source, filename, late_type_warnings);
     emit_type_warnings(parser.arena(), source, filename, &raw_warnings);
-    // lam_compile_main.ml:420 `Warnings.check_fatal ()`.
-    if typing_warnings_fatal
+    // lam_compile_main.ml:420 `Warnings.check_fatal ()` runs after the
+    // lambda and JS passes (checked below, after `lam_compile`).
+    let warnings_fatal = typing_warnings_fatal
         || type_warnings_have_errors(late_type_warnings)
-        || type_warnings_have_errors(&raw_warnings)
-    {
-        return Err(UserDiagnostic::new(String::new(), 2).into());
-    }
+        || type_warnings_have_errors(&raw_warnings);
     let possible_required_modules = raw_converter.take_possible_required_modules();
     let raw_lambda_current_stamp = raw_converter.current_stamp();
     if options.dump_lambda {
@@ -11864,6 +11862,10 @@ fn compile_source_to_js_with_options_inner(
             2,
         )
         .into());
+    }
+    // lam_compile_main.ml:420 `Warnings.check_fatal ()`.
+    if warnings_fatal {
+        return Err(UserDiagnostic::new(String::new(), 2).into());
     }
     let module_path_resolver = compiler
         .take_module_path_resolver()
