@@ -21811,6 +21811,19 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
     // generalize declarations.
     ctx.init_def(ctx.current_stamp());
     ctx.begin_def();
+    // typedecl.ml:1476 `enter_type` adds the placeholders with
+    // `Env.add_type ~check:true` (typedecl.ml:108), registering their usage
+    // checks before translation: fixed rows first, then a recursive group.
+    for row_id in &fixed_row_type_ids {
+        let row_loc = decls[row_id.decl_idx].ptype_loc;
+        tctx.check_type_usage(&row_id.name, arena.to_location(row_loc), row_loc);
+    }
+    if matches!(rec_flag, RecFlag::Recursive) {
+        for decl in decls {
+            let name = arena.get_string(decl.ptype_name.txt);
+            tctx.check_type_usage(name, arena.to_location(decl.ptype_loc), decl.ptype_loc);
+        }
+    }
     let loop_result: TypeModResult<()> = (|| {
         for row_id in &fixed_row_type_ids {
             let typed_row_decl = translate_fixed_row_type_declaration(
