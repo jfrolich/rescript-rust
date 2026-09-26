@@ -22279,6 +22279,23 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         &original_internal_decls_for_checks,
     )?;
 
+    // Same unbound type variable check as the structure path: signature type
+    // declarations also go through Typedecl.transl_type_decl, whose labels and
+    // constructor arguments are translated with `closed = true`
+    // (typedecl.ml:225, 264-269, 335).
+    for typed_decl in &typed_tree_decls {
+        if let Some((name, loc, detail, var)) =
+            find_unbound_type_var_in_typed_type_decl(ctx, typed_decl)
+        {
+            return Err(TypeModError::UnboundTypeVar {
+                loc,
+                name,
+                detail,
+                var,
+            });
+        }
+    }
+
     // OCaml transl_signature routes Psig_type through
     // Typedecl.transl_type_decl, whose typedecl.ml:1588-1592 runs
     // untagged checks before check_constraints and compute_properties_fixpoint.
