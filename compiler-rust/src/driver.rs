@@ -11440,7 +11440,11 @@ fn compile_source_to_js_with_options_inner(
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
-    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
+    // attributes; compiling a preprocessed `.ast` does not run it again.
+    if !options.frontend_already_reported {
+        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    }
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
@@ -12471,7 +12475,11 @@ pub fn typecheck_interface_source(
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
-    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
+    // attributes; compiling a preprocessed `.ast` does not run it again.
+    if !options.frontend_already_reported {
+        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    }
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
@@ -14263,7 +14271,11 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
-    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
+    // attributes; compiling a preprocessed `.ast` does not run it again.
+    if !options.frontend_already_reported {
+        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    }
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
@@ -14317,7 +14329,11 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
-    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
+    // attributes; compiling a preprocessed `.ast` does not run it again.
+    if !options.frontend_already_reported {
+        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    }
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
@@ -15082,7 +15098,11 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
-    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
+    // attributes; compiling a preprocessed `.ast` does not run it again.
+    if !options.frontend_already_reported {
+        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    }
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
@@ -15684,7 +15704,11 @@ pub fn typecheck_preprocessed_signature_in_process(
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
-    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
+    // attributes; compiling a preprocessed `.ast` does not run it again.
+    if !options.frontend_already_reported {
+        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    }
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
@@ -15820,7 +15844,11 @@ pub fn typecheck_implementation_in_process(
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
-    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
+    // attributes; compiling a preprocessed `.ast` does not run it again.
+    if !options.frontend_already_reported {
+        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    }
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
