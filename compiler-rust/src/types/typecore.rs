@@ -15366,6 +15366,22 @@ fn type_record(
                 ),
             });
         }
+        // `Label.disambiguate` with the expected record path: a qualified
+        // label of another type raises `Name_type_mismatch`
+        // (typecore.ml:919-939).
+        if let Some(record_opath_ty) = record_opath_ty
+            && let Some(err) = qualified_label_name_type_mismatch(
+                field.lid.loc,
+                resolved_lid,
+                tctx.arena,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+                record_opath_ty,
+            )
+        {
+            return Err(err);
+        }
         let unqualified_with_opath =
             record_opath_ty.is_some() && matches!(resolved_lid, Longident::Lident(_));
         if matches!(resolved_lid, Longident::Lident(_)) {
