@@ -1009,11 +1009,8 @@ impl<'src> Parser<'src> {
     /// - Binary (subtraction) when there's whitespace on both sides
     /// - Unary (negation) when at the start of a line without surrounding whitespace
     pub fn is_binary_op(&self) -> bool {
-        Scanner::is_binary_op(
-            self.scanner.src(),
-            self.start_pos.cnum as usize,
-            self.end_pos.cnum as usize,
-        )
+        self.scanner
+            .is_binary_op(self.start_pos.cnum as usize, self.end_pos.cnum as usize)
     }
 
     /// Set diamond mode on the scanner (for type parameters).

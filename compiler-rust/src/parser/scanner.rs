@@ -1724,23 +1724,40 @@ impl<'src> Scanner<'src> {
 
     /// Check if an operator has whitespace on both sides (making it binary).
     ///
-    /// Uses char-based indexing since `cnum` values are char indices (which equal
-    /// original byte offsets in Latin-1 mode). We cannot use `src.as_bytes()` because
-    /// the Rust string's UTF-8 representation has different byte offsets for non-ASCII
-    /// Latin-1 chars (each Latin-1 char 128-255 becomes 2 UTF-8 bytes).
-    pub fn is_binary_op(src: &str, start_cnum: usize, end_cnum: usize) -> bool {
+    /// `cnum` values are char indices (which equal original byte offsets in
+    /// Latin-1 mode, as in OCaml `Scanner.isBinaryOp`), not offsets into the
+    /// UTF-8 `src`, so the chars are located with `char_at_cnum`.
+    pub fn is_binary_op(&self, start_cnum: usize, end_cnum: usize) -> bool {
         if start_cnum == 0 {
             return false;
         }
-
-        let src_chars: Vec<char> = src.chars().collect();
-        let left_ok = start_cnum > 0
-            && start_cnum <= src_chars.len()
-            && Self::is_whitespace(src_chars[start_cnum - 1]);
-
-        let right_ok = end_cnum >= src_chars.len() || Self::is_whitespace(src_chars[end_cnum]);
-
+        let left_ok = self
+            .char_at_cnum(start_cnum - 1)
+            .is_some_and(Self::is_whitespace);
+        // Past the end of the source counts as whitespace on the right.
+        let right_ok = self.char_at_cnum(end_cnum).is_none_or(Self::is_whitespace);
         left_ok && right_ok
+    }
+
+    /// The char at char index `cnum`, or `None` past the end of the source.
+    ///
+    /// Walks from the scanner's current position (char `char_pos` at byte
+    /// `offset`), which is next to the token the parser is looking at, so this
+    /// costs the distance between the two rather than a scan from the start.
+    fn char_at_cnum(&self, cnum: usize) -> Option<char> {
+        let mut byte = self.offset.min(self.bytes.len());
+        let mut pos = self.char_pos;
+        if cnum >= pos {
+            return self.src[byte..].chars().nth(cnum - pos);
+        }
+        while pos > cnum {
+            byte -= 1;
+            while byte > 0 && self.bytes[byte] & 0xC0 == 0x80 {
+                byte -= 1;
+            }
+            pos -= 1;
+        }
+        self.src[byte..].chars().next()
     }
 }
 
@@ -1759,6 +1776,45 @@ mod tests {
 
         let result = scanner.scan();
         assert_eq!(result.token, Token::Lident(Cow::Borrowed("world")));
+    }
+
+    #[test]
+    fn is_binary_op_matches_whole_source_char_indexing() {
+        fn reference(src: &str, start_cnum: usize, end_cnum: usize) -> bool {
+            if start_cnum == 0 {
+                return false;
+            }
+            let chars: Vec<char> = src.chars().collect();
+            let left_ok = start_cnum <= chars.len() && Scanner::is_whitespace(chars[start_cnum - 1]);
+            let right_ok = end_cnum >= chars.len() || Scanner::is_whitespace(chars[end_cnum]);
+            left_ok && right_ok
+        }
+        for src in [
+            "let x = a - b\n-1",
+            "let s = \"\u{e9}\u{c3}\u{a9}\" - x < y\n<div/>",
+            "\u{e9}\u{e9} -x %e -. y-z",
+            "a -",
+        ] {
+            let mut arena = ParseArena::new();
+            let filename = arena.intern("test.res");
+            let mut scanner = Scanner::new(filename, src);
+            loop {
+                let result = scanner.scan();
+                let start = result.start_pos.cnum as usize;
+                let end = result.end_pos.cnum as usize;
+                assert_eq!(
+                    scanner.is_binary_op(start, end),
+                    reference(src, start, end),
+                    "{src:?} token at {start}..{end}"
+                );
+                for cnum in 0..start {
+                    assert_eq!(scanner.char_at_cnum(cnum), src.chars().nth(cnum));
+                }
+                if result.token == Token::Eof {
+                    break;
+                }
+            }
+        }
     }
 
     #[test]
