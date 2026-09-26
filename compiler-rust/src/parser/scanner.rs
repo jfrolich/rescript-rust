@@ -1472,10 +1472,9 @@ impl<'src> Scanner<'src> {
         // Capture the escape sequence contents BEFORE consuming the closing quote
         let contents = Cow::Borrowed(self.substring(escape_byte_start, self.offset));
 
-        // Consume closing quote
-        if self.ch == '\'' {
-            self.next();
-        }
+        // OCaml res_scanner.ml scan_escape: `next scanner` unconditionally
+        // (the closing quote is assumed, not checked).
+        self.next();
 
         Token::Codepoint {
             c: codepoint,
