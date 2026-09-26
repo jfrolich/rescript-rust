@@ -4409,16 +4409,22 @@ fn type_pattern_inner(
         }
 
         PD::Ppat_var(name) => {
-            // Variable pattern
-            let id = state.enter_variable(
-                tctx.type_ctx,
-                loc,
-                name,
-                expected_ty,
-                false,
-                false,
-                tctx.arena,
-            )?;
+            // Variable pattern. typecore.ml:1239-1243 (PR#7330): the
+            // counter-example placeholder `*extension*` is a fresh ident that
+            // is not entered as a pattern variable.
+            let id = if tctx.arena.get_string(name.txt) == "*extension*" {
+                tctx.type_ctx.create_ident("*extension*")
+            } else {
+                state.enter_variable(
+                    tctx.type_ctx,
+                    loc,
+                    name,
+                    expected_ty,
+                    false,
+                    false,
+                    tctx.arena,
+                )?
+            };
             Ok(Pattern::new(
                 PatternDesc::Tpat_var(id, convert_located_stridx(name, tctx.arena)),
                 loc,
@@ -16338,9 +16344,20 @@ fn type_record(
     }
 
     if typed_base.is_some() {
-        let num_fields = all_label_descriptions
-            .as_ref()
-            .map(|labels| labels.len())
+        // typecore.ml:2902-2906 reads `Array.length lbl.lbl_all` of the first
+        // label. For dict records that array is the shared one grown by
+        // `unsafe_do_not_use__add_with_name` (typecore.ml:960-975), modelled by
+        // the dict label cache.
+        let first_is_dict_label = typed_fields.first().is_some_and(|(_, lbl, _, _)| {
+            matches!(
+                &*ctx.get_desc(ctx.repr(lbl.lbl_res)),
+                TypeDesc::Tconstr { path, .. } if path.same(&crate::types::predef::path_dict())
+            )
+        });
+        let dict_labels = if first_is_dict_label { ctx.get_dict_pattern_labels() } else { Vec::new() };
+        let num_fields = (!dict_labels.is_empty())
+            .then_some(dict_labels.len())
+            .or_else(|| all_label_descriptions.as_ref().map(|labels| labels.len()))
             .or_else(|| all_labels.as_ref().map(|labels| labels.len()));
         if num_fields.is_some_and(|num_fields| fields.len() == num_fields) {
             tctx.report_warning(loc, Warning::UselessRecordWith);
