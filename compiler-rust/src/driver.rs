@@ -11602,9 +11602,11 @@ fn compile_source_to_js_with_options_inner(
     tctx.flush_value_usage_checks();
     let delayed_warnings = &tctx.warnings[delayed_type_warning_start..];
     emit_type_warnings(parser.arena(), source, filename, delayed_warnings);
-    if early_warnings_have_errors || type_warnings_have_errors(delayed_warnings) {
-        return Err(UserDiagnostic::new(String::new(), 2).into());
-    }
+    // `Warnings.check_fatal` only runs at lam_compile_main.ml:420 (or right
+    // after typing for typedtree/cmi-only runs, js_implementation.ml:158-159),
+    // so a fatal typing warning still lets Translmod report its warnings.
+    let typing_warnings_fatal =
+        early_warnings_have_errors || type_warnings_have_errors(delayed_warnings);
     let post_type_warning_start = tctx.warnings.len();
 
     // Print typed tree if requested
@@ -11626,7 +11628,12 @@ fn compile_source_to_js_with_options_inner(
         prepare_inferred_signature_for_saving(&type_ctx, simple_signature, has_resi);
     }
 
-    if options.gentype_config.is_some() && (!has_resi || gentype_ignore_interface) {
+    // `process_with_gentype` runs after the JS is emitted
+    // (js_implementation.ml:164), which a fatal warning prevents.
+    if options.gentype_config.is_some()
+        && (!has_resi || gentype_ignore_interface)
+        && !typing_warnings_fatal
+    {
         let module_name = current_unit_name
             .clone()
             .unwrap_or_else(|| module_name_from_source_filename(source_file_for_interface));
@@ -11661,6 +11668,9 @@ fn compile_source_to_js_with_options_inner(
     if (options.dump_typed_sexp || options.dump_typed_sexp_locs)
         && std::env::var_os("RUST_TYPEDTREE_ONLY").is_some()
     {
+        if typing_warnings_fatal {
+            return Err(UserDiagnostic::new(String::new(), 2).into());
+        }
         return Ok(String::new());
     }
 
@@ -11706,10 +11716,8 @@ fn compile_source_to_js_with_options_inner(
     let raw_warnings = raw_converter.take_warnings();
     let hoisted_functions = raw_converter.take_hoisted_functions();
     if let Some(diagnostic) = raw_converter.take_diagnostic() {
+        // A Translmod error escapes before `Warnings.check_fatal`.
         emit_type_warnings(parser.arena(), source, filename, &raw_warnings);
-        if type_warnings_have_errors(&raw_warnings) {
-            return Err(UserDiagnostic::new(String::new(), 2).into());
-        }
         return Err(UserDiagnostic::new(
             format_compiler_error_report_from_location(
                 source,
@@ -11723,11 +11731,12 @@ fn compile_source_to_js_with_options_inner(
     }
     let late_type_warnings = &tctx.warnings[post_type_warning_start..];
     emit_type_warnings(parser.arena(), source, filename, late_type_warnings);
-    if type_warnings_have_errors(late_type_warnings) {
-        return Err(UserDiagnostic::new(String::new(), 2).into());
-    }
     emit_type_warnings(parser.arena(), source, filename, &raw_warnings);
-    if type_warnings_have_errors(&raw_warnings) {
+    // lam_compile_main.ml:420 `Warnings.check_fatal ()`.
+    if typing_warnings_fatal
+        || type_warnings_have_errors(late_type_warnings)
+        || type_warnings_have_errors(&raw_warnings)
+    {
         return Err(UserDiagnostic::new(String::new(), 2).into());
     }
     let possible_required_modules = raw_converter.take_possible_required_modules();
