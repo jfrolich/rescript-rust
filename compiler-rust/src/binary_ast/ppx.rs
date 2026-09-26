@@ -2700,8 +2700,10 @@ fn validate_bs_string_type(typ: &CoreType, arena: &ParseArena) -> PpxResult<()> 
         NonNull,
     }
 
+    // `Ast_polyvar.map_row_fields_into_strings` (ast_polyvar.ml:44-71) folds
+    // from the right, so later rows are checked first.
     let mut rows = StringRows::Nothing;
-    for row in row_fields {
+    for row in row_fields.iter().rev() {
         match (&rows, row) {
             (StringRows::Nothing | StringRows::Null, RowField::Rtag(_, attrs, true, types))
                 if types.is_empty() =>
@@ -2732,7 +2734,9 @@ fn validate_bs_int_type(typ: &CoreType, arena: &ParseArena) -> PpxResult<()> {
         return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for @int"));
     };
     let (row_fields, closed, labels) = &**variant_inner;
-    if !matches!(closed, current::ClosedFlag::Closed) || labels.is_some() || row_fields.is_empty() {
+    // `spec_of_ptyp` (ast_external_process.ml:52-59) then
+    // `map_row_fields_into_ints` (ast_polyvar.ml:25-38), which accepts `[]`.
+    if !matches!(closed, current::ClosedFlag::Closed) || labels.is_some() {
         return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for @int"));
     }
 
@@ -8923,9 +8927,11 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         }
 
         ExpressionDesc::Pexp_pack(mod_expr_idx) => {
-            // Module expressions - don't recurse for now
+            // The default mapper maps the packed module with `sub.module_expr`
+            // (ast_mapper.ml), so externals inside are processed.
             let me = arena.get_mod_expr(*mod_expr_idx).clone();
-            ExpressionDesc::Pexp_pack(arena.push_mod_expr(me))
+            let rw = rewrite_module_expr(&me, arena);
+            ExpressionDesc::Pexp_pack(arena.push_mod_expr(rw))
         }
 
         ExpressionDesc::Pexp_letmodule(inner) => {
@@ -14531,7 +14537,14 @@ fn rewrite_module_expr(
                 rewrite_payload(payload, arena),
             )))
         }
-        // Ident, unpack - just clone
+        // The default mapper (ast_mapper.ml `M.map`) maps the unpacked
+        // expression with `sub.expr`, so `%raw` etc. inside are expanded.
+        current::ModuleExprDesc::Pmod_unpack(e) => {
+            let e = arena.get_expr(*e).clone();
+            let rw = rewrite_expression(&e, arena);
+            current::ModuleExprDesc::Pmod_unpack(arena.push_expr(rw))
+        }
+        // Ident - just clone
         _ => return mod_expr.clone(),
     };
 
