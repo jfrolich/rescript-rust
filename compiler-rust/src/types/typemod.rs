@@ -12700,7 +12700,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         ),
                                     )
                                 },
-                                val_loc: arena.to_location(vd.pval_loc),
+                                val_loc: arena.to_location(sig_item.psig_loc),
                                 val_attributes: vec![],
                                 val_path: None,
                             },
@@ -13863,7 +13863,9 @@ pub(crate) fn decl_signature_from_typed_signature(
                     ValueDescription {
                         val_type: vd.val_desc.ctyp_type,
                         val_kind,
-                        val_loc: arena.to_location(vd.val_loc),
+                        // typedecl.ml:1883-1889: `Types.val_loc` is the
+                        // signature item loc (typemod.ml:755-757).
+                        val_loc: arena.to_location(item.sig_loc),
                         val_attributes: parser_attrs_to_decl_attrs(arena, &vd.val_attributes),
                         val_path: None,
                     },
@@ -16944,10 +16946,12 @@ pub fn transl_signature<'a>(
                 let id = ctx.create_ident(&name_str);
                 // typedecl.ml:1918-1919: `Env.enter_value ~check:(fun s ->
                 // Unused_value_declaration s)`.
+                // `Types.val_loc` is the signature item loc passed by
+                // typemod.ml:755-757 (typedecl.ml:1883-1889).
                 tctx.add_value_usage_check(
                     &name_str,
-                    arena.to_location(vd.pval_loc),
-                    vd.pval_loc,
+                    arena.to_location(item.psig_loc),
+                    item.psig_loc,
                     Warning::UnusedValueDeclaration {
                         name: name_str.clone(),
                     },
