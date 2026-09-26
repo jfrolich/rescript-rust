@@ -1630,6 +1630,9 @@ fn pair_signature_items<'a>(
             errors.push(missing_signature_item_error(sig_id, sig_loc, &field_desc));
         }
     }
+    // includemod.ml:358-365 conses each missing field onto `unpaired` and
+    // raises the list as built, i.e. in reverse signature order.
+    errors.reverse();
 
     (len_impl, paired, errors)
 }
