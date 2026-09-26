@@ -1302,16 +1302,28 @@ fn parse_functor_arg(p: &mut Parser<'_>) -> Option<FunctorArg> {
                     // Continue parsing the module path
                     let ident_str_idx = p.arena_mut().push_interned_string(&ident);
                     let mut lid = Longident::Lident(ident_str_idx);
-                    while p.token == Token::Dot {
-                        p.next();
+                    // `parse_module_long_ident_tail ~lowercase:false`
+                    // (res_core.ml:806-826) after the first `.`.
+                    p.next();
+                    loop {
                         match &p.token {
                             Token::Uident(name) => {
                                 let name_clone = name.clone();
                                 let name_str_idx = p.arena_mut().push_interned_string(&name_clone);
                                 lid = Longident::Ldot(Box::new(lid), name_str_idx);
                                 p.next();
+                                if p.token == Token::Dot {
+                                    p.next();
+                                    continue;
+                                }
+                                break;
                             }
-                            _ => break,
+                            _ => {
+                                p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+                                let hole = p.arena_mut().intern("_");
+                                lid = Longident::Ldot(Box::new(lid), hole);
+                                break;
+                            }
                         }
                     }
                     let lid_idx = p.push_longident(lid);
