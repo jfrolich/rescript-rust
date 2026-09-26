@@ -5788,6 +5788,9 @@ pub fn unify<'a>(
         state.recursion_depth -= 1;
         return Err(TypeError::Unify(vec![]));
     }
+    // OCaml's outer `unify` (ctype.ml:2589-2594) takes a snapshot so a
+    // failure can `undo_compress` before expanding the trace.
+    let top_snapshot = (state.recursion_depth == 1).then(|| ctx.snapshot_type_state());
 
     // Fast path: same reference
     let t1 = ctx.repr(t1);
@@ -5828,10 +5831,15 @@ pub fn unify<'a>(
     // `full_expand` in the unification environment.
     if state.recursion_depth == 0
         && let Err(TypeError::Unify(trace)) = &result
-        && let Some(env) = state.env()
     {
-        record_trace_expansions(ctx, env, trace);
+        if let Some(snapshot) = &top_snapshot {
+            ctx.undo_compress(snapshot);
+        }
+        if let Some(env) = state.env() {
+            record_trace_expansions(ctx, env, trace);
+        }
     }
+    drop(top_snapshot);
     result
 }
 

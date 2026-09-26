@@ -144,6 +144,9 @@ impl ActiveTypeSnapshot {
 
 enum TypeMutation {
     TypeDesc(TypeExprRef, TypeDesc),
+    /// btype.ml `Ccompress (ty, old_desc, Tlink target)`: path compression by
+    /// `repr`, logged whatever the node's age.
+    Compress(TypeExprRef, TypeDesc, TypeExprRef),
     TypeLevel(TypeExprRef, i32),
     RowField(RowFieldRef, Option<RowField>),
     AbbrevMemo(AbbrevMemoRef, AbbrevMemo),
@@ -1949,6 +1952,30 @@ impl TypeContext {
         }
     }
 
+    /// btype.ml `undo_compress`: revert the path compressions made since
+    /// `snapshot` whose nodes still hold the compressed link, leaving every
+    /// other change (and the snapshot) in place.
+    pub(crate) fn undo_compress(&self, snapshot: &TypeMutationSnapshot<'_>) {
+        let compressions: Vec<(TypeExprRef, TypeDesc, TypeExprRef)> = {
+            let journal = self.mutation_journal.borrow();
+            if !journal.active.iter().any(|active| active.id == snapshot.id) {
+                return;
+            }
+            journal.entries[snapshot.cursor.min(journal.entries.len())..]
+                .iter()
+                .filter_map(|mutation| match mutation {
+                    TypeMutation::Compress(ty, old, target) => Some((*ty, old.clone(), *target)),
+                    _ => None,
+                })
+                .collect()
+        };
+        for (ty, old, target) in compressions {
+            if matches!(self.get_desc(ty).0, TypeDesc::Tlink(current) if current == target) {
+                self.types.get(ty).set_desc(old);
+            }
+        }
+    }
+
     /// Backtrack to a mutation-trail cursor.
     ///
     /// Restoring an outer snapshot also invalidates every still-live nested
@@ -1972,10 +1999,32 @@ impl TypeContext {
             self.mutation_logging.set(!journal.active.is_empty());
             mutations
         };
+        // btype.ml:692-700 `backtrack`: when anything was trailed it first
+        // runs `cleanup_abbrev ()`, forgetting every memorized expansion
+        // (including those made since the snapshot); memo contents are not
+        // part of OCaml's trail, so they are not restored either.
+        let has_changes = mutations.iter().any(|mutation| {
+            matches!(
+                mutation,
+                TypeMutation::TypeDesc(..)
+                    | TypeMutation::Compress(..)
+                    | TypeMutation::TypeLevel(..)
+                    | TypeMutation::RowField(..)
+            )
+        });
+        if has_changes {
+            let refs = std::mem::take(&mut *self.memoized_abbrev_refs.borrow_mut());
+            let abbrevs = self.abbrevs.borrow();
+            for memo in refs {
+                if let Some(cell) = abbrevs.get(memo.index()) {
+                    *cell.borrow_mut() = AbbrevMemo::Mnil;
+                }
+            }
+        }
         let mut restored = 0;
         for mutation in mutations.into_iter().rev() {
             match mutation {
-                TypeMutation::TypeDesc(ty, desc) => {
+                TypeMutation::TypeDesc(ty, desc) | TypeMutation::Compress(ty, desc, _) => {
                     self.types.get(ty).set_desc(desc);
                     restored += 1;
                 }
@@ -1989,16 +2038,7 @@ impl TypeContext {
                         restored += 1;
                     }
                 }
-                TypeMutation::AbbrevMemo(memo, value) => {
-                    if let Some(cell) = self.abbrevs.borrow().get(memo.index()) {
-                        *cell.borrow_mut() = value;
-                        restored += 1;
-                    }
-                }
-                TypeMutation::MemoizedAbbrevRefs(refs) => {
-                    *self.memoized_abbrev_refs.borrow_mut() = refs;
-                    restored += 1;
-                }
+                TypeMutation::AbbrevMemo(..) | TypeMutation::MemoizedAbbrevRefs(..) => {}
                 TypeMutation::CurrentAbbreviations(value) => {
                     self.current_abbreviations.set(value);
                     restored += 1;
@@ -3064,10 +3104,18 @@ impl TypeContext {
         }
 
         // Path compression: relink all traversed nodes to the representative.
+        // btype.ml `repr_link` logs each one as `Ccompress`.
         for i in 0..chain_len {
             let node = chain[i];
             if node != current {
-                self.set_desc(node, TypeDesc::Tlink(current));
+                if self.mutation_logging.get() {
+                    let old = self.get_desc(node).0;
+                    self.mutation_journal
+                        .borrow_mut()
+                        .entries
+                        .push(TypeMutation::Compress(node, old, current));
+                }
+                self.types.get(node).set_desc(TypeDesc::Tlink(current));
             }
         }
 
