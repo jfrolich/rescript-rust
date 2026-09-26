@@ -3675,30 +3675,20 @@ fn try_expand_head_with_mode<'a>(
 
             // OCaml ctype.ml expand_abbrev_gen: check memoized expansions first.
             if let Some(cached) = ctx.find_abbrev_expansion(lookup_abbrev, private_flag, &path) {
-                let cached_repr = ctx.repr(cached);
-                let stale_same_path = {
-                    let desc = ctx.borrow_desc(cached_repr);
-                    matches!(
-                        &*desc,
-                        TypeDesc::Tconstr {
-                            path: cached_path, ..
-                        } if cached_path.same(&path)
-                    )
-                };
-                if !(cached_repr == ty || stale_same_path) {
-                    let level = ctx.get_level(ty);
-                    if level != GENERIC_LEVEL {
-                        // OCaml compiler/ml/ctype.ml:1353-1359 lowers a
-                        // memoized abbreviation expansion with
-                        // `update_level env level ty'`. That is observable:
-                        // ctype.ml:666-673 `get_level` calls
-                        // Env.find_type, which can force component signatures
-                        // while expanding the head. Keep the env-aware path
-                        // here rather than the cheaper structural lowering.
-                        update_level_expand(ctx, env, level, cached);
-                    }
-                    return Some(cached_repr);
+                let level = ctx.get_level(ty);
+                if level != GENERIC_LEVEL {
+                    // OCaml compiler/ml/ctype.ml:1353-1359 lowers a
+                    // memoized abbreviation expansion with
+                    // `update_level env level ty'`. That is observable:
+                    // ctype.ml:666-673 `get_level` calls
+                    // Env.find_type, which can force component signatures
+                    // while expanding the head. Keep the env-aware path
+                    // here rather than the cheaper structural lowering.
+                    update_level_expand(ctx, env, level, cached);
                 }
+                // The cached expansion is returned even when it is `ty`
+                // itself (ctype.ml:1360-1362, PR#7324).
+                return Some(ctx.repr(cached));
             }
 
             let expand_with_subst =
