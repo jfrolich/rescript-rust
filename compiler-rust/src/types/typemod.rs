@@ -8308,13 +8308,12 @@ pub fn lookup_modtype_path_by_lid<'b>(
     }
 }
 
-fn lookup_modtype_path_or_error<'b>(
+fn lookup_modtype_path_or_error(
+    tctx: &mut TypeCheckContext<'_>,
     lid: &crate::parser::longident::Longident,
     loc: LocIdx,
     arena: &ParseArena,
     env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext,
 ) -> TypeModResult<Path> {
     // `Env.lookup_modtype` (env.ml:1022-1036) only goes through
     // `lookup_module_descr` for the module prefix of a dotted path; a bare
@@ -8326,13 +8325,22 @@ fn lookup_modtype_path_or_error<'b>(
             TypeCoreError::IllegalReferenceToRecursiveModule { loc },
         ));
     }
-    lookup_modtype_path_by_lid(lid, arena, env, pers_env, ctx).ok_or_else(|| {
-        let alternatives = unbound_modtype_alternatives(lid, arena, env, pers_env, ctx);
-        TypeModError::UnboundModtype {
-            loc,
-            lid: lid.clone(),
-            alternatives,
-        }
+    if let Some(path) =
+        lookup_modtype_path_by_lid(lid, arena, env, &mut tctx.persistent_env, tctx.type_ctx)
+    {
+        return Ok(path);
+    }
+    // `Typetexp.find_modtype` narrows the error to an unbound module prefix
+    // (typetexp.ml `find_component` / `narrow_unbound_lid_error`).
+    if let Some(error) = crate::types::typecore::unbound_module_prefix_error(tctx, env, loc, lid) {
+        return Err(TypeModError::CoreError(error));
+    }
+    let alternatives =
+        unbound_modtype_alternatives(lid, arena, env, &mut tctx.persistent_env, tctx.type_ctx);
+    Err(TypeModError::UnboundModtype {
+        loc,
+        lid: lid.clone(),
+        alternatives,
     })
 }
 
@@ -13229,12 +13237,11 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
             let longident = tctx.resolve_lid(lid.txt).clone();
             crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Modtype);
             let path = lookup_modtype_path_or_error(
+                tctx,
                 &longident,
                 mty.pmty_loc,
                 arena,
                 env,
-                &mut tctx.persistent_env,
-                tctx.type_ctx,
             )?;
             Ok(DeclMty::MtyIdent(path))
         }
@@ -13675,12 +13682,11 @@ fn approx_modtype_rec<'a>(
             let longident = tctx.resolve_lid(lid.txt).clone();
             crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Modtype);
             let path = lookup_modtype_path_or_error(
+                tctx,
                 &longident,
                 mty.pmty_loc,
                 arena,
                 env,
-                &mut tctx.persistent_env,
-                tctx.type_ctx,
             )?;
             Ok(DeclMty::MtyIdent(path))
         }
@@ -16798,12 +16804,11 @@ fn transl_modtype<'a>(
             let longident = tctx.resolve_lid(lid.txt).clone();
             crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Modtype);
             let path = lookup_modtype_path_or_error(
+                tctx,
                 &longident,
                 smty.pmty_loc,
                 arena,
                 env,
-                &mut tctx.persistent_env,
-                tctx.type_ctx,
             )?;
             TMtyDesc::Tmty_ident(path, lid.clone())
         }

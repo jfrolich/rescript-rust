@@ -18665,7 +18665,7 @@ pub(crate) fn find_type_for_lid(
     Ok((path, decl))
 }
 
-fn unbound_module_prefix_error(
+pub(crate) fn unbound_module_prefix_error(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     loc: LocIdx,
