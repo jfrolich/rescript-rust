@@ -18229,8 +18229,14 @@ fn type_extension_expr(
         } else {
             env.find_constructor(&constructor_name).ok().cloned()
         };
+        // `Typetexp.find_constructor env lid.loc lid.txt` (typecore.ml:3452).
         let Some(constructor) = constructor else {
-            return Err(TypeCoreError::InvalidExtensionConstructorPayload { loc });
+            return Err(unbound_constructor_lookup_error(
+                tctx,
+                env,
+                constructor_lid.loc,
+                &longident,
+            ));
         };
         let crate::types::ConstructorKind::Extension(path) = constructor.cstr_kind else {
             return Err(TypeCoreError::NotAnExtensionConstructor {
