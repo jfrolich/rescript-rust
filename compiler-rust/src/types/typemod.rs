@@ -18557,6 +18557,15 @@ fn type_structure_item<'a>(
             // are NOT visible to each other (they resolve to outer scope definitions).
             // new_env accumulates the final declarations and is returned.
             let temp_env = new_env.clone();
+            // typedecl.ml:1534-1538 builds the final env with `List.fold_right`
+            // over the declarations (fixed-row types first), each through
+            // `Env.store_type`; collect them and add them after the loop.
+            let mut final_env_entries: Vec<(
+                Ident,
+                crate::types::TypeDeclaration,
+                Vec<(Ident, crate::types::ConstructorDescription)>,
+                Vec<(Ident, crate::types::LabelDescription)>,
+            )> = Vec::new();
 
             for (row_index, row_id) in fixed_row_type_ids.iter().enumerate() {
                 tctx.type_ctx.usage().set_current_type_slot(row_slots[row_index]);
@@ -18570,7 +18579,12 @@ fn type_structure_item<'a>(
                     None,
                 )?;
                 let row_internal_decl = typed_row_decl.typ_type.clone();
-                new_env.add_type(row_id.id.clone(), row_internal_decl.clone());
+                final_env_entries.push((
+                    row_id.id.clone(),
+                    row_internal_decl.clone(),
+                    Vec::new(),
+                    Vec::new(),
+                ));
                 ctx.register_type_decl(&row_id.name, row_internal_decl.clone());
                 if row_id.id.stamp() != 0 {
                     ctx.register_type_decl_by_stamp(row_id.id.stamp(), row_internal_decl.clone());
@@ -19606,8 +19620,6 @@ fn type_structure_item<'a>(
                 // Save for generalization after the loop
                 internal_decls_for_generalize.push(internal_decl.clone());
 
-                // Add type to environment
-                new_env.add_type(type_id.clone(), internal_decl.clone());
 
                 // Also register in global type store for alias expansion
                 ctx.register_type_decl(type_name_str, internal_decl.clone());
@@ -19621,11 +19633,7 @@ fn type_structure_item<'a>(
                 // constructors remain inside `cstr_inlined`, and
                 // compiler/ml/env.ml:1668-1676 therefore installs no labels for
                 // them.
-                // env.ml:1623-1632 `store_type` adds them with `List.fold_right`.
-                for (cstr_id, cstr_desc) in constructors.into_iter().rev() {
-                    new_env.add_constructor(cstr_id, cstr_desc);
-                }
-
+                let mut env_labels = Vec::new();
                 // Add record labels to environment
                 if let crate::types::TypeKind::TypeRecord(ref labels, ref repres) =
                     internal_decl.type_kind
@@ -19655,11 +19663,14 @@ fn type_structure_item<'a>(
                         };
                         label_descs.push((ld.ld_id.clone(), lbl_desc));
                     }
-                    // env.ml:1629-1632: `List.fold_right` over the labels.
-                    for (ld_id, lbl_desc) in label_descs.into_iter().rev() {
-                        new_env.add_label(ld_id, lbl_desc);
-                    }
+                    env_labels = label_descs;
                 }
+                final_env_entries.push((
+                    type_id.clone(),
+                    internal_decl.clone(),
+                    constructors,
+                    env_labels,
+                ));
 
                 // Convert private flag
                 // Create typed tree type declaration
@@ -19695,6 +19706,19 @@ fn type_structure_item<'a>(
             // OCaml Typedecl.check_duplicates runs after translating the
             // declaration group and before final env construction/end_def.
             check_type_declaration_duplicate_definitions(tctx, arena, decls);
+            // typedecl.ml:1535-1538: `List.fold_right (fun (id, decl) env ->
+            // Env.add_type ~check:true id decl env) decls env`; `store_type`
+            // (env.ml:1623-1632) adds constructors and labels with
+            // `List.fold_right` too.
+            for (type_id, decl, constructors, labels) in final_env_entries.into_iter().rev() {
+                new_env.add_type(type_id, decl);
+                for (cstr_id, cstr_desc) in constructors.into_iter().rev() {
+                    new_env.add_constructor(cstr_id, cstr_desc);
+                }
+                for (ld_id, lbl_desc) in labels.into_iter().rev() {
+                    new_env.add_label(ld_id, lbl_desc);
+                }
+            }
             // typedecl.ml:1534-1538: the final env adds the declarations with
             // `Env.add_type ~check:true` through `List.fold_right`, registering
             // the remaining type and constructor usage checks last to first.
