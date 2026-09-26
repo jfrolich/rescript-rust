@@ -38,7 +38,7 @@ pub enum Path {
     Pident(Ident),
     /// A dotted access: `Array.t` is `Pdot(Pident(Array), "t", -1)`
     /// The integer is a position hint (usually -1 for no hint).
-    Pdot(Arc<Path>, SmolStr, i32),
+    Pdot(Arc<Path>, crate::name::Name, i32),
     /// Functor application: `F(X)` is `Papply(F, X)`
     Papply(Arc<Path>, Arc<Path>),
 }
@@ -76,7 +76,7 @@ impl Path {
 
     /// Create a dotted path.
     #[inline]
-    pub fn pdot(prefix: Path, name: impl Into<SmolStr>) -> Self {
+    pub fn pdot(prefix: Path, name: impl Into<crate::name::Name>) -> Self {
         Path::Pdot(Arc::new(prefix), name.into(), NOPOS)
     }
 
@@ -92,7 +92,7 @@ impl Path {
 
     /// Create a dotted path with position.
     #[inline]
-    pub fn pdot_pos(prefix: Path, name: impl Into<SmolStr>, pos: i32) -> Self {
+    pub fn pdot_pos(prefix: Path, name: impl Into<crate::name::Name>, pos: i32) -> Self {
         Path::Pdot(Arc::new(prefix), name.into(), pos)
     }
 

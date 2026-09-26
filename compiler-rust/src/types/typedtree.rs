@@ -1261,7 +1261,7 @@ mod node_size_tests {
     #[test]
     fn typed_expression_sizes_stay_compact() {
         use std::mem::size_of;
-        assert_eq!(size_of::<super::ExpressionDesc>(), 80);
-        assert_eq!(size_of::<super::Expression>(), 120);
+        assert_eq!(size_of::<super::ExpressionDesc>(), 72);
+        assert_eq!(size_of::<super::Expression>(), 112);
     }
 }

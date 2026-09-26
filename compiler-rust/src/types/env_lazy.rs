@@ -44,13 +44,13 @@ impl SignatureIndex {
         for (idx, item) in signature.iter().enumerate() {
             match item {
                 SignatureItem::SigValue(id, desc) => {
-                    index.values.insert(id.name_smol().clone(), (idx, runtime_pos));
+                    index.values.insert(smol_str::SmolStr::new_static(id.name()), (idx, runtime_pos));
                     if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
                         runtime_pos += 1;
                     }
                 }
                 SignatureItem::SigType(id, _, _) => {
-                    index.types.insert(id.name_smol().clone(), idx);
+                    index.types.insert(smol_str::SmolStr::new_static(id.name()), idx);
                 }
                 SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
                     runtime_pos += 1;
@@ -62,7 +62,7 @@ impl SignatureIndex {
                     ) {
                         index.alias_modules.push((idx, runtime_pos));
                     }
-                    index.modules.insert(id.name_smol().clone(), (idx, runtime_pos));
+                    index.modules.insert(smol_str::SmolStr::new_static(id.name()), (idx, runtime_pos));
                     runtime_pos += 1;
                 }
                 SignatureItem::SigModtype(_, _) => index.modtypes.push(idx),

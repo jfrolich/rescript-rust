@@ -195,7 +195,7 @@ pub enum EnvSummary {
 fn id_open_table<T>(components: Vec<(Ident, T, i32)>) -> OpenedMap<(Ident, T, i32)> {
     let mut table = OpenedMap::with_capacity_and_hasher(components.len(), Default::default());
     for (id, value, pos) in components {
-        table.insert(id.name_smol().clone(), (id, value, pos));
+        table.insert(smol_str::SmolStr::new_static(id.name()), (id, value, pos));
     }
     table
 }
@@ -204,7 +204,7 @@ fn tycomp_open_table<T>(components: Vec<(Ident, T)>) -> OpenedMap<Vec<(Ident, T)
     let mut table: OpenedMap<Vec<(Ident, T)>> =
         OpenedMap::with_capacity_and_hasher(components.len(), Default::default());
     for (id, value) in components {
-        let name = id.name_smol().clone();
+        let name = smol_str::SmolStr::new_static(id.name());
         match table.get_mut(&name) {
             Some(entries) => entries.insert(0, (id, value)),
             None => {
@@ -332,7 +332,7 @@ impl<T: Clone> IdTbl<T> {
             Some(entries) => std::rc::Rc::make_mut(entries).push((id, value)),
             None => {
                 self.current
-                    .insert(id.name_smol().clone(), std::rc::Rc::new(vec![(id, value)]));
+                    .insert(smol_str::SmolStr::new_static(id.name()), std::rc::Rc::new(vec![(id, value)]));
             }
         }
     }
@@ -595,7 +595,7 @@ impl<T: Clone> TycompTbl<T> {
             Some(entries) => std::rc::Rc::make_mut(entries).push((id, value)),
             None => {
                 self.current
-                    .insert(id.name_smol().clone(), std::rc::Rc::new(vec![(id, value)]));
+                    .insert(smol_str::SmolStr::new_static(id.name()), std::rc::Rc::new(vec![(id, value)]));
             }
         }
     }
@@ -1687,7 +1687,7 @@ impl Env {
                 Path::Pdot(parent, name, _) => {
                     let parent_md = lookup_module_inner(env, parent, visiting)?;
                     lookup_submodule_in_module_type(env, &parent_md.md_type, name, visiting)
-                        .ok_or_else(|| EnvError::ModuleNotFound(name.clone()))
+                        .ok_or_else(|| EnvError::ModuleNotFound((*name).into()))
                 }
                 Path::Papply(_, _) => Err(EnvError::ModuleNotFound(
                     "(functor application)".into(),
@@ -1820,7 +1820,7 @@ impl Env {
                         }
                     }
                 }
-                Err(EnvError::ModuleNotFound(name.clone()))
+                Err(EnvError::ModuleNotFound((*name).into()))
             }
             Path::Papply(_, _) => Err(EnvError::ModuleNotFound(
                 "(functor application)".into(),

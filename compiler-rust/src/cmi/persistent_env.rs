@@ -2258,7 +2258,7 @@ fn collect_sig_type_registrations(
                 let decl = ctx.thread_store().shared_type_decl(decl);
                 let qualified_path = Path::pdot(module_path.clone(), id.name());
                 out.push(crate::types::thread_store::SigTypeRegistration {
-                    name: id.name_smol().clone(),
+                    name: smol_str::SmolStr::new_static(id.name()),
                     stamp: id.stamp(),
                     qualified_name: smol_str::SmolStr::new(qualified_path.name()),
                     qualified_path,

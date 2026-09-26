@@ -52,6 +52,7 @@ pub mod driver;
 pub mod gentype;
 pub mod hash_seed;
 pub mod ident;
+pub mod name;
 pub mod intern;
 pub mod js_ir;
 pub mod lambda;

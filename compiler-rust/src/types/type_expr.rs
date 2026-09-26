@@ -1147,6 +1147,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compact_type_node_sizes() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<crate::ident::Ident>(), 16);
+        assert_eq!(size_of::<Path>(), 24);
+        assert!(size_of::<TypeDesc>() <= 72);
+        assert!(size_of::<TypeExpr>() <= 88);
+    }
+
+    #[test]
     fn store_tags_preserve_identity_and_sentinels() {
         for index in [0, 1, 255, 256, 10_000] {
             let local = TypeExprRef::from_usize(index);

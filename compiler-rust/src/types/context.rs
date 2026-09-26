@@ -693,12 +693,12 @@ impl std::hash::Hash for SamePathKey {
                         state.write_i32(id.stamp());
                     } else {
                         state.write_u8(1);
-                        state.write(id.name().as_bytes());
+                        std::hash::Hash::hash(&id.name_atom(), state);
                     }
                 }
                 Path::Pdot(parent, name, _) => {
                     state.write_u8(2);
-                    state.write(name.as_bytes());
+                    std::hash::Hash::hash(name, state);
                     hash_path(parent, state);
                 }
                 Path::Papply(functor, argument) => {
