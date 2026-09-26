@@ -634,7 +634,9 @@ fn parser_warning_attribute_payload<'a>(
     let crate::parser::ast::Constant::String(spec, _) = c.as_ref() else {
         return None;
     };
-    Some((spec.as_ref(), expr.pexp_loc))
+    // builtin_attributes.ml:202-212 reports `@ppwarning` at the payload
+    // item's `pstr_loc`.
+    Some((spec.as_ref(), item.pstr_loc))
 }
 
 fn apply_warning_attribute(

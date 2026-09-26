@@ -1007,9 +1007,13 @@ fn collect_builtin_warning_attribute(
             }
         }
         "ppwarning" | "ocaml.ppwarning" => {
-            if let Some((message, loc)) = payload_single_string_literal_with_loc(payload, arena) {
+            if let Some((message, _)) = payload_single_string_literal_with_loc(payload, arena) {
+                // builtin_attributes.ml:202-212 reports at the item's `pstr_loc`.
+                let Payload::PStr(items) = payload else {
+                    unreachable!("a single string literal payload is a structure");
+                };
                 warnings.push(PpxWarning {
-                    loc,
+                    loc: items[0].pstr_loc,
                     warning: Warning::Preprocessor {
                         message: message.to_string(),
                     },
