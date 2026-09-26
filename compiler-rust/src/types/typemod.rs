@@ -17375,6 +17375,9 @@ fn type_structure_unscoped<'a>(
             }
         }
     }
+    // typemod.ml:1596-1599: `type_struct` also runs `Ctype.init_def
+    // (Ident.current_time ())` for the empty rest of the structure.
+    tctx.type_ctx.init_def(tctx.type_ctx.current_stamp());
 
     // Evaluate pending @comptime type-builder bindings and emit type decls.
     // (Currently unused — type builders are emitted inline at their Pstr_value.
@@ -17744,7 +17747,9 @@ fn type_structure_no_export<'a>(
         typed_items.push(typed_item);
         current_env = new_env;
     }
-
+    // typemod.ml:1596-1599: `type_struct` also runs `Ctype.init_def
+    // (Ident.current_time ())` for the empty rest of the structure.
+    tctx.type_ctx.init_def(tctx.type_ctx.current_stamp());
 
     let inner_structure = Structure {
         str_items: typed_items,
