@@ -6082,6 +6082,12 @@ fn record_pattern_unresolved_label_error(
             env: Some(tctx.type_ctx.store_typed_env(env)),
         };
     }
+    // `Typetexp.find_all_labels` goes through `find_component`, whose
+    // `narrow_unbound_lid_error` (typetexp.ml:64-86) reports a missing
+    // module prefix first.
+    if let Some(err) = unbound_module_prefix_error(tctx, env, lid.loc, &field_lid_for_error) {
+        return err;
+    }
     TypeCoreError::UnboundRecordField {
         loc: lid.loc,
         field_name: tctx.longident_to_string(&field_lid_for_error),
@@ -6503,9 +6509,6 @@ fn type_pattern_record(
         }
     }
 
-    // OCaml unifies the inferred record type with the pattern expected type.
-    unify_pattern_types(tctx, loc, record_ty, expected_ty)?;
-
     // Invariant: records are sorted in the typed tree (by label position)
     // Matches OCaml typecore.ml: List.sort (fun (_, lbl1, _, _) (_, lbl2, _, _) -> compare lbl1.lbl_pos lbl2.lbl_pos)
     typed_fields.sort_by_key(|(_, label_desc, _, _)| label_desc.lbl_pos);
@@ -6565,6 +6568,10 @@ fn type_pattern_record(
             }
         }
     }
+
+    // OCaml `k'` (typecore.ml:1551-1561): `check_recordpat_labels`, then
+    // unify the inferred record type with the pattern expected type.
+    unify_pattern_types(tctx, loc, record_ty, expected_ty)?;
 
     let typed_rest = match record_rest {
         Some(rest) => Some(type_record_pat_rest(
@@ -27071,9 +27078,27 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
 
             if rewritten_path.is_none() {
                 if let Path::Pident(id) = &path {
+                    // OCaml compiler/ml/env.ml:1530-1538 substitutes the
+                    // component's own `Sig_type` binders (subst.ml:87-95
+                    // matches by ident identity); a same-name type from
+                    // outside the module, such as predef `array`, is kept.
+                    let is_component_binder = with_resolved_module_components_for_path_with_cache_mode(
+                        module_access_path,
+                        env,
+                        pers_env,
+                        ctx,
+                        ComponentLookupApi::ProbeModuleDescr,
+                        |components| {
+                            components
+                                .lookup_type(id.name())
+                                .is_some_and(|(binder, _)| binder.same(id))
+                        },
+                    )
+                    .unwrap_or(false);
                     let candidate = Path::pdot(module_access_path.clone(), id.name());
-                    if lookup_type_decl_for_qualification_probe(&candidate, env, pers_env, ctx)
-                        .is_some()
+                    if is_component_binder
+                        && lookup_type_decl_for_qualification_probe(&candidate, env, pers_env, ctx)
+                            .is_some()
                     {
                         rewritten_path = Some(candidate);
                     }
@@ -27090,7 +27115,10 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                     Path::Pdot(parent, _, _) => path_has_suffix(parent, module_access_path),
                     _ => false,
                 };
+                // A bare `Pident` is only rewritten when it is the component's
+                // own binder (checked above).
                 if !path_parent_has_module_suffix
+                    && !matches!(path, Path::Pident(_))
                     && let Some(candidate) = prepend_module_prefix(&path, module_access_path)
                 {
                     if !candidate.same(&path)
