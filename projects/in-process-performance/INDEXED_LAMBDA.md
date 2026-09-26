@@ -178,6 +178,26 @@ Validation at pause: `cargo check` passed during construction, and the existing 
 
 Remaining implementation: complete the general all-family dispatcher; test the newly retained continuation/tail/binding paths; finish primitive special cases, recursive function/binding metadata, catch/raise/switch modes and source locations; connect grouped M5 roots through JS passes/dependencies/fatal gate/CMJ export; then obtain independent review and all required correctness gates before any activation or performance claim. The new owner operations remain inactive in production. Compiler/shared-worktree/heavy-test ownership is released for the measurement task; no compiler process is left running.
 
+## Measurement: the inactive optimizer is slower than the recursive one
+
+Before continuing M6, the M1-M5 optimizer was timed against the production
+recursive optimizer on the same inputs. A temporary shadow hook in
+`LambdaCompiler::compile_deps_program_with_collected_possible_required_modules_owned`
+cloned each module's lambda, ran `optimize_for_pre_js_indexed` on one copy and
+`simplify_for_js_backend_with_external_inline_and_meta_owned` on the other, and
+summed the wall time of each over a serial clean build of a 3248-module
+application:
+
+| Optimizer | Total |
+|---|---|
+| Indexed (M1-M5, including the `Lambda -> IndexedLambda` import) | 1.47 s |
+| Recursive (production) | 0.74 s |
+
+The recursive optimizer is ~9% of serial compile CPU, so even an indexed
+pipeline that matched it would not pay for M6 by itself. Do not activate or
+extend this path for performance until the indexed passes are made faster
+than the recursive ones on real input; profile them first.
+
 ## Validation at every checkpoint
 
 - Unit tests for semantic output, source-order traversal, shared-child isolation, and exact rewrite decisions.
