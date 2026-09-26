@@ -5305,21 +5305,19 @@ fn resolve_variant_spread_sources(
                         );
                     }
                 } else {
-                    return Err(
-                        TypeModError::VariantSpreadCouldNotFindType {
-                            loc: spread_loc,
-                        },
-                    );
+                    // variant_type_spread.ml:98-100: only `Pcstr_tuple
+                    // [Ptyp_constr _]` is a spread; any other `...`
+                    // constructor is kept and typed as written.
+                    sources.push(None);
+                    continue;
                 }
             } else {
-                return Err(TypeModError::VariantSpreadCouldNotFindType {
-                    loc: cstr.pcd_loc,
-                });
+                sources.push(None);
+                continue;
             }
         } else {
-            return Err(TypeModError::VariantSpreadCouldNotFindType {
-                loc: cstr.pcd_loc,
-            });
+            sources.push(None);
+            continue;
         }
         sources.push(found.map(|cstrs| (cstrs, is_pdot)));
     }
