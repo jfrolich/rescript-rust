@@ -12163,29 +12163,6 @@ fn type_match(
         }
     };
 
-    // Type check exception cases against exn type.
-    // OCaml routes exception cases through type_cases with Predef.type_exn,
-    // which includes the propagation cycle (begin_def/end_def/generalize on
-    // all pattern types). This ensures as-bound variables get generalized types
-    // so instance() creates fresh copies at use sites.
-    let typed_exn_cases = if !exn_caselist.is_empty() {
-        let ctx = tctx.type_ctx;
-        let exn_ty = crate::types::ctype::instance(ctx, ctx.predef_exn());
-        let generic_exn_ty = ctx.predef_exn();
-        let exn_case_refs: Vec<&crate::parser::ast::Case> = exn_caselist.iter().collect();
-        type_match_cases_batch_non_gadt(
-            tctx,
-            env,
-            &exn_case_refs,
-            exn_ty,
-            generic_exn_ty,
-            expected_ty,
-            false,
-            body_context.clone(),
-        )?
-    } else {
-        Vec::new()
-    };
 
     // Match OCaml type_cases:
     //   if has_gadts then
@@ -12290,6 +12267,44 @@ fn type_match(
         unused_expected_ty,
         true,
     );
+
+    // Type check exception cases against exn type.
+    // OCaml routes exception cases through type_cases with Predef.type_exn,
+    // which includes the propagation cycle (begin_def/end_def/generalize on
+    // all pattern types). This ensures as-bound variables get generalized types
+    // so instance() creates fresh copies at use sites.
+    let typed_exn_cases = if !exn_caselist.is_empty() {
+        let ctx = tctx.type_ctx;
+        let exn_ty = crate::types::ctype::instance(ctx, ctx.predef_exn());
+        let generic_exn_ty = ctx.predef_exn();
+        let exn_case_refs: Vec<&crate::parser::ast::Case> = exn_caselist.iter().collect();
+        let typed = type_match_cases_batch_non_gadt(
+            tctx,
+            env,
+            &exn_case_refs,
+            exn_ty,
+            generic_exn_ty,
+            expected_ty,
+            false,
+            body_context.clone(),
+        )?;
+        // `type_cases ... Predef.type_exn ty_expected false loc exn_caselist`
+        // runs after the value cases were checked, and also checks unused
+        // cases (typecore.ml:2638-2641, 4483-4496).
+        finish_non_gadt_type_cases(
+            tctx,
+            env,
+            loc,
+            expected_ty,
+            exn_ty,
+            &exn_case_refs,
+            &typed,
+            false,
+        )?;
+        typed
+    } else {
+        Vec::new()
+    };
 
     // Keep sharing: match OCaml's `exp_type = instance env ty_expected`
     let result_ty = crate::types::instance(ctx, expected_ty);
