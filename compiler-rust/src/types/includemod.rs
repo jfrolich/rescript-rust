@@ -936,6 +936,28 @@ fn module_type_error_is_alias_unbound_module(
             || matches!(mty_sig, ModuleType::MtyAlias(..)))
 }
 
+/// The error half of OCaml `modtypes` (includemod.ml:187-198): `Dont_match`
+/// (a bare `ModuleTypeMismatch` here) becomes a `Module_types` entry; other
+/// errors from `try_modtypes` get one too unless either side is an alias, in
+/// which case the inner comparison already reported it.
+fn wrap_modtypes_error(
+    mty_impl: &ModuleType,
+    mty_sig: &ModuleType,
+    error: IncludeModError,
+) -> IncludeModError {
+    if !matches!(error, IncludeModError::ModuleTypeMismatch { .. })
+        && (matches!(mty_impl, ModuleType::MtyAlias(..))
+            || matches!(mty_sig, ModuleType::MtyAlias(..)))
+    {
+        return error;
+    }
+    IncludeModError::ModuleTypesMismatch {
+        actual: Box::new(mty_impl.clone()),
+        expected: Box::new(mty_sig.clone()),
+        error: Box::new(error),
+    }
+}
+
 /// Check if `mty_impl` is a subtype of `mty_sig` with optional aliasability.
 fn modtypes_inner<'a>(
     type_ctx: &'a TypeContext,
@@ -1122,6 +1144,7 @@ fn modtypes_inner<'a>(
                     let expanded = ctype::strengthen_module_type_for_inclusion_path(
                         type_ctx, env, &impl_path, expanded,
                     );
+                    // includemod.ml:231: `modtypes ~loc env cxt subst mty1 mty2`.
                     modtypes_inner(
                         type_ctx,
                         env,
@@ -1132,6 +1155,7 @@ fn modtypes_inner<'a>(
                         aliasable,
                         warnings,
                     )
+                    .map_err(|error| wrap_modtypes_error(&expanded, mty_sig, error))
                 }) {
                 coercion?
             } else {
@@ -1142,6 +1166,7 @@ fn modtypes_inner<'a>(
                         )
                     })
                     .unwrap_or_else(|| ModuleType::MtyAlias(pres_impl.clone(), impl_path.clone()));
+                // includemod.ml:231: `modtypes ~loc env cxt subst mty1 mty2`.
                 modtypes_inner(
                     type_ctx,
                     env,
@@ -1151,7 +1176,8 @@ fn modtypes_inner<'a>(
                     sig_access_path,
                     aliasable,
                     warnings,
-                )?
+                )
+                .map_err(|error| wrap_modtypes_error(&expanded, mty_sig, error))?
             };
             match pres_impl {
                 crate::types::decl::AliasPresence::MtaPresent => Ok(coercion),
@@ -1790,28 +1816,16 @@ fn check_paired_signature_items<'a>(
                     warnings,
                 )
                 .map_err(|error| {
-                    let name = impl_id.clone();
-                    if module_type_error_is_alias_unbound_module(
-                        &impl_mty,
-                        &sig_mod_decl.md_type,
-                        &error,
-                    ) {
-                        IncludeModError::InModule {
-                            name,
-                            error: Box::new(error),
-                        }
-                    } else {
-                        // `modtypes` in `Module id :: cxt` (includemod.ml:
-                        // 322-331): the `Module_types` entry and the errors
-                        // below it share that context.
-                        IncludeModError::InModule {
-                            name,
-                            error: Box::new(IncludeModError::ModuleTypesMismatch {
-                                actual: Box::new(impl_mty.clone()),
-                                expected: Box::new(sig_mod_decl.md_type.clone()),
-                                error: Box::new(error),
-                            }),
-                        }
+                    // `modtypes` in `Module id :: cxt` (includemod.ml:
+                    // 396-413): the `Module_types` entry and the errors below
+                    // it share that context.
+                    IncludeModError::InModule {
+                        name: impl_id.clone(),
+                        error: Box::new(wrap_modtypes_error(
+                            &impl_mty,
+                            &sig_mod_decl.md_type,
+                            error,
+                        )),
                     }
                 })?;
                 coercions.push((pair.runtime_pos, coercion));
