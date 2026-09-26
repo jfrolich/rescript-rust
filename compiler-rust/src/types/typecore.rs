@@ -2399,7 +2399,9 @@ pub fn transl_type(
     env: &Env,
     styp: &crate::parser::ast::CoreType,
 ) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
-    transl_type_with_options(tctx, env, styp, false, false, false)
+    // `Typetexp.transl_simple_type` always runs `globalize_used_variables`
+    // (typetexp.ml:659-696): new variables become global-level variables.
+    transl_type_with_options(tctx, env, styp, true, false, false)
 }
 
 pub(crate) fn transl_type_fixed(
@@ -2407,7 +2409,7 @@ pub(crate) fn transl_type_fixed(
     env: &Env,
     styp: &crate::parser::ast::CoreType,
 ) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
-    transl_type_with_options(tctx, env, styp, false, true, false)
+    transl_type_with_options(tctx, env, styp, true, true, false)
 }
 
 /// Run the deferred unifications of `Typetexp.globalize_used_variables`'s
@@ -7552,7 +7554,7 @@ fn type_statement<'a>(
 
     let expected_ty = env.type_unit(ctx);
     let context = type_clash_context_in_statement(expr);
-    unify_expression_types(tctx, typed.exp_loc, typed.exp_type, expected_ty, context)?;
+    unify_expression_types(tctx, proper_exp_loc(&typed), typed.exp_type, expected_ty, context)?;
     Ok(typed)
 }
 
@@ -9735,6 +9737,19 @@ fn instance_if_generic(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
 /// OCaml's `rue` mechanism: always instance the expected type before unifying.
 /// This matters even for monomorphic expected types, because OCaml still copies
 /// the top-level node and preserves distinct physical identities in the typed tree.
+/// `proper_exp_loc` (typecore.ml:2260-2266): the location of the outermost
+/// constraint/coercion in `exp_extra`, else the expression's location.
+fn proper_exp_loc(exp: &Expression) -> LocIdx {
+    exp.exp_extra
+        .iter()
+        .find_map(|(extra, loc, _)| match extra {
+            crate::types::typedtree::ExpExtra::Texp_constraint(_)
+            | crate::types::typedtree::ExpExtra::Texp_coerce(_) => Some(*loc),
+            _ => None,
+        })
+        .unwrap_or(exp.exp_loc)
+}
+
 fn rue_unify(
     tctx: &mut TypeCheckContext<'_>,
     loc: LocIdx,
@@ -16994,7 +17009,7 @@ fn type_field(
     // OCaml compiler/ml/typecore.ml:2993-3005 types `Pexp_field` by
     // `type_label_access`, `instance_label`, and `unify_exp`, then returns
     // `ty_arg` without recursively forcing paths inside the field argument type.
-    unify_expression_types(tctx, typed_record.exp_loc, ty_exp, ty_res, None)?;
+    unify_expression_types(tctx, proper_exp_loc(&typed_record), ty_exp, ty_res, None)?;
     Ok(Expression::new(
         ExpressionDesc::Texp_field(Box::new(typed_record), field_lid.clone(), label_desc),
         loc,
@@ -17242,7 +17257,7 @@ fn type_setfield(
     // instance env arg.exp_type}` from `type_label_exp`.
     typed_value.exp_type = crate::types::ctype::instance(ctx, typed_value.exp_type);
     // OCaml typecore.ml:2953: `unify_exp env record ty_record`.
-    unify_expression_types(tctx, typed_record.exp_loc, typed_record.exp_type, ty_record, None)?;
+    unify_expression_types(tctx, proper_exp_loc(&typed_record), typed_record.exp_type, ty_record, None)?;
 
     if label_desc.lbl_mut == crate::types::MutableFlag::Immutable {
         return Err(TypeCoreError::LabelNotMutable {

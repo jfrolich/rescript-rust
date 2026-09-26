@@ -12670,7 +12670,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                         };
                         // Use transl_type_scheme pattern: begin_def/end_def/generalize
                         // OCaml: reset_type_variables() for each val declaration
-                        tctx.type_variables.clear();
+                        tctx.reset_type_variables();
                         let ctx = tctx.type_ctx;
                         ctx.begin_def();
                         let (_typed_ct, val_type) =
@@ -16921,7 +16921,7 @@ pub fn transl_signature<'a>(
                 let name_str = arena.get_string(vd.pval_name.txt).to_string();
                 // Use transl_type_scheme pattern: begin_def/end_def/generalize
                 // OCaml: reset_type_variables() for each val declaration
-                tctx.type_variables.clear();
+                tctx.reset_type_variables();
                 let ctx = tctx.type_ctx;
                 ctx.begin_def();
                 let (typed_ctype, val_ty) =
@@ -18307,7 +18307,7 @@ fn type_structure_item<'a>(
             // Translate the type annotation using transl_type_scheme pattern:
             // OCaml: reset_type_variables() clears type var map so each declaration
             // gets fresh Tvars (e.g., 'a in log and 'a in log2 are separate nodes).
-            tctx.type_variables.clear();
+            tctx.reset_type_variables();
             let ctx = tctx.type_ctx;
             ctx.begin_def();
             let (typed_ctype, val_ty) = transl_type(tctx, env, arena.get_core_type(vd.pval_type))?;
@@ -18422,7 +18422,8 @@ fn type_structure_item<'a>(
             // are separate from the TypeKind and need explicit generalization.
             let mut env_desc_types_for_generalize: Vec<crate::types::TypeExprRef> = Vec::new();
 
-            // OCaml: reset_type_variables() before translating type declarations.
+            // OCaml resets the type variables per declaration inside
+            // `transl_declaration` (typedecl.ml:385), after `begin_def`.
             tctx.type_variables.clear();
 
             // OCaml typedecl.ml:1447-1484 prepends synthetic `t#row`
@@ -18565,6 +18566,9 @@ fn type_structure_item<'a>(
 
             for (decl_idx, decl) in decls.iter().enumerate() {
                 tctx.type_ctx.usage().set_current_type_slot(decl_slots[decl_idx]);
+                // typedecl.ml:385 `reset_type_variables ()` (after the group's
+                // init_def/begin_def), so global variables sit at this level.
+                tctx.reset_type_variables();
                 // typedecl.ml:1500-1503: each declaration is translated in
                 // `Builtin_attributes.warning_scope ptype_attributes`.
                 tctx.drain_open_slot_uses();
@@ -20004,21 +20008,13 @@ fn type_structure_item<'a>(
             // OCaml typedecl.ml: begin_def/end_def/generalize around type extension
             // constructor translation, matching Pstr_exception treatment. This ensures
             // arg types are at GENERIC_LEVEL so instance() creates fresh copies.
-            tctx.type_variables.clear();
+            tctx.reset_type_variables();
             ctx.begin_def();
 
-            let mut typed_params = Vec::new();
-            let mut typed_param_type_refs = Vec::new();
-            for (ct, v) in &ext.ptyext_params {
-                let (typed_ct, ty_ref) = transl_type(tctx, env, arena.get_core_type(*ct))?;
-                typed_param_type_refs.push(ty_ref);
-                let variance = match v {
-                    ParserVariance::Covariant => TypesVariance::covariant(),
-                    ParserVariance::Contravariant => TypesVariance::contravariant(),
-                    ParserVariance::Invariant => TypesVariance::null(),
-                };
-                typed_params.push((typed_ct, variance));
-            }
+            // typedecl.ml:1793 `make_params env styext.ptyext_params`
+            // (Typetexp.transl_type_param: a repeated variable is an error).
+            let (typed_params, typed_param_type_refs) =
+                translate_type_declaration_params(tctx, env, arena, &ext.ptyext_params)?;
             let allowed_type_params: HashSet<TypeExprRef> = typed_param_type_refs
                 .iter()
                 .map(|ty_ref| ctx.repr(*ty_ref))
@@ -20395,7 +20391,7 @@ fn type_structure_item<'a>(
             // at GENERIC_LEVEL so instance() creates fresh copies, preventing
             // declaration types from being linked to use-site aliases.
             // OCaml: reset_type_variables() at start of transl_exception
-            tctx.type_variables.clear();
+            tctx.reset_type_variables();
             ctx.begin_def();
 
             // Translate constructor arguments and collect type refs for env registration
@@ -21719,7 +21715,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
             check_not_undefined_type_attribute(arena, decl)?;
 
             // OCaml: reset_type_variables() before each type declaration
-            tctx.type_variables.clear();
+            tctx.reset_type_variables();
 
             // Convert type parameters
             let mut typ_params: Vec<(TypedCoreType, TypesVariance)> = Vec::new();
