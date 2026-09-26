@@ -918,10 +918,14 @@ impl<'src> Scanner<'src> {
                     );
                     // OCaml uses (max (scanner.offset - 1 - start_off) 0) to exclude the last char
                     let end_off = if self.offset > start_off {
-                        // Go back 1 character's worth of bytes
-                        // At EOF, the previous char was the last real char
-                        // We need to compute its byte offset
-                        self.offset.saturating_sub(1).max(start_off)
+                        // OCaml drops the last source byte, which is the last
+                        // char of the Latin-1 source view (one char per byte,
+                        // possibly two bytes in the Rust string).
+                        let prev_len = self.src[..self.offset.min(self.src.len())]
+                            .chars()
+                            .next_back()
+                            .map_or(1, char::len_utf8);
+                        self.offset.saturating_sub(prev_len).max(start_off)
                     } else {
                         start_off
                     };
