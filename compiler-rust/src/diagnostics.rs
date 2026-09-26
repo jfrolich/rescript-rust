@@ -482,6 +482,9 @@ and may change in future versions."
                     .to_string()
             }
             Warning::AmbiguousPattern { vars } => {
+                // warnings.ml:386-393: `List.sort String.compare vars`.
+                let mut vars = vars.clone();
+                vars.sort();
                 let msg = if vars.len() == 1 {
                     format!("variable {}", vars[0])
                 } else {
