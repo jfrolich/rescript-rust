@@ -6455,6 +6455,11 @@ fn unify_types<'a>(
             drop(desc1);
             drop(desc2);
 
+            // ctype.ml:2197-2201: in Expression mode unify3 runs
+            // `occur !env t1' t2'` before linking and unifying children.
+            if state.mode == UnifyMode::Expression {
+                occur_check(ctx, state.env(), state.mode, t1, t2)?;
+            }
             // OCaml links t1'→t2 before recursively unifying children.
             link_type(ctx, t1, t2);
             let result = (|| {
@@ -6482,6 +6487,11 @@ fn unify_types<'a>(
             drop(desc1);
             drop(desc2);
 
+            // ctype.ml:2197-2201: in Expression mode unify3 runs
+            // `occur !env t1' t2'` before linking and unifying children.
+            if state.mode == UnifyMode::Expression {
+                occur_check(ctx, state.env(), state.mode, t1, t2)?;
+            }
             // OCaml links t1'→t2 BEFORE recursing into children
             link_type(ctx, t1, t2);
 
@@ -6704,6 +6714,11 @@ fn unify_types<'a>(
                 .map(|(&a, &b)| (a, b))
                 .collect();
 
+            // ctype.ml:2197-2201: in Expression mode unify3 runs
+            // `occur !env t1' t2'` before linking and unifying children.
+            if state.mode == UnifyMode::Expression {
+                occur_check(ctx, state.env(), state.mode, t1, t2)?;
+            }
             unify_same_path_constructor_args(ctx, state, t1, t1, t2, &same_path, pairs)?;
 
             if state.mode != crate::types::UnifyMode::Pattern {
@@ -6761,6 +6776,11 @@ fn unify_types<'a>(
             drop(desc1);
             drop(desc2);
 
+            // ctype.ml:2197-2201: in Expression mode unify3 runs
+            // `occur !env t1' t2'` before linking and unifying children.
+            if state.mode == UnifyMode::Expression {
+                occur_check(ctx, state.env(), state.mode, t1, t2)?;
+            }
             // OCaml links t1'→t2 BEFORE recursing into children
             link_type(ctx, t1, t2);
 
@@ -6799,6 +6819,11 @@ fn unify_types<'a>(
             drop(desc1);
             drop(desc2);
 
+            // ctype.ml:2197-2201: in Expression mode unify3 runs
+            // `occur !env t1' t2'` before linking and unifying children.
+            if state.mode == UnifyMode::Expression {
+                occur_check(ctx, state.env(), state.mode, t1, t2)?;
+            }
             // OCaml links t1'→t2 BEFORE recursing into children
             link_type(ctx, t1, t2);
 
@@ -6824,6 +6849,11 @@ fn unify_types<'a>(
             drop(desc1);
             drop(desc2);
 
+            // ctype.ml:2197-2201: in Expression mode unify3 runs
+            // `occur !env t1' t2'` before linking and unifying children.
+            if state.mode == UnifyMode::Expression {
+                occur_check(ctx, state.env(), state.mode, t1, t2)?;
+            }
             // OCaml links t1'→t2 BEFORE recursing into children
             link_type(ctx, t1, t2);
 
@@ -6936,6 +6966,11 @@ fn unify_types<'a>(
                 .map(|(&a, &b)| (a, b))
                 .collect();
 
+            // ctype.ml:2197-2201: in Expression mode unify3 runs
+            // `occur !env t1' t2'` before linking and unifying children.
+            if state.mode == UnifyMode::Expression {
+                occur_check(ctx, state.env(), state.mode, t1, t2)?;
+            }
             // OCaml links t1'→t2 BEFORE recursing into children
             link_type(ctx, t1, t2);
 
