@@ -3492,8 +3492,8 @@ fn type_mod_error_to_anyhow_styled(
             qualifier,
             alternatives,
             module_suggestion,
-        }) => UserDiagnostic::new(
-            format_unbound_value_report(
+        }) => {
+            let mut report = format_unbound_value_report(
                 arena,
                 source,
                 filename,
@@ -3502,10 +3502,15 @@ fn type_mod_error_to_anyhow_styled(
                 qualifier.as_deref(),
                 alternatives,
                 module_suggestion.as_deref(),
-            ),
-            2,
-        )
-        .into(),
+            );
+            // See `ExprTypeClash`: style escapes follow `Color.color_enabled`.
+            if suppress_info_style {
+                report = report
+                    .replace("\x1b[1;33m", "")
+                    .replace("\x1b[0m", "");
+            }
+            UserDiagnostic::new(report, 2).into()
+        }
         TypeModError::CoreError(TypeCoreError::UnboundModule {
             loc,
             name,

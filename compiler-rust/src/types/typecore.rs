@@ -18625,6 +18625,16 @@ fn unbound_value_module_suggestion(
     };
     let candidate = capitalize_ascii(tctx.arena.get_string(*idx));
     if let Ok((path, _)) = env.find_module_with_path(&candidate) {
+        // `Env.lookup_module` marks the module (and an open providing it)
+        // used, which can report an open-shadowing warning right away.
+        let lid = tctx.arena.get_longident(tctx.arena.push_typecheck_lident(&candidate)).clone();
+        mark_open_lid_use(
+            tctx.type_ctx,
+            env,
+            tctx.arena,
+            &lid,
+            crate::types::env::OpenLookupKind::Module,
+        );
         return Some(format_arity_suggestion_path(&path));
     }
     let ctx = tctx.type_ctx;
