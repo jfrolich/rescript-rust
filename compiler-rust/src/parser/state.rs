@@ -110,6 +110,12 @@ pub struct Parser<'src> {
     pub prev_end_pos_idx: PosIdx,
     /// Stack of breadcrumbs for error recovery.
     breadcrumbs: Vec<(Grammar, Position)>,
+    /// Inside `lookahead`: number of breadcrumbs, from the bottom, that are
+    /// still as they were when the innermost lookahead started (0 outside).
+    lookahead_breadcrumb_floor: usize,
+    /// Breadcrumbs popped from below the floor during lookaheads, in pop
+    /// order, so `lookahead` can put them back without cloning the stack.
+    lookahead_popped_breadcrumbs: Vec<(Grammar, Position)>,
     /// Collected diagnostics.
     diagnostics: Vec<ParserDiagnostic>,
     /// Collected parser warnings.
@@ -188,6 +194,8 @@ impl<'src> Parser<'src> {
             end_pos_idx: default_pos_idx,
             prev_end_pos_idx: default_pos_idx,
             breadcrumbs: Vec::new(),
+            lookahead_breadcrumb_floor: 0,
+            lookahead_popped_breadcrumbs: Vec::new(),
             diagnostics: Vec::new(),
             warnings: Vec::new(),
             comments: Vec::new(),
@@ -813,7 +821,12 @@ impl<'src> Parser<'src> {
 
     /// Pop the most recent breadcrumb.
     pub fn eat_breadcrumb(&mut self) {
-        self.breadcrumbs.pop();
+        if let Some(popped) = self.breadcrumbs.pop()
+            && self.breadcrumbs.len() < self.lookahead_breadcrumb_floor
+        {
+            self.lookahead_breadcrumb_floor = self.breadcrumbs.len();
+            self.lookahead_popped_breadcrumbs.push(popped);
+        }
     }
 
     /// Get the current breadcrumbs.
@@ -841,7 +854,11 @@ impl<'src> Parser<'src> {
         let start_pos_idx = self.start_pos_idx;
         let end_pos_idx = self.end_pos_idx;
         let prev_end_pos_idx = self.prev_end_pos_idx;
-        let breadcrumbs = self.breadcrumbs.clone();
+        // Breadcrumbs are restored from the untouched bottom of the stack
+        // plus the entries popped from it (see `eat_breadcrumb`).
+        let outer_breadcrumb_floor =
+            std::mem::replace(&mut self.lookahead_breadcrumb_floor, self.breadcrumbs.len());
+        let popped_breadcrumbs_len = self.lookahead_popped_breadcrumbs.len();
         let diagnostics_len = self.diagnostics.len();
         let warnings_len = self.warnings.len();
         let comments_len = self.comments.len();
@@ -873,7 +890,15 @@ impl<'src> Parser<'src> {
         self.start_pos_idx = start_pos_idx;
         self.end_pos_idx = end_pos_idx;
         self.prev_end_pos_idx = prev_end_pos_idx;
-        self.breadcrumbs = breadcrumbs;
+        self.breadcrumbs.truncate(self.lookahead_breadcrumb_floor);
+        while self.lookahead_popped_breadcrumbs.len() > popped_breadcrumbs_len {
+            let popped = self
+                .lookahead_popped_breadcrumbs
+                .pop()
+                .expect("length checked above");
+            self.breadcrumbs.push(popped);
+        }
+        self.lookahead_breadcrumb_floor = outer_breadcrumb_floor;
         self.diagnostics.truncate(diagnostics_len);
         self.warnings.truncate(warnings_len);
         self.comments.truncate(comments_len);
@@ -1088,6 +1113,42 @@ mod tests {
         assert_eq!(parser.breadcrumbs().len(), 2);
         parser.eat_breadcrumb();
         assert_eq!(parser.breadcrumbs().len(), 1);
+    }
+
+    #[test]
+    fn lookahead_restores_breadcrumbs_popped_below_its_start() {
+        fn names(parser: &Parser<'_>) -> Vec<String> {
+            parser
+                .breadcrumbs()
+                .iter()
+                .map(|(g, _)| format!("{g:?}"))
+                .collect()
+        }
+        let mut parser = Parser::new("test.res", "let x = 42");
+        parser.leave_breadcrumb(Grammar::Implementation);
+        parser.leave_breadcrumb(Grammar::LetBinding);
+        parser.leave_breadcrumb(Grammar::ExprOperand);
+        let before = names(&parser);
+        parser.lookahead(|p| {
+            p.eat_breadcrumb();
+            p.eat_breadcrumb();
+            p.leave_breadcrumb(Grammar::TypeExpression);
+            p.lookahead(|p| {
+                p.eat_breadcrumb();
+                p.eat_breadcrumb();
+                p.leave_breadcrumb(Grammar::Pattern);
+                p.leave_breadcrumb(Grammar::ExprBlock);
+            });
+            assert_eq!(names(p), vec!["Implementation", "TypeExpression"]);
+            p.eat_breadcrumb();
+            p.eat_breadcrumb();
+            assert!(p.breadcrumbs().is_empty());
+            p.leave_breadcrumb(Grammar::Pattern);
+        });
+        assert_eq!(names(&parser), before);
+        // Outside a lookahead, pops are final.
+        parser.eat_breadcrumb();
+        assert_eq!(names(&parser), before[..2].to_vec());
     }
 
     #[test]
