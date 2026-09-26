@@ -375,19 +375,9 @@ fn parse_type_var_list(p: &mut Parser<'_>) -> Vec<StringLoc> {
     while p.token == Token::SingleQuote {
         p.next();
         let var_start_idx = p.start_pos_idx();
-        let (name, loc) = if p.token == Token::Eof {
-            p.err_at(
-                p.start_pos,
-                p.prev_end_pos,
-                DiagnosticCategory::Unexpected {
-                    token: p.token.clone().into_owned(),
-                    context: vec![],
-                },
-            );
-            (String::new(), p.mk_loc_idx_to_prev_end(var_start_idx))
-        } else {
-            super::core::parse_ident(p, super::core::error_messages::TYPE_PARAM, var_start_idx)
-        };
+        // OCaml `parse_type_var_list` (res_core.ml:4562-4575) has no Eof case.
+        let (name, loc) =
+            super::core::parse_ident(p, super::core::error_messages::TYPE_PARAM, var_start_idx);
         let name_idx = p.arena_mut().push_interned_string(&name);
         vars.push(with_loc(name_idx, loc));
     }
@@ -436,13 +426,15 @@ pub fn parse_typ_expr_no_arrow(p: &mut Parser<'_>) -> CoreType {
 }
 
 /// Parse a type expression with pre-parsed attributes.
+/// OCaml `parse_typ_expr ~attrs p` (res_core.ml:5032-5055).
 fn parse_typ_expr_with_attrs(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
     let start_pos_idx = p.start_pos_idx();
-    let mut typ = parse_atomic_typ_expr(p, attrs);
-    // Match OCaml: handle both EqualGreater and MinusGreater (error recovery)
-    if matches!(p.token, Token::EqualGreater | Token::MinusGreater) {
-        typ = parse_arrow_type_rest(p, typ, start_pos_idx);
-    }
+    let typ = if super::core::is_es6_arrow_type(p) {
+        parse_es6_arrow_type(p, attrs)
+    } else {
+        let typ = parse_atomic_typ_expr(p, attrs);
+        parse_arrow_type_rest(p, typ, start_pos_idx)
+    };
     parse_type_alias(p, typ)
 }
 
@@ -714,10 +706,7 @@ fn parse_atomic_typ_expr_with_start(
             p.next();
             let var_start_idx = p.start_pos_idx();
             let (name, var_loc) = if p.token == Token::Eof {
-                p.err(DiagnosticCategory::Unexpected {
-                    token: p.token.clone().into_owned(),
-                    context: vec![],
-                });
+                p.err_unexpected();
                 (String::new(), p.mk_loc_idx_to_prev_end(var_start_idx))
             } else {
                 super::core::parse_ident(p, super::core::error_messages::TYPE_VAR, var_start_idx)
@@ -2177,7 +2166,7 @@ fn is_bar_or_doc_comment_then_bar(p: &mut Parser<'_>) -> bool {
 /// Used for first-class module constraints: module(Expr: S)
 /// OCaml `parse_package_type ~start_pos ~attrs` (res_core.ml:4694-4704).
 pub fn parse_package_type(p: &mut Parser<'_>, start_pos_idx: PosIdx, attrs: Attributes) -> CoreType {
-    let lid = parse_module_long_ident(p);
+    let lid = super::module::parse_module_type_long_ident(p);
 
     // Parse optional constraints ("with" is not a keyword)
     let constraints = if matches!(&p.token, Token::Lident(s) if s == "with") {
@@ -2196,123 +2185,43 @@ pub fn parse_package_type(p: &mut Parser<'_>, start_pos_idx: PosIdx, attrs: Attr
     }
 }
 
-/// Parse a package type: module(S).
+/// OCaml `parse_atomic_typ_expr` `Module` branch (res_core.ml:4659-4664):
+/// `module(` package-type `)`.
 fn parse_package_type_with_parens(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     p.expect(Token::Lparen);
-
-    let lid = parse_module_long_ident(p);
-
-    // Parse optional constraints ("with" is not a keyword)
-    let constraints = if matches!(&p.token, Token::Lident(s) if s == "with") {
-        p.next();
-        parse_package_constraints(p)
-    } else {
-        vec![]
-    };
-
+    let package_type = parse_package_type(p, start_pos_idx, Attributes::new());
     p.expect(Token::Rparen);
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_package(Box::new((lid, constraints)))),
-        ptyp_loc: loc,
-        ptyp_attributes: Attributes::new(),
+        ptyp_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
+        ..package_type
     }
 }
 
-/// Parse a module long identifier.
-fn parse_module_long_ident(p: &mut Parser<'_>) -> super::ast::Loc<crate::parse_arena::LidentIdx> {
-    let start_pos_idx = p.start_pos_idx();
-    let mut path_parts: Vec<String> = vec![];
-
-    loop {
-        match &p.token {
-            Token::Uident(name) => {
-                path_parts.push(name.to_string());
-                p.next();
-                if p.token == Token::Dot {
-                    p.next();
-                    continue;
-                }
-                break;
-            }
-            Token::Lident(name) => {
-                path_parts.push(name.to_string());
-                p.next();
-                break;
-            }
-            _ => {
-                p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
-                path_parts.push("_".to_string());
-                break;
-            }
-        }
-    }
-
-    let lid = super::core::build_longident(p.arena_mut(), &path_parts);
-    let lid_idx = p.push_longident(lid);
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    with_loc(lid_idx, loc)
-}
-
-/// Parse a type long identifier (module path ending in a type name).
-fn parse_type_long_ident(p: &mut Parser<'_>) -> super::ast::Loc<crate::parse_arena::LidentIdx> {
-    let start_pos_idx = p.start_pos_idx();
-    let mut path_parts: Vec<String> = vec![];
-
-    loop {
-        match &p.token {
-            Token::Uident(name) => {
-                path_parts.push(name.to_string());
-                p.next();
-                if p.token == Token::Dot {
-                    p.next();
-                } else {
-                    break;
-                }
-            }
-            Token::Lident(name) => {
-                path_parts.push(name.to_string());
-                p.next();
-                break;
-            }
-            _ => break,
-        }
-    }
-
-    if path_parts.is_empty() {
-        p.err(DiagnosticCategory::Message(
-            "Expected type identifier".to_string(),
-        ));
-        path_parts.push("error".to_string());
-    }
-
-    let lid = super::core::build_longident(p.arena_mut(), &path_parts);
-    let lid_idx = p.push_longident(lid);
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    with_loc(lid_idx, loc)
-}
-
-/// Parse package constraints.
+/// OCaml `parse_package_constraints` (res_core.ml:4707-4731): the first
+/// constraint expects `type`, the rest are an `and` region.
 fn parse_package_constraints(
     p: &mut Parser<'_>,
 ) -> Vec<(super::ast::Loc<crate::parse_arena::LidentIdx>, CoreTypeIdx)> {
-    let mut constraints = vec![];
-
-    while p.token == Token::Typ || p.token == Token::And {
-        if p.token == Token::And {
-            p.next();
-        }
+    let first = {
         p.expect(Token::Typ);
-
-        let lid = parse_type_long_ident(p);
+        let lid = super::module::parse_value_path_lid(p);
         p.expect(Token::Equal);
-        let typ = parse_typ_expr_inner(p, false);
-        let typ_idx = p.arena_mut().push_core_type(typ);
-
-        constraints.push((lid, typ_idx));
-    }
-
+        let typ = parse_typ_expr(p);
+        (lid, p.arena_mut().push_core_type(typ))
+    };
+    let rest = super::core::parse_region(p, Grammar::PackageConstraint, |p| {
+        if p.token != Token::And {
+            return None;
+        }
+        p.next();
+        p.expect(Token::Typ);
+        let lid = super::module::parse_value_path_lid(p);
+        p.expect(Token::Equal);
+        let typ = parse_typ_expr(p);
+        Some((lid, p.arena_mut().push_core_type(typ)))
+    });
+    let mut constraints = vec![first];
+    constraints.extend(rest);
     constraints
 }
 

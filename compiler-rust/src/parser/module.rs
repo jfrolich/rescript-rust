@@ -1123,9 +1123,10 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                 // Parenthesized module expression
                 p.next();
                 if p.token == Token::Rparen {
-                    // Unit module expression: ()
-                    p.next();
+                    // Unit module expression: (). OCaml res_core.ml:6782-6786 builds
+                    // the location before `Parser.expect Rparen`.
                     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                    p.next();
                     ModuleExpr {
                         pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(vec![]))),
                         pmod_loc: loc,
@@ -1795,7 +1796,8 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
     match &p.token {
         Token::Typ => {
             p.next();
-            let lid = parse_type_long_ident(p);
+            // OCaml res_core.ml:7238: `parse_value_path`.
+            let lid = parse_value_path_lid(p);
             // Use the StrIdx directly from the longident to enable sharing
             let type_name_idx = p.arena().get_longident(lid.txt).last_idx();
             let type_loc = lid.loc.clone();
@@ -1887,7 +1889,7 @@ pub(super) fn parse_module_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
     parse_module_long_ident_with_lowercase(p, false)
 }
 
-fn parse_module_type_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
+pub(super) fn parse_module_type_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
     parse_module_long_ident_with_lowercase(p, true)
 }
 
@@ -2003,55 +2005,10 @@ pub(super) fn parse_value_path_for_type(p: &mut Parser<'_>) -> (Vec<String>, Pos
     (path_parts, name_start, name_end)
 }
 
-/// Parse a type long identifier.
-fn parse_type_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
-    let start_pos_idx = p.start_pos_idx();
-    let mut path_parts = vec![];
-
-    match &p.token {
-        Token::Lident(name) => {
-            path_parts.push(name.to_string());
-            p.next();
-        }
-        Token::Uident(_) => loop {
-            match &p.token {
-                Token::Uident(name) => {
-                    let name = name.to_string();
-                    let start = p.start_pos.clone();
-                    let end = p.end_pos.clone();
-                    path_parts.push(name.clone());
-                    p.next();
-                    if p.token == Token::Dot {
-                        p.next();
-                    } else {
-                        p.err_at(
-                            start,
-                            end,
-                            DiagnosticCategory::Lident(Token::Uident(name.into())),
-                        );
-                        break;
-                    }
-                }
-                Token::Lident(name) => {
-                    path_parts.push(name.to_string());
-                    p.next();
-                    break;
-                }
-                _ => {
-                    p.err_unexpected();
-                    path_parts.push("_".to_string());
-                    break;
-                }
-            }
-        },
-        _ => {
-            p.err_unexpected();
-            path_parts.push("_".to_string());
-        }
-    }
-
-    let lid_idx = super::core::build_longident_idx(p, &path_parts);
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+/// OCaml `parse_value_path` (res_core.ml:742-776) as a located longident.
+pub(super) fn parse_value_path_lid(p: &mut Parser<'_>) -> Loc<LidentIdx> {
+    let (parts, loc) = parse_value_path(p);
+    let lid_idx = super::core::build_longident_idx(p, &parts);
     with_loc(lid_idx, loc)
 }
 
