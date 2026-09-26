@@ -289,6 +289,11 @@ impl<'src> Scanner<'src> {
         let (ch, ch_len) = self.decode_at(next_byte_offset);
         self.ch = ch;
         self.ch_len = ch_len;
+        // res_scanner.ml:111-114: at EOF the column becomes the byte count
+        // since the line start (`offset16 <- offset - line_offset`).
+        if next_byte_offset >= self.bytes.len() {
+            self.offset16 = self.char_pos - self.line_offset;
+        }
     }
 
     /// Advance by 2 characters.
