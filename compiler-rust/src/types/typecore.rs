@@ -21797,7 +21797,9 @@ fn type_let_bindings(
             && tctx.warning_config.is_active(&Warning::UnusedRecFlag)
             && let Some(first) = bindings.first()
         {
-            let pat_loc = tctx.arena.get_pat(first.pvb_pat).ppat_loc;
+            // `List.hd spat_sexp_list` after the `pvb_constraint` rewrite
+            // (typecore.ml:4505-4514), whose pattern spans the binding.
+            let pat_loc = tctx.arena.get_pat(binding_patterns[0]).ppat_loc;
             crate::types::typemod::with_warning_scope(
                 tctx,
                 arena,
