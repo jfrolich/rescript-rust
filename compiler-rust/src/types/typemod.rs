@@ -18401,6 +18401,19 @@ fn type_structure_item<'a>(
             // declarations for fixed private rows, allocates their identifiers
             // before the real type identifiers, and enters row placeholders even
             // for Nonrecursive groups.
+            // OCaml typedecl.ml:1456 `Variant_type_spread.expand_variant_spreads`
+            // runs over the whole group in the outer env before identifiers are
+            // created or any declaration is translated.
+            let mut pre_spread_sources = Vec::with_capacity(decls.len());
+            for decl in decls.iter() {
+                pre_spread_sources.push(match &decl.ptype_kind {
+                    crate::parser::ast::TypeKind::Ptype_variant(cstrs) => Some(
+                        resolve_variant_spread_sources(tctx, env, arena, decl, cstrs)?,
+                    ),
+                    _ => None,
+                });
+            }
+
             let fixed_row_type_ids = collect_fixed_row_type_ids(ctx, arena, decls);
             let has_fixed_rows = !fixed_row_type_ids.is_empty();
 
@@ -18655,8 +18668,9 @@ fn type_structure_item<'a>(
                         // Uses transl_type to resolve the spread source type (handles qualified paths like S.x).
                         // (constructors, is_pdot) - is_pdot=true means source is from a sub-module,
                         // where OCaml's Subst.type_declaration creates fresh type copies
-                        let spread_sources =
-                            resolve_variant_spread_sources(tctx, env, arena, decl, cstrs)?;
+                        let spread_sources = pre_spread_sources[decl_idx]
+                            .take()
+                            .expect("variant spread sources resolved before the group");
                         // OCaml typedecl.ml:1456 expands (and validates) variant
                         // spreads before transl_declaration checks for duplicate
                         // constructors (typedecl.ml:461-467).
@@ -21551,6 +21565,17 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
     // declarations for fixed private rows before the user-written
     // declarations. Signature declarations go through the same
     // Typedecl.transl_type_decl path as structures.
+    // OCaml typedecl.ml:1456 expands variant spreads for the whole group
+    // before translating any declaration.
+    let mut pre_spread_sources = Vec::with_capacity(decls.len());
+    for decl in decls {
+        pre_spread_sources.push(match &decl.ptype_kind {
+            crate::parser::ast::TypeKind::Ptype_variant(cstrs) => {
+                Some(resolve_variant_spread_sources(tctx, env, arena, decl, cstrs)?)
+            }
+            _ => None,
+        });
+    }
     let fixed_row_type_ids = collect_fixed_row_type_ids(ctx, arena, decls);
     let has_fixed_rows = !fixed_row_type_ids.is_empty();
     let declared_type_ids: Vec<Ident> = match predeclared_type_ids {
@@ -21872,8 +21897,9 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                     // OCaml typedecl.ml:1456 expands variant spreads for
                     // signatures too, before transl_declaration checks for
                     // duplicate constructors (typedecl.ml:461-467).
-                    let spread_sources =
-                        resolve_variant_spread_sources(tctx, env, arena, decl, cstrs)?;
+                    let spread_sources = pre_spread_sources[decl_idx]
+                        .take()
+                        .expect("variant spread sources resolved before the group");
                     check_duplicate_constructor_declarations(arena, decl.ptype_loc, cstrs)?;
                     let mut internal_cstrs = Vec::with_capacity(cstrs.len());
                     let mut typed_tree_cstrs = Vec::with_capacity(cstrs.len());
