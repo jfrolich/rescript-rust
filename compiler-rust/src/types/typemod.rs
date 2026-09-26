@@ -10294,7 +10294,12 @@ fn resolve_with_constraint_target_in_sig(
 
     let (head, tail) = components.split_first()?;
 
+    // `merge` (typemod.ml:387-396) walks the signature with
+    // `Env.add_item item env`, so a module is scraped in an env that sees the
+    // items before it (e.g. `module B = A`).
+    let mut item_env = env.clone();
     for item in sig_items {
+        let env = &item_env;
         match item {
             SignatureItem::SigType(id, decl, _)
                 if id.name() == head.as_str() && tail.is_empty() =>
@@ -10310,7 +10315,17 @@ fn resolve_with_constraint_target_in_sig(
                 if tail.is_empty() {
                     return Some(ResolvedWithConstraintTarget::Module { path: module_path });
                 }
-                let child_sig = resolve_mod_type_to_sig(&md.md_type, Some(env), pers_env, ctx)?;
+                // `extract_sig` (typemod.ml:364-368) uses `Env.scrape_alias`,
+                // which strengthens a signature reached through an alias.
+                let child_sig = match &md.md_type {
+                    crate::types::decl::ModuleType::MtyAlias(..) => {
+                        match scrape_alias_module_type(&md.md_type, env, pers_env, ctx)? {
+                            crate::types::decl::ModuleType::MtySignature(sg) => sg,
+                            _ => return None,
+                        }
+                    }
+                    _ => resolve_mod_type_to_sig(&md.md_type, Some(env), pers_env, ctx)?,
+                };
                 return resolve_with_constraint_target_in_sig(
                     tail,
                     &child_sig,
@@ -10322,6 +10337,7 @@ fn resolve_with_constraint_target_in_sig(
             }
             _ => {}
         }
+        crate::types::includemod::add_sig_item_to_env(item, &mut item_env);
     }
 
     None
