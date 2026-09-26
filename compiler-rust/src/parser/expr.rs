@@ -1116,6 +1116,13 @@ fn set_first_type_param_paren_pos_idx(
 
 /// Parse a single function parameter.
 fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
+    // res_core.ml:1893-1896: only `type`, `~`, `.` or a pattern start begins a
+    // parameter.
+    if !matches!(p.token, Token::Typ | Token::Tilde | Token::Dot)
+        && !grammar::is_pattern_start(&p.token)
+    {
+        return None;
+    }
     let start_pos_idx = p.start_pos_idx();
 
     // Skip deprecated uncurried marker.
