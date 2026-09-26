@@ -298,27 +298,8 @@ fn format_include_error(
                 output.push_str(" is not included in ");
                 output.push_str(&expected_text);
                 output.push('\n');
-            } else if !(actual_text.contains('\n') && expected_text.contains('\n'))
-                && "  Modules do not match: ".len()
-                    + actual_text.len()
-                    + " is not included in ".len()
-                    + expected_text.len()
-                    <= 80
-            {
-                output.push_str("  Modules do not match: ");
-                output.push_str(&actual_text);
-                output.push_str(" is not included in ");
-                output.push_str(&expected_text);
-                output.push('\n');
             } else {
-                output.push_str("  Modules do not match:\n");
-                output.push_str("    ");
-                output.push_str(&actual_text);
-                output.push('\n');
-                output.push_str("  is not included in\n");
-                output.push_str("    ");
-                output.push_str(&expected_text);
-                output.push('\n');
+                output.push_str(&format_modules_do_not_match(&actual_text, &expected_text));
             }
             format_include_error(type_ctx, filename, error, output);
         }
@@ -687,6 +668,33 @@ fn hv_fits_on_one_line(parts: &[&str]) -> bool {
 // Declarations and module types print through `Printtyp`'s outcome trees and
 // `Res_outcome_printer` (printtyp.ml:1007-1192, res_outcome_printer.ml:481-842),
 // each rendered as one Doc string at width 80.
+
+/// `Module_types` in `include_symptom` (includemod.ml:566-569):
+/// `@[<hv 2>Modules do not match:@ %a@;<1 -2>is not included in@ %a@]`,
+/// where each module type is one `pp_print_string` of the outcome printer's
+/// rendering (res_outcome_printer.ml:1063-1065), laid out at column 2 of the
+/// error's vertical box.
+fn format_modules_do_not_match(actual: &str, expected: &str) -> String {
+    let mut buf = Vec::new();
+    {
+        let mut ppf = crate::parser::formatter::Formatter::new(&mut buf);
+        ppf.string_as(2, "");
+        ppf.open_hvbox(2);
+        ppf.string("Modules do not match:");
+        ppf.break_(1, 0);
+        ppf.string(actual);
+        ppf.break_(1, -2);
+        ppf.string("is not included in");
+        ppf.break_(1, 0);
+        ppf.string(expected);
+        ppf.close_box();
+        ppf.flush();
+    }
+    let mut out = String::from("  ");
+    out.push_str(&String::from_utf8_lossy(&buf));
+    out.push('\n');
+    out
+}
 
 pub(crate) fn format_module_type(type_ctx: &TypeContext, mty: &ModuleType) -> String {
     let tree = crate::types::printtyp::Printtyp::new(type_ctx).tree_of_modtype(mty, false);
