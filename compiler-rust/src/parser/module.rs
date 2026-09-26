@@ -1813,29 +1813,32 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
                 .collect();
             let params = parse_type_params(p, &parent);
 
-            // Check for destructive substitution (:=) vs regular type equation (=)
-            let is_substitution = p.token == Token::ColonEqual;
-            if is_substitution {
-                p.next();
-            } else {
-                p.expect(Token::Equal);
-            }
-            // Check for private keyword: type t = private string
-            let private = if p.token == Token::Private {
-                p.next();
-                PrivateFlag::Private
-            } else {
-                PrivateFlag::Public
-            };
-            let typ = typ::parse_typ_expr(p);
-            let type_constraints = if is_substitution {
-                // OCaml compiler/syntax/src/res_core.ml:7285-7294 returns the
-                // Pwith_typesubst branch immediately after parse_typ_expr. It
-                // only parses parse_type_constraints for the `=` branch at
-                // compiler/syntax/src/res_core.ml:7295-7306.
-                vec![]
-            } else {
-                parse_type_constraints(p)
+            // res_core.ml:7240-7270.
+            let (is_substitution, private, typ, type_constraints) = match p.token {
+                Token::ColonEqual => {
+                    p.next();
+                    let typ = typ::parse_typ_expr(p);
+                    (true, PrivateFlag::Public, typ, vec![])
+                }
+                Token::Equal => {
+                    p.next();
+                    let private = if p.token == Token::Private {
+                        p.next();
+                        PrivateFlag::Private
+                    } else {
+                        PrivateFlag::Public
+                    };
+                    let typ = typ::parse_typ_expr(p);
+                    let cstrs = parse_type_constraints(p);
+                    (false, private, typ, cstrs)
+                }
+                _ => {
+                    // TODO in OCaml: revisit.
+                    p.err_unexpected();
+                    let typ = typ::parse_typ_expr(p);
+                    let cstrs = parse_type_constraints(p);
+                    (false, PrivateFlag::Public, typ, cstrs)
+                }
             };
 
             let typ_idx = p.arena_mut().push_core_type(typ);
@@ -1858,23 +1861,46 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
             }
         }
         Token::Module => {
+            // res_core.ml:7219-7235.
             p.next();
             let lid = parse_module_long_ident(p);
-            // Check for destructive substitution (:=) vs regular module equation (=)
-            let is_substitution = p.token == Token::ColonEqual;
-            if is_substitution {
-                p.next();
-            } else {
-                p.expect(Token::Equal);
-            }
-            let lid2 = parse_module_long_ident(p);
-            if is_substitution {
-                Some(WithConstraint::Pwith_modsubst(lid, lid2))
-            } else {
-                Some(WithConstraint::Pwith_module(lid, lid2))
+            match p.token {
+                Token::ColonEqual => {
+                    p.next();
+                    let lid2 = parse_module_long_ident(p);
+                    Some(WithConstraint::Pwith_modsubst(lid, lid2))
+                }
+                Token::Equal => {
+                    p.next();
+                    let lid2 = parse_module_long_ident(p);
+                    Some(WithConstraint::Pwith_module(lid, lid2))
+                }
+                _ => {
+                    p.err_unexpected();
+                    let lid2 = parse_module_long_ident(p);
+                    Some(WithConstraint::Pwith_modsubst(lid, lid2))
+                }
             }
         }
-        _ => None,
+        _ => {
+            // res_core.ml:7271-7276.
+            p.err_unexpected();
+            let lid_idx = p.push_lident("");
+            let name_idx = p.arena_mut().intern("");
+            let typ = super::core::recover::default_type(p.arena_mut());
+            let typ_idx = p.arena_mut().push_core_type(typ);
+            let decl = TypeDeclaration {
+                ptype_name: with_loc(name_idx, LocIdx::none()),
+                ptype_params: vec![],
+                ptype_cstrs: vec![],
+                ptype_kind: TypeKind::Ptype_abstract,
+                ptype_private: PrivateFlag::Public,
+                ptype_manifest: Some(typ_idx),
+                ptype_attributes: Attributes::new(),
+                ptype_loc: LocIdx::none(),
+            };
+            Some(WithConstraint::Pwith_type(with_loc(lid_idx, LocIdx::none()), decl))
+        }
     }
 }
 
