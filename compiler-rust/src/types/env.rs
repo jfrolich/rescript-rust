@@ -635,6 +635,9 @@ struct TycompOpened<T> {
 #[derive(Debug, Clone)]
 pub struct TycompTbl<T> {
     current: PersistentHashMap<String, Vec<(Ident, T)>>,
+    /// Order in which each name of `current` was first added: the `Ident.add`
+    /// sequence that shapes OCaml's AVL tree (compiler/ext/ident.ml:144-150).
+    current_first_add: PersistentHashMap<String, i32>,
     opened: Option<Arc<TycompOpened<T>>>,
 }
 
@@ -642,6 +645,7 @@ impl<T: Clone> TycompTbl<T> {
     pub fn new() -> Self {
         Self {
             current: PersistentHashMap::default(),
+            current_first_add: PersistentHashMap::default(),
             opened: None,
         }
     }
@@ -651,6 +655,8 @@ impl<T: Clone> TycompTbl<T> {
         match self.current.get_mut(&name) {
             Some(entries) => entries.push((id, value)),
             None => {
+                let seq = self.current_first_add.len() as i32;
+                self.current_first_add.insert(name.clone(), seq);
                 self.current.insert(name.clone(), vec![(id, value)]);
             }
         }
@@ -674,6 +680,7 @@ impl<T: Clone> TycompTbl<T> {
         }
         *self = Self {
             current: PersistentHashMap::default(),
+            current_first_add: PersistentHashMap::default(),
             opened: Some(Arc::new(TycompOpened {
                 components: opened_components,
                 next: Arc::new(next),
@@ -797,14 +804,12 @@ impl<T: Clone> TycompTbl<T> {
     }
 
     fn collect_fold_name_order<'a>(&'a self, names: &mut Vec<&'a str>) {
-        names.extend(ident_tbl_fold_name_order(self.current.iter().map(
-            |(name, entries)| {
-                (
-                    name.as_str(),
-                    entries.first().map_or(0, |(id, _)| id.stamp()),
-                )
-            },
-        )));
+        names.extend(ident_tbl_fold_name_order(self.current.keys().map(|name| {
+            (
+                name.as_str(),
+                self.current_first_add.get(name).copied().unwrap_or(0),
+            )
+        })));
         if let Some(opened) = &self.opened {
             let mut components: Vec<(&str, usize)> = opened
                 .components

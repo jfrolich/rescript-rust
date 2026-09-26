@@ -43,15 +43,31 @@ use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 /// OCaml typedecl.ml:314-329 and 600-618: an optional record label is typed as
 /// `{typ with ptyp_desc = Ptyp_constr ({txt = Lident "option"; loc =
 /// typ.ptyp_loc}, [typ])}`, so `option` is looked up in the environment.
+/// `Typetexp.transl_simple_type env closed` (typedecl.ml:225, 264-269):
+/// record labels and non-GADT constructor arguments are translated `closed`.
+fn transl_decl_arg_type(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    typ: &crate::parser::ast::CoreType,
+    closed: bool,
+) -> Result<(crate::types::typedtree::TypedCoreType, TypeExprRef), TypeCoreError> {
+    if closed {
+        crate::types::typecore::transl_type_fixed(tctx, env, typ)
+    } else {
+        transl_type(tctx, env, typ)
+    }
+}
+
 fn transl_label_type(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     arena: &ParseArena,
     label: &crate::parser::ast::LabelDeclaration,
+    closed: bool,
 ) -> Result<(crate::types::typedtree::TypedCoreType, TypeExprRef), TypeCoreError> {
     let typ = arena.get_core_type(label.pld_type);
     if !label.pld_optional {
-        return transl_type(tctx, env, typ);
+        return transl_decl_arg_type(tctx, env, typ, closed);
     }
     let option_typ = crate::parser::ast::CoreType {
         ptyp_desc: Box::new(crate::parser::ast::CoreTypeDesc::Ptyp_constr(Box::new((
@@ -64,7 +80,7 @@ fn transl_label_type(
         ptyp_loc: typ.ptyp_loc,
         ptyp_attributes: typ.ptyp_attributes.clone(),
     };
-    transl_type(tctx, env, &option_typ)
+    transl_decl_arg_type(tctx, env, &option_typ, closed)
 }
 
 fn core_type_has_row_var(arena: &ParseArena, core_type: &crate::parser::ast::CoreType) -> bool {
@@ -12850,7 +12866,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                 for label in labels {
                                                     let lbl_name = arena.get_string(label.pld_name.txt);
                                                     let (_typed_label_ty, lbl_type) =
-                                                        transl_label_type(tctx, &sig_env, arena, label)?;
+                                                        transl_label_type(tctx, &sig_env, arena, label, false)?;
                                                     let lbl_type =
                                                         tctx.type_ctx.new_poly(lbl_type, vec![]);
                                                     let mutable_flag = match label.pld_mutable {
@@ -12908,7 +12924,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                     for label in labels {
                                         let lbl_name = arena.get_string(label.pld_name.txt);
                                         let (_typed_label_ty, lbl_type) =
-                                            transl_label_type(tctx, &sig_env, arena, label)?;
+                                            transl_label_type(tctx, &sig_env, arena, label, false)?;
                                         let lbl_type = tctx.type_ctx.new_poly(lbl_type, vec![]);
                                         let mutable_flag = match label.pld_mutable {
                                             crate::parser::ast::MutableFlag::Immutable => {
@@ -18875,10 +18891,11 @@ fn type_structure_item<'a>(
                                     let mut typed_args: Vec<TypeExprRef> = Vec::new();
                                     let mut typed_tree_args: Vec<TypedCoreType> = Vec::new();
                                     for core_type in types {
-                                        let (typed_core_type, type_ref) = transl_type(
+                                        let (typed_core_type, type_ref) = transl_decl_arg_type(
                                             tctx,
                                             &temp_env,
                                             arena.get_core_type(*core_type),
+                                            cstr.pcd_res.is_none(),
                                         )?;
                                         typed_args.push(type_ref);
                                         typed_tree_args.push(typed_core_type);
@@ -18896,7 +18913,7 @@ fn type_structure_item<'a>(
                                         Vec::new();
                                     for lbl in labels {
                                         let (typed_core_type, type_ref) =
-                                            transl_label_type(tctx, &temp_env, arena, lbl)?;
+                                            transl_label_type(tctx, &temp_env, arena, lbl, cstr.pcd_res.is_none())?;
                                         let mutable_flag = match lbl.pld_mutable {
                                             crate::parser::ast::MutableFlag::Immutable => {
                                                 crate::types::MutableFlag::Immutable
@@ -19267,7 +19284,7 @@ fn type_structure_item<'a>(
                         for lbl in labels {
                             let lbl_name_str = arena.get_string(lbl.pld_name.txt);
                             let (typed_core_type, type_ref) =
-                                transl_label_type(tctx, &temp_env, arena, lbl)?;
+                                transl_label_type(tctx, &temp_env, arena, lbl, true)?;
                             let mutable_flag = match lbl.pld_mutable {
                                 crate::parser::ast::MutableFlag::Immutable => {
                                     crate::types::MutableFlag::Immutable
@@ -19562,7 +19579,8 @@ fn type_structure_item<'a>(
                 // constructors remain inside `cstr_inlined`, and
                 // compiler/ml/env.ml:1668-1676 therefore installs no labels for
                 // them.
-                for (cstr_id, cstr_desc) in constructors {
+                // env.ml:1623-1632 `store_type` adds them with `List.fold_right`.
+                for (cstr_id, cstr_desc) in constructors.into_iter().rev() {
                     new_env.add_constructor(cstr_id, cstr_desc);
                 }
 
@@ -19574,6 +19592,7 @@ fn type_structure_item<'a>(
                     let ty_res =
                         ctx.new_constr(type_path.clone(), internal_decl.type_params.clone());
                     env_desc_types_for_generalize.push(ty_res);
+                    let mut label_descs = Vec::with_capacity(labels.len());
                     for (pos, ld) in labels.iter().enumerate() {
                         let lbl_desc = crate::types::LabelDescription {
                             lbl_name: ld.ld_id.name().to_string(),
@@ -19592,7 +19611,11 @@ fn type_structure_item<'a>(
                             lbl_loc: ld.ld_loc.clone(),
                             lbl_attributes: ld.ld_attributes.clone(),
                         };
-                        new_env.add_label(ld.ld_id.clone(), lbl_desc);
+                        label_descs.push((ld.ld_id.clone(), lbl_desc));
+                    }
+                    // env.ml:1629-1632: `List.fold_right` over the labels.
+                    for (ld_id, lbl_desc) in label_descs.into_iter().rev() {
+                        new_env.add_label(ld_id, lbl_desc);
                     }
                 }
 
@@ -20012,8 +20035,12 @@ fn type_structure_item<'a>(
                             crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) => {
                                 let mut typed = Vec::new();
                                 for ty in types {
-                                    let (typed_ct, ty_ref) =
-                                        transl_type(tctx, env, arena.get_core_type(*ty))?;
+                                    let (typed_ct, ty_ref) = transl_decl_arg_type(
+                                        tctx,
+                                        env,
+                                        arena.get_core_type(*ty),
+                                        ret.is_none(),
+                                    )?;
                                     arg_ty_refs.push(ty_ref);
                                     typed.push(typed_ct);
                                 }
@@ -20034,7 +20061,7 @@ fn type_structure_item<'a>(
                                     let label_name =
                                         arena.get_string(label.pld_name.txt).to_string();
                                     let (typed_ct, ty_ref) =
-                                        transl_label_type(tctx, env, arena, label)?;
+                                        transl_label_type(tctx, env, arena, label, ret.is_none())?;
                                     let (poly_typed_ct, poly_ty_ref) =
                                         force_poly_typed_core_type(ctx, typed_ct, ty_ref);
                                     let internal_ty_ref = match &*ctx.get_desc(poly_ty_ref) {
@@ -20214,7 +20241,7 @@ fn type_structure_item<'a>(
                     cstr_private: ext_private,
                     // `Datarepr.extension_descr`: `cstr_loc = ext.ext_loc`.
                     cstr_loc: arena.to_location(ec.pext_loc),
-                    cstr_attributes: vec![],
+                    cstr_attributes: parser_attrs_to_decl_attrs(arena, &ec.pext_attributes),
                     cstr_inlined: cstr_inlined.clone(),
                 };
                 constructor_descriptions.push((id.clone(), cstr_desc));
@@ -20232,7 +20259,7 @@ fn type_structure_item<'a>(
                         ext_ret_type: ext_ret_ty,
                         ext_private,
                         ext_loc: arena.to_location(ec.pext_loc),
-                        ext_attributes: vec![],
+                        ext_attributes: parser_attrs_to_decl_attrs(arena, &ec.pext_attributes),
                         ext_is_exception: false,
                     },
                     ext_kind,
@@ -20369,8 +20396,12 @@ fn type_structure_item<'a>(
                         crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) => {
                             let mut typed = Vec::new();
                             for ty in types {
-                                let (typed_ct, ty_ref) =
-                                    transl_type(tctx, env, arena.get_core_type(*ty))?;
+                                let (typed_ct, ty_ref) = transl_decl_arg_type(
+                                    tctx,
+                                    env,
+                                    arena.get_core_type(*ty),
+                                    ret.is_none(),
+                                )?;
                                 arg_ty_refs.push(ty_ref);
                                 typed.push(typed_ct);
                             }
@@ -20388,7 +20419,7 @@ fn type_structure_item<'a>(
                             for label in labels {
                                 let label_name = arena.get_string(label.pld_name.txt).to_string();
                                 let (typed_ct, ty_ref) =
-                                    transl_label_type(tctx, env, arena, label)?;
+                                    transl_label_type(tctx, env, arena, label, ret.is_none())?;
                                 let (poly_typed_ct, poly_ty_ref) =
                                     force_poly_typed_core_type(ctx, typed_ct, ty_ref);
                                 let internal_ty_ref = match &*ctx.get_desc(poly_ty_ref) {
@@ -20597,7 +20628,9 @@ fn type_structure_item<'a>(
                 cstr_private: crate::types::PrivateFlag::Public,
                 // `Datarepr.extension_descr`: `cstr_loc = ext.ext_loc`.
                 cstr_loc: arena.to_location(loc),
-                cstr_attributes: vec![],
+                // `Datarepr.extension_descr`: `cstr_attributes = ext.ext_attributes`
+                // (typedecl.ml `ext_attributes = sext.pext_attributes`).
+                cstr_attributes: parser_attrs_to_decl_attrs(arena, &ext_constr.pext_attributes),
                 cstr_inlined: cstr_inlined.clone(),
             };
             let mut new_env = env.clone();
@@ -20616,7 +20649,7 @@ fn type_structure_item<'a>(
                 ext_ret_type: ext_ret_ty,
                 ext_private: crate::types::PrivateFlag::Public,
                 ext_loc: arena.to_location(loc),
-                ext_attributes: vec![],
+                ext_attributes: parser_attrs_to_decl_attrs(arena, &ext_constr.pext_attributes),
                 ext_is_exception: true,
             };
             let desc =
@@ -21784,7 +21817,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                     for label in labels {
                         let lbl_name = arena.get_string(label.pld_name.txt);
                         let (typed_label_ty, lbl_type) =
-                            transl_label_type(tctx, &temp_env, arena, label)?;
+                            transl_label_type(tctx, &temp_env, arena, label, true)?;
                         let (poly_typed_core_type, poly_lbl_type) =
                             force_poly_typed_core_type(tctx.type_ctx, typed_label_ty, lbl_type);
                         let internal_lbl_type = match &*tctx.type_ctx.get_desc(poly_lbl_type) {
@@ -21958,8 +21991,12 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                 let mut internal_tuple_args = Vec::with_capacity(args.len());
                                 let mut typed_tuple_args = Vec::with_capacity(args.len());
                                 for arg in args {
-                                    let (typed_arg, arg_ref) =
-                                        transl_type(tctx, &temp_env, arena.get_core_type(*arg))?;
+                                    let (typed_arg, arg_ref) = transl_decl_arg_type(
+                                        tctx,
+                                        &temp_env,
+                                        arena.get_core_type(*arg),
+                                        cstr.pcd_res.is_none(),
+                                    )?;
                                     internal_tuple_args.push(arg_ref);
                                     typed_tuple_args.push(typed_arg);
                                 }
@@ -21977,7 +22014,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                 for label in labels {
                                     let lbl_name = arena.get_string(label.pld_name.txt);
                                     let (typed_label_ty, lbl_type) =
-                                        transl_label_type(tctx, &temp_env, arena, label)?;
+                                        transl_label_type(tctx, &temp_env, arena, label, cstr.pcd_res.is_none())?;
                                     let (poly_typed_core_type, poly_lbl_type) =
                                         force_poly_typed_core_type(
                                             tctx.type_ctx,

@@ -6466,7 +6466,8 @@ fn add_signature_to_env_with_options(
                     cstr_private: ext.ext_private,
                     // `Datarepr.extension_descr`: `cstr_loc = ext.ext_loc`.
                     cstr_loc: ext.ext_loc,
-                    cstr_attributes: vec![],
+                    // `Datarepr.extension_descr`: `cstr_attributes = ext.ext_attributes`.
+                    cstr_attributes: ext.ext_attributes.clone(),
                     cstr_inlined: None,
                 };
                 if as_opened {
