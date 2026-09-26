@@ -2742,77 +2742,34 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                 env.add_constructor(id, cstr_desc);
             };
 
+        // predef.ml:412-423: exactly these exceptions, in this order.
+        let loc_tuple = |ctx: &TypeContext| {
+            ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![
+                string_ty_for_exn,
+                int_ty_for_exn,
+                int_ty_for_exn,
+            ]))
+        };
+        add_exception(
+            &mut env,
+            predef::ident_undefined_recursive_module(),
+            vec![loc_tuple(ctx)],
+            exn_ty,
+        );
+        add_exception(&mut env, predef::ident_assert_failure(), vec![loc_tuple(ctx)], exn_ty);
+        add_exception(&mut env, predef::ident_division_by_zero(), vec![], exn_ty);
+        add_exception(&mut env, predef::ident_end_of_file(), vec![], exn_ty);
         add_exception(&mut env, predef::ident_not_found(), vec![], exn_ty);
+        add_exception(&mut env, predef::ident_failure(), vec![string_ty_for_exn], exn_ty);
+        let unknown_ty_for_exn = ctx.new_generic_constr(predef::path_unknown(), vec![]);
+        add_exception(&mut env, predef::ident_js_exn(), vec![unknown_ty_for_exn], exn_ty);
         add_exception(
             &mut env,
             predef::ident_invalid_argument(),
             vec![string_ty_for_exn],
             exn_ty,
         );
-        add_exception(
-            &mut env,
-            predef::ident_failure(),
-            vec![string_ty_for_exn],
-            exn_ty,
-        );
-        add_exception(&mut env, Ident::create_persistent("Exit"), vec![], exn_ty);
-        add_exception(
-            &mut env,
-            predef::ident_match_failure(),
-            vec![
-                ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![
-                    string_ty_for_exn,
-                    int_ty_for_exn,
-                    int_ty_for_exn,
-                ])),
-            ],
-            exn_ty,
-        );
-        add_exception(
-            &mut env,
-            predef::ident_assert_failure(),
-            vec![
-                ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![
-                    string_ty_for_exn,
-                    int_ty_for_exn,
-                    int_ty_for_exn,
-                ])),
-            ],
-            exn_ty,
-        );
-        add_exception(
-            &mut env,
-            Ident::create_persistent("Sys_error"),
-            vec![string_ty_for_exn],
-            exn_ty,
-        );
-        add_exception(&mut env, predef::ident_end_of_file(), vec![], exn_ty);
-        add_exception(&mut env, predef::ident_division_by_zero(), vec![], exn_ty);
-        add_exception(
-            &mut env,
-            Ident::create_persistent("Stack_overflow"),
-            vec![],
-            exn_ty,
-        );
-        add_exception(
-            &mut env,
-            predef::ident_undefined_recursive_module(),
-            vec![
-                ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![
-                    string_ty_for_exn,
-                    int_ty_for_exn,
-                    int_ty_for_exn,
-                ])),
-            ],
-            exn_ty,
-        );
-        let unknown_ty_for_exn = ctx.new_generic_constr(predef::path_unknown(), vec![]);
-        add_exception(
-            &mut env,
-            predef::ident_js_exn(),
-            vec![unknown_ty_for_exn],
-            exn_ty,
-        );
+        add_exception(&mut env, predef::ident_match_failure(), vec![loc_tuple(ctx)], exn_ty);
     }
 
     // char = int (private manifest)
