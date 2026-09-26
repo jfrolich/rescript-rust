@@ -394,8 +394,9 @@ fn transform_module_binding_with_tracking(
 ) -> ModuleBinding {
     // Track nested module name
     let module_name = arena.get_string(mb.pmb_name.txt).to_string();
+    // jsx_v4.ml:1374-1382 only tracks the name; `has_component` is saved and
+    // reset by the structure/signature mapper (jsx_ppx.ml:101-123).
     config.nested_modules.push(module_name);
-    config.has_component = false;
 
     let transformed = transform_module_binding(mb, config, arena, warnings);
 
