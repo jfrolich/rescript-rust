@@ -2196,7 +2196,7 @@ fn primitive_coerce(
         })
 }
 
-fn add_sig_item_to_env(item: &SignatureItem, env: &mut Env) {
+pub(crate) fn add_sig_item_to_env(item: &SignatureItem, env: &mut Env) {
     match item {
         SignatureItem::SigValue(id, desc) => env.add_value(id.clone(), desc.clone()),
         SignatureItem::SigType(id, decl, _) => env.add_type(id.clone(), decl.clone()),

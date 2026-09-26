@@ -11112,17 +11112,29 @@ fn with_constraint_has_non_signature_prefix(
     if tail.is_empty() {
         return false;
     }
-    let Some(module_decl) = sig_items.iter().find_map(|item| match item {
-        SignatureItem::SigModule(id, md, _) if id.name() == head => Some(md),
-        _ => None,
-    }) else {
+    // `merge` (typemod.ml:387-396) walks the signature with
+    // `Env.add_item item env`, so the prefix module is scraped in an env that
+    // sees the items before it (e.g. `module B = A`).
+    let mut item_env = env.clone();
+    let mut module_decl = None;
+    for item in sig_items {
+        if let SignatureItem::SigModule(id, md, _) = item
+            && id.name() == head
+        {
+            module_decl = Some(md);
+            break;
+        }
+        crate::types::includemod::add_sig_item_to_env(item, &mut item_env);
+    }
+    let Some(module_decl) = module_decl else {
         return false;
     };
-    let Some(child_sig) = resolve_mod_type_to_sig(&module_decl.md_type, Some(env), pers_env, ctx)
+    let Some(child_sig) =
+        resolve_mod_type_to_sig(&module_decl.md_type, Some(&item_env), pers_env, ctx)
     else {
         return true;
     };
-    with_constraint_has_non_signature_prefix(tail, &child_sig, env, pers_env, ctx)
+    with_constraint_has_non_signature_prefix(tail, &child_sig, &item_env, pers_env, ctx)
 }
 
 fn check_with_constraint_components<'a>(
