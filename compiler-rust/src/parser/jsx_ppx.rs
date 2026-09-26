@@ -2818,31 +2818,29 @@ fn strip_option(arena: &ParseArena, core_type: &CoreType) -> Option<CoreType> {
 }
 
 /// Strip `Stdlib.Nullable.t<T>` wrapper from a type, returning just `T`
+/// OCaml `strip_nullable` (jsx_v4.ml:120-131): the first argument of a
+/// `nullable` / `Nullable.t` / `Stdlib.Nullable.t` annotation (none if it has
+/// no arguments); any other type is kept.
 fn strip_js_nullable(arena: &ParseArena, core_type: &CoreType) -> Option<CoreType> {
-    match &*core_type.ptyp_desc {
-        CoreTypeDesc::Ptyp_constr(inner) if inner.1.len() == 1 => {
-            let (ref lid, ref args) = **inner;
-            // Check for Stdlib.Nullable.t
-            if let Longident::Ldot(outer, inner_idx) = arena.get_longident(lid.txt) {
-                let inner = arena.get_string(*inner_idx);
-                if inner == "t" {
-                    if let Longident::Ldot(js, nullable_idx) = outer.as_ref() {
-                        let nullable = arena.get_string(*nullable_idx);
-                        if nullable == "Nullable" {
-                            if let Longident::Lident(js_name_idx) = js.as_ref() {
-                                let js_name = arena.get_string(*js_name_idx);
-                                if js_name == "Js" {
-                                    return args.first().map(|t| arena.get_core_type(*t).clone());
-                                }
-                            }
-                        }
-                    }
+    if let CoreTypeDesc::Ptyp_constr(inner) = &*core_type.ptyp_desc {
+        let (ref lid, ref args) = **inner;
+        let is_nullable = match arena.get_longident(lid.txt) {
+            Longident::Lident(name) => arena.get_string(*name) == "nullable",
+            Longident::Ldot(outer, t) if arena.get_string(*t) == "t" => match outer.as_ref() {
+                Longident::Lident(m) => arena.get_string(*m) == "Nullable",
+                Longident::Ldot(root, m) => {
+                    arena.get_string(*m) == "Nullable"
+                        && matches!(root.as_ref(), Longident::Lident(r) if arena.get_string(*r) == "Stdlib")
                 }
-            }
-            Some(core_type.clone())
+                _ => false,
+            },
+            _ => false,
+        };
+        if is_nullable {
+            return args.first().map(|t| arena.get_core_type(*t).clone());
         }
-        _ => Some(core_type.clone()),
     }
+    Some(core_type.clone())
 }
 
 /// Create React.element type constraint
