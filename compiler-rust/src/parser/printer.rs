@@ -134,8 +134,9 @@ pub fn classify_ident_content(
     let bytes = txt.as_bytes();
     let len = bytes.len();
 
+    // res_printer.ml:430-431: `loop 0` on an empty string is `NormalIdent`.
     if len == 0 {
-        return IdentifierStyle::ExoticIdent;
+        return IdentifierStyle::NormalIdent;
     }
 
     // Check first character
@@ -836,6 +837,10 @@ pub fn print_poly_var_ident(txt: &str) -> Doc {
             }
         }
         IdentifierStyle::ExoticIdent => {
+            Doc::concat(vec![Doc::text("\""), Doc::text(txt), Doc::text("\"")])
+        }
+        // res_printer.ml `print_poly_var_ident`: an empty tag is quoted.
+        IdentifierStyle::NormalIdent if txt.is_empty() => {
             Doc::concat(vec![Doc::text("\""), Doc::text(txt), Doc::text("\"")])
         }
         IdentifierStyle::NormalIdent => Doc::text(txt),
@@ -2569,8 +2574,9 @@ fn print_record_expression(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    // Special case: empty record (no spread, no fields) - just print inside comments
-    if fields.is_empty() && spread.is_none() {
+    // res_printer.ml:3505-3508: `rows = []` prints `{}` (and the comments
+    // inside), even when there is a spread.
+    if fields.is_empty() {
         return Doc::concat(vec![
             Doc::lbrace(),
             print_comments_inside(cmt_tbl, loc, arena),
