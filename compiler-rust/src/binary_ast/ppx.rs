@@ -2085,7 +2085,9 @@ fn validate_variadic_arg_type(
     if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
         return Err(array_error());
     }
-    // `spec_of_ptyp true ty` (ast_external_process.ml:943).
+    // `spec_of_ptyp true ty` (ast_external_process.ml:943) raises for
+    // invalid @string/@int/@unwrap payload types (lines 39-70).
+    validate_external_core_type_arg_errors(typ, arena)?;
     let arg_type = refine_arg_type(true, typ, arena);
     spec_of_ptyp_warning(typ, arena, warnings);
     if !matches!(arg_type, Attr::Nothing) {
