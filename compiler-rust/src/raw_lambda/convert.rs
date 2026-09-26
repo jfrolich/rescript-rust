@@ -6183,6 +6183,9 @@ impl<'a> RawLambdaConverter<'a> {
                                     self.loc(binding.vb_pat.pat_loc),
                                     "This pattern can fail to match, so it is not allowed in a top-level `let` binding.".to_string(),
                                 );
+                                // translmod.ml:392 raises here, so the binding
+                                // itself is never translated.
+                                return body;
                             }
                             _ => {}
                         }
