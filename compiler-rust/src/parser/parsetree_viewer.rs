@@ -1084,6 +1084,7 @@ pub fn filter_parsing_attrs_slice<'a>(
                     | "res.taggedTemplate"
                     | "res.patVariantSpread"
                     | "res.dictPattern"
+                    | "res.dictSpread"
                     | "res.inlineRecordDefinition"
             )
         })

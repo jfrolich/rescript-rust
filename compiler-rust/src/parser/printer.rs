@@ -5614,7 +5614,17 @@ pub fn print_pattern(
             // Use print_lident for proper escaping of exotic identifiers
             let doc = print_lident(arena, arena.get_longident(lid.txt));
             let doc = print_comments(doc, cmt_tbl, lid.loc, arena);
-            Doc::concat(vec![Doc::text("#..."), doc])
+            // res_printer.ml:2817-2822: a variant spread prints as `...t`.
+            let prefix = if pat
+                .ppat_attributes
+                .iter()
+                .any(|attr| arena.get_string(attr.0.txt) == "res.patVariantSpread")
+            {
+                "..."
+            } else {
+                "#..."
+            };
+            Doc::concat(vec![Doc::text(prefix), doc])
         }
         // interval: 'a' .. 'z'
         PatternDesc::Ppat_interval(inner) => {
@@ -8023,11 +8033,8 @@ fn print_attributes_with_loc(
     arena: &ParseArena,
     inline: bool,
 ) -> Doc {
-    // Filter to printable attributes first
-    let filtered: Vec<&Attribute> = attrs
-        .iter()
-        .filter(|attr| parsetree_viewer::is_printable_attribute(arena, attr))
-        .collect();
+    // res_printer.ml:5994-5997: `Parsetree_viewer.filter_parsing_attrs`.
+    let filtered: Vec<&Attribute> = parsetree_viewer::filter_parsing_attrs_slice(arena, attrs);
     if filtered.is_empty() {
         return Doc::nil();
     }
