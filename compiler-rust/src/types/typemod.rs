@@ -13499,11 +13499,20 @@ fn approx_modtype<'a>(
     arena: &'a ParseArena,
     mty: &crate::parser::ast::ModuleType,
 ) -> TypeModResult<crate::types::decl::ModuleType> {
+    without_warnings(tctx, |tctx| approx_modtype_rec(tctx, env, arena, mty))
+}
+
+/// `Warnings.without_warnings f` (warnings.ml): run `f` with every warning
+/// disabled.
+fn without_warnings<'a, T>(
+    tctx: &mut TypeCheckContext<'a>,
+    f: impl FnOnce(&mut TypeCheckContext<'a>) -> T,
+) -> T {
     tctx.drain_open_slot_uses();
     let mut disabled = tctx.warning_config.clone();
     disabled.disable_all();
     let saved = std::mem::replace(&mut tctx.warning_config, disabled);
-    let result = approx_modtype_rec(tctx, env, arena, mty);
+    let result = f(tctx);
     tctx.drain_open_slot_uses();
     tctx.warning_config = saved;
     result
@@ -20867,11 +20876,14 @@ fn type_structure_item<'a>(
                 env0.add_module(id.clone(), empty_module_decl(mty.clone()));
             }
 
+            // typemod.ml:957: `Warnings.without_warnings (fun () -> transition env0 init)`.
             let mut dcl1 = Vec::with_capacity(rec_bindings.len());
             for ((name, name_loc, _, mty_idx, attrs, mb_loc), id) in
                 rec_bindings.iter().zip(mod_ids.iter())
             {
-                let typed_mty = transl_modtype(tctx, &env0, arena, arena.get_mod_type(*mty_idx))?;
+                let typed_mty = without_warnings(tctx, |tctx| {
+                    transl_modtype(tctx, &env0, arena, arena.get_mod_type(*mty_idx))
+                })?;
                 dcl1.push(crate::types::typedtree::TypedModuleDeclaration {
                     md_id: id.clone(),
                     md_name: Located {
