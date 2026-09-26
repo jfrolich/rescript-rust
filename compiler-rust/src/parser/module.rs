@@ -872,8 +872,9 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
             item_loc_idx = Some(loc);
             Some(SignatureItemDesc::Psig_attribute(Box::new(attr)))
         }
-        Token::Percent | Token::PercentPercent => {
-            let ext = parse_extension(p);
+        // OCaml res_core.ml:7407-7411: only `%%` starts a signature extension.
+        Token::PercentPercent => {
+            let ext = parse_extension(p, true);
             parse_newline_or_semicolon_signature(p);
             Some(SignatureItemDesc::Psig_extension(Box::new((
                 ext,
@@ -1143,7 +1144,7 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
         }
         Token::Percent => {
             // Module extension
-            let ext = parse_extension(p);
+            let ext = parse_extension(p, false);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             ModuleExpr {
                 pmod_desc: Box::new(ModuleExprDesc::Pmod_extension(Box::new(ext))),
@@ -1666,7 +1667,7 @@ fn parse_primary_module_type(p: &mut Parser<'_>) -> ModuleType {
         }
         Token::Percent => {
             // Module type extension
-            let ext = parse_extension(p);
+            let ext = parse_extension(p, false);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             ModuleType {
                 pmty_desc: Box::new(ModuleTypeDesc::Pmty_extension(Box::new(ext))),
@@ -4086,14 +4087,12 @@ pub fn parse_extension_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Located<
     with_loc(id_idx, p.mk_loc_idx_to_prev_end(start_pos_idx))
 }
 
-/// Parse an extension.
-pub(super) fn parse_extension(p: &mut Parser<'_>) -> Extension {
+/// OCaml `parse_extension ?(module_language = false)` (res_core.ml:7683-7689).
+pub(super) fn parse_extension(p: &mut Parser<'_>, module_language: bool) -> Extension {
     // Capture start position BEFORE consuming % or %% so extension location includes it
     let id_start_idx = p.start_pos_idx();
-
-    // Handle both %ext and %%ext (single and double percent)
-    if p.token == Token::PercentPercent {
-        p.next();
+    if module_language {
+        p.expect(Token::PercentPercent);
     } else {
         p.expect(Token::Percent);
     }

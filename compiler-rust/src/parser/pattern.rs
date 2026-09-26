@@ -290,7 +290,7 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
         }
         Token::Module => parse_module_pattern(p, attrs.clone()),
         Token::Percent => {
-            let extension = super::module::parse_extension(p);
+            let extension = super::module::parse_extension(p, false);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             pat(PatternDesc::Ppat_extension(Box::new(extension)), loc, attrs.clone())
         }
