@@ -943,9 +943,12 @@ pub fn compile(
     let build_command_state_ref: &BuildCommandState = build_state;
 
     let (tx, rx) = mpsc::channel::<WorkerMsg>();
-    // Bound concurrency to rayon's pool size so the priority heap actually
-    // orders work — dumping everything into rayon's deque would defeat #2.
-    let capacity = rayon::current_num_threads().max(1);
+    // Bound the jobs handed to rayon so the priority heap still orders work —
+    // dumping everything into rayon's queue would defeat #2. Allow one queued
+    // job per thread beyond the running ones: a worker that finishes then
+    // starts its next job at once instead of idling until this dispatcher
+    // has received its message and spawned a replacement.
+    let capacity = 2 * rayon::current_num_threads().max(1);
     // Worker snapshots share the registry's Arc-backed maps. Publishing a
     // dependency updates those shared maps, so a single template snapshot is
     // enough; each worker still clones it before adding local provisional
