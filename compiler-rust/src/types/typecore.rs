@@ -26286,6 +26286,15 @@ fn extract_concrete_record_type_info<'a>(
                 match decl.type_kind {
                     crate::types::TypeKind::TypeRecord(_, _) => return Some((path, args, decl)),
                     crate::types::TypeKind::TypeAbstract => {
+                        // `try_expand_once` uses `Env.find_type_expansion`
+                        // (env.ml:944-956): a private abstract type expands
+                        // only when its body has a constructor row.
+                        if let Some(manifest) = decl.type_manifest
+                            && decl.type_private == crate::types::PrivateFlag::Private
+                            && !crate::types::btype::has_constr_row(ctx, manifest)
+                        {
+                            return None;
+                        }
                         let expanded = if let Some(manifest) = decl.type_manifest {
                             crate::types::ctype::subst_type_params(
                                 ctx,
