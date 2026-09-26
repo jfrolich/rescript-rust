@@ -2848,6 +2848,19 @@ fn module_alias_error_for_lid(
 ) -> Option<TypeCoreError> {
     let md = module_decl_for_lid_without_scraping(tctx, env, lid)?;
     if let crate::types::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
+        // typetexp.ml:77-81: `Env.scrape_alias` (env.ml:1396-1406) follows the
+        // alias with `find_module`; only an alias whose target cannot be found
+        // is left as `Mty_alias` and reported.
+        if crate::types::typemod::scrape_alias_module_type(
+            &md.md_type,
+            env,
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
+        )
+        .is_some()
+        {
+            return None;
+        }
         Some(TypeCoreError::CannotScrapeAlias {
             loc,
             lid: lid.clone(),
@@ -5686,6 +5699,13 @@ fn type_pattern_construct(
         &lid_name,
         &cstr_desc,
     );
+    // typecore.ml:1393: `Builtin_attributes.check_deprecated loc
+    // constr.cstr_attributes constr.cstr_name`.
+    if let Some(warning) =
+        deprecated_warning_from_attrs(&cstr_desc.cstr_name, &cstr_desc.cstr_attributes)
+    {
+        tctx.report_warning(loc, warning);
+    }
     if !allow_existentials && !cstr_desc.cstr_existentials.is_empty() {
         return Err(TypeCoreError::UnexpectedExistential { loc });
     }
@@ -8042,11 +8062,10 @@ fn type_expect_with_recarg_unscoped<'a>(
             let exp_type = match &typed_e.exp_desc {
                 ExpressionDesc::Texp_construct(_, cd, _) if cd.cstr_name == "false" => expected_ty,
                 _ => {
-                    // OCaml: rue { ... exp_type = instance_def Predef.type_unit; ... }
-                    // Keep original argument order to preserve Tlink direction.
+                    // OCaml typecore.ml:3401-3414: `rue` unifies
+                    // `instance_def Predef.type_unit` with `instance env ty_expected`.
                     let unit_ty = env.type_unit(ctx);
-                    let inst_expected = instance_if_generic(ctx, expected_ty);
-                    unify_expression_types(tctx, loc, inst_expected, unit_ty, context)?;
+                    rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
                     unit_ty
                 }
             };
@@ -14274,6 +14293,13 @@ fn type_construct(
         tctx.longident_last_name_str(&longident),
         &cstr_desc,
     );
+    // typecore.ml:4229: `Builtin_attributes.check_deprecated loc
+    // constr.cstr_attributes constr.cstr_name`.
+    if let Some(warning) =
+        deprecated_warning_from_attrs(&cstr_desc.cstr_name, &cstr_desc.cstr_attributes)
+    {
+        tctx.report_warning(loc, warning);
+    }
     let provided_arity = match arg {
         None => 0,
         Some(arg_expr) => match &*arg_expr.pexp_desc {
@@ -15630,7 +15656,15 @@ fn type_record(
                         poly_vars,
                     )
                 } else {
-                    let resolved_lid = tctx.arena.get_longident(field.lid.txt);
+                    let resolved_lid = tctx.arena.get_longident(field.lid.txt).clone();
+                    // `Typetexp.find_all_labels` narrows a missing module
+                    // prefix first (typetexp.ml:64-86).
+                    if let Some(err) =
+                        unbound_module_prefix_error(tctx, env, field.lid.loc, &resolved_lid)
+                    {
+                        return Err(err);
+                    }
+                    let resolved_lid = &resolved_lid;
                     return Err(TypeCoreError::UnboundRecordField {
                         loc: field.lid.loc,
                         // OCaml prints the label as written (`B.x`).
