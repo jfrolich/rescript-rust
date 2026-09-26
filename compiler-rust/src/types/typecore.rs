@@ -6939,15 +6939,10 @@ fn type_record_pat_rest(
     drop(core_type);
     let rest_type_longident = tctx.resolve_lid(rest_type_lid.txt).clone();
 
-    // Typetexp.find_type env rest_type_lid.
-    let (rest_path, rest_annotation_decl_opt) =
-        resolve_type_constructor_path(tctx, env, &rest_type_longident);
-    let Some(rest_annotation_decl) = rest_annotation_decl_opt else {
-        return rest_err(
-            rest_type_lid.loc,
-            RecordRestError::NotRecord(rest_type_longident.clone()),
-        );
-    };
+    // Typetexp.find_type env rest_type_lid.loc rest_type_lid.txt
+    // (typecore_record_rest.ml:133-134).
+    let (rest_path, rest_annotation_decl) =
+        find_type_for_lid(tctx, env, rest_type_lid.loc, &rest_type_longident)?;
     let rest_annotation_decl =
         crate::types::ctype::instance_declaration(tctx.type_ctx, &rest_annotation_decl);
 
