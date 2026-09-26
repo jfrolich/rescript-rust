@@ -1334,11 +1334,13 @@ fn unify_pattern_constructor_mismatch(
     reify_in_unify_state(ctx, state, t1)?;
     reify_in_unify_state(ctx, state, t2)?;
     if state.generate_equations {
+        // ctype.ml:2266-2269: `mcomp` raises `Unify []`; the enclosing
+        // `unify` adds the pair.
         let Some(env) = state.env() else {
-            return Err(TypeError::Unify(vec![(t1, t2)]));
+            return Err(TypeError::Unify(vec![]));
         };
         if mcomp(ctx, env, t1, t2).is_err() {
-            return Err(TypeError::Unify(vec![(t1, t2)]));
+            return Err(TypeError::Unify(vec![]));
         }
     }
     Ok(())
