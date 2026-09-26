@@ -7815,8 +7815,8 @@ fn type_expect_with_recarg_unscoped<'a>(
                 return Err(TypeCoreError::BreakOutsideLoop { loc });
             }
             let unit_ty = env.type_unit(ctx);
-            let inst_expected = instance_if_generic(ctx, expected_ty);
-            unify_expression_types(tctx, loc, inst_expected, unit_ty, context)?;
+            // `rue`: `unify env unit (instance ty_expected)` (typecore.ml:3051-3074).
+            rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
             Ok(Expression::new(
                 ExpressionDesc::Texp_break,
                 loc,
@@ -7831,8 +7831,8 @@ fn type_expect_with_recarg_unscoped<'a>(
                 return Err(TypeCoreError::ContinueOutsideLoop { loc });
             }
             let unit_ty = env.type_unit(ctx);
-            let inst_expected = instance_if_generic(ctx, expected_ty);
-            unify_expression_types(tctx, loc, inst_expected, unit_ty, context)?;
+            // `rue`: `unify env unit (instance ty_expected)` (typecore.ml:3051-3074).
+            rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
             Ok(Expression::new(
                 ExpressionDesc::Texp_continue,
                 loc,
@@ -8027,11 +8027,10 @@ fn type_expect_with_recarg_unscoped<'a>(
             let body = tctx.arena.get_expr(*body_idx);
             let typed_body = with_loop_depth(tctx, |tctx| type_statement(tctx, env, body))?;
 
-            // OCaml: rue { ... exp_type = instance_def Predef.type_unit; ... }
-            // Keep original argument order to preserve Tlink direction.
+            // OCaml typecore.ml:3082-3090: `rue { ... exp_type = instance_def
+            // Predef.type_unit }`, i.e. `unify env unit (instance ty_expected)`.
             let result_unit_ty = env.type_unit(ctx);
-            let inst_expected = instance_if_generic(ctx, expected_ty);
-            unify_expression_types(tctx, loc, inst_expected, result_unit_ty, context)?;
+            rue_unify(tctx, loc, result_unit_ty, expected_ty, context)?;
 
             Ok(Expression::new(
                 ExpressionDesc::Texp_while(Box::new(typed_cond), Box::new(typed_body)),
@@ -13951,11 +13950,10 @@ fn type_for(
     // for the loop expression result.
     let typed_body = with_loop_depth(tctx, |tctx| type_statement(tctx, &body_env, body))?;
 
-    // OCaml: rue { ... exp_type = instance_def Predef.type_unit; ... }
-    // Keep original argument order to preserve Tlink direction.
+    // OCaml typecore.ml:3117-3126: `rue { ... exp_type = instance_def
+    // Predef.type_unit }`, i.e. `unify env unit (instance ty_expected)`.
     let result_unit_ty = env.type_unit(ctx);
-    let inst_expected = instance_if_generic(ctx, expected_ty);
-    unify_expression_types(tctx, loc, inst_expected, result_unit_ty, context)?;
+    rue_unify(tctx, loc, result_unit_ty, expected_ty, context)?;
 
     Ok(Expression::new(
         ExpressionDesc::Texp_for(
@@ -14113,10 +14111,10 @@ fn type_for_of(
 
     let typed_body = with_loop_depth(tctx, |tctx| type_statement(tctx, &body_env, body))?;
 
-    // Result type is unit, matching OCaml `instance_def Predef.type_unit`.
+    // OCaml `rue { ... exp_type = instance_def Predef.type_unit }`, i.e.
+    // `unify env unit (instance ty_expected)`.
     let result_unit_ty = env.type_unit(ctx);
-    let inst_expected = instance_if_generic(ctx, expected_ty);
-    unify_expression_types(tctx, loc, inst_expected, result_unit_ty, context)?;
+    rue_unify(tctx, loc, result_unit_ty, expected_ty, context)?;
 
     let pat_box = Box::new(pat.clone());
     let desc = if await_kw {
