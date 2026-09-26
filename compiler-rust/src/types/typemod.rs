@@ -734,6 +734,31 @@ where
     result
 }
 
+/// The entry half of `Builtin_attributes.warning_scope`, for loops whose body
+/// cannot be a closure; pair with `exit_warning_scope`.
+fn enter_warning_scope(
+    tctx: &mut TypeCheckContext<'_>,
+    arena: &ParseArena,
+    attrs: &Attributes,
+) -> Option<WarningConfig> {
+    if attrs.is_empty() {
+        return None;
+    }
+    tctx.drain_open_slot_uses();
+    let previous_config = tctx.warning_config.clone();
+    for attr in attrs.iter().rev() {
+        apply_warning_attribute_with_ppwarning(tctx, arena, attr, true);
+    }
+    Some(previous_config)
+}
+
+fn exit_warning_scope(tctx: &mut TypeCheckContext<'_>, previous: Option<WarningConfig>) {
+    if let Some(previous_config) = previous {
+        tctx.drain_open_slot_uses();
+        tctx.warning_config = previous_config;
+    }
+}
+
 fn parser_deprecated_payload_to_decl_payload(
     arena: &ParseArena,
     items: &[ParsedStructureItem],
@@ -17102,15 +17127,19 @@ pub fn transl_signature<'a>(
             }
             PSigDesc::Psig_modtype(mtd) => {
                 let name_str = arena.get_string(mtd.pmtd_name.txt).to_string();
-                let typed_mty = match &mtd.pmtd_type {
-                    Some(mt) => Some(transl_modtype(
-                        tctx,
-                        &sig_env,
-                        arena,
-                        arena.get_mod_type(*mt),
-                    )?),
-                    None => None,
-                };
+                // typemod.ml:887-889: `warning_scope pmtd_attributes`.
+                let typed_mty =
+                    with_warning_scope(tctx, arena, &mtd.pmtd_attributes, true, |tctx| {
+                        match &mtd.pmtd_type {
+                            Some(mt) => Ok::<_, TypeModError>(Some(transl_modtype(
+                                tctx,
+                                &sig_env,
+                                arena,
+                                arena.get_mod_type(*mt),
+                            )?)),
+                            None => Ok(None),
+                        }
+                    })?;
                 let decl_mtd = crate::types::ModtypeDeclaration {
                     mtd_type: typed_mty.as_ref().map(|tmty| tmty.mty_type.clone()),
                     mtd_attributes: vec![],
@@ -18806,6 +18835,10 @@ fn type_structure_item<'a>(
                         let has_unboxed = decl_has_unboxed_attr && num_consts + num_nonconsts == 1;
 
                         for (cstr_idx, cstr) in cstrs.iter().enumerate() {
+                            // typedecl.ml:589-591: each constructor is made in
+                            // `Builtin_attributes.warning_scope pcd_attributes`.
+                            let cstr_warning_scope =
+                                enter_warning_scope(tctx, arena, &cstr.pcd_attributes);
                             // Handle variant spread expansion
                             // Like OCaml's typedecl.ml: spread markers return None (filtered out)
                             // and expanded constructors get real types from the source type
@@ -18944,6 +18977,7 @@ fn type_structure_item<'a>(
                                         },
                                     ));
                                 }
+                                exit_warning_scope(tctx, cstr_warning_scope);
                                 continue;
                             }
 
@@ -19321,6 +19355,7 @@ fn type_structure_item<'a>(
                                     cstr_inlined,
                                 },
                             ));
+                            exit_warning_scope(tctx, cstr_warning_scope);
                         }
 
                         // OCaml compiler/ml/datarepr.ml:166-189 post-processes the
@@ -19362,8 +19397,13 @@ fn type_structure_item<'a>(
                         let mut typed_tree_labels: Vec<TypedLabelDeclaration> = Vec::new();
                         for lbl in labels {
                             let lbl_name_str = arena.get_string(lbl.pld_name.txt);
+                            // typedecl.ml:223: `transl_labels` translates each
+                            // label in `warning_scope pld_attributes`.
+                            let label_warning_scope =
+                                enter_warning_scope(tctx, arena, &lbl.pld_attributes);
                             let (typed_core_type, type_ref) =
                                 transl_label_type(tctx, &temp_env, arena, lbl, true)?;
+                            exit_warning_scope(tctx, label_warning_scope);
                             let mutable_flag = match lbl.pld_mutable {
                                 crate::parser::ast::MutableFlag::Immutable => {
                                     crate::types::MutableFlag::Immutable
@@ -21155,12 +21195,19 @@ fn type_structure_item<'a>(
             // Module type declaration: module type S = MT
             let mtd_name_str = arena.get_string(mtd.pmtd_name.txt);
 
-            let typed_mty = match &mtd.pmtd_type {
-                Some(mt) => Some(transl_modtype(tctx, env, arena, arena.get_mod_type(*mt))?),
-                None => None,
-            };
-
-            let mtd_id = tctx.type_ctx.create_ident(mtd_name_str);
+            // typemod.ml:887-889: `transl_modtype_decl` runs in
+            // `Builtin_attributes.warning_scope pmtd_attributes`.
+            let (typed_mty, mtd_id) =
+                with_warning_scope(tctx, arena, &mtd.pmtd_attributes, true, |tctx| {
+                    let typed_mty = match &mtd.pmtd_type {
+                        Some(mt) => {
+                            Some(transl_modtype(tctx, env, arena, arena.get_mod_type(*mt))?)
+                        }
+                        None => None,
+                    };
+                    let mtd_id = tctx.type_ctx.create_ident(mtd_name_str);
+                    Ok::<_, TypeModError>((typed_mty, mtd_id))
+                })?;
             let decl_mtd_type = typed_mty.as_ref().map(|tmty| tmty.mty_type.clone());
 
             let desc = StructureItemDesc::Tstr_modtype(ModuleTypeDeclaration {
