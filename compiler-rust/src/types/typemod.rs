@@ -19501,6 +19501,14 @@ fn type_structure_item<'a>(
                                             "fixed private row type must have a synthetic row id",
                                         );
                                 let row_path = Path::pident(row_id.id.clone());
+                                // typedecl.ml:720-723 finds the row with
+                                // `Env.lookup_type`, which marks it used.
+                                crate::types::typecore::mark_type_used(
+                                    ctx,
+                                    &temp_env,
+                                    &row_id.name,
+                                    arena.to_location(decl.ptype_loc),
+                                );
                                 set_fixed_row(
                                     ctx,
                                     &temp_env,
@@ -20609,7 +20617,7 @@ fn type_structure_item<'a>(
                         &allowed_type_params,
                     ) {
                         return Err(TypeModError::UnboundTypeVarInExtension {
-                            loc,
+                            loc: ext_constr.pext_loc,
                             var,
                             args: ext_args.clone(),
                         });
@@ -20635,7 +20643,7 @@ fn type_structure_item<'a>(
                 cstr_generalized: ext_ret_ty.is_some(),
                 cstr_private: crate::types::PrivateFlag::Public,
                 // `Datarepr.extension_descr`: `cstr_loc = ext.ext_loc`.
-                cstr_loc: arena.to_location(loc),
+                cstr_loc: arena.to_location(ext_constr.pext_loc),
                 // `Datarepr.extension_descr`: `cstr_attributes = ext.ext_attributes`
                 // (typedecl.ml `ext_attributes = sext.pext_attributes`).
                 cstr_attributes: parser_attrs_to_decl_attrs(arena, &ext_constr.pext_attributes),
@@ -20647,7 +20655,7 @@ fn type_structure_item<'a>(
             // compiler/ml/datarepr.ml:190-214 keeps inline-record labels under
             // `cstr_inlined`.
             // typedecl.ml:1863: `Env.add_extension ~check:true`.
-            tctx.check_extension_usage("exn", &name_str, true, arena.to_location(loc), loc, env.is_in_signature());
+            tctx.check_extension_usage("exn", &name_str, true, arena.to_location(ext_constr.pext_loc), ext_constr.pext_loc, env.is_in_signature());
             new_env.add_constructor(id.clone(), cstr_desc);
 
             let ext_type = crate::types::ExtensionConstructor {
@@ -20656,7 +20664,7 @@ fn type_structure_item<'a>(
                 ext_args,
                 ext_ret_type: ext_ret_ty,
                 ext_private: crate::types::PrivateFlag::Public,
-                ext_loc: arena.to_location(loc),
+                ext_loc: arena.to_location(ext_constr.pext_loc),
                 ext_attributes: parser_attrs_to_decl_attrs(arena, &ext_constr.pext_attributes),
                 ext_is_exception: true,
             };
@@ -20669,7 +20677,7 @@ fn type_structure_item<'a>(
                     },
                     ext_type: ext_type.clone(),
                     ext_kind,
-                    ext_loc: loc,
+                    ext_loc: ext_constr.pext_loc,
                     ext_attributes: ext_constr.pext_attributes.clone(),
                 });
             Ok((
@@ -22163,6 +22171,13 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                         let row_id = fixed_row_type_id_for_decl(&fixed_row_type_ids, decl_idx)
                             .expect("fixed private row type must have a synthetic row id");
                         let row_path = Path::pident(row_id.id.clone());
+                        // typedecl.ml:720-723: `Env.lookup_type` marks the row used.
+                        crate::types::typecore::mark_type_used(
+                            ctx,
+                            &temp_env,
+                            &row_id.name,
+                            arena.to_location(decl.ptype_loc),
+                        );
                         set_fixed_row(
                             ctx,
                             &temp_env,
