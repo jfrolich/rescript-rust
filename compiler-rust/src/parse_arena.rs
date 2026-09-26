@@ -1948,6 +1948,11 @@ impl ParseArena {
         self.strings.len()
     }
 
+    /// Copy of the interned (non-synthetic) strings, by index.
+    pub fn snapshot_strings(&self) -> crate::intern::InternedStrings {
+        self.strings.snapshot()
+    }
+
     /// Prepare append-only AST storage used by typecore synthetic rewrites.
     ///
     /// Typechecking creates a few parsed AST fragments to mirror OCaml rewrites

@@ -519,7 +519,9 @@ pub struct TypeContext {
 
     /// String table for ParseArena Longident components whose StrIdx values are
     /// intentionally unique per source occurrence for marshal identity.
-    arena_longident_names: RefCell<ahash::AHashMap<u32, String>>,
+    /// Registered arenas' strings in registration order; the first arena
+    /// that has an index names it.
+    arena_longident_names: RefCell<Vec<crate::intern::InternedStrings>>,
 
     /// Next synthetic StrIdx raw value for CMI longident strings.
     next_cmi_longident_idx: Cell<u32>,
@@ -799,7 +801,7 @@ impl TypeContext {
             gentype_portable_raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
             raw_component_module_sigs: RefCell::new(ahash::AHashMap::new()),
             cmi_longident_names: RefCell::new(ahash::AHashMap::new()),
-            arena_longident_names: RefCell::new(ahash::AHashMap::new()),
+            arena_longident_names: RefCell::new(Vec::new()),
             next_cmi_longident_idx: Cell::new(0xF000_0000),
             predef_int: Cell::new(None),
             predef_char: Cell::new(None),
@@ -972,18 +974,21 @@ impl TypeContext {
 
     pub(crate) fn register_arena_longident_names(&self, arena: &crate::parse_arena::ParseArena) {
         self.poison_store_build_for("register_arena_longident_names");
-        let mut names = self.arena_longident_names.borrow_mut();
-        for raw in 0..arena.string_count() {
-            let idx = StrIdx::from_raw(raw as u32);
-            names
-                .entry(raw as u32)
-                .or_insert_with(|| arena.get_string(idx).to_string());
+        if arena.string_count() > 0 {
+            self.arena_longident_names
+                .borrow_mut()
+                .push(arena.snapshot_strings());
         }
     }
 
     pub(crate) fn resolve_any_longident_component(&self, idx: StrIdx) -> Option<String> {
         self.cmi_longident_component_name(idx)
-            .or_else(|| self.arena_longident_names.borrow().get(&idx.raw()).cloned())
+            .or_else(|| {
+                self.arena_longident_names
+                    .borrow()
+                    .iter()
+                    .find_map(|strings| strings.get(idx).map(str::to_string))
+            })
     }
 
     /// Snapshot synthetic CMI longident component names so portable signatures

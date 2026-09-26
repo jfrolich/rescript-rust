@@ -209,6 +209,29 @@ impl Interner {
     pub fn is_empty(&self) -> bool {
         self.spans.is_empty()
     }
+
+    /// Copy of every string by index, without the deduplication table.
+    pub fn snapshot(&self) -> InternedStrings {
+        InternedStrings {
+            bytes: self.bytes.clone(),
+            spans: self.spans.clone(),
+        }
+    }
+}
+
+/// Read-only copy of an `Interner`'s strings (see `Interner::snapshot`).
+#[derive(Debug, Clone, Default)]
+pub struct InternedStrings {
+    bytes: String,
+    spans: Vec<(u32, u32)>,
+}
+
+impl InternedStrings {
+    /// The string at `idx`, if the snapshot has it.
+    pub fn get(&self, idx: StrIdx) -> Option<&str> {
+        let &(start, end) = self.spans.get(idx.0 as usize)?;
+        Some(&self.bytes[start as usize..end as usize])
+    }
 }
 
 #[cfg(test)]
