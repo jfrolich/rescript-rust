@@ -5221,13 +5221,12 @@ fn format_unbound_type_declaration_variable_report(
                 Some(var) => printer.print(var),
                 None => name.to_string(),
             };
-            message.push_str(".\nIn case ");
-            message.push_str(case_name);
-            message.push_str(" of ");
-            message.push_str(&args_text);
-            message.push_str(" the variable ");
-            message.push_str(&var_text);
-            message.push_str(" is unbound");
+            message.push_str(".\n");
+            message.push_str(&format_explain_unbound_gen(
+                "case",
+                &format!("{case_name} of {args_text}"),
+                &var_text,
+            ));
             return format_compiler_error_report_raw_message(arena, source, filename, loc, &message);
         }
         let (kwd, label, ty) = match detail {
@@ -5274,16 +5273,30 @@ fn format_unbound_type_declaration_variable_report(
             Some(var) => printer.print(var),
             None => name.to_string(),
         };
-        message.push_str(".\nIn ");
-        message.push_str(kwd);
-        message.push(' ');
-        message.push_str(&label);
-        message.push_str(&ty_text);
-        message.push_str(" the variable ");
-        message.push_str(&var_text);
-        message.push_str(" is unbound");
+        message.push_str(".\n");
+        message.push_str(&format_explain_unbound_gen(
+            kwd,
+            &format!("{label}{ty_text}"),
+            &var_text,
+        ));
     }
     format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+}
+
+/// `explain_unbound_gen` (typedecl.ml:2080-2090) after the `.@.` flush:
+/// `@[<hov2>In %s@ %a@;<1 -2>the variable %a is unbound@]` from column 0.
+fn format_explain_unbound_gen(kwd: &str, item: &str, var: &str) -> String {
+    type_clash::render_error_message_at_column0(|ppf| {
+        ppf.open_hovbox(2);
+        ppf.str(&format!("In {kwd}"));
+        ppf.space();
+        ppf.string_as(item.chars().count(), item);
+        ppf.break_(1, -2);
+        ppf.str("the variable ");
+        ppf.string_as(var.chars().count(), var);
+        ppf.str(" is unbound");
+        ppf.close_box();
+    })
 }
 
 fn format_unbound_modtype_report(
@@ -10800,95 +10813,101 @@ fn format_uncurried_arity_mismatch_report(
         && superfluous_args.is_empty()
         && !mismatch_in_unlabelled_args;
 
-    let mut message = String::new();
-    message.push_str("This function call is incorrect.\n");
-    message.push_str("The function has type:\n");
-    message.push_str(&format_type_expr(type_ctx, function_type));
-    message.push_str("\n\n");
-
-    if !missing_required_args.is_empty() {
-        message.push_str("- Missing arguments that must be provided: ");
-        message.push_str(
-            &missing_required_args
-                .iter()
-                .map(|arg| format!("~{arg}"))
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        message.push('\n');
-        message.push_str("- Hint: Did you want to partially apply the function? You can do that by putting `...` just before the closing parens of the function call. Example: ");
-        message.push_str(INFO);
-        message.push_str("yourFn(~arg1=someVar, ...)");
-        message.push_str(RESET);
-        message.push('\n');
-    }
-
-    if !superfluous_args.is_empty() {
-        message.push_str("- Called with arguments it does not take: ");
-        message.push_str(&superfluous_args.join(", "));
-        message.push('\n');
-    }
-
-    if mismatch_in_unlabelled_args {
-        message.push_str("- The function takes ");
-        message.push_str(INFO);
-        message.push_str(&unlabelled_arg_count_message(
-            args_from_type_unlabelled,
-            provided_unlabelled,
-            CountPosition::Left,
-        ));
-        message.push_str(RESET);
-        message.push_str(" unlabelled argument");
-        if args_from_type_unlabelled != 1 {
-            message.push('s');
+    // typecore.ml:5150-5220 lays the message out in one `@[<v>...@]` box.
+    use crate::types::printtyp::{TAG_ERROR, TAG_INFO, TAG_RESET};
+    let type_text = format_type_expr(type_ctx, function_type);
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let message = type_clash::render_error_message(|ppf| {
+        let tagged = |ppf: &mut crate::parser::formatter::Formatter<&mut Vec<u8>>,
+                      tag: &str,
+                      text: &str| {
+            ppf.string_as(0, tag);
+            ppf.str(text);
+            ppf.string_as(0, TAG_RESET);
+        };
+        ppf.open_vbox(0);
+        ppf.open_box(crate::parser::formatter::BoxKind::Box, 2);
+        ppf.str("This function call is incorrect.");
+        ppf.close_box();
+        ppf.cut();
+        ppf.str("The function has type:");
+        ppf.space();
+        ppf.str(&type_text);
+        if !is_fallback {
+            ppf.cut();
         }
-        message.push_str(", but is called with ");
-        message.push_str(ERROR);
-        message.push_str(&unlabelled_arg_count_message(
-            provided_unlabelled,
-            args_from_type_unlabelled,
-            CountPosition::Right,
-        ));
-        message.push_str(RESET);
-    }
-
-    if is_fallback {
-        message.push_str("It is called with ");
-        message.push_str(ERROR);
-        message.push_str(&provided_arity.to_string());
-        message.push_str(RESET);
-        message.push_str(" argument");
-        if provided_arity != 1 {
-            message.push('s');
+        if !missing_required_args.is_empty() {
+            ppf.cut();
+            ppf.str(&format!(
+                "- Missing arguments that must be provided: {}",
+                missing_required_args
+                    .iter()
+                    .map(|arg| format!("~{arg}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            ppf.cut();
+            ppf.str("- Hint: Did you want to partially apply the function? You can do that by putting `...` just before the closing parens of the function call. Example: ");
+            tagged(ppf, TAG_INFO, "yourFn(~arg1=someVar, ...)");
         }
-        message.push_str(" but");
-        if provided_arity > expected_arity {
-            message.push_str(" just");
+        if !superfluous_args.is_empty() {
+            ppf.cut();
+            ppf.str(&format!(
+                "- Called with arguments it does not take: {}",
+                superfluous_args.join(", ")
+            ));
         }
-        message.push_str(" requires ");
-        message.push_str(INFO);
-        message.push_str(&expected_arity.to_string());
-        message.push_str(RESET);
-        message.push('.');
-    }
-
-    if let Some(suggestion) = arity_suggestion {
-        message.push_str("\n\nHint: Try ");
-        message.push_str(INFO);
-        message.push_str(suggestion);
-        message.push_str(RESET);
-        message.push_str(" instead (takes ");
-        message.push_str(INFO);
-        message.push_str(&provided_arity.to_string());
-        message.push_str(RESET);
-        message.push_str(" argument");
-        if provided_arity != 1 {
-            message.push('s');
+        if mismatch_in_unlabelled_args {
+            ppf.cut();
+            ppf.str("- The function takes ");
+            tagged(
+                ppf,
+                TAG_INFO,
+                &unlabelled_arg_count_message(
+                    args_from_type_unlabelled,
+                    provided_unlabelled,
+                    CountPosition::Left,
+                ),
+            );
+            ppf.str(&format!(
+                " unlabelled argument{}, but is called with ",
+                plural(args_from_type_unlabelled)
+            ));
+            tagged(
+                ppf,
+                TAG_ERROR,
+                &unlabelled_arg_count_message(
+                    provided_unlabelled,
+                    args_from_type_unlabelled,
+                    CountPosition::Right,
+                ),
+            );
         }
-        message.push_str(").");
-    }
-
-    format_compiler_error_report(arena, source, filename, loc, &message)
+        if is_fallback {
+            ppf.cut();
+            ppf.cut();
+            ppf.str("It is called with ");
+            tagged(ppf, TAG_ERROR, &provided_arity.to_string());
+            ppf.str(&format!(
+                " argument{} but{} requires ",
+                plural(provided_arity),
+                if provided_arity > expected_arity { " just" } else { "" }
+            ));
+            tagged(ppf, TAG_INFO, &expected_arity.to_string());
+            ppf.str(".");
+        }
+        if let Some(suggestion) = arity_suggestion {
+            ppf.cut();
+            ppf.cut();
+            ppf.str("Hint: Try ");
+            tagged(ppf, TAG_INFO, suggestion);
+            ppf.str(" instead (takes ");
+            tagged(ppf, TAG_INFO, &provided_arity.to_string());
+            ppf.str(&format!(" argument{}).", plural(provided_arity)));
+        }
+        ppf.close_box();
+    });
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn format_constructor_arity_mismatch_report(
@@ -11469,9 +11488,11 @@ fn compile_source_to_js_with_options_inner(
     }
     tctx.drain_open_slot_uses();
     emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
-    if ppx_warnings_have_errors || type_warnings_have_errors(&tctx.warnings) {
-        return Err(UserDiagnostic::new(String::new(), 2).into());
-    }
+    // js_implementation.ml:158-163: `Warnings.check_fatal` runs only after
+    // `Typemod.type_implementation_more`, whose delayed checks
+    // (typemod.ml:1769-1776) still report their warnings.
+    let early_warnings_have_errors =
+        ppx_warnings_have_errors || type_warnings_have_errors(&tctx.warnings);
     let delayed_type_warning_start = tctx.warnings.len();
 
     let source_file_for_interface = options.source_filename.as_deref().unwrap_or(filename);
@@ -11569,7 +11590,7 @@ fn compile_source_to_js_with_options_inner(
     tctx.flush_value_usage_checks();
     let delayed_warnings = &tctx.warnings[delayed_type_warning_start..];
     emit_type_warnings(parser.arena(), source, filename, delayed_warnings);
-    if type_warnings_have_errors(delayed_warnings) {
+    if early_warnings_have_errors || type_warnings_have_errors(delayed_warnings) {
         return Err(UserDiagnostic::new(String::new(), 2).into());
     }
     let post_type_warning_start = tctx.warnings.len();
