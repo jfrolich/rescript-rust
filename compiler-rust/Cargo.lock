@@ -1743,6 +1743,7 @@ dependencies = [
  "dashmap",
  "elsa",
  "env_logger",
+ "hashbrown 0.15.5",
  "im-rc",
  "indexmap",
  "insta",
