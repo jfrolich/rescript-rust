@@ -17032,16 +17032,31 @@ fn type_setfield(
     let typed_record =
         type_expect_with_recarg(tctx, env, record_expr, record_ty, None, RecArg::Allowed)?;
     let ty_exp = typed_record.exp_type;
+    // `type_label_access` (typecore.ml:3648-3669): `opath` is only the
+    // receiver's concrete record path; other types (option, ...) do not drive
+    // label disambiguation, and the receiver unification reports the clash.
+    let record_type_info =
+        extract_concrete_record_type_info(ty_exp, env, &mut tctx.persistent_env, ctx);
+    // typecore.ml:3835-3843: direct field access on a dict is rejected.
+    if record_type_info
+        .as_ref()
+        .is_some_and(|(path, _, _)| is_dict_type_path(path))
+    {
+        return Err(TypeCoreError::FieldAccessOnDictType { loc: field_lid.loc });
+    }
+    let label_expected_record_ty = record_type_info.as_ref().map(|_| ty_exp);
 
-    if let Some(err) = qualified_label_name_type_mismatch(
-        field_lid.loc,
-        &resolved_lid,
-        tctx.arena,
-        env,
-        &mut tctx.persistent_env,
-        ctx,
-        ty_exp,
-    ) {
+    if let Some(err) = label_expected_record_ty.and_then(|expected_record_ty| {
+        qualified_label_name_type_mismatch(
+            field_lid.loc,
+            &resolved_lid,
+            tctx.arena,
+            env,
+            &mut tctx.persistent_env,
+            ctx,
+            expected_record_ty,
+        )
+    }) {
         return Err(err);
     }
 
@@ -17051,13 +17066,13 @@ fn type_setfield(
         env,
         &mut tctx.persistent_env,
         ctx,
-        Some(ty_exp),
+        label_expected_record_ty,
         None,
     )
     .or_else(|| {
         disambiguate_label(
             &field_name,
-            ty_exp,
+            label_expected_record_ty.unwrap_or_else(|| ctx.new_var(None)),
             env,
             &mut tctx.persistent_env,
             ctx,
@@ -18552,8 +18567,11 @@ fn capitalize_ascii(name: &str) -> String {
     capitalized
 }
 
+/// typetexp.ml:853-862: `Env.lookup_module ~load:false (Lident (capitalize
+/// name))`, which also finds a persistent unit other than the current one
+/// (env.ml:1022-1048).
 fn unbound_value_module_suggestion(
-    tctx: &TypeCheckContext<'_>,
+    tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     lid: &Longident,
 ) -> Option<String> {
@@ -18561,8 +18579,15 @@ fn unbound_value_module_suggestion(
         return None;
     };
     let candidate = capitalize_ascii(tctx.arena.get_string(*idx));
-    let (path, _) = env.find_module_with_path(&candidate).ok()?;
-    Some(format_arity_suggestion_path(&path))
+    if let Ok((path, _)) = env.find_module_with_path(&candidate) {
+        return Some(format_arity_suggestion_path(&path));
+    }
+    let ctx = tctx.type_ctx;
+    let pers = tctx.persistent_env.as_mut()?;
+    if pers.compiling_module_name() == Some(candidate.as_str()) {
+        return None;
+    }
+    pers.find_pers_struct(&candidate, ctx).map(|_| candidate)
 }
 
 /// OCaml `Typetexp.find_type` (compiler/ml/typetexp.ml): resolve a type
@@ -21790,60 +21815,9 @@ fn type_let_bindings(
 // Top-Level Entry Points
 // ============================================================================
 
+/// typecore.ml:4753-4758: `Printtyp.type_expr` into a buffer formatter.
 fn format_toplevel_return_type(ctx: &TypeContext, ty: TypeExprRef) -> String {
-    fn go(ctx: &TypeContext, ty: TypeExprRef, seen: &mut HashSet<TypeExprRef>) -> String {
-        let repr = ctx.repr(ty);
-        if !seen.insert(repr) {
-            return "_".to_string();
-        }
-
-        let desc = (*ctx.get_desc(repr)).clone();
-        let rendered = match &desc {
-            TypeDesc::Tvar(Some(name)) | TypeDesc::Tunivar(Some(name)) => name.clone(),
-            TypeDesc::Tvar(None) | TypeDesc::Tunivar(None) => "_".to_string(),
-            TypeDesc::Tconstr { path, args, .. } => {
-                let name = path.name();
-                if args.is_empty() {
-                    name
-                } else {
-                    let args = args
-                        .iter()
-                        .map(|arg| go(ctx, *arg, seen))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("{name}<{args}>")
-                }
-            }
-            TypeDesc::Ttuple(items) => {
-                let items = items
-                    .iter()
-                    .map(|item| go(ctx, *item, seen))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("({items})")
-            }
-            TypeDesc::Tarrow { args, ret } => {
-                let args = args
-                    .iter()
-                    .map(|arg| go(ctx, arg.typ, seen))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let ret = go(ctx, *ret, seen);
-                format!("({args}) => {ret}")
-            }
-            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) | TypeDesc::Tpoly { body: next, .. } => {
-                go(ctx, *next, seen)
-            }
-            TypeDesc::Tobject { .. } | TypeDesc::Tfield { .. } | TypeDesc::Tnil => "object".into(),
-            TypeDesc::Tvariant(_) => "variant".into(),
-            TypeDesc::Tpackage { path, .. } => format!("module({})", path.name()),
-        };
-
-        seen.remove(&repr);
-        rendered
-    }
-
-    go(ctx, ty, &mut HashSet::new())
+    crate::types::printtyp::Printtyp::new(ctx).type_expr(ty)
 }
 
 /// Type check a top-level expression.

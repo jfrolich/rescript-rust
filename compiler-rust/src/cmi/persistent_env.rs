@@ -986,6 +986,10 @@ impl PersistentEnv {
         self.nopervasives = nopervasives;
     }
 
+    pub fn compiling_module_name(&self) -> Option<&str> {
+        self.view.compiling_module.as_deref()
+    }
+
     pub fn set_compiling_module(&mut self, module_name: Option<String>) {
         self.view_mut().compiling_module = module_name;
     }
