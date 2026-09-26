@@ -6740,6 +6740,11 @@ fn check_type_abbrev_recursion_regular(
                     .any(|expanded_path| expanded_path.same(&path))
                 && let Some(decl) = find_decl(&path)
                 && let Some(body0) = decl.type_manifest
+                // `Env.find_type_expansion` (env.ml:944-956) does not expand
+                // a private abstract type without a constructor row.
+                && (decl.type_private == crate::types::PrivateFlag::Public
+                    || !matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract)
+                    || crate::types::btype::has_constr_row(ctx, body0))
             {
                 let (params, body) =
                     crate::types::ctype::instance_parameterized_type(ctx, &decl.type_params, body0);
