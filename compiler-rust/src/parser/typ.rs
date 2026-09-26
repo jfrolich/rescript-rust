@@ -1174,8 +1174,10 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         // 3. Regular @-attributes are parsed after start_pos
         //
         // So doc comments should NOT be included in arrow location, but @-attrs SHOULD be.
+        // res_core.ml:4819-4825: a single leading doc comment is consumed
+        // here; later ones are read by `parse_attributes`.
         let mut doc_attrs = vec![];
-        while let Token::DocComment { loc, content } = &p.token {
+        if let Token::DocComment { loc, content } = &p.token {
             let loc = loc.clone();
             let content = content.clone();
             p.next();
@@ -1212,8 +1214,8 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         // Use identity-based position to match OCaml's heap object creation behavior.
         let post_doc_start_idx = p.start_pos_idx();
 
-        // Parse regular @-style attributes
-        let regular_attrs = parse_regular_attributes(p);
+        // OCaml `parse_attributes p` (a `Grammar.Attribute` region).
+        let regular_attrs = parse_attributes(p);
 
         // Combine: doc_attrs @ regular_attrs (OCaml: doc_attr @ parse_attributes p)
         let param_attrs: Attributes = doc_attrs
@@ -1615,18 +1617,6 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
         }
     }
     p.eat_breadcrumb();
-    attrs
-}
-
-/// Parse only @-style attributes (NOT doc comments).
-/// Used when doc comments need to be handled separately for location purposes.
-fn parse_regular_attributes(p: &mut Parser<'_>) -> Attributes {
-    let mut attrs = Attributes::new();
-    while p.token == Token::At {
-        if let Some(attr) = parse_attribute(p) {
-            attrs.push(attr);
-        }
-    }
     attrs
 }
 
