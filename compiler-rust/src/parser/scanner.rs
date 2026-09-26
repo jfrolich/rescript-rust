@@ -1494,13 +1494,13 @@ impl<'src> Scanner<'src> {
 
     /// Convert a sequence of digits to a number.
     fn convert_number(&mut self, n: usize, base: u32) -> i32 {
+        // res_scanner.ml:495-503: exactly `n` chars are consumed and
+        // accumulated, digits or not.
         let mut x = 0i32;
         for _ in 0..n {
             let d = Self::digit_value(self.ch);
-            if d < base {
-                x = x * base as i32 + d as i32;
-                self.next();
-            }
+            x = x * base as i32 + d as i32;
+            self.next();
         }
         if utf8::is_valid_codepoint(x) {
             x
