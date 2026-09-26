@@ -771,7 +771,17 @@ fn parse_atomic_typ_expr_with_start(
                 }
             }
         }
-        Token::Lbrace => parse_record_or_object_type(p),
+        Token::Lbrace => {
+            let (typ, inline_record) = parse_record_or_object_type_inner(p);
+            if inline_record {
+                // res_core.ml:4771-4772: the extracted inline record is
+                // referenced with `Typ.constr ~loc lid params`, without
+                // `~attrs`, so the attributes before `{` are dropped.
+                p.eat_breadcrumb();
+                return typ;
+            }
+            typ
+        }
         // res_core.ml:4669-4671 calls `parse_polymorphic_variant_type ~attrs p`
         // without the inline-record context.
         Token::Lbracket => without_inline_record_context(p, parse_poly_variant_type),
@@ -1700,7 +1710,9 @@ fn parse_tuple_type(p: &mut Parser<'_>, start_pos_idx: PosIdx, first: CoreType) 
 // ============================================================================
 
 /// Parse a record or object type.
-fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
+/// Returns the type and whether the fields were extracted as an inline
+/// record type.
+fn parse_record_or_object_type_inner(p: &mut Parser<'_>) -> (CoreType, bool) {
     let start_pos_idx = p.start_pos_idx();
     p.expect(Token::Lbrace);
 
@@ -1750,14 +1762,17 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
         // Return a Ptyp_constr pointing to the inline type
         let type_args: Vec<CoreTypeIdx> = params.into_iter().map(|(t, _)| t).collect();
         let lid_idx = p.push_lident_from_idx(inline_type_idx);
-        CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-                with_loc(lid_idx, loc.clone()),
-                type_args,
-            )))),
-            ptyp_loc: loc,
-            ptyp_attributes: Attributes::new(),
-        }
+        (
+            CoreType {
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+                    with_loc(lid_idx, loc.clone()),
+                    type_args,
+                )))),
+                ptyp_loc: loc,
+                ptyp_attributes: Attributes::new(),
+            },
+            true,
+        )
     } else {
         // OCaml res_core.ml:4777-4800: a lowercase name here is an inline
         // record in the wrong place; the fields are object fields.
@@ -1774,11 +1789,14 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
         );
         p.expect(Token::Rbrace);
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-        CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((fields, closed)))),
-            ptyp_loc: loc,
-            ptyp_attributes: Attributes::new(),
-        }
+        (
+            CoreType {
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((fields, closed)))),
+                ptyp_loc: loc,
+                ptyp_attributes: Attributes::new(),
+            },
+            false,
+        )
     }
 }
 
