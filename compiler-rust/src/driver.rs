@@ -6131,8 +6131,11 @@ fn format_unbound_module_report(
             "{INFO}The module or file {name} can't be found.{RESET}\n- If it's a third-party dependency:\n  - Did you add it to the \"dependencies\" or \"dev-dependencies\" in rescript.json?\n- Did you include the file's directory to the \"sources\" in rescript.json?"
         )
     };
+    // typetexp.ml:742-750 `spellcheck`: an `Ldot (r, s)` is checked by its
+    // last component `s` against the modules of `r`.
+    let last_component = name.rsplit('.').next().unwrap_or(name);
     if name != "Str"
-        && let Some(hint) = super_spellcheck_hint(name, alternatives)
+        && let Some(hint) = super_spellcheck_hint(last_component, alternatives)
     {
         message.push_str("\n\n\n");
         message.push_str(INFO);
