@@ -229,7 +229,7 @@ impl From<&str> for TypeDeclarationMismatchDetail {
 pub fn format_error(type_ctx: &TypeContext, filename: &str, error: &IncludeModError) -> String {
     let mut output = String::new();
     output.push_str("  Signature mismatch:\n");
-    format_include_error(type_ctx, filename, error, &mut output);
+    format_include_error(type_ctx, filename, error, &mut Vec::new(), &mut output);
     output
 }
 
@@ -239,7 +239,7 @@ pub(crate) fn format_error_without_signature_header(
     error: &IncludeModError,
 ) -> String {
     let mut output = String::new();
-    format_include_error(type_ctx, filename, error, &mut output);
+    format_include_error(type_ctx, filename, error, &mut Vec::new(), &mut output);
     output
 }
 
@@ -265,54 +265,127 @@ fn push_show_loc(output: &mut String, location: &str, message: &str) {
     }
 }
 
+/// One step of `Includemod.error` contexts (includemod.ml:28-32).
+#[derive(Clone)]
+enum IncludeContext {
+    Module(Ident),
+    Modtype(Ident),
+    Body(Ident),
+}
+
+/// `Includemod.context` (includemod.ml:591-631) for a context listed from
+/// the outermost step, when it fits on one line.
+fn include_context_text(cxt: &[IncludeContext]) -> String {
+    fn argname(id: &Ident) -> &str {
+        if id.name() == "*" { "" } else { id.name() }
+    }
+    fn context(cxt: &[IncludeContext]) -> String {
+        match cxt {
+            [IncludeContext::Module(id), rem @ ..] => format!("module {}{}", id.name(), args(rem)),
+            [IncludeContext::Modtype(id), rem @ ..] => {
+                format!("module type {} = {}", id.name(), context_mty(rem))
+            }
+            [IncludeContext::Body(x), rem @ ..] => {
+                format!("functor ({}) -> {}", argname(x), context_mty(rem))
+            }
+            [] => "<here>".to_string(),
+        }
+    }
+    fn context_mty(cxt: &[IncludeContext]) -> String {
+        match cxt {
+            [IncludeContext::Module(_) | IncludeContext::Modtype(_), ..] => {
+                format!("sig {} end", context(cxt))
+            }
+            _ => context(cxt),
+        }
+    }
+    fn args(cxt: &[IncludeContext]) -> String {
+        match cxt {
+            [IncludeContext::Body(x), rem @ ..] => format!("({}){}", argname(x), args(rem)),
+            _ => format!(" : {}", context_mty(cxt)),
+        }
+    }
+    context(cxt)
+}
+
+/// The context part of `include_err` (includemod.ml:633-650): nothing at the
+/// top, `In module A.B:` inside plain submodules, otherwise
+/// `At position <context>`.
+fn push_include_context(cxt: &[IncludeContext], output: &mut String) {
+    if cxt.is_empty() {
+        return;
+    }
+    if cxt.iter().all(|step| matches!(step, IncludeContext::Module(_))) {
+        output.push_str("  In module ");
+        let names: Vec<&str> = cxt
+            .iter()
+            .map(|step| match step {
+                IncludeContext::Module(id) => id.name(),
+                _ => unreachable!(),
+            })
+            .collect();
+        output.push_str(&names.join("."));
+        output.push_str(":\n");
+    } else {
+        output.push_str("  At position ");
+        output.push_str(&include_context_text(cxt));
+        output.push('\n');
+    }
+}
+
+/// `Module_types` in `include_symptom`, with the elision that stands in for
+/// `is_big` in `report_error`.
+fn push_module_types_symptom(
+    type_ctx: &TypeContext,
+    actual: &ModuleType,
+    expected: &ModuleType,
+    error: &IncludeModError,
+    output: &mut String,
+) {
+    let actual_text = format_module_type(type_ctx, actual);
+    let expected_text = format_module_type(type_ctx, expected);
+    if should_elide_module_mismatch(&actual_text, &expected_text)
+        || should_elide_type_declaration_module_mismatch(error, &actual_text, &expected_text)
+    {
+        output.push_str("  ...\n");
+    } else if is_compact_type_declaration_mismatch(error) {
+        output.push_str("  Modules do not match: ");
+        output.push_str(&actual_text);
+        output.push_str(" is not included in ");
+        output.push_str(&expected_text);
+        output.push('\n');
+    } else {
+        output.push_str(&format_modules_do_not_match(&actual_text, &expected_text));
+    }
+}
+
+/// `report_error` (includemod.ml:663-676) over Rust's nested error tree: each
+/// entry of OCaml's flat error list is printed with its own context.
 fn format_include_error(
     type_ctx: &TypeContext,
     filename: &str,
     error: &IncludeModError,
+    cxt: &mut Vec<IncludeContext>,
     output: &mut String,
 ) {
     match error {
         IncludeModError::SignatureMismatch(errors) => {
             for error in errors {
-                format_include_error(type_ctx, filename, error, output);
+                format_include_error(type_ctx, filename, error, cxt, output);
             }
-        }
-        IncludeModError::ModuleTypesMismatch {
-            actual,
-            expected,
-            error,
-        } => {
-            let actual_text = format_module_type(type_ctx, actual);
-            let expected_text = format_module_type(type_ctx, expected);
-            if should_elide_module_mismatch(&actual_text, &expected_text)
-                || should_elide_type_declaration_module_mismatch(
-                    error,
-                    &actual_text,
-                    &expected_text,
-                )
-            {
-                output.push_str("  ...\n");
-            } else if is_compact_type_declaration_mismatch(error) {
-                output.push_str("  Modules do not match: ");
-                output.push_str(&actual_text);
-                output.push_str(" is not included in ");
-                output.push_str(&expected_text);
-                output.push('\n');
-            } else {
-                output.push_str(&format_modules_do_not_match(&actual_text, &expected_text));
-            }
-            format_include_error(type_ctx, filename, error, output);
-        }
-        IncludeModError::UnboundModulePath { path } => {
-            output.push_str("  Unbound module ");
-            output.push_str(&path.name());
-            output.push('\n');
+            return;
         }
         IncludeModError::InModule { name, error } => {
-            output.push_str("  In module ");
-            output.push_str(name.name());
-            output.push_str(":\n");
-            format_include_error(type_ctx, filename, error, output);
+            cxt.push(IncludeContext::Module(name.clone()));
+            format_include_error(type_ctx, filename, error, cxt, output);
+            cxt.pop();
+            return;
+        }
+        IncludeModError::AtModtype { name, error } => {
+            cxt.push(IncludeContext::Modtype(name.clone()));
+            format_include_error(type_ctx, filename, error, cxt, output);
+            cxt.pop();
+            return;
         }
         IncludeModError::InFunctorBody {
             param,
@@ -320,38 +393,41 @@ fn format_include_error(
             expected,
             error,
         } => {
-            let actual = format_module_type(type_ctx, actual);
-            let expected = format_module_type(type_ctx, expected);
-            output.push_str("  At position functor (");
-            output.push_str(param.name());
-            output.push_str(") -> <here>\n");
-            if actual.contains('\n')
-                && expected.contains('\n')
-                && actual.contains(" = ")
-                && expected.contains(" = ")
-            {
-                output.push_str("  Modules do not match:\n");
-                output.push_str("    ");
-                output.push_str(&actual);
-                output.push('\n');
-                output.push_str("  is not included in\n");
-                output.push_str("    ");
-                output.push_str(&expected);
-                output.push('\n');
-            } else {
-                output.push_str("  Modules do not match: ");
-                output.push_str(&actual);
-                output.push_str(" is not included in ");
-                output.push_str(&expected);
-                output.push('\n');
+            // `modtypes` on the functor results (includemod.ml:388-396) runs
+            // in `Body param :: cxt`.
+            cxt.push(IncludeContext::Body(param.clone()));
+            push_include_context(cxt, output);
+            push_module_types_symptom(type_ctx, actual, expected, error, output);
+            if !matches!(**error, IncludeModError::ModuleTypeMismatch { .. }) {
+                format_include_error(type_ctx, filename, error, cxt, output);
             }
-            format_functor_body_error(type_ctx, filename, param, error, output);
+            cxt.pop();
+            return;
         }
-        IncludeModError::AtModtype { name, error } => {
-            output.push_str("  At position module type ");
-            output.push_str(name.name());
-            output.push_str(" = <here>\n");
-            format_include_error(type_ctx, filename, error, output);
+        _ => {}
+    }
+    push_include_context(cxt, output);
+    match error {
+        IncludeModError::SignatureMismatch(_)
+        | IncludeModError::InModule { .. }
+        | IncludeModError::AtModtype { .. }
+        | IncludeModError::InFunctorBody { .. } => unreachable!(),
+        IncludeModError::ModuleTypesMismatch {
+            actual,
+            expected,
+            error,
+        } => {
+            push_module_types_symptom(type_ctx, actual, expected, error, output);
+            // A bare `ModuleTypeMismatch` below stands for `Dont_match`, which
+            // only contributes the `Module_types` entry (includemod.ml:222-229).
+            if !matches!(**error, IncludeModError::ModuleTypeMismatch { .. }) {
+                format_include_error(type_ctx, filename, error, cxt, output);
+            }
+        }
+        IncludeModError::UnboundModulePath { path } => {
+            output.push_str("  Unbound module ");
+            output.push_str(&path.name());
+            output.push('\n');
         }
         IncludeModError::TypeDeclarationMismatch {
             name,
@@ -546,7 +622,7 @@ fn format_include_error(
             output.push_str("    ");
             output.push_str(&format_modtype_declaration(type_ctx, name, expected));
             output.push('\n');
-            format_include_error(type_ctx, filename, error, output);
+            format_include_error(type_ctx, filename, error, cxt, output);
         }
         IncludeModError::ModtypePermutation => {
             output.push_str("  Illegal permutation of structure fields\n");
@@ -578,42 +654,6 @@ fn location_filename(type_ctx: &TypeContext, fallback: &str, loc: &Location) -> 
         .resolve_cmi_longident_component(loc.loc_start.file_name)
         .filter(|name| !name.is_empty() && name != "_none_")
         .unwrap_or_else(|| fallback.to_string())
-}
-
-fn format_functor_body_error(
-    type_ctx: &TypeContext,
-    filename: &str,
-    param: &Ident,
-    error: &IncludeModError,
-    output: &mut String,
-) {
-    if let IncludeModError::InModule { name, error } = error {
-        if let IncludeModError::ModuleTypesMismatch {
-            actual, expected, ..
-        } = error.as_ref()
-        {
-            output.push_str("  At position functor (");
-            output.push_str(param.name());
-            output.push_str(") -> sig module ");
-            output.push_str(name.name());
-            output.push_str(" : <here> end\n");
-            output.push_str("  Modules do not match: ");
-            output.push_str(&format_module_type_for_context_leaf(type_ctx, actual));
-            output.push_str(" is not included in ");
-            output.push_str(&format_module_type_for_context_leaf(type_ctx, expected));
-            output.push('\n');
-            return;
-        }
-    }
-
-    format_include_error(type_ctx, filename, error, output);
-}
-
-fn format_module_type_for_context_leaf(type_ctx: &TypeContext, mty: &ModuleType) -> String {
-    match mty {
-        ModuleType::MtyAlias(_, _) => String::new(),
-        _ => format_module_type(type_ctx, mty),
-    }
 }
 
 fn should_elide_module_mismatch(actual: &str, expected: &str) -> bool {
@@ -1761,15 +1801,15 @@ fn check_paired_signature_items<'a>(
                             error: Box::new(error),
                         }
                     } else {
+                        // `modtypes` in `Module id :: cxt` (includemod.ml:
+                        // 322-331): the `Module_types` entry and the errors
+                        // below it share that context.
                         IncludeModError::InModule {
-                            name: name.clone(),
+                            name,
                             error: Box::new(IncludeModError::ModuleTypesMismatch {
                                 actual: Box::new(impl_mty.clone()),
                                 expected: Box::new(sig_mod_decl.md_type.clone()),
-                                error: Box::new(IncludeModError::InModule {
-                                    name,
-                                    error: Box::new(error),
-                                }),
+                                error: Box::new(error),
                             }),
                         }
                     }
@@ -4551,24 +4591,12 @@ fn modtype_declarations<'a>(
     }
 }
 
+/// `check_modtype_equiv` runs in `Modtype id :: cxt` (includemod.ml:
+/// 473-476); every error below it shares that context.
 fn with_modtype_context(name: Ident, error: IncludeModError) -> IncludeModError {
-    match error {
-        IncludeModError::ModuleTypesMismatch {
-            actual,
-            expected,
-            error,
-        } => IncludeModError::AtModtype {
-            name: name.clone(),
-            error: Box::new(IncludeModError::ModuleTypesMismatch {
-                actual,
-                expected,
-                error: Box::new(with_modtype_context(name, *error)),
-            }),
-        },
-        error => IncludeModError::AtModtype {
-            name,
-            error: Box::new(error),
-        },
+    IncludeModError::AtModtype {
+        name,
+        error: Box::new(error),
     }
 }
 
