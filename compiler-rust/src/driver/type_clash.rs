@@ -1744,6 +1744,45 @@ pub(super) fn print_unbound_label(
     did_you_mean(ppf, hint);
 }
 
+/// `Typetexp.report_error`'s `Unbound_constructor lid` (typetexp.ml:891-904),
+/// followed by its `spellcheck` hint.
+pub(super) fn print_unbound_constructor(ppf: &mut Ppf<'_>, lid: &str, hint: Option<&str>) {
+    ppf.open_box(BoxKind::V, 0);
+    tagged(ppf, TAG_INFO, &format!("The variant constructor {lid} can't be found."));
+    ppf.cut();
+    ppf.cut();
+    ppf.open_box(BoxKind::V, 2);
+    ppf.str("- If it's defined in another module or file, bring it into scope by:");
+    ppf.cut();
+    ppf.open_box(BoxKind::Box, 0);
+    ppf.str("- Prefixing it with said module name:");
+    ppf.space();
+    tagged(ppf, TAG_INFO, &format!("TheModule.{lid}"));
+    ppf.close_box();
+    ppf.cut();
+    ppf.open_box(BoxKind::Box, 0);
+    ppf.str("- Or specifying its type:");
+    ppf.space();
+    tagged(ppf, TAG_INFO, &format!("let theValue: TheModule.theType = {lid}"));
+    ppf.close_box();
+    ppf.close_box();
+    ppf.cut();
+    ppf.str("- ");
+    ppf.open_box(BoxKind::Box, 0);
+    ppf.str("Constructors and modules are both capitalized.");
+    ppf.space();
+    ppf.str("Did you want the latter?");
+    ppf.space();
+    ppf.str("Then instead of ");
+    tagged(ppf, crate::types::printtyp::TAG_DIM, "let foo = Bar");
+    ppf.str(", try ");
+    tagged(ppf, TAG_INFO, "module Foo = Bar");
+    ppf.str(".");
+    ppf.close_box();
+    ppf.close_box();
+    did_you_mean(ppf, hint);
+}
+
 /// `Wrong_name` for the field of a constructor's inline record
 /// (typecore.ml:4957-4961) followed by `spellcheck ppf name valid_names`.
 pub(super) fn print_wrong_name_inline_record_field(
