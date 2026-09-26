@@ -5778,6 +5778,10 @@ fn format_compiler_warning_report(
     );
     let mut after_blank = false;
     let message = warning.warning.message();
+    // An empty message still prints its indented message line.
+    if message.is_empty() {
+        output.push_str("  \n");
+    }
     for (idx, line) in message.lines().enumerate() {
         let indent_line = match warning.warning {
             crate::diagnostics::Warning::NonClosedRecordPattern { .. } => idx == 0,
