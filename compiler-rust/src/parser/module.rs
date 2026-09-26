@@ -676,10 +676,6 @@ pub fn parse_signature(p: &mut Parser<'_>) -> Signature {
             items.push(item);
             continue;
         }
-        // Skip semicolons
-        while p.token == Token::Semicolon {
-            p.next();
-        }
 
         match parse_signature_item(p) {
             Some(item) => items.push(item),
@@ -1699,11 +1695,6 @@ fn parse_signature_in_braces(p: &mut Parser<'_>) -> Vec<SignatureItem> {
     let mut items = vec![];
 
     loop {
-        // Skip semicolons
-        while p.token == Token::Semicolon {
-            p.next();
-        }
-
         match parse_signature_item(p) {
             Some(item) => items.push(item),
             None => {
