@@ -1180,6 +1180,9 @@ pub struct TypeCheckContext<'a> {
     /// Mirrors OCaml Env.check_usage/Delayed_checks: lookup marks a binding as
     /// used, and the warning is emitted only when delayed checks are forced.
     value_usage_checks: Vec<ValueUsageCheck>,
+    /// Indices into `value_usage_checks` by declaration location, so marking
+    /// a use does not scan every pending check.
+    value_usage_index: HashMap<Location, smallvec::SmallVec<[u32; 1]>>,
     /// Useful match witnesses retyped when delayed checks are flushed.
     delayed_unused_witnesses: Vec<DelayedUnusedCheck>,
     generated_pattern_constructors: Vec<(String, crate::types::ConstructorDescription)>,
@@ -1288,6 +1291,7 @@ impl<'a> TypeCheckContext<'a> {
             diagnostics: Vec::new(),
             warnings: Vec::new(),
             value_usage_checks: Vec::new(),
+            value_usage_index: HashMap::new(),
             delayed_unused_witnesses: Vec::new(),
             generated_pattern_constructors: Vec::new(),
             generated_pattern_labels: Vec::new(),
@@ -1368,7 +1372,23 @@ impl<'a> TypeCheckContext<'a> {
     }
 
     pub fn truncate_value_usage_checks(&mut self, checkpoint: usize) {
-        self.value_usage_checks.truncate(checkpoint);
+        for check in self.value_usage_checks.drain(checkpoint.min(self.value_usage_checks.len())..) {
+            if let Some(indices) = self.value_usage_index.get_mut(&check.val_loc) {
+                indices.retain(|idx| (*idx as usize) < checkpoint);
+                if indices.is_empty() {
+                    self.value_usage_index.remove(&check.val_loc);
+                }
+            }
+        }
+    }
+
+    fn push_value_usage_check(&mut self, check: ValueUsageCheck) {
+        let idx = u32::try_from(self.value_usage_checks.len()).expect("too many value usage checks");
+        self.value_usage_index
+            .entry(check.val_loc)
+            .or_default()
+            .push(idx);
+        self.value_usage_checks.push(check);
     }
 
     pub fn add_value_usage_check(
@@ -1386,7 +1406,7 @@ impl<'a> TypeCheckContext<'a> {
         }
 
         let is_error = self.warning_config.is_error(&warning);
-        self.value_usage_checks.push(ValueUsageCheck {
+        self.push_value_usage_check(ValueUsageCheck {
             name: name.to_string(),
             val_loc,
             warning_loc,
@@ -1397,14 +1417,19 @@ impl<'a> TypeCheckContext<'a> {
     }
 
     pub fn mark_value_used(&mut self, name: &str, val_loc: Location) {
-        for check in &mut self.value_usage_checks {
-            if check.name == name && check.val_loc == val_loc {
+        let Some(indices) = self.value_usage_index.get(&val_loc) else {
+            return;
+        };
+        for &idx in indices {
+            let check = &mut self.value_usage_checks[idx as usize];
+            if check.name == name {
                 check.used = true;
             }
         }
     }
 
     pub fn flush_value_usage_checks(&mut self) {
+        self.value_usage_index.clear();
         for check in std::mem::take(&mut self.value_usage_checks) {
             if !check.used {
                 self.warnings.push(TypeCoreWarning {
@@ -35302,7 +35327,7 @@ mod tests {
         let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
         let val_loc = Location::none();
         for _ in 0..2 {
-            tctx.value_usage_checks.push(ValueUsageCheck {
+            tctx.push_value_usage_check(ValueUsageCheck {
                 name: "x".to_string(),
                 val_loc,
                 warning_loc: LocIdx::none(),
