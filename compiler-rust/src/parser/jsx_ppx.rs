@@ -197,6 +197,19 @@ pub fn transform_structure_with_warnings_result(
     initial_version: i32,
     arena: &mut ParseArena,
 ) -> JsxPreprocessorResult<(Structure, Vec<JsxPreprocessorWarning>)> {
+    let (result, warnings) =
+        transform_structure_collecting_warnings(structure, initial_version, arena);
+    result.map(|structure| (structure, warnings))
+}
+
+/// Like [`transform_structure_with_warnings_result`], but also returns the
+/// warnings reported before a fatal error: OCaml prints each warning as it is
+/// raised (`Location.prerr_warning`), before the error escapes.
+pub fn transform_structure_collecting_warnings(
+    structure: Structure,
+    initial_version: i32,
+    arena: &mut ParseArena,
+) -> (JsxPreprocessorResult<Structure>, Vec<JsxPreprocessorWarning>) {
     // Extract file name from first item's location
     let file_name = structure
         .first()
@@ -221,11 +234,11 @@ pub fn transform_structure_with_warnings_result(
     for item in structure {
         let items = transform_structure_item_multi(item, &mut config, arena, &mut warnings);
         if let Some(error) = config.fatal_error.take() {
-            return Err(error);
+            return (Err(error), warnings);
         }
         result.extend(items);
     }
-    Ok((result, warnings))
+    (Ok(result), warnings)
 }
 
 /// Transform a signature, applying JSX PPX transformations

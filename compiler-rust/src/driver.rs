@@ -4590,14 +4590,46 @@ fn format_repeated_name_report(
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
-fn non_generalizable_help_message(intro: &str, rendered_type: &str) -> String {
-    const ERROR: &str = "\x1b[1;31m";
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
+/// `non_generalizable_msg` (typemod.ml:1805-1812) around the fallback
+/// message of `Non_generalizable` / `Non_generalizable_module`
+/// (typemod.ml:1856-1874), inside `@[<v>...@]`.
+fn render_non_generalizable_message(intro: &str, rendered_type: &str) -> String {
+    use crate::types::printtyp::{TAG_ERROR, TAG_INFO, TAG_RESET};
+    type_clash::render_error_message(|ppf| {
+        ppf.open_vbox(0);
+        ppf.open_box(crate::parser::formatter::BoxKind::Box, 0);
+        ppf.str(intro);
+        ppf.cut();
+        ppf.string_as(0, TAG_ERROR);
+        ppf.str(rendered_type);
+        ppf.string_as(0, TAG_RESET);
+        ppf.close_box();
+        ppf.cut();
+        ppf.cut();
+        ppf.open_box(crate::parser::formatter::BoxKind::Box, 0);
+        ppf.str("This happens when the type system senses there's a mutation/side-effect,");
+        ppf.space();
+        ppf.str("in combination with a polymorphic value.");
+        ppf.cut();
+        ppf.string_as(0, TAG_INFO);
+        ppf.str("Using or annotating that value usually solves it.");
+        ppf.string_as(0, TAG_RESET);
+        ppf.close_box();
+        ppf.close_box();
+    })
+}
 
-    format!(
-        "{intro}\n{ERROR}{rendered_type}{RESET}\n\nThis happens when the type system senses there's a mutation/side-effect,\nin combination with a polymorphic value.\n{INFO}Using or annotating that value usually solves it.{RESET}"
-    )
+fn format_compiler_error_report_formatted_from_location(
+    source: &str,
+    filename: &str,
+    loc: &Location,
+    message: &str,
+) -> String {
+    let mut output = String::new();
+    push_compiler_error_report_header_from_location(&mut output, source, filename, loc);
+    output.push_str(&code_frame::apply_message_styles(message));
+    output.push_str("\n\n");
+    output
 }
 
 fn format_non_generalizable_report(
@@ -4608,11 +4640,11 @@ fn format_non_generalizable_report(
     typ: TypeExprRef,
 ) -> String {
     let rendered_type = format_non_generalizable_type_expr(type_ctx, typ);
-    let message = non_generalizable_help_message(
+    let message = render_non_generalizable_message(
         "This expression's type contains type variables that cannot be generalized:",
         &rendered_type,
     );
-    format_compiler_error_report_from_location(source, filename, loc, &message)
+    format_compiler_error_report_formatted_from_location(source, filename, loc, &message)
 }
 
 fn format_non_generalizable_module_report(
@@ -4622,31 +4654,12 @@ fn format_non_generalizable_module_report(
     type_ctx: &TypeContext,
     mty: &crate::types::decl::ModuleType,
 ) -> String {
-    const ERROR: &str = "\x1b[1;31m";
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let rendered_type = crate::types::includemod::format_module_type_show_weak(type_ctx, mty);
-    let mut output = String::new();
-
-    push_compiler_error_report_header_from_location(&mut output, source, filename, loc);
-    output.push_str(
-        "  The type of this module contains type variables that cannot be generalized:\n",
+    let message = render_non_generalizable_message(
+        "The type of this module contains type variables that cannot be generalized:",
+        &rendered_type,
     );
-    output.push_str("  ");
-    output.push_str(ERROR);
-    output.push_str(&rendered_type);
-    output.push_str(RESET);
-    output.push('\n');
-    output.push_str("  \n");
-    output.push_str("  This happens when the type system senses there's a mutation/side-effect,\n");
-    output.push_str("  in combination with a polymorphic value.\n");
-    output.push_str("  ");
-    output.push_str(INFO);
-    output.push_str("Using or annotating that value usually solves it.");
-    output.push_str(RESET);
-    output.push_str("\n\n");
-    output
+    format_compiler_error_report_formatted_from_location(source, filename, loc, &message)
 }
 
 fn format_interface_not_compiled_report(
@@ -11284,12 +11297,11 @@ pub fn run_implementation_frontend(
             parser.arena(),
             filename,
         )?;
-        let (structure, jsx_warnings) = jsx_ppx::transform_structure_with_warnings_result(
+        let (structure, jsx_warnings) = jsx_ppx::transform_structure_collecting_warnings(
             structure,
             jsx_version,
             parser.arena_mut(),
-        )
-        .map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
+        );
         let jsx_warnings = jsx_preprocessor_warnings_to_ppx(parser.arena_mut(), jsx_warnings);
         ppx_warnings_have_errors |= format_ppx_warnings_with_config(
             parser.arena(),
@@ -11299,7 +11311,7 @@ pub fn run_implementation_frontend(
             &jsx_warnings,
             out,
         );
-        structure
+        structure.map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?
     } else {
         structure
     };
@@ -12913,12 +12925,11 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 parser.arena(),
                 filename,
             )?;
-            let (structure, jsx_warnings) = jsx_ppx::transform_structure_with_warnings_result(
+            let (structure, jsx_warnings) = jsx_ppx::transform_structure_collecting_warnings(
                 structure,
                 jsx_version,
                 parser.arena_mut(),
-            )
-            .map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
+            );
             let jsx_warnings = jsx_preprocessor_warnings_to_ppx(parser.arena_mut(), jsx_warnings);
             let _ = emit_ppx_warnings_with_config(
                 parser.arena(),
@@ -12927,7 +12938,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 &file_warning_config,
                 &jsx_warnings,
             );
-            structure
+            structure.map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?
         } else {
             structure
         };
