@@ -1484,21 +1484,24 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         ));
         positional_index += 1;
 
+        // `parse_comma_delimited_region` after a node (res_core.ml:1073-1100).
         if !p.optional(&Token::Comma) {
-            if super::grammar::is_list_element(&super::grammar::Grammar::TypeParameters, &p.token) {
+            if p.token == Token::Eof || p.token == Token::Rparen {
+                break;
+            } else if super::grammar::is_list_element(
+                &super::grammar::Grammar::TypeParameters,
+                &p.token,
+            ) {
                 // Missing comma but next token looks like another type parameter.
                 // Emit "Did you forget a `,` here?" and continue parsing.
                 p.expect(Token::Comma);
-            } else if p.token != Token::Eof
-                && p.token != Token::Rparen
-                && !super::core::recover::should_abort_list_parse(p)
-            {
-                p.expect(Token::Comma);
+            } else {
+                if !super::core::recover::should_abort_list_parse(p) {
+                    p.expect(Token::Comma);
+                }
                 if p.token == Token::Semicolon {
                     p.next();
                 }
-            } else {
-                break;
             }
         }
     }
