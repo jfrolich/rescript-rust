@@ -33068,6 +33068,14 @@ fn partial_pred(
     let unify_snapshot = tctx.unify_state.snapshot_backtrack_state();
     let diagnostic_len = tctx.diagnostics.len();
     let mut state = PatternState::new();
+    // `let env = ref env` (typecore.ml:1744): GADT equations added while
+    // typing the counter-example go to a fresh env, not one left behind by
+    // earlier pattern typing.
+    let saved_unify_env = tctx
+        .unify_state
+        .env()
+        .map(crate::types::env::Env::clone_preserve_id);
+    tctx.unify_state.set_env(env);
     // Ctype.with_passive_variants (ctype.ml:2061-2072).
     let passive = ctx.set_passive_variants(true);
     let result = type_pattern_with_existentials_at_level(
@@ -33082,6 +33090,12 @@ fn partial_pred(
         explode,
     );
     ctx.set_passive_variants(passive);
+    match saved_unify_env {
+        Some(saved) => tctx.unify_state.set_env(&saved),
+        None => {
+            tctx.unify_state.take_env();
+        }
+    }
     ctx.restore_type_state(type_snapshot);
     tctx.unify_state.restore_backtrack_state(unify_snapshot);
     tctx.diagnostics.truncate(diagnostic_len);
