@@ -747,11 +747,13 @@ fn parse_atomic_typ_expr_with_start(
                 let lid_idx = p.push_lident_static("unit");
                 ast_helper::make_type_constr(lid_idx, vec![], lid_loc, LocIdx::none())
             } else {
-                // Parenthesized type or tuple
-                let typ = parse_typ_expr(p);
+                // Parenthesized type or tuple. res_core.ml:4618-4622 calls
+                // `parse_typ_expr p` and `parse_tuple_type` without the
+                // inline-record context.
+                let typ = without_inline_record_context(p, parse_typ_expr);
                 if p.token == Token::Comma {
                     // Tuple type
-                    parse_tuple_type(p, start_pos_idx, typ)
+                    without_inline_record_context(p, |p| parse_tuple_type(p, start_pos_idx, typ))
                 } else {
                     p.expect(Token::Rparen);
                     // OCaml includes the surrounding parentheses in the type's location.
@@ -770,7 +772,9 @@ fn parse_atomic_typ_expr_with_start(
             }
         }
         Token::Lbrace => parse_record_or_object_type(p),
-        Token::Lbracket => parse_poly_variant_type(p),
+        // res_core.ml:4669-4671 calls `parse_polymorphic_variant_type ~attrs p`
+        // without the inline-record context.
+        Token::Lbracket => without_inline_record_context(p, parse_poly_variant_type),
         Token::Module => {
             p.next();
             parse_package_type_with_parens(p, start_pos_idx)
