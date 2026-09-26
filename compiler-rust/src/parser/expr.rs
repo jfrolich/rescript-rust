@@ -598,8 +598,12 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
             // async arrow function
             // Capture the async keyword position for Pexp_newtype locations
             let async_pos_idx = p.start_pos_idx();
+            // OCaml res_core.ml:2366-2374 runs `is_es6_arrow_expression` with
+            // `async` still the current token.
+            let is_arrow =
+                super::core::is_es6_arrow_expression(p, context == ExprContext::TernaryTrueBranch);
             p.next();
-            if super::core::is_es6_arrow_expression(p, context == ExprContext::TernaryTrueBranch) {
+            if is_arrow {
                 // Pass attrs to arrow expression - they're consumed
                 // OCaml: Pexp_fun location starts AFTER async (not including it)
                 // But Pexp_newtype location DOES include async
