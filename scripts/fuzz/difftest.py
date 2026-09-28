@@ -199,7 +199,7 @@ def _compare_pipeline(
     elif ov == "ok" and rv != "ok":
         kind = "rust_rejects"
         sig = "rust: " + signature(r[-1].stderr)
-    elif not check_text:
+    elif not check_text or any(_RUST_ONLY_SYNTAX.search(src) for src in case.values()):
         kind = "same"
     elif ov != "ok":
         kind = "same" if _norm(o[-1].stderr) == _norm(r[-1].stderr) else "msg_diff"
@@ -213,7 +213,42 @@ def _compare_pipeline(
 
 
 def _norm(s: str) -> str:
-    return s.strip()
+    return _accepted(s).strip()
+
+
+# Accepted differences (not compared):
+# - `%raw` JavaScript parse errors: OCaml reports Flow's message as warning 103
+#   (bs_flow_ast_utils.ml check_flow_errors), Rust uses a different JS parser.
+# - The module listing under "Signature mismatch:".
+_BLOCK_START = re.compile(r"^  (?:\x1b\[[0-9;]*m)*(?:Warning number \d+|We've found a bug for you!|Syntax error!)")
+_FFI_OTHER = ("such externals are unsafe", "is redundant here")
+
+
+def _accepted(s: str) -> str:
+    blocks, cur = [], []
+    for line in s.split("\n"):
+        if _BLOCK_START.match(line) and cur:
+            blocks.append(cur)
+            cur = []
+        cur.append(line)
+    blocks.append(cur)
+    out = []
+    for b in blocks:
+        plain = [ANSI.sub("", x) for x in b]
+        ffi = [x for x in plain if "FFI warning: " in x]
+        if ffi and not any(o in x for x in ffi for o in _FFI_OTHER):
+            continue
+        for i, x in enumerate(plain):
+            if x.strip() == "Signature mismatch:":
+                b = b[: i + 1]
+                break
+        out.append("\n".join(b))
+    return "\n".join(out)
+
+
+# `inline for` is Rust-only comptime syntax (projects/comptime), so OCaml's
+# diagnostics for such sources are not a reference.
+_RUST_ONLY_SYNTAX = re.compile(r"\binline\s+for\b")
 
 
 def case_hash(case: dict[str, str]) -> str:
