@@ -246,7 +246,7 @@ pub enum UnifyMode {
 /// - Backtracking information
 pub struct UnifyState {
     /// Set of already unified type pairs.
-    unified_pairs: HashSet<(u32, u32)>,
+    unified_pairs: UnifiedPairSet,
 
     /// Current unification mode.
     pub mode: UnifyMode,
@@ -280,10 +280,44 @@ pub struct UnifyState {
     pub newtype_level: Option<i32>,
 }
 
+/// Multiplicative hash for the packed type-pair keys of `UnifiedPairSet`.
+#[derive(Default, Clone, Copy)]
+struct PairKeyHasher(u64);
+
+impl std::hash::Hasher for PairKeyHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ u64::from(b)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+
+    #[inline]
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (n ^ (n >> 29)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+/// Unordered type pairs already entered by `unify`, packed as
+/// `(smaller id << 32) | larger id`.
+type UnifiedPairSet =
+    std::collections::HashSet<u64, std::hash::BuildHasherDefault<PairKeyHasher>>;
+
+#[inline]
+fn unified_pair_key(t1: TypeExprRef, t2: TypeExprRef) -> u64 {
+    let (lo, hi) = if t1.0 < t2.0 { (t1.0, t2.0) } else { (t2.0, t1.0) };
+    (u64::from(lo) << 32) | u64::from(hi)
+}
+
 /// Snapshot of mutable unifier state for OCaml-style speculative pattern
 /// backtracking.
 pub(crate) struct UnifyStateSnapshot {
-    unified_pairs: HashSet<(u32, u32)>,
+    unified_pairs: UnifiedPairSet,
     mode: UnifyMode,
     generate_equations: bool,
     assume_injective: bool,
@@ -299,7 +333,7 @@ impl UnifyState {
     /// Create a new unify state.
     pub fn new() -> Self {
         UnifyState {
-            unified_pairs: HashSet::new(),
+            unified_pairs: UnifiedPairSet::default(),
             mode: UnifyMode::Expression,
             generate_equations: false,
             assume_injective: false,
@@ -315,7 +349,7 @@ impl UnifyState {
     /// Create a state for pattern matching.
     pub fn pattern_mode() -> Self {
         UnifyState {
-            unified_pairs: HashSet::new(),
+            unified_pairs: UnifiedPairSet::default(),
             mode: UnifyMode::Pattern,
             generate_equations: true,
             assume_injective: false,
@@ -427,22 +461,12 @@ impl UnifyState {
 
     /// Check if two types have already been unified.
     pub fn already_unified(&self, t1: TypeExprRef, t2: TypeExprRef) -> bool {
-        let key = if t1.0 < t2.0 {
-            (t1.0, t2.0)
-        } else {
-            (t2.0, t1.0)
-        };
-        self.unified_pairs.contains(&key)
+        self.unified_pairs.contains(&unified_pair_key(t1, t2))
     }
 
     /// Mark two types as unified.
     pub fn mark_unified(&mut self, t1: TypeExprRef, t2: TypeExprRef) {
-        let key = if t1.0 < t2.0 {
-            (t1.0, t2.0)
-        } else {
-            (t2.0, t1.0)
-        };
-        self.unified_pairs.insert(key);
+        self.unified_pairs.insert(unified_pair_key(t1, t2));
     }
 }
 
@@ -9738,7 +9762,7 @@ pub fn copy_type_deep(
 pub(crate) struct CopyCache {
     /// Node identity cache: maps original TypeExprRef → copied TypeExprRef.
     /// Ensures that if the same node is visited twice, we reuse the copy.
-    nodes: HashMap<TypeExprRef, TypeExprRef>,
+    nodes: super::type_expr::TypeExprRefMap<TypeExprRef>,
 
     /// Scoped marker table for OCaml Ctype.copy variant recursion handling.
     /// Mirrors `more.desc <- Tsubst(Ttuple [more'; t])` without mutating
@@ -9757,7 +9781,7 @@ struct CopyPartial {
 impl CopyCache {
     pub(crate) fn new() -> Self {
         CopyCache {
-            nodes: HashMap::new(),
+            nodes: super::type_expr::TypeExprRefMap::new(),
             row_more_markers: HashMap::new(),
             partial: None,
         }
@@ -9765,7 +9789,7 @@ impl CopyCache {
 
     fn new_partial(ctx: &TypeContext, ty: TypeExprRef, keep: bool) -> Self {
         CopyCache {
-            nodes: HashMap::new(),
+            nodes: super::type_expr::TypeExprRefMap::new(),
             row_more_markers: HashMap::new(),
             partial: Some(CopyPartial {
                 keep,
@@ -10406,7 +10430,7 @@ pub(crate) fn copy_type_cached(
     }
 
     // Preserve sharing for already-copied nodes (OCaml Tsubst behavior).
-    if let Some(&cached) = cache.nodes.get(&ty) {
+    if let Some(&cached) = cache.nodes.get(ty) {
         return cached;
     }
 
@@ -10613,10 +10637,9 @@ pub(crate) fn copy_type_cached(
                         // project through the local copy cache to recover the same
                         // representative.
                         let found_cached = cache
-                            .nodes
-                            .get(&found_ty)
+                            .nodes.get(found_ty)
                             .copied()
-                            .or_else(|| cache.nodes.get(&found_source).copied());
+                            .or_else(|| cache.nodes.get(found_source).copied());
                         let stale_relinked_alias_hit = found_cached.is_none()
                             && {
                                 let found_desc = ctx.get_desc(found_source);
