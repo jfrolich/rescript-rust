@@ -185,6 +185,10 @@ def _compare_pipeline(
     if ov == "crash" and rv == "crash" and _norm(o[-1].stderr) == _norm(r[-1].stderr):
         # Both print the same uncaught-exception report: that is parity.
         kind = "same"
+    elif ov == "timeout":
+        # The oracle did not terminate (e.g. OCaml recursing until its much
+        # larger stack overflows), so there is no verdict to compare against.
+        kind = "ocaml_crash"
     elif "crash" in (rv,) or rv == "timeout":
         kind = "crash"
         sig = f"rust-{rv}: " + (signature(r[-1].stderr) if r else "")

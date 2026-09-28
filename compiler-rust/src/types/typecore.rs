@@ -18418,160 +18418,6 @@ fn apply_letmodule_local_path_cleanup<'a>(
     }
 }
 
-fn letmodule_local_escape_type(
-    ctx: &TypeContext,
-    ty: TypeExprRef,
-    module_id: &Ident,
-    seen: &mut HashSet<TypeExprRef>,
-) -> Option<TypeExprRef> {
-    let ty = ctx.repr(ty);
-    if !seen.insert(ty) {
-        return None;
-    }
-
-    let desc = ctx.get_desc(ty).clone();
-    if let TypeDesc::Tconstr { path, .. } = &desc
-        && letmodule_path_root_is_module(path, module_id)
-    {
-        return Some(ty);
-    }
-
-    let mut found = None;
-    crate::types::iter_type_expr(ctx, ty, |child| {
-        if found.is_none() {
-            found = letmodule_local_escape_type(ctx, child, module_id, seen);
-        }
-    });
-    found
-}
-
-// OCaml enforces `let module` scoping through the unification that happens
-// while typing the exposed body. Preserve that diagnostic split here: an
-// escaping function parameter reports like `Pattern_type_clash`, while an
-// escaping result expression reports like `Expr_type_clash`.
-enum LetModuleLocalEscapeSite {
-    Pattern { loc: LocIdx, ty: TypeExprRef },
-    Expression { loc: LocIdx, ty: TypeExprRef },
-}
-
-fn letmodule_local_escape_pattern_site(
-    ctx: &TypeContext,
-    pat: &Pattern,
-    module_id: &Ident,
-) -> Option<(LocIdx, TypeExprRef)> {
-    let own_escape = || {
-        let escaped_ty =
-            letmodule_local_escape_type(ctx, pat.pat_type, module_id, &mut HashSet::new())?;
-        let loc = pat
-            .pat_extra
-            .iter()
-            .find_map(|(extra, loc, _)| {
-                matches!(extra, PatExtra::Tpat_constraint(_)).then_some(*loc)
-            })
-            .unwrap_or(pat.pat_loc);
-        Some((loc, escaped_ty))
-    };
-
-    if let Some(escape) = own_escape() {
-        return Some(escape);
-    }
-
-    match &pat.pat_desc {
-        PatternDesc::Tpat_alias(inner, _, _) => {
-            letmodule_local_escape_pattern_site(ctx, inner, module_id)
-        }
-        PatternDesc::Tpat_variant(_, Some(arg), _) => {
-            letmodule_local_escape_pattern_site(ctx, arg, module_id)
-        }
-        PatternDesc::Tpat_or(left, right, _) => {
-            letmodule_local_escape_pattern_site(ctx, left, module_id)
-                .or_else(|| letmodule_local_escape_pattern_site(ctx, right, module_id))
-        }
-        PatternDesc::Tpat_tuple(items)
-        | PatternDesc::Tpat_array(items)
-        | PatternDesc::Tpat_construct(_, _, items) => items
-            .iter()
-            .find_map(|item| letmodule_local_escape_pattern_site(ctx, item, module_id)),
-        PatternDesc::Tpat_record(fields, _, _) => fields.iter().find_map(|(_, _, field_pat, _)| {
-            letmodule_local_escape_pattern_site(ctx, field_pat, module_id)
-        }),
-        PatternDesc::Tpat_any
-        | PatternDesc::Tpat_var(_, _)
-        | PatternDesc::Tpat_constant(_)
-        | PatternDesc::Tpat_variant(_, None, _) => None,
-    }
-}
-
-fn letmodule_local_escape_function_param_site(
-    ctx: &TypeContext,
-    param: &FunctionParam,
-    module_id: &Ident,
-) -> Option<(LocIdx, TypeExprRef)> {
-    letmodule_local_escape_pattern_site(ctx, &param.fp_pat, module_id)
-}
-
-fn letmodule_local_escape_expression_site(
-    ctx: &TypeContext,
-    expr: &Expression,
-    module_id: &Ident,
-) -> Option<LetModuleLocalEscapeSite> {
-    let own_escape = || {
-        let escaped_ty =
-            letmodule_local_escape_type(ctx, expr.exp_type, module_id, &mut HashSet::new())?;
-        let loc = expr
-            .exp_extra
-            .iter()
-            .find_map(|(extra, loc, _)| {
-                matches!(
-                    extra,
-                    ExpExtra::Texp_constraint(_) | ExpExtra::Texp_coerce(_)
-                )
-                .then_some(*loc)
-            })
-            .unwrap_or(expr.exp_loc);
-        Some(LetModuleLocalEscapeSite::Expression {
-            loc,
-            ty: escaped_ty,
-        })
-    };
-
-    match &expr.exp_desc {
-        ExpressionDesc::Texp_let(_, _, body)
-        | ExpressionDesc::Texp_letmodule(_, _, _, body)
-        | ExpressionDesc::Texp_letexception(_, body)
-        | ExpressionDesc::Texp_sequence(_, body) => {
-            letmodule_local_escape_expression_site(ctx, body, module_id).or_else(own_escape)
-        }
-        ExpressionDesc::Texp_function { params, body, .. } => params
-            .iter()
-            .find_map(|param| {
-                letmodule_local_escape_function_param_site(ctx, param, module_id)
-                    .map(|(loc, ty)| LetModuleLocalEscapeSite::Pattern { loc, ty })
-            })
-            .or_else(|| letmodule_local_escape_expression_site(ctx, body, module_id))
-            .or_else(own_escape),
-        ExpressionDesc::Texp_ifthenelse(_, ifso, ifnot) => {
-            letmodule_local_escape_expression_site(ctx, ifso, module_id)
-                .or_else(|| {
-                    ifnot.as_deref().and_then(|expr| {
-                        letmodule_local_escape_expression_site(ctx, expr, module_id)
-                    })
-                })
-                .or_else(own_escape)
-        }
-        ExpressionDesc::Texp_match(_, cases, exn_cases, _) => cases
-            .iter()
-            .chain(exn_cases.iter())
-            .find_map(|case| letmodule_local_escape_expression_site(ctx, &case.c_rhs, module_id))
-            .or_else(own_escape),
-        ExpressionDesc::Texp_try(_, cases) => cases
-            .iter()
-            .find_map(|case| letmodule_local_escape_expression_site(ctx, &case.c_rhs, module_id))
-            .or_else(own_escape),
-        _ => own_escape(),
-    }
-}
-
 fn expression_result_loc(expr: &Expression) -> LocIdx {
     match &expr.exp_desc {
         ExpressionDesc::Texp_let(_, _, body)
@@ -19277,7 +19123,22 @@ fn type_letmodule(
         // Type check the body in the extended environment. Match OCaml let-module
         // scoping by abstracting local module-rooted type paths out of the exposed
         // expression type before unifying with the surrounding expectation.
-        let typed_body = type_expect(tctx, &body_env, body, expected_ty, None)?;
+        // OCaml typecore.ml `Pexp_letmodule` types the body with `new_env`,
+        // and every unification inside it runs in that env: `update_level`
+        // (ctype.ml:568-578) expands `M.t` before deciding it would escape.
+        let saved_unify_env = tctx
+            .unify_state
+            .env()
+            .map(crate::types::env::Env::clone_preserve_id);
+        tctx.unify_state.set_env(&body_env);
+        let typed_body = type_expect(tctx, &body_env, body, expected_ty, None);
+        match saved_unify_env {
+            Some(saved) => tctx.unify_state.set_env(&saved),
+            None => {
+                tctx.unify_state.take_env();
+            }
+        }
+        let typed_body = typed_body?;
         let rewritten_ty = typed_body.exp_type;
         apply_letmodule_local_path_cleanup(
             ctx,
@@ -19288,38 +19149,6 @@ fn type_letmodule(
             rewritten_ty,
             expected_ty,
         );
-        if let Some(escape_site) = letmodule_local_escape_expression_site(ctx, &typed_body, &mod_id)
-        {
-            let (escape_loc, escaped_ty, is_pattern) = match escape_site {
-                LetModuleLocalEscapeSite::Pattern { loc, ty } => (loc, ty, true),
-                LetModuleLocalEscapeSite::Expression { loc, ty } => (loc, ty, false),
-            };
-            let top_is_package = matches!(
-                &*ctx.get_desc(ctx.repr(rewritten_ty)),
-                TypeDesc::Tpackage { .. }
-            );
-            let (loc, trace) = if top_is_package {
-                (
-                    expression_result_loc(&typed_body),
-                    vec![(rewritten_ty, letmodule_ty), (escaped_ty, letmodule_ty)],
-                )
-            } else {
-                (escape_loc, vec![(escaped_ty, letmodule_ty)])
-            };
-            if is_pattern && !top_is_package {
-                return Err(TypeCoreError::PatternTypeClash {
-                    loc: Some(loc),
-                    trace,
-                    env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
-                });
-            }
-            return Err(TypeCoreError::ExprTypeClash {
-                loc,
-                trace,
-                context: None,
-                env: Some(tctx.type_ctx.store_typed_env(env)),
-            });
-        }
         // NOTE: OCaml does NOT unify body.exp_type with ty_expected here.
         // type_expect already connected them internally. Unifying here would
         // merge the Pexp_tuple's result_ty with the filter_arrow's return_ty,
