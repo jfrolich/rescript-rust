@@ -7229,6 +7229,132 @@ fn mtype_type_paths_sig(
     }
 }
 
+/// `pmd_name`, its loc, `pmd_type`, `pmd_attributes` and `pmd_loc`.
+type RecModuleTypeDecl = (String, LocIdx, crate::parse_arena::ModTypeIdx, Attributes, LocIdx);
+/// The second transition's declarations, `env2`, and the module identifiers.
+type RecModuleTypes = (Vec<crate::types::typedtree::TypedModuleDeclaration>, Env, Vec<Ident>);
+
+/// OCaml `Typemod.transl_recmodule_modtypes` (typemod.ml:914-981), shared by
+/// `module rec` structures and signatures. Returns the second transition's
+/// declarations, their environment (`env2`) and the module identifiers.
+fn transl_recmodule_modtypes<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    decls: &[RecModuleTypeDecl],
+) -> TypeModResult<RecModuleTypes> {
+    let ctx = tctx.type_ctx;
+    // OCaml transl_recmodule_modtypes creates all recursive module ids
+    // before initializing the definition level or translating any
+    // module-type constraint.
+    let mod_ids = decls
+        .iter()
+        .map(|(name, _, _, _, _)| ctx.create_ident(name))
+        .collect::<Vec<_>>();
+
+    let mut approx_env = env.clone();
+    for id in &mod_ids {
+        let dummy = crate::types::decl::ModuleType::MtyIdent(Path::pident(
+            ctx.create_ident("#recmod#"),
+        ));
+        approx_env.add_module(id.clone(), empty_module_decl(dummy));
+    }
+
+    ctx.init_def(ctx.current_stamp());
+
+    let mut init_decls = Vec::with_capacity(decls.len());
+    for ((_, _, mty_idx, _, _), id) in decls.iter().zip(mod_ids.iter()) {
+        let approx =
+            approx_modtype(tctx, &approx_env, arena, arena.get_mod_type(*mty_idx))?;
+        init_decls.push((id.clone(), approx));
+    }
+
+    let mut env0 = env.clone();
+    for (id, mty) in &init_decls {
+        env0.add_module(id.clone(), empty_module_decl(mty.clone()));
+    }
+
+    // typemod.ml:957: `Warnings.without_warnings (fun () -> transition env0 init)`.
+    let mut dcl1 = Vec::with_capacity(decls.len());
+    for ((name, name_loc, mty_idx, attrs, mb_loc), id) in
+        decls.iter().zip(mod_ids.iter())
+    {
+        let typed_mty = without_warnings(tctx, |tctx| {
+            transl_modtype(tctx, &env0, arena, arena.get_mod_type(*mty_idx))
+        })?;
+        dcl1.push(crate::types::typedtree::TypedModuleDeclaration {
+            md_id: id.clone(),
+            md_name: Located {
+                txt: name.clone(),
+                loc: *name_loc,
+            },
+            md_type: typed_mty,
+            md_attributes: attrs.clone(),
+            md_loc: *mb_loc,
+        });
+    }
+
+    let mut env1 = env.clone();
+    for decl in &dcl1 {
+        env1.add_module(
+            decl.md_id.clone(),
+            empty_module_decl(decl.md_type.mty_type.clone()),
+        );
+    }
+    // OCaml transl_recmodule_modtypes checks recursive-module type
+    // declarations after the first transition environment is built.
+    for ((_, _, mty_idx, _, _), decl) in decls.iter().zip(dcl1.iter()) {
+        check_recmod_type_declarations(
+            ctx,
+            &env1,
+            &mut tctx.persistent_env,
+            arena.get_mod_type(*mty_idx).pmty_loc,
+            &mod_ids,
+            &decl.md_id,
+            &decl.md_type.mty_type,
+        )?;
+    }
+
+    let mut dcl2 = Vec::with_capacity(decls.len());
+    for ((name, name_loc, mty_idx, attrs, mb_loc), id) in
+        decls.iter().zip(mod_ids.iter())
+    {
+        let typed_mty = transl_modtype(tctx, &env1, arena, arena.get_mod_type(*mty_idx))?;
+        dcl2.push(crate::types::typedtree::TypedModuleDeclaration {
+            md_id: id.clone(),
+            md_name: Located {
+                txt: name.clone(),
+                loc: *name_loc,
+            },
+            md_type: typed_mty,
+            md_attributes: attrs.clone(),
+            md_loc: *mb_loc,
+        });
+    }
+
+    let mut rec_env = env.clone();
+    for decl in &dcl2 {
+        rec_env.add_module(
+            decl.md_id.clone(),
+            empty_module_decl(decl.md_type.mty_type.clone()),
+        );
+    }
+    // And again after the second transition environment, before body
+    // typing and recursive module inclusion.
+    for ((_, _, mty_idx, _, _), decl) in decls.iter().zip(dcl2.iter()) {
+        check_recmod_type_declarations(
+            ctx,
+            &rec_env,
+            &mut tctx.persistent_env,
+            arena.get_mod_type(*mty_idx).pmty_loc,
+            &mod_ids,
+            &decl.md_id,
+            &decl.md_type.mty_type,
+        )?;
+    }
+    Ok((dcl2, rec_env, mod_ids))
+}
+
 /// OCaml `Typemod.check_recmod_typedecls` for one module (typemod.ml:591-601)
 /// with `Typedecl.check_recmod_typedecl` (typedecl.ml:2069-2074).
 fn check_recmod_type_declarations(
@@ -17166,6 +17292,27 @@ pub fn transl_signature<'a>(
                     md_loc: md.pmd_loc,
                 })
             }
+            PSigDesc::Psig_recmodule(sdecls) => {
+                // typemod.ml:824-841: transl_recmodule_modtypes, whose env2
+                // (modules added with `~arg:true`, no usage checks) types the
+                // rest of the signature.
+                let rec_type_decls: Vec<RecModuleTypeDecl> = sdecls
+                    .iter()
+                    .map(|pmd| {
+                        (
+                            arena.get_string(pmd.pmd_name.txt).to_string(),
+                            pmd.pmd_name.loc,
+                            pmd.pmd_type,
+                            pmd.pmd_attributes.clone(),
+                            pmd.pmd_loc,
+                        )
+                    })
+                    .collect();
+                let (decls, rec_env, _) =
+                    transl_recmodule_modtypes(tctx, &sig_env, arena, &rec_type_decls)?;
+                sig_env = rec_env;
+                TSigDesc::Tsig_recmodule(decls)
+            }
             PSigDesc::Psig_modtype(mtd) => {
                 let name_str = arena.get_string(mtd.pmtd_name.txt).to_string();
                 // typemod.ml:887-889: `warning_scope pmtd_attributes`.
@@ -21019,114 +21166,15 @@ fn type_structure_item<'a>(
                 ));
             }
 
-            // OCaml transl_recmodule_modtypes creates all recursive module ids
-            // before initializing the definition level or translating any
-            // module-type constraint.
-            let mod_ids = rec_bindings
+            // OCaml transl_recmodule_modtypes (typemod.ml:914-981).
+            let rec_type_decls: Vec<_> = rec_bindings
                 .iter()
-                .map(|(name, _, _, _, _, _)| ctx.create_ident(name))
-                .collect::<Vec<_>>();
-
-            let mut approx_env = env.clone();
-            for id in &mod_ids {
-                let dummy = crate::types::decl::ModuleType::MtyIdent(Path::pident(
-                    ctx.create_ident("#recmod#"),
-                ));
-                approx_env.add_module(id.clone(), empty_module_decl(dummy));
-            }
-
-            ctx.init_def(ctx.current_stamp());
-
-            let mut init_decls = Vec::with_capacity(rec_bindings.len());
-            for ((_, _, _, mty_idx, _, _), id) in rec_bindings.iter().zip(mod_ids.iter()) {
-                let approx =
-                    approx_modtype(tctx, &approx_env, arena, arena.get_mod_type(*mty_idx))?;
-                init_decls.push((id.clone(), approx));
-            }
-
-            let mut env0 = env.clone();
-            for (id, mty) in &init_decls {
-                env0.add_module(id.clone(), empty_module_decl(mty.clone()));
-            }
-
-            // typemod.ml:957: `Warnings.without_warnings (fun () -> transition env0 init)`.
-            let mut dcl1 = Vec::with_capacity(rec_bindings.len());
-            for ((name, name_loc, _, mty_idx, attrs, mb_loc), id) in
-                rec_bindings.iter().zip(mod_ids.iter())
-            {
-                let typed_mty = without_warnings(tctx, |tctx| {
-                    transl_modtype(tctx, &env0, arena, arena.get_mod_type(*mty_idx))
-                })?;
-                dcl1.push(crate::types::typedtree::TypedModuleDeclaration {
-                    md_id: id.clone(),
-                    md_name: Located {
-                        txt: name.clone(),
-                        loc: *name_loc,
-                    },
-                    md_type: typed_mty,
-                    md_attributes: attrs.clone(),
-                    md_loc: *mb_loc,
-                });
-            }
-
-            let mut env1 = env.clone();
-            for decl in &dcl1 {
-                env1.add_module(
-                    decl.md_id.clone(),
-                    empty_module_decl(decl.md_type.mty_type.clone()),
-                );
-            }
-            // OCaml transl_recmodule_modtypes checks recursive-module type
-            // declarations after the first transition environment is built.
-            for ((_, _, _, mty_idx, _, _), decl) in rec_bindings.iter().zip(dcl1.iter()) {
-                check_recmod_type_declarations(
-                    ctx,
-                    &env1,
-                    &mut tctx.persistent_env,
-                    arena.get_mod_type(*mty_idx).pmty_loc,
-                    &mod_ids,
-                    &decl.md_id,
-                    &decl.md_type.mty_type,
-                )?;
-            }
-
-            let mut dcl2 = Vec::with_capacity(rec_bindings.len());
-            for ((name, name_loc, _, mty_idx, attrs, mb_loc), id) in
-                rec_bindings.iter().zip(mod_ids.iter())
-            {
-                let typed_mty = transl_modtype(tctx, &env1, arena, arena.get_mod_type(*mty_idx))?;
-                dcl2.push(crate::types::typedtree::TypedModuleDeclaration {
-                    md_id: id.clone(),
-                    md_name: Located {
-                        txt: name.clone(),
-                        loc: *name_loc,
-                    },
-                    md_type: typed_mty,
-                    md_attributes: attrs.clone(),
-                    md_loc: *mb_loc,
-                });
-            }
-
-            let mut rec_env = env.clone();
-            for decl in &dcl2 {
-                rec_env.add_module(
-                    decl.md_id.clone(),
-                    empty_module_decl(decl.md_type.mty_type.clone()),
-                );
-            }
-            // And again after the second transition environment, before body
-            // typing and recursive module inclusion.
-            for ((_, _, _, mty_idx, _, _), decl) in rec_bindings.iter().zip(dcl2.iter()) {
-                check_recmod_type_declarations(
-                    ctx,
-                    &rec_env,
-                    &mut tctx.persistent_env,
-                    arena.get_mod_type(*mty_idx).pmty_loc,
-                    &mod_ids,
-                    &decl.md_id,
-                    &decl.md_type.mty_type,
-                )?;
-            }
+                .map(|(name, name_loc, _, mty_idx, attrs, mb_loc)| {
+                    (name.clone(), *name_loc, *mty_idx, attrs.clone(), *mb_loc)
+                })
+                .collect();
+            let (dcl2, rec_env, mod_ids) =
+                transl_recmodule_modtypes(tctx, env, arena, &rec_type_decls)?;
 
             // Type-check each module body with the environment produced by the
             // second recursive-module-type transition.
