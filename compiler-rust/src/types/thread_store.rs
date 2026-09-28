@@ -92,6 +92,39 @@ pub(crate) struct SigTypeRegistration {
     pub(crate) decl: Arc<TypeDeclaration>,
 }
 
+/// The type registrations of one store-owned signature, shared by every unit
+/// that loads it, with an exact-path index built on first use.
+#[derive(Debug)]
+pub(crate) struct SigTypeBatch {
+    entries: Box<[SigTypeRegistration]>,
+    exact_index: std::sync::OnceLock<ahash::AHashMap<Path, u32>>,
+}
+
+impl SigTypeBatch {
+    /// The declaration the batch registers last under `path`, as replaying
+    /// its entries into a map keyed by `qualified_path` would leave it.
+    pub(crate) fn find_exact(&self, path: &Path) -> Option<&Arc<TypeDeclaration>> {
+        let index = self.exact_index.get_or_init(|| {
+            let mut index = ahash::AHashMap::with_capacity(self.entries.len());
+            for (position, entry) in self.entries.iter().enumerate() {
+                index.insert(entry.qualified_path.clone(), position as u32);
+            }
+            index
+        });
+        index
+            .get(path)
+            .map(|&position| &self.entries[position as usize].decl)
+    }
+}
+
+impl std::ops::Deref for SigTypeBatch {
+    type Target = [SigTypeRegistration];
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
 /// Shared dependency state for one worker thread.
 pub(crate) struct ThreadTypeStore {
     types: TypeArena,
@@ -116,7 +149,7 @@ pub(crate) struct ThreadTypeStore {
     type_decl_arcs: RefCell<HashMap<usize, Arc<TypeDeclaration>>>,
     /// Per-unit type registrations of a store-owned signature under one module
     /// path, keyed by the signature's item address and that path.
-    sig_type_registrations: RefCell<HashMap<(usize, Path), Arc<[SigTypeRegistration]>>>,
+    sig_type_registrations: RefCell<HashMap<(usize, Path), Arc<SigTypeBatch>>>,
     /// Component-table name indexes of store-owned signatures, keyed by the
     /// signature's address (kept alive by `pers`).
     signature_indexes: RefCell<HashMap<usize, Arc<crate::types::env_lazy::SignatureIndex>>>,
@@ -204,12 +237,15 @@ impl ThreadTypeStore {
         sig: &Signature,
         module_path: &Path,
         build: impl FnOnce() -> Vec<SigTypeRegistration>,
-    ) -> Arc<[SigTypeRegistration]> {
+    ) -> Arc<SigTypeBatch> {
         let key = (sig.as_ptr() as usize, module_path.clone());
         if let Some(found) = self.sig_type_registrations.borrow().get(&key) {
             return found.clone();
         }
-        let built: Arc<[SigTypeRegistration]> = build().into();
+        let built = Arc::new(SigTypeBatch {
+            entries: build().into_boxed_slice(),
+            exact_index: std::sync::OnceLock::new(),
+        });
         self.sig_type_registrations
             .borrow_mut()
             .insert(key, built.clone());

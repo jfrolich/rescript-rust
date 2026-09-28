@@ -362,7 +362,17 @@ pub struct TypeContext {
     /// Used for looking up types via Pdot paths (e.g., "Js.Promise.t").
     type_decl_by_path: RefCell<ahash::AHashMap<smol_str::SmolStr, Arc<super::decl::TypeDeclaration>>>,
     /// Qualified declarations keyed by Path identity, preserving local stamps.
-    type_decl_by_exact_path: RefCell<ahash::AHashMap<Path, Arc<super::decl::TypeDeclaration>>>,
+    /// Only single `Exact` registrations, with their log position; batches
+    /// are kept whole in `exact_path_batches` and probed through their shared
+    /// index, so a unit never copies every dependency type into this map.
+    type_decl_by_exact_path:
+        RefCell<ahash::AHashMap<Path, (usize, Arc<super::decl::TypeDeclaration>)>>,
+    exact_path_batches: RefCell<Vec<(usize, Arc<super::thread_store::SigTypeBatch>)>>,
+    /// Exact-path answers, valid while the log length equals the first field.
+    exact_path_memo: RefCell<(
+        usize,
+        ahash::AHashMap<Path, Option<Arc<super::decl::TypeDeclaration>>>,
+    )>,
     /// Registrations for the four maps above, in registration order. Each map
     /// replays the log up to the present only when it is read: modules
     /// register every type of every loaded dependency but read these maps
@@ -657,7 +667,7 @@ static NEXT_STORE_PIECE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 #[derive(Debug)]
 enum TypeDeclRegistration {
     /// Every type of a store-owned signature, for all four maps.
-    Batch(Arc<[super::thread_store::SigTypeRegistration]>),
+    Batch(Arc<super::thread_store::SigTypeBatch>),
     Name(smol_str::SmolStr, Arc<super::decl::TypeDeclaration>),
     Stamp(i32, Arc<super::decl::TypeDeclaration>),
     Path(smol_str::SmolStr, Arc<super::decl::TypeDeclaration>),
@@ -771,6 +781,8 @@ impl TypeContext {
             type_decl_by_stamp: RefCell::new(ahash::AHashMap::new()),
             type_decl_by_path: RefCell::new(ahash::AHashMap::new()),
             type_decl_by_exact_path: RefCell::new(ahash::AHashMap::new()),
+            exact_path_batches: RefCell::new(Vec::new()),
+            exact_path_memo: RefCell::new((0, ahash::AHashMap::new())),
             type_decl_log: RefCell::new(Vec::new()),
             type_decl_log_replayed: Default::default(),
             type_item_by_path: RefCell::new(ahash::AHashMap::new()),
@@ -1042,7 +1054,7 @@ impl TypeContext {
     /// each entry.
     pub(crate) fn register_sig_type_registrations(
         &self,
-        registrations: &Arc<[super::thread_store::SigTypeRegistration]>,
+        registrations: &Arc<super::thread_store::SigTypeBatch>,
     ) {
         self.poison_store_build_for("register_sig_type_registrations");
         self.type_decl_log
@@ -1127,19 +1139,15 @@ impl TypeContext {
             }
             _ => {
                 let mut by_exact_path = self.type_decl_by_exact_path.borrow_mut();
-                by_exact_path.reserve(additional);
-                for entry in pending {
+                let mut batches = self.exact_path_batches.borrow_mut();
+                for (offset, entry) in pending.iter().enumerate() {
+                    let position = start + offset;
                     match entry {
                         TypeDeclRegistration::Batch(registrations) => {
-                            for registration in registrations.iter() {
-                                by_exact_path.insert(
-                                    registration.qualified_path.clone(),
-                                    registration.decl.clone(),
-                                );
-                            }
+                            batches.push((position, registrations.clone()));
                         }
                         TypeDeclRegistration::Exact(path, decl) => {
-                            by_exact_path.insert(path.clone(), decl.clone());
+                            by_exact_path.insert(path.clone(), (position, decl.clone()));
                         }
                         _ => {}
                     }
@@ -1902,19 +1910,40 @@ impl TypeContext {
     }
 
     /// Look up a qualified declaration by exact Path identity.
+    /// The declaration registered last under exactly `path`.
     pub fn find_type_decl_by_exact_path(
         &self,
         path: &Path,
-    ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+    ) -> Option<Arc<super::decl::TypeDeclaration>> {
         self.replay_type_decl_log(3);
-        let store = self.type_decl_by_exact_path.borrow();
-        if store.contains_key(path) {
-            Some(std::cell::Ref::map(store, |entries| {
-                entries.get(path).expect("checked exact type path").as_ref()
-            }))
-        } else {
-            None
+        let log_len = self.type_decl_log.borrow().len();
+        {
+            let mut memo = self.exact_path_memo.borrow_mut();
+            if memo.0 != log_len {
+                memo.0 = log_len;
+                memo.1.clear();
+            } else if let Some(found) = memo.1.get(path) {
+                return found.clone();
+            }
         }
+        let singles = self.type_decl_by_exact_path.borrow();
+        let single = singles.get(path);
+        let mut found = None;
+        for (position, batch) in self.exact_path_batches.borrow().iter().rev() {
+            if single.is_some_and(|(single_position, _)| position < single_position) {
+                break;
+            }
+            if let Some(decl) = batch.find_exact(path) {
+                found = Some(decl.clone());
+                break;
+            }
+        }
+        let found = found.or_else(|| single.map(|(_, decl)| decl.clone()));
+        self.exact_path_memo
+            .borrow_mut()
+            .1
+            .insert(path.clone(), found.clone());
+        found
     }
 
     // ========================================================================
