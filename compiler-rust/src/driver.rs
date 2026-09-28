@@ -5798,6 +5798,9 @@ fn format_compiler_warning_report(
             crate::diagnostics::Warning::FragileMatch { .. } => idx == 0,
             crate::diagnostics::Warning::FragileLiteralPattern => idx == 0,
             crate::diagnostics::Warning::UnreachableCase => idx == 0,
+            // warnings.ml:412-438 carries its own indentation after the
+            // first line; the printed return type keeps Format's layout.
+            crate::diagnostics::Warning::BsToplevelExpressionUnit { .. } => idx == 0,
             crate::diagnostics::Warning::BsRecordRestOptionalOverlap { .. } => idx == 0,
             crate::diagnostics::Warning::UnusedConstructor { .. }
             | crate::diagnostics::Warning::UnusedExtension { .. } => idx == 0,

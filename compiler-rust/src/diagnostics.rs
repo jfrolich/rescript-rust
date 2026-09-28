@@ -546,7 +546,7 @@ and may change in future versions."
                     .unwrap_or_else(|| "something that is not `unit`".to_string());
                 let mut message = format!(
                     "This{}is at the top level and is expected to return `unit`. \
-                     But it's returning {}.\n\n\
+                     But it's returning {}.\n\n  \
                      In ReScript, anything at the top level must evaluate to `unit`. You \
                      can fix this by assigning the expression to a value, or piping it into \
                      the `ignore` function.",
@@ -559,8 +559,8 @@ and may change in future versions."
                         "yourExpression"
                     };
                     message.push_str(&format!(
-                        "\n\nPossible solutions:\n\
-                         - Assigning to a value that is then ignored: `let _ = {help_text}`\n\
+                        "\n\n  Possible solutions:\n  \
+                         - Assigning to a value that is then ignored: `let _ = {help_text}`\n  \
                          - Piping into the built-in ignore function to ignore the result: `{help_text}->ignore`"
                     ));
                 }
