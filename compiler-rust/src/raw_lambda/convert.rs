@@ -5799,7 +5799,7 @@ impl<'a> RawLambdaConverter<'a> {
                             let expanded =
                                 crate::types::ctype::expand_head(self.type_ctx, &env, vd.val_type);
                             let is_function = matches!(
-                                &*self.type_ctx.get_desc(expanded),
+                                &*self.type_ctx.borrow_desc(expanded),
                                 TypeDesc::Tarrow { .. }
                             );
                             if !is_function {
@@ -11395,12 +11395,12 @@ impl<'a> RawLambdaConverter<'a> {
             conv: &mut RawLambdaConverter<'_>,
             lam: Lambda,
             mut args_rev: Vec<(Lambda, bool)>,
-            pending: &[(Option<Lambda>, bool)],
+            mut pending: std::collections::VecDeque<(Option<Lambda>, bool)>,
             loc: Location,
             transformed_jsx: bool,
         ) -> Lambda {
-            match pending.split_first() {
-                Some(((None, optional), tail)) => {
+            match pending.pop_front() {
+                Some((None, optional)) => {
                     let mut defs: Vec<(Ident, Lambda)> = Vec::new();
                     let protect =
                         |conv: &mut RawLambdaConverter<'_>,
@@ -11433,25 +11433,24 @@ impl<'a> RawLambdaConverter<'a> {
                         )
                     };
                     let handle = protect(conv, "func", applied, &mut defs);
-                    let protected_tail = tail
-                        .iter()
+                    let protected_tail = pending
+                        .into_iter()
                         .map(|(arg, is_optional)| {
                             (
-                                arg.as_ref()
-                                    .map(|lam| protect(conv, "arg", lam.clone(), &mut defs)),
-                                *is_optional,
+                                arg.map(|lam| protect(conv, "arg", lam, &mut defs)),
+                                is_optional,
                             )
                         })
-                        .collect::<Vec<_>>();
+                        .collect::<std::collections::VecDeque<_>>();
                     let id_arg = conv.fresh_ident("param");
                     let mut next_args_rev = Vec::with_capacity(1 + remaining_args.len());
-                    next_args_rev.push((Lambda::var(id_arg.clone()), *optional));
+                    next_args_rev.push((Lambda::var(id_arg.clone()), optional));
                     next_args_rev.extend(remaining_args);
                     let body = match build_apply(
                         conv,
                         handle,
                         next_args_rev,
-                        &protected_tail,
+                        protected_tail,
                         loc.clone(),
                         transformed_jsx,
                     ) {
@@ -11469,9 +11468,9 @@ impl<'a> RawLambdaConverter<'a> {
                         Lambda::let_(LetKind::Strict, id, lam, body)
                     })
                 }
-                Some(((Some(arg), optional), tail)) => {
-                    args_rev.insert(0, (arg.clone(), *optional));
-                    build_apply(conv, lam, args_rev, tail, loc, transformed_jsx)
+                Some((Some(arg), optional)) => {
+                    args_rev.insert(0, (arg, optional));
+                    build_apply(conv, lam, args_rev, pending, loc, transformed_jsx)
                 }
                 None => lapply(
                     loc,
@@ -11491,7 +11490,7 @@ impl<'a> RawLambdaConverter<'a> {
                 )
             })
             .collect::<Vec<_>>();
-        build_apply(self, lam, Vec::new(), &pending, loc, transformed_jsx)
+        build_apply(self, lam, Vec::new(), pending.into(), loc, transformed_jsx)
     }
 
     fn transl_apply_raw(
@@ -11530,13 +11529,13 @@ impl<'a> RawLambdaConverter<'a> {
             conv: &mut RawLambdaConverter<'_>,
             lam: RawLambda,
             mut args_rev: Vec<(RawLambda, bool)>,
-            pending: &[(Option<RawLambda>, bool)],
+            mut pending: std::collections::VecDeque<(Option<RawLambda>, bool)>,
             loc: Location,
             transformed_jsx: bool,
             inlined: InlineAttribute,
         ) -> RawLambda {
-            match pending.split_first() {
-                Some(((None, optional), tail)) => {
+            match pending.pop_front() {
+                Some((None, optional)) => {
                     let mut defs: Vec<(Ident, RawLambda)> = Vec::new();
                     let protect =
                         |conv: &mut RawLambdaConverter<'_>,
@@ -11570,25 +11569,24 @@ impl<'a> RawLambdaConverter<'a> {
                         )
                     };
                     let handle = protect(conv, "func", applied, &mut defs);
-                    let protected_tail = tail
-                        .iter()
+                    let protected_tail = pending
+                        .into_iter()
                         .map(|(arg, is_optional)| {
                             (
-                                arg.as_ref()
-                                    .map(|lam| protect(conv, "arg", lam.clone(), &mut defs)),
-                                *is_optional,
+                                arg.map(|lam| protect(conv, "arg", lam, &mut defs)),
+                                is_optional,
                             )
                         })
-                        .collect::<Vec<_>>();
+                        .collect::<std::collections::VecDeque<_>>();
                     let id_arg = conv.fresh_ident("param");
                     let mut next_args_rev = Vec::with_capacity(1 + remaining_args.len());
-                    next_args_rev.push((RawLambda::var(id_arg.clone()), *optional));
+                    next_args_rev.push((RawLambda::var(id_arg.clone()), optional));
                     next_args_rev.extend(remaining_args);
                     let body = match build_apply(
                         conv,
                         handle,
                         next_args_rev,
-                        &protected_tail,
+                        protected_tail,
                         loc,
                         transformed_jsx,
                         inlined,
@@ -11609,9 +11607,9 @@ impl<'a> RawLambdaConverter<'a> {
                         RawLambda::let_(LetKind::Strict, id, lam, body)
                     })
                 }
-                Some(((Some(arg), optional), tail)) => {
-                    args_rev.insert(0, (arg.clone(), *optional));
-                    build_apply(conv, lam, args_rev, tail, loc, transformed_jsx, inlined)
+                Some((Some(arg), optional)) => {
+                    args_rev.insert(0, (arg, optional));
+                    build_apply(conv, lam, args_rev, pending, loc, transformed_jsx, inlined)
                 }
                 None => lapply(
                     loc,
@@ -11667,7 +11665,7 @@ impl<'a> RawLambdaConverter<'a> {
                     self,
                     lam,
                     Vec::new(),
-                    &pending,
+                    pending.into(),
                     loc,
                     transformed_jsx,
                     inlined,

@@ -12505,8 +12505,8 @@ fn validate_object_field_method_attrs(attrs: &[Attribute], arena: &ParseArena) -
 
 fn validate_core_type_method_attribute_errors(
     typ: &CoreType,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+    arena: &ParseArena,
+) -> MethodAttrResult {
     match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow(inner) => {
             let (arg, ret, _arity) = &**inner;
@@ -12592,8 +12592,8 @@ fn validate_core_type_method_attribute_errors(
 
 fn validate_constructor_args_method_attribute_errors(
     args: &ConstructorArguments,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+    arena: &ParseArena,
+) -> MethodAttrResult {
     match args {
         ConstructorArguments::Pcstr_tuple(types) => {
             for typ_idx in types {
@@ -12613,8 +12613,8 @@ fn validate_constructor_args_method_attribute_errors(
 
 fn validate_type_declaration_method_attribute_errors(
     tdcl: &TypeDeclaration,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+    arena: &ParseArena,
+) -> MethodAttrResult {
     for (param, _) in &tdcl.ptype_params {
         let typ = arena.get_core_type(*param).clone();
         validate_core_type_method_attribute_errors(&typ, arena)?;
@@ -12652,8 +12652,8 @@ fn validate_type_declaration_method_attribute_errors(
 
 fn validate_type_extension_method_attribute_errors(
     ext: &TypeExtension,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+    arena: &ParseArena,
+) -> MethodAttrResult {
     for (param, _) in &ext.ptyext_params {
         let typ = arena.get_core_type(*param).clone();
         validate_core_type_method_attribute_errors(&typ, arena)?;
@@ -12666,8 +12666,8 @@ fn validate_type_extension_method_attribute_errors(
 
 fn validate_extension_constructor_method_attribute_errors(
     ext: &ExtensionConstructor,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+    arena: &ParseArena,
+) -> MethodAttrResult {
     match &ext.pext_kind {
         ExtensionConstructorKind::Pext_decl(args, res) => {
             validate_constructor_args_method_attribute_errors(args, arena)?;
@@ -12683,8 +12683,8 @@ fn validate_extension_constructor_method_attribute_errors(
 
 fn validate_payload_method_attribute_errors(
     payload: &Payload,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+    arena: &ParseArena,
+) -> MethodAttrResult {
     match payload {
         Payload::PStr(items) => validate_structure_method_attribute_errors(items, arena),
         Payload::PSig(items) => validate_signature_method_attribute_errors(items, arena),
@@ -12703,28 +12703,84 @@ fn validate_payload_method_attribute_errors(
     }
 }
 
+const FFI_EXTENSION_PAYLOAD_ERROR: &str = "%ffi extension can only be applied to a string containing a JavaScript function such as \"(x) => ...\"";
+
+/// Error from the builtin-PPX method-attribute and extension-payload checks.
+/// The checks only read the arena; the one error that needs to allocate in
+/// it (the `%ffi` parse warning) is completed by `into_ppx` at the top-level
+/// caller, before anything else touches the arena.
+enum MethodAttrError {
+    Ppx(PpxError),
+    FfiNotAFunction {
+        ext_loc: LocIdx,
+        code: String,
+        payload_loc: LocIdx,
+        first_line_offset: i32,
+    },
+}
+
+type MethodAttrResult = Result<(), MethodAttrError>;
+
+impl From<PpxError> for MethodAttrError {
+    fn from(error: PpxError) -> Self {
+        MethodAttrError::Ppx(error)
+    }
+}
+
+impl MethodAttrError {
+    fn at_loc(loc: LocIdx, message: &str) -> Self {
+        MethodAttrError::Ppx(PpxError::at_loc(loc, message))
+    }
+
+    fn into_ppx(self, arena: &mut ParseArena) -> PpxError {
+        match self {
+            MethodAttrError::Ppx(error) => error,
+            MethodAttrError::FfiNotAFunction {
+                ext_loc,
+                code,
+                payload_loc,
+                first_line_offset,
+            } => {
+                let err = PpxError::at_loc(ext_loc, FFI_EXTENSION_PAYLOAD_ERROR);
+                if let Some(warning) =
+                    raw_js_expression_parse_warning(&code, payload_loc, first_line_offset, arena)
+                {
+                    err.with_warning(
+                        warning.loc,
+                        Warning::BsFfiWarning {
+                            message: warning.message,
+                        },
+                    )
+                } else {
+                    err
+                }
+            }
+        }
+    }
+}
+
 fn validate_expression_extension_payload_error(
     extension: &current::Extension,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+    arena: &ParseArena,
+) -> MethodAttrResult {
     let (ext_name, payload) = extension;
     let name = arena.get_string(ext_name.txt);
     match name {
-        "debugger" if !payload_is_empty_str(payload) => Err(PpxError::at_loc(
+        "debugger" if !payload_is_empty_str(payload) => Err(MethodAttrError::at_loc(
             ext_name.loc,
             "%debugger extension doesn't accept arguments",
         )),
-        "raw" if payload_single_string_literal(payload, arena).is_none() => Err(PpxError::at_loc(
+        "raw" if payload_single_string_literal(payload, arena).is_none() => Err(MethodAttrError::at_loc(
             ext_name.loc,
             "%raw extension can only be applied to a string",
         )),
         "re" => match payload_single_string_literal_with_loc(payload, arena) {
-            None => Err(PpxError::at_loc(
+            None => Err(MethodAttrError::at_loc(
                 ext_name.loc,
                 "%re extension can only be applied to a string",
             )),
             Some((code, loc)) if !is_js_regex_literal(code) && !is_js_regex_like_literal(code) => {
-                Err(PpxError::at_loc(
+                Err(MethodAttrError::at_loc(
                     loc,
                     "Syntax error: a valid JS regex literal expected",
                 ))
@@ -12732,38 +12788,16 @@ fn validate_expression_extension_payload_error(
             Some(_) => Ok(()),
         },
         "ffi" => match payload_single_string_literal_info(payload, arena) {
-            Some((code, payload_loc, first_line_offset)) => {
-                let code = code.to_string();
-                if is_js_function(&code) {
-                    Ok(())
-                } else {
-                    let err = PpxError::at_loc(
-                        ext_name.loc,
-                        "%ffi extension can only be applied to a string containing a JavaScript function such as \"(x) => ...\"",
-                    );
-                    if let Some(warning) = raw_js_expression_parse_warning(
-                        &code,
-                        payload_loc,
-                        first_line_offset,
-                        arena,
-                    ) {
-                        Err(err.with_warning(
-                            warning.loc,
-                            Warning::BsFfiWarning {
-                                message: warning.message,
-                            },
-                        ))
-                    } else {
-                        Err(err)
-                    }
-                }
-            }
-            None => Err(PpxError::at_loc(
-                ext_name.loc,
-                "%ffi extension can only be applied to a string containing a JavaScript function such as \"(x) => ...\"",
-            )),
+            Some((code, _, _)) if is_js_function(code) => Ok(()),
+            Some((code, payload_loc, first_line_offset)) => Err(MethodAttrError::FfiNotAFunction {
+                ext_loc: ext_name.loc,
+                code: code.to_string(),
+                payload_loc,
+                first_line_offset,
+            }),
+            None => Err(PpxError::at_loc(ext_name.loc, FFI_EXTENSION_PAYLOAD_ERROR).into()),
         },
-        "obj" => validate_obj_extension_payload_error(payload, ext_name.loc, arena),
+        "obj" => Ok(validate_obj_extension_payload_error(payload, ext_name.loc, arena)?),
         _ => Ok(()),
     }
 }
@@ -12771,7 +12805,7 @@ fn validate_expression_extension_payload_error(
 fn validate_obj_extension_payload_error(
     payload: &Payload,
     ext_loc: LocIdx,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     let Some(fields) = payload_single_record_fields_without_spread(payload, arena) else {
         return Err(PpxError::at_loc(ext_loc, "Expect a record expression here"));
@@ -12787,12 +12821,12 @@ fn validate_obj_extension_payload_error(
 
 fn validate_structure_extension_payload_error(
     extension: &current::Extension,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+    arena: &ParseArena,
+) -> MethodAttrResult {
     let (ext_name, payload) = extension;
     let name = arena.get_string(ext_name.txt);
     if name == "raw" && payload_single_string_literal(payload, arena).is_none() {
-        Err(PpxError::at_loc(
+        Err(MethodAttrError::at_loc(
             ext_name.loc,
             "%%raw extension can only be applied to a string",
         ))
@@ -12803,8 +12837,8 @@ fn validate_structure_extension_payload_error(
 
 fn validate_structure_method_attribute_errors(
     structure: &[StructureItem],
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+    arena: &ParseArena,
+) -> MethodAttrResult {
     for item in structure {
         match &*item.pstr_desc {
             StructureItemDesc::Pstr_eval(inner) => {
@@ -12882,8 +12916,8 @@ fn validate_structure_method_attribute_errors(
 
 fn validate_signature_method_attribute_errors(
     signature: &[SignatureItem],
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+    arena: &ParseArena,
+) -> MethodAttrResult {
     for item in signature {
         match &*item.psig_desc {
             SignatureItemDesc::Psig_value(vd) => {
@@ -12940,8 +12974,8 @@ fn validate_signature_method_attribute_errors(
 
 fn validate_module_expr_method_attribute_errors(
     mod_expr: &ModuleExpr,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+    arena: &ParseArena,
+) -> MethodAttrResult {
     match &*mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_structure(items) => {
             validate_structure_method_attribute_errors(items, arena)
@@ -12979,8 +13013,8 @@ fn validate_module_expr_method_attribute_errors(
 
 fn validate_module_type_method_attribute_errors(
     mod_type: &ModuleType,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+    arena: &ParseArena,
+) -> MethodAttrResult {
     match &*mod_type.pmty_desc {
         ModuleTypeDesc::Pmty_signature(items) => {
             validate_signature_method_attribute_errors(items, arena)
@@ -13022,16 +13056,15 @@ fn validate_module_type_method_attribute_errors(
 
 fn validate_pattern_idx_method_attribute_errors(
     pat_idx: PatIdx,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
-    let pat = arena.get_pat(pat_idx).clone();
-    validate_pattern_method_attribute_errors(&pat, arena)
+    arena: &ParseArena,
+) -> MethodAttrResult {
+    validate_pattern_method_attribute_errors(arena.get_pat(pat_idx), arena)
 }
 
 fn validate_pattern_method_attribute_errors(
     pat: &Pattern,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+    arena: &ParseArena,
+) -> MethodAttrResult {
     match &*pat.ppat_desc {
         PatternDesc::Ppat_alias(inner, _)
         | PatternDesc::Ppat_exception(inner)
@@ -13088,13 +13121,12 @@ fn validate_pattern_method_attribute_errors(
 
 fn validate_expression_idx_method_attribute_errors(
     expr_idx: ExprIdx,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
-    let expr = arena.get_expr(expr_idx).clone();
-    validate_expression_method_attribute_errors(&expr, arena)
+    arena: &ParseArena,
+) -> MethodAttrResult {
+    validate_expression_method_attribute_errors(arena.get_expr(expr_idx), arena)
 }
 
-fn validate_cases_method_attribute_errors(cases: &[Case], arena: &mut ParseArena) -> PpxResult<()> {
+fn validate_cases_method_attribute_errors(cases: &[Case], arena: &ParseArena) -> MethodAttrResult {
     for case in cases {
         validate_pattern_idx_method_attribute_errors(case.pc_lhs, arena)?;
         if let Some(guard) = case.pc_guard {
@@ -13107,8 +13139,8 @@ fn validate_cases_method_attribute_errors(cases: &[Case], arena: &mut ParseArena
 
 fn validate_jsx_element_method_attribute_errors(
     jsx: &JsxElement,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+    arena: &ParseArena,
+) -> MethodAttrResult {
     match jsx {
         JsxElement::Fragment(fragment) => {
             for child in &fragment.children {
@@ -13130,8 +13162,8 @@ fn validate_jsx_element_method_attribute_errors(
 
 fn validate_jsx_props_method_attribute_errors(
     props: &[JsxProp],
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+    arena: &ParseArena,
+) -> MethodAttrResult {
     for prop in props {
         match prop {
             JsxProp::Value { value, .. } => {
@@ -13148,8 +13180,8 @@ fn validate_jsx_props_method_attribute_errors(
 
 fn validate_expression_method_attribute_errors(
     expr: &Expression,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+    arena: &ParseArena,
+) -> MethodAttrResult {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_let(inner) => {
             let (_rec_flag, bindings, body) = &**inner;
@@ -16287,7 +16319,8 @@ fn rewrite_structure_impl(
 ) -> PpxResult<Vec<StructureItem>> {
     if validate_invariants {
         validate_structure_deriving_errors(structure, arena)?;
-        validate_structure_method_attribute_errors(structure, arena)?;
+        validate_structure_method_attribute_errors(structure, arena)
+            .map_err(|error| error.into_ppx(arena))?;
         validate_structure_js_string_errors(structure, arena)?;
         validate_structure_await_errors(structure, arena, true)?;
         validate_structure_this_errors(structure, arena)?;
@@ -16658,7 +16691,8 @@ fn rewrite_signature_impl(
     apply_spice: bool,
 ) -> PpxResult<Vec<SignatureItem>> {
     validate_signature_deriving_errors(signature, arena)?;
-    validate_signature_method_attribute_errors(signature, arena)?;
+    validate_signature_method_attribute_errors(signature, arena)
+        .map_err(|error| error.into_ppx(arena))?;
     validate_signature_js_string_errors(signature, arena)?;
     validate_signature_await_errors(signature, arena, true)?;
     let previous_spice = std::mem::replace(&mut arena.spice_mapper_enabled, apply_spice);
