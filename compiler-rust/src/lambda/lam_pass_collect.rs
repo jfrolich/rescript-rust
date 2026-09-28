@@ -506,7 +506,8 @@ fn collect_bind_with_external(
                 Some(resolver) => get_arity_with_external_arity(meta, lam, resolver),
                 None => get_arity(meta, lam),
             };
-            let payload = function_payload_needed(func).then(|| lam.clone());
+            let payload = (meta.collect_function_payloads && function_payload_needed(func))
+                .then(|| lam.clone());
             annotate(meta, rec_flag, ident.clone(), arity, payload);
             collect_with_external(meta, &func.body, resolver);
         }

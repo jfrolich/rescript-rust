@@ -296,8 +296,13 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     // lam_compile_main.ml:148 — initial deep_flatten.
     let lam = deep_flatten_owned_with_id_gen(lam, &meta.id_gen);
 
-    // lam_compile_main.ml:154 — collect_info into meta.
+    // lam_compile_main.ml:154 — collect_info into meta. Only simplify_exits
+    // runs before the next collect re-annotates every function binding, and
+    // it neither reads function bodies from meta nor turns a function binding
+    // into another kind, so this collect records arities only.
+    meta.collect_function_payloads = false;
     collect_info_with_external_arity(&mut meta, &lam, external_arity);
+    meta.collect_function_payloads = true;
 
     // lam_compile_main.ml:159 — simplify_exits.
     let lam = simplify_exits_owned(lam, &meta.id_gen);
@@ -330,8 +335,12 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     // lam_compile_main.ml:175 — deep_flatten.
     let lam = deep_flatten_owned_with_id_gen(lam, &meta.id_gen);
 
-    // lam_compile_main.ml:176 — collect_info.
+    // lam_compile_main.ml:176 — collect_info. As at line 154: alpha
+    // conversion and simplify_exits read arities only, and the collect at
+    // line 183 re-annotates every function binding before simplify_alias.
+    meta.collect_function_payloads = false;
     collect_info_with_external_arity(&mut meta, &lam, external_arity);
+    meta.collect_function_payloads = true;
 
     // lam_compile_main.ml:180 — alpha_conversion.
     let lam = alpha_conversion_with_external_arity_owned(&mut meta, lam, external_arity);
