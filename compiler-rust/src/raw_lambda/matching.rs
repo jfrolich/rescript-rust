@@ -8385,13 +8385,17 @@ fn compile_match(
                 a.extend(argl.iter().cloned());
                 a
             };
-            let new_pm = PatternMatching {
-                cases: m.cases.clone(),
-                args: MatchArgs::new(new_args),
-                default: m.default.clone(),
-            };
-            let (first_match, rem) =
-                split_precompile(Some(ctx_ref), &Some(v.clone()), &new_pm, next_raise_count);
+            // `split_precompile` on a matching with the new args, without
+            // first copying the cases into that matching.
+            let (info, rem) = split_or(
+                Some(ctx_ref),
+                &Some(v.clone()),
+                m.cases.clone(),
+                &MatchArgs::new(new_args),
+                m.default.clone(),
+                next_raise_count,
+            );
+            let first_match = info.me;
 
             let mut comp_fn = |partial: &Partial,
                                ctx: &[Ctx],
