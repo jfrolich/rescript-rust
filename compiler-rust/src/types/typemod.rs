@@ -5584,26 +5584,74 @@ fn check_duplicate_constructor_declarations(
     Ok(())
 }
 
+/// `Record_attributes_check.check_duplicated_labels`
+/// (record_attributes_check.ml:28-69), installed as
+/// `Builtin_attributes.check_duplicated_labels` and run by
+/// `Typedecl.transl_labels` (typedecl.ml:209-213). An `@as` name clashes with
+/// any earlier label or `@as` name.
 fn check_duplicate_label_declarations(
     arena: &ParseArena,
     labels: &[crate::parser::ast::LabelDeclaration],
     record_name: Option<&str>,
 ) -> TypeModResult<()> {
-    let mut seen = HashSet::default();
+    let mut coll: HashSet<String> = HashSet::default();
     for label in labels {
         let name = arena.get_string(label.pld_name.txt);
-        if name == "..." {
-            continue;
-        }
-        if !seen.insert(name.to_string()) {
+        if coll.contains(name) && name != "..." {
             return Err(TypeModError::DuplicateLabel {
                 loc: label.pld_name.loc,
                 label: name.to_string(),
                 record_name: record_name.map(str::to_string),
             });
         }
+        // The `@as` name is checked against the names before this label, so
+        // `@as("x") x` is allowed (record_attributes_check.ml:58-64).
+        let as_name = label
+            .pld_attributes
+            .iter()
+            .find_map(|attr| label_as_name_with_loc(arena, attr));
+        let clashes = as_name
+            .as_ref()
+            .is_some_and(|(as_name, _)| coll.contains(as_name));
+        coll.insert(name.to_string());
+        if let Some((as_name, as_loc)) = as_name {
+            if clashes {
+                return Err(TypeModError::DuplicateLabel {
+                    loc: as_loc,
+                    label: as_name,
+                    record_name: record_name.map(str::to_string),
+                });
+            }
+            coll.insert(as_name);
+        }
     }
     Ok(())
+}
+
+/// `find_name_with_loc` (record_attributes_check.ml:28-41).
+fn label_as_name_with_loc(
+    arena: &ParseArena,
+    attr: &crate::parser::ast::Attribute,
+) -> Option<(String, LocIdx)> {
+    if arena.get_string(attr.0.txt) != "as" {
+        return None;
+    }
+    let crate::parser::ast::Payload::PStr(items) = &attr.1 else {
+        return None;
+    };
+    let [item] = items.as_slice() else {
+        return None;
+    };
+    let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
+        return None;
+    };
+    match &*arena.get_expr(eval.0).pexp_desc {
+        crate::parser::ast::ExpressionDesc::Pexp_constant(constant) => match &**constant {
+            crate::parser::ast::Constant::String(s, _) => Some((s.to_string(), attr.0.loc)),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn check_duplicate_typed_label_declarations(
