@@ -4986,17 +4986,12 @@ pub fn unify_var<'a>(
         return Ok(());
     }
 
-    let desc1 = ctx.get_desc(t1);
-    let desc2 = ctx.get_desc(t2);
-    match (&*desc1, &*desc2) {
-        (TypeDesc::Tvar(_), TypeDesc::Tconstr { .. }) if deep_occur(ctx, t1, t2) => {
-            drop(desc1);
-            drop(desc2);
-            unify(ctx, state, t1, t2)
-        }
-        (TypeDesc::Tvar(_), _) => {
-            drop(desc1);
-            drop(desc2);
+    // Only the variants are needed; read them without cloning descriptors.
+    let var1 = matches!(&*ctx.borrow_desc(t1), TypeDesc::Tvar(_));
+    let constr2 = matches!(&*ctx.borrow_desc(t2), TypeDesc::Tconstr { .. });
+    match (var1, constr2) {
+        (true, true) if deep_occur(ctx, t1, t2) => unify(ctx, state, t1, t2),
+        (true, _) => {
             // OCaml compiler/ml/ctype.ml:2820-2837 `unify_var`
             // performs `occur`, lowers levels, and links directly. It does
             // not call `occur_univar`; that check belongs to the full
@@ -5031,11 +5026,7 @@ pub fn unify_var<'a>(
             link_type(ctx, t1, t2);
             Ok(())
         }
-        _ => {
-            drop(desc1);
-            drop(desc2);
-            unify(ctx, state, t1, t2)
-        }
+        _ => unify(ctx, state, t1, t2),
     }
 }
 
@@ -7410,8 +7401,12 @@ fn generalize_rec(ctx: &TypeContext, ty: TypeExprRef) {
     if level > current && level != GENERIC_LEVEL {
         // Mark as generic
         ctx.set_level(ty, GENERIC_LEVEL);
-        if let TypeDesc::Tconstr { abbrev, .. } = &*ctx.get_desc(ty) {
-            btype::iter_abbrev(ctx, *abbrev, |memo_ty| {
+        let abbrev = match &*ctx.borrow_desc(ty) {
+            TypeDesc::Tconstr { abbrev, .. } => Some(*abbrev),
+            _ => None,
+        };
+        if let Some(abbrev) = abbrev {
+            btype::iter_abbrev(ctx, abbrev, |memo_ty| {
                 generalize_rec(ctx, memo_ty);
             });
         }
@@ -7439,15 +7434,12 @@ fn lower_nongen_type_expr_rec(
     }
 
     let level = ctx.get_level(ty);
-    let is_tvar = {
-        let desc = ctx.get_desc(ty);
-        matches!(&*desc, TypeDesc::Tvar(_))
-    };
+    let is_tvar = matches!(&*ctx.borrow_desc(ty), TypeDesc::Tvar(_));
     if is_tvar && level < GENERIC_LEVEL && level > nglev {
         ctx.set_level(ty, nglev);
     }
 
-    let mut children = Vec::new();
+    let mut children: smallvec::SmallVec<[TypeExprRef; 8]> = smallvec::SmallVec::new();
     iter_type_expr(ctx, ty, |child| children.push(child));
     for child in children {
         lower_nongen_type_expr_rec(ctx, nglev, child, seen);
@@ -7962,7 +7954,7 @@ pub fn compute_variance_decl(
         compute_variance_rec(ctx, env, &mut visited, initial_variance, *ty, 0);
     }
 
-    let is_type_var = |ty: TypeExprRef| matches!(&*ctx.get_desc(ctx.repr(ty)), TypeDesc::Tvar(_));
+    let is_type_var = |ty: TypeExprRef| matches!(&*ctx.borrow_desc(ctx.repr(ty)), TypeDesc::Tvar(_));
     let is_concrete = !matches!(decl.type_kind, super::TypeKind::TypeAbstract);
 
     // Extract variance for each param. This mirrors OCaml typedecl.ml:1200-1224:

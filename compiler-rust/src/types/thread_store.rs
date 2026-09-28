@@ -53,6 +53,12 @@ pub fn begin_build() {
     BUILD_GENERATION.fetch_add(1, Ordering::SeqCst);
 }
 
+/// Number of builds started with `begin_build` in this process (0 when none
+/// has, e.g. a standalone `bsc` run).
+pub fn build_generation() -> u64 {
+    BUILD_GENERATION.load(Ordering::SeqCst)
+}
+
 /// First binder stamp handed out to identifiers created while building shared
 /// store data. Compilation-local stamps restart per unit and stay far below
 /// this range, so a shared binder can never be `Ident::same` as a local one.

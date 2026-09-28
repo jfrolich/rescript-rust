@@ -1870,7 +1870,7 @@ fn object_row(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
 fn opened_object(ctx: &TypeContext, ty: TypeExprRef) -> bool {
     let row = object_row(ctx, ty);
     matches!(
-        &*ctx.get_desc(row),
+        &*ctx.borrow_desc(row),
         TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tconstr { .. }
     )
 }
@@ -2867,7 +2867,7 @@ fn transl_type_inner(
                             }
                         } else {
                             if let Some(path) = inherit_name
-                                && (matches!(&*ctx.get_desc(ctx.repr(expanded)), TypeDesc::Tvar(_))
+                                && (matches!(&*ctx.borrow_desc(ctx.repr(expanded)), TypeDesc::Tvar(_))
                                     || is_incomplete_type_constructor_path(ctx, env, &path))
                             {
                                 return Err(TypeCoreError::UnboundTypeConstructorIncomplete {
@@ -3081,7 +3081,7 @@ fn transl_type_inner(
                         };
                         let Some(fields) = inherited_fields else {
                             if let Some((path, _)) = inherit_name
-                                && (matches!(&*ctx.get_desc(ctx.repr(expanded)), TypeDesc::Tvar(_))
+                                && (matches!(&*ctx.borrow_desc(ctx.repr(expanded)), TypeDesc::Tvar(_))
                                     || is_incomplete_type_constructor_path(ctx, env, &path))
                             {
                                 return Err(TypeCoreError::UnboundTypeConstructorIncomplete {
@@ -9664,7 +9664,7 @@ fn type_application(
         let mut ty = ty_fun;
         loop {
             let expanded = crate::types::ctype::expand_head(ctx, env, ty);
-            match &*ctx.get_desc(expanded) {
+            match &*ctx.borrow_desc(expanded) {
                 TypeDesc::Tvar(_) => return true,
                 TypeDesc::Tarrow { args, ret } => {
                     if args
@@ -9916,7 +9916,7 @@ fn type_application(
     // compiler/ml/typecore.ml:4049-4069: a total call of an unknown
     // function commits it to one n-ary arrow matching the complete call site.
     let uncommitted_funct_ty = crate::types::ctype::expand_head(ctx, env, typed_funct.exp_type);
-    if total_app && matches!(&*ctx.get_desc(uncommitted_funct_ty), TypeDesc::Tvar(_)) {
+    if total_app && matches!(&*ctx.borrow_desc(uncommitted_funct_ty), TypeDesc::Tvar(_)) {
         let params = args
             .iter()
             .map(|(label, _)| {
@@ -9946,7 +9946,7 @@ fn type_application(
     // thunks are retained and forced in declaration order.
     let expanded_funct_ty = crate::types::ctype::expand_head(ctx, env, typed_funct.exp_type);
     let function_level = ctx.get_level(ctx.repr(expanded_funct_ty));
-    let (declared_params, declared_ret) = match &*ctx.get_desc(expanded_funct_ty) {
+    let (declared_params, declared_ret) = match &*ctx.borrow_desc(expanded_funct_ty) {
         TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
         TypeDesc::Tvar(_) => {
             return Err(TypeCoreError::ApplyNonFunction {
@@ -9966,7 +9966,7 @@ fn type_application(
         env,
         crate::types::instance(ctx, typed_funct.exp_type),
     );
-    let (inst_params, inst_ret) = match &*ctx.get_desc(expanded_inst_ty) {
+    let (inst_params, inst_ret) = match &*ctx.borrow_desc(expanded_inst_ty) {
         TypeDesc::Tarrow { args, ret } if args.len() == declared_params.len() => {
             (args.clone(), *ret)
         }
@@ -10121,7 +10121,7 @@ fn type_application(
                     function_level,
                 )
             };
-            if matches!(&*ctx.get_desc(ctx.repr(result_ty)), TypeDesc::Tarrow { .. }) {
+            if matches!(&*ctx.borrow_desc(ctx.repr(result_ty)), TypeDesc::Tarrow { .. }) {
                 return Err(TypeCoreError::ApplyWrongLabel {
                     loc: arg_expr.pexp_loc,
                     label: *label,
@@ -19869,7 +19869,7 @@ fn type_field(
         }
         let ty_exp_repr = tctx.type_ctx.repr(ty_exp);
         if matches!(
-            &*tctx.type_ctx.get_desc(ty_exp_repr),
+            &*tctx.type_ctx.borrow_desc(ty_exp_repr),
             TypeDesc::Tconstr { .. }
         ) {
             return Err(TypeCoreError::UnboundRecordField {
@@ -22192,7 +22192,7 @@ fn type_letmodule(
                 LetModuleLocalEscapeSite::Expression { loc, ty } => (loc, ty, false),
             };
             let top_is_package = matches!(
-                &*ctx.get_desc(ctx.repr(rewritten_ty)),
+                &*ctx.borrow_desc(ctx.repr(rewritten_ty)),
                 TypeDesc::Tpackage { .. }
             );
             let (loc, trace) = if top_is_package {
@@ -35544,15 +35544,15 @@ mod tests {
 
         // All should be valid Tconstr types
         assert!(matches!(
-            &*ctx.get_desc(int_ty),
+            &*ctx.borrow_desc(int_ty),
             crate::types::TypeDesc::Tconstr { .. }
         ));
         assert!(matches!(
-            &*ctx.get_desc(bool_ty),
+            &*ctx.borrow_desc(bool_ty),
             crate::types::TypeDesc::Tconstr { .. }
         ));
         assert!(matches!(
-            &*ctx.get_desc(string_ty),
+            &*ctx.borrow_desc(string_ty),
             crate::types::TypeDesc::Tconstr { .. }
         ));
 
@@ -35560,7 +35560,7 @@ mod tests {
         let elem_ty = ctx.new_var(None);
         let array_ty = env.type_array(&ctx, elem_ty);
         assert!(matches!(
-            &*ctx.get_desc(array_ty),
+            &*ctx.borrow_desc(array_ty),
             crate::types::TypeDesc::Tconstr { .. }
         ));
     }

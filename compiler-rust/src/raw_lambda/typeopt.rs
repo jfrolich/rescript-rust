@@ -275,9 +275,13 @@ pub(crate) fn scrape_ty(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeEx
     // OCaml `Typeopt.scrape_ty` uses `Ctype.expand_head_opt`, then checks
     // unboxed representations (compiler/ml/typeopt.ml:19-31).
     let ty = crate::types::ctype::expand_head_opt(ctx, env, ty);
-    match &*ctx.get_desc(ty) {
-        TypeDesc::Tconstr { path, .. } => {
-            if let Some(decl) = find_type_decl(ctx, env, path) {
+    let path = match &*ctx.borrow_desc(ty) {
+        TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+        _ => None,
+    };
+    match path {
+        Some(path) => {
+            if let Some(decl) = find_type_decl(ctx, env, &path) {
                 if decl.type_representation == crate::types::TypeRepresentation::Unboxed {
                     // For unboxed types, try to get the representation type.
                     // If the type is recursive (representation returns None),

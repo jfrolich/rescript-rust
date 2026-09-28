@@ -6332,7 +6332,7 @@ fn format_expr_type_clash_report(
         let actual = type_alias_full_expansion(type_ctx, *actual)
             .or_else(|| rendered_alias_expansion(type_ctx, *actual, trace, true))
             .unwrap_or_else(|| type_ctx.repr(*actual));
-        matches!(&*type_ctx.get_desc(actual), TypeDesc::Tarrow { .. })
+        matches!(&*type_ctx.borrow_desc(actual), TypeDesc::Tarrow { .. })
     });
     let expected_is_jsx_component = trace
         .iter()
@@ -7789,7 +7789,7 @@ fn append_extra_type_clash_help(
         message.push_str(RESET);
     } else if trace.iter().any(|(actual, expected)| {
         matches!(
-            &*type_ctx.get_desc(type_ctx.repr(*actual)),
+            &*type_ctx.borrow_desc(type_ctx.repr(*actual)),
             TypeDesc::Tarrow { .. }
         ) && type_is_jsx_component(type_ctx, *expected)
     }) {
@@ -8031,7 +8031,7 @@ fn escaped_constructor_path(
     var_ty: TypeExprRef,
 ) -> Option<String> {
     let var_ty = type_ctx.repr(var_ty);
-    if !matches!(&*type_ctx.get_desc(var_ty), TypeDesc::Tvar(_)) {
+    if !matches!(&*type_ctx.borrow_desc(var_ty), TypeDesc::Tvar(_)) {
         return None;
     }
 
@@ -9879,7 +9879,7 @@ fn polyvariant_row(
 
 fn type_is_polyvariant(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
     matches!(
-        &*type_ctx.get_desc(type_ctx.repr(ty)),
+        &*type_ctx.borrow_desc(type_ctx.repr(ty)),
         TypeDesc::Tvariant(_)
     )
 }
@@ -10068,7 +10068,7 @@ fn object_field_missing_pair(
 }
 
 fn type_is_nil(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
-    matches!(&*type_ctx.get_desc(type_ctx.repr(ty)), TypeDesc::Tnil)
+    matches!(&*type_ctx.borrow_desc(type_ctx.repr(ty)), TypeDesc::Tnil)
 }
 
 fn append_dict_literal_help(
@@ -10101,7 +10101,7 @@ fn append_dict_literal_help(
 fn type_is_object(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
     let repr = type_ctx.repr(ty);
     matches!(
-        &*type_ctx.get_desc(repr),
+        &*type_ctx.borrow_desc(repr),
         TypeDesc::Tobject { .. } | TypeDesc::Tfield { .. }
     )
 }
@@ -10168,7 +10168,7 @@ fn type_clash_array_to_tuple(type_ctx: &TypeContext, trace: &[(TypeExprRef, Type
             _ => false,
         };
         let expected_is_tuple = matches!(
-            &*type_ctx.get_desc(type_ctx.repr(expected)),
+            &*type_ctx.borrow_desc(type_ctx.repr(expected)),
             TypeDesc::Ttuple(_)
         );
 

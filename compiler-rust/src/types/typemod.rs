@@ -885,7 +885,7 @@ fn get_primitive_arity_from_type_depth(
 /// Used to determine prim_from_constructor for external declarations.
 fn is_type_constructor(ctx: &crate::types::context::TypeContext, ty: TypeExprRef) -> bool {
     let repr = ctx.repr(ty);
-    matches!(&*ctx.get_desc(repr), crate::types::TypeDesc::Tconstr { .. })
+    matches!(&*ctx.borrow_desc(repr), crate::types::TypeDesc::Tconstr { .. })
 }
 
 fn primitive_description_from_value_decl(
@@ -4364,7 +4364,7 @@ fn check_type_decl_variance_requirements(
                     continue;
                 }
                 let arg = ctx.repr(arg);
-                let constrained = !matches!(&*ctx.get_desc(arg), TypeDesc::Tvar(_))
+                let constrained = !matches!(&*ctx.borrow_desc(arg), TypeDesc::Tvar(_))
                     || free_vars_by_arg
                         .iter()
                         .enumerate()
