@@ -10784,13 +10784,13 @@ fn type_application(
         TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
         TypeDesc::Tvar(_) => {
             return Err(TypeCoreError::ApplyNonFunction {
-                loc: funct.pexp_loc,
+                loc: typed_funct.exp_loc,
                 typ: expanded_funct_ty,
             });
         }
         _ => {
             return Err(TypeCoreError::ApplyNonFunction {
-                loc: funct.pexp_loc,
+                loc: typed_funct.exp_loc,
                 typ: expanded_funct_ty,
             });
         }
@@ -10967,7 +10967,7 @@ fn type_application(
                 });
             }
             return Err(TypeCoreError::ApplyNonFunction {
-                loc: funct.pexp_loc,
+                loc: typed_funct.exp_loc,
                 typ: expanded_funct_ty,
             });
         }
