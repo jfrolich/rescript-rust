@@ -46,8 +46,9 @@ pub struct ScannerSnapshot<'src> {
     line_offset: usize,
     lnum: i32,
     mode: Vec<ScannerMode>,
-    prev_token: Option<Token<'src>>,
+    prev_token_allows_regex: bool,
     diagnostics_len: usize,
+    _src: std::marker::PhantomData<&'src str>,
 }
 
 /// The lexical scanner state.
@@ -80,7 +81,7 @@ pub struct Scanner<'src> {
     /// Collected diagnostics.
     diagnostics: Vec<ParserDiagnostic>,
     /// Previous non-comment token (for context-sensitive lexing like regex literals).
-    prev_token: Option<Token<'src>>,
+    prev_token_allows_regex: bool,
 }
 
 /// Result of scanning a token.
@@ -121,7 +122,7 @@ impl<'src> Scanner<'src> {
             lnum: 1,
             mode: Vec::new(),
             diagnostics: Vec::new(),
-            prev_token: None,
+            prev_token_allows_regex: true,
         }
     }
 
@@ -158,7 +159,8 @@ impl<'src> Scanner<'src> {
             line_offset: self.line_offset,
             lnum: self.lnum,
             mode: self.mode.clone(),
-            prev_token: self.prev_token.clone(),
+            prev_token_allows_regex: self.prev_token_allows_regex,
+            _src: std::marker::PhantomData,
             diagnostics_len: self.diagnostics.len(),
         }
     }
@@ -173,7 +175,7 @@ impl<'src> Scanner<'src> {
         self.line_offset = snapshot.line_offset;
         self.lnum = snapshot.lnum;
         self.mode = snapshot.mode;
-        self.prev_token = snapshot.prev_token;
+        self.prev_token_allows_regex = snapshot.prev_token_allows_regex;
         self.diagnostics.truncate(snapshot.diagnostics_len);
     }
 
@@ -1354,7 +1356,7 @@ impl<'src> Scanner<'src> {
 
         let end_pos = self.position();
         if !matches!(token, Token::Comment(_)) {
-            self.prev_token = Some(token.clone());
+            self.prev_token_allows_regex = Self::token_allows_regex_after(&token);
         }
         ScanResult {
             start_pos,
@@ -1375,9 +1377,14 @@ impl<'src> Scanner<'src> {
     }
 
     fn can_start_regex_literal(&self) -> bool {
-        match &self.prev_token {
-            None => true,
-            Some(prev) => {
+        self.prev_token_allows_regex
+    }
+
+    /// Whether a regex literal may start right after `prev` (the previous
+    /// non-comment token). Only this answer is kept, not the token itself.
+    fn token_allows_regex_after(prev: &Token<'_>) -> bool {
+        {
+            {
                 if prev.precedence() > 0 {
                     return true;
                 }
