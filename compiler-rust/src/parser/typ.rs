@@ -1846,6 +1846,12 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
 
 /// OCaml `parse_string_field_declaration` (compiler/syntax/src/res_core.ml:5186-5222).
 pub(super) fn parse_string_field_declaration(p: &mut Parser<'_>) -> Option<ObjectField> {
+    // OCaml res_core.ml:5186-5222 parses object field types with plain
+    // `parse_poly_type_expr p` / `parse_typ_expr p`: no inline record context.
+    without_inline_record_context(p, parse_string_field_declaration_inner)
+}
+
+fn parse_string_field_declaration_inner(p: &mut Parser<'_>) -> Option<ObjectField> {
     let attrs = parse_attributes(p);
     let (name, name_loc) = match &p.token {
         Token::String(name) => {
