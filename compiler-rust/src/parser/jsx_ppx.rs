@@ -143,6 +143,7 @@ pub type JsxPreprocessorResult<T> = Result<T, JsxPreprocessorError>;
 
 const DUPLICATE_REACT_COMPONENT_ATTR_MSG: &str =
     "Only one JSX component call can exist on a component at one time";
+const REACT_COMPONENT_DESTRUCTURE_MSG: &str = "JSX component calls cannot be destructured.";
 const MULTIPLE_COMPONENT_DEFINITIONS_MSG: &str = "Only one component definition is allowed for each module. Move to a submodule or other file if necessary.";
 const COMPONENT_WITH_PROPS_EXTERNAL_MSG: &str = "Components cannot be defined as externals when using @react.componentWithProps.\n\nIf you intended to define an external for a React component using a props type,\nuse the type React.component<props> instead.\nAlternatively, use @react.component for an external definition with labeled arguments.";
 const COMPONENT_WITH_PROPS_FORWARD_REF_MSG: &str = "Components using React.forwardRef cannot use @react.componentWithProps. Use @react.component instead.";
@@ -570,7 +571,7 @@ fn transform_react_component_binding(
 
     // Get function name and location from pattern
     let binding_pat = arena.get_pat(binding.pvb_pat).clone();
-    let fn_name = get_fn_name(arena, &binding_pat);
+    let fn_name = get_fn_name(arena, config, &binding_pat, config.empty_loc);
     let fn_name_loc = get_fn_name_loc(&binding_pat);
     let original_binding_loc = binding.pvb_loc.clone();
 
@@ -997,7 +998,8 @@ fn transform_react_component_with_props_binding(
     arena: &mut ParseArena,
 ) -> (ValueBinding, Option<ValueBinding>) {
     // Get function name and location from pattern
-    let fn_name = get_fn_name(arena, arena.get_pat(binding.pvb_pat));
+    let binding_pat = arena.get_pat(binding.pvb_pat);
+    let fn_name = get_fn_name(arena, config, binding_pat, binding_pat.ppat_loc);
     let _fn_name_loc = get_fn_name_loc(arena.get_pat(binding.pvb_pat));
     let internal_fn_name = format!("{}$Internal", fn_name);
     let full_module_name = make_module_name(config, &fn_name);
@@ -2740,15 +2742,27 @@ fn string_int_attribute_loc_in_core_type(
     }
 }
 
-fn get_fn_name(arena: &ParseArena, pat: &Pattern) -> String {
+/// `get_fn_name` (jsx_v4.ml:66-72). `pat_loc` is the `ppat_loc` OCaml sees on
+/// the outer pattern: `map_binding` has replaced it with `empty_loc` for
+/// `@react.component` (jsx_v4.ml:582-590), not for `componentWithProps`.
+fn get_fn_name(
+    arena: &ParseArena,
+    config: &mut JsxConfig,
+    pat: &Pattern,
+    pat_loc: Location,
+) -> String {
     match &*pat.ppat_desc {
         PatternDesc::Ppat_var(loc) => arena.get_string(loc.txt).to_string(),
         PatternDesc::Ppat_constraint(inner) => {
             let (ref inner_idx, _) = **inner;
             let inner_pat = arena.get_pat(*inner_idx);
-            get_fn_name(arena, inner_pat)
+            let inner_loc = inner_pat.ppat_loc;
+            get_fn_name(arena, config, inner_pat, inner_loc)
         }
-        _ => "make".to_string(),
+        _ => {
+            set_fatal_error(config, pat_loc, REACT_COMPONENT_DESTRUCTURE_MSG);
+            "make".to_string()
+        }
     }
 }
 

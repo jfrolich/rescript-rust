@@ -57,7 +57,6 @@ const LET_UNWRAP_FEATURE_NOT_ENABLED_MSG: &str = "Experimental feature not enabl
 const LET_UNWRAP_TOPLEVEL_MSG: &str = "`let?` is not allowed for top-level bindings.";
 const LET_UNWRAP_UNSUPPORTED_TYPE_MSG: &str =
     "`let?` is only supported in let bindings targeting the `result` or `option` type.";
-const REACT_COMPONENT_DESTRUCTURE_MSG: &str = "JSX component calls cannot be destructured.";
 static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 static EXTERNAL_PPX_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 const AST_IMPL_MAGIC_NUMBER: &[u8] = b"Caml1999M022";
@@ -110,27 +109,6 @@ pub fn module_name_from_source_filename(path: &str) -> String {
         None => String::new(),
         Some(ch) => ch.to_uppercase().collect::<String>() + chars.as_str(),
     }
-}
-
-fn has_react_component_attr(attrs: &[Attribute], arena: &crate::parse_arena::ParseArena) -> bool {
-    attrs.iter().any(|attr| {
-        matches!(
-            arena.get_string(attr.0.txt),
-            "react.component" | "jsx.component"
-        )
-    })
-}
-
-fn has_react_component_with_props_attr(
-    attrs: &[Attribute],
-    arena: &crate::parse_arena::ParseArena,
-) -> bool {
-    attrs.iter().any(|attr| {
-        matches!(
-            arena.get_string(attr.0.txt),
-            "react.componentWithProps" | "jsx.componentWithProps"
-        )
-    })
 }
 
 pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structure) -> i32 {
@@ -1131,113 +1109,6 @@ fn structure_has_config_string(
     })
 }
 
-fn reject_invalid_react_component_destructure_in_structure(
-    structure: &Structure,
-    arena: &ParseArena,
-    filename: &str,
-) -> Result<()> {
-    if react_component_destructure_in_structure(structure, arena) {
-        return Err(
-            UserDiagnostic::new(format_react_component_destructure_report(filename), 2).into(),
-        );
-    }
-    Ok(())
-}
-
-fn react_component_destructure_in_structure(structure: &Structure, arena: &ParseArena) -> bool {
-    for item in structure {
-        match &*item.pstr_desc {
-            StructureItemDesc::Pstr_value(value) => {
-                for binding in &value.1 {
-                    if (has_react_component_attr(&binding.pvb_attributes, arena)
-                        || has_react_component_with_props_attr(&binding.pvb_attributes, arena))
-                        && !react_component_pattern_is_plain_name(binding.pvb_pat, arena)
-                    {
-                        return true;
-                    }
-                }
-            }
-            StructureItemDesc::Pstr_module(module_binding) => {
-                if react_component_destructure_in_module_expr(
-                    arena.get_mod_expr(module_binding.pmb_expr),
-                    arena,
-                ) {
-                    return true;
-                }
-            }
-            StructureItemDesc::Pstr_recmodule(module_bindings) => {
-                for module_binding in module_bindings.iter() {
-                    if react_component_destructure_in_module_expr(
-                        arena.get_mod_expr(module_binding.pmb_expr),
-                        arena,
-                    ) {
-                        return true;
-                    }
-                }
-            }
-            StructureItemDesc::Pstr_include(include_decl) => {
-                if react_component_destructure_in_module_expr(
-                    arena.get_mod_expr(include_decl.pincl_mod),
-                    arena,
-                ) {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    false
-}
-
-fn react_component_destructure_in_module_expr(
-    module_expr: &ModuleExpr,
-    arena: &ParseArena,
-) -> bool {
-    match &*module_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(structure) => {
-            react_component_destructure_in_structure(structure, arena)
-        }
-        ModuleExprDesc::Pmod_functor(functor) => {
-            react_component_destructure_in_module_expr(arena.get_mod_expr(functor.2), arena)
-        }
-        ModuleExprDesc::Pmod_apply(lhs, rhs) => {
-            react_component_destructure_in_module_expr(arena.get_mod_expr(*lhs), arena)
-                || react_component_destructure_in_module_expr(arena.get_mod_expr(*rhs), arena)
-        }
-        ModuleExprDesc::Pmod_constraint(inner, _) => {
-            react_component_destructure_in_module_expr(arena.get_mod_expr(*inner), arena)
-        }
-        _ => false,
-    }
-}
-
-fn react_component_pattern_is_plain_name(
-    pat_idx: crate::parse_arena::PatIdx,
-    arena: &ParseArena,
-) -> bool {
-    let pat = arena.get_pat(pat_idx);
-    match &*pat.ppat_desc {
-        PatternDesc::Ppat_var(_) => true,
-        PatternDesc::Ppat_constraint(inner) => {
-            let (inner_pat, _) = &**inner;
-            react_component_pattern_is_plain_name(*inner_pat, arena)
-        }
-        _ => false,
-    }
-}
-
-fn format_react_component_destructure_report(filename: &str) -> String {
-    // OCaml reports this through `Location.error` without a location, so the
-    // intro and the (module-name) file are printed with the error and
-    // filename styles (compiler/ml/location.ml:94-160).
-    format!(
-        "\n  {}\n  {}\n\n  {REACT_COMPONENT_DESTRUCTURE_MSG}\n\n",
-        code_frame::colorize_intro("We've found a bug for you!", true),
-        code_frame::colorize_filename(&module_name_from_source_filename(filename))
-    )
-}
-
 /// A concrete JavaScript output target for one compile.
 #[derive(Clone)]
 pub struct JsOutputTarget {
@@ -1800,6 +1671,17 @@ fn jsx_ppx_error_to_anyhow(
     filename: &str,
 ) -> anyhow::Error {
     let loc = arena.to_location(err.loc);
+    // Location.print_loc (location.ml:75-92) prints the location's own
+    // pos_fname; a range-less `Location.in_file file_name` (jsx_v4.ml
+    // empty_loc) names the module rather than the source file.
+    let loc_file = arena.get_string(loc.loc_start.file_name);
+    let filename = if !code_frame::has_printable_range(&loc.loc_start, &loc.loc_end)
+        && !loc_file.is_empty()
+    {
+        loc_file
+    } else {
+        filename
+    };
     let output = match err.message_style {
         jsx_ppx::JsxPreprocessorMessageStyle::PrefixedLines => {
             format_compiler_error_report_from_location(source, filename, &loc, &err.message)
@@ -11268,11 +11150,6 @@ pub fn run_implementation_frontend(
     // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
     let jsx_version = options.jsx_version.or(file_config.jsx_version);
     let structure = if let Some(jsx_version) = jsx_version {
-        reject_invalid_react_component_destructure_in_structure(
-            &structure,
-            parser.arena(),
-            filename,
-        )?;
         let (structure, jsx_warnings) = jsx_ppx::transform_structure_collecting_warnings(
             structure,
             jsx_version,
@@ -12915,11 +12792,6 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
 
         let jsx_version = options.jsx_version.or(file_config.jsx_version);
         let structure = if let Some(jsx_version) = jsx_version {
-            reject_invalid_react_component_destructure_in_structure(
-                &structure,
-                parser.arena(),
-                filename,
-            )?;
             let (structure, jsx_warnings) = jsx_ppx::transform_structure_collecting_warnings(
                 structure,
                 jsx_version,
