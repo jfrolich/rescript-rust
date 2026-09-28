@@ -21851,6 +21851,15 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
     for decl in decls {
         check_nonrecursive_gadt_enter_type(rec_flag, decl)?;
     }
+    // Match OCaml Typedecl.transl_type_decl flow for signatures:
+    // `init_def (Ident.current_time ())` once the identifiers exist
+    // (typedecl.ml:1467-1475), translate inside begin_def/end_def, then
+    // generalize declarations.
+    ctx.init_def(ctx.current_stamp());
+    ctx.begin_def();
+    // typedecl.ml:1476 `enter_type` (typedecl.ml:73-108), after `begin_def`:
+    // fresh generic parameters, and a fresh variable as manifest when the
+    // declaration has one.
     for row_id in &fixed_row_type_ids {
         let placeholder_decl =
             fixed_row_placeholder_decl(ctx, arena, &decls[row_id.decl_idx], &row_id.id);
@@ -21858,22 +21867,20 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
     }
     if matches!(rec_flag, RecFlag::Recursive) {
         for (type_id, decl) in declared_type_ids.iter().zip(decls.iter()) {
+            let arity = decl.ptype_params.len();
             let placeholder_decl = crate::types::TypeDeclaration {
-                type_params: vec![],
-                type_arity: decl.ptype_params.len() as i32,
+                type_params: (0..arity).map(|_| ctx.new_generic_var(None)).collect(),
+                type_arity: arity as i32,
                 type_kind: crate::types::TypeKind::TypeAbstract,
                 type_private: match decl.ptype_private {
                     crate::parser::ast::PrivateFlag::Public => crate::types::PrivateFlag::Public,
                     crate::parser::ast::PrivateFlag::Private => crate::types::PrivateFlag::Private,
                 },
-                type_manifest: None,
-                type_variance: vec![
-                    crate::types::variance::Variance::null();
-                    decl.ptype_params.len()
-                ],
+                type_manifest: decl.ptype_manifest.map(|_| ctx.new_var(None)),
+                type_variance: (0..arity).map(|_| TypesVariance::full()).collect(),
                 type_newtype_level: None,
                 type_loc: arena.to_location(decl.ptype_loc),
-                type_attributes: vec![],
+                type_attributes: parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes),
                 type_immediate: false,
                 type_representation: crate::types::TypeRepresentation::Boxed,
                 type_inlined_types: vec![],
@@ -21883,12 +21890,6 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         }
     }
 
-    // Match OCaml Typedecl.transl_type_decl flow for signatures:
-    // `init_def (Ident.current_time ())` once the identifiers exist
-    // (typedecl.ml:1467-1475), translate inside begin_def/end_def, then
-    // generalize declarations.
-    ctx.init_def(ctx.current_stamp());
-    ctx.begin_def();
     // typedecl.ml:1476 `enter_type` adds the placeholders with
     // `Env.add_type ~check:true` (typedecl.ml:108), registering their usage
     // checks before translation: fixed rows first, then a recursive group.
@@ -22503,6 +22504,42 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         // group and before final env construction/end_def.
         check_type_declaration_duplicate_definitions(tctx, arena, decls);
     }
+    // typedecl.ml:1540-1546 `update_type` (typedecl.ml:110-124) in the final
+    // env (typedecl.ml:1534-1538): unify each recursive stub's manifest
+    // variable with the declared type.
+    let loop_result = loop_result.and_then(|()| {
+        if !matches!(rec_flag, RecFlag::Recursive) {
+            return Ok(());
+        }
+        let mut newenv = env.clone();
+        let entry_ids = if has_fixed_rows { &type_entry_ids } else { &declared_type_ids };
+        for (type_id, decl) in entry_ids.iter().zip(internal_decls_for_generalize.iter()) {
+            newenv.add_type(type_id.clone(), decl.clone());
+        }
+        for (decl, type_id) in decls.iter().zip(declared_type_ids.iter()) {
+            let Ok(stub) = temp_env.find_type_by_ident(type_id) else {
+                continue;
+            };
+            let Some(manifest) = stub.type_manifest else {
+                continue;
+            };
+            let params = stub.type_params.iter().map(|_| ctx.new_var(None)).collect();
+            let constr = ctx.new_constr(Path::pident(type_id.clone()), params);
+            let mut unify_state = crate::types::UnifyState::new();
+            unify_state.set_env(&newenv);
+            if let Err(err) = crate::types::unify(ctx, &mut unify_state, constr, manifest) {
+                let trace = match err {
+                    crate::types::TypeError::Unify(trace) if !trace.is_empty() => trace,
+                    _ => vec![(constr, manifest)],
+                };
+                return Err(TypeModError::TypeDeclTypeClash {
+                    loc: decl.ptype_loc,
+                    trace,
+                });
+            }
+        }
+        Ok(())
+    });
     ctx.end_def();
     loop_result?;
 
