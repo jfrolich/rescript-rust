@@ -555,28 +555,35 @@ impl<T: Clone> IdTbl<T> {
 
     pub fn visible_local_entries(&self) -> impl Iterator<Item = (&Ident, &T)> {
         let mut seen = HashSet::new();
+        let mut shadowing_opens = Vec::new();
         let mut items = Vec::new();
-        self.collect_visible_local_entries(&mut seen, &mut items);
+        self.collect_visible_local_entries(&mut seen, &mut shadowing_opens, &mut items);
         items.into_iter()
     }
 
+    /// `seen` holds the local names of shallower layers and `shadowing_opens`
+    /// the opened tables above this layer; a local binding is visible when
+    /// neither shadows its name. Opened tables are probed per local name
+    /// rather than copied into `seen`, since they are much larger.
     fn collect_visible_local_entries<'a>(
         &'a self,
-        seen: &mut HashSet<&'a str>,
+        seen: &mut HashSet<Name>,
+        shadowing_opens: &mut Vec<&'a OpenedMap<(Ident, T, i32)>>,
         items: &mut Vec<(&'a Ident, &'a T)>,
     ) {
         for (name, entries) in self.current.iter() {
-            if seen.insert(name.as_str())
+            if !shadowing_opens.iter().any(|opened| opened.contains_key(name))
+                && seen.insert(*name)
                 && let Some((id, value)) = entries.last()
             {
                 items.push((id, value));
             }
         }
         if let Some(opened) = &self.opened {
-            for name in opened.components.keys() {
-                seen.insert(name.as_str());
-            }
-            opened.next.collect_visible_local_entries(seen, items);
+            shadowing_opens.push(&opened.components);
+            opened
+                .next
+                .collect_visible_local_entries(seen, shadowing_opens, items);
         }
     }
 }

@@ -10844,7 +10844,7 @@ fn check_partial_simple_rows(
 
     // Check if all constructors of a variant type are covered
     // Collect constructor names from Tpat_construct patterns
-    let mut construct_names: HashSet<String> = HashSet::new();
+    let mut construct_names: HashSet<&str> = HashSet::new();
     let mut total_constructors: Option<i32> = None;
     let mut has_non_construct = false;
 
@@ -13312,16 +13312,16 @@ fn render_open_list_example(items: &[String]) -> String {
 }
 
 /// Collect construct names from top-level patterns, handling or-patterns
-fn collect_top_constructs(
+fn collect_top_constructs<'p>(
     ctx: &TypeContext,
-    pat: &Pattern,
-    names: &mut HashSet<String>,
+    pat: &'p Pattern,
+    names: &mut HashSet<&'p str>,
     total: &mut Option<i32>,
     has_non_construct: &mut bool,
 ) {
     match &pat.pat_desc {
         PatternDesc::Tpat_construct(_, cstr_desc, _) => {
-            names.insert(cstr_desc.cstr_name.clone());
+            names.insert(cstr_desc.cstr_name.as_str());
             if let crate::types::ConstructorKind::Ordinary(reference) = cstr_desc.cstr_kind {
                 *total = Some(ctx.with_variant_layout(reference.variant, |layout| {
                     layout.constructors.len() as i32

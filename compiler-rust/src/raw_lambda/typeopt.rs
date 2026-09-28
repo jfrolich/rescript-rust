@@ -308,7 +308,7 @@ pub(crate) fn is_base_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef, name: 
         env: &Env,
         ty: TypeExprRef,
         name: &str,
-        seen: &mut HashSet<TypeExprRef>,
+        seen: &mut crate::types::type_expr::TypeExprRefSet,
     ) -> bool {
         let ty = scrape_ty(ctx, env, ty);
         if !seen.insert(ty) {
@@ -346,7 +346,13 @@ pub(crate) fn is_base_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef, name: 
 
     // Match OCaml `Typeopt.is_base_type`: inspect `scrape env ty`
     // (compiler/ml/typeopt.ml:99-101).
-    visit(ctx, env, ty, name, &mut HashSet::new())
+    visit(
+        ctx,
+        env,
+        ty,
+        name,
+        &mut crate::types::type_expr::TypeExprRefSet::new(),
+    )
 }
 
 fn type_is_builtin_path_but_option(path: &Path) -> BuiltinPathTest {
