@@ -358,16 +358,13 @@ impl PartialEq for Ident {
 impl Eq for Ident {}
 
 impl Hash for Ident {
-    #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Consistent with `same` (the `Eq` impl): stamped identifiers are equal
-        // exactly when their stamps are, persistent ones (stamp 0) when their
-        // names are. Name hashes are precomputed, so neither case reads the
-        // name's text.
-        if self.stamp != 0 {
-            state.write_u32(self.stamp as u32);
+        // Hash based on first character and stamp for efficiency
+        // This matches the OCaml implementation
+        if let Some(c) = self.name.chars().next() {
+            (c as u32 ^ self.stamp as u32).hash(state);
         } else {
-            self.name.hash(state);
+            self.stamp.hash(state);
         }
     }
 }
