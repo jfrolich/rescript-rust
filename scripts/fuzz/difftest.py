@@ -170,6 +170,8 @@ def compare(
         if result.interesting:
             if pipeline != "direct":
                 result.signature = f"[{pipeline}] {result.signature}"
+            if any(name.endswith(".resi") for name in case):
+                result.signature = f"[resi] {result.signature}"
             return result
     assert result is not None
     return result

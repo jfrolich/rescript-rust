@@ -52,7 +52,8 @@ PRIORITY = ["rust_accepts", "crash", "rust_rejects", "msg_diff", "warn_diff", "o
 
 def module_name(path: Path) -> str:
     stem = path.stem
-    return stem[0].upper() + stem[1:] + ".res" if stem else "A.res"
+    ext = ".resi" if path.suffix == ".resi" else ".res"
+    return stem[0].upper() + stem[1:] + ext if stem else "A" + ext
 
 
 def bucket_id(sig: str) -> str:
@@ -106,7 +107,10 @@ def cmd_seeds(args):
     for d in SEED_DIRS:
         base = ROOT / d
         if base.exists():
-            files += [str(p) for p in base.rglob("*.res") if "/node_modules/" not in str(p)
+            # Interfaces are seeds too: compiling one standalone exercises
+            # signature typing (transl_signature), not just structures.
+            files += [str(p) for pat in ("*.res", "*.resi") for p in base.rglob(pat)
+                      if "/node_modules/" not in str(p)
                       and "/lib/" not in str(p) and p.stat().st_size < 60_000]
     print(f"checking {len(files)} candidate seeds", flush=True)
     seeds, n = [], 0
