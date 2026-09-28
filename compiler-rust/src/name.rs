@@ -14,7 +14,7 @@ use smol_str::SmolStr;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fmt;
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::hash::{Hash, Hasher};
 use std::sync::{LazyLock, Mutex};
 
 struct NameData {
@@ -75,6 +75,23 @@ impl Name {
         // Unavailable only while the thread is being torn down.
         let _ = LOCAL.try_with(|local| local.borrow_mut().insert(name.0.text, name));
         name
+    }
+
+    /// The name for `text` if it has been interned, without interning it.
+    /// A table keyed by names cannot contain a string that was never
+    /// interned, so a `None` here answers every lookup for `text`.
+    pub fn lookup(text: &str) -> Option<Name> {
+        if let Ok(Some(name)) = LOCAL.try_with(|local| local.borrow().get(text).copied()) {
+            return Some(name);
+        }
+        let hash = HASHER.hash_one(text);
+        let name = GLOBAL[(hash as usize) % SHARDS]
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(text)
+            .copied()?;
+        let _ = LOCAL.try_with(|local| local.borrow_mut().insert(name.0.text, name));
+        Some(name)
     }
 
     /// The interned string.
@@ -271,6 +288,17 @@ mod tests {
         assert_ne!(a, Name::new("world"));
         assert_eq!(a, "hello");
         assert_eq!(std::mem::size_of::<Name>(), 8);
+    }
+
+    #[test]
+    fn lookup_does_not_intern() {
+        assert_eq!(Name::lookup("name_lookup_never_interned_zq"), None);
+        let name = Name::new("name_lookup_interned_zq");
+        assert_eq!(Name::lookup("name_lookup_interned_zq"), Some(name));
+        let other = std::thread::spawn(|| Name::lookup("name_lookup_interned_zq"))
+            .join()
+            .unwrap();
+        assert_eq!(other, Some(name));
     }
 
     #[test]

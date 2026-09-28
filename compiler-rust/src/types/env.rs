@@ -32,6 +32,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use smol_str::SmolStr;
+use crate::name::Name;
 
 type PersistentHashMap<K, V> = im_rc::HashMap<K, V, ahash::RandomState>;
 type PersistentHashSet<T> = im_rc::HashSet<T, ahash::RandomState>;
@@ -39,7 +40,7 @@ type PersistentHashSet<T> = im_rc::HashSet<T, ahash::RandomState>;
 /// and only read afterwards (a rare in-place update copies the layer), so a
 /// flat hash table replaces the persistent map: one allocation to build and
 /// to drop instead of a tree of reference-counted nodes.
-type OpenedMap<V> = ahash::AHashMap<SmolStr, V>;
+type OpenedMap<V> = ahash::AHashMap<Name, V>;
 
 /// Collect free type variables (Tvar nodes) from a type expression.
 /// Matches OCaml's Datarepr.free_vars.
@@ -195,7 +196,7 @@ pub enum EnvSummary {
 fn id_open_table<T>(components: Vec<(Ident, T, i32)>) -> OpenedMap<(Ident, T, i32)> {
     let mut table = OpenedMap::with_capacity_and_hasher(components.len(), Default::default());
     for (id, value, pos) in components {
-        table.insert(smol_str::SmolStr::new_static(id.name()), (id, value, pos));
+        table.insert(id.name_atom(), (id, value, pos));
     }
     table
 }
@@ -204,7 +205,7 @@ fn tycomp_open_table<T>(components: Vec<(Ident, T)>) -> OpenedMap<Vec<(Ident, T)
     let mut table: OpenedMap<Vec<(Ident, T)>> =
         OpenedMap::with_capacity_and_hasher(components.len(), Default::default());
     for (id, value) in components {
-        let name = smol_str::SmolStr::new_static(id.name());
+        let name = id.name_atom();
         match table.get_mut(&name) {
             Some(entries) => entries.insert(0, (id, value)),
             None => {
@@ -315,7 +316,7 @@ type IdBucket<T> = std::rc::Rc<Vec<(Ident, T)>>;
 
 #[derive(Debug, Clone)]
 pub struct IdTbl<T> {
-    current: PersistentHashMap<SmolStr, IdBucket<T>>,
+    current: PersistentHashMap<Name, IdBucket<T>>,
     opened: Option<Arc<IdOpened<T>>>,
 }
 
@@ -328,11 +329,11 @@ impl<T: Clone> IdTbl<T> {
     }
 
     pub fn add(&mut self, id: Ident, value: T) {
-        match self.current.get_mut(id.name()) {
+        let key = id.name_atom();
+        match self.current.get_mut(&key) {
             Some(entries) => std::rc::Rc::make_mut(entries).push((id, value)),
             None => {
-                self.current
-                    .insert(smol_str::SmolStr::new_static(id.name()), std::rc::Rc::new(vec![(id, value)]));
+                self.current.insert(key, std::rc::Rc::new(vec![(id, value)]));
             }
         }
     }
@@ -369,16 +370,16 @@ impl<T: Clone> IdTbl<T> {
         names
     }
 
-    fn opened_name_counts(&self) -> HashMap<SmolStr, usize> {
+    fn opened_name_counts(&self) -> HashMap<Name, usize> {
         let mut counts = HashMap::new();
         self.collect_opened_name_counts(&mut counts);
         counts
     }
 
-    fn collect_opened_name_counts(&self, counts: &mut HashMap<SmolStr, usize>) {
+    fn collect_opened_name_counts(&self, counts: &mut HashMap<Name, usize>) {
         if let Some(opened) = &self.opened {
             for name in opened.components.keys() {
-                *counts.entry(name.clone()).or_default() += 1;
+                *counts.entry(*name).or_default() += 1;
             }
             opened.next.collect_opened_name_counts(counts);
         }
@@ -391,7 +392,7 @@ impl<T: Clone> IdTbl<T> {
             return None;
         }
         let stamp = id.stamp();
-        self.current.get(id.name()).and_then(|entries| {
+        self.current.get(&id.name_atom()).and_then(|entries| {
             entries
                 .iter()
                 .rev()
@@ -407,8 +408,12 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn find_name_entry(&self, name: &str) -> Option<(&Ident, &T)> {
+        self.find_name_entry_key(Name::lookup(name)?)
+    }
+
+    fn find_name_entry_key(&self, key: Name) -> Option<(&Ident, &T)> {
         if !self.current.is_empty()
-            && let Some((id, value)) = self.current.get(name).and_then(|entries| entries.last())
+            && let Some((id, value)) = self.current.get(&key).and_then(|entries| entries.last())
         {
             return Some((id, value));
         }
@@ -416,9 +421,9 @@ impl<T: Clone> IdTbl<T> {
         match &self.opened {
             Some(opened) => opened
                 .components
-                .get(name)
+                .get(&key)
                 .map(|(id, value, _)| (id, value))
-                .or_else(|| opened.next.find_name_entry(name)),
+                .or_else(|| opened.next.find_name_entry_key(key)),
             None => None,
         }
     }
@@ -432,8 +437,12 @@ impl<T: Clone> IdTbl<T> {
     }
 
     pub fn find_by_name_with_path(&self, name: &str) -> Option<(Path, &T)> {
+        self.find_by_key_with_path(Name::lookup(name)?)
+    }
+
+    fn find_by_key_with_path(&self, key: Name) -> Option<(Path, &T)> {
         if !self.current.is_empty()
-            && let Some((id, value)) = self.current.get(name).and_then(|entries| entries.last())
+            && let Some((id, value)) = self.current.get(&key).and_then(|entries| entries.last())
         {
             return Some((Path::pident(id.clone()), value));
         }
@@ -441,16 +450,16 @@ impl<T: Clone> IdTbl<T> {
         match &self.opened {
             Some(opened) => opened
                 .components
-                .get(name)
+                .get(&key)
                 .map(|(id, value, pos)| {
                     let path = opened
                         .root
                         .as_ref()
-                        .map(|root| Path::pdot_pos(root.clone(), name.to_string(), *pos))
+                        .map(|root| Path::pdot_pos(root.clone(), key, *pos))
                         .unwrap_or_else(|| Path::pident(id.clone()));
                     (path, value)
                 })
-                .or_else(|| opened.next.find_by_name_with_path(name)),
+                .or_else(|| opened.next.find_by_key_with_path(key)),
             None => None,
         }
     }
@@ -476,7 +485,14 @@ impl<T: Clone> IdTbl<T> {
     where
         F: FnMut(&T) -> T,
     {
-        if let Some(entries) = self.current.get_mut(name)
+        self.update_by_key(Name::lookup(name)?, f)
+    }
+
+    fn update_by_key<F>(&mut self, key: Name, f: &mut F) -> Option<(Ident, T)>
+    where
+        F: FnMut(&T) -> T,
+    {
+        if let Some(entries) = self.current.get_mut(&key)
             && let Some((id, value)) = std::rc::Rc::make_mut(entries).last_mut()
         {
             let updated = f(value);
@@ -486,12 +502,12 @@ impl<T: Clone> IdTbl<T> {
 
         if let Some(opened) = self.opened.as_mut() {
             let opened = Arc::make_mut(opened);
-            if let Some((id, value, _)) = Arc::make_mut(&mut opened.components).get_mut(name) {
+            if let Some((id, value, _)) = Arc::make_mut(&mut opened.components).get_mut(&key) {
                 let updated = f(value);
                 *value = updated.clone();
                 return Some((id.clone(), updated));
             }
-            return Arc::make_mut(&mut opened.next).update_by_name(name, f);
+            return Arc::make_mut(&mut opened.next).update_by_key(key, f);
         }
 
         None
@@ -499,16 +515,22 @@ impl<T: Clone> IdTbl<T> {
 
     pub fn find_all(&self, name: &str) -> Vec<&T> {
         let mut items = Vec::new();
-        if let Some(entries) = self.current.get(name) {
+        if let Some(key) = Name::lookup(name) {
+            self.collect_all_key(key, &mut items);
+        }
+        items
+    }
+
+    fn collect_all_key<'a>(&'a self, key: Name, items: &mut Vec<&'a T>) {
+        if let Some(entries) = self.current.get(&key) {
             items.extend(entries.iter().rev().map(|(_, value)| value));
         }
         if let Some(opened) = &self.opened {
-            if let Some((_, value, _)) = opened.components.get(name) {
+            if let Some((_, value, _)) = opened.components.get(&key) {
                 items.push(value);
             }
-            items.extend(opened.next.find_all(name));
+            opened.next.collect_all_key(key, items);
         }
-        items
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -578,7 +600,7 @@ struct TycompOpened<T> {
 /// as lists.
 #[derive(Debug, Clone)]
 pub struct TycompTbl<T> {
-    current: PersistentHashMap<SmolStr, IdBucket<T>>,
+    current: PersistentHashMap<Name, IdBucket<T>>,
     opened: Option<Arc<TycompOpened<T>>>,
 }
 
@@ -591,11 +613,11 @@ impl<T: Clone> TycompTbl<T> {
     }
 
     pub fn add(&mut self, id: Ident, value: T) {
-        match self.current.get_mut(id.name()) {
+        let key = id.name_atom();
+        match self.current.get_mut(&key) {
             Some(entries) => std::rc::Rc::make_mut(entries).push((id, value)),
             None => {
-                self.current
-                    .insert(smol_str::SmolStr::new_static(id.name()), std::rc::Rc::new(vec![(id, value)]));
+                self.current.insert(key, std::rc::Rc::new(vec![(id, value)]));
             }
         }
     }
@@ -631,49 +653,57 @@ impl<T: Clone> TycompTbl<T> {
         names
     }
 
-    fn opened_name_counts(&self) -> HashMap<SmolStr, usize> {
+    fn opened_name_counts(&self) -> HashMap<Name, usize> {
         let mut counts = HashMap::new();
         self.collect_opened_name_counts(&mut counts);
         counts
     }
 
-    fn collect_opened_name_counts(&self, counts: &mut HashMap<SmolStr, usize>) {
+    fn collect_opened_name_counts(&self, counts: &mut HashMap<Name, usize>) {
         if let Some(opened) = &self.opened {
             for (name, entries) in opened.components.iter() {
-                *counts.entry(name.clone()).or_default() += entries.len();
+                *counts.entry(*name).or_default() += entries.len();
             }
             opened.next.collect_opened_name_counts(counts);
         }
     }
 
     pub fn find_by_name(&self, name: &str) -> Option<&T> {
+        self.find_by_key(Name::lookup(name)?)
+    }
+
+    fn find_by_key(&self, key: Name) -> Option<&T> {
         if !self.current.is_empty()
-            && let Some((_, value)) = self.current.get(name).and_then(|entries| entries.last())
+            && let Some((_, value)) = self.current.get(&key).and_then(|entries| entries.last())
         {
             return Some(value);
         }
         match &self.opened {
             Some(opened) => opened
                 .components
-                .get(name)
+                .get(&key)
                 .and_then(|entries| entries.first())
                 .map(|(_, value)| value)
-                .or_else(|| opened.next.find_by_name(name)),
+                .or_else(|| opened.next.find_by_key(key)),
             None => None,
         }
     }
 
     pub fn find_by_name_with_origin(&self, name: &str) -> Option<(&Ident, &T, bool)> {
-        if let Some((id, value)) = self.current.get(name).and_then(|entries| entries.last()) {
+        self.find_by_key_with_origin(Name::lookup(name)?)
+    }
+
+    fn find_by_key_with_origin(&self, key: Name) -> Option<(&Ident, &T, bool)> {
+        if let Some((id, value)) = self.current.get(&key).and_then(|entries| entries.last()) {
             return Some((id, value, true));
         }
         match &self.opened {
             Some(opened) => opened
                 .components
-                .get(name)
+                .get(&key)
                 .and_then(|entries| entries.first())
                 .map(|(id, value)| (id, value, false))
-                .or_else(|| opened.next.find_by_name_with_origin(name)),
+                .or_else(|| opened.next.find_by_key_with_origin(key)),
             None => None,
         }
     }
@@ -681,7 +711,7 @@ impl<T: Clone> TycompTbl<T> {
     pub fn find_by_ident(&self, id: &Ident) -> Option<&T> {
         let stamp = id.stamp();
         if !self.current.is_empty()
-            && let Some(value) = self.current.get(id.name()).and_then(|entries| {
+            && let Some(value) = self.current.get(&id.name_atom()).and_then(|entries| {
             entries
                 .iter()
                 .rev()
@@ -703,16 +733,22 @@ impl<T: Clone> TycompTbl<T> {
 
     pub fn find_all(&self, name: &str) -> Vec<&T> {
         let mut items = Vec::new();
-        if let Some(entries) = self.current.get(name) {
+        if let Some(key) = Name::lookup(name) {
+            self.collect_all_key(key, &mut items);
+        }
+        items
+    }
+
+    fn collect_all_key<'a>(&'a self, key: Name, items: &mut Vec<&'a T>) {
+        if let Some(entries) = self.current.get(&key) {
             items.extend(entries.iter().rev().map(|(_, value)| value));
         }
         if let Some(opened) = &self.opened {
-            if let Some(entries) = opened.components.get(name) {
+            if let Some(entries) = opened.components.get(&key) {
                 items.extend(entries.iter().map(|(_, value)| value));
             }
-            items.extend(opened.next.find_all(name));
+            opened.next.collect_all_key(key, items);
         }
-        items
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&Ident, &T)> {
