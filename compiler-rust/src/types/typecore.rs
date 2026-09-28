@@ -25276,13 +25276,13 @@ where
     enum CopyTypeExprPlan {
         Tvar(Option<String>),
         Tarrow {
-            args: Vec<TypeArg>,
+            args: crate::types::type_expr::TypeArgList,
             ret: TypeExprRef,
         },
-        Ttuple(Vec<TypeExprRef>),
+        Ttuple(crate::types::type_expr::TypeRefList),
         Tconstr {
             path: Path,
-            args: Vec<TypeExprRef>,
+            args: crate::types::type_expr::TypeRefList,
         },
         Tobject {
             fields: TypeExprRef,
@@ -25307,12 +25307,12 @@ where
         Tunivar(Option<String>),
         Tpoly {
             body: TypeExprRef,
-            vars: Vec<TypeExprRef>,
+            vars: crate::types::type_expr::TypeRefList,
         },
         Tpackage {
             path: Path,
             lids: Vec<Longident>,
-            args: Vec<TypeExprRef>,
+            args: crate::types::type_expr::TypeRefList,
         },
     }
 
@@ -25347,13 +25347,13 @@ where
         match &*desc {
             TypeDesc::Tvar(name) => CopyTypeExprPlan::Tvar(name.clone()),
             TypeDesc::Tarrow { args, ret } => CopyTypeExprPlan::Tarrow {
-                args: args.to_vec(),
+                args: args.clone(),
                 ret: *ret,
             },
-            TypeDesc::Ttuple(types) => CopyTypeExprPlan::Ttuple(types.to_vec()),
+            TypeDesc::Ttuple(types) => CopyTypeExprPlan::Ttuple(types.clone()),
             TypeDesc::Tconstr { path, args, .. } => CopyTypeExprPlan::Tconstr {
                 path: type_path(path),
-                args: args.to_vec(),
+                args: args.clone(),
             },
             TypeDesc::Tobject { fields, name } => CopyTypeExprPlan::Tobject {
                 fields: *fields,
@@ -25404,12 +25404,12 @@ where
             TypeDesc::Tunivar(name) => CopyTypeExprPlan::Tunivar(name.clone()),
             TypeDesc::Tpoly { body, vars } => CopyTypeExprPlan::Tpoly {
                 body: *body,
-                vars: vars.to_vec(),
+                vars: vars.clone(),
             },
             TypeDesc::Tpackage { path, lids, args } => CopyTypeExprPlan::Tpackage {
                 path: type_path(path),
                 lids: lids.clone(),
-                args: args.to_vec(),
+                args: args.clone(),
             },
         }
     };
@@ -25419,8 +25419,9 @@ where
             CopyTypeExprPlan::Tvar(name) => TypeDesc::Tvar(name),
             CopyTypeExprPlan::Tarrow { args, ret } => {
                 let args = args
-                    .into_iter()
-                    .map(|mut arg| {
+                    .iter()
+                    .map(|arg| {
+                        let mut arg = arg.clone();
                         arg.typ = copy_lookup_type_expr_with_paths(
                             ctx,
                             arg.typ,
