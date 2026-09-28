@@ -5668,17 +5668,20 @@ fn subst_with_memo(
     // than restoring any previous outer context.
     ctx.set_current_abbreviations(AbbrevMemoRef::nil());
 
-    // 6. Unify stub with body (OCaml: !unify' env body0 body')
+    // 6. Unify stub with body (OCaml: !unify' env body0 body'). `unify'` is
+    // `unify_var` (ctype.ml:2609-2628), which links a variable without the
+    // top-level `unify` snapshot (ctype.ml:2589-2594); a snapshot here would
+    // trail links of the fresh instance that an outer backtrack must keep.
     let mut unify_state = UnifyState::new();
     unify_state.set_env(_env);
-    if unify(ctx, &mut unify_state, body0, fresh_body).is_err() {
+    if unify_var(ctx, &mut unify_state, body0, fresh_body).is_err() {
         // Preserve previous behavior if full unification fails.
         link_type(ctx, body0, fresh_body);
     }
 
     // 7. Bind params to args (OCaml: List.iter2 (!unify' env) params' args)
     for (p, a) in fresh_params.iter().zip(args.iter()) {
-        if unify(ctx, &mut unify_state, *p, *a).is_err() {
+        if unify_var(ctx, &mut unify_state, *p, *a).is_err() {
             link_type(ctx, *p, *a);
         }
     }
