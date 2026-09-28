@@ -5574,6 +5574,15 @@ impl<'a> RawLambdaConverter<'a> {
         cc: &ModuleCoercion,
         dynamic_import: bool,
     ) -> RawLambda {
+        // Each level is a `transl_module` call in OCaml, which starts with
+        // `check_attribute_on_module` (translmod.ml:278-279); the fallback
+        // below checks in `convert_module_expr_raw_with_coercion`.
+        if matches!(
+            module_expr.mod_desc,
+            ModuleExprDesc::Tmod_constraint(..) | ModuleExprDesc::Tmod_ident(..)
+        ) {
+            self.check_module_attribute(module_expr);
+        }
         match &module_expr.mod_desc {
             ModuleExprDesc::Tmod_constraint(inner, _, _, inner_cc) => {
                 let composed = Self::compose_coercions_raw(cc, inner_cc);
@@ -5585,6 +5594,9 @@ impl<'a> RawLambdaConverter<'a> {
                         crate::types::decl::ModuleType::MtyAlias(_, _)
                     )
                 {
+                    // OCaml recurses with `transl_module` into `inner` first,
+                    // which checks its attributes (translmod.ml:278-279).
+                    self.check_module_attribute(inner);
                     self.note_possible_required_modules_from_module_expr(inner, dynamic_import);
                     return self.apply_coercion_raw(
                         self.loc(inner.mod_loc),
