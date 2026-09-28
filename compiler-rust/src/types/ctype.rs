@@ -894,7 +894,7 @@ fn occur_univar(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeResult<()>
     fn occur_rec(
         ctx: &TypeContext,
         env: &Env,
-        bound: &mut HashSet<TypeExprRef>,
+        bound: &mut Vec<TypeExprRef>,
         visited: &mut TypeExprRefSet,
         ty: TypeExprRef,
     ) -> TypeResult<()> {
@@ -915,12 +915,12 @@ fn occur_univar(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeResult<()>
                 let body = *body;
                 let vars = vars.clone();
                 drop(desc);
-                let old_bound = bound.clone();
+                let old_bound_len = bound.len();
                 for var in vars {
-                    bound.insert(ctx.repr(var));
+                    bound.push(ctx.repr(var));
                 }
                 let result = occur_rec(ctx, env, bound, visited, body);
-                *bound = old_bound;
+                bound.truncate(old_bound_len);
                 result
             }
             TypeDesc::Tconstr { args, .. } if args.is_empty() => Ok(()),
@@ -981,7 +981,8 @@ fn occur_univar(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeResult<()>
         }
     }
 
-    let mut bound = HashSet::default();
+    // Univars bound by enclosing `Tpoly`s; a short stack, restored on exit.
+    let mut bound = Vec::new();
     let mut visited = TypeExprRefSet::new();
     occur_rec(ctx, env, &mut bound, &mut visited, ty)
 }
@@ -10438,13 +10439,13 @@ pub(crate) fn copy_type_cached(
         NewVar(Option<String>),
         NewUnivar(Option<String>),
         Arrow {
-            args: Vec<super::type_expr::TypeArg>,
+            args: super::type_expr::TypeArgList,
             ret: TypeExprRef,
         },
-        Tuple(Vec<TypeExprRef>),
+        Tuple(super::type_expr::TypeRefList),
         Constr {
             path: Path,
-            args: Vec<TypeExprRef>,
+            args: super::type_expr::TypeRefList,
         },
         Object {
             fields: TypeExprRef,
@@ -10459,13 +10460,13 @@ pub(crate) fn copy_type_cached(
         Nil,
         Poly {
             body: TypeExprRef,
-            vars: Vec<TypeExprRef>,
+            vars: super::type_expr::TypeRefList,
         },
         Variant(RowDesc),
         Package {
             path: Path,
             lids: Vec<crate::parser::longident::Longident>,
-            args: Vec<TypeExprRef>,
+            args: super::type_expr::TypeRefList,
         },
         Link(TypeExprRef),
         Forget(i32),
@@ -10518,13 +10519,13 @@ pub(crate) fn copy_type_cached(
                 TypeDesc::Tvar(_) => CopyAction::NewVar(None),
                 TypeDesc::Tunivar(name) => CopyAction::NewUnivar(name.clone()),
                 TypeDesc::Tarrow { args, ret } => CopyAction::Arrow {
-                    args: args.to_vec(),
+                    args: args.clone(),
                     ret: *ret,
                 },
-                TypeDesc::Ttuple(types) => CopyAction::Tuple(types.to_vec()),
+                TypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
                 TypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
                     path: path.clone(),
-                    args: args.to_vec(),
+                    args: args.clone(),
                 },
                 TypeDesc::Tobject { fields, name } => CopyAction::Object {
                     fields: *fields,
@@ -10550,13 +10551,13 @@ pub(crate) fn copy_type_cached(
                 TypeDesc::Tnil => CopyAction::Nil,
                 TypeDesc::Tpoly { body, vars } => CopyAction::Poly {
                     body: *body,
-                    vars: vars.to_vec(),
+                    vars: vars.clone(),
                 },
                 TypeDesc::Tvariant(row) => CopyAction::Variant(row.clone()),
                 TypeDesc::Tpackage { path, lids, args } => CopyAction::Package {
                     path: path.clone(),
                     lids: lids.clone(),
-                    args: args.to_vec(),
+                    args: args.clone(),
                 },
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => CopyAction::Link(*target),
             }
@@ -10590,8 +10591,9 @@ pub(crate) fn copy_type_cached(
             let copied_desc = match structural {
                 CopyAction::Arrow { args, ret } => {
                     let args = args
-                        .into_iter()
-                        .map(|mut arg| {
+                        .iter()
+                        .map(|arg| {
+                            let mut arg = arg.clone();
                             arg.typ = copy_type_cached(ctx, arg.typ, cache);
                             arg
                         })
@@ -10600,11 +10602,11 @@ pub(crate) fn copy_type_cached(
                     TypeDesc::Tarrow { args, ret }
                 }
                 CopyAction::Tuple(types) => {
-                    let types_copy: Vec<_> = types
+                    let types_copy: super::type_expr::TypeRefList = types
                         .iter()
                         .map(|t| copy_type_cached(ctx, *t, cache))
                         .collect();
-                    TypeDesc::Ttuple(types_copy.into())
+                    TypeDesc::Ttuple(types_copy)
                 }
                 CopyAction::Constr { path, args } => {
                     let abbrevs = ctx.current_abbreviations();
@@ -10658,7 +10660,7 @@ pub(crate) fn copy_type_cached(
                         }
                     }
 
-                    let args_copy: Vec<_> = args
+                    let args_copy: super::type_expr::TypeRefList = args
                         .iter()
                         .map(|t| copy_type_cached(ctx, *t, cache))
                         .collect();
@@ -10670,7 +10672,7 @@ pub(crate) fn copy_type_cached(
 
                     TypeDesc::Tconstr {
                         path,
-                        args: args_copy.into(),
+                        args: args_copy,
                         abbrev: copied_abbrev,
                     }
                 }
@@ -10707,13 +10709,13 @@ pub(crate) fn copy_type_cached(
                 CopyAction::Nil => TypeDesc::Tnil,
                 CopyAction::Poly { body, vars } => {
                     let body_copy = copy_type_cached(ctx, body, cache);
-                    let vars_copy: Vec<_> = vars
+                    let vars_copy: super::type_expr::TypeRefList = vars
                         .iter()
                         .map(|v| copy_type_cached(ctx, *v, cache))
                         .collect();
                     TypeDesc::Tpoly {
                         body: body_copy,
-                        vars: vars_copy.into(),
+                        vars: vars_copy,
                     }
                 }
                 CopyAction::Variant(row) => {

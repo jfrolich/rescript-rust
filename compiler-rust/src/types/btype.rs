@@ -308,10 +308,10 @@ where
         None,
         One(TypeExprRef),
         Two(TypeExprRef, TypeExprRef),
-        Many(Vec<TypeExprRef>),
+        Many(smallvec::SmallVec<[TypeExprRef; 8]>),
         Variant(RowDesc, TypeExprRef),
         Object(TypeExprRef, Option<Vec<TypeExprRef>>),
-        Poly(TypeExprRef, Vec<TypeExprRef>),
+        Poly(TypeExprRef, smallvec::SmallVec<[TypeExprRef; 8]>),
     }
 
     let children = {
@@ -320,12 +320,15 @@ where
             TypeDesc::Tvar(_) => Children::None,
             // compiler/ml/btype.ml:258-260 visits every n-ary parameter, then the return.
             TypeDesc::Tarrow { args, ret } => {
-                let mut children = args.iter().map(|arg| arg.typ).collect::<Vec<_>>();
+                let mut children = args
+                    .iter()
+                    .map(|arg| arg.typ)
+                    .collect::<smallvec::SmallVec<[TypeExprRef; 8]>>();
                 children.push(*ret);
                 Children::Many(children)
             }
-            TypeDesc::Ttuple(types) => Children::Many(types.to_vec()),
-            TypeDesc::Tconstr { args, .. } => Children::Many(args.to_vec()),
+            TypeDesc::Ttuple(types) => Children::Many(types.iter().copied().collect()),
+            TypeDesc::Tconstr { args, .. } => Children::Many(args.iter().copied().collect()),
             TypeDesc::Tobject { fields, name, .. } => {
                 let name_types = name.as_ref().map(|(_, types)| types.clone());
                 Children::Object(*fields, name_types)
@@ -340,8 +343,8 @@ where
             TypeDesc::Tlink(t) => Children::One(*t),
             TypeDesc::Tsubst(t) => Children::One(*t),
             TypeDesc::Tunivar(_) => Children::None,
-            TypeDesc::Tpoly { body, vars } => Children::Poly(*body, vars.to_vec()),
-            TypeDesc::Tpackage { args, .. } => Children::Many(args.to_vec()),
+            TypeDesc::Tpoly { body, vars } => Children::Poly(*body, vars.iter().copied().collect()),
+            TypeDesc::Tpackage { args, .. } => Children::Many(args.iter().copied().collect()),
         }
     };
 

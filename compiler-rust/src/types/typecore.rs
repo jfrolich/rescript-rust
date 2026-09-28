@@ -12288,12 +12288,16 @@ fn report_unused_match_cases<'case>(
     let mut covered_keys: HashSet<String> = HashSet::default();
     let mut covered_by_catch_all = false;
     let mut useful_witnesses = Vec::new();
+    // Per-row facts of the unguarded rows seen so far, kept incrementally
+    // instead of rescanning every previous row for each case.
+    let mut previous_all_simple = true;
+    let mut previous_any_dict = false;
 
     for case in cases {
-        let has_dict_pattern = typed_pattern_contains_dict_pattern(tctx.arena, &case.c_lhs)
-            || previous_unguarded_cases
-                .iter()
-                .any(|previous| typed_pattern_contains_dict_pattern(tctx.arena, previous.lhs));
+        let case_has_dict = typed_pattern_contains_dict_pattern(tctx.arena, &case.c_lhs);
+        let mut case_keys = simple_pattern_keys(tctx.arena, &case.c_lhs);
+        let case_is_simple = case_keys.is_some() || pattern_is_simple_catch_all(&case.c_lhs);
+        let has_dict_pattern = case_has_dict || previous_any_dict;
         if has_dict_pattern && !previous_unguarded_cases.is_empty() {
             // compiler/ml/parmatch.ml:2017-2035, 2211-2223: dict rows are
             // opaque for warning-56 satisfiability. Exclude prior dict rows so
@@ -12319,15 +12323,14 @@ fn report_unused_match_cases<'case>(
                         lhs: &case.c_lhs,
                         has_guard: false,
                     });
+                    previous_all_simple &= case_is_simple;
+                    previous_any_dict |= case_has_dict;
                 }
                 continue;
             }
         }
 
-        let previous_cases_are_simple = previous_unguarded_cases.iter().all(|previous| {
-            simple_pattern_keys(tctx.arena, previous.lhs).is_some()
-                || pattern_is_simple_catch_all(previous.lhs)
-        });
+        let previous_cases_are_simple = previous_all_simple;
         if previous_cases_are_simple
             && !previous_unguarded_cases.is_empty()
             && check_partial_simple_rows(ctx, env, &previous_unguarded_cases)
@@ -12343,6 +12346,8 @@ fn report_unused_match_cases<'case>(
                     lhs: &case.c_lhs,
                     has_guard: false,
                 });
+                previous_all_simple &= case_is_simple;
+                previous_any_dict |= case_has_dict;
             }
             continue;
         }
@@ -12353,11 +12358,13 @@ fn report_unused_match_cases<'case>(
                     lhs: &case.c_lhs,
                     has_guard: false,
                 });
+                previous_all_simple &= case_is_simple;
+                previous_any_dict |= case_has_dict;
             }
             continue;
         }
 
-        let pattern_keys = simple_pattern_keys(tctx.arena, &case.c_lhs);
+        let pattern_keys = case_keys.take();
         if pattern_keys.is_none() {
             let mut redundant = Vec::new();
             collect_redundant_nested_or_patterns(tctx.arena, &case.c_lhs, &mut redundant);
@@ -12391,10 +12398,7 @@ fn report_unused_match_cases<'case>(
             && !previous_unguarded_cases.is_empty()
             && tctx.warning_config.is_active(&Warning::UnreachableCase)
         {
-            let contains_dict = typed_pattern_contains_dict_pattern(tctx.arena, &case.c_lhs)
-                || previous_unguarded_cases
-                    .iter()
-                    .any(|previous| typed_pattern_contains_dict_pattern(tctx.arena, previous.lhs));
+            let contains_dict = case_has_dict || previous_any_dict;
             let patterns = typed_arena::Arena::new();
             let arena = PressureArena::new(&patterns);
             let previous = previous_unguarded_cases
@@ -12443,6 +12447,8 @@ fn report_unused_match_cases<'case>(
                 lhs: &case.c_lhs,
                 has_guard: false,
             });
+            previous_all_simple &= case_is_simple;
+            previous_any_dict |= case_has_dict;
         }
     }
 
