@@ -3776,6 +3776,23 @@ fn type_mod_error_to_anyhow_styled(
             2,
         )
         .into(),
+        TypeModError::TypeDeclTypeClash { loc, trace } => {
+            // typedecl.ml:2176-2180.
+            let message = type_clash::render_error_message(|ppf| {
+                type_clash::print_report_unification_error(
+                    ppf,
+                    type_ctx,
+                    trace,
+                    "This type constructor expands to type",
+                    "but is used here with type",
+                )
+            });
+            UserDiagnostic::new(
+                format_compiler_error_report_formatted(arena, source, filename, *loc, &message),
+                2,
+            )
+            .into()
+        }
         TypeModError::InconsistentConstraint { loc, trace } => UserDiagnostic::new(
             format_inconsistent_constraint_report(type_ctx, arena, source, filename, *loc, trace),
             2,

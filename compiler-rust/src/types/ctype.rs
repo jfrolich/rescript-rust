@@ -5650,18 +5650,10 @@ fn subst_with_memo(
     // 3. Set global abbreviations context so copy_type_cached can use find_repr
     ctx.set_current_abbreviations(memo_ref);
 
-    let (fresh_params, mut fresh_body) = instance_parameterized_type(ctx, params, body);
-    if ctx.repr(fresh_body) == ctx.repr(body) {
-        // Matches compiler/ml/ctype.ml:1273-1292: `subst` feeds the result of
-        // `instance_parameterized_type` (compiler/ml/ctype.ml:1134-1138) into
-        // unification. OCaml can safely relink the copied body because
-        // `cleanup_types` restores source nodes; in Rust, when copying a
-        // non-generic manifest returns the original `TypeExprRef`, make the
-        // top node fresh so unify3-style relinking cannot mutate the stored
-        // declaration manifest.
-        let desc = ctx.get_desc(fresh_body);
-        fresh_body = ctx.new_type((*desc).clone());
-    }
+    // 4. `instance_parameterized_type` (ctype.ml:1087). `copy` leaves
+    // non-generic nodes shared (ctype.ml `copy`: level <> generic_level), so
+    // a recursive stub's manifest variable is the body that unification binds.
+    let (fresh_params, fresh_body) = instance_parameterized_type(ctx, params, body);
 
     // 5. Clear instantiation abbreviations before the unifications below.
     // OCaml sets the global `abbreviations` ref back to `ref Mnil` here rather

@@ -3357,22 +3357,30 @@ fn transl_type_inner(
             let mut field_entries: HashMap<String, TypeExprRef> = HashMap::new();
             let mut field_insertions: Vec<String> = Vec::new();
 
+            // `add_typed_field` (typetexp.ml:571-579): skip equal types,
+            // otherwise unify in the translation env.
             fn add_object_field(
                 tctx: &mut TypeCheckContext<'_>,
+                env: &Env,
                 loc: LocIdx,
                 field_entries: &mut HashMap<String, TypeExprRef>,
                 field_insertions: &mut Vec<String>,
                 field_name: String,
                 field_type: TypeExprRef,
             ) -> TypeCoreResult<()> {
-                if let Some(existing_type) = field_entries.get(&field_name) {
+                if let Some(existing_type) = field_entries.get(&field_name).copied() {
                     let ctx = tctx.type_ctx;
-                    crate::types::unify(ctx, &mut tctx.unify_state, field_type, *existing_type)
+                    if crate::types::ctype::equal(ctx, env, false, &[field_type], &[existing_type]) {
+                        return Ok(());
+                    }
+                    let mut unify_state = UnifyState::new();
+                    unify_state.set_env(env);
+                    crate::types::unify(ctx, &mut unify_state, field_type, existing_type)
                         .map_err(|_| TypeCoreError::MethodMismatch {
                             loc,
                             label: field_name,
                             actual: field_type,
-                            expected: *existing_type,
+                            expected: existing_type,
                         })?;
                 } else {
                     field_insertions.push(field_name.clone());
@@ -3412,6 +3420,7 @@ fn transl_type_inner(
                         let field_name = tctx.arena.get_string(label.txt).to_string();
                         add_object_field(
                             tctx,
+                            env,
                             field_ct.ptyp_loc,
                             &mut field_entries,
                             &mut field_insertions,
@@ -3474,6 +3483,7 @@ fn transl_type_inner(
                                     } => {
                                         add_object_field(
                                             tctx,
+                                            env,
                                             inherit_ct.ptyp_loc,
                                             &mut field_entries,
                                             &mut field_insertions,
