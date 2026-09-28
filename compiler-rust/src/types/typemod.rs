@@ -15518,60 +15518,48 @@ fn row_field_display_type(
     }
 }
 
+/// `explain_unbound_single` (typedecl.ml:2096-2123): `None` when
+/// `explain_unbound_gen`'s `List.find` raises `Not_found`.
 fn find_unbound_type_var_detail_in_single_type(
     ctx: &crate::types::context::TypeContext,
     unbound: TypeExprRef,
     ty: TypeExprRef,
-) -> UnboundTypeVarDetail {
+) -> Option<UnboundTypeVarDetail> {
     let ty = ctx.repr(ty);
-    match &*ctx.get_desc(ty) {
+    let trivial = || {
+        crate::types::ctype::deep_occur(ctx, unbound, ty)
+            .then_some(UnboundTypeVarDetail::Type { ty })
+    };
+    let desc = ctx.get_desc(ty).clone();
+    match desc {
         TypeDesc::Tobject { fields, .. } => {
-            let mut current = ctx.repr(*fields);
-            loop {
-                if current == unbound {
-                    return UnboundTypeVarDetail::Type { ty };
-                }
-                match &*ctx.get_desc(current) {
-                    TypeDesc::Tfield {
-                        name, typ, rest, ..
-                    } => {
-                        if crate::types::ctype::deep_occur(ctx, unbound, *typ) {
-                            return UnboundTypeVarDetail::Method {
-                                name: name.clone(),
-                                ty: *typ,
-                            };
-                        }
-                        current = ctx.repr(*rest);
-                    }
-                    TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
-                        current = ctx.repr(*next);
-                    }
-                    _ => return UnboundTypeVarDetail::Type { ty },
-                }
+            let (fields, rest) = crate::types::ctype::flatten_fields(ctx, fields);
+            if rest == ctx.repr(unbound) {
+                return trivial();
             }
+            fields.into_iter().find_map(|(name, _, field_ty)| {
+                crate::types::ctype::deep_occur(ctx, unbound, field_ty)
+                    .then_some(UnboundTypeVarDetail::Method { name, ty: field_ty })
+            })
         }
         TypeDesc::Tvariant(row) => {
-            let row = crate::types::btype::row_repr(ctx, row);
-            if ctx.repr(row.row_more) == unbound {
-                return UnboundTypeVarDetail::Type { ty };
+            let row = crate::types::btype::row_repr(ctx, &row);
+            if ctx.repr(row.row_more) == ctx.repr(unbound) {
+                return trivial();
             }
-            for (label, field) in &row.row_fields {
-                if let Some(field_ty) = row_field_display_type(ctx, field)
-                    && crate::types::ctype::deep_occur(ctx, unbound, field_ty)
-                {
-                    return UnboundTypeVarDetail::Case {
+            row.row_fields.iter().find_map(|(label, field)| {
+                let field_ty = row_field_display_type(ctx, field)
+                    .unwrap_or_else(|| ctx.new_tuple(Vec::new()));
+                crate::types::ctype::deep_occur(ctx, unbound, field_ty).then(|| {
+                    UnboundTypeVarDetail::Case {
                         name: label.to_string(),
                         ty: field_ty,
                         polymorphic: true,
-                    };
-                }
-            }
-            UnboundTypeVarDetail::Type { ty }
+                    }
+                })
+            })
         }
-        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
-            find_unbound_type_var_detail_in_single_type(ctx, unbound, *next)
-        }
-        _ => UnboundTypeVarDetail::Type { ty },
+        _ => trivial(),
     }
 }
 
@@ -15607,7 +15595,7 @@ fn find_unbound_type_var_detail_in_type_decl(
         }
         crate::types::TypeKind::TypeAbstract => decl
             .type_manifest
-            .map(|manifest| find_unbound_type_var_detail_in_single_type(ctx, unbound, manifest)),
+            .and_then(|manifest| find_unbound_type_var_detail_in_single_type(ctx, unbound, manifest)),
         crate::types::TypeKind::TypeOpen => None,
     }
 }
