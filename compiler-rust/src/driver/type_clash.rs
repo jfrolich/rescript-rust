@@ -1420,6 +1420,27 @@ pub(super) fn print_pattern_type_clash(
     );
 }
 
+/// `Typecore.report_error`'s `Less_general (kind, trace)`
+/// (typecore.ml:5012-5016).
+pub(super) fn print_less_general(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    env: &Env,
+    kind: &str,
+    tr: &[(TypeExprRef, TypeExprRef)],
+) {
+    let mut printer = printer_with_env(ctx, env);
+    let first = format!("This {kind} has type");
+    printer.super_unification_error(
+        ppf,
+        true,
+        tr,
+        &mut |ppf| ppf.str(&first),
+        &mut |ppf| ppf.str("which is less general than"),
+        None,
+    );
+}
+
 /// `Typecore.report_error`'s `Or_pattern_type_clash (id, trace)`
 /// (typecore.ml:4864-4872).
 pub(super) fn print_or_pattern_type_clash(

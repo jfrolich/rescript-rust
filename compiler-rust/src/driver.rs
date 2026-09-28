@@ -3283,9 +3283,21 @@ fn type_mod_error_to_anyhow_styled(
             }
             UserDiagnostic::new(report, 2).into()
         }
-        TypeModError::CoreError(TypeCoreError::LessGeneral { loc, kind, trace }) => {
+        TypeModError::CoreError(TypeCoreError::LessGeneral {
+            loc,
+            kind,
+            trace,
+            env,
+        }) => {
+            let env = env
+                .and_then(|env| type_ctx.get_typed_env(env))
+                .map(|env| (*env).clone())
+                .unwrap_or_else(crate::types::Env::empty);
+            let message = type_clash::render_error_message(|ppf| {
+                type_clash::print_less_general(ppf, type_ctx, &env, kind, trace)
+            });
             UserDiagnostic::new(
-                format_less_general_report(type_ctx, arena, source, filename, *loc, kind, trace),
+                format_compiler_error_report_formatted(arena, source, filename, *loc, &message),
                 2,
             )
             .into()
@@ -7343,57 +7355,6 @@ fn format_not_subtype_report(
     }
 
     format_compiler_error_report(arena, source, filename, loc, &message)
-}
-
-fn format_less_general_report(
-    type_ctx: &TypeContext,
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-    loc: LocIdx,
-    kind: &str,
-    trace: &[(TypeExprRef, TypeExprRef)],
-) -> String {
-    const ERROR: &str = "\x1b[1;31m";
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
-    let (actual, expected) = match trace {
-        [(actual, _), (expected, _), ..] => (*actual, *expected),
-        [(actual, expected)] => (*actual, *expected),
-        _ => return format_compiler_error_report(arena, source, filename, loc, "Type error."),
-    };
-
-    let message = format!(
-        "This {kind} has type {ERROR}{}{RESET}\nwhich is less general than {INFO}{}{RESET}",
-        format_less_general_type_expr(type_ctx, actual),
-        format_less_general_type_expr(type_ctx, expected)
-    );
-    format_compiler_error_report(arena, source, filename, loc, &message)
-}
-
-fn format_less_general_type_expr(type_ctx: &TypeContext, ty: TypeExprRef) -> String {
-    let ty = type_ctx.repr(ty);
-    let desc = type_ctx.get_desc(ty);
-    let TypeDesc::Tpoly { body, vars } = &*desc else {
-        return format_type_expr(type_ctx, ty);
-    };
-    if vars.is_empty() {
-        return format_type_expr(type_ctx, *body);
-    }
-
-    let body = *body;
-    let vars = vars.clone();
-    drop(desc);
-
-    let mut printer = TypeExprPrinter::new(type_ctx);
-    let vars_text = vars
-        .iter()
-        .map(|var| printer.format(*var))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let body_text = printer.format(body);
-    format!("{vars_text}. {body_text}")
 }
 
 fn format_not_subtype_head_type(type_ctx: &TypeContext, ty: TypeExprRef) -> String {

@@ -746,6 +746,8 @@ pub enum TypeCoreError {
         loc: LocIdx,
         kind: String,
         trace: Vec<(TypeExprRef, TypeExprRef)>,
+        /// The environment of the check (OCaml's `Error` env).
+        env: Option<EnvRef>,
     },
 
     /// Modules not allowed.
@@ -20095,8 +20097,14 @@ fn check_univars_or_less_general(
         crate::types::ctype::generalize_expansive(ctx, env, exp.exp_type);
     }
 
+    // typecore.ml:2045-2047: "need to expand twice? cf. Ctype.unify2".
+    let vars: Vec<TypeExprRef> = vars
+        .iter()
+        .map(|var| crate::types::ctype::expand_head(ctx, env, *var))
+        .map(|var| crate::types::ctype::expand_head(ctx, env, var))
+        .collect();
     let mut universal_vars = Vec::new();
-    for var in vars {
+    for var in &vars {
         let var = ctx.repr(*var);
         crate::types::ctype::generalize(ctx, var);
         let var_name = {
@@ -20119,59 +20127,19 @@ fn check_univars_or_less_general(
     if universal_vars.len() == vars.len() {
         Ok(())
     } else {
+        // typecore.ml:2059-2067.
         let actual = ctx.new_generic_type(TypeDesc::Tpoly {
             body: ctx.repr(exp.exp_type),
             vars: universal_vars,
         });
-        let expected = less_general_expected_type(ctx, ty_expected);
+        let expected = ctx.repr(ty_expected);
         Err(TypeCoreError::LessGeneral {
             loc: exp.exp_loc,
             kind: kind.to_string(),
             trace: vec![(actual, actual), (expected, expected)],
+            env: Some(ctx.store_typed_env(env)),
         })
     }
-}
-
-fn less_general_expected_type(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
-    let ty = ctx.repr(ty);
-    let desc = ctx.get_desc(ty);
-    match &*desc {
-        TypeDesc::Tpoly { vars, .. } if !vars.is_empty() => return ty,
-        _ => {}
-    }
-    drop(desc);
-
-    let mut vars = Vec::new();
-    let mut seen = HashSet::new();
-    collect_universal_vars(ctx, ty, &mut seen, &mut vars);
-    if vars.is_empty() {
-        ty
-    } else {
-        ctx.new_generic_type(TypeDesc::Tpoly { body: ty, vars })
-    }
-}
-
-fn collect_universal_vars(
-    ctx: &TypeContext,
-    ty: TypeExprRef,
-    seen: &mut HashSet<TypeExprRef>,
-    vars: &mut Vec<TypeExprRef>,
-) {
-    let ty = ctx.repr(ty);
-    if !seen.insert(ty) {
-        return;
-    }
-
-    let desc = ctx.get_desc(ty);
-    if matches!(&*desc, TypeDesc::Tunivar(_)) {
-        vars.push(ty);
-        return;
-    }
-    drop(desc);
-
-    crate::types::iter_type_expr(ctx, ty, |child| {
-        collect_universal_vars(ctx, child, seen, vars);
-    });
 }
 
 /// OCaml typecore.ml `approx_type`: approximate a parsed core type for recursive let pre-unification.
