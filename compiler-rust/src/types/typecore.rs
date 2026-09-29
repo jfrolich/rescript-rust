@@ -7710,9 +7710,19 @@ fn type_expect_with_recarg<'a>(
     recarg: RecArg,
 ) -> TypeCoreResult<Expression> {
     let arena = tctx.arena;
-    crate::types::typemod::with_warning_scope(tctx, arena, &expr.pexp_attributes, true, |tctx| {
-        type_expect_with_recarg_unscoped(tctx, env, expr, expected_ty, context, recarg)
-    })
+    let mut typed =
+        crate::types::typemod::with_warning_scope(tctx, arena, &expr.pexp_attributes, true, |tctx| {
+            type_expect_with_recarg_unscoped(tctx, env, expr, expected_ty, context, recarg)
+        })?;
+    // OCaml records `exp_env = env` on every typed expression
+    // (typecore.ml type_expect_); later phases such as
+    // Typeopt.type_cannot_contain_undefined (translcore.ml:822) expand the
+    // expression's type in it. Nodes built without an env get the one they
+    // were typed in.
+    if typed.exp_env == EnvRef(0) {
+        typed.exp_env = tctx.type_ctx.store_typed_env(env);
+    }
+    Ok(typed)
 }
 
 fn type_expect_with_recarg_unscoped<'a>(
