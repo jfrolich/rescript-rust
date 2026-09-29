@@ -2439,16 +2439,18 @@ impl JsPrinter {
 
         self.write_char('{');
         let mut props = props.into_iter().peekable();
+        // js_dump.ml:1093-1095: the source prints as `Spread e` at level 1,
+        // whose operand is printed at level 13 (js_dump.ml:1117-1120).
         if let (Some(spread), None) = (dup, props.peek()) {
             self.write("...");
-            self.print_expression(spread, 1);
+            self.print_expression(spread, 13);
         } else if dup.is_some() || props.peek().is_some() {
             self.indent();
 
             if let Some(spread) = dup {
                 self.newline();
                 self.write("...");
-                self.print_expression(spread, 1);
+                self.print_expression(spread, 13);
                 if props.peek().is_some() {
                     self.write_char(',');
                 }
