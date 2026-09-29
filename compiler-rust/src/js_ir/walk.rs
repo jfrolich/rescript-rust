@@ -10,6 +10,8 @@ use super::{Block, Expression, ExpressionDesc, Statement, StatementDesc, Variabl
 pub(crate) trait Visitor<'a> {
     fn visit_expression(&mut self, _expression: &'a Expression) {}
     fn visit_declaration(&mut self, _declaration: &'a VariableDeclaration) {}
+    /// Called for every block before its statements.
+    fn visit_block(&mut self, _block: &'a Block) {}
     /// Whether the walk can stop early.
     fn done(&self) -> bool {
         false
@@ -17,6 +19,7 @@ pub(crate) trait Visitor<'a> {
 }
 
 pub(crate) fn walk_block<'a>(visitor: &mut impl Visitor<'a>, block: &'a Block) {
+    visitor.visit_block(block);
     for statement in block {
         if visitor.done() {
             return;
