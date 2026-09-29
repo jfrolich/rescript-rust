@@ -40,6 +40,9 @@ pub struct JsxConfig {
     pub file_name: String,
     /// First fatal PPX diagnostic found while transforming.
     pub fatal_error: Option<JsxPreprocessorError>,
+    /// Per expression index: 0 unknown, 1 its subtree is left unchanged by
+    /// `transform_expression`, 2 it may change.
+    unchanged_memo: Vec<u8>,
 }
 
 impl Default for JsxConfig {
@@ -51,6 +54,7 @@ impl Default for JsxConfig {
             has_component: false,
             file_name: String::new(),
             fatal_error: None,
+            unchanged_memo: Vec::new(),
         }
     }
 }
@@ -3915,6 +3919,12 @@ fn transform_expression(
     config: &mut JsxConfig,
     arena: &mut ParseArena,
 ) -> Expression {
+    // Every arm below only rebuilds its node around transformed children,
+    // except JSX elements and module expressions. A subtree without either
+    // comes back unchanged, so return it without rebuilding.
+    if !expression_may_change(&expr, arena, &mut config.unchanged_memo) {
+        return expr;
+    }
     let new_desc = match *expr.pexp_desc {
         ExpressionDesc::Pexp_jsx_element(jsx) => {
             transform_jsx_element(*jsx, config, &expr.pexp_loc, &expr.pexp_attributes, arena)
@@ -4991,4 +5001,96 @@ module MakePreset = (Preset: { let value: int }) => {
             after
         );
     }
+}
+
+/// Whether `transform_expression` may rewrite `expr` or its subtree: it
+/// contains a JSX element, a module expression (whose structure items get the
+/// component transform), or a construct this check does not inspect.
+fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u8>) -> bool {
+    let child = |idx: ExprIdx, memo: &mut Vec<u8>| subtree_may_change(idx, arena, memo);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_ident(_)
+        | ExpressionDesc::Pexp_constant(_)
+        | ExpressionDesc::Pexp_break
+        | ExpressionDesc::Pexp_continue => false,
+        ExpressionDesc::Pexp_let(inner) => {
+            inner.1.iter().any(|binding| child(binding.pvb_expr, memo)) || child(inner.2, memo)
+        }
+        ExpressionDesc::Pexp_fun(inner) => {
+            inner.default.is_some_and(|default| child(default, memo)) || child(inner.rhs, memo)
+        }
+        ExpressionDesc::Pexp_apply(inner) => {
+            child(inner.funct, memo) || inner.args.iter().any(|(_, arg)| child(*arg, memo))
+        }
+        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
+            child(inner.0, memo)
+                || inner.1.iter().any(|case| {
+                    case.pc_guard.is_some_and(|guard| child(guard, memo))
+                        || child(case.pc_rhs, memo)
+                })
+        }
+        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
+            items.iter().any(|item| child(*item, memo))
+        }
+        ExpressionDesc::Pexp_construct(_, arg) => arg.is_some_and(|arg| child(arg, memo)),
+        ExpressionDesc::Pexp_variant(inner) => inner.1.is_some_and(|arg| child(arg, memo)),
+        ExpressionDesc::Pexp_record(inner) => {
+            inner.0.iter().any(|field| child(field.expr, memo))
+                || inner.1.is_some_and(|spread| child(spread, memo))
+        }
+        ExpressionDesc::Pexp_field(target, _) => child(*target, memo),
+        ExpressionDesc::Pexp_setfield(inner) => child(inner.0, memo) || child(inner.2, memo),
+        ExpressionDesc::Pexp_ifthenelse(inner) => {
+            child(inner.0, memo)
+                || child(inner.1, memo)
+                || inner.2.is_some_and(|else_| child(else_, memo))
+        }
+        ExpressionDesc::Pexp_sequence(first, second)
+        | ExpressionDesc::Pexp_while(first, second) => child(*first, memo) || child(*second, memo),
+        ExpressionDesc::Pexp_for(inner) => {
+            child(inner.1, memo) || child(inner.2, memo) || child(inner.4, memo)
+        }
+        ExpressionDesc::Pexp_for_of(inner) | ExpressionDesc::Pexp_for_await_of(inner) => {
+            child(inner.1, memo) || child(inner.2, memo)
+        }
+        ExpressionDesc::Pexp_constraint(inner) => child(inner.0, memo),
+        ExpressionDesc::Pexp_coerce(inner) => child(inner.0, memo),
+        ExpressionDesc::Pexp_letexception(inner) => child(inner.1, memo),
+        ExpressionDesc::Pexp_assert(inner) | ExpressionDesc::Pexp_await(inner) => {
+            child(*inner, memo)
+        }
+        ExpressionDesc::Pexp_newtype(inner) => child(inner.1, memo),
+        ExpressionDesc::Pexp_open(inner) => child(inner.2, memo),
+        ExpressionDesc::Pexp_jsx_element(_)
+        | ExpressionDesc::Pexp_letmodule(_)
+        | ExpressionDesc::Pexp_pack(_)
+        | ExpressionDesc::Pexp_send(_)
+        | ExpressionDesc::Pexp_extension(_)
+        | ExpressionDesc::Pexp_inline_for(_)
+        | ExpressionDesc::Pexp_comptime_typeinfo(_)
+        | ExpressionDesc::Pexp_comptime_field(_)
+        | ExpressionDesc::Pexp_comptime_compile_error(_)
+        | ExpressionDesc::Pexp_comptime_typename(_)
+        | ExpressionDesc::Pexp_comptime_record(_)
+        | ExpressionDesc::Pexp_comptime_variant(_)
+        | ExpressionDesc::Pexp_comptime_build_variant(_)
+        | ExpressionDesc::Pexp_comptime_variant_case(_)
+        | ExpressionDesc::Pexp_comptime_build_record(_)
+        | ExpressionDesc::Pexp_comptime_record_field(_) => true,
+    }
+}
+
+fn subtree_may_change(idx: ExprIdx, arena: &ParseArena, memo: &mut Vec<u8>) -> bool {
+    let slot = idx.0 as usize;
+    if let Some(&known) = memo.get(slot)
+        && known != 0
+    {
+        return known == 2;
+    }
+    let may_change = expression_may_change(arena.get_expr(idx), arena, memo);
+    if slot >= memo.len() {
+        memo.resize(slot + 1, 0);
+    }
+    memo[slot] = if may_change { 2 } else { 1 };
+    may_change
 }
