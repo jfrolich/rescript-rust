@@ -162,10 +162,22 @@ pub fn read_folders(
     let mut map: AHashMap<PathBuf, SourceFileMeta> = AHashMap::new();
     let path_buf = PathBuf::from(path);
     fs::metadata(package_dir.join(path))?;
+    let mut subdirs: Vec<PathBuf> = Vec::new();
 
     for entry in fs::read_dir(package_dir.join(&path_buf))? {
-        let entry_path_buf = entry.map(|entry| entry.path())?;
-        let metadata = fs::metadata(&entry_path_buf)?;
+        let entry = entry?;
+        let entry_path_buf = entry.path();
+        // The listing already says what an entry is; only symlinks need a
+        // `stat` (which follows them) to know whether they lead to a folder.
+        let file_type = entry.file_type()?;
+        let followed = if file_type.is_symlink() {
+            Some(fs::metadata(&entry_path_buf)?)
+        } else {
+            None
+        };
+        let is_dir = followed
+            .as_ref()
+            .map_or(file_type.is_dir(), |metadata| metadata.file_type().is_dir());
         let Some(name) = entry_path_buf
             .file_name()
             .and_then(|name| name.to_str())
@@ -179,34 +191,35 @@ pub fn read_folders(
         };
 
         let path_ext = entry_path_buf.extension().and_then(|x| x.to_str());
-        let new_path = path_buf.join(&name);
-        if metadata.file_type().is_dir() && recurse {
-            map.extend(read_folders(
-                filter,
-                package_dir,
-                &new_path,
-                recurse,
-                is_type_dev,
-            )?);
+        if is_dir && recurse {
+            subdirs.push(path_buf.join(&name));
         }
 
         match path_ext {
             Some(extension) if helpers::is_source_file(extension) && matches_filter(filter, &name) => {
+                let modified = match &followed {
+                    Some(metadata) => metadata.modified()?,
+                    None => fs::metadata(&entry_path_buf)?.modified()?,
+                };
                 let mut path = path.to_owned();
                 path.push(&name);
-                map.insert(
-                    path,
-                    SourceFileMeta {
-                        modified: metadata.modified()?,
-                        is_type_dev,
-                    },
-                );
+                map.insert(path, SourceFileMeta { modified, is_type_dev });
             }
             Some(extension) if helpers::is_source_file(extension) => {
                 log::info!("Filtered: {name:?}")
             }
             _ => (),
         }
+    }
+
+    // Large source trees dominate package discovery; walk sibling folders in
+    // parallel.
+    let nested: Vec<Result<AHashMap<PathBuf, SourceFileMeta>>> = subdirs
+        .par_iter()
+        .map(|subdir| read_folders(filter, package_dir, subdir, recurse, is_type_dev))
+        .collect();
+    for folder in nested {
+        map.extend(folder?);
     }
 
     Ok(map)
@@ -1797,5 +1810,42 @@ mod test {
             dep_active.is_empty(),
             "an explicit empty features list should activate no feature-tagged dirs, got {dep_active:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_folders_finds_sources_in_nested_and_symlinked_folders() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let pkg = root.path();
+        let write = |rel: &str| {
+            let file = pkg.join(rel);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "let x = 1\n").unwrap();
+        };
+        write("src/A.res");
+        write("src/A.resi");
+        write("src/notes.md");
+        write("src/deep/er/B.res");
+        write("src/deep/er/B.bs.js");
+        write("elsewhere/C.res");
+        std::os::unix::fs::symlink(pkg.join("elsewhere"), pkg.join("src/linked")).unwrap();
+        std::os::unix::fs::symlink(pkg.join("elsewhere/C.res"), pkg.join("src/D.res")).unwrap();
+
+        let found = super::read_folders(&None, pkg, std::path::Path::new("src"), true, false).expect("read_folders");
+        let mut paths: Vec<String> = found.keys().map(|path| path.display().to_string()).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "src/A.res",
+                "src/A.resi",
+                "src/D.res",
+                "src/deep/er/B.res",
+                "src/linked/C.res",
+            ]
+        );
+
+        let shallow = super::read_folders(&None, pkg, std::path::Path::new("src"), false, false).expect("read_folders");
+        assert_eq!(shallow.len(), 3);
     }
 }
