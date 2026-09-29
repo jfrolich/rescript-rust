@@ -3442,15 +3442,17 @@ mod tests {
 
         ctx.restore_type_state(snapshot);
 
+        // btype.ml:544-553: memorized expansions are not trailed, and a
+        // backtrack with nothing trailed leaves them (and `memo`) alone.
         assert_eq!(
             ctx.find_abbrev_expansion(memo, PrivateFlag::Public, &path),
             Some(expansion)
         );
-        assert!(ctx.memoized_abbrev_refs.borrow().is_empty());
+        assert_eq!(&*ctx.memoized_abbrev_refs.borrow(), &[memo]);
     }
 
     #[test]
-    fn mutation_trail_restores_abbreviation_memos() {
+    fn mutation_trail_does_not_restore_abbreviation_memos() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let memo = ctx.alloc_abbrev_nil();
         let abbrev = ctx.new_var(None);
@@ -3470,11 +3472,14 @@ mod tests {
 
         ctx.restore_type_state(snapshot);
 
+        // btype.ml:544-547 `cleanup_abbrev` is not undone by `backtrack`
+        // (btype.ml:692-702): memo contents are not part of the trail.
         assert_eq!(
             ctx.find_abbrev_expansion(memo, PrivateFlag::Public, &path),
-            Some(first)
+            None
         );
-        assert_eq!(&*ctx.memoized_abbrev_refs.borrow(), &[memo]);
+        assert!(ctx.memoized_abbrev_refs.borrow().is_empty());
+        let _ = first;
     }
 
     #[test]
@@ -3582,10 +3587,14 @@ mod tests {
             ctx.get_row_field(pre_row),
             Some(RowField::Rpresent(None))
         ));
+        // btype.ml:692-702: a backtrack over trailed changes runs
+        // `cleanup_abbrev`, forgetting every memorized expansion, including
+        // those memorized before the snapshot.
         assert_eq!(
             ctx.find_abbrev_expansion(pre_memo, PrivateFlag::Public, &pre_path),
-            Some(pre_expansion)
+            None
         );
+        let _ = pre_expansion;
         assert!(matches!(&*ctx.get_desc(post_type), TypeDesc::Tvar(Some(name)) if name == "post"));
         assert!(matches!(
             ctx.get_row_field(post_row),
@@ -3596,7 +3605,7 @@ mod tests {
             None
         );
         assert_eq!(ctx.current_def_level_state(), initial_levels);
-        assert_eq!(&*ctx.memoized_abbrev_refs.borrow(), &[pre_memo]);
+        assert!(ctx.memoized_abbrev_refs.borrow().is_empty());
         assert!(!ctx.mutation_logging.get());
     }
 

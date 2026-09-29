@@ -32484,7 +32484,14 @@ mod tests {
         };
         // `check_usage` registers a (name, loc) key once.
         for _ in 0..2 {
-            tctx.add_value_usage_check("x", val_loc, LocIdx::none(), Warning::UnusedArgument);
+            tctx.add_value_usage_check(
+                "x",
+                val_loc,
+                LocIdx::none(),
+                Warning::UnusedValueDeclaration {
+                    name: "x".to_string(),
+                },
+            );
         }
         assert_eq!(tctx.value_usage_checks.len(), 1);
 
