@@ -861,6 +861,20 @@ pub enum FunParam<'a> {
     },
 }
 
+/// `newtype_params` (res_parsetree_viewer.ml:191-211) for a function's n-ary
+/// newtypes: a newtype without attributes joins the previous group.
+fn push_nary_newtypes<'a>(arena: &'a ParseArena, fun: &'a PexpFun, params: &mut Vec<FunParam<'a>>) {
+    for (name, attrs) in arena.nary_fun_newtypes(fun) {
+        match params.last_mut() {
+            Some(FunParam::NewTypes { names, .. }) if attrs.is_empty() => names.push(name),
+            _ => params.push(FunParam::NewTypes {
+                attrs: attrs.as_slice(),
+                names: vec![name],
+            }),
+        }
+    }
+}
+
 /// Extract function parameters from a potentially nested function expression.
 /// Returns (is_async, parameters, body).
 ///
@@ -923,6 +937,7 @@ pub fn fun_expr<'a>(
                     if !found_first_pexp_fun {
                         is_async = is_async || inner.is_async;
                     }
+                    push_nary_newtypes(arena, inner, &mut params);
                     for source in source_params {
                         params.push(FunParam::Parameter {
                             attrs: &source.p_attrs,
@@ -952,6 +967,9 @@ pub fn fun_expr<'a>(
                 // OCaml's condition: arity = None || n_fun = 0
                 // ArityIdx: arena.get_arity() returns None for unknown, Some(_) for known
                 // Only collect if this is the first function OR there's no arity marker
+                if n_fun == 0 {
+                    push_nary_newtypes(arena, inner, &mut params);
+                }
                 if n_fun == 0 || arena.get_arity(*arity).is_none() {
                     // OCaml's fun_expr passes {expr_ with pexp_attributes = []} to collect_params,
                     // which means the FIRST parameter always gets empty attrs. For nested functions,
