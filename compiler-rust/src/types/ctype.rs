@@ -574,6 +574,13 @@ fn get_level_with_lookup_capture(
             paths.push(path.clone());
         }
     }
+    // A declaration reached through a persistent unit comes out of
+    // `Subst.type_declaration`, which clears `type_newtype_level`
+    // (compiler/ml/subst.ml:292), so the lookup would fall back to the
+    // binding time anyway.
+    if path_root_is_persistent(path) {
+        return path_binding_time(path);
+    }
     // `Env.find_type` answers from bindings fixed within one module scope, so
     // repeated level checks of the same path reuse the first lookup.
     let scope_id = env.scope_id();
@@ -867,6 +874,51 @@ fn reify(ctx: &TypeContext, env: &mut Env, newtype_level: i32, ty: TypeExprRef) 
 ///
 /// This is the occurs check that prevents infinite types.
 /// Returns `true` if `needle` occurs in `haystack`.
+/// Whether `needle` is reachable from `haystack`, searched without a visited
+/// set within `budget` nodes: `Some(found)` when the search finished, `None`
+/// when the budget ran out (which also bounds cycles and repeatedly visited
+/// shared nodes). With `shallow_rows`, object and variant nodes are not
+/// entered (the `occurs` check); otherwise every child is.
+fn reaches_quick(
+    ctx: &TypeContext,
+    needle: TypeExprRef,
+    haystack: TypeExprRef,
+    shallow_rows: bool,
+    budget: &mut u32,
+) -> Option<bool> {
+    let haystack = ctx.repr(haystack);
+    if needle == haystack {
+        return Some(true);
+    }
+    if *budget == 0 {
+        return None;
+    }
+    *budget -= 1;
+    let desc = ctx.borrow_desc(haystack);
+    let mut search = |children: &mut dyn Iterator<Item = TypeExprRef>| {
+        for child in children {
+            if reaches_quick(ctx, needle, child, shallow_rows, budget)? {
+                return Some(true);
+            }
+        }
+        Some(false)
+    };
+    match &*desc {
+        TypeDesc::Tobject { .. } | TypeDesc::Tvariant(_) if shallow_rows => Some(false),
+        TypeDesc::Tvar(_) | TypeDesc::Tnil | TypeDesc::Tunivar(_) => Some(false),
+        TypeDesc::Tconstr { args, .. } | TypeDesc::Ttuple(args) => search(&mut args.iter().copied()),
+        TypeDesc::Tarrow { args, ret } => {
+            search(&mut args.iter().map(|arg| arg.typ).chain(std::iter::once(*ret)))
+        }
+        _ => {
+            drop(desc);
+            let mut children: smallvec::SmallVec<[TypeExprRef; 8]> = smallvec::SmallVec::new();
+            iter_type_expr(ctx, haystack, |child| children.push(child));
+            search(&mut children.into_iter())
+        }
+    }
+}
+
 pub fn occurs(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef) -> bool {
     fn occurs_rec(
         ctx: &TypeContext,
@@ -902,8 +954,47 @@ pub fn occurs(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef) -> 
     }
 
     let needle = ctx.repr(needle);
+    let mut budget = 256;
+    if let Some(found) = reaches_quick(ctx, needle, haystack, true, &mut budget) {
+        return found;
+    }
     let mut visited = TypeExprRefSet::new();
     occurs_rec(ctx, needle, haystack, &mut visited)
+}
+
+/// Whether the `occur_univar` walk from `ty` certainly meets no `Tunivar`.
+///
+/// Visits a superset of that walk's nodes (every constructor argument, where
+/// the walk skips invariant ones) without its visited set, variance lookups
+/// or argument copies, and gives up (`false`) on reaching a `Tunivar` or
+/// `Tpoly` or after `budget` nodes, which also bounds cycles and sharing.
+fn surely_univar_free(ctx: &TypeContext, ty: TypeExprRef, budget: &mut u32) -> bool {
+    let ty = ctx.repr(ty);
+    if *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
+    let desc = ctx.borrow_desc(ty);
+    match &*desc {
+        TypeDesc::Tvar(_) | TypeDesc::Tnil => true,
+        TypeDesc::Tunivar(_) | TypeDesc::Tpoly { .. } => false,
+        TypeDesc::Tconstr { args, .. } | TypeDesc::Ttuple(args) => {
+            args.iter().all(|arg| surely_univar_free(ctx, *arg, budget))
+        }
+        TypeDesc::Tarrow { args, ret } => {
+            args.iter()
+                .all(|arg| surely_univar_free(ctx, arg.typ, budget))
+                && surely_univar_free(ctx, *ret, budget)
+        }
+        _ => {
+            drop(desc);
+            let mut children: smallvec::SmallVec<[TypeExprRef; 8]> = smallvec::SmallVec::new();
+            iter_type_expr(ctx, ty, |child| children.push(child));
+            children
+                .into_iter()
+                .all(|child| surely_univar_free(ctx, child, budget))
+        }
+    }
 }
 
 /// Match OCaml's `occur_univar` pass before linking a type variable.
@@ -915,6 +1006,12 @@ pub fn occurs(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef) -> 
 /// tables. Keep this as part of variable unification instead of forcing module
 /// signatures from typecore call sites.
 fn occur_univar(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeResult<()> {
+    // The walk below can only fail on a reachable `Tunivar`, which is rare;
+    // rule it out cheaply first.
+    let mut budget = 256;
+    if surely_univar_free(ctx, ty, &mut budget) {
+        return Ok(());
+    }
     fn occur_rec(
         ctx: &TypeContext,
         env: &Env,
@@ -1046,6 +1143,10 @@ pub fn deep_occur(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef)
     }
 
     let needle = ctx.repr(needle);
+    let mut budget = 256;
+    if let Some(found) = reaches_quick(ctx, needle, haystack, false, &mut budget) {
+        return found;
+    }
     let mut visited = TypeExprRefSet::new();
     deep_occur_rec(ctx, needle, haystack, &mut visited)
 }
@@ -11819,6 +11920,51 @@ mod tests {
         assert!(!occurs(&ctx, a, b));
         assert!(occurs(&ctx, a, a));
         assert!(occurs(&ctx, a, tuple));
+    }
+
+    #[test]
+    fn occurs_checks_agree_beyond_the_quick_walk_budget() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let needle = ctx.new_var(None);
+        let other = ctx.new_var(None);
+        // Share each level twice so the walk without a visited set exceeds
+        // its budget long before the full walk would finish.
+        let mut with_needle = needle;
+        let mut without_needle = other;
+        for _ in 0..40 {
+            with_needle = ctx.new_tuple(vec![with_needle, with_needle]);
+            without_needle = ctx.new_tuple(vec![without_needle, without_needle]);
+        }
+        assert!(occurs(&ctx, needle, with_needle));
+        assert!(deep_occur(&ctx, needle, with_needle));
+        assert!(!occurs(&ctx, needle, without_needle));
+        assert!(!deep_occur(&ctx, needle, without_needle));
+        let mut budget = 256;
+        assert!(!surely_univar_free(&ctx, without_needle, &mut budget));
+    }
+
+    #[test]
+    fn occurs_checks_terminate_on_cyclic_types() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let needle = ctx.new_var(None);
+        let hole = ctx.new_var(None);
+        let cycle = ctx.new_tuple(vec![hole, hole]);
+        link_type(&ctx, hole, cycle);
+        assert!(!occurs(&ctx, needle, cycle));
+        assert!(!deep_occur(&ctx, needle, cycle));
+        let mut budget = 256;
+        assert!(!surely_univar_free(&ctx, cycle, &mut budget));
+    }
+
+    #[test]
+    fn occur_univar_quick_walk_stops_at_univars() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let plain = ctx.new_tuple(vec![ctx.new_var(None), ctx.new_var(None)]);
+        let mut budget = 256;
+        assert!(surely_univar_free(&ctx, plain, &mut budget));
+        let with_univar = ctx.new_tuple(vec![ctx.new_var(None), ctx.new_univar(None)]);
+        let mut budget = 256;
+        assert!(!surely_univar_free(&ctx, with_univar, &mut budget));
     }
 
     #[test]
