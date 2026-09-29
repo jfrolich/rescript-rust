@@ -85,3 +85,34 @@ let peak = (data: array<float>, i, top) => {
   let v = data[2 * i + (top ? 1 : 0)]->Option.getOr(0.)
   top ? Math.max(0., v) : Math.max(0., -.v)
 }
+
+// A staticcatch nested in another's handler keeps its exit variable (in_staticcatch).
+module AsyncState = {
+  type t<'a, 'b> = Initial | Loading | Success('a) | Failure('b)
+}
+type conv = Pending | Processing | Done
+type medium2 = SoundEffect | Other
+let expectsEnhancedAudio = (~medium: option<medium2>) =>
+  switch medium {
+  | Some(SoundEffect) => false
+  | _ => true
+  }
+let should = (
+  ~status: option<string>,
+  ~uploadPercentage: option<float>,
+  ~conversionStatus: option<conv>,
+  ~enhancedAudioURL: AsyncState.t<option<string>, string>,
+  ~enhancedAudioEnabled: option<bool>,
+  ~medium: option<medium2>,
+) =>
+  switch status {
+  | None => true
+  | Some(_) =>
+    switch (uploadPercentage, conversionStatus, enhancedAudioURL, enhancedAudioEnabled) {
+    | (Some(percentage), _, _, _) if percentage < 100. => true
+    | (_, Some(Pending | Processing), _, _) => true
+    | (_, _, AsyncState.Initial | AsyncState.Loading | AsyncState.Success(None), Some(true) | None) =>
+      expectsEnhancedAudio(~medium)
+    | _ => false
+    }
+  }

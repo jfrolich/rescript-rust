@@ -3265,6 +3265,13 @@ impl LambdaCompiler {
         if !self.fallthrough_return_handlers.is_empty() {
             return false;
         }
+        // lam_compile.ml:937-962: the pseudo-jmp arm needs
+        // `Tail_with_name {in_staticcatch = false}`; a staticcatch compiled
+        // inside another one's body or dispatched handlers has
+        // `in_staticcatch = true` and takes the exit-variable arm.
+        if !self.static_handlers.is_empty() || !self.static_jump_handlers.is_empty() {
+            return false;
+        }
         // OCaml flattens nested staticcatch chains before deciding whether the
         // current handler can fall through after the switch. Once we're already
         // under an enclosing static handler/jump chain, keep plain handlers
