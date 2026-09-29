@@ -2793,19 +2793,21 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
 // Types
 // ============================================================================
 
-/// Print core_type at level 1 (wraps arrow and alias types in parens).
-/// Matches OCaml's core_type1 which falls through to paren true (core_type ctxt) for those.
+/// `core_type1` (pprintast.ml:328-400): no box of its own; types with
+/// attributes go through `core_type`, and arrow, alias and poly types fall
+/// through to `paren true (core_type ctxt)`.
 fn print_core_type1<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ: &CoreType) {
-    let needs_parens = matches!(
-        *typ.ptyp_desc,
-        CoreTypeDesc::Ptyp_arrow(_) | CoreTypeDesc::Ptyp_alias(..)
-    );
-    if needs_parens {
-        f.string("(");
+    if !typ.ptyp_attributes.is_empty() {
         print_core_type(f, arena, typ);
-        f.string(")");
-    } else {
-        print_core_type(f, arena, typ);
+        return;
+    }
+    match &*typ.ptyp_desc {
+        CoreTypeDesc::Ptyp_arrow(_) | CoreTypeDesc::Ptyp_alias(..) | CoreTypeDesc::Ptyp_poly(_) => {
+            f.string("(");
+            print_core_type(f, arena, typ);
+            f.string(")");
+        }
+        _ => print_core_type_inner(f, arena, typ),
     }
 }
 
@@ -2855,21 +2857,10 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             f.open_box(BoxKind::Box, 2);
             let args = arena.nary_arrow_args(arg, *arity);
             for arg in args.iter() {
+                // `type_with_label` (pprintast.ml:287-295) prints the
+                // argument with `core_type1`.
                 print_arg_label(f, arena, &arg.lbl);
-                // Arrow and alias types as args need parentheses (OCaml's core_type1
-                // wraps them via the `| _ -> paren true (core_type ctxt) f x` fallthrough)
-                let arg_typ = arena.get_core_type(arg.typ);
-                let arg_needs_parens = matches!(
-                    *arg_typ.ptyp_desc,
-                    CoreTypeDesc::Ptyp_arrow(_) | CoreTypeDesc::Ptyp_alias(..)
-                );
-                if arg_needs_parens {
-                    f.string("(");
-                }
-                print_core_type(f, arena, arg_typ);
-                if arg_needs_parens {
-                    f.string(")");
-                }
+                print_core_type1(f, arena, arena.get_core_type(arg.typ));
                 // Print attributes on the argument (after the type)
                 print_attributes(f, arena, &arg.attrs);
                 f.space(); // Break hint before ->
