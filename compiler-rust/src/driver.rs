@@ -2828,9 +2828,9 @@ fn type_mod_error_to_anyhow_styled(
             )
             .into()
         }
-        TypeModError::CoreError(TypeCoreError::CannotApplyModule { loc, mty }) => {
+        TypeModError::CoreError(TypeCoreError::CannotApplyModule { loc, mty, origin }) => {
             UserDiagnostic::new(
-                format_cannot_apply_module_report(type_ctx, arena, source, filename, *loc, mty),
+                format_cannot_apply_module_report(type_ctx, arena, source, filename, *loc, mty, origin.as_ref()),
                 2,
             )
             .into()
@@ -2849,8 +2849,8 @@ fn type_mod_error_to_anyhow_styled(
             )
             .into()
         }
-        TypeModError::CannotApply { loc, mty } => UserDiagnostic::new(
-            format_cannot_apply_module_report(type_ctx, arena, source, filename, *loc, mty),
+        TypeModError::CannotApply { loc, mty, origin } => UserDiagnostic::new(
+            format_cannot_apply_module_report(type_ctx, arena, source, filename, *loc, mty, origin.as_ref()),
             2,
         )
         .into(),
@@ -4868,9 +4868,13 @@ fn format_cannot_apply_module_report(
     filename: &str,
     loc: LocIdx,
     mty: &crate::types::decl::ModuleType,
+    origin: Option<&crate::types::Path>,
 ) -> String {
     // typemod.ml:1816 "@[This module is not a functor; it has type@ %a@]".
-    let rendered_module_type = format_typemod_module_type(type_ctx, mty);
+    let rendered_module_type = match origin {
+        Some(origin) => crate::types::includemod::format_persistent_module_type(type_ctx, mty, origin),
+        None => format_typemod_module_type(type_ctx, mty),
+    };
     let message = type_clash::render_error_message(|ppf| {
         ppf.open_box(crate::parser::formatter::BoxKind::Box, 0);
         ppf.str("This module is not a functor; it has type");

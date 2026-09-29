@@ -741,6 +741,18 @@ pub(crate) fn format_module_type(type_ctx: &TypeContext, mty: &ModuleType) -> St
     crate::types::printtyp::print_out_module_type(&tree)
 }
 
+/// Print a signature loaded from the persistent unit `origin` the way OCaml
+/// prints its raw `ps_sig`: paths into the unit are relative to it.
+pub(crate) fn format_persistent_module_type(
+    type_ctx: &TypeContext,
+    mty: &ModuleType,
+    origin: &crate::types::Path,
+) -> String {
+    let mut printer = crate::types::printtyp::Printtyp::new(type_ctx);
+    let tree = printer.tree_of_modtype_in_unit(mty, origin);
+    crate::types::printtyp::print_out_module_type(&tree)
+}
+
 pub(crate) fn format_module_type_show_weak(type_ctx: &TypeContext, mty: &ModuleType) -> String {
     format_module_type(type_ctx, mty)
 }

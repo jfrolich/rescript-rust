@@ -763,6 +763,7 @@ pub enum TypeCoreError {
     CannotApplyModule {
         loc: LocIdx,
         mty: crate::types::decl::ModuleType,
+        origin: Option<Path>,
     },
 
     /// A module typing error surfaced while typing an expression form.
@@ -19391,8 +19392,8 @@ fn type_pack(
         false,
     )
     .map_err(|e| match e {
-        crate::types::typemod::TypeModError::CannotApply { loc, mty } => {
-            TypeCoreError::CannotApplyModule { loc, mty }
+        crate::types::typemod::TypeModError::CannotApply { loc, mty, origin } => {
+            TypeCoreError::CannotApplyModule { loc, mty, origin }
         }
         other => TypeCoreError::ModuleError(Box::new(other)),
     });

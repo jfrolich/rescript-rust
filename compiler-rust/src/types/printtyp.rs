@@ -169,6 +169,11 @@ pub(crate) struct Printtyp<'a> {
     signature_types: Vec<(String, Path)>,
     /// `printing_context.inlined_types` while printing a type declaration.
     inlined_types: Option<Vec<crate::types::decl::TypeInlinedType>>,
+    /// Qualified prefixes of the persistent-unit signatures being printed,
+    /// innermost last. Rust stores a unit's signature with its paths
+    /// qualified by the unit (the `prefix_idents` form of its components);
+    /// OCaml prints the raw `ps_sig`, where they are local identifiers.
+    unit_prefixes: Vec<Path>,
 }
 
 impl<'a> Printtyp<'a> {
@@ -188,6 +193,7 @@ impl<'a> Printtyp<'a> {
             printing_env_lookup_type: None,
             signature_types: Vec::new(),
             inlined_types: None,
+            unit_prefixes: Vec::new(),
         }
     }
 
@@ -241,6 +247,9 @@ impl<'a> Printtyp<'a> {
 
     /// `tree_of_path`.
     pub(crate) fn tree_of_path(&self, path: &Path) -> OutIdent {
+        if let Some(relative) = self.unit_relative_path(path) {
+            return relative;
+        }
         match path {
             Path::Pident(id) => OutIdent::Oide_ident(self.ident_name(id)),
             Path::Pdot(_, s, _) if self.non_shadowed_pervasive_or_stdlib(path) => {
@@ -1293,6 +1302,45 @@ impl<'a> Printtyp<'a> {
         }
     }
 
+    /// A path into one of the persistent-unit signatures being printed, as
+    /// the path relative to the innermost enclosing one.
+    fn unit_relative_path(&self, path: &Path) -> Option<OutIdent> {
+        fn strip(path: &Path, prefix: &Path) -> Option<Vec<String>> {
+            if path.same(prefix) {
+                return Some(Vec::new());
+            }
+            match path {
+                Path::Pdot(parent, name, _) => {
+                    let mut rest = strip(parent, prefix)?;
+                    rest.push(name.to_string());
+                    Some(rest)
+                }
+                _ => None,
+            }
+        }
+        self.unit_prefixes.iter().rev().find_map(|prefix| {
+            let rest = strip(path, prefix)?;
+            let mut parts = rest.into_iter();
+            let first = parts.next()?;
+            Some(parts.fold(OutIdent::Oide_ident(first), |acc, part| {
+                OutIdent::Oide_dot(Box::new(acc), part)
+            }))
+        })
+    }
+
+    /// `tree_of_modtype` for a signature loaded from the persistent unit
+    /// `origin`.
+    pub(crate) fn tree_of_modtype_in_unit(
+        &mut self,
+        mty: &crate::types::decl::ModuleType,
+        origin: &Path,
+    ) -> OutModuleType {
+        self.unit_prefixes.push(origin.clone());
+        let tree = self.tree_of_modtype(mty, false);
+        self.unit_prefixes.pop();
+        tree
+    }
+
     /// `tree_of_signature` (printtyp.ml:1145-1165): each item is printed in
     /// the environment extended with the items before it; the members of a
     /// recursive type group after the first see the environment of the
@@ -1372,7 +1420,19 @@ impl<'a> Printtyp<'a> {
         rs: crate::types::decl::RecStatus,
         ellipsis: bool,
     ) -> OutSigItem {
-        OutSigItem::Osig_module(id.name().to_string(), self.tree_of_modtype(mty, ellipsis), tree_of_rec(rs))
+        // A submodule of a persistent unit is qualified by the unit's path.
+        let scoped = self
+            .unit_prefixes
+            .last()
+            .map(|prefix| Path::pdot(prefix.clone(), id.name().to_string()));
+        if let Some(prefix) = &scoped {
+            self.unit_prefixes.push(prefix.clone());
+        }
+        let tree = self.tree_of_modtype(mty, ellipsis);
+        if scoped.is_some() {
+            self.unit_prefixes.pop();
+        }
+        OutSigItem::Osig_module(id.name().to_string(), tree, tree_of_rec(rs))
     }
 }
 

@@ -221,9 +221,7 @@ def _norm(s: str) -> str:
 # Accepted differences (not compared):
 # - `%raw` JavaScript parse errors: OCaml reports Flow's message as warning 103
 #   (bs_flow_ast_utils.ml check_flow_errors), Rust uses a different JS parser.
-# - The module listing under "Signature mismatch:", and the signature printed
-#   after "This module is not a functor; it has type" (Rust stores persistent
-#   signatures with qualified paths, so it prints `M.t` where OCaml prints `t`).
+# - The module listing under "Signature mismatch:".
 _BLOCK_START = re.compile(r"^  (?:\x1b\[[0-9;]*m)*(?:Warning number \d+|We've found a bug for you!|Syntax error!)")
 _FFI_OTHER = ("such externals are unsafe", "is redundant here")
 
@@ -243,7 +241,7 @@ def _accepted(s: str) -> str:
         if ffi and not any(o in x for x in ffi for o in _FFI_OTHER):
             continue
         for i, x in enumerate(plain):
-            if x.strip() in ("Signature mismatch:", "This module is not a functor; it has type"):
+            if x.strip() == "Signature mismatch:":
                 b = b[: i + 1]
                 break
         out.append("\n".join(b))

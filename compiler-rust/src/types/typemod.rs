@@ -3761,6 +3761,11 @@ pub enum TypeModError {
         loc: LocIdx,
         /// Actual module type.
         mty: crate::types::decl::ModuleType,
+        /// The persistent unit `mty` was loaded from, if any. Rust stores
+        /// persistent signatures with paths qualified by their unit; OCaml's
+        /// `Env.find_module` returns the raw `ps_sig`, whose own items are
+        /// local identifiers (env.ml:865-875).
+        origin: Option<Path>,
     },
     /// A normalized internal module path points at a missing compiled interface.
     MissingModule {
@@ -7226,6 +7231,23 @@ fn mtype_type_paths_sig(
         SignatureItem::SigClass | SignatureItem::SigClassType => {
             mtype_type_paths_sig(ctx, env, pers_env, p, pos, rem)
         }
+    }
+}
+
+/// The persistent unit a typed module identifier's signature comes from: the
+/// normalized alias target for an alias, otherwise the identifier itself.
+fn persistent_module_origin(me: &crate::types::typedtree::ModuleExpr) -> Option<Path> {
+    use crate::types::typedtree::{ModuleCoercion, ModuleExprDesc};
+    let path = match &me.mod_desc {
+        ModuleExprDesc::Tmod_constraint(_, _, _, ModuleCoercion::Tcoerce_alias(_, target, _)) => {
+            target.clone()
+        }
+        ModuleExprDesc::Tmod_ident(path, _) => path.clone(),
+        _ => return None,
+    };
+    match &path {
+        Path::Pident(id) if id.is_persistent() => Some(path),
+        _ => None,
     }
 }
 
@@ -16471,6 +16493,7 @@ fn type_module_expr_with_alias_inner<'a>(
                     return Err(TypeModError::CannotApply {
                         loc: functor.pmod_loc,
                         mty: typed_functor.mod_type.clone(),
+                        origin: persistent_module_origin(&typed_functor),
                     });
                 }
             };
