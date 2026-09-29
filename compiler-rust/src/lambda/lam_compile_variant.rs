@@ -1631,10 +1631,11 @@ impl LambdaCompiler {
             return block_branch;
         };
 
-        if const_branch.is_empty() {
-            block_branch
-        } else if block_branch.is_empty() {
-            const_branch
+        // An empty branch still needs the dispatch test around the other one:
+        // `S.if_ test const_branch block_branch` (js_stmt_make.ml:248-262)
+        // turns `if (test) {} else {b}` into `if (!test) {b}`.
+        if const_branch.is_empty() && block_branch.is_empty() {
+            Vec::new()
         } else {
             self.compile_effect_if(dispatch_test, const_branch, block_branch)
         }
