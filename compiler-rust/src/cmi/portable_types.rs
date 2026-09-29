@@ -169,8 +169,12 @@ pub fn compute_type_graph_fingerprint_pub(entries: &[PortableTypeEntry], sig: &S
 }
 
 fn compute_type_graph_fingerprint(entries: &[PortableTypeEntry], sig: &Signature) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    let mut hasher = DefaultHasher::new();
+    // Deterministic within a build (fixed seeds); the fingerprint only lives
+    // in the in-memory interface registry.
+    use std::hash::BuildHasher;
+    let mut hasher =
+        ahash::RandomState::with_seeds(0x5245_5343, 0x5249_5054, 0x4649_4e47, 0x4552_5052)
+            .build_hasher();
 
     // Hash the public signature through its remapped TypeExprRef roots instead
     // of hashing the portable arena linearly. The same interface can serialize

@@ -26,7 +26,7 @@
 //! assert_eq!(located.txt, "hello");
 //! ```
 
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -1927,6 +1927,7 @@ impl ParseArena {
     }
 
     /// Get the string content for a StrIdx.
+    #[inline]
     pub fn get_string(&self, idx: StrIdx) -> &str {
         let raw = idx.raw();
         if raw < self.synthetic_string_base {
@@ -1939,8 +1940,11 @@ impl ParseArena {
     }
 
     /// File names referenced by source positions in this arena.
-    pub fn source_file_names(&self) -> HashMap<StrIdx, String> {
-        self.position_file_names.clone()
+    pub fn source_file_names(&self) -> std::collections::HashMap<StrIdx, String> {
+        self.position_file_names
+            .iter()
+            .map(|(idx, name)| (*idx, name.clone()))
+            .collect()
     }
 
     /// Number of strings currently stored in the arena string table.
