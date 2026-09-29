@@ -7,6 +7,7 @@
 //! Each match arm cites the OCaml line in `lam_pass_lets_dce.ml` that
 //! justifies it. Do not introduce Rust-only logic.
 
+use crate::lambda::map_box;
 use ahash::AHashMap as HashMap;
 
 use crate::ident::Ident;
@@ -668,7 +669,12 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
             params,
             body,
             attr,
-        }) => Lambda::function_(arity, params, lets_helper_owned(state, *body), attr),
+        }) => Lambda::Lfunction(LFunction {
+            arity: arity,
+            params: params,
+            body: map_box(body, |inner| lets_helper_owned(state, inner)),
+            attr: attr,
+        }),
 
         Lambda::Lconst(_) | Lambda::LglobalModule(_, _) => lam,
 
@@ -728,7 +734,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
                 .collect();
             let new_failaction = sw
                 .sw_failaction
-                .map(|x| Box::new(lets_helper_owned(state, *x)));
+                .map(|x| map_box(x, |inner| lets_helper_owned(state, inner)));
             Lambda::Lswitch(
                 Box::new(new_scrut),
                 LambdaSwitch {
@@ -748,7 +754,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
                 .into_iter()
                 .map(|(s, e)| (s, lets_helper_owned(state, e)))
                 .collect();
-            let new_default = default.map(|x| Box::new(lets_helper_owned(state, *x)));
+            let new_default = default.map(|x| map_box(x, |inner| lets_helper_owned(state, inner)));
             Lambda::LstringSwitch(Box::new(new_scrut), new_cases, new_default)
         }
 

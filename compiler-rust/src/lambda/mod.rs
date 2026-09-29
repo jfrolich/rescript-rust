@@ -253,6 +253,16 @@ pub struct Apply {
     pub ap_transformed_jsx: bool,
 }
 
+/// Transform the lambda in `boxed` and store the result in the same
+/// allocation, so passes that rebuild the tree do not free and reallocate
+/// every child box.
+#[inline]
+pub(crate) fn map_box(mut boxed: Box<Lambda>, f: impl FnOnce(Lambda) -> Lambda) -> Box<Lambda> {
+    let inner = std::mem::replace(&mut *boxed, Lambda::Lbreak);
+    *boxed = f(inner);
+    boxed
+}
+
 /// Lambda IR expression
 ///
 /// This is the core representation used for code generation and optimization.

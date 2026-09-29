@@ -18,6 +18,7 @@ use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::lam_util::field_flatten_get;
 use crate::lambda::{Apply, Lambda, LambdaSwitch, PrimInfo};
+use crate::lambda::{LFunction, map_box};
 use crate::location::Location;
 
 /// Rust counterpart to `Lam_compile_env.query_external_id_info` used by
@@ -383,9 +384,12 @@ impl<'a> Simplifier<'a> {
             Lambda::Lconst(_) => lam,
 
             // lam_pass_remove_alias.ml:119
-            Lambda::Llet(kind, v, l1, l2) => {
-                Lambda::let_(kind, v, self.simpl_owned(*l1), self.simpl_owned(*l2))
-            }
+            Lambda::Llet(kind, v, l1, l2) => Lambda::Llet(
+                kind,
+                v,
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
 
             // lam_pass_remove_alias.ml:120-122
             Lambda::Lletrec(bindings, body) => {
@@ -393,7 +397,7 @@ impl<'a> Simplifier<'a> {
                     .into_iter()
                     .map(|(id, expr)| (id, self.simpl_owned(expr)))
                     .collect();
-                Lambda::letrec(bindings, self.simpl_owned(*body))
+                Lambda::Lletrec(bindings, map_box(body, |inner| self.simpl_owned(inner)))
             }
 
             // lam_pass_remove_alias.ml:131-246 — cross-module, local, and
@@ -557,12 +561,12 @@ impl<'a> Simplifier<'a> {
             }
 
             // lam_pass_remove_alias.ml:247-248
-            Lambda::Lfunction(func) => Lambda::function_(
-                func.arity,
-                func.params,
-                self.simpl_owned(*func.body),
-                func.attr,
-            ),
+            Lambda::Lfunction(func) => Lambda::Lfunction(LFunction {
+                arity: func.arity,
+                params: func.params,
+                body: map_box(func.body, |inner| self.simpl_owned(inner)),
+                attr: func.attr,
+            }),
 
             // lam_pass_remove_alias.ml:249-267
             Lambda::Lswitch(scrut, switch) => Lambda::switch(
@@ -582,7 +586,7 @@ impl<'a> Simplifier<'a> {
                         .collect(),
                     sw_failaction: switch
                         .sw_failaction
-                        .map(|expr| Box::new(self.simpl_owned(*expr))),
+                        .map(|expr| map_box(expr, |inner| self.simpl_owned(inner))),
                     sw_dispatch: switch.sw_dispatch,
                 },
             ),
@@ -601,7 +605,7 @@ impl<'a> Simplifier<'a> {
                     sw.into_iter()
                         .map(|(k, v)| (k, self.simpl_owned(v)))
                         .collect(),
-                    d.map(|d| Box::new(self.simpl_owned(*d))),
+                    d.map(|d| map_box(d, |inner| self.simpl_owned(inner))),
                 )
             }
 
@@ -611,44 +615,57 @@ impl<'a> Simplifier<'a> {
             }
 
             // lam_pass_remove_alias.ml:279
-            Lambda::LstaticCatch(l1, ids, l2) => {
-                Lambda::static_catch(self.simpl_owned(*l1), ids.0, ids.1, self.simpl_owned(*l2))
-            }
+            Lambda::LstaticCatch(l1, ids, l2) => Lambda::LstaticCatch(
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                (ids.0, ids.1),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
 
             // lam_pass_remove_alias.ml:280
-            Lambda::LtryWith(l1, v, l2) => {
-                Lambda::try_(self.simpl_owned(*l1), v, self.simpl_owned(*l2))
-            }
+            Lambda::LtryWith(l1, v, l2) => Lambda::LtryWith(
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                v,
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
 
             // lam_pass_remove_alias.ml:281
             Lambda::Lsequence(l1, l2) => Lambda::seq(self.simpl_owned(*l1), self.simpl_owned(*l2)),
 
             // lam_pass_remove_alias.ml:282
-            Lambda::Lwhile(l1, l2) => Lambda::while_(self.simpl_owned(*l1), self.simpl_owned(*l2)),
+            Lambda::Lwhile(l1, l2) => Lambda::Lwhile(
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
 
             // lam_pass_remove_alias.ml:283-284
-            Lambda::Lfor(var, l1, l2, dir, l3) => Lambda::for_(
+            Lambda::Lfor(var, l1, l2, dir, l3) => Lambda::Lfor(
                 var,
-                self.simpl_owned(*l1),
-                self.simpl_owned(*l2),
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
                 dir,
-                self.simpl_owned(*l3),
+                map_box(l3, |inner| self.simpl_owned(inner)),
             ),
 
             // lam_pass_remove_alias.ml after #7887.
-            Lambda::Lfor_of(var, l1, l2) => {
-                Lambda::for_of(var, self.simpl_owned(*l1), self.simpl_owned(*l2))
-            }
-            Lambda::Lfor_await_of(var, l1, l2) => {
-                Lambda::for_await_of(var, self.simpl_owned(*l1), self.simpl_owned(*l2))
-            }
+            Lambda::Lfor_of(var, l1, l2) => Lambda::Lfor_of(
+                var,
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
+            Lambda::Lfor_await_of(var, l1, l2) => Lambda::Lfor_await_of(
+                var,
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
 
             // OCaml `Lam_pass_remove_alias.simplify_alias` after #8348.
             Lambda::Lbreak => Lambda::break_(),
             Lambda::Lcontinue => Lambda::continue_(),
 
             // lam_pass_remove_alias.ml:285-288
-            Lambda::Lassign(v, l) => Lambda::assign(v, self.simpl_owned(*l)),
+            Lambda::Lassign(v, l) => {
+                Lambda::Lassign(v, map_box(l, |inner| self.simpl_owned(inner)))
+            }
         }
     }
 

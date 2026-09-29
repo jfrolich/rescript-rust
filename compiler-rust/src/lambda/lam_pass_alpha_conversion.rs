@@ -11,6 +11,7 @@ use crate::lambda::lam_eta_conversion::transform_under_supply;
 use crate::lambda::lam_pass_collect::ExternalArityResolver;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::{ApInfo, Apply, ApplyStatus, Lambda, LambdaSwitch, PrimInfo};
+use crate::lambda::{LFunction, map_box};
 
 /// Direct port of `Lam_pass_alpha_conversion.alpha_conversion`
 /// (lam_pass_alpha_conversion.ml:25-129).
@@ -344,15 +345,18 @@ impl<'a, 'r> Alpha<'a, 'r> {
                     ap_info,
                 )
             }
-            Lambda::Llet(str, v, l1, l2) => {
-                Lambda::let_(str, v, self.simpl_owned(*l1), self.simpl_owned(*l2))
-            }
+            Lambda::Llet(str, v, l1, l2) => Lambda::Llet(
+                str,
+                v,
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
             Lambda::Lletrec(bindings, body) => {
                 let bindings = bindings
                     .into_iter()
                     .map(|(id, e)| (id, self.simpl_owned(e)))
                     .collect();
-                Lambda::letrec(bindings, self.simpl_owned(*body))
+                Lambda::Lletrec(bindings, map_box(body, |inner| self.simpl_owned(inner)))
             }
             Lambda::Lprim(PrimInfo {
                 primitive,
@@ -363,9 +367,12 @@ impl<'a, 'r> Alpha<'a, 'r> {
                 args.into_iter().map(|a| self.simpl_owned(a)).collect(),
                 loc,
             ),
-            Lambda::Lfunction(f) => {
-                Lambda::function_(f.arity, f.params, self.simpl_owned(*f.body), f.attr)
-            }
+            Lambda::Lfunction(f) => Lambda::Lfunction(LFunction {
+                arity: f.arity,
+                params: f.params,
+                body: map_box(f.body, |inner| self.simpl_owned(inner)),
+                attr: f.attr,
+            }),
             Lambda::Lswitch(scrut, switch) => Lambda::switch(
                 self.simpl_owned(*scrut),
                 LambdaSwitch {
@@ -381,7 +388,9 @@ impl<'a, 'r> Alpha<'a, 'r> {
                         .into_iter()
                         .map(|(k, l)| (k, self.simpl_owned(l)))
                         .collect(),
-                    sw_failaction: switch.sw_failaction.map(|f| Box::new(self.simpl_owned(*f))),
+                    sw_failaction: switch
+                        .sw_failaction
+                        .map(|f| map_box(f, |inner| self.simpl_owned(inner))),
                     sw_dispatch: switch.sw_dispatch,
                 },
             ),
@@ -390,40 +399,53 @@ impl<'a, 'r> Alpha<'a, 'r> {
                 sw.into_iter()
                     .map(|(k, v)| (k, self.simpl_owned(v)))
                     .collect(),
-                d.map(|d| Box::new(self.simpl_owned(*d))),
+                d.map(|d| map_box(d, |inner| self.simpl_owned(inner))),
             ),
             Lambda::LstaticRaise(i, ls) => {
                 Lambda::static_raise(i, ls.into_iter().map(|l| self.simpl_owned(l)).collect())
             }
-            Lambda::LstaticCatch(l1, ids, l2) => {
-                Lambda::static_catch(self.simpl_owned(*l1), ids.0, ids.1, self.simpl_owned(*l2))
-            }
-            Lambda::LtryWith(l1, v, l2) => {
-                Lambda::try_(self.simpl_owned(*l1), v, self.simpl_owned(*l2))
-            }
+            Lambda::LstaticCatch(l1, ids, l2) => Lambda::LstaticCatch(
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                (ids.0, ids.1),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
+            Lambda::LtryWith(l1, v, l2) => Lambda::LtryWith(
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                v,
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
             Lambda::LifThenElse(l1, l2, l3) => Lambda::if_(
                 self.simpl_owned(*l1),
                 self.simpl_owned(*l2),
                 self.simpl_owned(*l3),
             ),
             Lambda::Lsequence(l1, l2) => Lambda::seq(self.simpl_owned(*l1), self.simpl_owned(*l2)),
-            Lambda::Lwhile(l1, l2) => Lambda::while_(self.simpl_owned(*l1), self.simpl_owned(*l2)),
-            Lambda::Lfor(var, l1, l2, dir, l3) => Lambda::for_(
-                var,
-                self.simpl_owned(*l1),
-                self.simpl_owned(*l2),
-                dir,
-                self.simpl_owned(*l3),
+            Lambda::Lwhile(l1, l2) => Lambda::Lwhile(
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
             ),
-            Lambda::Lfor_of(var, l1, l2) => {
-                Lambda::for_of(var, self.simpl_owned(*l1), self.simpl_owned(*l2))
-            }
-            Lambda::Lfor_await_of(var, l1, l2) => {
-                Lambda::for_await_of(var, self.simpl_owned(*l1), self.simpl_owned(*l2))
-            }
+            Lambda::Lfor(var, l1, l2, dir, l3) => Lambda::Lfor(
+                var,
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+                dir,
+                map_box(l3, |inner| self.simpl_owned(inner)),
+            ),
+            Lambda::Lfor_of(var, l1, l2) => Lambda::Lfor_of(
+                var,
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
+            Lambda::Lfor_await_of(var, l1, l2) => Lambda::Lfor_await_of(
+                var,
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
             Lambda::Lbreak => Lambda::break_(),
             Lambda::Lcontinue => Lambda::continue_(),
-            Lambda::Lassign(v, l) => Lambda::assign(v, self.simpl_owned(*l)),
+            Lambda::Lassign(v, l) => {
+                Lambda::Lassign(v, map_box(l, |inner| self.simpl_owned(inner)))
+            }
         }
     }
 }
