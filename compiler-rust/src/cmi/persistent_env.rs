@@ -6064,16 +6064,25 @@ fn substitute_submodule_paths(sig_items: &[SignatureItem], module_path: &Path, c
 }
 
 trait AliasRewriteSink {
+    fn has_alias_rewrite(&self, key: &str) -> bool;
     fn insert_alias_rewrite_if_absent(&mut self, key: String, value: Path);
 }
 
 impl AliasRewriteSink for HashMap<String, Path> {
+    fn has_alias_rewrite(&self, key: &str) -> bool {
+        self.contains_key(key)
+    }
+
     fn insert_alias_rewrite_if_absent(&mut self, key: String, value: Path) {
         self.entry(key).or_insert(value);
     }
 }
 
 impl AliasRewriteSink for AliasPrefixRewrites {
+    fn has_alias_rewrite(&self, key: &str) -> bool {
+        self.local.contains_key(key) || self.base.contains_key(key)
+    }
+
     fn insert_alias_rewrite_if_absent(&mut self, key: String, value: Path) {
         self.insert_if_absent(key, value);
     }
@@ -6098,14 +6107,18 @@ fn collect_alias_rewrites<S: AliasRewriteSink>(
                 // that alias-shaped module as either MtyAlias or MtyIdent after CMI
                 // loading, so record both forms for flattened namespace units such
                 // as `Webapi__Fetch`.
-                if let Path::Pident(alias_id) = alias_path {
-                    let qualified = Path::pdot(module_path.clone(), id.name());
+                // Only the first mapping for a name is kept; skip building
+                // the key and path for names already mapped.
+                if let Path::Pident(alias_id) = alias_path
+                    && !rewrites.has_alias_rewrite(alias_id.name())
+                {
+                    let qualified = Path::pdot(module_path.clone(), id.name_atom());
                     rewrites.insert_alias_rewrite_if_absent(alias_id.name().to_string(), qualified);
                 }
             }
             // Also recurse into MtySignature submodules to find nested aliases
             if let ModuleType::MtySignature(sub_sig) = &md.md_type {
-                let sub_path = Path::pdot(module_path.clone(), id.name());
+                let sub_path = Path::pdot(module_path.clone(), id.name_atom());
                 collect_alias_rewrites(sub_sig, &sub_path, rewrites);
             }
         }
