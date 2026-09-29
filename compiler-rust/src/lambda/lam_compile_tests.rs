@@ -10356,10 +10356,12 @@ fn recursive_self_tailcalls_lower_sequors_to_looping_while_bodies() {
 #[test]
 fn recursive_self_tailcalls_rename_params_before_loop_assignments() {
     let mut compiler = LambdaCompiler::new();
-    let loop_ = Ident::create_local("loop");
-    let a = Ident::create_local("a");
-    let b = Ident::create_local("b");
-    let flag = Ident::create_local("flag");
+    // Allocate from the compiler's generator so the stamps cannot collide
+    // with the loop parameters it creates, whatever ran before on this thread.
+    let loop_ = compiler.id_gen.create("loop");
+    let a = compiler.id_gen.create("a");
+    let b = compiler.id_gen.create("b");
+    let flag = compiler.id_gen.create("flag");
     let tailcall = Lambda::Lapply(Apply {
         ap_func: Box::new(Lambda::var(loop_.clone())),
         ap_args: vec![
