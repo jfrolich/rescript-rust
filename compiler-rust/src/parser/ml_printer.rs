@@ -448,7 +448,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
                 print_value_binding(
                     f,
                     arena,
-                    arena.get_pat(binding.pvb_pat),
+                    binding.pvb_pat,
                     arena.get_expr(binding.pvb_expr),
                 );
                 f.close_box();
@@ -727,9 +727,31 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
 fn print_value_binding<W: Write>(
     f: &mut Formatter<W>,
     arena: &ParseArena,
-    pat: &Pattern,
+    pat_idx: crate::parse_arena::PatIdx,
     expr: &Expression,
 ) {
+    let pat = arena.get_pat(pat_idx);
+    // pprintast.ml:1119-1123: `pvb_constraint = Some {pvc_newtypes; pvc_type}`.
+    if let Some(constraint) = arena.value_constraint(pat_idx) {
+        print_simple_pattern(f, arena, pat);
+        f.space();
+        f.string(": type");
+        f.space();
+        for (i, name) in constraint.pvc_newtypes.iter().enumerate() {
+            if i > 0 {
+                f.space();
+            }
+            f.string(arena.get_string(name.txt));
+        }
+        f.string(".");
+        f.space();
+        print_core_type(f, arena, arena.get_core_type(constraint.pvc_type));
+        f.space();
+        f.string("=");
+        f.space();
+        print_expression(f, arena, expr);
+        return;
+    }
     if !expr.pexp_attributes.is_empty() {
         // OCaml: pp f "%a@;=@;%a" (pattern ctxt) p (expression ctxt) x
         print_pattern(f, arena, pat);
@@ -1474,7 +1496,7 @@ fn print_expression_inner<W: Write>(
                 print_value_binding(
                     f,
                     arena,
-                    arena.get_pat(binding.pvb_pat),
+                    binding.pvb_pat,
                     arena.get_expr(binding.pvb_expr),
                 );
                 f.close_box();
