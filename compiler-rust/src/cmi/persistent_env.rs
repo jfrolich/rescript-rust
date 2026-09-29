@@ -6701,10 +6701,10 @@ mod resolution_view_tests {
         let second = original.clone();
         let ctx1 = TypeContext::new(Arc::new(IdGenerator::new()));
         let ctx2 = TypeContext::new(Arc::new(IdGenerator::new()));
-        let (sig1, fallback1) = first
+        let (sig1, fallback1, _) = first
             .typecheck_source_signature(&unit, &ctx1)
             .expect("first fallback");
-        let (sig2, fallback2) = second
+        let (sig2, fallback2, _) = second
             .typecheck_source_signature(&unit, &ctx2)
             .expect("second fallback");
         assert_eq!(sig1.len(), sig2.len());
