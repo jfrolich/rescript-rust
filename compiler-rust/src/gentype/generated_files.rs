@@ -39,10 +39,28 @@ pub fn write_file(file_path: &str, contents: &str) -> io::Result<()> {
     fs::write(file_path, contents)
 }
 
+/// Whether `read_file` of a file holding `raw` would equal `expected`: the
+/// file's lines joined by `\n`, compared without building the joined string.
+fn joined_lines_equal(raw: &str, expected: &str) -> bool {
+    let mut rest = expected;
+    for (index, line) in raw.lines().enumerate() {
+        if index > 0 {
+            let Some(after) = rest.strip_prefix('\n') else {
+                return false;
+            };
+            rest = after;
+        }
+        let Some(after) = rest.strip_prefix(line) else {
+            return false;
+        };
+        rest = after;
+    }
+    rest.is_empty()
+}
+
 pub fn write_file_if_required(output_file: &str, file_contents: &str) -> io::Result<()> {
     if std::path::Path::new(output_file).exists() {
-        let old_contents = read_file(output_file)?;
-        let identical = old_contents == file_contents;
+        let identical = joined_lines_equal(&fs::read_to_string(output_file)?, file_contents);
         if identical {
             log_file_action(FileAction::Identical, output_file);
         } else {
@@ -54,4 +72,33 @@ pub fn write_file_if_required(output_file: &str, file_contents: &str) -> io::Res
         write_file(output_file, file_contents)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::joined_lines_equal;
+
+    #[test]
+    fn joined_lines_equal_matches_joining_read_lines() {
+        let cases = [
+            ("", ""),
+            ("a", "a"),
+            ("a\n", "a"),
+            ("a\r\nb\n", "a\nb"),
+            ("a\nb", "a\nb\n"),
+            ("a\n\nb", "a\n\nb"),
+            ("\n", ""),
+            ("\n\n", "\n"),
+            ("ab", "a"),
+            ("a", "ab"),
+        ];
+        for (raw, expected) in cases {
+            let joined = raw.lines().collect::<Vec<_>>().join("\n");
+            assert_eq!(
+                joined_lines_equal(raw, expected),
+                joined == expected,
+                "{raw:?} vs {expected:?}"
+            );
+        }
+    }
 }

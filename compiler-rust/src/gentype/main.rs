@@ -89,12 +89,16 @@ fn canonicalize_with_cached_parent(path: &Path) -> Option<PathBuf> {
 }
 
 fn normalize_cmt_cache_key(cmt_file: &str) -> String {
-    // Keep the in-process cache key on the same absolute path base that
-    // compiler/gentype/Paths.ml:61-64 applies before selecting .cmti/.cmt
-    // artifacts. OCaml then checks physical files at
-    // compiler/gentype/Paths.ml:79-83, where `./` segments are resolved by
-    // the filesystem; the virtual in-process CMT cache has to remove those
-    // lexical no-op segments before comparing keys.
+    // The key is requested several times per artifact; remember the keys that
+    // resolved on the filesystem (a missing file may appear later, so its
+    // lexical fallback is not remembered).
+    thread_local! {
+        static RESOLVED_KEYS: std::cell::RefCell<HashMap<String, String>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    if let Some(key) = RESOLVED_KEYS.with(|keys| keys.borrow().get(cmt_file).cloned()) {
+        return key;
+    }
     let path = PathBuf::from(cmt_file);
     let path = if path.is_relative() {
         crate::process_cwd::current_dir()
@@ -103,10 +107,18 @@ fn normalize_cmt_cache_key(cmt_file: &str) -> String {
     } else {
         path
     };
-    canonicalize_with_cached_parent(&path)
-        .unwrap_or_else(|| normalize_cmt_path_lexically(path))
-        .to_string_lossy()
-        .to_string()
+    match canonicalize_with_cached_parent(&path) {
+        Some(resolved) => {
+            let key = resolved.to_string_lossy().to_string();
+            RESOLVED_KEYS.with(|keys| {
+                keys.borrow_mut().insert(cmt_file.to_string(), key.clone());
+            });
+            key
+        }
+        None => normalize_cmt_path_lexically(path)
+            .to_string_lossy()
+            .to_string(),
+    }
 }
 
 fn has_in_process_type_declarations(cmt_file: &Path) -> bool {
