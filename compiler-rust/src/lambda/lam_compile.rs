@@ -6274,11 +6274,30 @@ impl LambdaCompiler {
         // is its own group, so the same per-clause logic applies uniformly —
         // including the trailing case (mario_game's `process_collision` case 3).
         debug_assert_eq!(handler_blocks.len(), handler_lambdas.len());
-        let clauses: Vec<(i32, CaseClause)> = handler_blocks
+        // `compile_cases` (lam_compile.ml:1106-1136) dispatches the handlers
+        // with `compile_general_cases`, whose `group_apply`
+        // (lam_compile.ml:184-188, 685-715) merges `Lam.eq_approx` handlers:
+        // only the last clause of a group carries the body.
+        let indexed: Vec<(usize, &Lambda)> =
+            handler_lambdas.iter().copied().enumerate().collect();
+        let grouped = crate::lambda::lam_compile_variant::stable_group_switch_cases(indexed, |_, _| true);
+        let mut blocks: Vec<Option<Block>> = handler_blocks.into_iter().map(Some).collect();
+        let clauses: Vec<(i32, CaseClause)> = grouped
             .into_iter()
-            .zip(handler_lambdas.iter())
-            .enumerate()
-            .map(|(i, (body, handler_lam))| {
+            .map(|(i, handler_lam, is_last)| {
+                let code = first_code + i32::try_from(i).expect("exit handler index fits in i32");
+                if !is_last {
+                    return (
+                        code,
+                        CaseClause {
+                            source_loc: None,
+                            body: vec![],
+                            should_break: false,
+                            comment: None,
+                        },
+                    );
+                }
+                let body = blocks[i].take().expect("each handler clause is emitted once");
                 let should_break = if block_terminates(&body) {
                     false
                 } else if is_return_context {
@@ -6287,7 +6306,7 @@ impl LambdaCompiler {
                     true
                 };
                 (
-                    first_code + i32::try_from(i).expect("exit handler index fits in i32"),
+                    code,
                     CaseClause {
                         source_loc: None,
                         body,

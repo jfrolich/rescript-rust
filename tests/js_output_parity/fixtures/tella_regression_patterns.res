@@ -56,3 +56,26 @@ module Config = {
 type state = {initialType: Config.t}
 type props<'a> = {initialSupportType?: 'a}
 let makeProps = (state: state) => ({initialSupportType: state.initialType}: props<_>)
+
+// Identical exit handlers share one switch clause (group_apply).
+module Log = {
+  let error = (~call: string, ~err=?, ~error: string, ~extra=?, ~more=?, key: string) => {
+    ignore((call, err, error, extra, more, key))
+    Console.log(key)
+  }
+}
+type apiError = NotFound | ServerError(string) | RateLimited | BadRequest(string)
+let classify = (~call, ~logKey, ~clientMessage, ~serverMessage, code: option<int>, message) =>
+  switch code {
+  | Some(404) => NotFound
+  | Some(401) | Some(403) =>
+    Log.error(~call, ~error=message, logKey)
+    ServerError(serverMessage)
+  | Some(429) =>
+    Log.error(~call, ~error=message, logKey)
+    RateLimited
+  | Some(code) if code >= 400 && code < 500 => BadRequest(clientMessage)
+  | _ =>
+    Log.error(~call, ~error=message, logKey)
+    ServerError(serverMessage)
+  }
