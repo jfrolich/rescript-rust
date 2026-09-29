@@ -135,3 +135,20 @@ let makeToggle = (setProxiesEnabled: bool => unit, setBoth: ((option<bool>, opti
   }
   _checked => disabled ? toggleProxies(true) : toggleProxies(false)
 }
+
+// An if whose else is a single return flips to an early return (js_stmt_make.ml).
+type reserveResult = {status: string, token: string}
+@val external setIfAbsent: string => promise<Nullable.t<string>> = "setIfAbsent"
+@val external get: string => promise<Nullable.t<JSON.t>> = "get"
+let createdMarker = "created"
+let reserveDedupe = async (cacheKey, token) => {
+  let claimed = await setIfAbsent(cacheKey)
+  switch claimed->Nullable.toOption {
+  | Some(_) => {status: "reserved", token}
+  | None =>
+    switch (await get(cacheKey))->Nullable.toOption {
+    | Some(String(value)) if value == createdMarker => {status: "created", token: ""}
+    | Some(_) | None => {status: "in_flight", token: ""}
+    }
+  }
+}
