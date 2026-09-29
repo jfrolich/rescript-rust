@@ -3607,28 +3607,19 @@ impl<'a> RawLambdaConverter<'a> {
         &self,
         cstr: &crate::types::ConstructorDescription,
         args: &[Expression],
-        fallback_env: EnvRef,
     ) -> TagInfo {
         match &cstr.cstr_kind {
             crate::types::ConstructorKind::Ordinary(_) if constructor_has_optional_shape(cstr) => {
                 match args {
                     [arg] => {
-                        let arg_env_skip = self.type_ctx.get_typed_env(arg.exp_env).map(|env| {
-                            type_cannot_contain_undefined(self.type_ctx, env.as_ref(), arg.exp_type)
-                        });
-                        let fallback_env_skip =
-                            self.type_ctx.get_typed_env(fallback_env).map(|env| {
-                                type_cannot_contain_undefined(
-                                    self.type_ctx,
-                                    env.as_ref(),
-                                    arg.exp_type,
-                                )
+                        // translcore.ml:818-824: `type_cannot_contain_undefined
+                        // arg.exp_type arg.exp_env`.
+                        let can_skip = self
+                            .type_ctx
+                            .get_typed_env(arg.exp_env)
+                            .is_some_and(|env| {
+                                type_cannot_contain_undefined(self.type_ctx, env.as_ref(), arg.exp_type)
                             });
-                        let no_env_skip =
-                            type_cannot_contain_undefined_no_env(self.type_ctx, arg.exp_type);
-                        let can_skip = arg_env_skip.unwrap_or(false)
-                            || fallback_env_skip.unwrap_or(false)
-                            || no_env_skip;
                         if can_skip {
                             TagInfo::SomeNotNested
                         } else {
@@ -3668,7 +3659,6 @@ impl<'a> RawLambdaConverter<'a> {
     fn convert_construct_raw(
         &mut self,
         loc: Location,
-        fallback_env: EnvRef,
         cstr: &crate::types::ConstructorDescription,
         args: &[Expression],
     ) -> RawLambda {
@@ -3742,7 +3732,7 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 crate::types::VariantConstructorCase::Block(_) => {
                     let elems = args.iter().map(|arg| self.convert_expr_raw(arg)).collect();
-                    let tag_info = self.raw_constructor_tag_info(cstr, args, fallback_env);
+                    let tag_info = self.raw_constructor_tag_info(cstr, args);
                     self.raw_block_or_prim(
                         reference.block_index(self.type_ctx) as i32,
                         tag_info,
@@ -6655,7 +6645,7 @@ impl<'a> RawLambdaConverter<'a> {
                 self.raw_block_or_prim(0, TagInfo::Tuple, elems, self.loc(expr.exp_loc))
             }
             ExpressionDesc::Texp_construct(_, cstr, args) => {
-                self.convert_construct_raw(self.loc(expr.exp_loc), expr.exp_env, cstr, args)
+                self.convert_construct_raw(self.loc(expr.exp_loc), cstr, args)
             }
             ExpressionDesc::Texp_variant(tag, arg) => match arg {
                 None => raw_polyvariant_const(tag),
@@ -6911,7 +6901,6 @@ impl<'a> RawLambdaConverter<'a> {
                 _ => {
                     let raw = self.convert_construct_raw(
                         self.loc(expr.exp_loc),
-                        expr.exp_env,
                         cstr,
                         args,
                     );
@@ -12480,7 +12469,7 @@ mod tests {
             cstr_inlined: None,
         };
 
-        let lowered = converter.convert_construct_raw(Location::none(), EnvRef(0), &cstr, &[]);
+        let lowered = converter.convert_construct_raw(Location::none(), &cstr, &[]);
 
         assert!(matches!(
             lowered,
@@ -12546,7 +12535,7 @@ mod tests {
             })),
         };
 
-        let lowered = converter.convert_construct_raw(Location::none(), EnvRef(0), &cstr, &[arg]);
+        let lowered = converter.convert_construct_raw(Location::none(), &cstr, &[arg]);
 
         assert!(matches!(
             lowered,
