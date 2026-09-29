@@ -43,7 +43,10 @@ impl<'a> LoweringContext<'a> {
 
     fn lower_lambda_with_dynamic_import(&mut self, raw: RawLambda, dynamic_import: bool) -> Lambda {
         match raw {
-            RawLambda::Lshared(inner) => self.lower_lambda_with_dynamic_import(std::sync::Arc::unwrap_or_clone(inner), dynamic_import),
+            RawLambda::Lshared(inner) => self.lower_lambda_with_dynamic_import(
+                std::sync::Arc::unwrap_or_clone(inner),
+                dynamic_import,
+            ),
             RawLambda::Lvar(id) => Lambda::var(self.alias_target(id)),
             RawLambda::LglobalModule(id, imported) => {
                 if id.is_predef_exn() {
