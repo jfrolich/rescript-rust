@@ -116,3 +116,22 @@ let should = (
     | _ => false
     }
   }
+
+// destruct_pattern sizes the branch a constant argument selects.
+let logEvent = (s: string) => Console.log(s)
+let makeToggle = (setProxiesEnabled: bool => unit, setBoth: ((option<bool>, option<bool>)) => unit, wasmEditor, enhancedAudioEnabled, disabled) => {
+  let toggleProxies = checked => {
+    if checked {
+      setProxiesEnabled(true)
+      logEvent("PROXY_TOGGLE: Enabled")
+    } else {
+      logEvent("PROXY_TOGGLE: Disabled")
+      if wasmEditor || !enhancedAudioEnabled {
+        setProxiesEnabled(false)
+      } else {
+        setBoth((Some(false), Some(false)))
+      }
+    }
+  }
+  _checked => disabled ? toggleProxies(true) : toggleProxies(false)
+}

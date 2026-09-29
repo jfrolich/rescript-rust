@@ -517,10 +517,11 @@ pub(crate) fn destruct_pattern(body: &Lambda, params: &[Ident], args: &[Lambda])
         }
         Lambda::LifThenElse(cond, then_, else_) => {
             if let Lambda::Lvar(v) = &**cond {
-                if let Some(Lambda::Lconst(_)) = find_arg(v, params, args) {
-                    // Would enable constant folding
+                if let Some(lam @ Lambda::Lconst(_)) = find_arg(v, params, args) {
+                    // lam_analysis.ml:238-242: `size (Lam.if_ lam then_ else_)`
+                    // with the constant argument, which selects one branch.
                     return size(&Lambda::if_(
-                        (**cond).clone(),
+                        lam.clone(),
                         (**then_).clone(),
                         (**else_).clone(),
                     )) < SMALL_INLINE_SIZE;
