@@ -155,6 +155,7 @@ fn lambda_optional_none() -> Lambda {
 fn raw_free_variables(lam: &RawLambda) -> HashSet<Ident> {
     fn collect(lam: &RawLambda, fv: &mut HashSet<Ident>) {
         match lam {
+            RawLambda::Lshared(inner) => collect(inner, fv),
             RawLambda::Lvar(id) => {
                 fv.insert(id.clone());
             }
@@ -273,6 +274,7 @@ fn raw_subst_idents_owned(subst: &HashMap<Ident, Ident>, lam: RawLambda) -> RawL
     }
 
     match lam {
+        RawLambda::Lshared(inner) => raw_subst_idents_owned(subst, std::sync::Arc::unwrap_or_clone(inner)),
         RawLambda::Lvar(id) => subst
             .get(&id)
             .cloned()
@@ -1130,6 +1132,7 @@ impl<'a> RawLambdaConverter<'a> {
         dynamic_import_scope: bool,
     ) {
         match lam {
+            RawLambda::Lshared(inner) => self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(inner, dynamic_import_scope),
             RawLambda::Lvar(_) | RawLambda::Lconst(_) => {}
             RawLambda::LglobalModule(id, dynamic_import) => {
                 self.note_possible_required_module(id, dynamic_import_scope || *dynamic_import);
@@ -1997,6 +2000,7 @@ impl<'a> RawLambdaConverter<'a> {
         counter: &mut i32,
     ) -> Option<RawLambda> {
         match lam {
+            RawLambda::Lshared(inner) => Self::normalize_for_key(inner, env, counter),
             RawLambda::Lvar(id) => {
                 if let Some(replacement) = env.get(id) {
                     Some(replacement.clone())

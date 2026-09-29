@@ -136,9 +136,99 @@ pub enum RawLambda {
     Lassign(Ident, Box<RawLambda>),
     /// Method send.
     Lsend(String, Box<RawLambda>, Location),
+    /// A match action placed in a compiled matching without copying it.
+    /// Only the pattern-matching compiler creates this, and its entry points
+    /// replace every occurrence (see `matching::resolve_shared_actions`), so
+    /// no other pass sees it.
+    Lshared(std::sync::Arc<RawLambda>),
 }
 
 impl RawLambda {
+    /// Look through shared match actions.
+    #[inline]
+    pub fn peel(&self) -> &RawLambda {
+        let mut lam = self;
+        while let RawLambda::Lshared(inner) = lam {
+            lam = inner;
+        }
+        lam
+    }
+
+    /// Take ownership through shared match actions, copying an action only
+    /// while something else still refers to it.
+    pub fn unshare(self) -> RawLambda {
+        let mut lam = self;
+        while let RawLambda::Lshared(inner) = lam {
+            lam = std::sync::Arc::unwrap_or_clone(inner);
+        }
+        lam
+    }
+
+    /// Apply `f` to each direct child expression.
+    pub fn for_each_child_mut(&mut self, f: &mut impl FnMut(&mut RawLambda)) {
+        match self {
+            RawLambda::Lvar(_)
+            | RawLambda::LglobalModule(_, _)
+            | RawLambda::Lconst(_)
+            | RawLambda::Lbreak
+            | RawLambda::Lcontinue => {}
+            RawLambda::Lapply(apply) => {
+                f(&mut apply.ap_func);
+                apply.ap_args.iter_mut().for_each(|arg| f(arg));
+            }
+            RawLambda::Lfunction(func) => f(&mut func.body),
+            RawLambda::Llet(_, _, value, body) => {
+                f(value);
+                f(body);
+            }
+            RawLambda::Lletrec(bindings, body) => {
+                bindings.iter_mut().for_each(|(_, value)| f(value));
+                f(body);
+            }
+            RawLambda::Lprim(info) => info.args.iter_mut().for_each(|arg| f(arg)),
+            RawLambda::Lswitch(arg, sw, _) => {
+                f(arg);
+                sw.sw_consts.iter_mut().for_each(|(_, act)| f(act));
+                sw.sw_blocks.iter_mut().for_each(|(_, act)| f(act));
+                if let Some(fail) = &mut sw.sw_failaction {
+                    f(fail);
+                }
+            }
+            RawLambda::LstringSwitch(arg, cases, default) => {
+                f(arg);
+                cases.iter_mut().for_each(|(_, act)| f(act));
+                if let Some(default) = default {
+                    f(default);
+                }
+            }
+            RawLambda::LstaticRaise(_, args) => args.iter_mut().for_each(|arg| f(arg)),
+            RawLambda::LstaticCatch(body, _, handler) | RawLambda::LtryWith(body, _, handler) => {
+                f(body);
+                f(handler);
+            }
+            RawLambda::LifThenElse(cond, ifso, ifnot) => {
+                f(cond);
+                f(ifso);
+                f(ifnot);
+            }
+            RawLambda::Lsequence(first, second) | RawLambda::Lwhile(first, second) => {
+                f(first);
+                f(second);
+            }
+            RawLambda::Lfor(_, start, finish, _, body) => {
+                f(start);
+                f(finish);
+                f(body);
+            }
+            RawLambda::Lfor_of(_, iterable, body) | RawLambda::Lfor_await_of(_, iterable, body) => {
+                f(iterable);
+                f(body);
+            }
+            RawLambda::Lassign(_, value) | RawLambda::Lsend(_, value, _) => f(value),
+            RawLambda::Lshared(_) => {}
+        }
+    }
+
     /// Create a variable reference.
     pub fn var(id: Ident) -> Self {
         RawLambda::Lvar(id)
@@ -334,6 +424,7 @@ impl RawLambda {
     /// Lower raw lambda back into the existing Lambda IR.
     pub fn into_lowered(self) -> Lambda {
         match self {
+            RawLambda::Lshared(inner) => std::sync::Arc::unwrap_or_clone(inner).into_lowered(),
             RawLambda::Lvar(id) => Lambda::Lvar(id),
             RawLambda::LglobalModule(id, dynamic_import) => {
                 Lambda::LglobalModule(id, dynamic_import)

@@ -422,6 +422,7 @@ fn sequence<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Optio
 
 fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Ident>) {
     match lam0 {
+        RawLambda::Lshared(inner) => lam(f, inner, reraise_exn),
         RawLambda::Lvar(id) => print_ident(f, id),
         RawLambda::LglobalModule(id, dynamic_import) => {
             f.open_box(BoxKind::Box, 2);

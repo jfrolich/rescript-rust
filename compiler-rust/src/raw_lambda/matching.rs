@@ -58,7 +58,9 @@ struct MatchActionData {
 }
 
 enum MatchActionKind {
-    Raw(RawLambda),
+    /// Shared so a compiled matching can place the action without copying it
+    /// (see `RawLambda::Lshared`).
+    Raw(Arc<RawLambda>),
     Bind {
         kind: LetKind,
         id: Ident,
@@ -69,7 +71,7 @@ enum MatchActionKind {
 
 impl MatchAction {
     fn new(action: RawLambda) -> Self {
-        Self::from_kind(MatchActionKind::Raw(action))
+        Self::from_kind(MatchActionKind::Raw(Arc::new(action)))
     }
 
     fn from_kind(kind: MatchActionKind) -> Self {
@@ -98,7 +100,7 @@ impl MatchAction {
 
     fn to_raw(&self) -> RawLambda {
         match &self.0.kind {
-            MatchActionKind::Raw(raw) => raw.clone(),
+            MatchActionKind::Raw(raw) => RawLambda::Lshared(raw.clone()),
             MatchActionKind::Bind {
                 kind,
                 id,
@@ -174,7 +176,7 @@ impl MatchAction {
 impl MatchActionData {
     fn into_raw(self) -> RawLambda {
         match self.kind {
-            MatchActionKind::Raw(raw) => raw,
+            MatchActionKind::Raw(raw) => RawLambda::Lshared(raw),
             MatchActionKind::Bind {
                 kind,
                 id,
@@ -1835,11 +1837,13 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
         count: &mut i32,
         next_id: &mut i32,
     ) -> Option<RawLambda> {
+        let e = e.peel();
         *count += 1;
         if *count > MAX_RAW {
             return None; // Too big
         }
         match e {
+            RawLambda::Lshared(_) => unreachable!("peeled"),
             RawLambda::Lvar(id) => {
                 if let Some((_, replacement)) = env.iter().rev().find(|(key, _)| key.same(id)) {
                     Some(replacement.clone())
@@ -2125,6 +2129,8 @@ impl MakeKeyWriter {
 
     fn write_raw_after_count(&mut self, e: &RawLambda, out: &mut String) -> Option<()> {
         match e {
+            // A shared action counts as the node it wraps.
+            RawLambda::Lshared(inner) => self.write_raw_after_count(inner, out),
             RawLambda::Lvar(id) => {
                 if let Some((_, replacement)) = self.env.iter().rev().find(|(key, _)| key.same(id))
                 {
@@ -2371,9 +2377,9 @@ impl MakeKeyWriter {
 
 fn same_var_body(body: &KeyBody<'_>, id: &Ident) -> bool {
     match body {
-        KeyBody::Raw(RawLambda::Lvar(v)) => v.same(id),
+        KeyBody::Raw(raw) if matches!(raw.peel(), RawLambda::Lvar(v) if v.same(id)) => true,
         KeyBody::Action(action) => {
-            matches!(&action.0.kind, MatchActionKind::Raw(RawLambda::Lvar(v)) if v.same(id))
+            matches!(&action.0.kind, MatchActionKind::Raw(raw) if matches!(&**raw, RawLambda::Lvar(v) if v.same(id)))
         }
         _ => false,
     }
@@ -2580,7 +2586,7 @@ pub fn make_catch(
     next_raise_count: &mut i32,
     k: impl FnOnce(RawLambda) -> RawLambda,
 ) -> RawLambda {
-    match &d {
+    match d.peel() {
         RawLambda::LstaticRaise(_, args) if args.is_empty() => k(d),
         _ => {
             let e = bump_raise_count(next_raise_count, "matching::make_catch");
@@ -2598,7 +2604,7 @@ pub fn make_catch(
 ///
 /// Equivalent to OCaml's `as_simple_exit`.
 pub fn as_simple_exit(lam: &RawLambda) -> Option<i32> {
-    match lam {
+    match lam.peel() {
         RawLambda::LstaticRaise(i, args) if args.is_empty() => Some(*i),
         RawLambda::Llet(LetKind::Alias, _, _, e) => as_simple_exit(e),
         _ => None,
@@ -2626,7 +2632,7 @@ pub fn make_catch_delayed(
             let i = bump_raise_count(next_raise_count, "matching::make_catch_delayed");
             (
                 i,
-                Box::new(move |body: RawLambda| match &body {
+                Box::new(move |body: RawLambda| match body.peel() {
                     RawLambda::LstaticRaise(j, _) if *j == i => handler,
                     _ => {
                         RawLambda::LstaticCatch(Box::new(body), (i, Vec::new()), Box::new(handler))
@@ -2660,7 +2666,7 @@ fn raw_static_raise(l: &RawLambda) -> Option<(i32, StaticRaiseArgs<'_>)> {
     match make_key(l) {
         Some(RawLambda::LstaticRaise(i, args)) => Some((i, StaticRaiseArgs::Owned(args))),
         Some(_) => None,
-        None => match l {
+        None => match l.peel() {
             // OCaml `compiler/ml/matching.ml:479-482` returns the original
             // lambda when `make_key` fails. Borrow that original static raise
             // instead of cloning the whole raw lambda tree.
@@ -2821,7 +2827,7 @@ fn simplify_or(ctx_ref: Option<&TypeContext>, p: &Pattern) -> Pattern {
 /// Bind a variable to an argument in an action.
 /// Equivalent to OCaml's `Lambda.bind Alias id arg action`.
 fn bind(kind: LetKind, id: &Ident, arg: &RawLambda, action: RawLambda) -> RawLambda {
-    match arg {
+    match arg.peel() {
         RawLambda::Lvar(v) if v.same(id) => action,
         _ => RawLambda::Llet(kind, id.clone(), Box::new(arg.clone()), Box::new(action)),
     }
@@ -3286,6 +3292,7 @@ pub fn pm_free_variables(pm: &PatternMatching) -> IdentSet {
 fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
     fn collect(lam: &RawLambda, fv: &mut IdentSet) {
         match lam {
+            RawLambda::Lshared(inner) => collect(inner, fv),
             RawLambda::Lvar(id) => {
                 fv.insert(id.clone());
             }
@@ -3416,9 +3423,9 @@ fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
 /// Check if a lambda action is guarded (contains `if ... then ... else staticraise(0, [])`).
 /// Equivalent to OCaml's `Lambda.is_guarded`.
 fn is_guarded(lam: &RawLambda) -> bool {
-    match lam {
+    match lam.peel() {
         RawLambda::LifThenElse(_, _, else_br) => {
-            matches!(else_br.as_ref(), RawLambda::LstaticRaise(0, args) if args.is_empty())
+            matches!(else_br.peel(), RawLambda::LstaticRaise(0, args) if args.is_empty())
         }
         RawLambda::Llet(_, _, _, body) => is_guarded(body),
         _ => false,
@@ -5883,9 +5890,12 @@ fn share_actions_tree(
     // (the shared action is already a simple exit), there is no handler to reapply.
     let handler_pairs: Vec<(i32, RawLambda)> = handlers
         .into_iter()
-        .filter_map(|(i, h)| match h(make_exit(i)) {
-            RawLambda::LstaticRaise(j, args) if j == i && args.is_empty() => None,
-            handler => Some((i, handler)),
+        .filter_map(|(i, h)| {
+            let handler = h(make_exit(i));
+            match handler.peel() {
+                RawLambda::LstaticRaise(j, args) if *j == i && args.is_empty() => None,
+                _ => Some((i, handler)),
+            }
         })
         .collect();
 
@@ -5902,7 +5912,7 @@ fn apply_handlers(mut result: RawLambda, handlers: Vec<(i32, RawLambda)>) -> Raw
     // So iterating forward: first handler wraps result first (innermost),
     // then each subsequent handler wraps around (outermost).
     for (exit_id, handler) in handlers.into_iter() {
-        match &result {
+        match result.peel() {
             RawLambda::LstaticRaise(j, args) if *j == exit_id && args.is_empty() => {
                 result = handler;
             }
@@ -6233,7 +6243,7 @@ fn sarg_make_offset(arg: RawLambda, n: i32) -> RawLambda {
 /// SArg: bind a variable.
 /// Equivalent to OCaml's `SArg.bind`.
 fn sarg_bind(arg: RawLambda, body: impl FnOnce(RawLambda) -> RawLambda) -> RawLambda {
-    match &arg {
+    match arg.peel() {
         RawLambda::Lvar(v) => {
             let newarg = arg.clone();
             let result = body(newarg);
@@ -6258,7 +6268,7 @@ fn sarg_make_const(i: i32) -> RawLambda {
 /// Equivalent to OCaml's `SArg.make_isout`.
 fn sarg_make_isout(h: RawLambda, arg: RawLambda) -> RawLambda {
     RawLambda::Lprim(RawPrimInfo {
-        primitive: Primitive::Pisout(match &h {
+        primitive: Primitive::Pisout(match h.peel() {
             RawLambda::Lconst(crate::lambda::Constant::Int { i, .. }) => *i,
             _ => 0,
         }),
@@ -8088,7 +8098,7 @@ fn compile_test<K: Clone>(
 /// Check if v approximately appears in lam.
 /// Equivalent to OCaml's `approx_present`.
 fn approx_present(v: &Ident, lam: &RawLambda) -> bool {
-    match lam {
+    match lam.peel() {
         RawLambda::Lconst(_) | RawLambda::LglobalModule(_, _) => false,
         RawLambda::LstaticRaise(_, args) => args.iter().any(|a| approx_present(v, a)),
         RawLambda::Lprim(info) => info.args.iter().any(|a| approx_present(v, a)),
@@ -8106,7 +8116,23 @@ fn lower_bind(v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
     // OCaml `compiler/ml/matching.ml:2413-2435` rebuilds only the branch that
     // needs the alias binding. Pattern-match the Rust value by ownership so
     // unchanged subtrees move through instead of recursively cloning the
-    // already-built raw lambda.
+    // already-built raw lambda. A shared action is only copied when one of
+    // the rewriting shapes below applies; otherwise it is wrapped unchanged.
+    let lam = match lam {
+        RawLambda::Lshared(inner)
+            if matches!(
+                &*inner,
+                RawLambda::LifThenElse(..)
+                    | RawLambda::Lswitch(..)
+                    | RawLambda::Llet(LetKind::Alias, ..)
+                    | RawLambda::Lvar(_)
+                    | RawLambda::Lshared(_)
+            ) =>
+        {
+            RawLambda::Lshared(inner).unshare()
+        }
+        other => other,
+    };
     match lam {
         RawLambda::LifThenElse(cond, ifso, ifnot) => {
             let pcond = approx_present(v, &cond);
@@ -8164,7 +8190,7 @@ fn lower_bind(v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
 /// Bind with check — try to lower alias bindings.
 /// Equivalent to OCaml's `bind_check`.
 fn bind_check(str_kind: LetKind, v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
-    match (&str_kind, arg) {
+    match (&str_kind, arg.peel()) {
         (_, RawLambda::Lvar(_)) => bind(str_kind, v, arg, lam),
         (LetKind::Alias, _) => lower_bind(v, arg, lam),
         _ => bind(str_kind, v, arg, lam),
@@ -8320,8 +8346,8 @@ fn lambda_unit() -> RawLambda {
 /// Patch a guarded action: replace the guard's static raise(0,[]) with the patch lambda.
 /// Equivalent to OCaml's `Lambda.patch_guarded`.
 fn patch_guarded(patch: RawLambda, lam: &RawLambda) -> RawLambda {
-    match lam {
-        RawLambda::LifThenElse(cond, body, else_br) => match else_br.as_ref() {
+    match lam.peel() {
+        RawLambda::LifThenElse(cond, body, else_br) => match else_br.peel() {
             RawLambda::LstaticRaise(0, args) if args.is_empty() => {
                 RawLambda::LifThenElse(cond.clone(), body.clone(), Box::new(patch))
             }
@@ -9201,7 +9227,45 @@ fn check_total(
 
 /// Compile a matching with error handler.
 /// Equivalent to OCaml's `compile_matching`.
+/// Replace the shared actions (`RawLambda::Lshared`) in a compiled matching
+/// by the actions themselves, moving each action that is placed once.
+///
+/// The matching compiler places an action by reference instead of copying
+/// its lambda (OCaml shares the immutable action, `compiler/ml/matching.ml`
+/// `Lambda.bind` / `Switch.Store`). Once the matching structures are dropped,
+/// an action used once is uniquely owned by its occurrence and moves out. An
+/// action's own lambda never contains shared actions, so the walk stops there.
+pub(crate) fn resolve_shared_actions(lam: &mut RawLambda) {
+    if let RawLambda::Lshared(_) = lam {
+        *lam = std::mem::replace(lam, RawLambda::Lbreak).unshare();
+        return;
+    }
+    lam.for_each_child_mut(&mut resolve_shared_actions);
+}
+
 pub fn compile_matching(
+    ctx_ref: &TypeContext,
+    arena: &ParseArena,
+    handler_fun: impl FnOnce() -> RawLambda,
+    arg: RawLambda,
+    pat_act_list: Vec<(Pattern, RawLambda)>,
+    partial: Partial,
+    next_raise_count: &mut i32,
+) -> RawLambda {
+    let mut lambda = compile_matching_unresolved(
+        ctx_ref,
+        arena,
+        handler_fun,
+        arg,
+        pat_act_list,
+        partial,
+        next_raise_count,
+    );
+    resolve_shared_actions(&mut lambda);
+    lambda
+}
+
+fn compile_matching_unresolved(
     ctx_ref: &TypeContext,
     arena: &ParseArena,
     handler_fun: impl FnOnce() -> RawLambda,
@@ -9407,6 +9471,28 @@ pub fn for_let(
 /// Compile a tupled function match.
 /// Equivalent to OCaml's `for_tupled_function`.
 pub fn for_tupled_function(
+    ctx_ref: &TypeContext,
+    arena: &ParseArena,
+    loc: Location,
+    paraml: &[Ident],
+    pats_act_list: Vec<(Vec<Pattern>, RawLambda)>,
+    partial: Partial,
+    next_raise_count: &mut i32,
+) -> RawLambda {
+    let mut lambda = for_tupled_function_unresolved(
+        ctx_ref,
+        arena,
+        loc,
+        paraml,
+        pats_act_list,
+        partial,
+        next_raise_count,
+    );
+    resolve_shared_actions(&mut lambda);
+    lambda
+}
+
+fn for_tupled_function_unresolved(
     ctx_ref: &TypeContext,
     arena: &ParseArena,
     loc: Location,
@@ -9782,7 +9868,7 @@ pub fn for_multiple_match(
         .iter()
         .map(|(v, _)| RawLambda::Lvar(v.clone()))
         .collect();
-    let inner = do_for_multiple_match(
+    let mut inner = do_for_multiple_match(
         ctx_ref,
         arena,
         loc,
@@ -9791,6 +9877,7 @@ pub fn for_multiple_match(
         partial,
         next_raise_count,
     );
+    resolve_shared_actions(&mut inner);
     v_paraml
         .into_iter()
         .rev()
@@ -9799,6 +9886,44 @@ pub fn for_multiple_match(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resolve_shared_actions_replaces_every_shared_action() {
+        use super::*;
+        fn has_shared(lam: &mut RawLambda) -> bool {
+            if matches!(lam, RawLambda::Lshared(_)) {
+                return true;
+            }
+            let mut found = false;
+            lam.for_each_child_mut(&mut |child| found |= has_shared(child));
+            found
+        }
+        let once = Arc::new(RawLambda::Lvar(Ident::create_local("once")));
+        let twice = Arc::new(RawLambda::Lconst(crate::lambda::Constant::int(2)));
+        let mut lam = RawLambda::LifThenElse(
+            Box::new(RawLambda::Lvar(Ident::create_local("cond"))),
+            Box::new(RawLambda::Lshared(once)),
+            Box::new(RawLambda::Lsequence(
+                Box::new(RawLambda::Lshared(twice.clone())),
+                Box::new(RawLambda::Lshared(twice)),
+            )),
+        );
+        resolve_shared_actions(&mut lam);
+        assert!(!has_shared(&mut lam));
+        let RawLambda::LifThenElse(_, ifso, ifnot) = &lam else {
+            panic!("shape changed");
+        };
+        assert!(matches!(ifso.as_ref(), RawLambda::Lvar(id) if id.name() == "once"));
+        let RawLambda::Lsequence(first, second) = ifnot.as_ref() else {
+            panic!("shape changed");
+        };
+        for action in [first, second] {
+            assert!(matches!(
+                action.as_ref(),
+                RawLambda::Lconst(crate::lambda::Constant::Int { i: 2, .. })
+            ));
+        }
+    }
+
     use super::*;
     use crate::context::IdGenerator;
     use crate::types::env::initial_env;

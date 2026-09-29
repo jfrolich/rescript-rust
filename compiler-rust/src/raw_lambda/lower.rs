@@ -43,6 +43,7 @@ impl<'a> LoweringContext<'a> {
 
     fn lower_lambda_with_dynamic_import(&mut self, raw: RawLambda, dynamic_import: bool) -> Lambda {
         match raw {
+            RawLambda::Lshared(inner) => self.lower_lambda_with_dynamic_import(std::sync::Arc::unwrap_or_clone(inner), dynamic_import),
             RawLambda::Lvar(id) => Lambda::var(self.alias_target(id)),
             RawLambda::LglobalModule(id, imported) => {
                 if id.is_predef_exn() {
@@ -509,6 +510,7 @@ impl<'a> LoweringContext<'a> {
 
 fn collect_exported_idents(raw: &RawLambda, exports: &mut HashSet<Ident>) {
     match raw {
+        RawLambda::Lshared(inner) => collect_exported_idents(inner, exports),
         RawLambda::Lvar(_) | RawLambda::LglobalModule(_, _) | RawLambda::Lconst(_) => {}
         RawLambda::Lapply(apply) => {
             collect_exported_idents(&apply.ap_func, exports);
@@ -1678,6 +1680,7 @@ fn max_ident_stamp(raw: &RawLambda) -> i32 {
 
     fn visit_raw(max_stamp: &mut i32, raw: &RawLambda) {
         match raw {
+            RawLambda::Lshared(inner) => visit_raw(max_stamp, inner),
             RawLambda::Lvar(id) | RawLambda::LglobalModule(id, _) => visit_ident(max_stamp, id),
             RawLambda::Lconst(_) => {}
             RawLambda::Lapply(apply) => {
