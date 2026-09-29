@@ -2168,16 +2168,25 @@ impl TypeContext {
 
     /// The node behind `r`, in this compilation's arena or the thread store.
     #[inline]
+    /// The node behind `r`. Local nodes are by far the most common (hundreds
+    /// of millions of reads per build), so their path is inlined into callers;
+    /// store nodes take the out-of-line path.
+    #[inline]
     fn node(&self, r: TypeExprRef) -> &TypeExpr {
         if r.is_store() {
-            if let Some(index) = self.store_desc_overlay.borrow().get(r.store_index()) {
-                return self.store_descs.get_at(*index);
-            }
-            self.store.node(r)
+            self.store_node(r)
         } else {
             self.poison_store_build();
             self.types.get(r)
         }
+    }
+
+    #[inline(never)]
+    fn store_node(&self, r: TypeExprRef) -> &TypeExpr {
+        if let Some(index) = self.store_desc_overlay.borrow().get(r.store_index()) {
+            return self.store_descs.get_at(*index);
+        }
+        self.store.node(r)
     }
 
     /// Clone the descriptor so callers can hold it across node mutations.
@@ -2199,15 +2208,19 @@ impl TypeContext {
     #[inline]
     pub fn get_level(&self, r: TypeExprRef) -> i32 {
         if r.is_store() {
-            return self
-                .store_level_overlay
-                .borrow()
-                .get(r.store_index())
-                .copied()
-                .unwrap_or_else(|| self.store.node(r).level());
+            return self.store_level(r);
         }
         self.poison_store_build();
         self.types.get(r).level()
+    }
+
+    #[inline(never)]
+    fn store_level(&self, r: TypeExprRef) -> i32 {
+        self.store_level_overlay
+            .borrow()
+            .get(r.store_index())
+            .copied()
+            .unwrap_or_else(|| self.store.node(r).level())
     }
 
     /// Number of allocated type expressions.
@@ -3701,9 +3714,9 @@ impl TypeContext {
     /// This uses path compression to update intermediate links
     /// to point directly to the representative, improving
     /// subsequent lookup performance.
+    #[inline]
     pub fn repr(&self, t: TypeExprRef) -> TypeExprRef {
-        // Fast path: check if t is already a representative (no link).
-        // This avoids any allocation for the common case.
+        // Fast path, inlined into callers: `t` is already a representative.
         let first_next = {
             let desc = self.borrow_desc(t);
             match &*desc {
@@ -3716,6 +3729,13 @@ impl TypeContext {
                 _ => return t,
             }
         };
+        self.repr_chain(t, first_next)
+    }
+
+    /// Follow a link chain starting at `t` (whose next node is `first_next`)
+    /// and compress it.
+    #[inline(never)]
+    fn repr_chain(&self, t: TypeExprRef, first_next: TypeExprRef) -> TypeExprRef {
 
         // Follow chain to the end, collecting nodes for path compression.
         // Uses a fixed-size stack buffer — chains longer than 32 are
