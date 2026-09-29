@@ -1936,8 +1936,10 @@ impl JsPrinter {
                     self.write_char('(');
                 }
                 self.print_member_target_expression(arr, true);
+                // `P.group f 1` around the whole access plus
+                // `P.bracket_group f 1` around the index (js_dump.ml:1039-1043).
                 self.write_char('[');
-                self.print_expression(idx, 0);
+                self.with_indent(2, |this| this.print_expression(idx, 0));
                 self.write_char(']');
                 if needs_paren {
                     self.write_char(')');

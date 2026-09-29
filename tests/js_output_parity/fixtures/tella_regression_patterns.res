@@ -79,3 +79,9 @@ let classify = (~call, ~logKey, ~clientMessage, ~serverMessage, code: option<int
     Log.error(~call, ~error=message, logKey)
     ServerError(serverMessage)
   }
+
+// A multi-line index expression is indented by Array_index's two groups.
+let peak = (data: array<float>, i, top) => {
+  let v = data[2 * i + (top ? 1 : 0)]->Option.getOr(0.)
+  top ? Math.max(0., v) : Math.max(0., -.v)
+}
