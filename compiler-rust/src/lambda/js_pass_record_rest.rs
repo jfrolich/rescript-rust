@@ -12,17 +12,19 @@ use crate::js_ir::{
 use crate::lambda::LetKind;
 
 pub(crate) fn apply_js_record_rest_pass(mut deps: DepsProgram) -> DepsProgram {
-    let start_stamp =
-        crate::lambda::js_pass_flatten_and_mark_dead::max_ident_stamp_in_program(&deps.program)
-            .max(Ident::current_local_stamp());
-    Ident::set_current_time(start_stamp);
     // Without a `RecordRest` expression the rewrite rebuilds the program
-    // unchanged and creates no identifiers.
+    // unchanged and creates no identifiers. The flatten-and-mark-dead pass
+    // that runs next raises the identifier counter past the same program, so
+    // the counter only needs raising here before a rewrite.
     let mut finder = RecordRestFinder::default();
     crate::js_ir::walk::walk_block(&mut finder, &deps.program.block);
     if !finder.found {
         return deps;
     }
+    let start_stamp =
+        crate::lambda::js_pass_flatten_and_mark_dead::max_ident_stamp_in_program(&deps.program)
+            .max(Ident::current_local_stamp());
+    Ident::set_current_time(start_stamp);
     deps.program.block = rewrite_block(std::mem::take(&mut deps.program.block));
     deps
 }
