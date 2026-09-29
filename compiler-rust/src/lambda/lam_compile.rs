@@ -68,7 +68,6 @@ use super::lam_coercion::{
     max_ident_stamp_in_expression, push_effect_expression, push_s_exp,
     resolve_declared_same_name_self_alias_target, resolve_export_aliases,
     reusable_same_name_export_binding,
-    rewrite_toplevel_variable_initializers_through_rewriteable_aliases,
 };
 use super::lam_compile_variant::{empty_switch_case_clause, stable_group_switch_cases};
 
@@ -704,9 +703,6 @@ impl LambdaCompiler {
                     (vec![], vec![])
                 }
             };
-            rewrite_toplevel_variable_initializers_through_rewriteable_aliases(
-                &mut block, &exports,
-            );
             let exports = resolve_export_aliases(&block, exports);
             let side_effect = module_side_effect_reason(&simplified);
 

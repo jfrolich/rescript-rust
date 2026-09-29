@@ -8,7 +8,6 @@ pub(super) use crate::js_ir::{
 pub(super) use crate::lambda::js_exp_make::{
     int32_band, int32_bxor, int32_mul, ocaml_typeof_expr, raw_typeof_comparison,
 };
-pub(super) use crate::lambda::js_shake::later_toplevel_effect_allows_tail_move;
 pub(super) use crate::lambda::lam_coercion::resolve_export_aliases;
 pub(super) use crate::lambda::lam_compile_external::external_module_import_attributes;
 pub(super) use crate::lambda::lam_constant::{
