@@ -7303,9 +7303,14 @@ fn print_module_type_functor(
         }
     };
 
+    // res_printer.ml:934-947: a signature result keeps its `{` after `=>`.
+    let arrow_sep = match &*return_mty.pmty_desc {
+        ModuleTypeDesc::Pmty_signature(_) => Doc::space(),
+        _ => Doc::line(),
+    };
     Doc::group(Doc::concat(vec![
         parameters_doc,
-        Doc::group(Doc::concat(vec![Doc::text(" =>"), Doc::line(), return_doc])),
+        Doc::group(Doc::concat(vec![Doc::text(" =>"), arrow_sep, return_doc])),
     ]))
 }
 
