@@ -1368,6 +1368,7 @@ fn path_binding_time(path: &Path) -> i32 {
 /// Check if a path is "local" (non-persistent root identifier with non-zero stamp).
 /// Matches OCaml's `Path.binding_time > 0` — local module aliases and type aliases
 /// have high stamps, while persistent (CMI-loaded) modules have stamp 0.
+#[inline]
 fn is_local_path(path: &Path) -> bool {
     match path {
         Path::Pident(id) => id.stamp() != 0,
@@ -2912,6 +2913,7 @@ fn normalize_path_full_inner<'a>(
 /// the type parameters with the given arguments.
 ///
 /// Returns `Some(expanded)` if expansion was possible, `None` otherwise.
+#[inline]
 fn proper_abbrevs(
     ctx: &TypeContext,
     path: &Path,
@@ -10425,7 +10427,10 @@ pub(crate) fn copy_type_cached(
     // OCaml Ctype.copy marker precedence:
     // if `more.desc` is temporarily `Tsubst(Ttuple [more'; t])`,
     // copying `more` itself must yield the tuple target.
-    if let Some(marker) = cache.row_more_markers.get(&ty).copied() {
+    // (The marker table is almost always empty; skip hashing then.)
+    if !cache.row_more_markers.is_empty()
+        && let Some(marker) = cache.row_more_markers.get(&ty).copied()
+    {
         return marker.tuple;
     }
 
@@ -10437,7 +10442,7 @@ pub(crate) fn copy_type_cached(
     // Match OCaml ctype.ml copy marker handling for recursive variants:
     // if row_more currently carries a temporary marker, reuse the
     // already-registered variant copy directly.
-    if ctx.get_level(ty) == GENERIC_LEVEL {
+    if !cache.row_more_markers.is_empty() && ctx.get_level(ty) == GENERIC_LEVEL {
         if let TypeDesc::Tvariant(row0) = &*ctx.borrow_desc(ty) {
             let row = row_repr_ref(ctx, row0);
             let row = row.as_ref();

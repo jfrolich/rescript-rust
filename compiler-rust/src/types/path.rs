@@ -108,7 +108,9 @@ impl Path {
     pub fn same(&self, other: &Path) -> bool {
         match (self, other) {
             (Path::Pident(id1), Path::Pident(id2)) => id1.same(id2),
-            (Path::Pdot(p1, s1, _), Path::Pdot(p2, s2, _)) => s1 == s2 && p1.same(p2),
+            (Path::Pdot(p1, s1, _), Path::Pdot(p2, s2, _)) => {
+                s1 == s2 && (Arc::ptr_eq(p1, p2) || p1.same(p2))
+            }
             (Path::Papply(f1, a1), Path::Papply(f2, a2)) => f1.same(f2) && a1.same(a2),
             _ => false,
         }
