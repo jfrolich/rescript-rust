@@ -152,3 +152,21 @@ let reserveDedupe = async (cacheKey, token) => {
     }
   }
 }
+
+// A short-circuit assigned to a declared variable (compile_sequor, Assign).
+let isEmptyCta = (c: string) => c == ""
+let hasCallToAction = (ctaHidden, storyCTA, globalCTA, storyCTA2, globalCTA2) => {
+  let hasCTA = if ctaHidden {
+    false
+  } else {
+    switch storyCTA {
+    | Some(c) if !isEmptyCta(c) => true
+    | _ => globalCTA->Option.map(c => !isEmptyCta(c))->Option.getOr(false)
+    } ||
+    switch storyCTA2 {
+    | Some(c) if !isEmptyCta(c) => true
+    | _ => globalCTA2->Option.map(c => !isEmptyCta(c))->Option.getOr(false)
+    }
+  }
+  Console.log(hasCTA)
+}

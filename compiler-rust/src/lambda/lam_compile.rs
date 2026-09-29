@@ -4866,6 +4866,38 @@ impl LambdaCompiler {
             Lambda::LifThenElse(cond, then_, else_) => {
                 self.compile_if_assignment_block(result, cond, then_, else_)
             }
+            // compile_sequand / compile_sequor with an `Assign v` continuation
+            // (lam_compile.ml:1138-1210).
+            Lambda::Lprim(info) if short_circuit_primitive(&info.primitive, &info.args).is_some() => {
+                let (op, lhs, rhs) =
+                    short_circuit_primitive(&info.primitive, &info.args).expect("checked above");
+                let lhs_compiled = self.compile_expr(lhs);
+                let rhs_compiled = self.compile_expr(rhs);
+                let assign = |value: Expression| {
+                    Statement::exp(Expression::bin(
+                        BinOp::Eq,
+                        Expression::var(result.clone()),
+                        value,
+                    ))
+                };
+                let mut block = lhs_compiled.prelude;
+                if rhs_compiled.prelude.is_empty() {
+                    let op = match op {
+                        ShortCircuitOp::And => BinOp::And,
+                        ShortCircuitOp::Or => BinOp::Or,
+                    };
+                    block.push(assign(Expression::bin(op, lhs_compiled.expr, rhs_compiled.expr)));
+                    return block;
+                }
+                let mut rhs_block = rhs_compiled.prelude;
+                rhs_block.push(assign(rhs_compiled.expr));
+                block.push(Statement::if_(
+                    op.test_expr(lhs_compiled.expr),
+                    rhs_block,
+                    vec![assign(op.default_expr())],
+                ));
+                block
+            }
             Lambda::Lswitch(scrut, switch) => {
                 self.compile_switch_assignment_block(result, scrut, switch)
             }
