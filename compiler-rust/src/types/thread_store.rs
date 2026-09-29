@@ -351,6 +351,14 @@ impl ThreadTypeStore {
         self.row_fields.borrow_mut()[rf.store_index()] = field;
     }
 
+    /// Apply `f` to a store memo cell without copying it.
+    pub(crate) fn with_abbrev<R>(&self, memo: AbbrevMemoRef, f: impl FnOnce(&AbbrevMemo) -> R) -> R {
+        match self.abbrevs.borrow().get(memo.store_index()) {
+            Some(value) => f(value),
+            None => f(&AbbrevMemo::Mnil),
+        }
+    }
+
     pub(crate) fn abbrev(&self, memo: AbbrevMemoRef) -> AbbrevMemo {
         self.abbrevs
             .borrow()

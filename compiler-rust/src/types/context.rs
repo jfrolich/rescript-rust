@@ -2587,6 +2587,22 @@ impl TypeContext {
             .unwrap_or(AbbrevMemo::Mnil)
     }
 
+    /// Apply `f` to a memo cell without copying it (the chain scans below
+    /// only compare paths and follow `next`).
+    fn with_abbrev<R>(&self, memo: AbbrevMemoRef, f: impl FnOnce(&AbbrevMemo) -> R) -> R {
+        if memo.is_store() {
+            if let Some(value) = self.store_abbrev_overlay.borrow().get(memo.store_index()) {
+                return f(value);
+            }
+            return self.store.with_abbrev(memo, f);
+        }
+        let abbrevs = self.abbrevs.borrow();
+        match abbrevs.get(memo.index()) {
+            Some(cell) => f(&cell.borrow()),
+            None => f(&AbbrevMemo::Mnil),
+        }
+    }
+
     /// Write a memo cell; store cells are written to this compilation's
     /// overlay only. Missing local cells are ignored.
     fn write_abbrev(&self, memo: AbbrevMemoRef, value: AbbrevMemo) {
@@ -2621,9 +2637,8 @@ impl TypeContext {
     ) -> Option<TypeExprRef> {
         let mut current = memo;
         for _ in 0..128 {
-            let node = self.read_abbrev(current);
-            match node {
-                AbbrevMemo::Mnil => return None,
+            let step = self.with_abbrev(current, |node| match node {
+                AbbrevMemo::Mnil => Err(None),
                 AbbrevMemo::Mcons {
                     private_flag: cached_private,
                     path: cached_path,
@@ -2631,14 +2646,17 @@ impl TypeContext {
                     next,
                     ..
                 } => {
-                    if private_flag <= cached_private && path.same(&cached_path) {
-                        return Some(expansion);
+                    if private_flag <= *cached_private && path.same(cached_path) {
+                        Err(Some(*expansion))
+                    } else {
+                        Ok(*next)
                     }
-                    current = next;
                 }
-                AbbrevMemo::Mlink(next) => {
-                    current = next;
-                }
+                AbbrevMemo::Mlink(next) => Ok(*next),
+            });
+            match step {
+                Ok(next) => current = next,
+                Err(found) => return found,
             }
         }
         None
@@ -2650,9 +2668,8 @@ impl TypeContext {
     pub fn find_abbrev_repr(&self, memo: AbbrevMemoRef, path: &Path) -> Option<TypeExprRef> {
         let mut current = memo;
         for _ in 0..128 {
-            let node = self.read_abbrev(current);
-            match node {
-                AbbrevMemo::Mnil => return None,
+            let step = self.with_abbrev(current, |node| match node {
+                AbbrevMemo::Mnil => Err(None),
                 AbbrevMemo::Mcons {
                     private_flag: cached_private,
                     path: cached_path,
@@ -2662,14 +2679,17 @@ impl TypeContext {
                 } => {
                     // Match OCaml find_repr: only public memo entries participate
                     // in repr reuse during copy.
-                    if cached_private == PrivateFlag::Public && path.same(&cached_path) {
-                        return Some(abbrev);
+                    if *cached_private == PrivateFlag::Public && path.same(cached_path) {
+                        Err(Some(*abbrev))
+                    } else {
+                        Ok(*next)
                     }
-                    current = next;
                 }
-                AbbrevMemo::Mlink(next) => {
-                    current = next;
-                }
+                AbbrevMemo::Mlink(next) => Ok(*next),
+            });
+            match step {
+                Ok(next) => current = next,
+                Err(found) => return found,
             }
         }
         None
