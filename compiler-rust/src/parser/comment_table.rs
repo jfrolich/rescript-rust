@@ -2300,6 +2300,31 @@ fn walk_expression(
                         },
                     })
                     .collect();
+                // res_comments_table.ml:360-392: each newtype becomes a fake
+                // `Nolabel` parameter whose pattern is the name at its own
+                // location, and the parameters are walked in source order.
+                let mut parameters: Vec<OwnedFunParam> = parameters
+                    .into_iter()
+                    .flat_map(|param| match param {
+                        OwnedFunParam::NewTypes { names } => names
+                            .into_iter()
+                            .map(|name| OwnedFunParam::Parameter {
+                                label: ArgLabel::Nolabel,
+                                default_expr: None,
+                                pat: Pattern {
+                                    ppat_desc: Box::new(PatternDesc::Ppat_var(name.clone())),
+                                    ppat_loc: name.loc,
+                                    ppat_attributes: crate::parser::ast::Attributes::new(),
+                                },
+                            })
+                            .collect::<Vec<_>>(),
+                        other => vec![other],
+                    })
+                    .collect();
+                parameters.sort_by_key(|param| match param {
+                    OwnedFunParam::Parameter { pat, .. } => arena.loc_start(pat.ppat_loc).cnum,
+                    OwnedFunParam::NewTypes { .. } => 0,
+                });
                 (is_async, parameters, return_expr.clone())
             };
 

@@ -7838,13 +7838,57 @@ fn print_value_binding(
         Doc::text("and ")
     };
 
-    // Special case: value binding sugar for locally abstract types
-    // let x: type t. ... = (type t) => ...
-    // OCaml's printer handles this by printing the sugared form instead of desugared
-    if let (PatternDesc::Ppat_constraint(pat_inner), ExpressionDesc::Pexp_newtype(_)) = (
-        &*arena.get_pat(vb.pvb_pat).ppat_desc,
-        &*arena.get_expr(vb.pvb_expr).pexp_desc,
-    ) {
+    // res_printer.ml:2359-2392: `pvb_constraint = Some {pvc_newtypes; pvc_type}`
+    // prints `let p: type a b. t = e`.
+    if let Some(constraint) = arena.value_constraint(vb.pvb_pat) {
+        let newtypes = Doc::join(
+            Doc::space(),
+            constraint
+                .pvc_newtypes
+                .iter()
+                .map(|name| {
+                    print_comments(
+                        print_ident_like(arena.get_string(name.txt), false, false),
+                        cmt_tbl,
+                        name.loc,
+                        arena,
+                    )
+                })
+                .collect(),
+        );
+        let pat_doc = print_pattern(state, arena.get_pat(vb.pvb_pat), cmt_tbl, arena);
+        let typ_doc =
+            print_typ_expr(state, arena.get_core_type(constraint.pvc_type), cmt_tbl, arena);
+        let expr_doc =
+            print_expression_with_comments(state, arena.get_expr(vb.pvb_expr), cmt_tbl, arena);
+        return Doc::group(Doc::concat(vec![
+            attrs_doc,
+            header,
+            pat_doc,
+            Doc::text(":"),
+            Doc::indent(Doc::concat(vec![
+                Doc::line(),
+                Doc::text("type "),
+                newtypes,
+                Doc::dot(),
+                Doc::space(),
+                typ_doc,
+                Doc::text(" ="),
+                Doc::line(),
+                expr_doc,
+            ])),
+        ]));
+    }
+
+    // res_printer.ml:2393-2450: `Ppat_constraint (p, Ptyp_poly)` over a
+    // `Pexp_fun` with newtypes.
+    let fun_has_newtypes = match &*arena.get_expr(vb.pvb_expr).pexp_desc {
+        ExpressionDesc::Pexp_fun(fun) => !arena.nary_fun_newtypes(fun).is_empty(),
+        _ => false,
+    };
+    if let (PatternDesc::Ppat_constraint(pat_inner), true) =
+        (&*arena.get_pat(vb.pvb_pat).ppat_desc, fun_has_newtypes)
+    {
         let (ref inner_pat_idx, ref pat_typ) = **pat_inner;
         let pat_typ = arena.get_core_type(*pat_typ);
         let inner_pat = arena.get_pat(*inner_pat_idx);
