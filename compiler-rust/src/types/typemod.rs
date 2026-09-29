@@ -5051,6 +5051,40 @@ fn check_type_declaration_coherence(
         &self_path,
         &manifest_path,
     );
+    // `Includecore.type_declarations ~equality:true` (includecore.ml:384-398)
+    // marks the manifest's constructors with the privacy-derived usage and,
+    // for the equation, the re-exported constructors as built.
+    if let (
+        crate::types::decl::TypeKind::TypeVariant(expected_cstrs, _),
+        crate::types::decl::TypeKind::TypeVariant(cstrs, _),
+    ) = (&expected_decl.type_kind, &substituted_decl.type_kind)
+        && !env.is_implicit_coercion()
+    {
+        let usage = if expected_decl.type_private == crate::types::PrivateFlag::Private
+            || substituted_decl.type_private == crate::types::PrivateFlag::Public
+        {
+            crate::types::usage::ConstructorUsage::Positive
+        } else {
+            crate::types::usage::ConstructorUsage::Privatize
+        };
+        let mut usage_tables = ctx.usage();
+        for cstr in expected_cstrs {
+            usage_tables.mark_constructor_used(
+                usage,
+                manifest_path.last(),
+                expected_decl.type_loc,
+                cstr.cd_id.name(),
+            );
+        }
+        for cstr in cstrs {
+            usage_tables.mark_constructor_used(
+                crate::types::usage::ConstructorUsage::Positive,
+                id.name(),
+                substituted_decl.type_loc,
+                cstr.cd_id.name(),
+            );
+        }
+    }
     if let Some(detail) =
         coherence_definition_mismatch_detail(ctx, &expected_decl, &substituted_decl)
     {
