@@ -58,13 +58,17 @@ fn first_char_case_variant(name: &str) -> Option<String> {
     let mut chars = name.chars();
     let first = chars.next()?;
     let rest = chars.as_str();
-    if first.is_ascii_uppercase() {
-        Some(format!("{}{}", first.to_ascii_lowercase(), rest))
+    let swapped = if first.is_ascii_uppercase() {
+        first.to_ascii_lowercase()
     } else if first.is_ascii_lowercase() {
-        Some(format!("{}{}", first.to_ascii_uppercase(), rest))
+        first.to_ascii_uppercase()
     } else {
-        None
-    }
+        return None;
+    };
+    let mut variant = String::with_capacity(name.len());
+    variant.push(swapped);
+    variant.push_str(rest);
+    Some(variant)
 }
 
 fn resolve_first_char_case_key<'a, V>(map: &'a HashMap<String, V>, name: &str) -> Option<&'a str> {
