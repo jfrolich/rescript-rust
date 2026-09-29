@@ -14909,6 +14909,11 @@ fn fast_exact_unqualified_opath_record_label<'a>(
         return None;
     }
 
+    // `disambiguate_by_type` chose the first label in scope; `Label.disambiguate`
+    // calls its `use ()` callback (typecore.ml:912-922).
+    if let Some((desc, mark)) = env.find_all_labels_marking(field_name).into_iter().next() {
+        use_label_candidate(ctx, env, field_name, desc, mark);
+    }
     record_label_from_info(label_info, field_name).or_else(|| Some((*first_label).clone()))
 }
 
@@ -15608,13 +15613,15 @@ fn type_record(
                 if matches!(resolved_lid, Longident::Ldot(..)) {
                     return None;
                 }
-                qualified_record_label_from_info(
+                let label = qualified_record_label_from_info(
                     disambiguation_label_descriptions.as_ref(),
                     field_name,
                     env,
                     &mut tctx.persistent_env,
                     ctx,
-                )
+                )?;
+                use_in_scope_label_of_type(ctx, env, field_name, &label);
+                Some(label)
             })
             .or_else(|| {
                 if matches!(resolved_lid, Longident::Ldot(..)) {
@@ -25685,6 +25692,26 @@ fn use_constructor_candidate(
             !crate::types::ctype::same_constr(ctx, env, desc.cstr_res, hidden.cstr_res)
         });
         ctx.record_open_slot_use(slot, "constructor", name, shadowed);
+    }
+}
+
+/// `disambiguate_by_type` (typecore.ml:875-880) picks the first label in
+/// scope of the selected record type and `Label.disambiguate` calls its
+/// `use ()` callback (typecore.ml:912-922). Candidates are matched by
+/// `Path.same` on the result type.
+fn use_in_scope_label_of_type(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    name: &str,
+    selected: &crate::types::LabelDescription,
+) {
+    let Some(selected_path) = label_result_path(ctx, selected) else {
+        return;
+    };
+    if let Some((desc, mark)) = env.find_all_labels_marking(name).into_iter().find(|(desc, _)| {
+        label_result_path(ctx, desc).is_some_and(|path| path.same(&selected_path))
+    }) {
+        use_label_candidate(ctx, env, name, desc, mark);
     }
 }
 
