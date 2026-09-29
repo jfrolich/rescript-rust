@@ -2696,6 +2696,29 @@ fn lambda_to_string(lam: &RawLambda) -> String {
     format!("{lam:?}")
 }
 
+/// Whether `lambda_to_string(lam) == expected`, comparing while formatting
+/// so a mismatch stops at its first differing piece without building the
+/// string.
+fn lambda_debug_equals(lam: &RawLambda, expected: &str) -> bool {
+    struct Compare<'a> {
+        rest: &'a str,
+    }
+    impl std::fmt::Write for Compare<'_> {
+        fn write_str(&mut self, piece: &str) -> std::fmt::Result {
+            match self.rest.strip_prefix(piece) {
+                Some(rest) => {
+                    self.rest = rest;
+                    Ok(())
+                }
+                None => Err(std::fmt::Error),
+            }
+        }
+    }
+    let mut compare = Compare { rest: expected };
+    std::fmt::Write::write_fmt(&mut compare, format_args!("{lam:?}")).is_ok()
+        && compare.rest.is_empty()
+}
+
 // ============================================================================
 // same_actions — Check if all actions in a list are the same
 // ============================================================================
@@ -7062,7 +7085,7 @@ fn all_actions_same_tagged<K>(cases: &[(K, RawLambda)]) -> bool {
                 let Some(raw_act) = tr_raw(act) else {
                     return false;
                 };
-                if lambda_to_string(&raw_act) != raw_act0_str {
+                if !lambda_debug_equals(&raw_act, &raw_act0_str) {
                     return false;
                 }
             }
