@@ -73,7 +73,11 @@ impl LambdaCompiler {
                 comment: Some(PointerInfo::Constructor(tag)),
             } => match &tag.runtime_tag {
                 Some(ConstructorRuntimeTag::Int(value)) => Self::compile_runtime_int(*value),
-                Some(ConstructorRuntimeTag::String(value)) => Expression::string(value.clone()),
+                // js_exp_make.ml:1360-1361 `E.tag_type`: `str s ~delim:DStarJ`.
+                Some(ConstructorRuntimeTag::String(value)) => Expression::new(ExpressionDesc::Str {
+                    delim: Delim::StarJ,
+                    txt: value.clone(),
+                }),
                 Some(ConstructorRuntimeTag::Float(value)) => {
                     Expression::number(Number::float(value.clone()))
                 }
@@ -99,8 +103,13 @@ impl LambdaCompiler {
                 Some(crate::types::VariantTagType::Int(value)) => {
                     Expression::number(Number::int(*value))
                 }
+                // lam_compile_const.ml:57 `E.tag_type t`, which is
+                // `str s ~delim:DStarJ` for strings (js_exp_make.ml:1360-1361).
                 Some(crate::types::VariantTagType::String(value)) => {
-                    Expression::string(value.clone())
+                    Expression::new(ExpressionDesc::Str {
+                        delim: Delim::StarJ,
+                        txt: value.clone(),
+                    })
                 }
                 Some(crate::types::VariantTagType::Float(value)) => {
                     Expression::number(Number::float(value.clone()))
