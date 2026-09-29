@@ -7966,7 +7966,6 @@ fn print_value_binding(
         }
     }
 
-    let pat = print_pattern(state, arena.get_pat(vb.pvb_pat), cmt_tbl, arena);
     let vb_expr = arena.get_expr(vb.pvb_expr);
     // Print expression and check if it needs parens/braces
     let doc = print_expression_with_comments(state, vb_expr, cmt_tbl, arena);
@@ -7974,6 +7973,18 @@ fn print_value_binding(
         ParenKind::Parenthesized => add_parens(doc),
         ParenKind::Braced(loc) => print_braces(doc, vb_expr, loc, arena),
         ParenKind::Nothing => doc,
+    };
+    // res_printer.ml:2474-2482: a line comment trailing the pattern moves
+    // `=` to its own line.
+    let pvb_pat = arena.get_pat(vb.pvb_pat);
+    let pattern_has_trailing_line_comment = cmt_tbl
+        .get_trailing_comments(pvb_pat.ppat_loc, arena)
+        .is_some_and(|comments| comments.iter().any(|c| c.is_single_line()));
+    let pat = print_pattern(state, pvb_pat, cmt_tbl, arena);
+    let equal_doc = if pattern_has_trailing_line_comment {
+        Doc::indent(Doc::concat(vec![Doc::hard_line(), Doc::text("=")]))
+    } else {
+        Doc::text(" =")
     };
 
     // Special case: single pipe expression
@@ -7986,7 +7997,7 @@ fn print_value_binding(
                 attrs_doc.clone(),
                 header.clone(),
                 pat.clone(),
-                Doc::text(" ="),
+                equal_doc.clone(),
                 Doc::space(),
                 printed_expr.clone(),
             ])),
@@ -7995,7 +8006,7 @@ fn print_value_binding(
                 attrs_doc,
                 header,
                 pat,
-                Doc::text(" ="),
+                equal_doc.clone(),
                 Doc::indent(Doc::concat(vec![Doc::line(), printed_expr])),
             ])),
         ]);
@@ -8042,7 +8053,7 @@ fn print_value_binding(
         attrs_doc,
         header,
         pat,
-        Doc::text(" ="),
+        equal_doc.clone(),
         rhs,
     ]))
 }

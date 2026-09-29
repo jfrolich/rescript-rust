@@ -1197,6 +1197,51 @@ fn walk_value_binding(
     comments: Vec<Comment>,
     arena: &mut ParseArena,
 ) {
+    // res_comments_table.ml:911-930: `pvb_constraint = Some {pvc_newtypes;
+    // pvc_type}` walks the pattern, each newtype name, then the type, and
+    // continues with the expression after the type.
+    if let Some(constraint) = arena.value_constraint(vb.pvb_pat).cloned() {
+        let pvb_pat = arena.get_pat(vb.pvb_pat).clone();
+        let (leading, inside, trailing) = partition_by_loc(comments, pvb_pat.ppat_loc, arena);
+        t.attach_leading(pvb_pat.ppat_loc, leading, arena);
+        walk_pattern(&pvb_pat, t, inside, arena);
+        let (after_pattern, rest) = partition_adjacent_trailing(pvb_pat.ppat_loc, trailing, arena);
+        t.attach_trailing(pvb_pat.ppat_loc, after_pattern, arena);
+        let rest = visit_list_but_continue_with_remaining_comments(
+            &constraint.pvc_newtypes,
+            |newtype, _| newtype.loc,
+            |newtype, t, comments, arena| {
+                let (leading, trailing) = partition_leading_trailing(comments, newtype.loc, arena);
+                t.attach_leading(newtype.loc, leading, arena);
+                t.attach_trailing(newtype.loc, trailing, arena);
+            },
+            t,
+            rest,
+            false,
+            arena,
+        );
+        let typ = arena.get_core_type(constraint.pvc_type).clone();
+        let (before_type, inside_type, after_type) = partition_by_loc(rest, typ.ptyp_loc, arena);
+        t.attach_leading(typ.ptyp_loc, before_type, arena);
+        walk_core_type(&typ, t, inside_type, arena);
+        // `walk_expression_after pvc_type.ptyp_loc vb.pvb_expr after_type`.
+        let (after_previous, surrounding_expr) =
+            partition_adjacent_trailing(typ.ptyp_loc, after_type, arena);
+        t.attach_trailing(typ.ptyp_loc, after_previous, arena);
+        let expr = arena.get_expr(vb.pvb_expr).clone();
+        let (before_expr, inside_expr, after_expr) =
+            partition_by_loc(surrounding_expr, expr.pexp_loc, arena);
+        if is_block_expr(arena, &expr) {
+            let combined: Vec<Comment> =
+                before_expr.into_iter().chain(inside_expr).chain(after_expr).collect();
+            walk_expression(&expr, t, combined, arena);
+        } else {
+            t.attach_leading(expr.pexp_loc, before_expr, arena);
+            walk_expression(&expr, t, inside_expr, arena);
+            t.attach_trailing(expr.pexp_loc, after_expr, arena);
+        }
+        return;
+    }
     // OCaml rewrites value binding locations for sugar cases to properly partition comments.
     // This is necessary because the AST locations for sugar forms span the entire binding,
     // which causes all comments to be "inside" the pattern and none for the expression.
