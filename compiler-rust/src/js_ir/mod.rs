@@ -2351,7 +2351,7 @@ fn js_or_expression(left: Expression, right: Expression) -> Expression {
 
 fn simplify_and_if_no_side_effects(left: &Expression, right: &Expression) -> Option<Expression> {
     if expression_has_no_side_effects(left) && expression_has_no_side_effects(right) {
-        simplify_and_expression(left, right)
+        simplify_and_expression_with_depth(left, right, 0, true)
     } else {
         None
     }
@@ -2359,20 +2359,22 @@ fn simplify_and_if_no_side_effects(left: &Expression, right: &Expression) -> Opt
 
 fn simplify_or_if_no_side_effects(left: &Expression, right: &Expression) -> Option<Expression> {
     if expression_has_no_side_effects(left) && expression_has_no_side_effects(right) {
-        simplify_or_expression(left, right)
+        simplify_or_expression_with_depth(left, right, 0, true)
     } else {
         None
     }
 }
 
-fn simplify_and_expression(left: &Expression, right: &Expression) -> Option<Expression> {
-    simplify_and_expression_with_depth(left, right, 0)
-}
-
+/// `pure` is true when both operands are already known to have no side
+/// effects. Sub-expressions of pure `&&`/`||` operands, their negations and
+/// conjunctions of them are pure as well, so recursive calls on those pass it
+/// on instead of walking the operands again (for long `||` chains that walk
+/// made each step linear and whole-chain construction quadratic).
 fn simplify_and_expression_with_depth(
     left: &Expression,
     right: &Expression,
     depth: usize,
+    pure: bool,
 ) -> Option<Expression> {
     if depth > JS_SIMPLIFY_MAX_DEPTH {
         return None;
@@ -2387,15 +2389,15 @@ fn simplify_and_expression_with_depth(
         _ => {}
     }
 
-    if expression_has_no_side_effects(left) && expression_has_no_side_effects(right) {
+    if pure || (expression_has_no_side_effects(left) && expression_has_no_side_effects(right)) {
         match (&left.desc, &right.desc) {
             (ExpressionDesc::Bin(BinOp::And, left_a, left_b), _) => {
                 let simplified_left_a =
-                    simplify_and_expression_with_depth(left_a, right, depth + 1);
+                    simplify_and_expression_with_depth(left_a, right, depth + 1, true);
                 let simplified_left_b =
-                    simplify_and_expression_with_depth(left_b, right, depth + 1);
+                    simplify_and_expression_with_depth(left_b, right, depth + 1, true);
                 return match (simplified_left_a, simplified_left_b) {
-                    (None, None) => simplify_and_expression_with_depth(left_a, left_b, depth + 1)
+                    (None, None) => simplify_and_expression_with_depth(left_a, left_b, depth + 1, true)
                         .and_then(|expr| simplify_and_force(&expr, right, depth + 1)),
                     (Some(left_a), None) => simplify_and_force(&left_a, left_b, depth + 1),
                     (None, Some(left_b)) => simplify_and_force(left_a, &left_b, depth + 1),
@@ -2405,13 +2407,13 @@ fn simplify_and_expression_with_depth(
             (_, ExpressionDesc::Bin(BinOp::And, right_a, right_b)) => {
                 let combined =
                     raw_bin_expression(BinOp::And, left.clone(), right_a.as_ref().clone());
-                return simplify_and_expression_with_depth(&combined, right_b, depth + 1);
+                return simplify_and_expression_with_depth(&combined, right_b, depth + 1, true);
             }
             (ExpressionDesc::Bin(BinOp::Or, left_a, left_b), _) => {
                 let simplified_left_a =
-                    simplify_and_expression_with_depth(left_a, right, depth + 1);
+                    simplify_and_expression_with_depth(left_a, right, depth + 1, true);
                 let simplified_left_b =
-                    simplify_and_expression_with_depth(left_b, right, depth + 1);
+                    simplify_and_expression_with_depth(left_b, right, depth + 1, true);
                 return match (simplified_left_a, simplified_left_b) {
                     (Some(expr), None) if matches!(expr.desc, ExpressionDesc::Bool(false)) => Some(
                         raw_bin_expression(BinOp::And, left_b.as_ref().clone(), right.clone()),
@@ -2420,7 +2422,7 @@ fn simplify_and_expression_with_depth(
                         raw_bin_expression(BinOp::And, left_a.as_ref().clone(), right.clone()),
                     ),
                     (None, _) | (_, None) => {
-                        simplify_or_expression_with_depth(left_a, left_b, depth + 1)
+                        simplify_or_expression_with_depth(left_a, left_b, depth + 1, true)
                             .and_then(|expr| simplify_and_force(&expr, right, depth + 1))
                     }
                     (Some(left_a), Some(left_b)) => simplify_or_force(&left_a, &left_b, depth + 1),
@@ -2434,10 +2436,14 @@ fn simplify_and_expression_with_depth(
         return Some(left.clone());
     }
 
-    if expression_has_no_side_effects(left) && disjunction_contains_expression(left, right) {
+    if (pure || expression_has_no_side_effects(left))
+        && disjunction_contains_expression(left, right)
+    {
         return Some(right.clone());
     }
-    if expression_has_no_side_effects(right) && disjunction_contains_expression(right, left) {
+    if (pure || expression_has_no_side_effects(right))
+        && disjunction_contains_expression(right, left)
+    {
         return Some(left.clone());
     }
 
@@ -2462,14 +2468,12 @@ fn simplify_and_expression_with_depth(
     None
 }
 
-fn simplify_or_expression(left: &Expression, right: &Expression) -> Option<Expression> {
-    simplify_or_expression_with_depth(left, right, 0)
-}
-
+/// See `simplify_and_expression_with_depth` for `pure`.
 fn simplify_or_expression_with_depth(
     left: &Expression,
     right: &Expression,
     depth: usize,
+    pure: bool,
 ) -> Option<Expression> {
     if depth > JS_SIMPLIFY_MAX_DEPTH {
         return None;
@@ -2484,26 +2488,31 @@ fn simplify_or_expression_with_depth(
         _ => {}
     }
 
-    if expression_has_no_side_effects(left) && conjunction_contains_expression(left, right) {
+    if (pure || expression_has_no_side_effects(left))
+        && conjunction_contains_expression(left, right)
+    {
         return Some(right.clone());
     }
-    if expression_has_no_side_effects(right) && conjunction_contains_expression(right, left) {
+    if (pure || expression_has_no_side_effects(right))
+        && conjunction_contains_expression(right, left)
+    {
         return Some(left.clone());
     }
 
     let left_not = push_negation(left.clone())?;
     let right_not = push_negation(right.clone())?;
-    let simplified = simplify_and_expression_with_depth(&left_not, &right_not, depth + 1)?;
+    // Negation keeps operands pure.
+    let simplified = simplify_and_expression_with_depth(&left_not, &right_not, depth + 1, pure)?;
     push_negation(simplified)
 }
 
 fn simplify_and_force(left: &Expression, right: &Expression, depth: usize) -> Option<Expression> {
-    simplify_and_expression_with_depth(left, right, depth)
+    simplify_and_expression_with_depth(left, right, depth, false)
         .or_else(|| Some(raw_bin_expression(BinOp::And, left.clone(), right.clone())))
 }
 
 fn simplify_or_force(left: &Expression, right: &Expression, depth: usize) -> Option<Expression> {
-    simplify_or_expression_with_depth(left, right, depth)
+    simplify_or_expression_with_depth(left, right, depth, false)
         .or_else(|| Some(raw_bin_expression(BinOp::Or, left.clone(), right.clone())))
 }
 
