@@ -346,6 +346,10 @@ if ! run_build "Step 4: Building actual outputs with rewatch --in-process..." "$
     echo -e "${RED}Rust in-process build failed; log saved to $CACHE_DIR/errors/rust-build.err${RESET}" >&2
     exit 1
 fi
+# Keep both build logs so their diagnostics can be compared.
+mkdir -p "$CACHE_DIR/logs"
+cp "$TEMP_DIR/ocaml-build.log" "$CACHE_DIR/logs/ocaml-build.log" 2>/dev/null || true
+cp "$TEMP_DIR/rust-build.log" "$CACHE_DIR/logs/rust-build.log" 2>/dev/null || true
 
 echo -e "${BOLD}Step 5: Comparing generated JS outputs...${RESET}"
 pass_count=0

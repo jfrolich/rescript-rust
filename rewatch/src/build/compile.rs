@@ -3141,6 +3141,9 @@ fn compile_module_in_process_to_js_boundary(
     let mut local_registry = registry.clone();
     let mut interface_registry_update: Option<PendingRegistryUpdate> = None;
     let mut gentype_ignore_interface = false;
+    // The interface's warnings, reported before the implementation's (the
+    // subprocess path compiles the interface first).
+    let mut interface_warnings = String::new();
 
     // Register this module's metadata in the local registry
     local_registry.insert_module_info(module_name.to_string(), provisional_module_info.clone());
@@ -3175,7 +3178,11 @@ fn compile_module_in_process_to_js_boundary(
                 intf_source_abs.display()
             ),
         }
-        .map_err(|e| anyhow!("Interface typecheck failed for {}: {}", module_name, e));
+        .map_err(|e| match e.downcast::<rescript_compiler::driver::UserDiagnostic>() {
+            // A compiler diagnostic is reported as the text bsc prints.
+            Ok(diagnostic) => anyhow!("{}", diagnostic.output()),
+            Err(e) => anyhow!("Interface typecheck failed for {}: {}", module_name, e),
+        });
 
         let intf_result = match intf_result {
             Ok(r) => r,
@@ -3183,6 +3190,7 @@ fn compile_module_in_process_to_js_boundary(
                 return Err(e);
             }
         };
+        interface_warnings = intf_result.warnings;
 
         // Register the .resi's PersStruct in the local registry so the
         // .res compilation can find it for moregen constraints.
@@ -3325,9 +3333,17 @@ fn compile_module_in_process_to_js_boundary(
     };
 
     let pre_js = match pre_js {
-        Ok(Ok(result)) => result,
+        Ok(Ok(mut result)) => {
+            result.warnings.insert_str(0, &interface_warnings);
+            result
+        }
         Ok(Err(e)) => {
-            return Err(anyhow!("Compilation failed for {}: {}", module_name, e));
+            let e = in_process_compile_error(module_name, e);
+            return Err(if interface_warnings.is_empty() {
+                e
+            } else {
+                anyhow!("{interface_warnings}{e}")
+            });
         }
         Err(panic) => {
             let msg = if let Some(s) = panic.downcast_ref::<String>() {
@@ -3448,7 +3464,7 @@ fn finish_in_process_js_inner(
 ) -> Result<InProcessModuleResult> {
     let PreJsMsg {
         module_name,
-        pre_js,
+        mut pre_js,
         needed_modules: _,
         interface_registry_update,
         source_abs,
@@ -3464,6 +3480,8 @@ fn finish_in_process_js_inner(
     let package = build_state
         .get_package(&module.package_name)
         .expect("Package not found");
+    // The warnings bsc prints to stderr, filtered like the subprocess path.
+    let warning = visible_compiler_warnings(&std::mem::take(&mut pre_js.warnings), package.is_local_dep);
     let _span = if tracing::enabled!(tracing::Level::INFO) {
         info_span!(
             parent: &parent_span,
@@ -3610,7 +3628,7 @@ fn finish_in_process_js_inner(
     }
 
     Ok(InProcessModuleResult {
-        warning: None,
+        warning,
         registry_updates,
     })
 }
@@ -4004,6 +4022,15 @@ fn compile_file(
 
             Ok(visible_compiler_warnings(&err, package.is_local_dep))
         }
+    }
+}
+
+/// An in-process compile failure. A compiler diagnostic is reported as the
+/// text bsc prints, like the subprocess path does.
+fn in_process_compile_error(module_name: &str, err: anyhow::Error) -> anyhow::Error {
+    match err.downcast::<rescript_compiler::driver::UserDiagnostic>() {
+        Ok(diagnostic) => anyhow!("{}", diagnostic.output()),
+        Err(err) => anyhow!("Compilation failed for {}: {}", module_name, err),
     }
 }
 

@@ -597,6 +597,7 @@ fn serialize_signature(
         cache: HashMap::new(),
         variant_layouts: Vec::new(),
         variant_layout_cache: HashMap::new(),
+        file_name_cache: HashMap::new(),
     };
     let mut sig = sig.clone();
     ser.remap_signature(&mut sig);
@@ -614,9 +615,35 @@ struct TypeGraphSerializer<'a> {
     cache: HashMap<TypeExprRef, usize>,
     variant_layouts: Vec<crate::types::VariantLayout>,
     variant_layout_cache: HashMap<crate::types::VariantLayoutRef, usize>,
+    /// Source-arena file names re-interned as synthetic CMI names.
+    file_name_cache: HashMap<crate::intern::StrIdx, crate::intern::StrIdx>,
 }
 
 impl<'a> TypeGraphSerializer<'a> {
+    /// Declaration locations name their file through the source arena's
+    /// string table, which does not travel with the signature. Re-intern the
+    /// name in the TypeContext's synthetic CMI name table, as reading a `.cmi`
+    /// does (`sig_reader::read_location`), so the importing compile can
+    /// resolve it.
+    fn remap_loc(&mut self, loc: &mut crate::location::Location) {
+        let Some(arena) = self.arena else {
+            return;
+        };
+        for pos in [&mut loc.loc_start, &mut loc.loc_end] {
+            let idx = pos.file_name;
+            if idx == crate::intern::StrIdx::default()
+                || self.ctx.resolve_cmi_longident_component(idx).is_some()
+            {
+                continue;
+            }
+            let ctx = self.ctx;
+            pos.file_name = *self
+                .file_name_cache
+                .entry(idx)
+                .or_insert_with(|| ctx.intern_cmi_longident_name(arena.get_string(idx)));
+        }
+    }
+
     /// Serialize a TypeExprRef, returning the portable index.
     fn serialize_type(&mut self, r: TypeExprRef) -> usize {
         if let Some(&idx) = self.cache.get(&r) {
@@ -786,9 +813,11 @@ impl<'a> TypeGraphSerializer<'a> {
 
     fn remap_value_desc(&mut self, vd: &mut ValueDescription) {
         vd.val_type = TypeExprRef::from_usize(self.serialize_type(vd.val_type));
+        self.remap_loc(&mut vd.val_loc);
     }
 
     fn remap_type_decl(&mut self, td: &mut TypeDeclaration) {
+        self.remap_loc(&mut td.type_loc);
         if let TypeKind::TypeVariant(_, layout_ref) = &mut td.type_kind {
             let index = if let Some(index) = self.variant_layout_cache.get(layout_ref) {
                 *index
@@ -833,9 +862,11 @@ impl<'a> TypeGraphSerializer<'a> {
 
     fn remap_label_decl(&mut self, ld: &mut LabelDeclaration) {
         ld.ld_type = TypeExprRef::from_usize(self.serialize_type(ld.ld_type));
+        self.remap_loc(&mut ld.ld_loc);
     }
 
     fn remap_ctor_decl(&mut self, cd: &mut ConstructorDeclaration) {
+        self.remap_loc(&mut cd.cd_loc);
         match &mut cd.cd_args {
             ConstructorArguments::CstrTuple(types) => {
                 for t in types.iter_mut() {
@@ -854,6 +885,7 @@ impl<'a> TypeGraphSerializer<'a> {
     }
 
     fn remap_ext_ctor(&mut self, ec: &mut ExtensionConstructor) {
+        self.remap_loc(&mut ec.ext_loc);
         for p in ec.ext_type_params.iter_mut() {
             *p = TypeExprRef::from_usize(self.serialize_type(*p));
         }
@@ -875,10 +907,12 @@ impl<'a> TypeGraphSerializer<'a> {
     }
 
     fn remap_module_decl(&mut self, md: &mut ModuleDeclaration) {
+        self.remap_loc(&mut md.md_loc);
         self.remap_module_type(&mut md.md_type);
     }
 
     fn remap_modtype_decl(&mut self, mtd: &mut ModtypeDeclaration) {
+        self.remap_loc(&mut mtd.mtd_loc);
         if let Some(ref mut mt) = mtd.mtd_type {
             self.remap_module_type(mt);
         }
@@ -1259,7 +1293,8 @@ mod type_arg_tests {
             ret: shared,
         });
         let mut ser = TypeGraphSerializer { ctx: &ctx, arena: None, entries: Vec::new(),
-            cache: HashMap::new(), variant_layouts: Vec::new(), variant_layout_cache: HashMap::new() };
+            cache: HashMap::new(), variant_layouts: Vec::new(), variant_layout_cache: HashMap::new(),
+            file_name_cache: HashMap::new() };
         let index = ser.serialize_type(arrow);
         let PortableTypeDesc::Tarrow { args, ret } = &ser.entries[index].desc else { panic!("not arrow") };
         assert_eq!(args.len(), 3);

@@ -5756,12 +5756,47 @@ fn emit_type_warnings(
     }
 
     let mut stderr = std::io::stderr();
-    for warning in warnings {
-        let output = format_compiler_warning_report(arena, source, filename, warning);
-        let output = crate::source_text::decode_internal_utf8_runs(&output);
-        let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
-    }
+    let output = format_type_warnings(arena, source, filename, warnings);
+    let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
     let _ = std::io::Write::flush(&mut stderr);
+}
+
+/// The reports [`emit_type_warnings`] prints, as one string.
+fn format_type_warnings(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    warnings: &[TypeCoreWarning],
+) -> String {
+    let mut output = String::new();
+    for warning in warnings {
+        let report = format_compiler_warning_report(arena, source, filename, warning);
+        output.push_str(&crate::source_text::decode_internal_utf8_runs(&report));
+    }
+    output
+}
+
+/// The source text an in-process compile reports diagnostics against. Like
+/// OCaml's code frames (location.ml), it is read back from the source file.
+fn read_in_process_source(filename: &str) -> String {
+    std::fs::read(filename)
+        .map(crate::source_text::latin1_bytes_to_string)
+        .unwrap_or_default()
+}
+
+/// An error report preceded by the warnings printed before it.
+fn prefix_diagnostic(prefix: &str, err: anyhow::Error) -> anyhow::Error {
+    if prefix.is_empty() {
+        return err;
+    }
+    match err.downcast::<UserDiagnostic>() {
+        Ok(diagnostic) => UserDiagnostic::new(
+            format!("{prefix}{}", diagnostic.output()),
+            diagnostic.exit_code(),
+        )
+        .into(),
+        Err(err) => anyhow!("{prefix}{err}"),
+    }
 }
 
 fn type_warnings_have_errors(warnings: &[TypeCoreWarning]) -> bool {
@@ -12066,7 +12101,16 @@ fn check_compunit_inclusion_for_errors(
         pers.add_load_path(source_dir);
     }
     let _ = pers.find_pers_struct(&module_name, type_ctx);
-    let Some(target_sig) = pers.read_raw_sig_shared(&module_name, type_ctx) else {
+    // In-process, the interface was saved without a `.cmi`; its raw `ps_sig`
+    // travels with the registered portable structure.
+    let raw_in_process_sig = if pers.is_in_process_mode() {
+        type_ctx.get_gentype_raw_module_sig(&module_name)
+    } else {
+        None
+    };
+    let Some(target_sig) =
+        raw_in_process_sig.or_else(|| pers.read_raw_sig_shared(&module_name, type_ctx))
+    else {
         return Ok(());
     };
     // Env.read_signature forces ps_sig, whose Subst.signature identity copy
@@ -14478,6 +14522,8 @@ pub struct InProcessCompileResult {
     pub typed_tree_sexp: String,
     pub raw_lambda_sexp: String,
     pub lambda_sexp: String,
+    /// The warning reports the file compile prints to stderr.
+    pub warnings: String,
 }
 
 /// Owned in-process compilation state after typechecking and Lambda lowering,
@@ -14500,6 +14546,8 @@ pub struct InProcessPreJsCompileResult {
     pub typed_tree_sexp: String,
     pub raw_lambda_sexp: String,
     pub lambda_sexp: String,
+    /// The warning reports the file compile prints to stderr.
+    pub warnings: String,
 }
 
 pub struct InProcessJsMetadataReady {
@@ -14537,6 +14585,8 @@ pub struct InProcessInterfaceResult {
     /// contains `@@genType.ignoreInterface`, GenType must select the
     /// implementation typed artifact for generated output.
     pub gentype_ignore_interface: bool,
+    /// The warning reports the file compile prints to stderr.
+    pub warnings: String,
 }
 
 fn process_gentype_typed_artifact_if_enabled<'a>(
@@ -14996,12 +15046,41 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     tctx.set_persistent_env(pers_env);
     drop(env_setup_span);
 
-    let (typed_structure, final_env) =
-        crate::timing::measure(crate::timing::Phase::Typecheck, || {
-            let _phase = info_span!("compiler.type_structure").entered();
-            type_structure(&mut tctx, &env, arena, structure)
-                .map_err(|e| anyhow!("Type checking failed: {e:?}"))
-        })?;
+    // Diagnostics are reported against the source file, read only when
+    // there is something to report.
+    let source_cell = std::cell::OnceCell::new();
+    let source = || -> &str { source_cell.get_or_init(|| read_in_process_source(filename)) };
+
+    let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
+        let _phase = info_span!("compiler.type_structure").entered();
+        type_structure(&mut tctx, &env, arena, structure)
+    });
+    let (typed_structure, final_env) = match typed {
+        Ok(result) => result,
+        Err(e) => {
+            // As in the file compile: the warnings reported so far precede
+            // the error report.
+            tctx.drain_open_slot_uses();
+            let warnings = format_type_warnings(arena, source(), filename, &tctx.warnings);
+            let suppress_info_style =
+                !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
+            if let Some(error) = tctx
+                .persistent_env
+                .as_ref()
+                .and_then(|persistent_env| persistent_env.last_error())
+            {
+                return Err(prefix_diagnostic(
+                    &warnings,
+                    persistent_env_error_to_anyhow(error, filename),
+                ));
+            }
+            return Err(prefix_diagnostic(
+                &warnings,
+                type_mod_error_to_anyhow(e, &type_ctx, arena, source(), filename, suppress_info_style),
+            ));
+        }
+    };
+    tctx.drain_open_slot_uses();
 
     let mut inferred_implementation_coercion = None;
     let mut published_signature = {
@@ -15035,7 +15114,20 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 &final_env,
                 &simple_signature,
             ) {
-                return Err(anyhow!("Type checking failed: {e:?}"));
+                let warnings = format_type_warnings(arena, source(), filename, &tctx.warnings);
+                let suppress_info_style =
+                    !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
+                return Err(prefix_diagnostic(
+                    &warnings,
+                    type_mod_error_to_anyhow(
+                        e,
+                        &type_ctx,
+                        arena,
+                        source(),
+                        filename,
+                        suppress_info_style,
+                    ),
+                ));
             }
             normalize_signature_types(&type_ctx, &typed_structure, &final_env);
         }
@@ -15044,6 +15136,28 @@ pub fn compile_preprocessed_structure_in_process_until_js(
 
         simple_signature
     };
+    // typemod.ml:1742-1758: with an interface, the implementation is checked
+    // against it (marking the included declarations used) before the delayed
+    // checks, as the file compile does.
+    if has_interface {
+        if let Err(error) = check_compunit_inclusion_for_errors(
+            &mut tctx,
+            &type_ctx,
+            &env,
+            &typed_structure,
+            filename,
+            source(),
+            filename,
+            true,
+        ) {
+            let warnings = format_type_warnings(arena, source(), filename, &tctx.warnings);
+            return Err(prefix_diagnostic(&warnings, error));
+        }
+    }
+    // typemod.ml:1769-1776 forces the delayed usage checks before Lambda
+    // translation, as the file compile does.
+    tctx.flush_value_usage_checks();
+    let post_type_warning_start = tctx.warnings.len();
 
     // OCaml saves the inferred `.cmi` only in the no-interface branch before
     // Lambda translation mutates any shared type nodes
@@ -15167,6 +15281,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let unit_name = options.current_unit_name().unwrap_or_default();
     let (
         raw_lambda,
+        raw_warnings,
         raw_diagnostic,
         raw_possible_required_modules,
         raw_lambda_current_stamp,
@@ -15201,6 +15316,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         }
         let raw_lambda = raw_converter
             .convert_structure_with_coercion(&typed_structure, &implementation_coercion);
+        let raw_warnings = raw_converter.take_warnings();
         let raw_diagnostic = raw_converter.take_diagnostic();
         let possible_required_modules = raw_converter.take_possible_required_modules();
         let raw_lambda_current_stamp = raw_converter.current_stamp();
@@ -15208,6 +15324,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         let hoisted_exports = raw_converter.take_hoisted_exports();
         (
             raw_lambda,
+            raw_warnings,
             raw_diagnostic,
             possible_required_modules,
             raw_lambda_current_stamp,
@@ -15215,8 +15332,34 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             hoisted_exports,
         )
     });
+    // The file compile reports the typing warnings, then Translmod's
+    // (js_implementation.ml:161-167); a Translmod error escapes before
+    // `Warnings.check_fatal`.
+    let mut warnings =
+        format_type_warnings(arena, source(), filename, &tctx.warnings[..post_type_warning_start]);
     if let Some(diagnostic) = raw_diagnostic {
-        return Err(anyhow!(diagnostic.message));
+        warnings.push_str(&format_type_warnings(arena, source(), filename, &raw_warnings));
+        return Err(prefix_diagnostic(
+            &warnings,
+            UserDiagnostic::new(
+                format_compiler_error_report_from_location(
+                    source(),
+                    filename,
+                    &diagnostic.loc,
+                    &diagnostic.message,
+                ),
+                2,
+            )
+            .into(),
+        ));
+    }
+    let late_type_warnings = &tctx.warnings[post_type_warning_start..];
+    warnings.push_str(&format_type_warnings(arena, source(), filename, late_type_warnings));
+    warnings.push_str(&format_type_warnings(arena, source(), filename, &raw_warnings));
+    // lam_compile_main.ml:420 `Warnings.check_fatal ()`: a warning configured
+    // as an error fails the compilation after its reports.
+    if type_warnings_have_errors(&tctx.warnings) || type_warnings_have_errors(&raw_warnings) {
+        return Err(UserDiagnostic::new(warnings, 2).into());
     }
     // Capture raw lambda sexp for the playground (only if requested).
     let raw_lambda_sexp = if options.capture_intermediates {
@@ -15273,6 +15416,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         typed_tree_sexp,
         raw_lambda_sexp,
         lambda_sexp,
+        warnings,
     })
 }
 
@@ -15477,6 +15621,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         typed_tree_sexp: pre_js.typed_tree_sexp,
         raw_lambda_sexp: pre_js.raw_lambda_sexp,
         lambda_sexp: pre_js.lambda_sexp,
+        warnings: pre_js.warnings,
     })
 }
 
@@ -15603,11 +15748,52 @@ pub fn typecheck_preprocessed_signature_in_process(
 
     tctx.set_persistent_env(pers_env);
 
-    let typed_signature = crate::timing::measure(crate::timing::Phase::Typecheck, || {
+    // Diagnostics are reported against the source file, read only when
+    // there is something to report.
+    let source_cell = std::cell::OnceCell::new();
+    let source = || -> &str { source_cell.get_or_init(|| read_in_process_source(filename)) };
+
+    let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
         let _phase = info_span!("compiler.type_signature").entered();
         transl_signature(&mut tctx, &env, arena, signature)
-            .map_err(|e| anyhow!("Type checking failed: {e:?}"))
-    })?;
+    });
+    let typed_signature = match typed {
+        Ok(typed_signature) => typed_signature,
+        Err(e) => {
+            // As in the file compile: the warnings reported so far precede
+            // the error report.
+            tctx.drain_open_slot_uses();
+            let warnings = format_type_warnings(arena, source(), filename, &tctx.warnings);
+            let suppress_info_style =
+                !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
+            if let Some(error) = tctx
+                .persistent_env
+                .as_ref()
+                .and_then(|persistent_env| persistent_env.last_error())
+            {
+                return Err(prefix_diagnostic(
+                    &warnings,
+                    persistent_env_error_to_anyhow(error, filename),
+                ));
+            }
+            return Err(prefix_diagnostic(
+                &warnings,
+                type_mod_error_to_anyhow(e, &type_ctx, arena, source(), filename, suppress_info_style),
+            ));
+        }
+    };
+    // js_implementation.ml:62: `ignore (Includemod.signatures initial_env sg
+    // sg)`, which marks the declarations of the interface used.
+    let sig_type = crate::types::typemod::decl_signature_from_typed_signature(&typed_signature, arena);
+    let _ = crate::types::includemod::compunit(
+        &type_ctx, &env, filename, &sig_type, filename, &sig_type,
+    );
+    // js_implementation.ml:64 `Delayed_checks.force_delayed_checks ()`.
+    tctx.flush_value_usage_checks();
+    let warnings = format_type_warnings(arena, source(), filename, &tctx.warnings);
+    if type_warnings_have_errors(&tctx.warnings) {
+        return Err(UserDiagnostic::new(warnings, 2).into());
+    }
     let gentype_ignore_interface = options.gentype_config.is_some()
         && crate::gentype::annotation::signature_check_annotation(
             arena,
@@ -15658,6 +15844,13 @@ pub fn typecheck_preprocessed_signature_in_process(
         .unwrap_or_else(PersistentEnv::new);
 
     // js_implementation.ml:66: `Builtin_attributes.deprecated_of_sig ast`.
+    // The raw `ps_sig` of the saved interface (env.ml:1949-1952,
+    // env.ml:669-678), before registration substitutes component paths in
+    // place. The implementation is checked against it (typemod.ml:1742-1758),
+    // as the file compile checks against the `.cmi`.
+    let raw_signature = std::sync::Arc::new(
+        crate::types::typecore::copy_lookup_signature_for_subst(&published_signature, &type_ctx),
+    );
     internal_env.register_in_memory_signature(
         module_name,
         published_signature.clone(),
@@ -15665,6 +15858,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         crate::types::typemod::deprecated_of_sig(arena, signature),
         &type_ctx,
     );
+    type_ctx.register_raw_module_sig(module_name, raw_signature);
 
     let (pers_struct, new_alias_rewrites) = internal_env.extract_module_update(
         module_name,
@@ -15678,6 +15872,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         pers_struct,
         new_alias_rewrites,
         gentype_ignore_interface,
+        warnings,
     })
 }
 
@@ -15781,6 +15976,7 @@ pub fn typecheck_implementation_in_process(
         pers_struct,
         new_alias_rewrites,
         gentype_ignore_interface: false,
+        warnings: String::new(),
     })
 }
 
