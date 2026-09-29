@@ -177,6 +177,9 @@ pub struct PersStruct {
     pub ps_sig: Arc<Signature>,
     /// Source filename
     pub ps_filename: String,
+    /// The `Deprecated` persistence flag (`cmi_flags`, env.ml:663-668),
+    /// reported when the unit is looked up (env.ml:1044-1048).
+    pub ps_deprecated: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -492,6 +495,7 @@ impl ModuleRegistry {
         let portable = PortablePersStruct {
             ps_name: namespace_name.to_string(),
             ps_filename: format!("{}.mlmap", namespace_name),
+            ps_deprecated: None,
             ps_sig: sig_items,
             raw_ps_sig: None,
             cmi_longident_names: Vec::new(),
@@ -847,6 +851,11 @@ impl PersistentEnv {
             .map(|value| (cache_key.to_string(), value))
     }
 
+    /// The already-loaded persistent structure of `name`, without loading it.
+    pub(crate) fn loaded_pers_struct(&self, name: &str) -> Option<Arc<PersStruct>> {
+        self.cache_lookup_entry(name).and_then(|(_, loaded)| loaded)
+    }
+
     fn cache_contains_key(&self, name: &str) -> bool {
         let cache = self.cache.lock().unwrap();
         resolve_first_char_case_key(&cache, name).is_some()
@@ -1197,6 +1206,7 @@ impl PersistentEnv {
         ps_name: String,
         mut signature: Signature,
         ps_filename: String,
+        ps_deprecated: Option<String>,
         ctx: &'a TypeContext,
     ) -> PersStruct {
         let module_path = Path::Pident(Ident::create_persistent(name));
@@ -1232,6 +1242,7 @@ impl PersistentEnv {
             ps_name,
             ps_sig: signature,
             ps_filename,
+            ps_deprecated,
         }
     }
 
@@ -1478,7 +1489,7 @@ impl PersistentEnv {
         &self,
         source_path: &FsPath,
         ctx: &'a TypeContext,
-    ) -> Option<(Signature, PersistentEnv)> {
+    ) -> Option<(Signature, PersistentEnv, Option<String>)> {
         if self.source_fallback_depth >= Self::MAX_SOURCE_FALLBACK_DEPTH {
             return None;
         }
@@ -1546,6 +1557,7 @@ impl PersistentEnv {
             }
             let signature =
                 crate::binary_ast::ppx::rewrite_signature(&signature, parser.arena_mut()).ok()?;
+            let deprecated = crate::types::typemod::deprecated_of_sig(parser.arena(), &signature);
 
             crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
             let mut tctx = TypeCheckContext::new(ctx, parser.arena());
@@ -1568,7 +1580,7 @@ impl PersistentEnv {
                 crate::types::decl::ModuleType::MtySignature(signature) => signature,
                 _ => return None,
             };
-            return Some((signature, fallback_pers));
+            return Some((signature, fallback_pers, deprecated));
         }
 
         let mut parser = Parser::new(&filename, &source);
@@ -1592,6 +1604,7 @@ impl PersistentEnv {
         };
         let structure =
             crate::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut()).ok()?;
+        let deprecated = crate::types::typemod::deprecated_of_str(parser.arena(), &structure);
 
         crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
         let mut tctx = TypeCheckContext::new(ctx, parser.arena());
@@ -1611,7 +1624,7 @@ impl PersistentEnv {
         }
 
         let fallback_pers = tctx.persistent_env.take()?;
-        Some((typed_structure.str_type.clone(), fallback_pers))
+        Some((typed_structure.str_type.clone(), fallback_pers, deprecated))
     }
 
     fn load_module_from_source_fallback<'a>(
@@ -1646,7 +1659,7 @@ impl PersistentEnv {
             );
         }
 
-        let (signature, fallback_pers) = self.typecheck_source_signature(preferred_path, ctx)?;
+        let (signature, fallback_pers, deprecated) = self.typecheck_source_signature(preferred_path, ctx)?;
         self.view_mut().alias_prefix_rewrites
             .extend_missing(fallback_pers.view.alias_prefix_rewrites.local_clone());
         let fallback_entries = fallback_pers
@@ -1668,6 +1681,7 @@ impl PersistentEnv {
             name.to_string(),
             signature,
             preferred_path.to_string_lossy().into_owned(),
+            deprecated,
             ctx,
         ))
     }
@@ -1714,11 +1728,16 @@ impl PersistentEnv {
 
             let mut sig_ctx = SigReadContext::new(ctx);
             let signature = sig_ctx.read_signature(&cmi.cmi_sign);
+            // env.ml:663-668: the unit's `Deprecated` persistence flag.
+            let deprecated = cmi.cmi_flags.iter().fold(None, |_, flag| match flag {
+                crate::cmi::cmi_format::PersFlags::Deprecated(s) => Some(s.clone()),
+            });
             return Some(self.finalize_loaded_signature(
                 name,
                 name.to_string(),
                 signature,
                 display_path,
+                deprecated,
                 ctx,
             ));
         }
@@ -1740,7 +1759,7 @@ impl PersistentEnv {
         // The source_fallback_paths already points to the preferred file
         // (.resi if it exists, .res otherwise), set by rewatch when
         // registering the paths.
-        let (signature, fallback_pers) = self.typecheck_source_signature(&source_path, ctx)?;
+        let (signature, fallback_pers, deprecated) = self.typecheck_source_signature(&source_path, ctx)?;
 
         // Merge any modules the fallback discovered
         self.view_mut().alias_prefix_rewrites
@@ -1764,6 +1783,7 @@ impl PersistentEnv {
             name.to_string(),
             signature,
             source_path.to_string_lossy().into_owned(),
+            deprecated,
             ctx,
         ))
     }
@@ -2005,6 +2025,7 @@ impl PersistentEnv {
         name: &str,
         signature: Signature,
         source_filename: &str,
+        deprecated: Option<String>,
         ctx: &'a TypeContext,
     ) {
         let ps = self.finalize_loaded_signature(
@@ -2012,6 +2033,7 @@ impl PersistentEnv {
             name.to_string(),
             signature,
             source_filename.to_string(),
+            deprecated,
             ctx,
         );
         self.view_mut().hidden_modules.remove(name);
@@ -2079,6 +2101,7 @@ impl PersistentEnv {
             ps_name: namespace_name.to_string(),
             ps_sig: Arc::new(sig_items),
             ps_filename: format!("{}.mlmap", namespace_name),
+            ps_deprecated: None,
         };
         self.view_mut().hidden_modules.remove(namespace_name);
         self.cache_insert(namespace_name.to_string(), Some(Arc::new(ps)));
@@ -6561,7 +6584,7 @@ mod resolution_view_tests {
     fn warm_preparation_keeps_view_shared_and_cold_preparation_stays_private() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let mut original = PersistentEnv::new();
-        original.register_in_memory_signature("M", vec![], "M.res", &ctx);
+        original.register_in_memory_signature("M", vec![], "M.res", None, &ctx);
         let ps = original
             .find_pers_struct("M", &ctx)
             .expect("registered module");
@@ -6610,6 +6633,7 @@ mod resolution_view_tests {
         let portable = Arc::new(PortablePersStruct {
             ps_name: "Portable".to_string(),
             ps_filename: "Portable.res".to_string(),
+            ps_deprecated: None,
             ps_sig: vec![],
             raw_ps_sig: None,
             cmi_longident_names: vec![],

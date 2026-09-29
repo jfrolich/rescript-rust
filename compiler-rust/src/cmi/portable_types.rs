@@ -127,6 +127,8 @@ pub enum PortableRowField {
 pub struct PortablePersStruct {
     pub ps_name: String,
     pub ps_filename: String,
+    /// `PersStruct::ps_deprecated`.
+    pub ps_deprecated: Option<String>,
     /// Signature with TypeExprRef values being indices into `type_graph.entries`.
     pub ps_sig: Signature,
     /// Raw `ps_sig` copy for OCaml-style lazy alias scraping.
@@ -573,6 +575,7 @@ pub fn serialize_pers_struct(
     PortablePersStruct {
         ps_name: ps.ps_name.clone(),
         ps_filename: ps.ps_filename.clone(),
+        ps_deprecated: ps.ps_deprecated.clone(),
         ps_sig: sig,
         raw_ps_sig,
         cmi_longident_names: ctx.snapshot_cmi_longident_names(),
@@ -915,6 +918,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         ps_name: pps.ps_name.clone(),
         ps_sig: Arc::new(sig),
         ps_filename: pps.ps_filename.clone(),
+        ps_deprecated: pps.ps_deprecated.clone(),
     }
 }
 

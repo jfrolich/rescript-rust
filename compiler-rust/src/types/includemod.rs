@@ -71,7 +71,7 @@ fn deprecated_inclusion_warning(
     let message = if reason.is_empty() {
         name.to_string()
     } else {
-        format!("{name}\n{reason}")
+        format!("{name}\n  {reason}")
     };
     Some(Warning::Deprecated {
         message,
@@ -104,7 +104,7 @@ fn deprecated_mutable_inclusion_warning(
     let message = if reason.is_empty() {
         format!("mutating field {name}")
     } else {
-        format!("mutating field {name}\n{reason}")
+        format!("mutating field {name}\n  {reason}")
     };
     Some(Warning::Deprecated {
         message,

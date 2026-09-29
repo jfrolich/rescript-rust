@@ -759,6 +759,73 @@ fn exit_warning_scope(tctx: &mut TypeCheckContext<'_>, previous: Option<WarningC
     }
 }
 
+/// `Builtin_attributes.deprecated_of_attrs` (builtin_attributes.ml:76-80) on
+/// one parser attribute: `Some (string_of_opt_payload p)` for `deprecated`.
+fn parser_deprecated_of_attr(arena: &ParseArena, attr: &ParsedAttribute) -> Option<String> {
+    let (name, payload) = attr;
+    if !matches!(arena.get_string(name.txt), "deprecated" | "ocaml.deprecated") {
+        return None;
+    }
+    // `string_of_opt_payload` (builtin_attributes.ml:23-31).
+    let string = match payload {
+        ParsedPayload::PStr(items) => match items.as_slice() {
+            [item] => match item.pstr_desc.as_ref() {
+                ParsedStructureItemDesc::Pstr_eval(eval_box) => {
+                    match arena.get_expr(eval_box.0).pexp_desc.as_ref() {
+                        crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match c.as_ref() {
+                            crate::parser::ast::Constant::String(value, _) => {
+                                Some(value.to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                }
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    };
+    Some(string.unwrap_or_default())
+}
+
+/// `Builtin_attributes.deprecated_of_str` (builtin_attributes.ml:178-183):
+/// the unit's leading floating attributes decide its `Deprecated` flag
+/// (typemod.ml:1778).
+pub(crate) fn deprecated_of_str(
+    arena: &ParseArena,
+    items: &[ParsedStructureItem],
+) -> Option<String> {
+    for item in items {
+        let ParsedStructureItemDesc::Pstr_attribute(attr) = item.pstr_desc.as_ref() else {
+            return None;
+        };
+        if let Some(txt) = parser_deprecated_of_attr(arena, attr) {
+            return Some(txt);
+        }
+    }
+    None
+}
+
+/// `Builtin_attributes.deprecated_of_sig` (builtin_attributes.ml:171-176),
+/// used for interfaces (js_implementation.ml:66).
+pub(crate) fn deprecated_of_sig(
+    arena: &ParseArena,
+    items: &[crate::parser::ast::SignatureItem],
+) -> Option<String> {
+    for item in items {
+        let crate::parser::ast::SignatureItemDesc::Psig_attribute(attr) = item.psig_desc.as_ref()
+        else {
+            return None;
+        };
+        if let Some(txt) = parser_deprecated_of_attr(arena, attr) {
+            return Some(txt);
+        }
+    }
+    None
+}
+
 fn parser_deprecated_payload_to_decl_payload(
     arena: &ParseArena,
     items: &[ParsedStructureItem],
@@ -774,11 +841,10 @@ fn parser_deprecated_payload_to_decl_payload(
 
     match expr.pexp_desc.as_ref() {
         crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match c.as_ref() {
+            // The plain `string_of_payload` form (builtin_attributes.ml:23-26);
+            // `Deprecated` is kept for the record form.
             crate::parser::ast::Constant::String(reason, _) => {
-                Some(crate::types::decl::AttributePayload::Deprecated {
-                    reason: reason.to_string(),
-                    can_be_automigrated: false,
-                })
+                Some(crate::types::decl::AttributePayload::Str(reason.to_string()))
             }
             _ => None,
         },
@@ -5327,6 +5393,7 @@ fn resolve_variant_spread_sources(
                         tctx,
                         env,
                         &spread_lid,
+                        None,
                     );
                     if let Some(source_decl) = source_decl {
                         is_pdot = matches!(path, Path::Pdot(..));
@@ -13468,7 +13535,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
         }
         PMtyDesc::Pmty_ident(lid) => {
             let longident = tctx.resolve_lid(lid.txt).clone();
-            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Modtype);
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Modtype, None);
             let path = lookup_modtype_path_or_error(
                 tctx,
                 &longident,
@@ -13630,7 +13697,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
         PMtyDesc::Pmty_alias(lid) => {
             check_recursive_module_reference_lid(lid, arena, env)?;
             let longident = tctx.resolve_lid(lid.txt).clone();
-            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module);
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module, None);
             let path = lookup_module_path_by_lid(
                 &longident,
                 arena,
@@ -13862,6 +13929,7 @@ fn approx_modtype_rec<'a>(
                         arena,
                         open_lid,
                         crate::types::env::OpenLookupKind::Module,
+                        Some(od.popen_lid.loc),
                     );
                     let lookup_env = sig_env.clone_preserve_id();
                     if crate::types::typecore::open_module_lid_components_into_env(
@@ -13913,7 +13981,7 @@ fn approx_modtype_rec<'a>(
     match &*mty.pmty_desc {
         PMtyDesc::Pmty_ident(lid) => {
             let longident = tctx.resolve_lid(lid.txt).clone();
-            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Modtype);
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Modtype, Some(mty.pmty_loc));
             let path = lookup_modtype_path_or_error(
                 tctx,
                 &longident,
@@ -13926,7 +13994,7 @@ fn approx_modtype_rec<'a>(
         PMtyDesc::Pmty_alias(lid) => {
             check_recursive_module_reference_lid(lid, arena, env)?;
             let longident = tctx.resolve_lid(lid.txt).clone();
-            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module);
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module, Some(mty.pmty_loc));
             let path = lookup_module_path_by_lid(
                 &longident,
                 arena,
@@ -16103,7 +16171,7 @@ fn type_module_expr_with_alias_inner<'a>(
             // Module identifier: M
             // Look up the module path in the environment
             let longident = tctx.resolve_lid(lid.txt).clone();
-            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module);
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module, Some(mod_expr.pmod_loc));
             let path =
                 lookup_module_path_for_module_expr(tctx, env, arena, &longident, !alias, loc)?;
             let aliasable = !env.is_functor_arg_path(&path);
@@ -16912,7 +16980,7 @@ fn type_module_type_of_expr_raw<'a>(
     match &*mod_expr.pmod_desc {
         ParsedModuleExprDesc::Pmod_ident(lid) => {
             let longident = tctx.resolve_lid(lid.txt).clone();
-            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module);
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module, Some(mod_expr.pmod_loc));
             // `Typetexp.find_module` (typetexp.ml:86-96 via env.ml:1022-1036)
             // reports a recursive module still bound to its placeholder.
             if let Longident::Lident(mod_idx) = &longident
@@ -17024,7 +17092,7 @@ fn transl_modtype<'a>(
     let desc = match &*smty.pmty_desc {
         PMtyDesc::Pmty_ident(lid) => {
             let longident = tctx.resolve_lid(lid.txt).clone();
-            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Modtype);
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Modtype, Some(smty.pmty_loc));
             let path = lookup_modtype_path_or_error(
                 tctx,
                 &longident,
@@ -17104,7 +17172,7 @@ fn transl_modtype<'a>(
         PMtyDesc::Pmty_alias(lid) => {
             check_recursive_module_reference_lid(lid, arena, env)?;
             let longident = tctx.resolve_lid(lid.txt).clone();
-            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module);
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module, Some(smty.pmty_loc));
             let path = lookup_module_path_by_lid(
                 &longident,
                 arena,
@@ -17403,6 +17471,7 @@ pub fn transl_signature<'a>(
                     arena,
                     open_lid,
                     crate::types::env::OpenLookupKind::Module,
+                    Some(od.popen_lid.loc),
                 );
                 let slot = tctx.open_signature_slot(od.popen_override, od.popen_loc);
                 sig_env.set_pending_open_slot(slot);
@@ -21402,6 +21471,7 @@ fn type_structure_item<'a>(
                 arena,
                 &longident,
                 crate::types::env::OpenLookupKind::Module,
+                Some(open_desc.popen_lid.loc),
             );
             // OCaml `type_open_` (compiler/ml/typemod.ml:88-89) starts with
             // `Typetexp.lookup_module ~load:true`, which raises for an unbound module.

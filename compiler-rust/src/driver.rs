@@ -5711,6 +5711,9 @@ fn format_compiler_warning_report(
             crate::diagnostics::Warning::AmbiguousPattern { .. } => idx == 0,
             crate::diagnostics::Warning::AmbiguousName { .. } => idx == 0,
             crate::diagnostics::Warning::FragileMatch { .. } => idx == 0,
+            // `Builtin_attributes.cat` and warnings.ml:263-278 carry the
+            // indentation of every later line in the message itself.
+            crate::diagnostics::Warning::Deprecated { .. } => idx == 0,
             crate::diagnostics::Warning::FragileLiteralPattern => idx == 0,
             crate::diagnostics::Warning::UnreachableCase => idx == 0,
             // warnings.ml:412-438 carries its own indentation after the
@@ -15080,10 +15083,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         let current_raw_sig = std::sync::Arc::new(
             crate::types::typecore::copy_lookup_signature_for_subst(&signature_for_save, &type_ctx),
         );
+        // typemod.ml:1778: `Builtin_attributes.deprecated_of_str ast`.
         internal_env.register_in_memory_signature(
             module_name,
             signature_for_save,
             filename,
+            crate::types::typemod::deprecated_of_str(arena, structure),
             &type_ctx,
         );
         // OCaml saves the current unit into the persistent table before
@@ -15652,10 +15657,12 @@ pub fn typecheck_preprocessed_signature_in_process(
         .take()
         .unwrap_or_else(PersistentEnv::new);
 
+    // js_implementation.ml:66: `Builtin_attributes.deprecated_of_sig ast`.
     internal_env.register_in_memory_signature(
         module_name,
         published_signature.clone(),
         filename,
+        crate::types::typemod::deprecated_of_sig(arena, signature),
         &type_ctx,
     );
 
@@ -15753,10 +15760,12 @@ pub fn typecheck_implementation_in_process(
         .take()
         .unwrap_or_else(PersistentEnv::new);
 
+    // typemod.ml:1778: `Builtin_attributes.deprecated_of_str ast`.
     internal_env.register_in_memory_signature(
         module_name,
         published_signature.clone(),
         filename,
+        crate::types::typemod::deprecated_of_str(parser.arena(), &structure),
         &type_ctx,
     );
 

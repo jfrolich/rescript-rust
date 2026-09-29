@@ -540,7 +540,8 @@ pub enum AttributePayload {
     Bool(bool),
     /// Identifier payload
     Ident(String),
-    /// Deprecated payload with optional migration metadata.
+    /// Record-form `@deprecated({reason, migrate})` payload with optional
+    /// migration metadata (the plain string form is `Str`).
     Deprecated {
         reason: String,
         can_be_automigrated: bool,

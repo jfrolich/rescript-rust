@@ -312,6 +312,38 @@ pub(crate) struct OpenSlotState {
     pub shadowed: Vec<(&'static str, String)>,
 }
 
+#[derive(Debug, Clone)]
+/// A side effect of an `Env` lookup that OCaml performs during the lookup
+/// itself and Rust replays, in call order, when the lookup events drain.
+pub(crate) enum LookupEvent {
+    /// A `using name shadowed` call of an open's slot (env.ml:1847-1861).
+    OpenSlot(OpenSlotEvent),
+    /// `report_deprecated ?loc p deprecated` (env.ml:989-994).
+    ModuleDeprecated(ModuleDeprecation),
+}
+
+#[derive(Debug, Clone)]
+/// The module whose `deprecated` flag `report_deprecated` checks.
+pub(crate) enum ModuleDeprecation {
+    /// A module resolved in the lookup environment: `Path.name p` and the
+    /// `deprecated_of_attrs md_attributes` of its declaration.
+    Resolved {
+        loc: crate::parse_arena::LocIdx,
+        name: String,
+        deprecated: String,
+    },
+    /// A module inside persistent unit `unit`, reached through the submodule
+    /// `components` (empty for the unit itself, whose flag is `ps_comps`'
+    /// `Deprecated` persistence flag). Resolved once the lookup has loaded
+    /// the unit, without forcing a load.
+    Persistent {
+        loc: crate::parse_arena::LocIdx,
+        name: String,
+        unit: String,
+        components: Vec<String>,
+    },
+}
+
 /// One `using name shadowed` call.
 #[derive(Debug, Clone)]
 pub(crate) struct OpenSlotEvent {
@@ -410,7 +442,7 @@ pub struct TypeContext {
 
     /// `using` calls made by lookups, processed by the type checker with the
     /// warning state current at the lookup.
-    open_slot_events: RefCell<Vec<OpenSlotEvent>>,
+    open_slot_events: RefCell<Vec<LookupEvent>>,
 
     /// OCaml `Env`'s usage tables (env.ml:27-53).
     usage: RefCell<super::usage::UsageTables>,
@@ -1865,12 +1897,19 @@ impl TypeContext {
 
     /// Record a `using name shadowed` call of an open's slot.
     pub(crate) fn record_open_slot_use(&self, slot: u32, kind: &'static str, name: &str, shadowed: bool) {
-        self.open_slot_events.borrow_mut().push(OpenSlotEvent {
+        self.open_slot_events.borrow_mut().push(LookupEvent::OpenSlot(OpenSlotEvent {
             slot,
             kind,
             name: name.to_string(),
             shadowed,
-        });
+        }));
+    }
+
+    /// Record a `report_deprecated` call of a module lookup.
+    pub(crate) fn record_module_deprecation(&self, deprecation: ModuleDeprecation) {
+        self.open_slot_events
+            .borrow_mut()
+            .push(LookupEvent::ModuleDeprecated(deprecation));
     }
 
     /// Take the recorded `using` calls in call order.
@@ -1902,7 +1941,7 @@ impl TypeContext {
         self.usage.borrow_mut()
     }
 
-    pub(crate) fn take_open_slot_events(&self) -> Vec<OpenSlotEvent> {
+    pub(crate) fn take_open_slot_events(&self) -> Vec<LookupEvent> {
         std::mem::take(&mut *self.open_slot_events.borrow_mut())
     }
 

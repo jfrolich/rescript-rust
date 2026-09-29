@@ -1536,8 +1536,55 @@ impl<'a> TypeCheckContext<'a> {
     /// Run the `using` callbacks recorded by lookups (env.ml:1847-1861):
     /// report each newly shadowed `(kind, name)` at the open's location, and
     /// mark the open used.
+    /// `report_deprecated ?loc p deprecated` (env.ml:989-994).
+    fn report_module_deprecation(&mut self, deprecation: crate::types::context::ModuleDeprecation) {
+        use crate::types::context::ModuleDeprecation;
+        let (loc, name, deprecated) = match deprecation {
+            ModuleDeprecation::Resolved {
+                loc,
+                name,
+                deprecated,
+            } => (loc, name, deprecated),
+            ModuleDeprecation::Persistent {
+                loc,
+                name,
+                unit,
+                components,
+            } => {
+                let Some(deprecated) = self.persistent_env.as_ref().and_then(|pers_env| {
+                    persistent_module_deprecated(pers_env, &unit, &components)
+                }) else {
+                    return;
+                };
+                (loc, name, deprecated)
+            }
+        };
+        let txt = if deprecated.is_empty() {
+            String::new()
+        } else {
+            format!("\n{deprecated}")
+        };
+        self.report_warning_at(
+            self.warnings.len(),
+            loc,
+            Warning::Deprecated {
+                message: format!("module {name}{txt}"),
+                def_loc: Location::none(),
+                use_loc: Location::none(),
+                can_be_automigrated: false,
+            },
+        );
+    }
+
     pub(crate) fn drain_open_slot_uses(&mut self) {
         for event in self.type_ctx.take_open_slot_events() {
+            let event = match event {
+                crate::types::context::LookupEvent::OpenSlot(event) => event,
+                crate::types::context::LookupEvent::ModuleDeprecated(deprecation) => {
+                    self.report_module_deprecation(deprecation);
+                    continue;
+                }
+            };
             let report = self.type_ctx.with_open_slot(event.slot, |state| {
                 let report = if event.shadowed
                     && !state
@@ -2727,9 +2774,10 @@ pub(crate) fn resolve_type_constructor_path(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     lid: &Longident,
+    loc: Option<LocIdx>,
 ) -> (Path, Option<crate::types::decl::TypeDeclaration>) {
     // `Env.lookup_type` (env.ml:1062-1073) marks the source name.
-    mark_open_lid_use(tctx.type_ctx, env, tctx.arena, lid, crate::types::env::OpenLookupKind::Type);
+    mark_open_lid_use(tctx.type_ctx, env, tctx.arena, lid, crate::types::env::OpenLookupKind::Type, loc);
     match lid {
         Longident::Lident(name_idx) => {
             let name = tctx.arena.get_string(*name_idx);
@@ -3853,7 +3901,7 @@ fn transl_type_inner(
             }
 
             let longident = tctx.resolve_lid(mod_lid.txt).clone();
-            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, tctx.arena, &longident, crate::types::env::OpenLookupKind::Modtype);
+            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, tctx.arena, &longident, crate::types::env::OpenLookupKind::Modtype, Some(loc));
             let pack_path = match crate::types::typemod::lookup_modtype_path_by_lid(
                 &longident,
                 tctx.arena,
@@ -5539,7 +5587,7 @@ fn type_pattern_construct(
     if is_qualified {
         // `Typetexp.find_all_constructors` marks the qualifying module
         // through `lookup_module_descr` (env.ml:1076-1089).
-        mark_open_lid_use(ctx, env, tctx.arena, lid_txt, crate::types::env::OpenLookupKind::Component);
+        mark_open_lid_use(ctx, env, tctx.arena, lid_txt, crate::types::env::OpenLookupKind::Component, Some(lid.loc));
     }
     let qualified_opath = if is_qualified {
         // OCaml compiler/ml/typecore.ml:1456-1478 computes `opath`, gets
@@ -6260,6 +6308,7 @@ fn type_pattern_record(
             .or_else(|| {
                 lookup_label_by_lid(
                     &resolved_lid,
+                    Some(field.lid.loc),
                     tctx.arena,
                     env,
                     &mut tctx.persistent_env,
@@ -7605,6 +7654,81 @@ fn deprecated_warning_from_attrs(
     Some(deprecated_warning(name, reason, can_be_automigrated))
 }
 
+/// `Builtin_attributes.deprecated_of_attrs` (builtin_attributes.ml:76-80).
+fn deprecated_of_decl_attrs(attrs: &[crate::types::decl::Attribute]) -> Option<String> {
+    let attr = attrs
+        .iter()
+        .find(|attr| matches!(attr.attr_name.txt.as_str(), "deprecated" | "ocaml.deprecated"))?;
+    Some(match &attr.attr_payload {
+        // `string_of_opt_payload` (builtin_attributes.ml:28-31): the record
+        // form has no string payload.
+        crate::types::decl::AttributePayload::Str(reason) => reason.clone(),
+        _ => String::new(),
+    })
+}
+
+/// The `deprecated` flag of the components of a module inside a loaded
+/// persistent unit: the unit's `Deprecated` persistence flag
+/// (env.ml:663-668), or the `md_attributes` its submodule components were
+/// built from (env.ml:1527-1533).
+fn persistent_module_deprecated(
+    pers_env: &crate::cmi::persistent_env::PersistentEnv,
+    unit: &str,
+    components: &[String],
+) -> Option<String> {
+    let ps = pers_env.loaded_pers_struct(unit)?;
+    if components.is_empty() {
+        return ps.ps_deprecated.clone();
+    }
+    signature_submodule_deprecated(pers_env, &ps.ps_sig, components, 0)
+}
+
+fn signature_submodule_deprecated(
+    pers_env: &crate::cmi::persistent_env::PersistentEnv,
+    items: &[crate::types::decl::SignatureItem],
+    components: &[String],
+    depth: usize,
+) -> Option<String> {
+    use crate::types::decl::{ModuleType, SignatureItem};
+    let (first, rest) = components.split_first()?;
+    if depth > 32 {
+        return None;
+    }
+    let md = items.iter().rev().find_map(|item| match item {
+        SignatureItem::SigModule(id, md, _) if id.name() == first.as_str() => Some(md),
+        _ => None,
+    })?;
+    if rest.is_empty() {
+        return deprecated_of_decl_attrs(&md.md_attributes);
+    }
+    match &md.md_type {
+        ModuleType::MtySignature(items) => {
+            signature_submodule_deprecated(pers_env, items, rest, depth + 1)
+        }
+        ModuleType::MtyAlias(_, path) => {
+            let (unit, mut target) = persistent_path_components(path)?;
+            target.extend(rest.iter().cloned());
+            let ps = pers_env.loaded_pers_struct(&unit)?;
+            signature_submodule_deprecated(pers_env, &ps.ps_sig, &target, depth + 1)
+        }
+        _ => None,
+    }
+}
+
+/// A module path rooted at a persistent unit, as the unit name and the
+/// submodule names below it.
+fn persistent_path_components(path: &Path) -> Option<(String, Vec<String>)> {
+    match path {
+        Path::Pident(id) if id.is_persistent() => Some((id.name().to_string(), Vec::new())),
+        Path::Pdot(parent, name, _) => {
+            let (unit, mut components) = persistent_path_components(parent)?;
+            components.push(name.to_string());
+            Some((unit, components))
+        }
+        _ => None,
+    }
+}
+
 fn deprecated_attr_payload(attrs: &[crate::types::decl::Attribute]) -> Option<(&str, bool)> {
     for attr in attrs {
         if attr.attr_name.txt != "deprecated" && attr.attr_name.txt != "ocaml.deprecated" {
@@ -7627,7 +7751,8 @@ fn deprecated_warning(name: &str, reason: &str, can_be_automigrated: bool) -> Wa
     let message = if reason.is_empty() {
         name.to_string()
     } else {
-        format!("{name}\n{reason}")
+        // `Builtin_attributes.cat` (builtin_attributes.ml:71-74).
+        format!("{name}\n  {reason}")
     };
     Warning::Deprecated {
         message,
@@ -7679,7 +7804,7 @@ fn deprecated_mutable_warning_for_label(
         let message = if reason.is_empty() {
             format!("mutating field {name}")
         } else {
-            format!("mutating field {name}\n{reason}")
+            format!("mutating field {name}\n  {reason}")
         };
         return Some(Warning::Deprecated {
             message,
@@ -7780,7 +7905,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             }
 
             // Normal identifier expression
-            mark_open_lid_use(ctx, env, tctx.arena, longident, crate::types::env::OpenLookupKind::Value);
+            mark_open_lid_use(ctx, env, tctx.arena, longident, crate::types::env::OpenLookupKind::Value, Some(lid.loc));
             let (path, desc) = match env.lookup_value_by_lid(
                 longident,
                 tctx.arena,
@@ -12489,12 +12614,15 @@ fn pattern_contains_generalized_constructor(
             let is_qualified = matches!(lid_txt, Longident::Ldot(..));
             // `Env.lookup_all_constructors` on a qualified name marks its head
             // through `lookup_module_descr` (env.ml:1076-1089).
+            // typecore.ml:2172: `Env.lookup_all_constructors lid.txt env`,
+            // without `?loc`.
             mark_open_lid_use(
                 tctx.type_ctx,
                 env,
                 tctx.arena,
                 &lid_txt,
                 crate::types::env::OpenLookupKind::Component,
+                None,
             );
             let is_generalized = if is_qualified {
                 lookup_predef_option_constructor(&lid_txt, tctx.arena, env, tctx.type_ctx)
@@ -14189,7 +14317,7 @@ fn type_construct(
     if is_qualified {
         // `Typetexp.find_all_constructors` marks the qualifying module
         // through `lookup_module_descr` (env.ml:1076-1089).
-        mark_open_lid_use(ctx, env, tctx.arena, &longident, crate::types::env::OpenLookupKind::Component);
+        mark_open_lid_use(ctx, env, tctx.arena, &longident, crate::types::env::OpenLookupKind::Component, Some(lid.loc));
     }
     let qualified_opath = if is_qualified {
         // OCaml compiler/ml/typecore.ml:4244-4253 computes `opath`, gathers
@@ -15461,6 +15589,7 @@ fn type_record(
             .or_else(|| {
                 lookup_label_by_lid(
                     resolved_lid,
+                    Some(field.lid.loc),
                     tctx.arena,
                     env,
                     &mut tctx.persistent_env,
@@ -16926,6 +17055,7 @@ fn type_field(
     // Disambiguate label: use the record expression's type to find the right label
     let (env_label, needs_label_qualification) = if let Some(label) = lookup_label_by_lid(
         &resolved_lid,
+        Some(field_lid.loc),
         tctx.arena,
         env,
         &mut tctx.persistent_env,
@@ -17128,6 +17258,7 @@ fn type_setfield(
 
     let env_label = lookup_label_by_lid(
         &resolved_lid,
+        Some(field_lid.loc),
         tctx.arena,
         env,
         &mut tctx.persistent_env,
@@ -17538,6 +17669,7 @@ fn type_open(
         tctx.arena,
         open_lid,
         crate::types::env::OpenLookupKind::Module,
+        Some(lid.loc),
     );
     let slot = tctx.open_signature_slot(override_flag.clone(), loc);
     open_env.set_pending_open_slot(slot);
@@ -18507,6 +18639,7 @@ fn unbound_value_module_suggestion(
             tctx.arena,
             &lid,
             crate::types::env::OpenLookupKind::Module,
+            None,
         );
         return Some(format_arity_suggestion_path(&path));
     }
@@ -18526,7 +18659,7 @@ pub(crate) fn find_type_for_lid(
     loc: LocIdx,
     longident: &Longident,
 ) -> TypeCoreResult<(Path, crate::types::decl::TypeDeclaration)> {
-    let (path, type_decl) = resolve_type_constructor_path(tctx, env, longident);
+    let (path, type_decl) = resolve_type_constructor_path(tctx, env, longident, Some(loc));
     // `Env.lookup_type` marks the declaration used (env.ml:1174-1177).
     if let Some(decl) = type_decl.as_ref() {
         mark_type_used(tctx.type_ctx, env, tctx.longident_last_name_str(longident), decl.type_loc);
@@ -20203,7 +20336,8 @@ fn approx_type_for_rec_let(
         CTD::Ptyp_constr(inner) => {
             let (lid, args) = &**inner;
             let longident = tctx.resolve_lid(lid.txt).clone();
-            let (path, decl) = resolve_type_constructor_path(tctx, env, &longident);
+            // typecore.ml:1988: `Env.lookup_type lid.txt env`, without `?loc`.
+            let (path, decl) = resolve_type_constructor_path(tctx, env, &longident, None);
             if let Some(decl) = decl {
                 if args.len() == decl.type_arity as usize {
                     let tys = args
@@ -25848,6 +25982,7 @@ where
 /// record type declaration directly.
 fn lookup_label_by_lid<'a>(
     lid: &Longident,
+    loc: Option<LocIdx>,
     arena: &ParseArena,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
@@ -25860,7 +25995,7 @@ fn lookup_label_by_lid<'a>(
     };
     // `Typetexp.find_all_labels` marks the qualifying module through
     // `lookup_module_descr` (env.ml:1076-1089).
-    mark_open_lid_use(ctx, env, arena, lid, crate::types::env::OpenLookupKind::Component);
+    mark_open_lid_use(ctx, env, arena, lid, crate::types::env::OpenLookupKind::Component, loc);
 
     let label_name = arena.get_string(*label_idx);
     let mut defer_component_label_force = false;
@@ -28004,50 +28139,190 @@ pub(crate) fn mark_open_lid_use(
     arena: &ParseArena,
     lid: &Longident,
     kind: crate::types::env::OpenLookupKind,
+    loc: Option<LocIdx>,
 ) {
     // `Env.lookup_module` marks the module itself; every other lookup marks
-    // the modules of its prefix through `lookup_module_descr`.
+    // the modules of its prefix through `lookup_module_descr`. Both report
+    // deprecated modules along the way when the lookup carries `?loc`.
+    let predef = matches!(
+        lid,
+        Longident::Ldot(prefix, _)
+            if matches!(prefix.as_ref(), Longident::Lident(head) if arena.get_string(*head) == "*predef*")
+    );
+    let mut deprecations = Vec::new();
+    let mut report = match loc {
+        Some(loc) if !predef => Some((loc, &mut deprecations)),
+        _ => None,
+    };
     match (lid, kind) {
         (_, crate::types::env::OpenLookupKind::Module) => {
-            mark_module_lid_used(ctx, env, arena, lid);
+            mark_module_lid_used(ctx, env, arena, lid, &mut report);
         }
         (Longident::Ldot(prefix, _), _) => {
-            mark_module_lid_used(ctx, env, arena, prefix);
+            mark_module_lid_used(ctx, env, arena, prefix, &mut report);
         }
         _ => {}
     }
     mark_open_lid_use_inner(ctx, env, arena, lid, kind);
+    // The opened-layer `using` call of the head happens while the head is
+    // found (env.ml:1000-1004), before `report_deprecated`.
+    for deprecation in deprecations {
+        ctx.record_module_deprecation(deprecation);
+    }
 }
 
-/// The `mark_module_used` calls of `Env.lookup_module_descr` and
-/// `Env.lookup_module` (env.ml:996-1074) along a module longident: each
-/// component is marked with the location of its declaration (`comps.loc`,
-/// the `md_loc` the components were built from). Returns the module type of
-/// `lid` when it is a local module.
+/// Where the lookup of a module longident has arrived.
+enum ModuleLidTarget {
+    /// A module declaration of the lookup environment.
+    Local {
+        name: String,
+        md_type: crate::types::decl::ModuleType,
+    },
+    /// A module inside a persistent unit.
+    Persistent {
+        name: String,
+        unit: String,
+        components: Vec<String>,
+    },
+}
+
+type ModuleDeprecationReport<'r> =
+    Option<(LocIdx, &'r mut Vec<crate::types::context::ModuleDeprecation>)>;
+
+/// The `mark_module_used` and `report_deprecated` calls of
+/// `Env.lookup_module_descr` and `Env.lookup_module` (env.ml:989-1074) along
+/// a module longident: each component is marked with the location of its
+/// declaration (`comps.loc`, the `md_loc` the components were built from),
+/// and reported when its components are deprecated.
 fn mark_module_lid_used(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
     arena: &ParseArena,
     lid: &Longident,
-) -> Option<crate::types::decl::ModuleType> {
-    let (name, md_loc, md_type) = match lid {
+    report: &mut ModuleDeprecationReport<'_>,
+) -> Option<ModuleLidTarget> {
+    use crate::types::context::ModuleDeprecation;
+    let (name, path_name, md) = match lid {
         Longident::Lident(idx) => {
             let name = arena.get_string(*idx);
-            let (_, md) = env.find_module_with_path(name).ok()?;
-            (name, md.md_loc, md.md_type.clone())
+            match env.find_module_with_path(name) {
+                Ok((path, md)) => (name, path.name(), md.clone()),
+                // `find_pers_struct s` then `ps.ps_comps.deprecated`
+                // (env.ml:1043-1048).
+                Err(_) => {
+                    return Some(persistent_module_target(
+                        report,
+                        name.to_string(),
+                        name.to_string(),
+                        Vec::new(),
+                    ));
+                }
+            }
         }
         Longident::Ldot(prefix, idx) => {
-            let parent = mark_module_lid_used(ctx, env, arena, prefix)?;
+            let parent = mark_module_lid_used(ctx, env, arena, prefix, report)?;
             let name = arena.get_string(*idx);
-            let md = submodule_declaration(env, &parent, name, 0)?;
-            (name, md.md_loc, md.md_type)
+            match parent {
+                ModuleLidTarget::Local {
+                    name: parent_name,
+                    md_type,
+                } => {
+                    let path_name = format!("{parent_name}.{name}");
+                    match submodule_declaration(env, &md_type, name, 0) {
+                        Some(md) => (name, path_name, md),
+                        None => {
+                            let (unit, mut components) =
+                                local_module_type_persistent_target(env, &md_type, 0)?;
+                            components.push(name.to_string());
+                            return Some(persistent_module_target(
+                                report, path_name, unit, components,
+                            ));
+                        }
+                    }
+                }
+                ModuleLidTarget::Persistent {
+                    name: parent_name,
+                    unit,
+                    mut components,
+                } => {
+                    components.push(name.to_string());
+                    return Some(persistent_module_target(
+                        report,
+                        format!("{parent_name}.{name}"),
+                        unit,
+                        components,
+                    ));
+                }
+            }
         }
         Longident::Lapply(_, _) => return None,
     };
     if !env.is_implicit_coercion() {
-        ctx.usage().mark_module_used(name, md_loc);
+        ctx.usage().mark_module_used(name, md.md_loc);
     }
-    Some(md_type)
+    if let Some((loc, deprecations)) = report.as_mut()
+        && let Some(deprecated) = deprecated_of_decl_attrs(&md.md_attributes)
+    {
+        deprecations.push(ModuleDeprecation::Resolved {
+            loc: *loc,
+            name: path_name.clone(),
+            deprecated,
+        });
+    }
+    Some(ModuleLidTarget::Local {
+        name: path_name,
+        md_type: md.md_type,
+    })
+}
+
+/// A module inside a persistent unit; its deprecation is resolved once the
+/// lookup has loaded the unit.
+fn persistent_module_target(
+    report: &mut ModuleDeprecationReport<'_>,
+    name: String,
+    unit: String,
+    components: Vec<String>,
+) -> ModuleLidTarget {
+    if let Some((loc, deprecations)) = report.as_mut() {
+        deprecations.push(crate::types::context::ModuleDeprecation::Persistent {
+            loc: *loc,
+            name: name.clone(),
+            unit: unit.clone(),
+            components: components.clone(),
+        });
+    }
+    ModuleLidTarget::Persistent {
+        name,
+        unit,
+        components,
+    }
+}
+
+/// The persistent module a local module type is an alias of, through local
+/// module type and alias indirections.
+fn local_module_type_persistent_target(
+    env: &Env,
+    mty: &crate::types::decl::ModuleType,
+    depth: usize,
+) -> Option<(String, Vec<String>)> {
+    use crate::types::decl::ModuleType;
+    if depth > 32 {
+        return None;
+    }
+    match mty {
+        ModuleType::MtyIdent(path) => {
+            let mty = env.lookup_modtype(path).ok()?.mtd_type.clone()?;
+            local_module_type_persistent_target(env, &mty, depth + 1)
+        }
+        ModuleType::MtyAlias(_, path) => match persistent_path_components(path) {
+            Some(target) => Some(target),
+            None => {
+                let mty = env.lookup_module(path).ok()?.md_type.clone();
+                local_module_type_persistent_target(env, &mty, depth + 1)
+            }
+        },
+        _ => None,
+    }
 }
 
 /// The declaration of submodule `name` in the components of a local module

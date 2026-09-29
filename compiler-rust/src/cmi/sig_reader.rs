@@ -1343,6 +1343,11 @@ fn read_deprecated_attribute_payload(value: &OcamlValue) -> AttributePayload {
     match value {
         OcamlValue::Block(0, fields) if !fields.is_empty() => {
             let structure = &fields[0];
+            // `string_of_payload` (builtin_attributes.ml:23-26): a single
+            // string constant is the plain `@deprecated("reason")` form.
+            if let Some(reason) = plain_string_payload(structure) {
+                return AttributePayload::Str(reason);
+            }
             let Some(reason) = extract_str_payload_string(structure) else {
                 return AttributePayload::Empty;
             };
@@ -1352,6 +1357,39 @@ fn read_deprecated_attribute_payload(value: &OcamlValue) -> AttributePayload {
             }
         }
         _ => AttributePayload::Empty,
+    }
+}
+
+/// `PStr [{pstr_desc = Pstr_eval ({pexp_desc = Pexp_constant
+/// (Pconst_string (s, _))}, _)}]`, given the marshaled structure list.
+fn plain_string_payload(structure: &OcamlValue) -> Option<String> {
+    let OcamlValue::Block(0, cons) = structure else {
+        return None;
+    };
+    let [item, OcamlValue::Int(0)] = cons.as_ref() else {
+        return None;
+    };
+    let OcamlValue::Block(0, item) = item else {
+        return None;
+    };
+    // Pstr_eval (expression, attributes)
+    let OcamlValue::Block(0, eval) = item.first()? else {
+        return None;
+    };
+    let OcamlValue::Block(0, expr) = eval.first()? else {
+        return None;
+    };
+    // Pexp_constant constant
+    let OcamlValue::Block(1, constant) = expr.first()? else {
+        return None;
+    };
+    // Pconst_string (string, delimiter)
+    let OcamlValue::Block(2, string) = constant.first()? else {
+        return None;
+    };
+    match string.first()? {
+        OcamlValue::String(s) => Some(s.clone()),
+        _ => None,
     }
 }
 
