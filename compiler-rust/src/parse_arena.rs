@@ -2411,6 +2411,15 @@ impl ParseArena {
             .insert(first_type, args.into_boxed_slice());
     }
 
+    /// The n-ary parameters recorded for an arrow whose first parameter is
+    /// `arg`, when the parser grouped more than one.
+    pub fn nary_arrow_args_slice(
+        &self,
+        arg: &crate::parser::ast::TypeArg,
+    ) -> Option<&[crate::parser::ast::TypeArg]> {
+        self.nary_arrow_args_by_first_type.get(&arg.typ).map(|args| &args[..])
+    }
+
     pub fn nary_arrow_args<'a>(
         &'a self,
         arg: &'a crate::parser::ast::TypeArg,

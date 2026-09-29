@@ -1446,92 +1446,29 @@ fn has_as_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
         .any(|attr| arena.get_string(attr.0.txt) == "as")
 }
 
-/// Extract arrow type components: (attrs_before, args, return_type)
-///
-/// This decomposes an arrow type like `(a, b) => c` into its argument list
-/// and return type. The `max_arity` parameter limits how many arguments to extract.
+/// `Res_parsetree_viewer.arrow_type` (res_parsetree_viewer.ml:3-7): an arrow
+/// is its attributes, its n-ary parameters and its return type.
 pub fn arrow_type<'a>(
     arena: &'a ParseArena,
     typ: &'a CoreType,
-    max_arity: Option<usize>,
 ) -> (&'a Attributes, Vec<TypeParameter<'a>>, &'a CoreType) {
-    // Use isize to match OCaml's behavior where we stop when arity goes negative
-    let max_arity: isize = max_arity.map(|n| n as isize).unwrap_or(isize::MAX);
-
-    fn process<'a>(
-        arena: &'a ParseArena,
-        attrs_before: &'a Attributes,
-        acc: Vec<TypeParameter<'a>>,
-        typ: &'a CoreType,
-        remaining_arity: isize,
-    ) -> (&'a Attributes, Vec<TypeParameter<'a>>, &'a CoreType) {
-        // OCaml: | _ when max_arity < 0 -> (attrs_before, List.rev acc, typ)
-        // Stop when we've exhausted our arity budget (gone negative means we
-        // tried to consume one more than allowed)
-        if remaining_arity < 0 {
-            return (attrs_before, acc, typ);
-        }
-
-        match &*typ.ptyp_desc {
-            CoreTypeDesc::Ptyp_arrow(inner) => {
-                let (ref arg, ref ret_idx, ref arity) = **inner;
-                // Stop at explicitly-aritied arrow if we already have arguments
-                // Arity is now ArityIdx, look up to check if it's Full
-                if arena.get_arity(*arity).is_some() && !acc.is_empty() && arg.attrs.is_empty() {
-                    return (attrs_before, acc, typ);
-                }
-
-                let ret: &CoreType = arena.get_core_type(*ret_idx);
-                let arg_typ: &CoreType = arena.get_core_type(arg.typ);
-
-                // Unlabeled argument with no attrs - continue processing
-                if matches!(arg.lbl, ArgLabel::Nolabel) && arg.attrs.is_empty() {
-                    let mut new_acc = acc;
-                    new_acc.push(TypeParameter {
-                        attrs: &arg.attrs,
-                        lbl: &arg.lbl,
-                        typ: arg_typ,
-                    });
-                    return process(arena, attrs_before, new_acc, ret, remaining_arity - 1);
-                }
-
-                // Unlabeled argument with attrs - return as final type
-                if matches!(arg.lbl, ArgLabel::Nolabel) {
-                    return (attrs_before, acc, typ);
-                }
-
-                // Labeled argument - continue processing
-                // Calculate adjusted arity for @as workaround
-                // OCaml: When arg is Ptyp_any with @as attr, don't decrement arity
-                let adjusted_arity = if matches!(&*arg_typ.ptyp_desc, CoreTypeDesc::Ptyp_any)
-                    && has_as_attr(arena, &arg_typ.ptyp_attributes)
-                {
-                    remaining_arity
-                } else {
-                    remaining_arity - 1
-                };
-
-                let mut new_acc = acc;
-                new_acc.push(TypeParameter {
-                    attrs: &arg.attrs,
-                    lbl: &arg.lbl,
-                    typ: arg_typ,
-                });
-                process(arena, attrs_before, new_acc, ret, adjusted_arity)
-            }
-
-            _ => (attrs_before, acc, typ),
-        }
-    }
-
     match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (..) = **inner;
-            // Start processing with the type's attributes as attrs_before,
-            // and process the type without those attributes
-            process(arena, &typ.ptyp_attributes, Vec::new(), typ, max_arity)
+            let (arg, ret, _) = &**inner;
+            let params = arena
+                .nary_arrow_args_slice(arg)
+                .unwrap_or(std::slice::from_ref(&**arg));
+            let params = params
+                .iter()
+                .map(|param| TypeParameter {
+                    attrs: &param.attrs,
+                    lbl: &param.lbl,
+                    typ: arena.get_core_type(param.typ),
+                })
+                .collect();
+            (&typ.ptyp_attributes, params, arena.get_core_type(*ret))
         }
-        _ => process(arena, &EMPTY_ATTRS, Vec::new(), typ, max_arity),
+        _ => (&EMPTY_ATTRS, Vec::new(), typ),
     }
 }
 

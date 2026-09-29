@@ -3176,7 +3176,7 @@ fn walk_core_type(
             // This ensures comments between parameters are properly partitioned.
             use crate::parser::parsetree_viewer;
             let (parameters, return_type) = {
-                let (_, parameters, return_type) = parsetree_viewer::arrow_type(arena, ct, None);
+                let (_, parameters, return_type) = parsetree_viewer::arrow_type(arena, ct);
                 let parameters: Vec<OwnedTypeParameter> = parameters
                     .into_iter()
                     .map(|param| OwnedTypeParameter {
