@@ -22144,11 +22144,15 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                         &typed_tree_labels,
                         Some(arena.get_string(decl.ptype_name.txt)),
                     )?;
+                    // typedecl.ml:643-647 (shared by structures and
+                    // signatures): `if unbox then Record_unboxed false`.
+                    let repres = if decl_has_unboxed_attr && internal_labels.len() == 1 {
+                        crate::types::RecordRepresentation::RecordUnboxed(false)
+                    } else {
+                        crate::types::RecordRepresentation::RecordRegular
+                    };
                     (
-                        crate::types::TypeKind::TypeRecord(
-                            internal_labels,
-                            crate::types::RecordRepresentation::RecordRegular,
-                        ),
+                        crate::types::TypeKind::TypeRecord(internal_labels, repres),
                         TypedTypeKind::Ttype_record(typed_tree_labels),
                     )
                 }
