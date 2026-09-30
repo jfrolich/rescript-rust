@@ -483,6 +483,11 @@ fn marshal_attribute_list(
 /// When sharing is enabled and attrs match `[(name, PStr [])]` where name uses
 /// `Location.none` (LocIdx::default()), the attribute tuple is shared via
 /// `singleton_attr_list_table`.
+/// Marshal an attribute list without any parser-specific sharing.
+pub fn marshal_attributes_plain(attrs: &Attributes, w: &mut MarshalWriter<'_>) {
+    marshal_attributes(attrs, w, false, false, None);
+}
+
 fn marshal_attributes(
     attrs: &Attributes,
     w: &mut MarshalWriter<'_>,

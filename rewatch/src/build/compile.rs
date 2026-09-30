@@ -2055,8 +2055,27 @@ fn build_compiler_options(
         make_runtime: parsed_flags.make_runtime,
         gentype_config,
         gentype_resolver,
+        typed_artifacts: Some(std::sync::Arc::new(typed_artifact_output(package, source_file_path))),
         ..Default::default()
     })
+}
+
+/// Where editor tooling expects the typed artifacts of a module: next to the
+/// `.ast` under `lib/bs`, plus a flat copy in `lib/ocaml` (the same files the
+/// bsc subprocess path copies after compiling).
+fn typed_artifact_output(
+    package: &packages::Package,
+    source_file_path: &Path,
+) -> rescript_compiler::driver::TypedArtifactOutput {
+    let build_path = package.get_build_path();
+    let dir = source_file_path.parent().unwrap_or_else(|| Path::new(""));
+    let basename = helpers::file_path_to_compiler_asset_basename(source_file_path, &package.namespace);
+    rescript_compiler::driver::TypedArtifactOutput {
+        output_prefix: build_path.join(dir).join(basename),
+        copy_dirs: vec![package.get_ocaml_build_path()],
+        builddir: build_path.to_string_lossy().into_owned(),
+        args: std::env::args().collect(),
+    }
 }
 
 fn package_spec_to_module_format(spec: &config::PackageSpec) -> rescript_compiler::js_ir::ModuleFormat {

@@ -1223,6 +1223,135 @@ pub struct CompilerOptions {
     /// so frontend warnings were reported by the `-bs-ast` run and are not
     /// repeated. Rust re-runs the frontend from source, silently.
     pub frontend_already_reported: bool,
+    /// Write OCaml-compatible `.cmi`/`.cmt`/`.cmti` files for editor tooling
+    /// (compiler/ml/typemod.ml:1761-1796; js_implementation.ml:66-70).
+    pub typed_artifacts: Option<std::sync::Arc<TypedArtifactOutput>>,
+}
+
+/// Where and how to save the typed artifacts of one compilation unit.
+#[derive(Debug, Clone)]
+pub struct TypedArtifactOutput {
+    /// `outputprefix`: artifact path without extension (e.g. `lib/bs/src/Foo`).
+    pub output_prefix: PathBuf,
+    /// Extra directories that receive copies of the artifacts (`lib/ocaml`).
+    pub copy_dirs: Vec<PathBuf>,
+    /// `cmt_builddir`.
+    pub builddir: String,
+    /// `cmt_args`.
+    pub args: Vec<String>,
+}
+
+/// Which typed annotations are being saved.
+enum TypedArtifactKind<'t> {
+    Implementation {
+        structure: &'t crate::types::typedtree::Structure,
+        /// The inferred signature to save as `.cmi` (no `.resi`).
+        cmi: Option<(&'t [crate::types::decl::SignatureItem], Option<String>)>,
+    },
+    Interface {
+        signature: &'t crate::types::typedtree::TypedSignature,
+        sig_type: &'t [crate::types::decl::SignatureItem],
+        deprecated: Option<String>,
+    },
+}
+
+fn write_artifact_if_changed(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    if std::fs::read(path).ok().as_deref() == Some(bytes) {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
+}
+
+fn save_typed_artifacts(
+    options: &CompilerOptions,
+    arena: &crate::parse_arena::ParseArena,
+    type_ctx: &TypeContext,
+    filename: &str,
+    module_name: &str,
+    kind: TypedArtifactKind<'_>,
+) -> Result<()> {
+    use crate::cmi::cmt_writer;
+    let Some(out) = options.typed_artifacts.as_deref() else {
+        return Ok(());
+    };
+    let _phase = info_span!("compiler.save_typed_artifacts").entered();
+    let (load_path, _) = build_load_path_with_display(options);
+    let load_path: Vec<String> = load_path
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let source_digest = std::fs::read(filename).ok().map(|s| cmt_writer::md5(&s));
+    // typemod.ml:1761-1788 saves under `modulename`, the unit name.
+    let unit_name = options.current_unit_name();
+    let module_name = unit_name.as_deref().unwrap_or(module_name);
+    let info = cmt_writer::CmtInfo {
+        modname: module_name,
+        sourcefile: Some(filename),
+        builddir: &out.builddir,
+        loadpath: &load_path,
+        args: &out.args,
+        source_digest,
+        imports: &[],
+    };
+    let mut files: Vec<(&str, Vec<u8>)> = Vec::new();
+    match kind {
+        TypedArtifactKind::Implementation { structure, cmi } => {
+            if let Some((sign, deprecated)) = &cmi {
+                files.push((
+                    "cmi",
+                    cmt_writer::cmi_bytes(arena, type_ctx, module_name, sign, &[], deprecated.as_deref()),
+                ));
+            }
+            files.push((
+                "cmt",
+                cmt_writer::cmt_bytes(
+                    arena,
+                    type_ctx,
+                    cmt_writer::BinaryAnnots::Implementation(structure),
+                    &info,
+                    cmi.as_ref().map(|(sign, deprecated)| (*sign, deprecated.as_deref())),
+                ),
+            ));
+        }
+        TypedArtifactKind::Interface {
+            signature,
+            sig_type,
+            deprecated,
+        } => {
+            files.push((
+                "cmi",
+                cmt_writer::cmi_bytes(arena, type_ctx, module_name, sig_type, &[], deprecated.as_deref()),
+            ));
+            files.push((
+                "cmti",
+                cmt_writer::cmt_bytes(
+                    arena,
+                    type_ctx,
+                    cmt_writer::BinaryAnnots::Interface(signature, sig_type),
+                    &info,
+                    Some((sig_type, deprecated.as_deref())),
+                ),
+            ));
+        }
+    }
+    for (ext, bytes) in &files {
+        let with_ext = |path: &std::path::Path| {
+            let mut path = path.as_os_str().to_owned();
+            path.push(".");
+            path.push(ext);
+            PathBuf::from(path)
+        };
+        write_artifact_if_changed(&with_ext(&out.output_prefix), bytes)?;
+        if let Some(file_name) = out.output_prefix.file_name() {
+            for dir in &out.copy_dirs {
+                write_artifact_if_changed(&with_ext(&dir.join(file_name)), bytes)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 impl Default for CompilerOptions {
@@ -1268,6 +1397,7 @@ impl Default for CompilerOptions {
             skip_js_render: false,
             publish_in_process_signature: true,
             frontend_already_reported: false,
+            typed_artifacts: None,
         }
     }
 }
@@ -15307,6 +15437,25 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     tctx.flush_value_usage_checks();
     let post_type_warning_start = tctx.warnings.len();
 
+    // typemod.ml:1761-1788: save the `.cmt` (and, without an interface, the
+    // inferred `.cmi`) before Lambda translation.
+    save_typed_artifacts(
+        options,
+        arena,
+        &type_ctx,
+        filename,
+        module_name,
+        TypedArtifactKind::Implementation {
+            structure: &typed_structure,
+            cmi: (!has_interface).then(|| {
+                (
+                    published_signature.as_slice(),
+                    crate::types::typemod::deprecated_of_str(arena, structure),
+                )
+            }),
+        },
+    )?;
+
     // OCaml saves the inferred `.cmi` only in the no-interface branch before
     // Lambda translation mutates any shared type nodes
     // (compiler/ml/typemod.ml:1768-1788; translmod.ml:267). With a `.resi`,
@@ -15985,6 +16134,24 @@ pub fn typecheck_preprocessed_signature_in_process(
                 ));
             }
         };
+
+    // js_implementation.ml:66-70: save the `.cmi` and the `.cmti`.
+    if let crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature) =
+        &typed_module_type.mty_desc
+    {
+        save_typed_artifacts(
+            options,
+            arena,
+            &type_ctx,
+            filename,
+            module_name,
+            TypedArtifactKind::Interface {
+                signature: typed_signature,
+                sig_type: &published_signature,
+                deprecated: crate::types::typemod::deprecated_of_sig(arena, signature),
+            },
+        )?;
+    }
 
     let mut internal_env = tctx
         .persistent_env

@@ -2109,6 +2109,8 @@ fn value_descriptions<'a>(
     subst: &InclusionSubst,
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<ModuleCoercion> {
+    // includemod.ml:57: `Cmt_format.record_value_dependency vd1 vd2`.
+    type_ctx.record_value_dependency(impl_desc, sig_desc);
     // includemod.ml:58: `Env.mark_value_used env (Ident.name id) vd1`.
     if !env.is_implicit_coercion() {
         type_ctx.usage().mark_value_used(id.name(), impl_desc.val_loc);

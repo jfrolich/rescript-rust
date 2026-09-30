@@ -689,6 +689,9 @@ pub struct TypeContext {
 
     /// Reuse EnvRefs for identical logical environments.
     typed_envs_by_id: RefCell<ahash::AHashMap<u64, EnvRef>>,
+    /// `Cmt_format.value_deps` (compiler/ml/cmt_format_common.ml:149-183):
+    /// implementation/specification value pairs matched by inclusion checks.
+    value_deps: RefCell<Vec<(super::decl::ValueDescription, super::decl::ValueDescription)>>,
 }
 
 fn push_unique_path(paths: &mut Vec<Path>, path: Path) {
@@ -780,6 +783,7 @@ impl TypeContext {
             synthesized_record_lidents: RefCell::new(ahash::AHashMap::new()),
             typed_envs: RefCell::new(Vec::new()),
             typed_envs_by_id: RefCell::new(ahash::AHashMap::new()),
+            value_deps: RefCell::new(Vec::new()),
         }
     }
 
@@ -1936,6 +1940,24 @@ impl TypeContext {
             .unwrap_or_else(crate::diagnostics::WarningConfig::new)
     }
 
+    /// `Cmt_format.record_value_dependency` (cmt_format_common.ml:180-183).
+    pub(crate) fn record_value_dependency(
+        &self,
+        vd1: &super::decl::ValueDescription,
+        vd2: &super::decl::ValueDescription,
+    ) {
+        if vd1.val_loc != vd2.val_loc {
+            self.value_deps.borrow_mut().push((vd1.clone(), vd2.clone()));
+        }
+    }
+
+    /// Recorded value dependencies, most recent first (as OCaml's list).
+    pub fn value_dependencies(
+        &self,
+    ) -> Vec<(super::decl::ValueDescription, super::decl::ValueDescription)> {
+        self.value_deps.borrow().iter().rev().cloned().collect()
+    }
+
     /// The usage tables of OCaml `Env` (env.ml:27-53).
     pub(crate) fn usage(&self) -> std::cell::RefMut<'_, super::usage::UsageTables> {
         self.usage.borrow_mut()
@@ -2610,6 +2632,14 @@ impl TypeContext {
     // ========================================================================
     // Field Kinds
     // ========================================================================
+
+    /// Read the value stored in a field kind reference (`Fvar` contents).
+    pub fn get_field_kind(&self, r: FieldKindRef) -> Option<FieldKind> {
+        self.field_kinds
+            .borrow()
+            .get(r.0 as usize)
+            .and_then(|cell| cell.borrow().clone())
+    }
 
     /// Allocate a field kind reference.
     fn alloc_field_kind(&self, kind: Option<FieldKind>) -> FieldKindRef {
