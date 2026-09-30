@@ -506,6 +506,7 @@ fn run() -> Result<()> {
         frontend_already_reported: from_ast,
         typed_artifacts: None,
         visible_package_roots: None,
+        binary_annotations: true,
         keep_locs: true,
     };
 

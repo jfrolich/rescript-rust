@@ -1769,6 +1769,8 @@ pub(crate) struct InProcessCompilerFlags {
     pub(crate) warning_error_specs: Vec<String>,
     /// `Clflags.keep_locs` (`-keep-locs`/`-no-keep-locs`, default on).
     pub(crate) keep_locs: bool,
+    /// `Clflags.binary_annotations` (`-bs-no-bin-annot` turns it off).
+    pub(crate) binary_annotations: bool,
 }
 
 impl Default for InProcessCompilerFlags {
@@ -1790,6 +1792,7 @@ impl Default for InProcessCompilerFlags {
             warning_specs: Vec::new(),
             warning_error_specs: Vec::new(),
             keep_locs: true,
+            binary_annotations: true,
         }
     }
 }
@@ -1814,6 +1817,7 @@ pub(crate) fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessComp
             // compiler/bsc/rescript_compiler_main.ml:454-458.
             "-keep-locs" => parsed.keep_locs = true,
             "-no-keep-locs" => parsed.keep_locs = false,
+            "-bs-no-bin-annot" => parsed.binary_annotations = false,
             "-bs-jsx" => {
                 if let Some(version) = iter.next().and_then(|v| v.parse::<i32>().ok()) {
                     parsed.jsx_version = Some(version);
@@ -2090,6 +2094,7 @@ fn build_compiler_options(
         gentype_resolver,
         typed_artifacts: Some(std::sync::Arc::new(typed_artifact_output(package, source_file_path))),
         keep_locs: parsed_flags.keep_locs,
+        binary_annotations: parsed_flags.binary_annotations,
         visible_package_roots: Some(visible_package_roots),
         ..Default::default()
     })

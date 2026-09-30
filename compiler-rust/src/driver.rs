@@ -1229,6 +1229,9 @@ pub struct CompilerOptions {
     /// Package roots whose in-process units are on the load path (the `-I`
     /// directories of a file build). `None` makes every registered unit visible.
     pub visible_package_roots: Option<Vec<PathBuf>>,
+    /// `Clflags.binary_annotations` (off with `-bs-no-bin-annot`): whether
+    /// `.cmt`/`.cmti` files are saved (cmt_format.ml:20).
+    pub binary_annotations: bool,
     /// `Clflags.keep_locs` (`-keep-locs`/`-no-keep-locs`): whether saved
     /// signatures keep source locations (subst.ml:57-67 `Subst.for_saving`).
     pub keep_locs: bool,
@@ -1278,6 +1281,7 @@ fn save_typed_artifacts(
     filename: &str,
     module_name: &str,
     kind: TypedArtifactKind<'_>,
+    binary_annotations: bool,
 ) -> Result<()> {
     use crate::cmi::cmt_writer;
     let Some(out) = options.typed_artifacts.as_deref() else {
@@ -1366,6 +1370,10 @@ fn save_typed_artifacts(
                 ),
             ));
         }
+    }
+    // cmt_format.ml:20: without binary annotations only the `.cmi` is saved.
+    if !(binary_annotations && options.binary_annotations) {
+        files.retain(|(ext, _)| *ext == "cmi");
     }
     for (ext, bytes) in &files {
         let with_ext = |path: &std::path::Path| {
@@ -1508,6 +1516,7 @@ pub fn save_namespace_typed_artifacts(
             structure: &structure,
             cmi: Some((signature.as_slice(), None)),
         },
+        true,
     )
 }
 
@@ -1556,6 +1565,7 @@ impl Default for CompilerOptions {
             frontend_already_reported: false,
             typed_artifacts: None,
             visible_package_roots: None,
+            binary_annotations: true,
             keep_locs: true,
         }
     }
@@ -13991,6 +14001,8 @@ fn moregen_link_impl(
 #[derive(Debug, Default, Clone)]
 pub struct FileConfigOverrides {
     pub let_unwrap: bool,
+    /// `-bs-no-bin-annot` (`Clflags.binary_annotations := false`).
+    pub no_bin_annot: bool,
     pub jsx_version: Option<i32>,
     /// `-w`/`-warn-error` specs in application order (`true` = `-warn-error`).
     pub warning_ops: Vec<(bool, String)>,
@@ -14051,6 +14063,10 @@ fn run_file_level_flags(
             return false;
         };
         let BscFlagArity::String = arity else {
+            // rescript_compiler_main.ml:476-477.
+            if flag == "-bs-no-bin-annot" {
+                overrides.no_bin_annot = true;
+            }
             continue;
         };
         let Some(arg) = flags.get(i) else {
@@ -15614,6 +15630,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 )
             }),
         },
+        !file_config.no_bin_annot,
     )?;
 
     // OCaml saves the inferred `.cmi` only in the no-interface branch before
@@ -16315,6 +16332,7 @@ pub fn typecheck_preprocessed_signature_in_process(
                 sig_type: &published_signature,
                 deprecated: crate::types::typemod::deprecated_of_sig(arena, signature),
             },
+            !file_config.no_bin_annot,
         )?;
     }
 
