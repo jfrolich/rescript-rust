@@ -1298,6 +1298,9 @@ pub struct TypeCheckContext<'a> {
     pub force_fresh_local_float: bool,
     /// Mirrors OCaml's Experimental_features.LetUnwrap during type checking.
     pub experimental_let_unwrap: bool,
+    /// `~deprecated_context:FunctionCall` of typecore.ml:2496: set while
+    /// typing the function of an application and consumed by `Pexp_ident`.
+    pub(crate) deprecated_function_call: bool,
     /// Mirrors OCaml's Clflags.transparent_modules from `-no-alias-deps`.
     pub transparent_modules: bool,
     /// When inside Pexp_constraint, the GENERIC constraint type. Used by
@@ -1444,6 +1447,7 @@ impl<'a> TypeCheckContext<'a> {
             persistent_manifest_type_lookup_depth: 0,
             force_fresh_local_float: false,
             experimental_let_unwrap: false,
+            deprecated_function_call: false,
             transparent_modules: false,
             generic_constraint_body_ty: None,
             module_expr_semantic_types: HashMap::new(),
@@ -3129,6 +3133,13 @@ fn transl_type_inner(
             }
 
             let (path, decl) = find_type_for_lid(tctx, env, lid.loc, longident)?;
+            // typetexp.ml:104-106: `check_deprecated ~deprecated_context:Reference`.
+            record_deprecated_used(
+                tctx,
+                lid.loc,
+                &decl.type_attributes,
+                Some(crate::types::context::DeprecatedContext::Reference),
+            );
             if let Some(warning) = deprecated_warning_for_type(&path, &decl) {
                 tctx.report_warning(lid.loc, warning);
             }
@@ -5764,6 +5775,7 @@ fn type_pattern_construct(
     );
     // typecore.ml:1393: `Builtin_attributes.check_deprecated loc
     // constr.cstr_attributes constr.cstr_name`.
+    record_deprecated_used(tctx, loc, &cstr_desc.cstr_attributes, None);
     if let Some(warning) =
         deprecated_warning_from_attrs(&cstr_desc.cstr_name, &cstr_desc.cstr_attributes)
     {
@@ -7743,6 +7755,7 @@ fn deprecated_attr_payload(attrs: &[crate::types::decl::Attribute]) -> Option<(&
             crate::types::decl::AttributePayload::Deprecated {
                 reason,
                 can_be_automigrated,
+                ..
             } => (reason.as_str(), *can_be_automigrated),
             crate::types::decl::AttributePayload::Str(reason) => (reason.as_str(), false),
             crate::types::decl::AttributePayload::Empty => ("", false),
@@ -7750,6 +7763,41 @@ fn deprecated_attr_payload(attrs: &[crate::types::decl::Attribute]) -> Option<(&
         });
     }
     None
+}
+
+/// `Cmt_utils.record_deprecated_used` from `Builtin_attributes.check_deprecated`
+/// (builtin_attributes.ml:126-133): remember a use of a deprecated item with
+/// its migration templates for `rescript-tools migrate`.
+fn record_deprecated_used(
+    tctx: &TypeCheckContext<'_>,
+    loc: LocIdx,
+    attrs: &[crate::types::decl::Attribute],
+    context: Option<crate::types::context::DeprecatedContext>,
+) {
+    use crate::types::decl::AttributePayload;
+    let Some(attr) = attrs
+        .iter()
+        .find(|attr| matches!(attr.attr_name.txt.as_str(), "deprecated" | "ocaml.deprecated"))
+    else {
+        return;
+    };
+    let (text, migrate, migrate_in_pipe_chain) = match &attr.attr_payload {
+        AttributePayload::Deprecated {
+            reason,
+            migrate,
+            migrate_in_pipe_chain,
+            ..
+        } => (reason.clone(), migrate.clone(), migrate_in_pipe_chain.clone()),
+        AttributePayload::Str(reason) => (reason.clone(), None, None),
+        _ => (String::new(), None, None),
+    };
+    tctx.type_ctx.record_deprecated_used(crate::types::context::DeprecatedUse {
+        source_loc: tctx.arena.to_location(loc),
+        text,
+        migrate,
+        migrate_in_pipe_chain,
+        context,
+    });
 }
 
 fn deprecated_warning(name: &str, reason: &str, can_be_automigrated: bool) -> Warning {
@@ -7929,6 +7977,13 @@ fn type_expect_with_recarg_unscoped<'a>(
             // `Env.lookup_value` marks the declaration used (env.ml:1169-1172).
             let used_name = tctx.arena.get_string(longident.last_idx());
             tctx.mark_value_used(env, used_name, desc.val_loc);
+            // typetexp.ml:117-123 via typecore.ml:2381-2388.
+            let deprecated_context = if std::mem::take(&mut tctx.deprecated_function_call) {
+                crate::types::context::DeprecatedContext::FunctionCall
+            } else {
+                crate::types::context::DeprecatedContext::Reference
+            };
+            record_deprecated_used(tctx, lid.loc, &desc.val_attributes, Some(deprecated_context));
             if let Some(warning) = deprecated_warning_for_value(&path, &desc) {
                 tctx.report_warning(lid.loc, warning);
             }
@@ -10748,7 +10803,11 @@ fn type_application(
     //   begin_def (); ... type_application/translate_unified_ops ...; end_def ();
     ctx.begin_def();
     let funct_ty = ctx.new_var(None);
-    let typed_funct = type_expect(tctx, env, funct, funct_ty, None)?;
+    tctx.deprecated_function_call =
+        matches!(&*funct.pexp_desc, crate::parser::ast::ExpressionDesc::Pexp_ident(_));
+    let typed_funct = type_expect(tctx, env, funct, funct_ty, None);
+    tctx.deprecated_function_call = false;
+    let typed_funct = typed_funct?;
     let typed_funct_value_path = match &typed_funct.exp_desc {
         ExpressionDesc::Texp_ident(path, _, _) => Some(path.clone()),
         _ => None,
@@ -14487,6 +14546,7 @@ fn type_construct(
     );
     // typecore.ml:4229: `Builtin_attributes.check_deprecated loc
     // constr.cstr_attributes constr.cstr_name`.
+    record_deprecated_used(tctx, loc, &cstr_desc.cstr_attributes, None);
     if let Some(warning) =
         deprecated_warning_from_attrs(&cstr_desc.cstr_name, &cstr_desc.cstr_attributes)
     {

@@ -545,6 +545,11 @@ pub enum AttributePayload {
     Deprecated {
         reason: String,
         can_be_automigrated: bool,
+        /// The `migrate` template expression, marshalled in the current
+        /// parsetree layout (`Cmt_utils.deprecated_used.migration_template`).
+        migrate: Option<crate::binary_ast::marshal::MarshalFragment>,
+        /// The `migrateInPipeChain` template expression, marshalled likewise.
+        migrate_in_pipe_chain: Option<crate::binary_ast::marshal::MarshalFragment>,
     },
     /// Structure payload (list of string pairs)
     Structure(Vec<(String, String)>),

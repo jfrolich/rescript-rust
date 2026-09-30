@@ -120,6 +120,22 @@ impl PrimListShareKind {
 /// let bytes = writer.finish();
 /// ```
 
+/// A self-contained marshalled value: its encoded payload plus the object and
+/// heap-size counts it contributes. Shared references inside a fragment are
+/// relative to its own objects, so it can be embedded verbatim into another
+/// stream with [`MarshalWriter::write_fragment`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MarshalFragment {
+    /// Encoded payload (no marshal header).
+    pub bytes: Vec<u8>,
+    /// Number of shareable objects in the payload.
+    pub objects: u32,
+    /// Heap size in words on 32-bit platforms.
+    pub size_32: u32,
+    /// Heap size in words on 64-bit platforms.
+    pub size_64: u32,
+}
+
 #[derive(Debug)]
 pub struct MarshalWriter<'a> {
     /// Debug tracing is configured once per serialization, not per AST node.
@@ -1572,6 +1588,24 @@ impl<'a> MarshalWriter<'a> {
         result.extend_from_slice(&self.buffer);
 
         result
+    }
+
+    /// The written value as a self-contained [`MarshalFragment`].
+    pub fn fragment(&self) -> MarshalFragment {
+        MarshalFragment {
+            bytes: self.buffer.clone(),
+            objects: self.obj_counter,
+            size_32: self.size_32,
+            size_64: self.size_64,
+        }
+    }
+
+    /// Embed a fragment produced by another writer as the next value.
+    pub fn write_fragment(&mut self, fragment: &MarshalFragment) {
+        self.buffer.extend_from_slice(&fragment.bytes);
+        self.obj_counter += fragment.objects;
+        self.size_32 += fragment.size_32;
+        self.size_64 += fragment.size_64;
     }
 
     /// Get just the payload without the header (for testing)

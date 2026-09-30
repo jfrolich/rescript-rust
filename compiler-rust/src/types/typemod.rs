@@ -852,6 +852,16 @@ fn parser_deprecated_payload_to_decl_payload(
             let (fields, _base) = record.as_ref();
             let mut reason = None;
             let mut can_be_automigrated = false;
+            let mut migrate = None;
+            let mut migrate_in_pipe_chain = None;
+            // builtin_attributes.ml:82-124 `deprecated_of_attrs_with_migrate`
+            // keeps the template expressions for `Cmt_utils.deprecated_used`.
+            let marshal_template = |expr_idx| {
+                let mut writer = crate::binary_ast::MarshalWriter::new();
+                writer.set_arena(arena);
+                crate::binary_ast::Marshal::marshal(arena.get_expr(expr_idx), &mut writer);
+                writer.fragment()
+            };
             for field in fields {
                 let field_name = arena.lident_last(field.lid.txt);
                 if field_name == "reason" {
@@ -863,13 +873,23 @@ fn parser_deprecated_payload_to_decl_payload(
                             reason = Some(value.to_string());
                         }
                     }
-                } else if field_name == "migrate" || field_name == "migrateInPipeChain" {
+                } else if field_name == "migrate" {
                     can_be_automigrated = true;
+                    if migrate.is_none() {
+                        migrate = Some(marshal_template(field.expr));
+                    }
+                } else if field_name == "migrateInPipeChain" {
+                    can_be_automigrated = true;
+                    if migrate_in_pipe_chain.is_none() {
+                        migrate_in_pipe_chain = Some(marshal_template(field.expr));
+                    }
                 }
             }
             reason.map(|reason| crate::types::decl::AttributePayload::Deprecated {
                 reason,
                 can_be_automigrated,
+                migrate,
+                migrate_in_pipe_chain,
             })
         }
         _ => None,

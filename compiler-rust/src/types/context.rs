@@ -89,6 +89,24 @@ pub type TypeDescRef<'a> = std::cell::Ref<'a, TypeDesc>;
 
 /// Cloned snapshot of a type descriptor, for cases where the caller
 /// needs to hold the desc while also mutating the same type node.
+/// `Cmt_utils.deprecated_used_context`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeprecatedContext {
+    FunctionCall,
+    Reference,
+}
+
+/// `Cmt_utils.deprecated_used`: a use of a deprecated item, saved in the
+/// `.cmt` for `rescript-tools migrate`.
+#[derive(Debug, Clone)]
+pub struct DeprecatedUse {
+    pub source_loc: crate::location::Location,
+    pub text: String,
+    pub migrate: Option<crate::binary_ast::marshal::MarshalFragment>,
+    pub migrate_in_pipe_chain: Option<crate::binary_ast::marshal::MarshalFragment>,
+    pub context: Option<DeprecatedContext>,
+}
+
 pub struct TypeDescSnapshot(TypeDesc);
 
 impl Deref for TypeDescSnapshot {
@@ -692,6 +710,8 @@ pub struct TypeContext {
     /// `Cmt_format.value_deps` (compiler/ml/cmt_format_common.ml:149-183):
     /// implementation/specification value pairs matched by inclusion checks.
     value_deps: RefCell<Vec<(super::decl::ValueDescription, super::decl::ValueDescription)>>,
+    /// `Cmt_format.deprecated_used` (cmt_format_common.ml:152-178).
+    deprecated_used: RefCell<Vec<DeprecatedUse>>,
 }
 
 fn push_unique_path(paths: &mut Vec<Path>, path: Path) {
@@ -784,6 +804,7 @@ impl TypeContext {
             typed_envs: RefCell::new(Vec::new()),
             typed_envs_by_id: RefCell::new(ahash::AHashMap::new()),
             value_deps: RefCell::new(Vec::new()),
+            deprecated_used: RefCell::new(Vec::new()),
         }
     }
 
@@ -1949,6 +1970,16 @@ impl TypeContext {
         if vd1.val_loc != vd2.val_loc {
             self.value_deps.borrow_mut().push((vd1.clone(), vd2.clone()));
         }
+    }
+
+    /// `Cmt_format.record_deprecated_used`.
+    pub(crate) fn record_deprecated_used(&self, used: DeprecatedUse) {
+        self.deprecated_used.borrow_mut().push(used);
+    }
+
+    /// Recorded deprecated uses, most recent first (as OCaml's list).
+    pub fn deprecated_uses(&self) -> Vec<DeprecatedUse> {
+        self.deprecated_used.borrow().iter().rev().cloned().collect()
     }
 
     /// Recorded value dependencies, most recent first (as OCaml's list).

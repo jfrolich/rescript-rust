@@ -1354,6 +1354,8 @@ fn read_deprecated_attribute_payload(value: &OcamlValue) -> AttributePayload {
             AttributePayload::Deprecated {
                 reason,
                 can_be_automigrated: deprecated_payload_has_migration_template(structure),
+                migrate: None,
+                migrate_in_pipe_chain: None,
             }
         }
         _ => AttributePayload::Empty,

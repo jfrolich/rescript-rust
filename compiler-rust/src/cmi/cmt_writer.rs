@@ -436,10 +436,7 @@ impl<'a> CmtWriter<'a> {
         let expr: Option<Box<dyn FnOnce(&mut Self)>> = match &attr.attr_payload {
             AttributePayload::Empty | AttributePayload::Structure(_) => None,
             AttributePayload::Str(s)
-            | AttributePayload::Deprecated {
-                reason: s,
-                can_be_automigrated: _,
-            } => {
+            | AttributePayload::Deprecated { reason: s, .. } => {
                 let s = s.clone();
                 Some(Box::new(move |w: &mut Self| {
                     // Pexp_constant (Pconst_string (s, None))
@@ -2350,9 +2347,24 @@ impl<'a> CmtWriter<'a> {
         });
         self.digest_option(&interface_digest);
         self.bool(true); // cmt_use_summaries
-        // cmt_extra_info = {deprecated_used = []}
+        // cmt_extra_info = {deprecated_used} (cmt_utils.ml:1-11).
         self.w.write_block_header(0, 1);
-        self.w.write_int(0);
+        let uses = self.ctx.deprecated_uses();
+        self.list(&uses, |w, used| {
+            w.w.write_block_header(0, 5);
+            w.location(&used.source_loc);
+            w.str(&used.text);
+            w.option(used.migrate.as_ref(), |w, template| w.w.write_fragment(template));
+            w.option(used.migrate_in_pipe_chain.as_ref(), |w, template| {
+                w.w.write_fragment(template)
+            });
+            w.option(used.context.as_ref(), |w, context| {
+                w.int(match context {
+                    crate::types::context::DeprecatedContext::FunctionCall => 0,
+                    crate::types::context::DeprecatedContext::Reference => 1,
+                })
+            });
+        });
     }
 }
 
