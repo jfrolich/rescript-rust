@@ -1226,6 +1226,9 @@ pub struct CompilerOptions {
     /// Write OCaml-compatible `.cmi`/`.cmt`/`.cmti` files for editor tooling
     /// (compiler/ml/typemod.ml:1761-1796; js_implementation.ml:66-70).
     pub typed_artifacts: Option<std::sync::Arc<TypedArtifactOutput>>,
+    /// Package roots whose in-process units are on the load path (the `-I`
+    /// directories of a file build). `None` makes every registered unit visible.
+    pub visible_package_roots: Option<Vec<PathBuf>>,
     /// `Clflags.keep_locs` (`-keep-locs`/`-no-keep-locs`): whether saved
     /// signatures keep source locations (subst.ml:57-67 `Subst.for_saving`).
     pub keep_locs: bool,
@@ -1594,6 +1597,7 @@ impl Default for CompilerOptions {
             publish_in_process_signature: true,
             frontend_already_reported: false,
             typed_artifacts: None,
+            visible_package_roots: None,
             keep_locs: true,
         }
     }
@@ -15502,6 +15506,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
+    pers_env.set_visible_package_roots(options.visible_package_roots.clone());
     let (load_path, load_path_display) = build_load_path_with_display(options);
     type_ctx.set_load_paths(load_path.clone());
     pers_env.set_load_path_with_display(load_path.clone(), load_path_display);
@@ -16227,6 +16232,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
+    pers_env.set_visible_package_roots(options.visible_package_roots.clone());
     let (load_path, load_path_display) = build_load_path_with_display(options);
     type_ctx.set_load_paths(load_path.clone());
     pers_env.set_load_path_with_display(load_path, load_path_display);
@@ -16443,6 +16449,7 @@ pub fn typecheck_implementation_in_process(
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
+    pers_env.set_visible_package_roots(options.visible_package_roots.clone());
     let (load_path, load_path_display) = build_load_path_with_display(options);
     type_ctx.set_load_paths(load_path.clone());
     pers_env.set_load_path_with_display(load_path, load_path_display);

@@ -404,6 +404,9 @@ pub struct ModuleRegistry {
     /// as an implicit dependency (e.g., via `-open Pervasives`) but hasn't
     /// been compiled yet in the current wave.
     source_fallback_paths: SharedRegistryMap<PathBuf>,
+    /// Package roots of registered modules that carry no `InMemoryModuleInfo`
+    /// (namespace units), for load-path visibility.
+    module_package_roots: SharedRegistryMap<PathBuf>,
     local_cached_modules: HashMap<String, Arc<PortablePersStruct>>,
     local_module_info: HashMap<String, InMemoryModuleInfo>,
     local_alias_rewrites: HashMap<String, Path>,
@@ -466,6 +469,20 @@ impl ModuleRegistry {
         namespace_name: &str,
         module_aliases: &[(String, String)],
     ) {
+        self.register_namespace_for_package(namespace_name, module_aliases, None);
+    }
+
+    /// [`Self::register_namespace`] for a namespace owned by the package at
+    /// `package_root` (its `.mlmap` is only on that package's load path).
+    pub fn register_namespace_for_package(
+        &mut self,
+        namespace_name: &str,
+        module_aliases: &[(String, String)],
+        package_root: Option<PathBuf>,
+    ) {
+        if let Some(root) = package_root {
+            self.module_package_roots.insert(namespace_name.to_string(), root);
+        }
         let mut sig_items: Signature = Vec::with_capacity(module_aliases.len());
         for (short_name, internal_name) in module_aliases {
             sig_items.push(SignatureItem::SigModule(
@@ -666,6 +683,13 @@ pub struct PersistentEnv {
     /// type graphs that are internalized into the current TypeContext on first access
     /// via `find_pers_struct`. Populated by `from_registry()`.
     portable_cache: SharedRegistryMap<Arc<PortablePersStruct>>,
+    /// Package roots of registered units without module info (namespaces).
+    module_package_roots: SharedRegistryMap<PathBuf>,
+    /// Package roots whose units are on this compilation's load path. OCaml
+    /// only finds units through `-I` directories (the package itself, its
+    /// dependencies, dev dependencies for dev sources and the runtime);
+    /// `None` makes every registered unit visible.
+    visible_package_roots: Option<Arc<Vec<PathBuf>>>,
     /// First persistent-loader error observed through any clone of this env.
     last_error: Arc<Mutex<Option<PersistentEnvError>>>,
     /// Consistency table for imported CMI digests, matching OCaml `Consistbl`.
@@ -732,6 +756,8 @@ impl PersistentEnv {
             source_fallback_paths: SharedRegistryMap::default(),
             source_fallback_depth: 0,
             portable_cache: SharedRegistryMap::default(),
+            module_package_roots: SharedRegistryMap::default(),
+            visible_package_roots: None,
             last_error: Arc::new(Mutex::new(None)),
             crc_units: Arc::new(Mutex::new(HashMap::new())),
             view: Arc::new(ResolutionView {
@@ -762,6 +788,8 @@ impl PersistentEnv {
             source_fallback_paths: registry.source_fallback_paths.clone(),
             source_fallback_depth: 0,
             portable_cache: registry.cached_modules.clone(),
+            module_package_roots: registry.module_package_roots.clone(),
+            visible_package_roots: None,
             last_error: Arc::new(Mutex::new(None)),
             crc_units: Arc::new(Mutex::new(HashMap::new())),
             view: Arc::new(ResolutionView {
@@ -840,7 +868,7 @@ impl PersistentEnv {
     }
 
     fn cache_lookup_entry(&self, name: &str) -> Option<(String, Option<Arc<PersStruct>>)> {
-        if self.view.hidden_modules.contains(name) {
+        if self.view.hidden_modules.contains(name) || self.outside_load_path(name) {
             return Some((name.to_string(), None));
         }
         let cache = self.cache.lock().unwrap();
@@ -870,6 +898,9 @@ impl PersistentEnv {
     }
 
     fn in_memory_info(&self, name: &str) -> Option<InMemoryModuleInfo> {
+        if self.outside_load_path(name) {
+            return None;
+        }
         if let Some(key) = resolve_first_char_case_key(&self.view.in_memory_module_overrides, name) {
             if self.view.hidden_modules.contains(key) {
                 return None;
@@ -906,6 +937,9 @@ impl PersistentEnv {
     }
 
     fn portable_cache_entry(&self, name: &str) -> Option<(String, Arc<PortablePersStruct>)> {
+        if self.outside_load_path(name) {
+            return None;
+        }
         if let Some(key) = resolve_first_char_case_key(&self.view.portable_cache_overrides, name) {
             return self.view.portable_cache_overrides
                 .get(key)
@@ -983,6 +1017,33 @@ impl PersistentEnv {
         self.load_path_display = Arc::new(display_paths);
     }
 
+    /// Restrict registered units to those of the given packages (see
+    /// `visible_package_roots`).
+    pub fn set_visible_package_roots(&mut self, roots: Option<Vec<PathBuf>>) {
+        self.visible_package_roots = roots.map(Arc::new);
+    }
+
+    /// Whether `name` is a registered unit of a package outside the load path.
+    fn outside_load_path(&self, name: &str) -> bool {
+        let Some(visible) = self.visible_package_roots.as_deref() else {
+            return false;
+        };
+        let visible_root = |root: &FsPath| visible.iter().any(|v| v == root);
+        if let Some(outside) = self.in_memory_info_with(name, |info| {
+            !info.is_runtime
+                && info
+                    .package_root
+                    .as_deref()
+                    .is_some_and(|root| !visible_root(root))
+        }) {
+            return outside;
+        }
+        if let Some((_, root)) = self.module_package_roots.get_case_cloned(name) {
+            return !visible_root(&root);
+        }
+        false
+    }
+
     pub fn set_open_modules(&mut self, open_modules: Vec<String>) {
         self.open_modules = Arc::new(open_modules);
     }
@@ -1041,6 +1102,9 @@ impl PersistentEnv {
         // know that the unit exists. Keep this as an availability probe so
         // namespace alias resolution can avoid consuming `Subst.signature`
         // stamps just to test a flattened compile-unit name.
+        if self.outside_load_path(name) {
+            return false;
+        }
         self.cache_contains_key(name)
             || self.portable_cache.contains_key(name)
             || self.in_memory_modules.contains_key(name)
@@ -1526,6 +1590,8 @@ impl PersistentEnv {
             source_fallback_paths: self.source_fallback_paths.clone(),
             source_fallback_depth: self.source_fallback_depth + 1,
             portable_cache: self.portable_cache.clone(),
+            module_package_roots: self.module_package_roots.clone(),
+            visible_package_roots: self.visible_package_roots.clone(),
             last_error: self.last_error.clone(),
             crc_units: self.crc_units.clone(),
             view: Arc::new(ResolutionView {

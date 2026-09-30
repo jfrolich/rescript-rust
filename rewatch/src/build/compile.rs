@@ -1877,8 +1877,29 @@ fn build_compiler_options(
         }
     }
 
-    // Add dev dependency paths if the module is type:dev
-    // (omitted for simplicity in first cut; can be added later)
+    // OCaml compiles with `-I` for the package, its dependencies and, for
+    // `type: dev` sources, its dev dependencies (`get_dependency_paths`);
+    // units of other packages are not visible.
+    let is_type_dev = build_state
+        .modules
+        .get(module_name)
+        .is_some_and(|module| module.is_type_dev);
+    let mut visible_package_roots = vec![package.path.clone()];
+    let visible_deps = package.config.get_dependency_names().into_iter().chain(
+        is_type_dev
+            .then(|| package.config.get_dev_dependency_names())
+            .into_iter()
+            .flatten(),
+    );
+    for dep_name in visible_deps {
+        if let Some(dep_pkg) = build_state.packages.get(&dep_name) {
+            visible_package_roots.push(dep_pkg.path.clone());
+            let dep_include = dep_pkg.get_ocaml_build_path();
+            if !include_paths.contains(&dep_include) {
+                include_paths.push(dep_include);
+            }
+        }
+    }
 
     // Extract JSX version from root config
     let jsx_version = parsed_flags.jsx_version.or_else(|| {
@@ -2063,6 +2084,7 @@ fn build_compiler_options(
         gentype_resolver,
         typed_artifacts: Some(std::sync::Arc::new(typed_artifact_output(package, source_file_path))),
         keep_locs: parsed_flags.keep_locs,
+        visible_package_roots: Some(visible_package_roots),
         ..Default::default()
     })
 }
@@ -2331,7 +2353,11 @@ fn register_namespace_signatures(build_state: &BuildCommandState) {
             .collect();
 
         if !module_aliases.is_empty() {
-            build_state.register_namespace_in_registry(&namespace_suffix, &module_aliases);
+            build_state.register_namespace_in_registry(
+                &namespace_suffix,
+                &module_aliases,
+                package.path.clone(),
+            );
             // Editor tooling reads the namespace unit from lib/bs like the
             // bsc-compiled `.mlmap` (js_implementation.ml:207-226).
             let mut sorted_aliases = module_aliases.clone();

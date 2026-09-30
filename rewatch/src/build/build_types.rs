@@ -504,11 +504,16 @@ impl BuildCommandState {
     }
 
     /// Register a namespace in the module registry.
-    pub fn register_namespace_in_registry(&self, namespace_name: &str, module_aliases: &[(String, String)]) {
+    pub fn register_namespace_in_registry(
+        &self,
+        namespace_name: &str,
+        module_aliases: &[(String, String)],
+        package_root: PathBuf,
+    ) {
         self.module_registry
             .lock()
             .unwrap()
-            .register_namespace(namespace_name, module_aliases);
+            .register_namespace_for_package(namespace_name, module_aliases, Some(package_root));
     }
 
     /// Store extracted dependencies from the parse phase for a module file.
