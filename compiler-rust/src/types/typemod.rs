@@ -19921,6 +19921,20 @@ fn type_structure_item<'a>(
             // OCaml Typedecl.check_duplicates runs after translating the
             // declaration group and before final env construction/end_def.
             check_type_declaration_duplicate_definitions(tctx, arena, decls);
+            // typedecl.ml:1509-1526: every declaration of the group records
+            // the group's inline record definitions for printing.
+            let inline_types = group_inline_record_types(arena, &typed_tree_decls);
+            if !inline_types.is_empty() {
+                for (_, decl, _, _) in final_env_entries.iter_mut() {
+                    decl.type_inlined_types = inline_types.clone();
+                }
+                for typed_decl in typed_tree_decls.iter_mut() {
+                    typed_decl.typ_type.type_inlined_types = inline_types.clone();
+                }
+                for decl in internal_decls_for_generalize.iter_mut() {
+                    decl.type_inlined_types = inline_types.clone();
+                }
+            }
             // typedecl.ml:1535-1538: `List.fold_right (fun (id, decl) env ->
             // Env.add_type ~check:true id decl env) decls env`; `store_type`
             // (env.ml:1623-1632) adds constructors and labels with
@@ -22502,6 +22516,17 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         // OCaml Typedecl.check_duplicates runs after translating the declaration
         // group and before final env construction/end_def.
         check_type_declaration_duplicate_definitions(tctx, arena, decls);
+        // typedecl.ml:1509-1526: every declaration of the group records
+        // the group's inline record definitions for printing.
+        let inline_types = group_inline_record_types(arena, &typed_tree_decls);
+        if !inline_types.is_empty() {
+            for typed_decl in typed_tree_decls.iter_mut() {
+                typed_decl.typ_type.type_inlined_types = inline_types.clone();
+            }
+            for decl in internal_decls_for_generalize.iter_mut() {
+                decl.type_inlined_types = inline_types.clone();
+            }
+        }
     }
     // typedecl.ml:1540-1546 `update_type` (typedecl.ml:110-124) in the final
     // env (typedecl.ml:1534-1538): unify each recursive stub's manifest
