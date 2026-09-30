@@ -1267,6 +1267,40 @@ pub fn compile(
     // though modules complete in arbitrary order.
     results_buffer.sort_by(|a, b| a.module_name.cmp(&b.module_name));
 
+    // A module is only dispatched once its dependencies compiled, so a module
+    // that (transitively) depends on a failed one is never compiled in a
+    // subprocess build. In-process builds can start a dependent early, from
+    // its dependency's published interface; drop such results so they are
+    // neither reported nor counted, and leave the module dirty.
+    let failed: AHashSet<String> = results_buffer
+        .iter()
+        .filter(|msg| {
+            msg.result.is_err() || matches!(msg.interface_result, Some(Err(_)))
+        })
+        .map(|msg| msg.module_name.clone())
+        .collect();
+    if !failed.is_empty() {
+        let depends_on_failed = |name: &str| {
+            let mut stack = vec![name.to_string()];
+            let mut seen = AHashSet::new();
+            while let Some(current) = stack.pop() {
+                let Some(module) = build_state.build_state.modules.get(&current) else {
+                    continue;
+                };
+                for dep in &module.deps {
+                    if failed.contains(dep) {
+                        return true;
+                    }
+                    if seen.insert(dep.clone()) {
+                        stack.push(dep.clone());
+                    }
+                }
+            }
+            false
+        };
+        results_buffer.retain(|msg| !depends_on_failed(&msg.module_name));
+    }
+
     // These timestamps are used as a compile-generation marker by
     // mark_modules_with_expired_deps_dirty, not as precise wall-clock compile
     // times. All modules successfully compiled in one pass are mutually
