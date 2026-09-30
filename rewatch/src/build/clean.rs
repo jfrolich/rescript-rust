@@ -6,8 +6,8 @@ use crate::config::{Config, SourceMapCommand};
 use crate::helpers;
 use crate::helpers::emojis::*;
 use crate::project_context::ProjectContext;
-use ahash::AHashSet;
-use anyhow::Result;
+use ahash::{AHashMap, AHashSet};
+use anyhow::{Result, anyhow};
 use console::style;
 use rayon::prelude::*;
 use std::io::Write;
@@ -307,7 +307,103 @@ fn has_compile_warnings(module: &Module) -> bool {
     )
 }
 
+/// Per-package record of the sources an in-process build compiled. In-process
+/// builds write no `.ast` files, whose recorded source paths drive
+/// [`cleanup_previous_build`]; this manifest lets the next build remove the
+/// outputs of modules whose sources disappeared.
+const IN_PROCESS_MANIFEST: &str = "in-process-sources.txt";
+
+fn in_process_source_paths(build_state: &BuildCommandState) -> AHashMap<String, Vec<(String, PathBuf)>> {
+    let mut by_package: AHashMap<String, Vec<(String, PathBuf)>> = AHashMap::new();
+    for (module_name, module) in build_state.modules.iter() {
+        if let SourceType::SourceFile(source_file) = &module.source_type {
+            let entries = by_package.entry(module.package_name.clone()).or_default();
+            entries.push((module_name.clone(), source_file.implementation.path.clone()));
+            if let Some(interface) = &source_file.interface {
+                entries.push((module_name.clone(), interface.path.clone()));
+            }
+        }
+    }
+    by_package
+}
+
+/// Record the compiled sources of an in-process build (see [`IN_PROCESS_MANIFEST`]).
+pub fn write_in_process_manifest(build_state: &BuildCommandState) {
+    for (package_name, mut entries) in in_process_source_paths(build_state) {
+        let Some(package) = build_state.packages.get(&package_name) else {
+            continue;
+        };
+        entries.sort();
+        let content: String = entries
+            .iter()
+            .map(|(module_name, path)| format!("{module_name}\t{}\n", path.to_string_lossy()))
+            .collect();
+        let dir = package.get_ocaml_build_path();
+        let path = dir.join(IN_PROCESS_MANIFEST);
+        if std::fs::read_to_string(&path).is_ok_and(|existing| existing == content) {
+            continue;
+        }
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(path, content);
+    }
+}
+
+/// Remove the outputs of sources recorded by the previous in-process build
+/// that no longer exist: the JS output and the typed artifacts in `lib/bs`
+/// and `lib/ocaml`. Returns (removed sources, recorded sources).
+pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) -> (usize, usize) {
+    let root_config = build_state.get_root_config();
+    let suffix = root_config.get_suffix(root_config.get_package_specs().first().unwrap());
+    let current = in_process_source_paths(build_state);
+    let mut removed = 0;
+    let mut total = 0;
+    let mut deleted_modules = AHashSet::new();
+    for package in build_state.packages.values() {
+        let Ok(content) = std::fs::read_to_string(package.get_ocaml_build_path().join(IN_PROCESS_MANIFEST))
+        else {
+            continue;
+        };
+        let current_paths: AHashSet<&PathBuf> = current
+            .get(&package.name)
+            .map(|entries| entries.iter().map(|(_, path)| path).collect())
+            .unwrap_or_default();
+        for line in content.lines() {
+            let Some((module_name, path)) = line.split_once('\t') else {
+                continue;
+            };
+            total += 1;
+            let path = PathBuf::from(path);
+            if current_paths.contains(&path) {
+                continue;
+            }
+            removed += 1;
+            let basename = helpers::file_path_to_compiler_asset_basename(&path, &package.namespace);
+            let dir = path.parent().unwrap_or_else(|| Path::new(""));
+            for extension in ["cmi", "cmt", "cmti", "cmj"] {
+                let file = format!("{basename}.{extension}");
+                let _ = std::fs::remove_file(package.get_build_path().join(dir).join(&file));
+                let _ = std::fs::remove_file(package.get_ocaml_build_path().join(&file));
+            }
+            if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(helpers::is_implementation_file)
+            {
+                remove_mjs_file(&package.path.join(&path), &suffix);
+            }
+            if !build_state.modules.contains_key(module_name) {
+                deleted_modules.insert(module_name.to_string());
+            }
+        }
+    }
+    build_state.deleted_modules = deleted_modules;
+    (removed, total)
+}
+
 pub fn cleanup_after_build(build_state: &BuildCommandState) {
+    if build_state.build_mode().is_in_process() {
+        write_in_process_manifest(build_state);
+    }
     build_state.modules.par_iter().for_each(|(_module_name, module)| {
         let package = build_state.get_package(&module.package_name).unwrap();
         if has_parse_warnings(module)

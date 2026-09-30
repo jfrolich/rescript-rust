@@ -242,9 +242,12 @@ pub fn initialize_build(
     );
     packages::parse_packages(&mut build_state)?;
 
-    let compile_assets_state = read_compile_state::read(&mut build_state)?;
-
-    let (diff_cleanup, total_cleanup) = clean::cleanup_previous_build(&mut build_state, compile_assets_state);
+    let (diff_cleanup, total_cleanup) = if build_state.build_mode().is_in_process() {
+        clean::cleanup_previous_in_process_build(&mut build_state)
+    } else {
+        let compile_assets_state = read_compile_state::read(&mut build_state)?;
+        clean::cleanup_previous_build(&mut build_state, compile_assets_state)
+    };
     let timing_clean_total = timing_clean_start.elapsed();
 
     if show_progress {
