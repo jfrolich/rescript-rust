@@ -14664,11 +14664,16 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
                     psig_loc: item.psig_loc,
                 }
             } else {
+                // Ast_mapper.default_mapper.value_description maps `pval_type`
+                // through `typ_mapper` (Ast_core_type_class_type.typ_mapper),
+                // which expands `@get`/`@set` object fields.
+                let vd_type = arena.get_core_type(vd.pval_type).clone();
+                let rewritten_type = rewrite_core_type(&vd_type, arena);
                 SignatureItem {
                     psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(
                         ValueDescription {
                             pval_name: vd.pval_name.clone(),
-                            pval_type: vd.pval_type.clone(),
+                            pval_type: arena.push_core_type(rewritten_type),
                             pval_prim: vd.pval_prim.clone(),
                             pval_attributes: rewritten_attrs.into(),
                             pval_loc: vd.pval_loc,
