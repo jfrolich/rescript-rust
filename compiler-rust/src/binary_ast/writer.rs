@@ -238,8 +238,14 @@ pub fn write_structure_ast_current_with_extra_deps_and_builtin_ppx(
         ast.clone()
     };
 
-    // 2. Process @@config attributes (e.g., no_export wrapping)
-    let rewritten_ast = apply_no_export_config(arena, rewritten_ast);
+    // 2. Process @@config attributes (no_export wrapping). When the caller
+    //    ran the frontend (`builtin_ppx == false`), it already applied it
+    //    (js_implementation.ml:130).
+    let rewritten_ast = if builtin_ppx {
+        apply_no_export_config(arena, rewritten_ast)
+    } else {
+        rewritten_ast
+    };
 
     // 3. Extract dependencies from the rewritten AST and merge explicit opens.
     let mut deps = extract_structure_deps(arena, &rewritten_ast);

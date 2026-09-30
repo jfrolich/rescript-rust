@@ -878,10 +878,7 @@ fn generate_ast_with_rust_parser(
             let structure = frontend.structure;
 
             let (structure, deps) = if in_process {
-                let structure = rescript_compiler::binary_ast::writer::apply_no_export_config(
-                    parser.arena_mut(),
-                    structure,
-                );
+                // The frontend already applied `no_export` (js_implementation.ml:130).
                 let mut deps = extract_structure_deps(parser.arena(), &structure);
                 deps.extend(extra_deps.iter().cloned());
                 (structure, Some(deps))

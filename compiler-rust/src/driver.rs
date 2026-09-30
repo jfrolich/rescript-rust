@@ -11416,6 +11416,9 @@ pub fn run_implementation_frontend(
             out,
         );
     }
+    // js_implementation.ml:130 `if !Js_config.no_export then no_export ast`,
+    // applied once to the top-level structure after the frontend.
+    let structure = crate::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
     Ok(ImplementationFrontend {
         structure,
         warnings_fatal: ppx_warnings_have_errors,
@@ -13043,6 +13046,9 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             }
             rewritten
         };
+        // js_implementation.ml:130 `no_export` after the frontend.
+        let structure =
+            crate::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
         parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
         // Type check
@@ -14786,8 +14792,8 @@ pub fn compile_source_in_process(
     let frontend = frontend?;
     let warnings_fatal = frontend.warnings_fatal;
     let experimental_let_unwrap = frontend.experimental_let_unwrap;
-    let structure =
-        crate::binary_ast::writer::apply_no_export_config(parser.arena_mut(), frontend.structure);
+    // The frontend already applied `no_export` (js_implementation.ml:130).
+    let structure = frontend.structure;
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     let mut effective_options = options.clone();
@@ -16037,6 +16043,8 @@ pub fn typecheck_implementation_in_process(
     let file_config = extract_file_config_from_structure(&structure, parser.arena());
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena());
+    // js_implementation.ml:130 `no_export` after parsing.
+    let structure = crate::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
