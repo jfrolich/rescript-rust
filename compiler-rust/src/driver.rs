@@ -1273,8 +1273,15 @@ impl Default for CompilerOptions {
 }
 
 impl CompilerOptions {
+    /// `Env.get_unit_name ()`: js_implementation.ml:142-145 sets it to
+    /// `Ext_filename.module_name outputprefix` (ext_filename.ml:71-79), the
+    /// basename up to its last dot, so `hello.foo.res` is unit `Hello` even
+    /// though the build registers it under its full module name.
     fn current_unit_name(&self) -> Option<String> {
-        self.module_name.clone().or_else(|| {
+        self.module_name
+            .as_deref()
+            .map(|name| name.rsplit_once('.').map_or(name, |(unit, _)| unit).to_string())
+            .or_else(|| {
             self.source_filename
                 .as_deref()
                 .map(module_name_from_source_filename)
