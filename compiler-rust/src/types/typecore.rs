@@ -7484,7 +7484,10 @@ fn type_pattern_interval(
     // `or` nodes, then restores the source location only on the outer pattern.
     // This keeps Parmatch warning 12 from reporting partially overlapped
     // generated interval arms as source subpatterns.
-    let ghost_loc = tctx.arena.none_loc();
+    let ghost_loc = tctx
+        .arena
+        .interval_ghost_loc(loc)
+        .unwrap_or_else(|| tctx.arena.none_loc());
 
     // Build all constant patterns for the range
     let mut patterns: Vec<Pattern> = (start_val..=end_val)
@@ -13531,6 +13534,7 @@ pub fn prepare_typecheck_arena(arena: &mut ParseArena) {
         let bindings = desugar_nary_function_defaults(arena, loc, &params);
         arena.set_nary_fun_default_bindings(fun.lhs, bindings);
     }
+    arena.prepare_interval_ghost_locs();
     // Optional-default AST is allocated above while the arena is exclusive.
     // Prepare stable append-only storage afterward for environment-dependent
     // pattern rewrites performed during type checking (for example variants).

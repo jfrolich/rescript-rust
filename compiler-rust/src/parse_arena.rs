@@ -493,6 +493,10 @@ pub struct ParseArena {
     /// while the arena is still exclusively borrowed.
     nary_fun_default_bindings_by_first_pattern:
         HashMap<PatIdx, Box<[(FunParam, Option<crate::parser::ast::ValueBinding>)]>>,
+    /// Ghost copies of character-interval pattern locations
+    /// (typecore.ml:1337 `{loc with loc_ghost = true}`), allocated before
+    /// type checking for the same aliasing reason.
+    interval_ghost_locs: HashMap<LocIdx, LocIdx>,
     /// N-ary locally-abstract-type (`newtypes`) lists keyed by the function's
     /// first parameter pattern, mirroring `Pexp_fun.newtypes` in the current
     /// upstream parsetree. Each entry is `(name, attributes)`; the parser puts
@@ -934,6 +938,7 @@ impl Default for ParseArena {
             nary_fun_params_by_first_pattern: HashMap::new(),
             nary_fun_unknown_arity_by_first_pattern: HashMap::new(),
             nary_fun_default_bindings_by_first_pattern: HashMap::new(),
+            interval_ghost_locs: HashMap::new(),
             nary_fun_newtypes_by_first_pattern: HashMap::new(),
             nary_arrow_args_by_first_type: HashMap::new(),
             value_constraints_by_pattern: HashMap::new(),
@@ -2458,6 +2463,28 @@ impl ParseArena {
     ) {
         self.nary_fun_default_bindings_by_first_pattern
             .insert(first_pattern, bindings.into_boxed_slice());
+    }
+
+    /// Allocate the ghost locations used by character-interval expansion.
+    pub fn prepare_interval_ghost_locs(&mut self) {
+        // Read the parser-owned pattern storage directly: patterns pushed by
+        // earlier preparation can sit above a previous synthetic base.
+        for i in 0..self.patterns.len() {
+            let pat = self.patterns.get(PatIdx(i as u32));
+            if !matches!(&*pat.ppat_desc, crate::parser::ast::PatternDesc::Ppat_interval(_)) {
+                continue;
+            }
+            let loc = pat.ppat_loc;
+            if !self.interval_ghost_locs.contains_key(&loc) {
+                let ghost = self.mk_ghost_loc(loc);
+                self.interval_ghost_locs.insert(loc, ghost);
+            }
+        }
+    }
+
+    /// The ghost copy of an interval pattern's location.
+    pub fn interval_ghost_loc(&self, loc: LocIdx) -> Option<LocIdx> {
+        self.interval_ghost_locs.get(&loc).copied()
     }
 
     /// Return optional-default lowering prepared before type checking.
