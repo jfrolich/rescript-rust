@@ -4558,6 +4558,120 @@ fn substitute_type_expr_path(
     }
 }
 
+/// Path prefixes that `prefix_idents` (env.ml:1454-1481) re-roots when a
+/// component is reached through a module alias. OCaml's raw unit signature
+/// names its own binders with local idents, which the component prefix
+/// replaces; Rust's persistent signatures name them through the unit path,
+/// so every `<alias source>.x` becomes `<component>.x`.
+pub fn alias_reroot_prefixes(module_path: &Path, ctx: &TypeContext) -> Vec<(Path, Path)> {
+    component_alias_sources(module_path, ctx)
+        .into_iter()
+        .filter(|source| !source.same(module_path))
+        .map(|source| (source, module_path.clone()))
+        .collect()
+}
+
+/// Copy `desc` with its alias-source paths re-rooted at the component when
+/// its type mentions any (`Subst.value_description` of env.ml:1537).
+pub fn reroot_value_description(
+    desc: &mut crate::types::decl::ValueDescription,
+    prefixes: &[(Path, Path)],
+    ctx: &TypeContext,
+) {
+    if prefixes.is_empty() || !type_expr_mentions_path_prefixes(desc.val_type, prefixes, ctx) {
+        return;
+    }
+    let mut cache = crate::types::type_expr::TypeExprRefMap::new();
+    let map_path = |p: &Path| reroot_path(p, prefixes);
+    desc.val_type =
+        crate::types::typecore::copy_type_expr_mapping_paths(ctx, desc.val_type, &mut cache, &map_path);
+}
+
+/// Alias sources of a component path, including those inherited from its
+/// ancestors: when `A.B` is reached through the alias `A = U`, `A.B.C` is the
+/// component `U.B.C` re-rooted (env.ml:1567-1578 builds child components
+/// from the parent's prefixed signature).
+fn component_alias_sources(module_path: &Path, ctx: &TypeContext) -> Vec<Path> {
+    let mut sources = ctx.alias_sources_for_component_path(module_path);
+    if let Path::Pdot(parent, name, _) = module_path {
+        for parent_source in component_alias_sources(parent, ctx) {
+            let derived = Path::pdot(parent_source, name.as_str());
+            if !derived.same(module_path) && !sources.iter().any(|s| s.same(&derived)) {
+                sources.push(derived);
+            }
+        }
+    }
+    sources
+}
+
+/// Rewrite `path` through the first matching `(old, new)` prefix pair.
+pub fn reroot_path(path: &Path, prefixes: &[(Path, Path)]) -> Path {
+    rewrite_path_by_path_prefixes(path, prefixes).unwrap_or_else(|| path.clone())
+}
+
+/// Whether any type constructor or package path reachable from `ty` starts
+/// with one of the `old` prefixes.
+pub fn type_expr_mentions_path_prefixes(
+    ty: TypeExprRef,
+    prefixes: &[(Path, Path)],
+    ctx: &TypeContext,
+) -> bool {
+    fn walk(
+        ty: TypeExprRef,
+        prefixes: &[(Path, Path)],
+        ctx: &TypeContext,
+        visited: &mut HashSet<usize>,
+    ) -> bool {
+        if !visited.insert(ty.index()) {
+            return false;
+        }
+        let desc = ctx.get_desc(ty);
+        let hit = |p: &Path| rewrite_path_by_path_prefixes(p, prefixes).is_some();
+        match &*desc {
+            TypeDesc::Tconstr { path, args, .. } => {
+                hit(path) || args.iter().any(|a| walk(*a, prefixes, ctx, visited))
+            }
+            TypeDesc::Tarrow { args, ret } => {
+                args.iter().any(|a| walk(a.typ, prefixes, ctx, visited))
+                    || walk(*ret, prefixes, ctx, visited)
+            }
+            TypeDesc::Ttuple(items) => items.iter().any(|a| walk(*a, prefixes, ctx, visited)),
+            TypeDesc::Tlink(t) | TypeDesc::Tsubst(t) => walk(*t, prefixes, ctx, visited),
+            TypeDesc::Tpoly { body, vars } => {
+                walk(*body, prefixes, ctx, visited)
+                    || vars.iter().any(|v| walk(*v, prefixes, ctx, visited))
+            }
+            TypeDesc::Tobject { fields, name } => {
+                name.as_ref().is_some_and(|(p, args)| {
+                    hit(p) || args.iter().any(|a| walk(*a, prefixes, ctx, visited))
+                }) || walk(*fields, prefixes, ctx, visited)
+            }
+            TypeDesc::Tfield { typ, rest, .. } => {
+                walk(*typ, prefixes, ctx, visited) || walk(*rest, prefixes, ctx, visited)
+            }
+            TypeDesc::Tvariant(row) => {
+                row.row_name.as_ref().is_some_and(|(p, args)| {
+                    hit(p) || args.iter().any(|a| walk(*a, prefixes, ctx, visited))
+                }) || walk(row.row_more, prefixes, ctx, visited)
+                    || row.row_fields.iter().any(|(_, field)| match field {
+                        crate::types::type_expr::RowField::Rpresent(Some(t)) => {
+                            walk(*t, prefixes, ctx, visited)
+                        }
+                        crate::types::type_expr::RowField::Reither { types, .. } => {
+                            types.iter().any(|t| walk(*t, prefixes, ctx, visited))
+                        }
+                        _ => false,
+                    })
+            }
+            TypeDesc::Tpackage { path, args, .. } => {
+                hit(path) || args.iter().any(|a| walk(*a, prefixes, ctx, visited))
+            }
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => false,
+        }
+    }
+    walk(ty, prefixes, ctx, &mut HashSet::new())
+}
+
 pub fn substitute_type_paths_in_value_from_sig(
     desc: &mut crate::types::decl::ValueDescription,
     sig_items: &[SignatureItem],
@@ -4607,9 +4721,13 @@ pub fn substitute_type_paths_in_value_from_sig(
         &mut visited,
     );
 
-    for alias_source in ctx.alias_sources_for_component_path(module_path) {
+    for alias_source in component_alias_sources(module_path, ctx) {
         for item in sig_items {
-            let SignatureItem::SigType(id, _, _) = item else {
+            // `prefix_idents` (env.ml:1454-1481) re-roots type and module
+            // binders alike: `Result.t` inside the aliased unit becomes
+            // `<component>.Result.t`, so nested module prefixes move too.
+            let (SignatureItem::SigType(id, _, _) | SignatureItem::SigModule(id, _, _)) = item
+            else {
                 continue;
             };
             let old_path = Path::pdot(alias_source.clone(), id.name());
@@ -6086,6 +6204,7 @@ fn add_signature_to_env_with_options(
     // only value-bearing items (non-primitive values, modules, extension constructors)
     // get runtime field positions. Types and module types are skipped.
     let mut pos: i32 = 0;
+    let reroot_prefixes = alias_reroot_prefixes(module_path, ctx);
     let mut opened_values = Vec::new();
     let mut opened_types = Vec::new();
     let mut opened_constructors = Vec::new();
@@ -6105,6 +6224,9 @@ fn add_signature_to_env_with_options(
             SignatureItem::SigValue(id, desc) => {
                 // Add value binding with qualified path
                 let mut desc = desc.clone();
+                // env.ml:1874-1877 opens the component table, whose values
+                // were substituted for the component path (env.ml:1537).
+                reroot_value_description(&mut desc, &reroot_prefixes, ctx);
                 let value_pos = pos;
                 desc.val_path = Some(slot_path(id.name(), value_pos));
                 // OCaml: only increment pos for non-primitive values

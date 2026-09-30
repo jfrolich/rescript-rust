@@ -34,6 +34,72 @@ fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
     root_ident(path).is_some_and(|id| id.is_persistent() || id.stamp() == 0)
 }
 
+/// OCaml builds `comp_constrs` from the declarations after `prefix_idents`
+/// and `Subst.type_declaration` (env.ml:1530-1547), so a component reached
+/// through a module alias sees its own unit's types rooted at the component.
+/// The descriptions here come from the unit's signature; re-root the ones that
+/// still mention the alias source, copying their types like `Subst.type_expr`.
+fn reroot_constructor_descriptions(
+    descs: &mut [ConstructorDescription],
+    signature: &[SignatureItem],
+    access_path: &Path,
+    ctx: &super::context::TypeContext,
+) {
+    let _ = signature;
+    let prefixes = crate::cmi::persistent_env::alias_reroot_prefixes(access_path, ctx);
+    if prefixes.is_empty() {
+        return;
+    }
+    let mentions = |ty: super::type_expr::TypeExprRef| {
+        crate::cmi::persistent_env::type_expr_mentions_path_prefixes(ty, &prefixes, ctx)
+    };
+    let map_path = |p: &Path| crate::cmi::persistent_env::reroot_path(p, &prefixes);
+    for desc in descs.iter_mut() {
+        if !(desc.cstr_args.iter().any(|t| mentions(*t))
+            || desc.cstr_existentials.iter().any(|t| mentions(*t))
+            || mentions(desc.cstr_res))
+        {
+            continue;
+        }
+        let mut cache = super::type_expr::TypeExprRefMap::new();
+        let mut copy = |ty: super::type_expr::TypeExprRef| {
+            super::typecore::copy_type_expr_mapping_paths(ctx, ty, &mut cache, &map_path)
+        };
+        desc.cstr_res = copy(desc.cstr_res);
+        desc.cstr_existentials = desc.cstr_existentials.iter().map(|t| copy(*t)).collect();
+        desc.cstr_args = desc.cstr_args.iter().map(|t| copy(*t)).collect();
+    }
+}
+
+/// Label counterpart of [`reroot_constructor_descriptions`] (env.ml:1548-1559).
+fn reroot_label_descriptions(
+    descs: &mut [LabelDescription],
+    signature: &[SignatureItem],
+    access_path: &Path,
+    ctx: &super::context::TypeContext,
+) {
+    let _ = signature;
+    let prefixes = crate::cmi::persistent_env::alias_reroot_prefixes(access_path, ctx);
+    if prefixes.is_empty() {
+        return;
+    }
+    let mentions = |ty: super::type_expr::TypeExprRef| {
+        crate::cmi::persistent_env::type_expr_mentions_path_prefixes(ty, &prefixes, ctx)
+    };
+    let map_path = |p: &Path| crate::cmi::persistent_env::reroot_path(p, &prefixes);
+    for desc in descs.iter_mut() {
+        if !(mentions(desc.lbl_arg) || mentions(desc.lbl_res)) {
+            continue;
+        }
+        let mut cache = super::type_expr::TypeExprRefMap::new();
+        let mut copy = |ty: super::type_expr::TypeExprRef| {
+            super::typecore::copy_type_expr_mapping_paths(ctx, ty, &mut cache, &map_path)
+        };
+        desc.lbl_res = copy(desc.lbl_res);
+        desc.lbl_arg = copy(desc.lbl_arg);
+    }
+}
+
 fn build_matching_type_constructors(
     out: &mut Vec<ConstructorDescription>,
     access_path: &Path,
@@ -57,6 +123,9 @@ pub(crate) fn constructors_of_type_path(
     let mut out = Vec::new();
     build_type_constructors(&mut out, type_path, decl, None, ctx);
     out.reverse();
+    if let Some(access_path) = type_path.parent() {
+        reroot_constructor_descriptions(&mut out, &[], &access_path, ctx);
+    }
     out
 }
 
@@ -71,7 +140,7 @@ pub(crate) fn labels_of_type_path(
         return Vec::new();
     };
     let res_ty = ctx.new_generic_constr(type_path.clone(), decl.type_params.clone());
-    labels
+    let mut descs: Vec<LabelDescription> = labels
         .iter()
         .enumerate()
         .map(|(pos, ld)| LabelDescription {
@@ -87,7 +156,11 @@ pub(crate) fn labels_of_type_path(
             lbl_loc: ld.ld_loc,
             lbl_attributes: ld.ld_attributes.clone(),
         })
-        .collect()
+        .collect();
+    if let Some(access_path) = type_path.parent() {
+        reroot_label_descriptions(&mut descs, &[], &access_path, ctx);
+    }
+    descs
 }
 
 fn build_type_constructors(
@@ -956,12 +1029,19 @@ impl QualifiedModuleComponents {
         // signature immutable and forces only the requested constructor bucket,
         // preserving env.ml:1132-1137 lookup semantics without materializing
         // every constructor in large dependency signatures.
-        let built = Arc::new(build_constructors_for_name(
+        let mut built = build_constructors_for_name(
             self.access_path(),
             self.signature.as_ref(),
             name,
             ctx,
-        ));
+        );
+        reroot_constructor_descriptions(
+            &mut built,
+            self.signature.as_ref(),
+            self.access_path(),
+            ctx,
+        );
+        let built = Arc::new(built);
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_scan(
                 crate::perf_counters::LazyLookupKind::Constructor,
@@ -992,12 +1072,14 @@ impl QualifiedModuleComponents {
         // selected component path. For normal compilation, force just the label
         // bucket requested by typecore.ml:1107-1126-style qualified lookup; this
         // avoids constructing hundreds of unused JSX record labels per module view.
-        let built = Arc::new(build_labels_for_name(
+        let mut built = build_labels_for_name(
             self.access_path(),
             self.signature.as_ref(),
             name,
             ctx,
-        ));
+        );
+        reroot_label_descriptions(&mut built, self.signature.as_ref(), self.access_path(), ctx);
+        let built = Arc::new(built);
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_scan(
                 crate::perf_counters::LazyLookupKind::Label,

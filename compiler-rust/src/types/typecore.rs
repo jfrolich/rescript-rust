@@ -21952,6 +21952,19 @@ fn clone_copy_lookup_path(path: &Path) -> Path {
     path.clone()
 }
 
+/// `Subst.type_expr` with a type/module path map: copies the graph keeping
+/// generic levels and physical sharing, rewriting paths through `map_path`.
+pub(crate) fn copy_type_expr_mapping_paths(
+    ctx: &TypeContext,
+    ty: TypeExprRef,
+    cache: &mut TypeExprRefMap<TypeExprRef>,
+    map_path: &dyn Fn(&Path) -> Path,
+) -> TypeExprRef {
+    copy_lookup_type_expr_with_paths(ctx, ty, cache, &|p: &Path| map_path(p), &|p: &Path| {
+        map_path(p)
+    })
+}
+
 fn copy_lookup_type_expr_with_paths<TP, MP>(
     ctx: &TypeContext,
     ty: TypeExprRef,
