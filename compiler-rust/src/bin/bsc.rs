@@ -505,6 +505,7 @@ fn run() -> Result<()> {
         publish_in_process_signature: true,
         frontend_already_reported: from_ast,
         typed_artifacts: None,
+        keep_locs: true,
     };
 
     if is_interface {

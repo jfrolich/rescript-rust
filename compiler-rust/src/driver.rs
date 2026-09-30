@@ -1226,6 +1226,9 @@ pub struct CompilerOptions {
     /// Write OCaml-compatible `.cmi`/`.cmt`/`.cmti` files for editor tooling
     /// (compiler/ml/typemod.ml:1761-1796; js_implementation.ml:66-70).
     pub typed_artifacts: Option<std::sync::Arc<TypedArtifactOutput>>,
+    /// `Clflags.keep_locs` (`-keep-locs`/`-no-keep-locs`): whether saved
+    /// signatures keep source locations (subst.ml:57-67 `Subst.for_saving`).
+    pub keep_locs: bool,
 }
 
 /// Where and how to save the typed artifacts of one compilation unit.
@@ -1296,6 +1299,26 @@ fn save_typed_artifacts(
         source_digest,
         imports: &[],
     };
+    // The `.cmi` holds the `Subst.for_saving` copy of the signature.
+    let stripped: Option<Vec<crate::types::decl::SignatureItem>> = (!options.keep_locs).then(|| {
+        let mut sig = match &kind {
+            TypedArtifactKind::Implementation { cmi, .. } => {
+                cmi.as_ref().map(|(sign, _)| sign.to_vec()).unwrap_or_default()
+            }
+            TypedArtifactKind::Interface { sig_type, .. } => sig_type.to_vec(),
+        };
+        strip_saved_signature_locations(&mut sig);
+        sig
+    });
+    let kind = match (kind, stripped.as_deref()) {
+        (TypedArtifactKind::Implementation { structure, cmi: Some((_, dep)) }, Some(sig)) => {
+            TypedArtifactKind::Implementation {
+                structure,
+                cmi: Some((sig, dep)),
+            }
+        }
+        (kind, _) => kind,
+    };
     let mut files: Vec<(&str, Vec<u8>)> = Vec::new();
     match kind {
         TypedArtifactKind::Implementation { structure, cmi } => {
@@ -1321,9 +1344,10 @@ fn save_typed_artifacts(
             sig_type,
             deprecated,
         } => {
+            let cmi_sign = stripped.as_deref().unwrap_or(sig_type);
             files.push((
                 "cmi",
-                cmt_writer::cmi_bytes(arena, type_ctx, module_name, sig_type, &[], deprecated.as_deref()),
+                cmt_writer::cmi_bytes(arena, type_ctx, module_name, cmi_sign, &[], deprecated.as_deref()),
             ));
             files.push((
                 "cmti",
@@ -1332,7 +1356,7 @@ fn save_typed_artifacts(
                     type_ctx,
                     cmt_writer::BinaryAnnots::Interface(signature, sig_type),
                     &info,
-                    Some((sig_type, deprecated.as_deref())),
+                    Some((cmi_sign, deprecated.as_deref())),
                 ),
             ));
         }
@@ -1352,6 +1376,92 @@ fn save_typed_artifacts(
         }
     }
     Ok(())
+}
+
+/// `Subst.signature (Subst.for_saving ...)` with `Clflags.keep_locs = false`
+/// (subst.ml:57-67): saved signatures replace every location, including the
+/// attributes', with `Location.none`.
+fn strip_saved_signature_locations(sig: &mut [crate::types::decl::SignatureItem]) {
+    use crate::location::Location;
+    use crate::types::decl::{
+        Attribute, ConstructorArguments, LabelDeclaration, ModuleType, SignatureItem, TypeKind,
+    };
+    fn attrs(attrs: &mut [Attribute]) {
+        for attr in attrs {
+            attr.attr_loc = Location::none();
+            attr.attr_name.loc = Location::none();
+        }
+    }
+    fn labels(labels: &mut [LabelDeclaration]) {
+        for ld in labels {
+            ld.ld_loc = Location::none();
+            attrs(&mut ld.ld_attributes);
+        }
+    }
+    fn args(args: &mut ConstructorArguments) {
+        if let ConstructorArguments::CstrRecord(lds) = args {
+            labels(lds);
+        }
+    }
+    fn module_type(mty: &mut ModuleType) {
+        match mty {
+            ModuleType::MtySignature(sig) => strip_saved_signature_locations(sig),
+            ModuleType::MtyFunctor {
+                param_type, result, ..
+            } => {
+                if let Some(param) = param_type {
+                    module_type(param);
+                }
+                module_type(result);
+            }
+            ModuleType::MtyIdent(_) | ModuleType::MtyAlias(..) => {}
+        }
+    }
+    for item in sig {
+        match item {
+            SignatureItem::SigValue(_, vd) => {
+                vd.val_loc = Location::none();
+                attrs(&mut vd.val_attributes);
+            }
+            SignatureItem::SigType(_, td, _) => {
+                td.type_loc = Location::none();
+                attrs(&mut td.type_attributes);
+                match &mut td.type_kind {
+                    TypeKind::TypeRecord(lds, _) => labels(lds),
+                    TypeKind::TypeVariant(cds, _) => {
+                        for cd in cds {
+                            cd.cd_loc = Location::none();
+                            attrs(&mut cd.cd_attributes);
+                            args(&mut cd.cd_args);
+                        }
+                    }
+                    TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
+                }
+                for inlined in &mut td.type_inlined_types {
+                    let crate::types::decl::TypeInlinedType::Record { labels: lds, .. } = inlined;
+                    labels(lds);
+                }
+            }
+            SignatureItem::SigTypext(_, ext, _) => {
+                ext.ext_loc = Location::none();
+                attrs(&mut ext.ext_attributes);
+                args(&mut ext.ext_args);
+            }
+            SignatureItem::SigModule(_, md, _) => {
+                md.md_loc = Location::none();
+                attrs(&mut md.md_attributes);
+                module_type(&mut md.md_type);
+            }
+            SignatureItem::SigModtype(_, mtd) => {
+                mtd.mtd_loc = Location::none();
+                attrs(&mut mtd.mtd_attributes);
+                if let Some(mty) = &mut mtd.mtd_type {
+                    module_type(mty);
+                }
+            }
+            SignatureItem::SigClass | SignatureItem::SigClassType => {}
+        }
+    }
 }
 
 impl Default for CompilerOptions {
@@ -1398,6 +1508,7 @@ impl Default for CompilerOptions {
             publish_in_process_signature: true,
             frontend_already_reported: false,
             typed_artifacts: None,
+            keep_locs: true,
         }
     }
 }
@@ -15478,11 +15589,14 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             .take()
             .unwrap_or_else(PersistentEnv::new);
 
-        let signature_for_save = if signature_ready.is_some() {
+        let mut signature_for_save = if signature_ready.is_some() {
             std::mem::take(&mut published_signature)
         } else {
             published_signature.clone()
         };
+        if !options.keep_locs {
+            strip_saved_signature_locations(&mut signature_for_save);
+        }
         // OCaml compiler/ml/env.ml:1949-1952 saves a fresh
         // `Subst.signature (Subst.for_saving Subst.identity) sg` copy before
         // installing the persistent structure. Keep Rust's GenType raw-signature
@@ -16166,9 +16280,13 @@ pub fn typecheck_preprocessed_signature_in_process(
     let raw_signature = std::sync::Arc::new(
         crate::types::typecore::copy_lookup_signature_for_subst(&published_signature, &type_ctx),
     );
+    let mut saved_signature = published_signature.clone();
+    if !options.keep_locs {
+        strip_saved_signature_locations(&mut saved_signature);
+    }
     internal_env.register_in_memory_signature(
         module_name,
-        published_signature.clone(),
+        saved_signature,
         filename,
         crate::types::typemod::deprecated_of_sig(arena, signature),
         &type_ctx,

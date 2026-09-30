@@ -1761,6 +1761,8 @@ pub(crate) struct InProcessCompilerFlags {
     pub(crate) open_modules: Vec<String>,
     pub(crate) warning_specs: Vec<String>,
     pub(crate) warning_error_specs: Vec<String>,
+    /// `Clflags.keep_locs` (`-keep-locs`/`-no-keep-locs`, default on).
+    pub(crate) keep_locs: bool,
 }
 
 impl Default for InProcessCompilerFlags {
@@ -1781,6 +1783,7 @@ impl Default for InProcessCompilerFlags {
             open_modules: Vec::new(),
             warning_specs: Vec::new(),
             warning_error_specs: Vec::new(),
+            keep_locs: true,
         }
     }
 }
@@ -1802,6 +1805,9 @@ pub(crate) fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessComp
             "-make-runtime" => parsed.make_runtime = true,
             "-bs-g" => parsed.debug = true,
             "-bs-jsx-preserve" => parsed.jsx_preserve = true,
+            // compiler/bsc/rescript_compiler_main.ml:454-458.
+            "-keep-locs" => parsed.keep_locs = true,
+            "-no-keep-locs" => parsed.keep_locs = false,
             "-bs-jsx" => {
                 if let Some(version) = iter.next().and_then(|v| v.parse::<i32>().ok()) {
                     parsed.jsx_version = Some(version);
@@ -2056,6 +2062,7 @@ fn build_compiler_options(
         gentype_config,
         gentype_resolver,
         typed_artifacts: Some(std::sync::Arc::new(typed_artifact_output(package, source_file_path))),
+        keep_locs: parsed_flags.keep_locs,
         ..Default::default()
     })
 }
@@ -3113,6 +3120,7 @@ fn runtime_compiler_options(
         module_name: Some(module_name.to_string()),
         package_name: Some(runtime_config.name.clone()),
         make_runtime: parsed_flags.make_runtime,
+        keep_locs: parsed_flags.keep_locs,
         skip_js_render: true,
         ..Default::default()
     }
