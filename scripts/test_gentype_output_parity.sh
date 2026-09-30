@@ -509,8 +509,8 @@ run_suite() {
     if ! run_build "$suite_name: building expected outputs with OCaml bsc" "$suite_cache/errors/ocaml-build.log" bash -c '
         set -e
         cd "$0"
-        RESCRIPT_BSC_EXE="$1" "$2" clean
-        RESCRIPT_BSC_EXE="$1" "$2" build
+        RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$1" "$2" clean
+        RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$1" "$2" build
     ' "$project_dir" "$OCAML_BSC" "$RESCRIPT_CLI"; then
         echo -e "${RED}$suite_name: OCaml build failed; cannot compute parity for this suite${RESET}" >&2
         failed_suites=$((failed_suites + 1))

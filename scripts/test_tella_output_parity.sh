@@ -299,8 +299,8 @@ touch "$TEMP_DIR/ocaml-build-start.marker"
 if ! run_build "Step 3: Building expected outputs with OCaml bsc..." "$TEMP_DIR/ocaml-build.log" bash -c '
     set -e
     cd "$0"
-    RESCRIPT_BSC_EXE="$1" "$2" clean
-    RESCRIPT_BSC_EXE="$1" "$2" build
+    RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$1" "$2" clean
+    RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$1" "$2" build
 ' "$TELLA_BUILD_DIR" "$OCAML_BSC" "$RESCRIPT_CLI"; then
     cp "$TEMP_DIR/ocaml-build.log" "$CACHE_DIR/errors/ocaml-build.err" 2>/dev/null || true
     exit 2

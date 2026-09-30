@@ -256,7 +256,7 @@ compare_directory_case() {
     write_directory_project_config "$ocaml_project_dir" "$module_system" "$suffix" "$case_flags_raw" "$mode_flags_raw" "$extra_config_path"
     write_directory_project_config "$rust_project_dir" "$module_system" "$suffix" "$case_flags_raw" "$mode_flags_raw" "$extra_config_path"
 
-    run_capture "$ocaml_log" env RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --no-timing true "$ocaml_project_dir"
+    run_capture "$ocaml_log" env RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --no-timing true "$ocaml_project_dir"
     run_capture "$rust_log" env RESCRIPT_BSC_EXE="$RUST_BSC" "$REWATCH_BIN" build --in-process --no-timing true "$rust_project_dir"
 
     local ocaml_status rust_status

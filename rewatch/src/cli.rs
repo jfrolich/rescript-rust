@@ -204,28 +204,38 @@ pub struct WarnErrorArg {
 
 #[derive(Args, Debug, Clone, Copy)]
 pub struct RustParserArg {
-    /// Parse sources in-process with the Rust parser (no parser subprocess).
-    #[arg(long, default_value_t = false, num_args = 0..=1)]
+    /// Development only: parse with the Rust parser but compile with a bsc
+    /// subprocess (file-backed artifacts).
+    #[arg(long, default_value_t = false, num_args = 0..=1, hide = true)]
     pub rust: bool,
 }
 
 #[derive(Args, Debug, Clone, Copy)]
 pub struct SubprocessArg {
-    /// Run bsc as a subprocess with timeout (use with --rust). Default is in-process.
-    #[arg(long)]
+    /// Development only: run bsc as a subprocess with timeout (use with --rust).
+    #[arg(long, hide = true)]
     pub subprocess: bool,
 }
 
 #[derive(Args, Debug, Clone, Copy)]
 pub struct InProcessArg {
-    /// Run the Rust compiler fully in-process with no disk-based compiler artifacts.
-    /// Mutually exclusive with --rust.
-    #[arg(long)]
+    /// Accepted for compatibility: builds always compile in-process.
+    #[arg(long, hide = true)]
     pub in_process: bool,
 }
 
-/// Derive the build mode from CLI flags.
-/// Errors if --rust and --in-process are both set.
+/// Environment variable that selects the legacy bsc subprocess build. Only
+/// tooling that drives an external compiler (e.g. the OCaml reference bsc in
+/// parity scripts) should set it.
+pub const SUBPROCESS_BUILD_ENV: &str = "RESCRIPT_SUBPROCESS_BUILD";
+
+fn subprocess_build_requested() -> bool {
+    std::env::var(SUBPROCESS_BUILD_ENV).is_ok_and(|value| !value.is_empty() && value != "0")
+}
+
+/// Derive the build mode. Builds compile in-process; `--rust` (development)
+/// and `RESCRIPT_SUBPROCESS_BUILD=1` select the file-backed bsc subprocess
+/// modes. Errors if `--rust` and `--in-process` are both set.
 pub fn resolve_build_mode(
     rust: bool,
     in_process: bool,
@@ -235,7 +245,8 @@ pub fn resolve_build_mode(
         (true, true) => Err("--rust and --in-process are mutually exclusive".to_string()),
         (_, true) => Ok(BuildMode::InProcess),
         (true, false) => Ok(BuildMode::Rust),
-        (false, false) => Ok(BuildMode::Default),
+        (false, false) if subprocess_build_requested() => Ok(BuildMode::Default),
+        (false, false) => Ok(BuildMode::InProcess),
     }
 }
 

@@ -175,8 +175,17 @@ pub fn get_compiler_args(rescript_file_path: &Path) -> Result<String> {
     Ok(result)
 }
 
-pub fn get_compiler_info(project_context: &ProjectContext) -> Result<CompilerInfo> {
-    let bsc_path = helpers::get_bsc();
+pub fn get_compiler_info(project_context: &ProjectContext, build_mode: BuildMode) -> Result<CompilerInfo> {
+    // In-process builds compile with the compiler linked into this
+    // executable, so its identity invalidates previous builds; only the bsc
+    // subprocess modes need an external bsc.
+    let bsc_path = if build_mode.is_in_process() {
+        std::env::current_exe()
+            .and_then(|path| path.canonicalize())
+            .context("Could not resolve the rescript executable")?
+    } else {
+        helpers::get_bsc()
+    };
     let bsc_hash = helpers::compute_file_hash(&bsc_path).ok_or(anyhow!(
         "Failed to compute bsc hash for {}",
         bsc_path.to_string_lossy()
@@ -214,7 +223,7 @@ pub fn initialize_build(
     )
     .entered();
     let project_context = ProjectContext::new(path)?;
-    let compiler = get_compiler_info(&project_context)?;
+    let compiler = get_compiler_info(&project_context, build_mode)?;
 
     let timing_clean_start = Instant::now();
     let packages = packages::make(filter, &project_context, show_progress, prod, features.as_ref())?;
