@@ -2100,9 +2100,14 @@ mod tests {
         let c2 = mapper.map_constant(&current::Constant::Char(65));
         assert!(matches!(c2, pt0::Constant::Char(65)));
 
-        // Note: None delimiter is mapped to Some("js") for OCaml parsetree0 parity
+        // ast_mapper_to0.ml map_constant keeps the delimiter.
         let c3 = mapper.map_constant(&current::Constant::String(Cow::Borrowed("hello"), None));
-        assert!(matches!(c3, pt0::Constant::String(s, Some(d)) if s == "hello" && d == "js"));
+        assert!(matches!(c3, pt0::Constant::String(s, None) if s == "hello"));
+        let c4 = mapper.map_constant(&current::Constant::String(
+            Cow::Borrowed("hello"),
+            Some(Cow::Borrowed("js")),
+        ));
+        assert!(matches!(c4, pt0::Constant::String(s, Some(d)) if s == "hello" && d == "js"));
     }
 }
 
