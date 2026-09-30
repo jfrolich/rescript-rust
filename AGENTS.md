@@ -926,17 +926,27 @@ Rewatch follows the OTEL spec for configuration — no rewatch-specific knobs ex
 
 #### Running Rewatch Directly
 
-When running the rewatch binary directly (via `cargo run` or the compiled binary) during development, you need to set environment variables to point to the local compiler and runtime. Otherwise, rewatch will try to use the installed versions:
+When running the rewatch binary directly (via `cargo run` or the compiled binary) during development, point it at the local runtime. Otherwise, rewatch will try to use the installed version:
 
 ```bash
-# Set the compiler executable path
-export RESCRIPT_BSC_EXE=$(realpath _build/default/compiler/bsc/rescript_compiler_main.exe)
-
 # Set the runtime path
 export RESCRIPT_RUNTIME=$(realpath packages/@rescript/runtime)
 
 # Now you can run rewatch directly
 cargo run --manifest-path rewatch/Cargo.toml -- build
+```
+
+Builds compile in-process with the Rust compiler linked into rewatch: they
+write the JavaScript plus the `.cmi`/`.cmt`/`.cmti` files editor tooling reads,
+and need no `bsc` executable. One-shot builds recompile every module (watch
+mode keeps state in memory). The legacy file-backed `bsc` subprocess build is
+only used when `RESCRIPT_SUBPROCESS_BUILD=1` is set, together with
+`RESCRIPT_BSC_EXE`; the parity scripts use it to build their OCaml reference
+outputs:
+
+```bash
+RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE=$(realpath _build/install/default/bin/bsc) \
+  cargo run --manifest-path rewatch/Cargo.toml -- build
 ```
 
 Note that the dev binary is `./rewatch/target/debug/rescript`, not `rewatch`. The binary name is `rescript` because that's the package name in `Cargo.toml`.
