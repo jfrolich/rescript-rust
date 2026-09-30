@@ -555,6 +555,87 @@ pub enum AttributePayload {
     Structure(Vec<(String, String)>),
 }
 
+/// Visit every `Location` of a signature: declaration locations and the
+/// locations of their attributes, recursively through module types.
+pub fn for_each_signature_location(sig: &mut [SignatureItem], f: &mut dyn FnMut(&mut Location)) {
+    fn attrs(attrs: &mut [Attribute], f: &mut dyn FnMut(&mut Location)) {
+        for attr in attrs {
+            f(&mut attr.attr_loc);
+            f(&mut attr.attr_name.loc);
+        }
+    }
+    fn labels(labels: &mut [LabelDeclaration], f: &mut dyn FnMut(&mut Location)) {
+        for ld in labels {
+            f(&mut ld.ld_loc);
+            attrs(&mut ld.ld_attributes, f);
+        }
+    }
+    fn args(args: &mut ConstructorArguments, f: &mut dyn FnMut(&mut Location)) {
+        if let ConstructorArguments::CstrRecord(lds) = args {
+            labels(lds, f);
+        }
+    }
+    fn module_type(mty: &mut ModuleType, f: &mut dyn FnMut(&mut Location)) {
+        match mty {
+            ModuleType::MtySignature(sig) => for_each_signature_location(sig, f),
+            ModuleType::MtyFunctor {
+                param_type, result, ..
+            } => {
+                if let Some(param) = param_type {
+                    module_type(param, f);
+                }
+                module_type(result, f);
+            }
+            ModuleType::MtyIdent(_) | ModuleType::MtyAlias(..) => {}
+        }
+    }
+    for item in sig {
+        match item {
+            SignatureItem::SigValue(_, vd) => {
+                f(&mut vd.val_loc);
+                attrs(&mut vd.val_attributes, f);
+            }
+            SignatureItem::SigType(_, td, _) => {
+                f(&mut td.type_loc);
+                attrs(&mut td.type_attributes, f);
+                match &mut td.type_kind {
+                    TypeKind::TypeRecord(lds, _) => labels(lds, f),
+                    TypeKind::TypeVariant(cds, _) => {
+                        for cd in cds {
+                            f(&mut cd.cd_loc);
+                            attrs(&mut cd.cd_attributes, f);
+                            args(&mut cd.cd_args, f);
+                        }
+                    }
+                    TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
+                }
+                for inlined in &mut td.type_inlined_types {
+                    let TypeInlinedType::Record { labels: lds, .. } = inlined;
+                    labels(lds, f);
+                }
+            }
+            SignatureItem::SigTypext(_, ext, _) => {
+                f(&mut ext.ext_loc);
+                attrs(&mut ext.ext_attributes, f);
+                args(&mut ext.ext_args, f);
+            }
+            SignatureItem::SigModule(_, md, _) => {
+                f(&mut md.md_loc);
+                attrs(&mut md.md_attributes, f);
+                module_type(&mut md.md_type, f);
+            }
+            SignatureItem::SigModtype(_, mtd) => {
+                f(&mut mtd.mtd_loc);
+                attrs(&mut mtd.mtd_attributes, f);
+                if let Some(mty) = &mut mtd.mtd_type {
+                    module_type(mty, f);
+                }
+            }
+            SignatureItem::SigClass | SignatureItem::SigClassType => {}
+        }
+    }
+}
+
 pub const INTERNAL_OPTIONAL_ATTR_NAME: &str = "internal.optional";
 
 pub fn has_internal_optional_attr(attrs: &[Attribute]) -> bool {

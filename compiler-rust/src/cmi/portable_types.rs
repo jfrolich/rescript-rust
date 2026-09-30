@@ -601,6 +601,7 @@ fn serialize_signature(
     };
     let mut sig = sig.clone();
     ser.remap_signature(&mut sig);
+    ser.remap_signature_locations(&mut sig);
     let type_graph = PortableTypeGraph {
         entries: ser.entries,
         variant_layouts: ser.variant_layouts,
@@ -620,6 +621,12 @@ struct TypeGraphSerializer<'a> {
 }
 
 impl<'a> TypeGraphSerializer<'a> {
+    /// Remap the file names of every location in a signature (declarations
+    /// and attributes) to names portable across contexts.
+    fn remap_signature_locations(&mut self, sig: &mut Signature) {
+        crate::types::decl::for_each_signature_location(sig, &mut |loc| self.remap_loc(loc));
+    }
+
     /// Declaration locations name their file through the source arena's
     /// string table, which does not travel with the signature. Re-intern the
     /// name in the TypeContext's synthetic CMI name table, as reading a `.cmi`
@@ -941,9 +948,8 @@ impl<'a> TypeGraphSerializer<'a> {
 /// Load a PortablePersStruct into the current TypeContext, producing a PersStruct
 /// with valid TypeExprRefs.
 pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) -> PersStruct {
-    ctx.import_cmi_longident_names(&pps.cmi_longident_names);
-
-    let sig = internalize_signature(&pps.ps_sig, &pps.type_graph, ctx);
+    let mut sig = internalize_signature(&pps.ps_sig, &pps.type_graph, ctx);
+    remap_signature_file_names(&mut sig, &pps.cmi_longident_names, ctx);
     if pps.raw_ps_sig.is_some() && pps.raw_type_graph.is_some() {
         ctx.register_gentype_portable_raw_module_sig(&pps.ps_name, pps.clone());
     }
@@ -960,11 +966,31 @@ pub(crate) fn internalize_raw_signature(
     pps: &PortablePersStruct,
     ctx: &TypeContext,
 ) -> Option<Signature> {
-    Some(internalize_signature(
+    let mut sig = internalize_signature(
         pps.raw_ps_sig.as_ref()?,
         pps.raw_type_graph.as_ref()?,
         ctx,
-    ))
+    );
+    remap_signature_file_names(&mut sig, &pps.cmi_longident_names, ctx);
+    Some(sig)
+}
+
+/// Locations of a portable signature name their files through the
+/// publishing context's synthetic names; every context numbers those from the
+/// same base, so give each imported name a fresh index in `ctx`.
+fn remap_signature_file_names(sig: &mut Signature, names: &[(u32, String)], ctx: &TypeContext) {
+    let names: HashMap<u32, &str> = names.iter().map(|(raw, name)| (*raw, name.as_str())).collect();
+    let mut fresh: HashMap<u32, crate::intern::StrIdx> = HashMap::new();
+    crate::types::decl::for_each_signature_location(sig, &mut |loc| {
+        for pos in [&mut loc.loc_start, &mut loc.loc_end] {
+            let raw = pos.file_name.raw();
+            if let Some(name) = names.get(&raw) {
+                pos.file_name = *fresh
+                    .entry(raw)
+                    .or_insert_with(|| ctx.intern_cmi_longident_name(name));
+            }
+        }
+    });
 }
 
 fn internalize_signature(

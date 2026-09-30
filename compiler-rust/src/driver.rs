@@ -1385,30 +1385,18 @@ fn save_typed_artifacts(
 /// (subst.ml:57-67): saved signatures replace every location, including the
 /// attributes', with `Location.none`.
 fn strip_saved_signature_locations(sig: &mut [crate::types::decl::SignatureItem]) {
-    use crate::location::Location;
-    use crate::types::decl::{
-        Attribute, ConstructorArguments, LabelDeclaration, ModuleType, SignatureItem, TypeKind,
-    };
-    fn attrs(attrs: &mut [Attribute]) {
-        for attr in attrs {
-            attr.attr_loc = Location::none();
-            attr.attr_name.loc = Location::none();
-        }
-    }
-    fn labels(labels: &mut [LabelDeclaration]) {
-        for ld in labels {
-            ld.ld_loc = Location::none();
-            attrs(&mut ld.ld_attributes);
-        }
-    }
-    fn args(args: &mut ConstructorArguments) {
-        if let ConstructorArguments::CstrRecord(lds) = args {
-            labels(lds);
-        }
-    }
+    crate::types::decl::for_each_signature_location(sig, &mut |loc| {
+        *loc = crate::location::Location::none();
+    });
+}
+
+/// `Subst.extension_constructor` for saving drops `ext_loc` whatever
+/// `keep_locs` says (subst.ml:314-322).
+fn strip_saved_extension_locations(sig: &mut [crate::types::decl::SignatureItem]) {
+    use crate::types::decl::{ModuleType, SignatureItem};
     fn module_type(mty: &mut ModuleType) {
         match mty {
-            ModuleType::MtySignature(sig) => strip_saved_signature_locations(sig),
+            ModuleType::MtySignature(sig) => strip_saved_extension_locations(sig),
             ModuleType::MtyFunctor {
                 param_type, result, ..
             } => {
