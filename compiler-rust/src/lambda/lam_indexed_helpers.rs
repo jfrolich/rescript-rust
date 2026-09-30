@@ -142,10 +142,8 @@ fn boolean_location(store: &IndexedLambda, node: NodeId) -> Option<crate::locati
 fn is_assert_false(store: &IndexedLambda, node: NodeId) -> bool {
     matches!(
         store.view(node),
-        NodeView::Const(Constant::Int {
-            comment: Some(crate::lambda::lam_constant::PointerInfo::AssertFalse),
-            ..
-        })
+        NodeView::Const(Constant::Int { comment: Some(info), .. })
+            if matches!(**info, crate::lambda::lam_constant::PointerInfo::AssertFalse)
     )
 }
 fn is_true(store: &IndexedLambda, node: NodeId) -> bool {
@@ -613,7 +611,7 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                         )
                 }).map(|(_, node)| *node),
                 NodeView::Const(Constant::Block { tag_info, .. }) => {
-                    let runtime = match tag_info {
+                    let runtime = match &**tag_info {
                         crate::lambda::TagInfo::Constructor { runtime, .. } | crate::lambda::TagInfo::RecordInlined { runtime, .. } => Some(runtime),
                         _ => None,
                     };

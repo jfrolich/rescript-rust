@@ -70,8 +70,12 @@ impl LambdaCompiler {
             Constant::JsFalse => Expression::bool(false),
             Constant::Int {
                 i,
-                comment: Some(PointerInfo::Constructor(tag)),
-            } => match &tag.runtime_tag {
+                comment: Some(info),
+            } if matches!(**info, PointerInfo::Constructor(_)) => {
+                let PointerInfo::Constructor(tag) = &**info else {
+                    unreachable!()
+                };
+                match &tag.runtime_tag {
                 Some(ConstructorRuntimeTag::Int(value)) => Self::compile_runtime_int(*value),
                 // OCaml `Js_exp_make.tag_type` (js_exp_make.ml:1361) emits `@as`
                 // strings with `~delim:DStarJ`, printing the payload verbatim.
@@ -93,8 +97,9 @@ impl LambdaCompiler {
                     ExpressionDesc::Number(Number::int(*i)),
                     tag.name.clone(),
                 ),
+            }
             },
-            Constant::Int { i, comment } => match pointer_info_comment_text(comment.as_ref()) {
+            Constant::Int { i, comment } => match pointer_info_comment_text(comment.as_ref().map(|v| &**v)) {
                 Some(comment) => {
                     Expression::with_comment(ExpressionDesc::Number(Number::int(*i)), comment)
                 }
@@ -129,7 +134,7 @@ impl LambdaCompiler {
                 None => Expression::string(tag.name.clone()),
             },
             Constant::NativeInt { i, comment } => {
-                match pointer_info_comment_text(comment.as_ref()) {
+                match pointer_info_comment_text(comment.as_ref().map(|v| &**v)) {
                     Some(comment) => Expression::with_comment(
                         ExpressionDesc::Number(Number::float(i.to_string())),
                         comment,
@@ -176,7 +181,7 @@ impl LambdaCompiler {
                 Expression::new(ExpressionDesc::CamlBlock(
                     elems,
                     MutableFlag::NA,
-                    tag_info.clone(),
+                    *tag_info.clone(),
                 ))
             }
             Constant::Some(inner) => Self::compile_some_constant(inner),

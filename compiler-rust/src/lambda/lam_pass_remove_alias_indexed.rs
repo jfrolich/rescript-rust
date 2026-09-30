@@ -57,14 +57,12 @@ fn boolean_kind(store: &IndexedLambda, meta: &IndexedLamStats, id: &Ident) -> Ou
 }
 
 fn const_some(value: &crate::lambda::Constant) -> bool {
-    matches!(
-        value,
-        crate::lambda::Constant::Some(_)
-            | crate::lambda::Constant::Block {
-                tag_info: TagInfo::Some | TagInfo::SomeNotNested,
-                ..
-            }
-    )
+    matches!(value, crate::lambda::Constant::Some(_))
+        || matches!(
+            value,
+            crate::lambda::Constant::Block { tag_info, .. }
+                if matches!(**tag_info, TagInfo::Some | TagInfo::SomeNotNested)
+        )
 }
 
 fn field_get(
@@ -95,7 +93,7 @@ fn field_get(
                 })
         }
         Some(IndexedIdKind::Constant(crate::lambda::Constant::Block { tag_info, elements })) => {
-            let selected = match (info, tag_info) {
+            let selected = match (info, &**tag_info) {
                 (FieldDbgInfo::Record { name }, TagInfo::Record { fields, .. }) => fields
                     .iter()
                     .position(|(field, _)| field == name)
@@ -604,12 +602,12 @@ mod tests {
         }
     }
     fn apply(function: Lambda, args: Vec<Lambda>, jsx: bool) -> Lambda {
-        Lambda::Lapply(Apply {
+        Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(function),
             ap_args: args,
             ap_info: info(),
             ap_transformed_jsx: jsx,
-        })
+        }))
     }
     fn run(input: Lambda, start: i32) -> (Lambda, i32, usize) {
         let generator = IdGenerator::with_start_stamp(start);
@@ -738,11 +736,11 @@ mod tests {
         let shapes = vec![
             Lambda::const_(Constant::Some(Box::new(Constant::int(1)))),
             Lambda::const_(Constant::Block {
-                tag_info: TagInfo::Some,
+                tag_info: Box::new(TagInfo::Some),
                 elements: vec![Constant::int(1)],
             }),
             Lambda::const_(Constant::Block {
-                tag_info: TagInfo::SomeNotNested,
+                tag_info: Box::new(TagInfo::SomeNotNested),
                 elements: vec![Constant::int(1)],
             }),
             Lambda::prim(
@@ -874,10 +872,10 @@ mod tests {
         assert_exact(&actual, &fallback);
 
         let record = Constant::Block {
-            tag_info: TagInfo::record(
+            tag_info: Box::new(TagInfo::record(
                 vec![("a".into(), false), ("b".into(), false)],
                 crate::parser::ast::MutableFlag::Immutable,
-            ),
+            )),
             elements: vec![Constant::int(7), Constant::int(8)],
         };
         let actual = simplify_field(
@@ -888,7 +886,7 @@ mod tests {
         );
         assert_exact(&actual, &int(8));
         let tuple = Constant::Block {
-            tag_info: TagInfo::Tuple,
+            tag_info: Box::new(TagInfo::Tuple),
             elements: vec![Constant::int(9)],
         };
         let actual = simplify_field(
@@ -1165,12 +1163,12 @@ mod tests {
         ];
         for attr in variants {
             let function = Lambda::function_(1, vec![x.clone()], Lambda::var(x.clone()), attr);
-            let input = Lambda::Lapply(Apply {
+            let input = Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(function),
                 ap_args: vec![int(1)],
                 ap_info: app_info.clone(),
                 ap_transformed_jsx: true,
-            });
+            }));
             let (actual, frontier, _) = run(input.clone(), 20);
             assert_exact(&actual, &input);
             assert_eq!(frontier, 20);
@@ -1181,12 +1179,12 @@ mod tests {
             Lambda::var(x),
             FunctionAttribute::default(),
         );
-        let input = Lambda::Lapply(Apply {
+        let input = Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(function),
             ap_args: vec![int(1)],
             ap_info: app_info,
             ap_transformed_jsx: true,
-        });
+        }));
         let (actual, _, _) = run(input.clone(), 20);
         assert_exact(&actual, &input);
     }
@@ -1233,10 +1231,10 @@ mod tests {
         let Lambda::Lapply(expected_apply) = input else {
             unreachable!()
         };
-        let expected = Lambda::Lapply(Apply {
+        let expected = Lambda::Lapply(Box::new(Apply {
             ap_transformed_jsx: false,
-            ..expected_apply
-        });
+            ..*expected_apply
+        }));
         assert_exact(&context.materialize(), &expected);
         assert_eq!(generator.current_stamp(), 100);
     }
@@ -1321,7 +1319,7 @@ mod tests {
         let x = id("x", 1);
         let callee = id("callee", 2);
         let input = apply(
-            Lambda::Lfunction(LFunction {
+            Lambda::Lfunction(Box::new(LFunction {
                 arity: 1,
                 params: vec![x.clone()],
                 body: Box::new(apply(
@@ -1330,7 +1328,7 @@ mod tests {
                     true,
                 )),
                 attr: FunctionAttribute::default(),
-            }),
+            })),
             vec![int(4)],
             true,
         );
@@ -1539,7 +1537,7 @@ mod tests {
                 measurements.metadata_retained_only_side_payload_shallow_bytes,
                 measurements.superseded_unreachable_side_payload_shallow_bytes,
             ),
-            (28, 6, 3, 8, 20, 496, 204, 1268),
+            (28, 6, 3, 8, 20, 448, 204, 1268),
         );
     }
 }

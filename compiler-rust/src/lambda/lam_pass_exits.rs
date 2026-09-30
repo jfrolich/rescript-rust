@@ -347,14 +347,14 @@ fn subst_helper_owned(
             apply.ap_transformed_jsx,
         ),
         // lam_pass_exits.ml:206-207
-        Lambda::Lfunction(func) => Lambda::Lfunction(LFunction {
+        Lambda::Lfunction(func) => Lambda::Lfunction(Box::new(LFunction {
             arity: func.arity,
             params: func.params,
             body: map_box(func.body, |inner| {
                 subst_helper_owned(subst, counts, id_gen, inner)
             }),
             attr: func.attr,
-        }),
+        })),
         // lam_pass_exits.ml:208
         Lambda::Llet(kind, v, l1, l2) => Lambda::Llet(
             kind,

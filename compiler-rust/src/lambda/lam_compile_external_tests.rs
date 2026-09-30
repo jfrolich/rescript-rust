@@ -221,7 +221,7 @@ fn translates_external_module_values_to_qualified_members_like_ocaml() {
 fn lowers_pjs_unsafe_downgrade_getters_to_method_calls() {
     let mut compiler = LambdaCompiler::new();
     let john = Ident::create_persistent("john");
-    let lam = Lambda::Lapply(Apply {
+    let lam = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::prim(
             Primitive::PjsUnsafeDowngrade {
                 name: "say".to_string(),
@@ -246,7 +246,7 @@ fn lowers_pjs_unsafe_downgrade_getters_to_method_calls() {
             status: ApplyStatus::Uncurry,
         },
         ap_transformed_jsx: false,
-    });
+    }));
 
     let program = compiler.compile_program(&lam);
     let rendered = print_block(&program.block);
@@ -358,7 +358,7 @@ fn lowers_default_module_values_in_dynamic_imports() {
 fn lowers_unit_returning_default_module_functions_in_dynamic_imports() {
     let mut compiler = LambdaCompiler::new();
     let param = Ident::create_local("prim");
-    let eta_expanded_default = Lambda::Lfunction(crate::lambda::LFunction {
+    let eta_expanded_default = Lambda::Lfunction(Box::new(crate::lambda::LFunction {
         arity: 1,
         params: vec![param.clone()],
         body: Box::new(Lambda::seq(
@@ -386,7 +386,7 @@ fn lowers_unit_returning_default_module_functions_in_dynamic_imports() {
             Lambda::const_(Constant::JsUndefined { is_unit: true }),
         )),
         attr: crate::lambda::FunctionAttribute::default(),
-    });
+    }));
     let program = compiler.compile_program(&Lambda::prim(
         Primitive::Pimport,
         vec![eta_expanded_default],
@@ -671,7 +671,7 @@ fn lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml() {
             transformed_jsx: false,
         },
         vec![Lambda::const_(Constant::Block {
-            tag_info: TagInfo::PolyVar("b".to_string()),
+            tag_info: Box::new(TagInfo::PolyVar("b".to_string())),
             elements: vec![Constant::Pointer("b".to_string()), Constant::int(2)],
         })],
         Location::none(),

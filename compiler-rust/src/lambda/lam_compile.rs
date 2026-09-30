@@ -1122,12 +1122,15 @@ impl LambdaCompiler {
     }
 
     fn module_field_apply_target<'a>(&self, lam: &'a Lambda) -> Option<(ModuleId, &'a str)> {
-        let Lambda::Lprim(crate::lambda::PrimInfo {
+        let Lambda::Lprim(__prim202) = lam
+        else {
+            return None;
+        };
+        let crate::lambda::PrimInfo {
             primitive: Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }),
             args,
             ..
-        }) = lam
-        else {
+        } = __prim202.as_ref() else {
             return None;
         };
         let [Lambda::LglobalModule(id, dynamic_import)] = args.as_slice() else {
@@ -1241,7 +1244,7 @@ impl LambdaCompiler {
             && lfunction_can_be_inlined(&function)
         {
             let reduced =
-                self.import_and_beta_indexed_cmj_function(context, function, args.as_slice());
+                self.import_and_beta_indexed_cmj_function(context, *function, args.as_slice());
             return Some(PreparedIndexedExternalApply::Reduced(reduced));
         }
 
@@ -1398,11 +1401,19 @@ impl LambdaCompiler {
     ) -> bool {
         match lam {
             Lambda::Lsequence(set, rest) => match set.as_ref() {
-                Lambda::Lprim(PrimInfo {
+                Lambda::Lprim(__prim5) if matches!(__prim5.as_ref(), PrimInfo {
                     primitive: Primitive::Psetfield(_, field_info),
                     args,
                     ..
-                }) if matches!(args.as_slice(), [Lambda::Lvar(id), _] if id == copy_id) => {
+                } if matches!(args.as_slice(), [Lambda::Lvar(id), _] if id == copy_id)) => {
+            let PrimInfo {
+                    primitive: Primitive::Psetfield(_, field_info),
+                    args,
+                    ..
+                } = __prim5.as_ref() else {
+                unreachable!()
+            };
+
                     overrides.push((field_info, &args[1]));
                     Self::collect_record_spread_overrides(copy_id, rest, overrides)
                 }
@@ -1423,12 +1434,15 @@ impl LambdaCompiler {
         value: &Lambda,
         body: &Lambda,
     ) -> Option<Compiled> {
-        let Lambda::Lprim(PrimInfo {
+        let Lambda::Lprim(__prim201) = value
+        else {
+            return None;
+        };
+        let PrimInfo {
             primitive: Primitive::Pduprecord,
             args,
             ..
-        }) = value
-        else {
+        } = __prim201.as_ref() else {
             return None;
         };
         let [init] = args.as_slice() else {
@@ -1548,10 +1562,10 @@ impl LambdaCompiler {
                     Lambda::Llet(..)
                         | Lambda::Lletrec(..)
                         | Lambda::Lsequence(..)
-                        | Lambda::Lprim(crate::lambda::PrimInfo {
-                            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_), _,),
-                            ..
-                        })
+                ) || matches!(
+                    body.as_ref(),
+                    Lambda::Lprim(prim)
+                        if matches!(prim.primitive, Primitive::Pmakeblock(TagInfo::ModuleExport(_), _))
                 );
                 let mut prelude = if is_top_level_let {
                     self.with_fresh_loop_label_counter(|this| {
@@ -1581,10 +1595,10 @@ impl LambdaCompiler {
                     Lambda::Llet(..)
                         | Lambda::Lletrec(..)
                         | Lambda::Lsequence(..)
-                        | Lambda::Lprim(crate::lambda::PrimInfo {
-                            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_), _,),
-                            ..
-                        })
+                ) || matches!(
+                    body.as_ref(),
+                    Lambda::Lprim(prim)
+                        if matches!(prim.primitive, Primitive::Pmakeblock(TagInfo::ModuleExport(_), _))
                 );
                 let mut prelude = if is_top_level {
                     self.with_fresh_loop_label_counter(|this| {
@@ -1725,10 +1739,10 @@ impl LambdaCompiler {
                     Lambda::Llet(..)
                         | Lambda::Lletrec(..)
                         | Lambda::Lsequence(..)
-                        | Lambda::Lprim(crate::lambda::PrimInfo {
-                            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_), _,),
-                            ..
-                        })
+                ) || matches!(
+                    b.as_ref(),
+                    Lambda::Lprim(prim)
+                        if matches!(prim.primitive, Primitive::Pmakeblock(TagInfo::ModuleExport(_), _))
                 );
                 let first = if head_is_top_level {
                     self.with_fresh_loop_label_counter(|this| this.compile_effect_output(a))
@@ -3579,7 +3593,7 @@ impl LambdaCompiler {
     ) -> Expression {
         let has_self_tailcall = function_has_self_tailcall(tail_targets, &func.body);
         if !has_self_tailcall {
-            return self.compile_expr(&Lambda::Lfunction(func.clone())).expr;
+            return self.compile_expr(&Lambda::Lfunction(Box::new(func.clone()))).expr;
         }
 
         let params = if func.attr.one_unit_arg {
@@ -3591,7 +3605,7 @@ impl LambdaCompiler {
         let body = self.compile_tail_loop_return_block(&func.body, &mut tail_loop);
 
         if !tail_loop.triggered {
-            return self.compile_expr(&Lambda::Lfunction(func.clone())).expr;
+            return self.compile_expr(&Lambda::Lfunction(Box::new(func.clone()))).expr;
         }
 
         let lowered_params = params
@@ -5457,7 +5471,9 @@ impl LambdaCompiler {
     fn dynamic_import_supported_argument(lam: &Lambda) -> bool {
         match lam {
             Lambda::LglobalModule(_, _) | Lambda::Lvar(_) => true,
-            Lambda::Lprim(PrimInfo { primitive, .. }) => {
+            Lambda::Lprim(__prim4) => {
+            let PrimInfo { primitive, .. } = __prim4.as_ref();
+
                 matches!(
                     primitive,
                     Primitive::Pfield(_, _) | Primitive::PjsCall { .. }
@@ -6535,7 +6551,7 @@ fn staticcatch_debug_kind(lam: &Lambda) -> &'static str {
 
 fn recursive_function_binding_value(expr: &Lambda) -> Option<LFunction> {
     match expr {
-        Lambda::Lfunction(func) => Some(func.clone()),
+        Lambda::Lfunction(func) => Some(*func.clone()),
         _ => None,
     }
 }
@@ -6713,27 +6729,45 @@ fn lower_ocaml_for_range_direction<'a>(
     match (direction, finish) {
         (
             crate::lambda::DirectionFlag::Upto,
-            Lambda::Lprim(crate::lambda::PrimInfo {
+            Lambda::Lprim(__prim3),
+        ) if matches!(__prim3.as_ref(), crate::lambda::PrimInfo {
                 primitive: Primitive::Psubint,
                 args,
                 ..
-            }),
-        ) => match args.as_slice() {
+            }) => {
+            let crate::lambda::PrimInfo {
+                primitive: Primitive::Psubint,
+                args,
+                ..
+            } = __prim3.as_ref() else {
+                unreachable!()
+            };
+            match args.as_slice() {
             [new_finish, Lambda::Lconst(Constant::Int { i: 1, .. })] => {
                 (new_finish, ForDirection::Up)
             }
             _ => (finish, ForDirection::Upto),
+        }
         },
         (
             crate::lambda::DirectionFlag::Upto,
-            Lambda::Lprim(crate::lambda::PrimInfo {
+            Lambda::Lprim(__prim2),
+        ) if matches!(__prim2.as_ref(), crate::lambda::PrimInfo {
                 primitive: Primitive::Poffsetint(-1),
                 args,
                 ..
-            }),
-        ) => match args.as_slice() {
+            }) => {
+            let crate::lambda::PrimInfo {
+                primitive: Primitive::Poffsetint(-1),
+                args,
+                ..
+            } = __prim2.as_ref() else {
+                unreachable!()
+            };
+            match args.as_slice() {
             [new_finish] => (new_finish, ForDirection::Up),
             _ => (finish, ForDirection::Upto),
+        }
         },
         (crate::lambda::DirectionFlag::Upto, _) => (finish, ForDirection::Upto),
         (crate::lambda::DirectionFlag::Downto, _) => (finish, ForDirection::Downto),
@@ -6805,7 +6839,9 @@ pub(crate) fn trailing_return_expression(block: &[Statement]) -> Option<&Express
 
 fn function_has_self_tailcall(tail_targets: &[Ident], lam: &Lambda) -> bool {
     match lam {
-        Lambda::Lapply(Apply { ap_func, .. }) => {
+        Lambda::Lapply(__apply1) => {
+            let Apply { ap_func, .. } = __apply1.as_ref();
+
             matches!(ap_func.as_ref(), Lambda::Lvar(id) if tail_targets.iter().any(|target| id.same(target)))
         }
         Lambda::Llet(_, _, _, body) => function_has_self_tailcall(tail_targets, body),
@@ -7265,13 +7301,12 @@ fn collect_cmj_export_arities_from_simplified_lambda(
                         .unwrap_or(arg),
                     _ => arg,
                 };
-                if let Lambda::Lprim(PrimInfo {
+                if let Lambda::Lprim(__prim200) = value && let PrimInfo {
                     primitive:
                         Primitive::Pmakeblock(_, crate::lambda::lam_primitive::Mutable::Immutable),
                     args,
                     ..
-                }) = value
-                {
+                } = __prim200.as_ref() {
                     let submodule_arities = args
                         .iter()
                         .map(|lam| get_arity(&meta, lam))
@@ -7303,11 +7338,20 @@ fn collect_toplevel_export_bindings<'a>(
             collect_toplevel_export_bindings(body, bindings)
         }
         Lambda::Lsequence(_, right) => collect_toplevel_export_bindings(right, bindings),
-        Lambda::Lprim(PrimInfo {
+        Lambda::Lprim(__prim0) if matches!(__prim0.as_ref(), PrimInfo {
             primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(exports), _),
             args,
             ..
-        }) => Some((exports, args)),
+        }) => {
+            let PrimInfo {
+            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(exports), _),
+            args,
+            ..
+        } = __prim0.as_ref() else {
+                unreachable!()
+            };
+            Some((exports, args))
+        },
         _ => None,
     }
 }

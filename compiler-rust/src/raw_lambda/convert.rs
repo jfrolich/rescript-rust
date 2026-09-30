@@ -133,14 +133,14 @@ fn raw_constructor_constant(
     };
     Constant::Int {
         i: tag,
-        comment: Some(comment),
+        comment: Some(Box::new(comment)),
     }
 }
 
 fn raw_optional_none_constant() -> Constant {
     Constant::Int {
         i: 0,
-        comment: Some(PointerInfo::ShapeNone),
+        comment: Some(Box::new(PointerInfo::ShapeNone)),
     }
 }
 
@@ -560,7 +560,7 @@ fn structure_has_config_string(structure: &Structure, value: &str, arena: &Parse
 fn raw_polyvariant_const(tag: &str) -> RawLambda {
     RawLambda::const_(Constant::Int {
         i: crate::types::btype::hash_variant(tag),
-        comment: Some(PointerInfo::PolyVariant(tag.to_string())),
+        comment: Some(Box::new(PointerInfo::PolyVariant(tag.to_string()))),
     })
 }
 
@@ -2662,7 +2662,7 @@ impl<'a> RawLambdaConverter<'a> {
                 "File {file:?}, line {line}, characters {start_col}-{end_col}"
             ))),
             RawLocKind::Pos => RawLambda::const_(Constant::Block {
-                tag_info: TagInfo::Tuple,
+                tag_info: Box::new(TagInfo::Tuple),
                 elements: vec![
                     Constant::ImmString(file),
                     Constant::int(line),
@@ -2700,7 +2700,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn failure_payload(&self, loc: Location) -> Constant {
         Constant::Block {
-            tag_info: TagInfo::Tuple,
+            tag_info: Box::new(TagInfo::Tuple),
             elements: vec![
                 Constant::string_with_delim(self.basename_for_loc(loc), StringDelim::Plain),
                 Constant::int(loc.loc_start.line),
@@ -3573,7 +3573,7 @@ impl<'a> RawLambdaConverter<'a> {
             .collect::<Option<Vec<_>>>()
         {
             RawLambda::const_(Constant::Block {
-                tag_info,
+                tag_info: Box::new(tag_info),
                 elements: constants,
             })
         } else {
@@ -5651,7 +5651,7 @@ impl<'a> RawLambdaConverter<'a> {
         let loc = self.loc(loc_idx);
         let fname = self.basename_for_loc(loc);
         RawLambda::Lconst(Constant::Block {
-            tag_info: TagInfo::Tuple,
+            tag_info: Box::new(TagInfo::Tuple),
             elements: vec![
                 Constant::string_with_delim(fname, StringDelim::Plain),
                 Constant::int(loc.loc_start.line),
@@ -5759,7 +5759,7 @@ impl<'a> RawLambdaConverter<'a> {
                 // Module alias: constant value
                 Some(Constant::Block {
                     // value tag
-                    tag_info: TagInfo::constructor("value", 2),
+                    tag_info: Box::new(TagInfo::constructor("value", 2)),
                     elements: vec![Constant::ModuleAlias],
                 })
             }
@@ -5767,9 +5767,9 @@ impl<'a> RawLambdaConverter<'a> {
                 let struct_shape = self.init_shape_struct(env, sg)?;
                 Some(Constant::Block {
                     // Module tag
-                    tag_info: TagInfo::constructor("Module", 2),
+                    tag_info: Box::new(TagInfo::constructor("Module", 2)),
                     elements: vec![Constant::Block {
-                        tag_info: TagInfo::Tuple,
+                        tag_info: Box::new(TagInfo::Tuple),
                         elements: struct_shape,
                     }],
                 })
@@ -5815,7 +5815,7 @@ impl<'a> RawLambdaConverter<'a> {
                             let init_v = recmodule_function_shape_constant();
                             // add_name: wrap with (shape, name) tuple
                             result.push(Constant::Block {
-                                tag_info: TagInfo::Tuple,
+                                tag_info: Box::new(TagInfo::Tuple),
                                 elements: vec![
                                     init_v,
                                     Constant::string_with_delim(id.name(), StringDelim::Plain),
@@ -5834,7 +5834,7 @@ impl<'a> RawLambdaConverter<'a> {
                     let sub_shape = self.init_shape_mod(&env, &md.md_type)?;
                     // add_name: wrap with (shape, name) tuple
                     result.push(Constant::Block {
-                        tag_info: TagInfo::Tuple,
+                        tag_info: Box::new(TagInfo::Tuple),
                         elements: vec![
                             sub_shape,
                             Constant::string_with_delim(id.name(), StringDelim::Plain),
@@ -7245,14 +7245,14 @@ impl<'a> RawLambdaConverter<'a> {
             .unwrap_or(crate::lambda::SwitchDispatch::Direct);
         let sw = Lambda::Lswitch(
             Box::new(scrut_var),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: false,
                 sw_consts: const_cases,
                 sw_blocks_full: false,
                 sw_blocks: block_cases,
                 sw_failaction: failaction,
                 sw_dispatch: dispatch,
-            },
+            }),
         );
 
         Some(match wrap_let {
@@ -7470,7 +7470,7 @@ impl<'a> RawLambdaConverter<'a> {
                 predef_exception_ident("Match_failure", PREDEF_MATCH_FAILURE_STAMP);
             let exn = RawLambda::LglobalModule(match_failure_ident, false);
             let payload = RawLambda::Lconst(Constant::Block {
-                tag_info: TagInfo::Tuple,
+                tag_info: Box::new(TagInfo::Tuple),
                 elements: vec![
                     Constant::string_with_delim(fname.clone(), StringDelim::Plain),
                     Constant::int(line),
@@ -7539,7 +7539,7 @@ impl<'a> RawLambdaConverter<'a> {
                     predef_exception_ident("Match_failure", PREDEF_MATCH_FAILURE_STAMP);
                 let exn = RawLambda::LglobalModule(match_failure_ident, false);
                 let payload = RawLambda::Lconst(Constant::Block {
-                    tag_info: TagInfo::Tuple,
+                    tag_info: Box::new(TagInfo::Tuple),
                     elements: vec![
                         Constant::string_with_delim(fname.clone(), StringDelim::Plain),
                         Constant::int(line),
@@ -10462,14 +10462,14 @@ impl<'a> RawLambdaConverter<'a> {
 
         Some(Lambda::Lswitch(
             Box::new(Lambda::var(ids[idx].clone())),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: false,
                 sw_consts,
                 sw_blocks_full: false,
                 sw_blocks,
                 sw_failaction: failaction,
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            },
+            }),
         ))
     }
 
@@ -10891,7 +10891,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 );
                                 let exn = RawLambda::LglobalModule(match_failure_ident, false);
                                 let payload = RawLambda::Lconst(Constant::Block {
-                                    tag_info: TagInfo::Tuple,
+                                    tag_info: Box::new(TagInfo::Tuple),
                                     elements: vec![
                                         Constant::string_with_delim(
                                             fname.clone(),
@@ -11379,7 +11379,7 @@ impl<'a> RawLambdaConverter<'a> {
         transformed_jsx: bool,
     ) -> Lambda {
         fn lapply(loc: Location, func: Lambda, args: Vec<Lambda>, transformed_jsx: bool) -> Lambda {
-            Lambda::Lapply(Apply {
+            Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(func),
                 ap_args: args,
                 ap_info: ApInfo {
@@ -11388,7 +11388,7 @@ impl<'a> RawLambdaConverter<'a> {
                     status: ApplyStatus::Na,
                 },
                 ap_transformed_jsx: transformed_jsx,
-            })
+            }))
         }
 
         fn is_simple(lam: &Lambda) -> bool {
@@ -11458,12 +11458,12 @@ impl<'a> RawLambdaConverter<'a> {
                         loc.clone(),
                         transformed_jsx,
                     ) {
-                        Lambda::Lfunction(func) => Lambda::Lfunction(crate::lambda::LFunction {
+                        Lambda::Lfunction(func) => Lambda::Lfunction(Box::new(crate::lambda::LFunction {
                             arity: func.arity + 1,
                             params: std::iter::once(id_arg).chain(func.params).collect(),
                             body: func.body,
                             attr: func.attr,
-                        }),
+                        })),
                         lam => {
                             Lambda::function_(1, vec![id_arg], lam, FunctionAttribute::default())
                         }
@@ -12211,7 +12211,7 @@ fn ffi_marshaled_constant(value: &OcamlValue) -> Option<Constant> {
         }),
         OcamlValue::Block(1, fields) if fields.len() == 2 => Some(Constant::Int {
             i: fields[0].as_int() as i32,
-            comment: ffi_marshaled_pointer_info(&fields[1]),
+            comment: (ffi_marshaled_pointer_info(&fields[1])).map(Box::new),
         }),
         OcamlValue::Block(2, fields) if fields.len() == 1 => Some(Constant::Constructor(
             ffi_marshaled_variant_tag(&fields[0])?,
@@ -12402,10 +12402,10 @@ mod tests {
 
         assert!(matches!(info.primitive, Primitive::Pjscomp(Comparison::Eq)));
         assert!(
-            matches!(info.args.as_slice(), [RawLambda::Lvar(id), RawLambda::Lconst(Constant::Int { i, comment: Some(PointerInfo::PolyVariant(name)) })]
+            matches!(info.args.as_slice(), [RawLambda::Lvar(id), RawLambda::Lconst(Constant::Int { i, comment: Some(comment) })]
             if id.same(&scrutinee_id)
                 && *i == crate::types::btype::hash_variant("InvalidNext")
-                && name == "InvalidNext")
+                && matches!(&**comment, PointerInfo::PolyVariant(name) if name == "InvalidNext"))
         );
     }
 
@@ -12508,17 +12508,18 @@ mod tests {
 
         assert!(matches!(
             lowered,
-            RawLambda::Lconst(Constant::Block {
-                tag_info:
-                    TagInfo::RecordInlined {
-                        name,
-                        num_nonconst,
-                        fields,
-                        mutable_flag: ParserMutableFlag::Immutable,
-                        ..
-                    },
-                elements,
-            }) if name == "B" && num_nonconst == 1 && fields.is_empty() && elements.is_empty()
+            RawLambda::Lconst(Constant::Block { tag_info, elements })
+                if elements.is_empty()
+                    && matches!(
+                        &*tag_info,
+                        TagInfo::RecordInlined {
+                            name,
+                            num_nonconst,
+                            fields,
+                            mutable_flag: ParserMutableFlag::Immutable,
+                            ..
+                        } if name == "B" && *num_nonconst == 1 && fields.is_empty()
+                    )
         ));
     }
 

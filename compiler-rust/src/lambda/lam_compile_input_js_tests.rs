@@ -29,7 +29,7 @@ fn indexed_identity_module_emits_original_identifier_with_all_flags() {
             };
             // Exercise the consumer shape without the producer smart constructor
             // collapsing the inlined module wrapper first.
-            let body = Lambda::Lprim(PrimInfo {
+            let body = Lambda::Lprim(Box::new(PrimInfo {
                 primitive: Primitive::Pmakeblock(
                     crate::lambda::TagInfo::Module(vec!["value".into()]),
                     Mutable::Immutable,
@@ -40,7 +40,7 @@ fn indexed_identity_module_emits_original_identifier_with_all_flags() {
                     Lambda::var(alias.clone())
                 }],
                 loc: Location::none(),
-            });
+            }));
             let body = if inline {
                 body
             } else {

@@ -417,12 +417,12 @@ fn constant(c: &Constant) -> Sexp {
         Constant::Int { i, comment } => Sexp::list(vec![
             Sexp::atom("Const_int"),
             Sexp::atom(i.to_string()),
-            pointer_info(comment),
+            pointer_info(&comment.as_deref().cloned()),
         ]),
         Constant::NativeInt { i, comment } => Sexp::list(vec![
             Sexp::atom("Const_int"),
             Sexp::atom(i.to_string()),
-            pointer_info(comment),
+            pointer_info(&comment.as_deref().cloned()),
         ]),
         Constant::Constructor(tag) => {
             Sexp::list(vec![Sexp::atom("Const_constructor"), variant_tag(tag)])
@@ -652,30 +652,36 @@ fn lambda(lam: &Lambda, with_locs: bool) -> Sexp {
             bool_sexp(*dynamic_import),
         ]),
         Lambda::Lconst(c) => Sexp::list(vec![Sexp::atom("Lconst"), constant(c)]),
-        Lambda::Lapply(Apply {
-            ap_func,
-            ap_args,
-            ap_info,
-            ap_transformed_jsx,
-        }) => Sexp::list(vec![
-            Sexp::atom("Lapply"),
-            lambda(ap_func, with_locs),
-            Sexp::list(ap_args.iter().map(|a| lambda(a, with_locs)).collect()),
-            ap_info_sexp(ap_info, with_locs),
-            bool_sexp(*ap_transformed_jsx),
-        ]),
-        Lambda::Lfunction(LFunction {
-            arity,
-            params,
-            body,
-            attr,
-        }) => Sexp::list(vec![
-            Sexp::atom("Lfunction"),
-            int(*arity),
-            Sexp::list(params.iter().map(ident).collect()),
-            lambda(body, with_locs),
-            function_attribute(attr),
-        ]),
+        Lambda::Lapply(__apply2) => {
+            let Apply {
+                ap_func,
+                ap_args,
+                ap_info,
+                ap_transformed_jsx,
+            } = __apply2.as_ref();
+            Sexp::list(vec![
+                Sexp::atom("Lapply"),
+                lambda(ap_func, with_locs),
+                Sexp::list(ap_args.iter().map(|a| lambda(a, with_locs)).collect()),
+                ap_info_sexp(ap_info, with_locs),
+                bool_sexp(*ap_transformed_jsx),
+            ])
+        }
+        Lambda::Lfunction(__func1) => {
+            let LFunction {
+                arity,
+                params,
+                body,
+                attr,
+            } = __func1.as_ref();
+            Sexp::list(vec![
+                Sexp::atom("Lfunction"),
+                int(*arity),
+                Sexp::list(params.iter().map(ident).collect()),
+                lambda(body, with_locs),
+                function_attribute(attr),
+            ])
+        }
         Lambda::Llet(kind, id, arg, body) => Sexp::list(vec![
             Sexp::atom("Llet"),
             let_kind(kind),
@@ -693,11 +699,13 @@ fn lambda(lam: &Lambda, with_locs: bool) -> Sexp {
             ),
             lambda(body, with_locs),
         ]),
-        Lambda::Lprim(PrimInfo {
-            primitive: prim,
-            args,
-            loc: _,
-        }) => {
+        Lambda::Lprim(__prim0) => {
+            let PrimInfo {
+                primitive: prim,
+                args,
+                loc: _,
+            } = __prim0.as_ref();
+
             let items = vec![
                 Sexp::atom("Lprim"),
                 primitive(prim, with_locs),

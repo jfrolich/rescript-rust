@@ -99,11 +99,11 @@ pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> O
             let new_args = substitute_args(&prim_info.args, &mut param_map)?;
 
             // Build the new primitive
-            let mut result = Lambda::Lprim(PrimInfo {
+            let mut result = Lambda::Lprim(Box::new(PrimInfo {
                 primitive: prim_info.primitive.clone(),
                 args: new_args,
                 loc: prim_info.loc.clone(),
-            });
+            }));
 
             // Add sequences for unused arguments (preserve side effects)
             for (_param, usage) in param_map.iter() {
@@ -120,11 +120,25 @@ pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> O
             // Check if the function is simple (variable or module access)
             let is_simple_func = match &*apply.ap_func {
                 Lambda::Lvar(_) => true,
-                Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::Pfield(_, _),
-                    args,
-                    ..
-                }) => {
+                Lambda::Lprim(__prim2)
+                    if matches!(
+                        __prim2.as_ref(),
+                        PrimInfo {
+                            primitive: Primitive::Pfield(_, _),
+                            args: _,
+                            ..
+                        }
+                    ) =>
+                {
+                    let PrimInfo {
+                        primitive: Primitive::Pfield(_, _),
+                        args,
+                        ..
+                    } = __prim2.as_ref()
+                    else {
+                        unreachable!()
+                    };
+
                     matches!(args.as_slice(), [Lambda::LglobalModule(_, _)])
                 }
                 _ => false,
@@ -153,12 +167,12 @@ pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> O
             };
 
             // Build the new application
-            let mut result = Lambda::Lapply(Apply {
+            let mut result = Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(new_func),
                 ap_args: new_args,
                 ap_info: apply.ap_info.clone(),
                 ap_transformed_jsx: apply.ap_transformed_jsx,
-            });
+            }));
 
             // Add sequences for unused arguments
             for (_param, usage) in param_map.iter() {
@@ -388,18 +402,43 @@ pub fn propagate_beta_reduce_with_map_and_meta_and_id_gen(
 /// as an opaque `Lvar`.
 fn register_bound_param_kind(ident_tbl: &mut IdentTable, param: &Ident, arg: &Lambda) {
     match arg {
-        Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
-            args,
-            ..
-        }) => {
+        Lambda::Lprim(__prim1)
+            if matches!(
+                __prim1.as_ref(),
+                PrimInfo {
+                    primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
+                    args: _,
+                    ..
+                }
+            ) =>
+        {
+            let PrimInfo {
+                primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
+                args,
+                ..
+            } = __prim1.as_ref()
+            else {
+                unreachable!()
+            };
+
             ident_tbl.insert(param.clone(), kind_of_lambda_block(args));
         }
-        Lambda::Lprim(PrimInfo {
+        Lambda::Lprim(__prim0)
+            if matches!(__prim0.as_ref(), PrimInfo {
             primitive: Primitive::Psome | Primitive::PsomeNotNest,
             args,
             ..
-        }) if args.len() == 1 => {
+        } if args.len() == 1) =>
+        {
+            let PrimInfo {
+                primitive: Primitive::Psome | Primitive::PsomeNotNest,
+                args,
+                ..
+            } = __prim0.as_ref()
+            else {
+                unreachable!()
+            };
+
             ident_tbl.insert(param.clone(), IdKind::NormalOptional(args[0].clone()));
         }
         _ => {}
@@ -428,11 +467,11 @@ fn bound_param_binding(arg: &Lambda) -> Lambda {
 
 fn is_boxed_optional_binding(arg: &Lambda) -> bool {
     matches!(
-        arg,
-        Lambda::Lprim(PrimInfo {
-            primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
-            ..
-        })
+            arg,
+            Lambda::Lprim(__prim108) if matches!(__prim108.as_ref(), PrimInfo {
+                primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
+                ..
+            })
     )
 }
 
@@ -457,7 +496,7 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
     match lam {
         Lambda::Lvar(id) => substitution.get(id).cloned().unwrap_or_else(|| lam.clone()),
         Lambda::Lconst(_) => lam.clone(),
-        Lambda::Lapply(apply) => Lambda::Lapply(Apply {
+        Lambda::Lapply(apply) => Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(rewrite_bounded_vars(substitution, &apply.ap_func, id_gen)),
             ap_args: apply
                 .ap_args
@@ -466,7 +505,7 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
                 .collect(),
             ap_info: apply.ap_info.clone(),
             ap_transformed_jsx: apply.ap_transformed_jsx,
-        }),
+        })),
         Lambda::Lfunction(func) => {
             let params = func
                 .params
@@ -501,7 +540,7 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
                 .collect();
             Lambda::letrec(bindings, rewrite_bounded_vars(substitution, body, id_gen))
         }
-        Lambda::Lprim(prim_info) => Lambda::Lprim(PrimInfo {
+        Lambda::Lprim(prim_info) => Lambda::Lprim(Box::new(PrimInfo {
             primitive: prim_info.primitive.clone(),
             args: prim_info
                 .args
@@ -509,7 +548,7 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
                 .map(|arg| rewrite_bounded_vars(substitution, arg, id_gen))
                 .collect(),
             loc: prim_info.loc.clone(),
-        }),
+        })),
         Lambda::LglobalModule(_, _) => lam.clone(),
         Lambda::Lswitch(arg, switch) => Lambda::switch(
             rewrite_bounded_vars(substitution, arg, id_gen),
@@ -870,27 +909,27 @@ mod tests {
             panic!("expected first argument binding to be outermost");
         };
         assert!(matches!(
-            outer_value.as_ref(),
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::PjsCall { prim_name, .. },
-                ..
-            }) if prim_name == "first"
+                    outer_value.as_ref(),
+                    Lambda::Lprim(__prim107) if matches!(__prim107.as_ref(), PrimInfo {
+                        primitive: Primitive::PjsCall { prim_name, .. },
+                        ..
+                    } if prim_name == "first")
         ));
         assert!(matches!(
-            inner.as_ref(),
-            Lambda::Llet(
-                _,
-                _,
-                inner_value,
-                _
-            ) if matches!(
-                inner_value.as_ref(),
-                Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::PjsCall { prim_name, .. },
-                    ..
-                }) if prim_name == "second"
-            )
-        ));
+                    inner.as_ref(),
+                    Lambda::Llet(
+                        _,
+                        _,
+                        inner_value,
+                        _
+                    ) if matches!(
+                        inner_value.as_ref(),
+                        Lambda::Lprim(__prim106) if matches!(__prim106.as_ref(), PrimInfo {
+                            primitive: Primitive::PjsCall { prim_name, .. },
+                            ..
+                        } if prim_name == "second")
+        )
+                ));
     }
 
     #[test]
@@ -975,51 +1014,51 @@ mod tests {
         };
         assert_eq!(kind, LetKind::Strict);
         assert!(matches!(
-            *value,
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::Pidentity,
-                args,
-                ..
-            }) if matches!(
-                args.as_slice(),
-                [Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::PnullToOpt,
-                    ..
-                })]
-            )
+                    *value,
+                    Lambda::Lprim(__prim105) if matches!(__prim105.as_ref(), PrimInfo {
+                        primitive: Primitive::Pidentity,
+                        args,
+                        ..
+                    } if matches!(
+                        args.as_slice(),
+                        [Lambda::Lprim(__prim104)] if matches!(__prim104.as_ref(), PrimInfo {
+                            primitive: Primitive::PnullToOpt,
+                            ..
+                        })
+        ))
         ));
         let Lambda::LifThenElse(cond, then_, _) = *body else {
             panic!("expected the reduced body to stay as an if");
         };
         assert!(matches!(
-            cond.as_ref(),
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::PisNotNone,
-                args,
-                ..
-            }) if matches!(
-                args.as_slice(),
-                [Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::Pidentity,
-                    args: inner_args,
-                    ..
-                })] if matches!(inner_args.as_slice(), [Lambda::Lvar(id)] if id.same(&fresh))
-            )
+                    cond.as_ref(),
+                    Lambda::Lprim(__prim103) if matches!(__prim103.as_ref(), PrimInfo {
+                        primitive: Primitive::PisNotNone,
+                        args,
+                        ..
+                    } if matches!(
+                        args.as_slice(),
+                        [Lambda::Lprim(__prim102)] if matches!(__prim102.as_ref(), PrimInfo {
+                            primitive: Primitive::Pidentity,
+                            args: inner_args,
+                            ..
+                        } if matches!(inner_args.as_slice(), [Lambda::Lvar(id)] if id.same(&fresh)))
+        ))
         ));
         assert!(matches!(
-            then_.as_ref(),
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::PvalFromOption,
-                args,
-                ..
-            }) if matches!(
-                args.as_slice(),
-                [Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::Pidentity,
-                    args: inner_args,
-                    ..
-                })] if matches!(inner_args.as_slice(), [Lambda::Lvar(id)] if id.same(&fresh))
-            )
+                    then_.as_ref(),
+                    Lambda::Lprim(__prim101) if matches!(__prim101.as_ref(), PrimInfo {
+                        primitive: Primitive::PvalFromOption,
+                        args,
+                        ..
+                    } if matches!(
+                        args.as_slice(),
+                        [Lambda::Lprim(__prim100)] if matches!(__prim100.as_ref(), PrimInfo {
+                            primitive: Primitive::Pidentity,
+                            args: inner_args,
+                            ..
+                        } if matches!(inner_args.as_slice(), [Lambda::Lvar(id)] if id.same(&fresh)))
+        ))
         ));
     }
 
@@ -1173,7 +1212,7 @@ mod tests {
             std::slice::from_ref(&x),
             &Lambda::Lswitch(
                 Box::new(Lambda::var(x.clone())),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: true,
                     sw_consts: vec![
                         (
@@ -1189,7 +1228,7 @@ mod tests {
                     sw_blocks: vec![],
                     sw_failaction: None,
                     sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-                },
+                }),
             ),
             &[Lambda::const_(Constant::int(1))],
         );

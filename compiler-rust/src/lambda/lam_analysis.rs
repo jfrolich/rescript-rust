@@ -442,7 +442,7 @@ fn size_constant(c: &Constant) -> i32 {
         Constant::Block {
             tag_info, elements, ..
         } => {
-            let missing_fields = match tag_info {
+            let missing_fields = match &**tag_info {
                 TagInfo::Record { .. } | TagInfo::RecordInlined { .. } => tag_info
                     .logical_field_count()
                     .saturating_sub(elements.len()),
@@ -509,7 +509,7 @@ pub(crate) fn destruct_pattern(body: &Lambda, params: &[Ident], args: &[Lambda])
                     // Would need to evaluate the switch to check size
                     return size(&Lambda::switch(
                         Lambda::Lconst(constant.clone()),
-                        switch.clone(),
+                        *switch.clone(),
                     )) < SMALL_INLINE_SIZE;
                 }
             }
@@ -537,17 +537,19 @@ pub(crate) fn destruct_pattern(body: &Lambda, params: &[Ident], args: &[Lambda])
 pub fn safe_to_inline(lam: &Lambda) -> bool {
     match lam {
         Lambda::Lfunction(_) => true,
-        Lambda::Lconst(c) => matches!(
-            c,
-            Constant::Pointer(_)
-                | Constant::Int {
-                    comment: Some(crate::lambda::lam_constant::PointerInfo::Constructor(_)),
-                    ..
-                }
-                | Constant::JsTrue
-                | Constant::JsFalse
-                | Constant::JsUndefined { .. }
-        ),
+        Lambda::Lconst(c) => {
+            matches!(
+                c,
+                Constant::Pointer(_)
+                    | Constant::JsTrue
+                    | Constant::JsFalse
+                    | Constant::JsUndefined { .. }
+            ) || matches!(
+                c,
+                Constant::Int { comment: Some(info), .. }
+                    if matches!(**info, crate::lambda::lam_constant::PointerInfo::Constructor(_))
+            )
+        }
         _ => false,
     }
 }
@@ -721,14 +723,14 @@ mod tests {
         // Switch is too big
         let switch = Lambda::Lswitch(
             Box::new(Lambda::const_(Constant::int(0))),
-            crate::lambda::LambdaSwitch {
+            Box::new(crate::lambda::LambdaSwitch {
                 sw_consts_full: true,
                 sw_consts: vec![],
                 sw_blocks_full: true,
                 sw_blocks: vec![],
                 sw_failaction: None,
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            },
+            }),
         );
         assert_eq!(size(&switch), TOO_BIG_TO_INLINE);
     }
@@ -817,7 +819,7 @@ mod tests {
         // Block sums up fields
         assert_eq!(
             size_constant(&Constant::Block {
-                tag_info: crate::lambda::lam_tag_info::TagInfo::Tuple,
+                tag_info: Box::new(crate::lambda::lam_tag_info::TagInfo::Tuple),
                 elements: vec![Constant::int(1), Constant::int(2), Constant::int(3)],
             }),
             3
@@ -825,11 +827,11 @@ mod tests {
 
         assert_eq!(
             size_constant(&Constant::Block {
-                tag_info: TagInfo::Record {
+                tag_info: Box::new(TagInfo::Record {
                     fields: vec![("className".to_string(), true)],
                     logical_field_count: Some(4),
                     mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                },
+                }),
                 elements: vec![Constant::Some(Box::new(Constant::string("button")))],
             }),
             4
@@ -877,7 +879,7 @@ mod tests {
             params: vec![x.clone()],
             body: Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(x)),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: true,
                     sw_consts: vec![
                         (
@@ -893,7 +895,7 @@ mod tests {
                     sw_blocks: vec![],
                     sw_failaction: None,
                     sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-                },
+                }),
             )),
             attr: FunctionAttribute::default(),
         };

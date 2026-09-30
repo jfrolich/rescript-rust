@@ -109,10 +109,24 @@ fn is_safe_to_share(lam: &Lambda) -> bool {
                 | Constant::JsFalse
                 | Constant::JsUndefined { .. }
         ),
-        Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
-            ..
-        }) => true,
+        Lambda::Lprim(__prim0)
+            if matches!(
+                __prim0.as_ref(),
+                PrimInfo {
+                    primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
+                    ..
+                }
+            ) =>
+        {
+            let PrimInfo {
+                primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
+                ..
+            } = __prim0.as_ref()
+            else {
+                unreachable!()
+            };
+            true
+        }
         _ => false,
     }
 }

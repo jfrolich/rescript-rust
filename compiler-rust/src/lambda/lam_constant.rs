@@ -87,7 +87,7 @@ pub enum Constant {
         /// The integer value (32-bit)
         i: i32,
         /// Optional comment/info about the integer
-        comment: Option<PointerInfo>,
+        comment: Option<Box<PointerInfo>>,
     },
 
     /// Native integer constant kept at 64-bit width.
@@ -95,7 +95,7 @@ pub enum Constant {
         /// The integer value (64-bit)
         i: i64,
         /// Optional comment/info about the integer
-        comment: Option<PointerInfo>,
+        comment: Option<Box<PointerInfo>>,
     },
 
     /// Nullary nominal constructor with its canonical runtime tag.
@@ -132,7 +132,7 @@ pub enum Constant {
     /// Block constant (for variants, records, tuples)
     Block {
         /// Tag info for debugging/codegen
-        tag_info: TagInfo,
+        tag_info: Box<TagInfo>,
         /// Block elements
         elements: Vec<Constant>,
     },
@@ -154,7 +154,7 @@ impl Constant {
     pub fn int_with_comment(i: i32, comment: PointerInfo) -> Self {
         Constant::Int {
             i,
-            comment: Some(comment),
+            comment: Some(Box::new(comment)),
         }
     }
 
@@ -388,14 +388,14 @@ mod tests {
         assert!(!Constant::Some(Box::new(Constant::int(42))).is_allocating());
         assert!(
             Constant::Some(Box::new(Constant::Block {
-                tag_info: TagInfo::Tuple,
+                tag_info: Box::new(TagInfo::Tuple),
                 elements: vec![Constant::int(1)],
             }))
             .is_allocating()
         );
         assert!(
             Constant::Block {
-                tag_info: TagInfo::Tuple,
+                tag_info: Box::new(TagInfo::Tuple),
                 elements: vec![Constant::int(1), Constant::int(2)],
             }
             .is_allocating()

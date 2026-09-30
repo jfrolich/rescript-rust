@@ -38,7 +38,10 @@ where
             Lambda::Lletrec(decl, body) => {
                 aux(body, exits) || decl.iter().any(|(_, l)| aux(l, exits))
             }
-            Lambda::Lprim(PrimInfo { args, .. }) => args.iter().any(|a| aux(a, exits)),
+            Lambda::Lprim(__prim0) => {
+                let PrimInfo { args, .. } = __prim0.as_ref();
+                args.iter().any(|a| aux(a, exits))
+            }
             Lambda::Lswitch(arg, sw) => {
                 aux(arg, exits)
                     || sw.sw_consts.iter().any(|(_, l)| aux(l, exits))
@@ -87,12 +90,12 @@ mod tests {
     fn stops_at_lfunction_boundary() {
         use crate::lambda::LFunction;
         let body = Lambda::LstaticRaise(1, vec![]);
-        let func = Lambda::Lfunction(LFunction {
+        let func = Lambda::Lfunction(Box::new(LFunction {
             arity: 0,
             params: vec![],
             body: Box::new(body),
             attr: Default::default(),
-        });
+        }));
         assert!(!has_exit_code(&func, |_| true));
     }
 

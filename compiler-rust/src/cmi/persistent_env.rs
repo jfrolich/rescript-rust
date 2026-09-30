@@ -2597,14 +2597,14 @@ fn decode_cmj_lambda(value: &OcamlValue) -> Option<Lambda> {
         }
         OcamlValue::Block(3, fields) if fields.len() == 1 => {
             let apply = decode_cmj_apply(&fields[0])?;
-            Some(Lambda::Lapply(apply))
+            Some(Lambda::Lapply(Box::new(apply)))
         }
         OcamlValue::Block(4, fields) if fields.len() == 1 => {
-            Some(Lambda::Lfunction(decode_cmj_lfunction(&fields[0])?))
+            Some(Lambda::Lfunction(Box::new(decode_cmj_lfunction(&fields[0])?)))
         }
         OcamlValue::Block(7, fields) if fields.len() == 1 => {
             let prim = decode_cmj_prim_info(&fields[0])?;
-            Some(Lambda::Lprim(prim))
+            Some(Lambda::Lprim(Box::new(prim)))
         }
         OcamlValue::Block(13, fields) if fields.len() == 3 => Some(Lambda::if_(
             decode_cmj_lambda(&fields[0])?,
@@ -2748,7 +2748,7 @@ fn decode_cmj_lambda_constant(value: &OcamlValue) -> Option<LambdaConstant> {
         }),
         OcamlValue::Block(1, fields) if fields.len() == 2 => Some(LambdaConstant::Int {
             i: fields[0].as_int() as i32,
-            comment: decode_cmj_pointer_info(&fields[1])?,
+            comment: (decode_cmj_pointer_info(&fields[1])?).map(Box::new),
         }),
         OcamlValue::Block(2, fields) if fields.len() == 1 => Some(LambdaConstant::Constructor(
             decode_cmj_variant_tag(&fields[0])?,
@@ -2771,7 +2771,7 @@ fn decode_cmj_lambda_constant(value: &OcamlValue) -> Option<LambdaConstant> {
             Some(LambdaConstant::Pointer(fields[0].as_string().to_string()))
         }
         OcamlValue::Block(8, fields) if fields.len() == 2 => Some(LambdaConstant::Block {
-            tag_info: decode_cmj_tag_info(&fields[0])?,
+            tag_info: Box::new(decode_cmj_tag_info(&fields[0])?),
             elements: decode_cmj_list(&fields[1], decode_cmj_lambda_constant)?,
         }),
         OcamlValue::Block(9, fields) if fields.len() == 1 => Some(LambdaConstant::Some(Box::new(

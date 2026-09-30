@@ -373,7 +373,7 @@ pub(crate) fn indexed_size(arena: &IndexedLambda, node: NodeId) -> i32 {
             Constant::Block {
                 tag_info, elements, ..
             } => {
-                let missing = match tag_info {
+                let missing = match &**tag_info {
                     crate::lambda::TagInfo::Record { .. }
                     | crate::lambda::TagInfo::RecordInlined { .. } => tag_info
                         .logical_field_count()
@@ -755,25 +755,62 @@ mod tests {
         fn bind(lambda: &Lambda, out: &mut Vec<String>) {
             match lambda {
                 Lambda::Lconst(_) | Lambda::LglobalModule(_, _) | Lambda::Lvar(_) => {}
-                Lambda::Lprim(crate::lambda::PrimInfo {
-                    primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
-                    args,
-                    ..
-                }) => {
+                Lambda::Lprim(__prim2)
+                    if matches!(
+                        __prim2.as_ref(),
+                        crate::lambda::PrimInfo {
+                            primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
+                            args: _,
+                            ..
+                        }
+                    ) =>
+                {
+                    let crate::lambda::PrimInfo {
+                        primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
+                        args,
+                        ..
+                    } = __prim2.as_ref()
+                    else {
+                        unreachable!()
+                    };
+
                     for arg in args {
                         tree_collect_order(arg, out);
                     }
                 }
-                Lambda::Lprim(crate::lambda::PrimInfo {
+                Lambda::Lprim(__prim1)
+                    if matches!(__prim1.as_ref(), crate::lambda::PrimInfo {
                     primitive: Primitive::Psome | Primitive::PsomeNotNest,
                     args,
                     ..
-                }) if args.len() == 1 => tree_collect_order(&args[0], out),
-                Lambda::Lprim(crate::lambda::PrimInfo {
+                } if args.len() == 1) =>
+                {
+                    let crate::lambda::PrimInfo {
+                        primitive: Primitive::Psome | Primitive::PsomeNotNest,
+                        args,
+                        ..
+                    } = __prim1.as_ref()
+                    else {
+                        unreachable!()
+                    };
+                    tree_collect_order(&args[0], out)
+                }
+                Lambda::Lprim(__prim0)
+                    if matches!(__prim0.as_ref(), crate::lambda::PrimInfo {
                     primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
                     args,
                     ..
-                }) if matches!(args.as_slice(), [Lambda::Lvar(_)]) => {}
+                } if matches!(args.as_slice(), [Lambda::Lvar(_)])) =>
+                {
+                    let crate::lambda::PrimInfo {
+                        primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
+                        args,
+                        ..
+                    } = __prim0.as_ref()
+                    else {
+                        unreachable!()
+                    };
+                }
                 Lambda::Lfunction(function) => tree_collect_order(&function.body, out),
                 other => tree_collect_order(other, out),
             }
@@ -877,7 +914,7 @@ mod tests {
         );
         let tail = Lambda::Lswitch(
             Box::new(Lambda::Lvar(optional.clone())),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: false,
                 sw_consts: vec![
                     (SwitchKey::Int(2), Lambda::Lvar(f.clone())),
@@ -887,7 +924,7 @@ mod tests {
                 sw_blocks: vec![],
                 sw_failaction: Some(Box::new(Lambda::Lvar(block.clone()))),
                 sw_dispatch: SwitchDispatch::Direct,
-            },
+            }),
         );
         let lambda = Lambda::let_(
             crate::lambda::LetKind::Strict,
@@ -968,14 +1005,14 @@ mod tests {
             ),
             Lambda::Lswitch(
                 Box::new(Lambda::Lconst(Constant::int(0))),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: false,
                     sw_consts: vec![(SwitchKey::Int(1), function(1))],
                     sw_blocks_full: true,
                     sw_blocks: vec![(SwitchKey::Int(2), function(1))],
                     sw_failaction: Some(Box::new(function(1))),
                     sw_dispatch: SwitchDispatch::Direct,
-                },
+                }),
             ),
             Lambda::LstringSwitch(
                 Box::new(Lambda::Lconst(Constant::int(0))),
@@ -1132,12 +1169,12 @@ mod tests {
     #[test]
     fn bound_functions_always_retain_node_ids_like_ocaml_collect() {
         fn raw_function(params: Vec<Ident>, body: Lambda, attr: FunctionAttribute) -> Lambda {
-            Lambda::Lfunction(crate::lambda::LFunction {
+            Lambda::Lfunction(Box::new(crate::lambda::LFunction {
                 arity: params.len() as i32,
                 params,
                 body: Box::new(body),
                 attr,
-            })
+            }))
         }
         fn sequences(count: i32) -> Lambda {
             (1..count).fold(Lambda::Lconst(Constant::int(0)), |body, n| {
@@ -1147,14 +1184,14 @@ mod tests {
         let param = id("param", 60);
         let parameter_switch = Lambda::Lswitch(
             Box::new(Lambda::Lvar(param.clone())),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: true,
                 sw_consts: vec![(SwitchKey::Int(0), Lambda::Lconst(Constant::int(0)))],
                 sw_blocks_full: true,
                 sw_blocks: vec![],
                 sw_failaction: None,
                 sw_dispatch: SwitchDispatch::Direct,
-            },
+            }),
         );
         let impure_medium = Lambda::Lsequence(
             Box::new(Lambda::Lassign(
@@ -1398,7 +1435,7 @@ mod tests {
     #[test]
     fn cached_external_misses_do_not_reresolve_and_keep_import_modes_separate() {
         fn field(module: Ident, dynamic: bool) -> Lambda {
-            Lambda::Lprim(crate::lambda::PrimInfo {
+            Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                 primitive: Primitive::Pfield(
                     0,
                     FieldDbgInfo::Module {
@@ -1407,7 +1444,7 @@ mod tests {
                 ),
                 args: vec![Lambda::LglobalModule(module, dynamic)],
                 loc: Location::none(),
-            })
+            }))
         }
         let static_one = id("staticOne", 50);
         let static_two = id("staticTwo", 51);
@@ -1598,7 +1635,7 @@ mod indexed_size_sparse_tests {
     #[test]
     fn weighted_size_counts_omitted_record_and_object_fields() {
         let constant = Lambda::const_(Constant::Block {
-            tag_info: sparse_tag(),
+            tag_info: Box::new(sparse_tag()),
             elements: vec![Constant::int(1)],
         });
         let store = IndexedLambda::from_lambda(constant);

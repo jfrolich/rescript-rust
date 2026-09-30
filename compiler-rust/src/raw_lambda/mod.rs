@@ -430,7 +430,7 @@ impl RawLambda {
                 Lambda::LglobalModule(id, dynamic_import)
             }
             RawLambda::Lconst(c) => Lambda::Lconst(c),
-            RawLambda::Lapply(apply) => Lambda::Lapply(crate::lambda::Apply {
+            RawLambda::Lapply(apply) => Lambda::Lapply(Box::new(crate::lambda::Apply {
                 ap_func: Box::new(apply.ap_func.into_lowered()),
                 ap_args: apply
                     .ap_args
@@ -439,13 +439,13 @@ impl RawLambda {
                     .collect(),
                 ap_info: apply.ap_info,
                 ap_transformed_jsx: apply.ap_transformed_jsx,
-            }),
-            RawLambda::Lfunction(func) => Lambda::Lfunction(crate::lambda::LFunction {
+            })),
+            RawLambda::Lfunction(func) => Lambda::Lfunction(Box::new(crate::lambda::LFunction {
                 arity: func.arity,
                 params: func.params,
                 body: Box::new(func.body.into_lowered()),
                 attr: func.attr,
-            }),
+            })),
             RawLambda::Llet(kind, id, value, body) => Lambda::Llet(
                 kind,
                 id,
@@ -459,14 +459,14 @@ impl RawLambda {
                     .collect(),
                 Box::new(body.into_lowered()),
             ),
-            RawLambda::Lprim(info) => Lambda::Lprim(crate::lambda::PrimInfo {
+            RawLambda::Lprim(info) => Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                 primitive: info.primitive,
                 args: info.args.into_iter().map(RawLambda::into_lowered).collect(),
                 loc: info.loc,
-            }),
+            })),
             RawLambda::Lswitch(arg, sw, _) => Lambda::Lswitch(
                 Box::new(arg.into_lowered()),
-                crate::lambda::LambdaSwitch {
+                Box::new(crate::lambda::LambdaSwitch {
                     sw_consts_full: sw.sw_consts_full,
                     sw_consts: sw
                         .sw_consts
@@ -481,7 +481,7 @@ impl RawLambda {
                         .collect(),
                     sw_failaction: sw.sw_failaction.map(|lam| Box::new(lam.into_lowered())),
                     sw_dispatch: sw.sw_dispatch,
-                },
+                }),
             ),
             RawLambda::LstringSwitch(arg, cases, default) => Lambda::LstringSwitch(
                 Box::new(arg.into_lowered()),
@@ -536,7 +536,7 @@ impl RawLambda {
             RawLambda::Lbreak => Lambda::Lbreak,
             RawLambda::Lcontinue => Lambda::Lcontinue,
             RawLambda::Lassign(id, value) => Lambda::Lassign(id, Box::new(value.into_lowered())),
-            RawLambda::Lsend(name, obj, loc) => Lambda::Lprim(crate::lambda::PrimInfo {
+            RawLambda::Lsend(name, obj, loc) => Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                 primitive: Primitive::PjsCall {
                     prim_name: format!("send{name}"),
                     arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
@@ -553,7 +553,7 @@ impl RawLambda {
                 },
                 args: vec![obj.into_lowered()],
                 loc,
-            }),
+            })),
         }
     }
 }

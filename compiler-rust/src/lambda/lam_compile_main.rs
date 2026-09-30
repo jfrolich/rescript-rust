@@ -59,10 +59,24 @@ pub fn add_hoisted_function_aliases(
         match lam {
             Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => terminal_exports(body),
             Lambda::Lsequence(_, body) => terminal_exports(body),
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
-                ..
-            }) => ids.clone(),
+            Lambda::Lprim(__prim4)
+                if matches!(
+                    __prim4.as_ref(),
+                    PrimInfo {
+                        primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_ids), _),
+                        ..
+                    }
+                ) =>
+            {
+                let PrimInfo {
+                    primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
+                    ..
+                } = __prim4.as_ref()
+                else {
+                    unreachable!()
+                };
+                ids.clone()
+            }
             _ => Vec::new(),
         }
     }
@@ -84,17 +98,29 @@ pub fn add_hoisted_function_aliases(
                     None => (lam.clone(), Some(id.clone())),
                 }
             }
-            Lambda::Lprim(PrimInfo {
+            Lambda::Lprim(__prim3)
+                if matches!(__prim3.as_ref(), PrimInfo {
                 primitive: Primitive::Pfield(pos, _),
                 args,
                 ..
-            }) if args.len() == 1 => {
-                let (base, _) = resolve_binding(&args[0], groups, seen);
-                if let Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::Pmakeblock(TagInfo::Module(_), _),
+            } if args.len() == 1) =>
+            {
+                let PrimInfo {
+                    primitive: Primitive::Pfield(pos, _),
                     args,
                     ..
-                }) = base
+                } = __prim3.as_ref()
+                else {
+                    unreachable!()
+                };
+
+                let (base, _) = resolve_binding(&args[0], groups, seen);
+                if let Lambda::Lprim(__prim201) = base
+                    && let PrimInfo {
+                        primitive: Primitive::Pmakeblock(TagInfo::Module(_), _),
+                        args,
+                        ..
+                    } = __prim201.as_ref()
                     && let Some(field) = usize::try_from(*pos).ok().and_then(|pos| args.get(pos))
                 {
                     return resolve_binding(field, groups, seen);
@@ -114,11 +140,14 @@ pub fn add_hoisted_function_aliases(
             return Some(resolve_binding(lam, groups, &mut HashSet::new()).1);
         }
         let (resolved, _) = resolve_binding(lam, groups, &mut HashSet::new());
-        let Lambda::Lprim(PrimInfo {
+        let Lambda::Lprim(__prim200) = resolved else {
+            return None;
+        };
+        let PrimInfo {
             primitive: Primitive::Pmakeblock(TagInfo::Module(names), _),
             args,
             ..
-        }) = resolved
+        } = __prim200.as_ref()
         else {
             return None;
         };
@@ -137,11 +166,25 @@ pub fn add_hoisted_function_aliases(
             Lambda::Lsequence(left, body) => {
                 Lambda::Lsequence(left, Box::new(append_aliases(*body, aliases)))
             }
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(mut ids), mutable_),
-                mut args,
-                loc,
-            }) => {
+            Lambda::Lprim(__prim2)
+                if matches!(
+                    __prim2.as_ref(),
+                    PrimInfo {
+                        primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_ids), _),
+                        args: _,
+                        loc: _,
+                    }
+                ) =>
+            {
+                let PrimInfo {
+                    primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(mut ids), mutable_),
+                    mut args,
+                    loc,
+                } = *__prim2
+                else {
+                    unreachable!()
+                };
+
                 ids.extend(aliases.iter().map(|(id, _)| id.clone()));
                 args.extend(aliases.iter().map(|(id, _)| Lambda::var(id.clone())));
                 let mut result = Lambda::prim(
@@ -405,11 +448,25 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
             let new_right = rewrite_export_makeblock(meta, *right);
             Lambda::Lsequence(left, Box::new(new_right))
         }
-        Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(export_ids), mutable_),
-            args,
-            loc,
-        }) => {
+        Lambda::Lprim(__prim1)
+            if matches!(
+                __prim1.as_ref(),
+                PrimInfo {
+                    primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_export_ids), _),
+                    args,
+                    loc,
+                }
+            ) =>
+        {
+            let PrimInfo {
+                primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(export_ids), mutable_),
+                args,
+                loc,
+            } = *__prim1
+            else {
+                unreachable!()
+            };
+
             // lam_coercion.ml:88-122 — fold_right2 over (export_ids, args).
             // OCaml builds `result.groups` by prepending Single(...)
             // entries, so the resulting groups list ends up in
@@ -464,11 +521,11 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
             meta.exports = new_export_ids.clone();
             meta.export_idents = new_export_ids.iter().cloned().collect();
 
-            let mut result = Lambda::Lprim(PrimInfo {
+            let mut result = Lambda::Lprim(Box::new(PrimInfo {
                 primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(new_export_ids), mutable_),
                 args: new_args,
                 loc,
-            });
+            }));
             // Wrap with hoisted Llets so the FIRST hoist (by export
             // order) is OUTERMOST, matching OCaml's compile_group
             // iteration order.
@@ -495,10 +552,24 @@ fn extract_export_idents(lam: &Lambda) -> Vec<Ident> {
     match lam {
         Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => extract_export_idents(body),
         Lambda::Lsequence(_, right) => extract_export_idents(right),
-        Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
-            ..
-        }) => ids.clone(),
+        Lambda::Lprim(__prim0)
+            if matches!(
+                __prim0.as_ref(),
+                PrimInfo {
+                    primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
+                    ..
+                }
+            ) =>
+        {
+            let PrimInfo {
+                primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
+                ..
+            } = __prim0.as_ref()
+            else {
+                unreachable!()
+            };
+            ids.clone()
+        }
         _ => Vec::new(),
     }
 }

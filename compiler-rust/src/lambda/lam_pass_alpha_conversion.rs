@@ -188,12 +188,14 @@ impl<'a, 'r> Alpha<'a, 'r> {
             Lambda::Lconst(_) | Lambda::Lvar(_) => lam.clone(),
 
             // lam_pass_alpha_conversion.ml:54-61
-            Lambda::Lapply(Apply {
-                ap_func,
-                ap_args,
-                ap_info,
-                ap_transformed_jsx,
-            }) => {
+            Lambda::Lapply(__apply3) => {
+                let Apply {
+                    ap_func,
+                    ap_args,
+                    ap_info,
+                    ap_transformed_jsx,
+                } = __apply3.as_ref();
+
                 let args_arity = self.get_arity(ap_func).extract_arity();
                 let len = ap_args.len() as i32;
                 self.populate_apply_info(
@@ -224,15 +226,18 @@ impl<'a, 'r> Alpha<'a, 'r> {
             Lambda::LglobalModule(_, _) => lam.clone(),
 
             // lam_pass_alpha_conversion.ml:67-68 — recurse through primitives.
-            Lambda::Lprim(PrimInfo {
-                primitive,
-                args,
-                loc,
-            }) => Lambda::prim(
-                primitive.clone(),
-                args.iter().map(|a| self.simpl(a)).collect(),
-                loc.clone(),
-            ),
+            Lambda::Lprim(__prim2) => {
+                let PrimInfo {
+                    primitive,
+                    args,
+                    loc,
+                } = __prim2.as_ref();
+                Lambda::prim(
+                    primitive.clone(),
+                    args.iter().map(|a| self.simpl(a)).collect(),
+                    loc.clone(),
+                )
+            }
 
             // lam_pass_alpha_conversion.ml:88-90
             Lambda::Lfunction(f) => Lambda::function_(
@@ -328,12 +333,14 @@ impl<'a, 'r> Alpha<'a, 'r> {
     fn simpl_owned(&mut self, lam: Lambda) -> Lambda {
         match lam {
             Lambda::Lconst(_) | Lambda::Lvar(_) | Lambda::LglobalModule(_, _) => lam,
-            Lambda::Lapply(Apply {
-                ap_func,
-                ap_args,
-                ap_info,
-                ap_transformed_jsx,
-            }) => {
+            Lambda::Lapply(__apply1) => {
+                let Apply {
+                    ap_func,
+                    ap_args,
+                    ap_info,
+                    ap_transformed_jsx,
+                } = *__apply1;
+
                 let args_arity = self.get_arity(&ap_func).extract_arity();
                 let len = ap_args.len() as i32;
                 self.populate_apply_info_owned(
@@ -358,21 +365,24 @@ impl<'a, 'r> Alpha<'a, 'r> {
                     .collect();
                 Lambda::Lletrec(bindings, map_box(body, |inner| self.simpl_owned(inner)))
             }
-            Lambda::Lprim(PrimInfo {
-                primitive,
-                args,
-                loc,
-            }) => Lambda::prim(
-                primitive,
-                args.into_iter().map(|a| self.simpl_owned(a)).collect(),
-                loc,
-            ),
-            Lambda::Lfunction(f) => Lambda::Lfunction(LFunction {
+            Lambda::Lprim(__prim0) => {
+                let PrimInfo {
+                    primitive,
+                    args,
+                    loc,
+                } = *__prim0;
+                Lambda::prim(
+                    primitive,
+                    args.into_iter().map(|a| self.simpl_owned(a)).collect(),
+                    loc,
+                )
+            }
+            Lambda::Lfunction(f) => Lambda::Lfunction(Box::new(LFunction {
                 arity: f.arity,
                 params: f.params,
                 body: map_box(f.body, |inner| self.simpl_owned(inner)),
                 attr: f.attr,
-            }),
+            })),
             Lambda::Lswitch(scrut, switch) => Lambda::switch(
                 self.simpl_owned(*scrut),
                 LambdaSwitch {

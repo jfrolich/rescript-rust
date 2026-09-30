@@ -7683,7 +7683,7 @@ fn convert_polyvar_list(xs: &[(i32, (String, RawLambda))]) -> Vec<(Vec<(i32, Str
 fn raw_polyvariant_hash_const(hash: i32, name: &str) -> RawLambda {
     RawLambda::Lconst(crate::lambda::lam_constant::Constant::Int {
         i: hash,
-        comment: Some(PointerInfo::PolyVariant(name.to_string())),
+        comment: Some(Box::new(PointerInfo::PolyVariant(name.to_string()))),
     })
 }
 
@@ -9367,7 +9367,7 @@ pub fn partial_function(_ctx_ref: &TypeContext, loc: Location) -> RawLambda {
     let match_failure_ident = crate::types::predef::ident_match_failure();
     let exn = RawLambda::LglobalModule(match_failure_ident, false);
     let payload = RawLambda::Lconst(crate::lambda::Constant::Block {
-        tag_info: TagInfo::Tuple,
+        tag_info: Box::new(TagInfo::Tuple),
         elements: vec![
             crate::lambda::Constant::string(fname),
             crate::lambda::Constant::int(line),
@@ -10013,12 +10013,12 @@ mod tests {
         };
 
         assert!(
-            matches!(first_eq.args.as_slice(), [RawLambda::Lvar(_), RawLambda::Lconst(crate::lambda::lam_constant::Constant::Int { i, comment: Some(PointerInfo::PolyVariant(name)) })]
-            if *i == btype::hash_variant("A") && name == "A")
+            matches!(first_eq.args.as_slice(), [RawLambda::Lvar(_), RawLambda::Lconst(crate::lambda::lam_constant::Constant::Int { i, comment: Some(comment) })]
+            if *i == btype::hash_variant("A") && matches!(&**comment, PointerInfo::PolyVariant(name) if name == "A"))
         );
         assert!(
-            matches!(second_eq.args.as_slice(), [RawLambda::Lvar(_), RawLambda::Lconst(crate::lambda::lam_constant::Constant::Int { i, comment: Some(PointerInfo::PolyVariant(name)) })]
-            if *i == btype::hash_variant("B") && name == "B")
+            matches!(second_eq.args.as_slice(), [RawLambda::Lvar(_), RawLambda::Lconst(crate::lambda::lam_constant::Constant::Int { i, comment: Some(comment) })]
+            if *i == btype::hash_variant("B") && matches!(&**comment, PointerInfo::PolyVariant(name) if name == "B"))
         );
     }
 }
