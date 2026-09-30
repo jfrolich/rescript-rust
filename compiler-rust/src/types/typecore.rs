@@ -6537,10 +6537,12 @@ fn type_pattern_record(
                 state,
                 explode,
             )?;
-            // Wrap in Tpat_construct("Some", [typed_inner]) with type option<T>
+            // Wrap in Tpat_construct("Some", [typed_inner]) with type option<T>.
+            // typecore.ml:1529 builds the constructor with
+            // `mknoloc (Ldot (Lident "*predef*", "Some"))`.
             let some_lid = Located {
                 txt: tctx.arena.some_lid(),
-                loc: parsed_pat.ppat_loc,
+                loc: tctx.arena.none_loc(),
             };
             let some_cstr = make_some_constructor(ctx);
             Pattern::new(
@@ -11174,10 +11176,11 @@ fn type_application(
                     let wrapped_env = typed_arg.exp_env;
                     let option_ty = env.type_option(ctx, typed_arg.exp_type);
                     Expression::new(
+                        // typecore.ml:298-302 `option_some`: `mknoloc (Lident "Some")`.
                         ExpressionDesc::Texp_construct(
                             Located {
                                 txt: tctx.arena.plain_some_lid(),
-                                loc: wrapped_loc,
+                                loc: tctx.arena.none_loc(),
                             },
                             make_some_constructor(ctx),
                             vec![typed_arg],
@@ -13402,14 +13405,17 @@ fn desugar_nary_function_defaults(
                 find_loc_idx_by_bounds(arena, sloc_start, sloc_end).unwrap_or(source_pat_loc);
 
             let label_name = arena.get_string(label.txt).to_owned();
+            // typecore.ml:3550-3582 names the synthesized binders with `mknoloc`.
+            let noloc = arena.none_loc();
             let opt_name = arena.intern_string(&format!("*opt_{label_name}*"));
             let opt_lid = arena.push_longident(Longident::Lident(opt_name));
             let sth_name = arena.intern_string("*sth*");
             let sth_lid = arena.push_longident(Longident::Lident(sth_name));
             let matched_pat = arena.push_pat(ParsedPattern {
+                // typecore.ml:3558 `Pat.var ~loc:default_loc (mknoloc "*sth*")`.
                 ppat_desc: Box::new(PD::Ppat_var(Located {
                     txt: sth_name,
-                    loc: default_loc,
+                    loc: noloc,
                 })),
                 ppat_loc: default_loc,
                 ppat_attributes: Attributes::new(),
@@ -13418,7 +13424,7 @@ fn desugar_nary_function_defaults(
                 ppat_desc: Box::new(PD::Ppat_construct(
                     Located {
                         txt: arena.predef_some_lid(),
-                        loc: default_loc,
+                        loc: noloc,
                     },
                     Some(matched_pat),
                 )),
@@ -13429,7 +13435,7 @@ fn desugar_nary_function_defaults(
                 ppat_desc: Box::new(PD::Ppat_construct(
                     Located {
                         txt: arena.predef_none_lid(),
-                        loc: default_loc,
+                        loc: noloc,
                     },
                     None,
                 )),
@@ -13439,13 +13445,16 @@ fn desugar_nary_function_defaults(
             let some_rhs = arena.push_expr(ParsedExpression {
                 pexp_desc: Box::new(ED::Pexp_ident(Located {
                     txt: sth_lid,
-                    loc: default_loc,
+                    loc: noloc,
                 })),
                 pexp_loc: default_loc,
                 pexp_attributes: Attributes::new(),
             });
             let scrutinee = arena.push_expr(ParsedExpression {
-                pexp_desc: Box::new(ED::Pexp_ident(Located { txt: opt_lid, loc })),
+                pexp_desc: Box::new(ED::Pexp_ident(Located {
+                    txt: opt_lid,
+                    loc: noloc,
+                })),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             });
@@ -13480,9 +13489,10 @@ fn desugar_nary_function_defaults(
                 p_lbl: param.p_lbl,
                 p_default: None,
                 p_pat: arena.push_pat(ParsedPattern {
+                    // typecore.ml:3582 `Pat.var ~loc:sloc (mknoloc opt_name)`.
                     ppat_desc: Box::new(PD::Ppat_var(Located {
                         txt: opt_name,
-                        loc: sloc,
+                        loc: noloc,
                     })),
                     ppat_loc: sloc,
                     ppat_attributes: Attributes::new(),
