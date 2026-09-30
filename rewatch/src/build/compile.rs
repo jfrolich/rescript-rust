@@ -966,7 +966,11 @@ pub fn compile(
                     in_flight,
                 );
             }
-            while in_flight < capacity && !has_errors {
+            // A subprocess build stops dispatching at the first error. An
+            // in-process build recompiles everything, so it keeps compiling
+            // the modules that do not depend on a failed one: the result no
+            // longer depends on scheduling and every error is reported.
+            while in_flight < capacity && (in_process_mode || !has_errors) {
                 if let Some(pre_js_msg) = pop_ready_js(&mut ready_js, &waiting_js_by_dep) {
                     if let Some(counters) = scheduler_counters.as_mut() {
                         counters.scheduled_js += 1;
@@ -1164,7 +1168,9 @@ pub fn compile(
                             );
                         }
 
-                        if msg.result.is_err() || msg.interface_result.as_ref().is_some_and(|r| r.is_err()) {
+                        let module_failed = msg.result.is_err()
+                            || msg.interface_result.as_ref().is_some_and(|r| r.is_err());
+                        if module_failed {
                             has_errors = true;
                         }
 
@@ -1190,7 +1196,7 @@ pub fn compile(
 
                         if in_process_mode {
                             let completed_without_signature =
-                                !signature_ready.contains(&finished_name) && !has_errors;
+                                !signature_ready.contains(&finished_name) && !module_failed;
                             if completed_without_signature {
                                 unblock_dependents(
                                     build_state_ref,
