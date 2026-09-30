@@ -1303,14 +1303,17 @@ fn save_typed_artifacts(
         imports: &[],
     };
     // The `.cmi` holds the `Subst.for_saving` copy of the signature.
-    let stripped: Option<Vec<crate::types::decl::SignatureItem>> = (!options.keep_locs).then(|| {
+    let stripped: Option<Vec<crate::types::decl::SignatureItem>> = Some({
         let mut sig = match &kind {
             TypedArtifactKind::Implementation { cmi, .. } => {
                 cmi.as_ref().map(|(sign, _)| sign.to_vec()).unwrap_or_default()
             }
             TypedArtifactKind::Interface { sig_type, .. } => sig_type.to_vec(),
         };
-        strip_saved_signature_locations(&mut sig);
+        if !options.keep_locs {
+            strip_saved_signature_locations(&mut sig);
+        }
+        strip_saved_extension_locations(&mut sig);
         sig
     });
     let kind = match (kind, stripped.as_deref()) {
@@ -1410,47 +1413,14 @@ fn strip_saved_extension_locations(sig: &mut [crate::types::decl::SignatureItem]
     }
     for item in sig {
         match item {
-            SignatureItem::SigValue(_, vd) => {
-                vd.val_loc = Location::none();
-                attrs(&mut vd.val_attributes);
-            }
-            SignatureItem::SigType(_, td, _) => {
-                td.type_loc = Location::none();
-                attrs(&mut td.type_attributes);
-                match &mut td.type_kind {
-                    TypeKind::TypeRecord(lds, _) => labels(lds),
-                    TypeKind::TypeVariant(cds, _) => {
-                        for cd in cds {
-                            cd.cd_loc = Location::none();
-                            attrs(&mut cd.cd_attributes);
-                            args(&mut cd.cd_args);
-                        }
-                    }
-                    TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
-                }
-                for inlined in &mut td.type_inlined_types {
-                    let crate::types::decl::TypeInlinedType::Record { labels: lds, .. } = inlined;
-                    labels(lds);
-                }
-            }
-            SignatureItem::SigTypext(_, ext, _) => {
-                ext.ext_loc = Location::none();
-                attrs(&mut ext.ext_attributes);
-                args(&mut ext.ext_args);
-            }
-            SignatureItem::SigModule(_, md, _) => {
-                md.md_loc = Location::none();
-                attrs(&mut md.md_attributes);
-                module_type(&mut md.md_type);
-            }
+            SignatureItem::SigTypext(_, ext, _) => ext.ext_loc = crate::location::Location::none(),
+            SignatureItem::SigModule(_, md, _) => module_type(&mut md.md_type),
             SignatureItem::SigModtype(_, mtd) => {
-                mtd.mtd_loc = Location::none();
-                attrs(&mut mtd.mtd_attributes);
                 if let Some(mty) = &mut mtd.mtd_type {
                     module_type(mty);
                 }
             }
-            SignatureItem::SigClass | SignatureItem::SigClassType => {}
+            _ => {}
         }
     }
 }
@@ -15676,6 +15646,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         if !options.keep_locs {
             strip_saved_signature_locations(&mut signature_for_save);
         }
+        strip_saved_extension_locations(&mut signature_for_save);
         // OCaml compiler/ml/env.ml:1949-1952 saves a fresh
         // `Subst.signature (Subst.for_saving Subst.identity) sg` copy before
         // installing the persistent structure. Keep Rust's GenType raw-signature
@@ -16364,6 +16335,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     if !options.keep_locs {
         strip_saved_signature_locations(&mut saved_signature);
     }
+    strip_saved_extension_locations(&mut saved_signature);
     internal_env.register_in_memory_signature(
         module_name,
         saved_signature,
