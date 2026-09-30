@@ -21416,9 +21416,9 @@ fn type_structure_item<'a>(
             Ok((
                 StructureItem {
                     str_desc: desc,
-                    // OCaml type_open receives `popen_loc` and retains that
-                    // complete `open M` span for Env warning callbacks.
-                    str_loc: open_desc.popen_loc,
+                    // typemod.ml:1603 `str_loc = pstr.pstr_loc` for every item;
+                    // `type_open` keeps `popen_loc` for its own warnings.
+                    str_loc: loc,
                     str_env: EnvRef(0),
                 },
                 vec![],
