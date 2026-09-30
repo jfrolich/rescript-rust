@@ -1661,16 +1661,53 @@ fn rewrite_included_type_decl_paths_to_local(
         );
     }
     if let Some(manifest) = decl.type_manifest {
-        rewrite_included_type_paths_to_local(
-            ctx,
-            manifest,
-            include_root_path,
-            include_alias_heads,
-            local_type_ids,
-            local_module_ids,
-            local_modtype_ids,
-            visited,
-        );
+        // mtype.ml:28-40 `strengthen` gives the included declaration the
+        // manifest `Root.t` of its own name; `Subst.signature` only renames
+        // idents, so that path stays rooted at the included module.
+        let manifest = ctx.repr(manifest);
+        let self_strengthened_args = match &*ctx.get_desc(manifest) {
+            crate::types::TypeDesc::Tconstr { path, args, .. }
+                if rewrite_included_path_to_local(
+                    path,
+                    include_root_path,
+                    include_alias_heads,
+                    local_type_ids,
+                    local_module_ids,
+                    local_modtype_ids,
+                )
+                .is_some_and(|local| matches!(&local, Path::Pident(local_id) if local_id.same(id))) =>
+            {
+                Some(args.clone())
+            }
+            _ => None,
+        };
+        match self_strengthened_args {
+            Some(args) => {
+                visited.insert(manifest);
+                for arg in args {
+                    rewrite_included_type_paths_to_local(
+                        ctx,
+                        arg,
+                        include_root_path,
+                        include_alias_heads,
+                        local_type_ids,
+                        local_module_ids,
+                        local_modtype_ids,
+                        visited,
+                    );
+                }
+            }
+            None => rewrite_included_type_paths_to_local(
+                ctx,
+                manifest,
+                include_root_path,
+                include_alias_heads,
+                local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
+                visited,
+            ),
+        }
     }
     match &mut decl.type_kind {
         crate::types::TypeKind::TypeVariant(constructors, _) => {
@@ -21734,7 +21771,10 @@ fn type_structure_item<'a>(
                 }
             }
 
-            let item_sig = stored_include_sig.unwrap_or_default();
+            // typemod.ml:1568-1589: the environment and the structure's
+            // signature both take the same `Subst.signature` of the included
+            // module type, whose items name each other locally.
+            let item_sig = localized_include_sig.or(stored_include_sig).unwrap_or_default();
             let desc = StructureItemDesc::Tstr_include(IncludeDeclaration {
                 incl_mod: typed_mod,
                 incl_type: item_sig.clone(),
