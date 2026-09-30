@@ -2244,7 +2244,13 @@ fn send_js_metadata_ready(
 }
 
 /// Write JS output to the correct location(s) based on package specs.
+///
+/// In-process builds recompile every module, so leave files whose content is
+/// unchanged untouched: bundlers and watchers key off modification times.
 fn write_file_creating_parent_on_missing(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    if std::fs::read(path).is_ok_and(|existing| existing == contents.as_ref()) {
+        return Ok(());
+    }
     match std::fs::write(path, contents.as_ref()) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
