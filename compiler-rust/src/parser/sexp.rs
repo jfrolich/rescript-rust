@@ -764,7 +764,7 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
             ])
         }
         ExpressionDesc::Pexp_fun(inner) => {
-            let params = arena
+            let params: Vec<Sexp> = arena
                 .nary_fun_params(inner)
                 .iter()
                 .map(|param| {
@@ -783,20 +783,14 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
                 .collect();
             Sexp::list(vec![
                 Sexp::atom("Pexp_fun"),
-                Sexp::list(
-                    arena
-                        .nary_fun_newtypes(inner)
-                        .iter()
-                        .map(|(name, attrs)| {
-                            Sexp::list(vec![
-                                Sexp::atom("newtype"),
-                                Sexp::atom(&quote_string(arena.get_string(name.txt))),
-                                attributes(arena, attrs),
-                            ])
-                        })
-                        .collect(),
-                ),
-                Sexp::list(params),
+                Sexp::list(map_empty(arena.nary_fun_newtypes(inner), |(name, attrs)| {
+                    Sexp::list(vec![
+                        Sexp::atom("newtype"),
+                        Sexp::atom(&quote_string(arena.get_string(name.txt))),
+                        attributes(arena, attrs),
+                    ])
+                })),
+                Sexp::list(if params.is_empty() { vec![Sexp::list(vec![])] } else { params }),
                 expression(arena, arena.get_expr(arena.nary_fun_body(inner))),
             ])
         }

@@ -174,7 +174,8 @@ fn run() {
     // For ML output and type checking, use ParseForTypeChecker mode where strings get Some("js") delimiter
     // This matches OCaml's for_printer flag behavior
     let mode = match args.print.as_str() {
-        "sexp" | "sexp-locs" | "sexp0-locs" | "res" | "ast" => ParserMode::Default,
+        // res_cli.ml: `for_printer` only for res / sexp / sexp-locs.
+        "sexp" | "sexp-locs" | "res" if !args.typechecker => ParserMode::Default,
         _ => ParserMode::ParseForTypeChecker,
     };
 
@@ -272,7 +273,7 @@ fn run() {
                 // 3. Marshaled signature (using output_value)
 
                 // Write magic
-                let _ = io::stdout().write_all(b"Caml1999N022");
+                let _ = io::stdout().write_all(b"ResIntf01300");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -293,7 +294,7 @@ fn run() {
                 let sig0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
 
                 // Write magic
-                let _ = io::stdout().write_all(b"Caml1999N022");
+                let _ = io::stdout().write_all(b"ResIntf01300");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -412,7 +413,7 @@ fn run() {
                 // 3. Marshaled structure (using output_value)
 
                 // Write magic
-                let _ = io::stdout().write_all(b"Caml1999M022");
+                let _ = io::stdout().write_all(b"ResImpl01300");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -433,7 +434,7 @@ fn run() {
                 let str0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
 
                 // Write magic
-                let _ = io::stdout().write_all(b"Caml1999M022");
+                let _ = io::stdout().write_all(b"ResImpl01300");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
