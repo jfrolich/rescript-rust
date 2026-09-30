@@ -1006,7 +1006,7 @@ impl LambdaCompiler {
     fn compile_apply_call(&mut self, apply: &Apply) -> Compiled {
         let mut compiled = self.compile_apply_call_inner(apply);
         if compiled.expr.source_loc.is_none() {
-            compiled.expr.source_loc = self.source_loc(&apply.ap_info.loc);
+            compiled.expr.source_loc = (self.source_loc(&apply.ap_info.loc)).map(Box::new);
         }
         compiled
     }
@@ -1501,7 +1501,7 @@ impl LambdaCompiler {
             Lambda::Lapply(apply) => {
                 let mut compiled = self.compile_apply_call(apply);
                 if compiled.expr.source_loc.is_none() {
-                    compiled.expr.source_loc = self.source_loc(&apply.ap_info.loc);
+                    compiled.expr.source_loc = (self.source_loc(&apply.ap_info.loc)).map(Box::new);
                 }
                 compiled
             }
@@ -1536,7 +1536,7 @@ impl LambdaCompiler {
                     env: Default::default(),
                     return_unit: func.attr.return_unit,
                     async_: func.attr.async_,
-                    directive: func.attr.directive.clone(),
+                    directive: (func.attr.directive.clone()).map(Box::new),
                 });
                 Compiled {
                     prelude: vec![],
@@ -2509,7 +2509,7 @@ impl LambdaCompiler {
         if let Some(first) = block.first_mut()
             && first.source_loc.is_none()
         {
-            first.source_loc = source_loc;
+            first.source_loc = (source_loc).map(Box::new);
         }
         block
     }
@@ -2845,7 +2845,7 @@ impl LambdaCompiler {
                 let compiled = self.compile_apply_call(apply);
                 let mut block = compiled.prelude;
                 let mut statement = Statement::return_(compiled.expr);
-                statement.source_loc = self.source_loc(&apply.ap_info.loc);
+                statement.source_loc = (self.source_loc(&apply.ap_info.loc)).map(Box::new);
                 block.push(statement);
                 block
             }
@@ -3646,7 +3646,7 @@ impl LambdaCompiler {
             env: Default::default(),
             return_unit: func.attr.return_unit,
             async_: func.attr.async_,
-            directive: func.attr.directive.clone(),
+            directive: (func.attr.directive.clone()).map(Box::new),
         })
     }
 

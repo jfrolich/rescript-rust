@@ -173,8 +173,9 @@ impl LambdaCompiler {
         dispatches: Option<&[(String, String)]>,
     ) -> Vec<Expression> {
         match &arg.desc {
-            ExpressionDesc::CamlBlock(items, _, TagInfo::PolyVar(_))
-                if matches!(
+            ExpressionDesc::CamlBlock(items, _, tag)
+                if matches!(**tag, TagInfo::PolyVar(_))
+                    && matches!(
                     items.as_slice(),
                     [
                         Expression {

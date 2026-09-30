@@ -181,7 +181,7 @@ impl LambdaCompiler {
                 Expression::new(ExpressionDesc::CamlBlock(
                     elems,
                     MutableFlag::NA,
-                    *tag_info.clone(),
+                    tag_info.clone(),
                 ))
             }
             Constant::Some(inner) => Self::compile_some_constant(inner),

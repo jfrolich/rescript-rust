@@ -509,7 +509,10 @@ pub(crate) fn extract_toplevel_exports(
         comment,
     } = expr;
     match desc {
-        ExpressionDesc::CamlBlock(values, _, TagInfo::ModuleExport(exports)) => {
+        ExpressionDesc::CamlBlock(values, _, tag) if matches!(*tag, TagInfo::ModuleExport(_)) => {
+            let TagInfo::ModuleExport(exports) = *tag else {
+                unreachable!()
+            };
             debug_assert_eq!(
                 exports.len(),
                 values.len(),
@@ -689,7 +692,7 @@ pub(crate) fn push_effect_expression(block: &mut Block, expr: Expression) {
 /// strips every side-effect-free expression, which matches OCaml's
 /// `output_of_expression` (js_output.ml:42-52) but not `S.exp`.
 pub(crate) fn push_s_exp(block: &mut Block, expr: Expression) {
-    let source_loc = expr.source_loc;
+    let source_loc = expr.source_loc.clone();
     match expr.desc {
         ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. } => {}
         ExpressionDesc::Seq(left, right) => match (&left.desc, &right.desc) {

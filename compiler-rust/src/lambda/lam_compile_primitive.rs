@@ -636,7 +636,7 @@ impl LambdaCompiler {
                 Expression::new(ExpressionDesc::CamlBlock(
                     compiled_args,
                     js_mutable,
-                    tag_info.clone(),
+                    Box::new(tag_info.clone()),
                 ))
             }
             // OCaml lam_compile_primitive.ml:560-564 builds the mutable list
@@ -644,7 +644,7 @@ impl LambdaCompiler {
             Pmakelist => Expression::new(ExpressionDesc::CamlBlock(
                 compiled_args,
                 MutableFlag::Mutable,
-                TagInfo::constructor("::", 1),
+                Box::new(TagInfo::constructor("::", 1)),
             )),
             PrawJsCode(info) => {
                 Expression::new(ExpressionDesc::RawJsCode(crate::js_ir::JsRawInfo {
@@ -654,7 +654,7 @@ impl LambdaCompiler {
             }
             Pdebugger => {
                 let mut statement = Statement::debugger();
-                statement.source_loc = self.source_loc(loc);
+                statement.source_loc = (self.source_loc(loc)).map(Box::new);
                 prelude.push(statement);
                 Expression::undefined(false)
             }
@@ -664,7 +664,7 @@ impl LambdaCompiler {
                     .cloned()
                     .unwrap_or_else(|| Expression::undefined(false));
                 let mut statement = Statement::throw(expr);
-                statement.source_loc = self.source_loc(loc);
+                statement.source_loc = (self.source_loc(loc)).map(Box::new);
                 prelude.push(statement);
                 Expression::undefined(false)
             }

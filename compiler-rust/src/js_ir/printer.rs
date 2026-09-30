@@ -437,8 +437,8 @@ impl JsPrinter {
             self.newline();
         }
 
-        self.mark_source_loc(stmt.source_loc.as_ref());
-        self.fallback_expression_source_loc = stmt.source_loc;
+        self.mark_source_loc(stmt.source_loc.as_ref().map(|v| &**v));
+        self.fallback_expression_source_loc = stmt.source_loc.as_deref().copied();
         self.print_statement_desc(&stmt.desc, top_level);
         self.fallback_expression_source_loc = None;
     }
@@ -509,7 +509,7 @@ impl JsPrinter {
                             body,
                             *return_unit,
                             *async_,
-                            directive.as_deref(),
+                            directive.as_deref().map(|x| x.as_str()),
                         );
                         return;
                     }
@@ -919,7 +919,7 @@ impl JsPrinter {
                     ..
                 } = &value.desc
                 {
-                    self.mark_source_loc(value.source_loc.as_ref());
+                    self.mark_source_loc(value.source_loc.as_ref().map(|v| &**v));
                     // OCaml reference: compiler/core/js_dump.ml:337-360 builds
                     // `set_env` including `Name_non_top id`, then
                     // compiler/core/js_dump.ml:411-414 prints the function in
@@ -933,7 +933,7 @@ impl JsPrinter {
                         body,
                         return_unit: *return_unit,
                         async_: *async_,
-                        directive: directive.as_deref(),
+                        directive: directive.as_deref().map(|x| x.as_str()),
                         function_ident: Some(&decl.ident),
                     });
                 } else {
@@ -1293,7 +1293,7 @@ impl JsPrinter {
             ExpressionDesc::Fun { .. } | ExpressionDesc::Object(_, _) => true,
             ExpressionDesc::RawJsCode(info) => !info.is_stmt,
             ExpressionDesc::CamlBlock(_, _, tag_info) => matches!(
-                tag_info,
+                &**tag_info,
                 crate::lambda::TagInfo::Record { .. }
                     | crate::lambda::TagInfo::Module(_)
                     | crate::lambda::TagInfo::PolyVar(_)
@@ -1407,14 +1407,17 @@ impl JsPrinter {
                 self.collect_jsx_fields_from_object(props)?,
                 dup.as_ref().map(|dup| dup.as_ref()),
             )),
-            ExpressionDesc::CamlBlock(
-                elements,
-                _,
-                crate::lambda::TagInfo::Record { fields, .. },
-            ) => Some((
-                self.collect_jsx_fields_from_record_block(elements, fields)?,
-                None,
-            )),
+            ExpressionDesc::CamlBlock(elements, _, tag)
+                if matches!(**tag, crate::lambda::TagInfo::Record { .. }) =>
+            {
+                let crate::lambda::TagInfo::Record { fields, .. } = &**tag else {
+                    unreachable!()
+                };
+                Some((
+                    self.collect_jsx_fields_from_record_block(elements, fields)?,
+                    None,
+                ))
+            }
             ExpressionDesc::Seq(_, _) => {
                 let (fields, spread_props) = self.collect_jsx_spread_assignments(props)?;
                 Some((fields, Some(spread_props)))
@@ -1652,7 +1655,7 @@ impl JsPrinter {
             self.write(" */");
         }
 
-        self.mark_source_loc(expr.source_loc.as_ref());
+        self.mark_source_loc(expr.source_loc.as_ref().map(|v| &**v));
         self.print_expression_desc(&expr.desc, level);
     }
 
@@ -2019,7 +2022,7 @@ impl JsPrinter {
                     body,
                     return_unit: *return_unit,
                     async_: *async_,
-                    directive: directive.as_deref(),
+                    directive: directive.as_deref().map(|x| x.as_str()),
                     function_ident: None,
                 });
             }
@@ -2110,13 +2113,13 @@ impl JsPrinter {
             ExpressionDesc::CamlBlock(elements, _mutable, tag_info) => {
                 use crate::lambda::TagInfo;
 
-                if matches!(tag_info, TagInfo::Extension | TagInfo::RecordExt { .. }) {
+                if matches!(&**tag_info, TagInfo::Extension | TagInfo::RecordExt { .. }) {
                     self.print_exception_block_literal(level, elements, tag_info, false);
                     return;
                 }
 
                 // Check if this is a record with field names
-                match tag_info {
+                match &**tag_info {
                     TagInfo::Record { fields, .. } if fields.len() == elements.len() => {
                         if record_uses_array_syntax(fields) {
                             self.print_array_literal(elements);
@@ -2327,7 +2330,7 @@ impl JsPrinter {
         match &expr.desc {
             ExpressionDesc::CamlBlock(elements, _, tag_info)
                 if matches!(
-                    tag_info,
+                    &**tag_info,
                     crate::lambda::TagInfo::Extension | crate::lambda::TagInfo::RecordExt { .. }
                 ) =>
             {
@@ -2726,7 +2729,7 @@ impl JsPrinter {
             StatementDesc::If(cond, then_, else_) if else_is_single_return_undefined(else_) => {
                 self.print_statement(
                     &Statement {
-                        source_loc: stmt.source_loc,
+                        source_loc: stmt.source_loc.clone(),
                         desc: StatementDesc::If(cond.clone(), then_.clone(), vec![]),
                         comment: stmt.comment.clone(),
                     },
@@ -4366,7 +4369,7 @@ mod tests {
                 Expression::new(ExpressionDesc::CamlBlock(
                     vec![],
                     MutableFlag::Immutable,
-                    TagInfo::record(vec![], crate::parser::ast::MutableFlag::Immutable),
+                    Box::new(TagInfo::record(vec![], crate::parser::ast::MutableFlag::Immutable)),
                 )),
             ],
             CallInfo {
@@ -4387,13 +4390,13 @@ mod tests {
                         ),
                     ],
                     MutableFlag::Immutable,
-                    TagInfo::record(
+                    Box::new(TagInfo::record(
                         vec![
                             ("className".to_string(), true),
                             ("children".to_string(), false),
                         ],
                         crate::parser::ast::MutableFlag::Immutable,
-                    ),
+                    )),
                 )),
             ],
             CallInfo {
@@ -5118,7 +5121,7 @@ mod tests {
                 ExpressionDesc::CamlBlock(
                     vec![Expression::number(Number::int(1))],
                     MutableFlag::Immutable,
-                    TagInfo::constructor("Some", 1),
+                    Box::new(TagInfo::constructor("Some", 1)),
                 ),
             ))],
             env: Default::default(),
@@ -5844,7 +5847,7 @@ mod tests {
                 env: Default::default(),
                 return_unit: false,
                 async_: false,
-                directive: Some("'use memo'".to_string()),
+                directive: Some(Box::new("'use memo'".to_string())),
             })),
             property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
@@ -5864,7 +5867,7 @@ mod tests {
             env: Default::default(),
             return_unit: false,
             async_: false,
-            directive: Some("'use cache'".to_string()),
+            directive: Some(Box::new("'use cache'".to_string())),
         }));
 
         assert_eq!(
@@ -5928,7 +5931,7 @@ mod tests {
                 Expression::number(Number::int(0)),
             ],
             MutableFlag::Immutable,
-            TagInfo::constructor("::", 1),
+            Box::new(TagInfo::constructor("::", 1)),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  hd: 1,\n  tl: 0\n}");
@@ -5939,7 +5942,7 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::number(Number::int(1))],
             MutableFlag::Immutable,
-            TagInfo::constructor("Some", 1),
+            Box::new(TagInfo::constructor("Some", 1)),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  TAG: \"Some\",\n  _0: 1\n}");
@@ -5953,7 +5956,7 @@ mod tests {
                 Expression::number(Number::int(2)),
             ],
             MutableFlag::Immutable,
-            TagInfo::constructor("A", 2),
+            Box::new(TagInfo::constructor("A", 2)),
         ));
 
         assert_eq!(
@@ -5974,10 +5977,10 @@ mod tests {
                 Expression::undefined(false),
             ],
             MutableFlag::Immutable,
-            TagInfo::record(
+            Box::new(TagInfo::record(
                 vec![("x".to_string(), false), ("i".to_string(), true)],
                 crate::parser::ast::MutableFlag::Immutable,
-            ),
+            )),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  x: 10\n}");
@@ -5988,7 +5991,7 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::string("hello")],
             MutableFlag::Immutable,
-            TagInfo::RecordInlined {
+            Box::new(TagInfo::RecordInlined {
                 name: "One".to_string(),
                 num_nonconst: 1,
                 runtime: Box::new(crate::types::BlockRuntime {
@@ -6002,7 +6005,7 @@ mod tests {
                 fields: vec![("name".to_string(), false)],
                 logical_field_count: None,
                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-            },
+            }),
         ));
 
         assert_eq!(
@@ -6019,10 +6022,10 @@ mod tests {
                 Expression::number(Number::int(2)),
             ],
             MutableFlag::Immutable,
-            TagInfo::record(
+            Box::new(TagInfo::record(
                 vec![("0".to_string(), false), ("1".to_string(), false)],
                 crate::parser::ast::MutableFlag::Immutable,
-            ),
+            )),
         ));
 
         assert_eq!(print_expression(&expr), "[\n  1,\n  2\n]");
@@ -6033,7 +6036,7 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::number(Number::int(1))],
             MutableFlag::Immutable,
-            TagInfo::Module(vec!["value".to_string()]),
+            Box::new(TagInfo::Module(vec!["value".to_string()])),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  value: 1\n}");
@@ -6044,7 +6047,7 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::string("Not_found")],
             MutableFlag::Immutable,
-            TagInfo::Extension,
+            Box::new(TagInfo::Extension),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  RE_EXN_ID: \"Not_found\"\n}");
@@ -6058,10 +6061,10 @@ mod tests {
                 Expression::number(Number::int(3)),
             ],
             MutableFlag::Immutable,
-            TagInfo::RecordExt {
+            Box::new(TagInfo::RecordExt {
                 fields: vec!["value".to_string()],
                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-            },
+            }),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  RE_EXN_ID: A,\n  value: 3\n}");
@@ -6073,7 +6076,7 @@ mod tests {
             ExpressionDesc::CamlBlock(
                 vec![Expression::string("Not_found")],
                 MutableFlag::Immutable,
-                TagInfo::Extension,
+                Box::new(TagInfo::Extension),
             ),
         ))]);
 

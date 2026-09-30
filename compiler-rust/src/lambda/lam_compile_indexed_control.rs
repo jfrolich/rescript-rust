@@ -66,7 +66,7 @@ impl IndexedJsConsumer<'_> {
                 env: Default::default(),
                 return_unit: attr.return_unit,
                 async_: attr.async_,
-                directive: attr.directive,
+                directive: (attr.directive).map(Box::new),
             }),
         }
     }

@@ -110,7 +110,7 @@ impl<'a> IndexedJsConsumer<'a> {
                             _ => Expression::call(function, args, CallInfo::default()),
                         },
                     };
-                    if expr.source_loc.is_none() { expr.source_loc = self.compiler.source_loc(&info.loc); }
+                    if expr.source_loc.is_none() { expr.source_loc = (self.compiler.source_loc(&info.loc)).map(Box::new); }
                     Output::of_block_and_expression(continuation, prelude, expr)
                 }
             };
@@ -178,7 +178,7 @@ impl<'a> IndexedJsConsumer<'a> {
             compiled_function.value.expect("call function"), args,
             call_info_of_apply_status(jsx, info.status),
         );
-        expr.source_loc = self.compiler.source_loc(&info.loc);
+        expr.source_loc = (self.compiler.source_loc(&info.loc)).map(Box::new);
         Output::of_block_and_expression(continuation, prelude, expr)
     }
 

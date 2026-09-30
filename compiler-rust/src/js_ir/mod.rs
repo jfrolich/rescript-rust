@@ -827,10 +827,10 @@ pub enum ExpressionDesc {
         is_method: bool,
         params: Vec<Ident>,
         body: Block,
-        env: FunEnv,
+        env: Box<FunEnv>,
         return_unit: bool,
         async_: bool,
-        directive: Option<String>,
+        directive: Option<Box<String>>,
     },
 
     /// String literal
@@ -846,7 +846,7 @@ pub enum ExpressionDesc {
     OptionalBlock(Box<Expression>, bool),
 
     /// Caml block (variant, record, tuple)
-    CamlBlock(Vec<Expression>, MutableFlag, TagInfo),
+    CamlBlock(Vec<Expression>, MutableFlag, Box<TagInfo>),
 
     /// Block tag access
     CamlBlockTag(Box<Expression>, String),
@@ -889,9 +889,9 @@ pub struct Expression {
     /// Expression description
     pub desc: ExpressionDesc,
     /// Optional comment
-    pub comment: Option<String>,
+    pub comment: Option<Box<String>>,
     /// Original ReScript source location used by source map generation.
-    pub source_loc: Option<crate::location::Location>,
+    pub source_loc: Option<Box<crate::location::Location>>,
 }
 
 impl Expression {
@@ -908,7 +908,7 @@ impl Expression {
     pub fn with_comment(desc: ExpressionDesc, comment: impl Into<String>) -> Self {
         Self {
             desc,
-            comment: Some(comment.into()),
+            comment: Some(Box::new(comment.into())),
             source_loc: None,
         }
     }
@@ -1754,9 +1754,9 @@ pub struct Statement {
     /// Statement description
     pub desc: StatementDesc,
     /// Optional comment
-    pub comment: Option<String>,
+    pub comment: Option<Box<String>>,
     /// Original ReScript source location used by source map generation.
-    pub source_loc: Option<crate::location::Location>,
+    pub source_loc: Option<Box<crate::location::Location>>,
 }
 
 impl Statement {
@@ -1858,7 +1858,7 @@ impl Statement {
 
     /// Create a return statement
     pub fn return_(expr: Expression) -> Self {
-        let source_loc = expr.source_loc;
+        let source_loc = expr.source_loc.clone();
         let mut statement = Self::new(StatementDesc::Return(expr));
         statement.source_loc = source_loc;
         statement
@@ -1905,7 +1905,7 @@ fn block_with_comment(block: Block, comment: Option<String>) -> Statement {
         [] => Statement {
             source_loc: None,
             desc: StatementDesc::Block(vec![]),
-            comment,
+            comment: comment.map(Box::new),
         },
         [stmt] => match &stmt.desc {
             StatementDesc::Block(inner) => block_with_comment(inner.clone(), comment),
@@ -1914,7 +1914,7 @@ fn block_with_comment(block: Block, comment: Option<String>) -> Statement {
         _ => Statement {
             source_loc: None,
             desc: StatementDesc::Block(block),
-            comment,
+            comment: comment.map(Box::new),
         },
     }
 }
@@ -1957,7 +1957,7 @@ fn normalize_statement(desc: StatementDesc, comment: Option<String>) -> Statemen
         _ => Statement {
             source_loc: None,
             desc,
-            comment,
+            comment: comment.map(Box::new),
         },
     }
 }

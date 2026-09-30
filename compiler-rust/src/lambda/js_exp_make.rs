@@ -646,8 +646,16 @@ pub(crate) fn pure_record_field_item(
     }
 
     match &target.desc {
-        ExpressionDesc::CamlBlock(items, _, TagInfo::Record { fields, .. })
-        | ExpressionDesc::CamlBlock(items, _, TagInfo::RecordInlined { fields, .. }) => {
+        ExpressionDesc::CamlBlock(items, _, tag)
+            if matches!(
+                **tag,
+                TagInfo::Record { .. } | TagInfo::RecordInlined { .. }
+            ) =>
+        {
+            let (TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. }) = &**tag
+            else {
+                unreachable!()
+            };
             for (item, (field_name, _)) in items.iter().zip(fields.iter()) {
                 if field_name == field {
                     return Some(item.clone());
@@ -669,8 +677,16 @@ pub(crate) fn direct_projection_from_pure_literal(
     }
 
     match &target.desc {
-        ExpressionDesc::CamlBlock(items, _, TagInfo::Record { fields, .. })
-        | ExpressionDesc::CamlBlock(items, _, TagInfo::RecordInlined { fields, .. }) => {
+        ExpressionDesc::CamlBlock(items, _, tag)
+            if matches!(
+                **tag,
+                TagInfo::Record { .. } | TagInfo::RecordInlined { .. }
+            ) =>
+        {
+            let (TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. }) = &**tag
+            else {
+                unreachable!()
+            };
             if let Some(field) = field {
                 for (item, (field_name, _)) in items.iter().zip(fields.iter()) {
                     if field_name == field {

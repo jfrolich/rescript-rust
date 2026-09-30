@@ -514,7 +514,7 @@ fn indexed_function_keeps_attributes_and_restores_outer_control_state() {
     else {
         panic!("function")
     };
-    assert_eq!(directive.as_deref(), Some("use server"));
+    assert_eq!(directive.as_deref().map(String::as_str), Some("use server"));
     assert_eq!(params[0].name(), id.name());
     assert_eq!(params[0].stamp(), id.stamp());
     assert_eq!(params[0].flags(), id.flags());

@@ -721,7 +721,7 @@ fn compile_constant_empty_list_keeps_numeric_zero_with_pointer_comment() {
             comment: Some(ref comment),
             ..
         }
-        if comment == "[]"
+        if **comment == "[]"
     ));
     assert_eq!(print_expression(&compiled), "/* [] */0");
 }
@@ -923,7 +923,7 @@ fn compile_create_extension_uses_primitive_exceptions_create() {
             ..
         }] if txt == "Local_exception_test.A"
     ));
-    assert_eq!(compiled.expr.comment.as_deref(), Some("@__PURE__"));
+    assert_eq!(compiled.expr.comment.as_deref().map(String::as_str), Some("@__PURE__"));
     assert_eq!(
         print_expression(&compiled.expr),
         "/* @__PURE__ */Primitive_exceptions.create(\"Local_exception_test.A\")"
@@ -7286,7 +7286,7 @@ fn js_flatten_and_mark_dead_substitutes_immutable_caml_block_index_reads() {
                                 Expression::number(Number::int(3)),
                             ],
                             MutableFlag::Immutable,
-                            TagInfo::tuple(),
+                            Box::new(TagInfo::tuple()),
                         ))),
                         property: LetKind::Strict,
                         ident_info: IdentInfo::default(),
@@ -7469,7 +7469,7 @@ fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
                                     Expression::number(Number::int(0)),
                                 ],
                                 MutableFlag::Immutable,
-                                TagInfo::Constructor {
+                                Box::new(TagInfo::Constructor {
                                     name: "::".to_string(),
                                     num_nonconst: 1,
                                     runtime: Box::new(crate::types::BlockRuntime {
@@ -7480,11 +7480,11 @@ fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
                                         tag_name: None,
                                         untagged: false,
                                     }),
-                                },
+                                }),
                             )),
                         ],
                         MutableFlag::Immutable,
-                        TagInfo::Constructor {
+                        Box::new(TagInfo::Constructor {
                             name: "::".to_string(),
                             num_nonconst: 1,
                             runtime: Box::new(crate::types::BlockRuntime {
@@ -7495,7 +7495,7 @@ fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
                                 tag_name: None,
                                 untagged: false,
                             }),
-                        },
+                        }),
                     ))),
                     property: LetKind::Strict,
                     ident_info: IdentInfo::default(),
@@ -7566,7 +7566,7 @@ fn js_flatten_and_mark_dead_keeps_single_field_module_reads_materialized_like_oc
                         value: Some(Expression::new(ExpressionDesc::CamlBlock(
                             vec![Expression::var(eq.clone())],
                             MutableFlag::Immutable,
-                            TagInfo::Module(vec!["Eq".to_string()]),
+                            Box::new(TagInfo::Module(vec!["Eq".to_string()])),
                         ))),
                         property: LetKind::Strict,
                         ident_info: IdentInfo::default(),
@@ -7649,7 +7649,7 @@ fn js_flatten_and_mark_dead_preserves_transformed_jsx_component_make_reads() {
                             value: Some(Expression::new(ExpressionDesc::CamlBlock(
                                 vec![Expression::var(component.clone())],
                                 MutableFlag::Immutable,
-                                TagInfo::Module(vec!["make".to_string()]),
+                                Box::new(TagInfo::Module(vec!["make".to_string()])),
                             ))),
                             property: LetKind::Strict,
                             ident_info: IdentInfo::default(),
@@ -7676,10 +7676,10 @@ fn js_flatten_and_mark_dead_preserves_transformed_jsx_component_make_reads() {
                                 Expression::new(ExpressionDesc::CamlBlock(
                                     vec![],
                                     MutableFlag::Immutable,
-                                    TagInfo::record(
+                                    Box::new(TagInfo::record(
                                         vec![],
                                         crate::parser::ast::MutableFlag::Immutable,
-                                    ),
+                                    )),
                                 )),
                             ],
                             CallInfo {
@@ -7726,7 +7726,7 @@ fn js_flatten_and_mark_dead_keeps_single_field_component_make_reads_without_jsx_
                             value: Some(Expression::new(ExpressionDesc::CamlBlock(
                                 vec![Expression::var(component.clone())],
                                 MutableFlag::Immutable,
-                                TagInfo::Module(vec!["make".to_string()]),
+                                Box::new(TagInfo::Module(vec!["make".to_string()])),
                             ))),
                             property: LetKind::Strict,
                             ident_info: IdentInfo::default(),
@@ -7753,10 +7753,10 @@ fn js_flatten_and_mark_dead_keeps_single_field_component_make_reads_without_jsx_
                                 Expression::new(ExpressionDesc::CamlBlock(
                                     vec![],
                                     MutableFlag::Immutable,
-                                    TagInfo::record(
+                                    Box::new(TagInfo::record(
                                         vec![],
                                         crate::parser::ast::MutableFlag::Immutable,
-                                    ),
+                                    )),
                                 )),
                             ],
                             CallInfo {
@@ -7821,7 +7821,7 @@ fn js_flatten_and_mark_dead_keeps_async_component_make_aliases_materialized() {
                             value: Some(Expression::new(ExpressionDesc::CamlBlock(
                                 vec![Expression::var(component.clone())],
                                 MutableFlag::Immutable,
-                                TagInfo::Module(vec!["make".to_string()]),
+                                Box::new(TagInfo::Module(vec!["make".to_string()])),
                             ))),
                             property: LetKind::Strict,
                             ident_info: IdentInfo::default(),
@@ -7875,7 +7875,7 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
                             Expression::undefined(false),
                         ],
                         MutableFlag::Immutable,
-                        TagInfo::Record {
+                        Box::new(TagInfo::Record {
                             fields: vec![
                                 ("id".to_string(), true),
                                 ("name".to_string(), true),
@@ -7886,7 +7886,7 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
                             ],
                             logical_field_count: None,
                             mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                        },
+                        }),
                     ))),
                     property: LetKind::StrictOpt,
                     ident_info: IdentInfo::default(),
@@ -8002,7 +8002,7 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
                             )),
                         ],
                         MutableFlag::Immutable,
-                        TagInfo::Record {
+                        Box::new(TagInfo::Record {
                             fields: vec![
                                 ("pk".to_string(), false),
                                 ("exportStatus".to_string(), true),
@@ -8010,7 +8010,7 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
                             ],
                             logical_field_count: None,
                             mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                        },
+                        }),
                     ))),
                     property: LetKind::Strict,
                     ident_info: IdentInfo::default(),
@@ -8114,22 +8114,22 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
                                     Expression::number(Number::int(3)),
                                 ],
                                 MutableFlag::Immutable,
-                                TagInfo::Record {
+                                Box::new(TagInfo::Record {
                                     fields: vec![
                                         ("xx".to_string(), false),
                                         ("yy".to_string(), false),
                                     ],
                                     logical_field_count: None,
                                     mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                                },
+                                }),
                             )),
                         ],
                         MutableFlag::Immutable,
-                        TagInfo::Record {
+                        Box::new(TagInfo::Record {
                             fields: vec![("a".to_string(), false), ("b".to_string(), false)],
                             logical_field_count: None,
                             mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                        },
+                        }),
                     ))),
                     property: LetKind::Alias,
                     ident_info: IdentInfo::default(),
@@ -9247,7 +9247,7 @@ fn lowers_module_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(eq.clone())],
             MutableFlag::Immutable,
-            TagInfo::Module(vec!["Eq".to_string()]),
+            Box::new(TagInfo::Module(vec!["Eq".to_string()])),
         )),
     );
 
@@ -9273,11 +9273,11 @@ fn lowers_record_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(value.clone())],
             MutableFlag::Immutable,
-            TagInfo::Record {
+            Box::new(TagInfo::Record {
                 fields: vec![("d".to_string(), false)],
                 logical_field_count: None,
                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-            },
+            }),
         )),
     );
 
@@ -9302,7 +9302,7 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(head.clone()), Expression::var(tail.clone())],
             MutableFlag::Immutable,
-            TagInfo::Constructor {
+            Box::new(TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
                 runtime: Box::new(crate::types::BlockRuntime {
@@ -9313,7 +9313,7 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
                     tag_name: None,
                     untagged: false,
                 }),
-            },
+            }),
         )),
     );
     let tail_expr = compiler.compile_field_access(
@@ -9322,7 +9322,7 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(head.clone()), Expression::var(tail.clone())],
             MutableFlag::Immutable,
-            TagInfo::Constructor {
+            Box::new(TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
                 runtime: Box::new(crate::types::BlockRuntime {
@@ -9333,7 +9333,7 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
                     tag_name: None,
                     untagged: false,
                 }),
-            },
+            }),
         )),
     );
 
@@ -9366,7 +9366,7 @@ fn lowers_extension_pfield_from_pure_caml_block_directly_like_ocaml() {
                 Expression::var(payload.clone()),
             ],
             MutableFlag::Immutable,
-            TagInfo::Extension,
+            Box::new(TagInfo::Extension),
         )),
     );
 
@@ -9438,7 +9438,7 @@ fn lowers_polyvar_pfield_from_pure_caml_block_directly_like_ocaml() {
     let block = Expression::new(ExpressionDesc::CamlBlock(
         vec![Expression::string("Tag"), Expression::var(payload.clone())],
         MutableFlag::Immutable,
-        TagInfo::PolyVar("Tag".to_string()),
+        Box::new(TagInfo::PolyVar("Tag".to_string())),
     ));
     let tag = compiler.compile_field_access(0, &FieldDbgInfo::PolyVarTag, &block);
     let value = compiler.compile_field_access(1, &FieldDbgInfo::PolyVarContent, &block);
