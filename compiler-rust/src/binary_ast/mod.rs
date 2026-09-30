@@ -53,6 +53,7 @@ pub mod mapper_to0;
 pub mod marshal;
 pub mod parsetree0;
 pub mod parsetree0_marshal;
+pub mod parsetree0_unmarshal;
 pub mod ppx;
 pub mod serialize;
 pub mod spice_ppx;

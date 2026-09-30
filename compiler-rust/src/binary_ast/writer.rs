@@ -144,6 +144,18 @@ pub fn write_external_ppx_signature_input(
     )
 }
 
+/// Write the external `-ppx` input for an already converted Parsetree0 AST
+/// (`Cmd_ppx_apply.write_ast`): magic, marshaled input name, marshaled AST.
+pub fn write_external_ppx_input0<A: Marshal>(
+    output_path: &Path,
+    source_path: &str,
+    arena: &ParseArena,
+    magic: &[u8],
+    ast: &A,
+) -> io::Result<()> {
+    write_external_ppx_input(output_path, source_path, arena, magic, ast)
+}
+
 fn write_external_ppx_input<A: Marshal>(
     output_path: &Path,
     source_path: &str,

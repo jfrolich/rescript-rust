@@ -586,6 +586,24 @@ fn generate_ast(
 
     // The Rust parser runs the same frontend as `bsc -bs-ast` in process, so it
     // reads the flags OCaml's `-bs-ast` would receive (see `parser_args`).
+    // `-ppx` rewriters from `ppx-flags`, as `parser_args` passes them to
+    // `bsc -bs-ast`.
+    let external_ppxs = match &package.config.ppx_flags {
+        Some(flags) if use_rust_parser && !flags.is_empty() => {
+            let contents = helpers::read_file(&file_path).unwrap_or_default();
+            let ppx_args = config::flatten_ppx_flags(
+                &build_state.project_context,
+                &package.config,
+                &filter_ppx_flags(&package.config.ppx_flags, &contents),
+            )?;
+            ppx_args
+                .chunks(2)
+                .filter(|pair| pair[0] == "-ppx")
+                .map(|pair| pair[1].clone())
+                .collect()
+        }
+        _ => Vec::new(),
+    };
     let frontend_options = use_rust_parser.then(|| {
         let root_config = build_state.project_context.get_root_config();
         let flags = [
@@ -609,6 +627,7 @@ fn generate_ast(
             experimental_let_unwrap: parsed.experimental_let_unwrap
                 || rust_parser_let_unwrap_enabled(root_config, &package.config),
             no_builtin_ppx: parsed.no_builtin_ppx,
+            external_ppxs,
             ..Default::default()
         }
     });

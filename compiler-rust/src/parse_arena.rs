@@ -508,6 +508,9 @@ pub struct ParseArena {
     /// cannot return a `Result`; OCaml's mapper raises it immediately, so the
     /// public rewrite entry points report it before any later error.
     ppx_deferred_error: Option<crate::binary_ast::ppx::PpxError>,
+    /// Whether the builtin spice mapper stands in for a configured external
+    /// spice PPX (see `driver::is_builtin_external_ppx`).
+    builtin_spice_disabled: bool,
     /// Sparse side table for case guards, keyed by owning match/try ExprIdx.
     /// Value is a case-indexed list of optional guard expressions.
     expr_case_guards: Vec<Option<Box<[Option<ExprIdx>]>>>,
@@ -936,6 +939,7 @@ impl Default for ParseArena {
             value_constraints_by_pattern: HashMap::new(),
             value_constraint_varify_errors: HashMap::new(),
             ppx_deferred_error: None,
+            builtin_spice_disabled: false,
             expr_case_guards: Vec::new(),
             expr_construct_args: Vec::new(),
             expr_variant_args: Vec::new(),
@@ -2558,6 +2562,15 @@ impl ParseArena {
         constraint.pvc_expression = Some(wrapped);
         self.value_constraints_by_pattern
             .insert(pattern, constraint);
+    }
+
+    /// Enable or disable the builtin spice mapper for this compilation.
+    pub fn set_builtin_spice(&mut self, enabled: bool) {
+        self.builtin_spice_disabled = !enabled;
+    }
+
+    pub fn builtin_spice_enabled(&self) -> bool {
+        !self.builtin_spice_disabled
     }
 
     /// Record a nested builtin-ppx error unless an earlier one is pending.

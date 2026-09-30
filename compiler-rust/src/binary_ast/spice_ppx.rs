@@ -5395,6 +5395,9 @@ pub fn expand_structure_item_with_mapper(
     arena: &mut ParseArena,
     mapper_active: bool,
 ) -> SpiceResult<Vec<StructureItem>> {
+    if !arena.builtin_spice_enabled() {
+        return Ok(vec![item.clone()]);
+    }
     map_structure_item_spice(item, arena, mapper_active)
 }
 
@@ -5402,6 +5405,9 @@ pub fn expand_structure_item(
     item: &StructureItem,
     arena: &mut ParseArena,
 ) -> SpiceResult<Vec<StructureItem>> {
+    if !arena.builtin_spice_enabled() {
+        return Ok(vec![item.clone()]);
+    }
     let mapper_active = structure_item_contains_spice_type_decl(item, arena);
     map_structure_item_spice(item, arena, mapper_active)
 }
@@ -5422,6 +5428,9 @@ pub fn expand_structure(
     structure: &[StructureItem],
     arena: &mut ParseArena,
 ) -> SpiceResult<Vec<StructureItem>> {
+    if !arena.builtin_spice_enabled() {
+        return Ok(structure.to_vec());
+    }
     let mapper_active = structure_contains_spice_type_decl(structure, arena);
     map_structure_items_with_mapper(structure, arena, mapper_active)
 }
@@ -5431,6 +5440,9 @@ pub fn expand_signature_item_with_mapper(
     arena: &mut ParseArena,
     mapper_active: bool,
 ) -> SpiceResult<Vec<SignatureItem>> {
+    if !arena.builtin_spice_enabled() {
+        return Ok(vec![item.clone()]);
+    }
     map_signature_item_spice(item, arena, mapper_active)
 }
 
@@ -5438,6 +5450,9 @@ pub fn expand_signature_item(
     item: &SignatureItem,
     arena: &mut ParseArena,
 ) -> SpiceResult<Vec<SignatureItem>> {
+    if !arena.builtin_spice_enabled() {
+        return Ok(vec![item.clone()]);
+    }
     let mapper_active = signature_item_contains_spice_type_decl(item, arena);
     map_signature_item_spice(item, arena, mapper_active)
 }

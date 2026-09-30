@@ -1469,84 +1469,224 @@ fn check_external_ppx_output_magic(
     Ok(())
 }
 
+/// `Cmd_ppx_apply.rewrite` (cmd_ppx_apply.ml:78-95): write the Parsetree0
+/// input, run each rewriter on the previous one's output, and return the
+/// last output file's contents.
 fn run_external_ppxs(
     ppxs: &[String],
     filename: &str,
-    arena: &mut ParseArena,
-    write_input: impl Fn(&std::path::Path, &str, &mut ParseArena) -> std::io::Result<()>,
+    write_input: impl FnOnce(&std::path::Path) -> std::io::Result<()>,
     magic: &[u8],
-) -> Result<()> {
-    if ppxs.is_empty() {
-        return Ok(());
-    }
-
-    let mut input_path = temp_ppx_file(filename)?;
-    write_input(&input_path, filename, arena)
-        .with_context(|| format!("Failed to write {}", input_path.display()))?;
+) -> Result<Vec<u8>> {
+    let input_path = temp_ppx_file(filename)?;
+    write_input(&input_path).with_context(|| format!("Failed to write {}", input_path.display()))?;
     let mut temp_files = vec![input_path.clone()];
-
-    for ppx in ppxs {
-        let output_path = temp_ppx_file(filename)?;
-        let command = format!(
-            "{} {} {}",
-            ppx,
-            shell_quote_path(&input_path),
-            shell_quote_path(&output_path)
-        );
-        let status = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&command)
-            .status();
-        let ok = status.as_ref().is_ok_and(|status| status.success());
-        if !ok {
-            return Err(external_ppx_cannot_run(filename, &command));
+    let mut current = input_path;
+    let result = (|| {
+        for ppx in ppxs {
+            let output_path = temp_ppx_file(filename)?;
+            temp_files.push(output_path.clone());
+            let command = format!(
+                "{} {} {}",
+                ppx,
+                shell_quote_path(&current),
+                shell_quote_path(&output_path)
+            );
+            let status = std::process::Command::new("sh").arg("-c").arg(&command).status();
+            if !status.as_ref().is_ok_and(|status| status.success()) || !output_path.exists() {
+                return Err(external_ppx_cannot_run(filename, &command));
+            }
+            check_external_ppx_output_magic(&output_path, magic, filename)?;
+            current = output_path;
         }
-        if !output_path.exists() {
-            return Err(external_ppx_cannot_run(filename, &command));
-        }
-        check_external_ppx_output_magic(&output_path, magic, filename)?;
-        temp_files.push(output_path.clone());
-        input_path = output_path;
-    }
-
+        std::fs::read(&current).with_context(|| format!("Failed to read {}", current.display()))
+    })();
     for path in temp_files {
         let _ = std::fs::remove_file(path);
     }
-    Ok(())
+    result
 }
 
+/// External PPXs the compiler implements itself: `@rescript/ppx-spice` style
+/// rewriters are covered by the builtin spice mapper (`binary_ast::spice_ppx`),
+/// which runs as part of the builtin PPX.
+fn is_builtin_external_ppx(ppx: &str) -> bool {
+    let command = ppx.split_whitespace().next().unwrap_or(ppx);
+    command.contains("ppx-spice") || command.contains("ppx_spice")
+}
+
+impl CompilerOptions {
+    /// Whether a configured `-ppx` is the spice PPX the builtin mapper
+    /// implements.
+    pub fn builtin_spice(&self) -> bool {
+        self.external_ppxs.iter().any(|ppx| is_builtin_external_ppx(ppx))
+    }
+}
+
+fn external_ppxs_to_run(options: &CompilerOptions) -> Vec<String> {
+    options
+        .external_ppxs
+        .iter()
+        .filter(|ppx| !is_builtin_external_ppx(ppx))
+        .cloned()
+        .collect()
+}
+
+/// `Ast_mapper.ppx_context` (ast_mapper.ml:571-640): the
+/// `[@@@ocaml.ppx.context]` record the rewriters receive.
+fn ppx_context_attribute(
+    arena: &mut ParseArena,
+    options: &CompilerOptions,
+) -> crate::binary_ast::parsetree0::Attribute {
+    use crate::binary_ast::parsetree0 as pt0;
+    use crate::location::Located as OldLocated;
+    let none = arena.to_location(arena.none_loc());
+    let mk = |desc: pt0::ExpressionDesc| pt0::Expression {
+        pexp_desc: desc,
+        pexp_loc: none.clone(),
+        pexp_attributes: vec![],
+    };
+    let mut lid = |arena: &mut ParseArena, name: &str| {
+        OldLocated::new(Longident::Lident(arena.intern(name)), none.clone())
+    };
+    let string = |s: &str| {
+        mk(pt0::ExpressionDesc::Constant(pt0::Constant::String(s.to_string(), None)))
+    };
+    let list = |arena: &mut ParseArena, items: Vec<pt0::Expression>| {
+        let mut tail = mk(pt0::ExpressionDesc::Construct(lid(arena, "[]"), None));
+        for item in items.into_iter().rev() {
+            tail = mk(pt0::ExpressionDesc::Construct(
+                lid(arena, "::"),
+                Some(Box::new(mk(pt0::ExpressionDesc::Tuple(vec![item, tail])))),
+            ));
+        }
+        tail
+    };
+    let path_string = |p: &PathBuf| p.to_string_lossy().into_owned();
+    // `-I` prepends to `Clflags.include_dirs`; `Res_compmisc.init_path` puts
+    // them back in command-line order ahead of the stdlib directory.
+    let include_dirs: Vec<_> = options.include_paths.iter().rev().map(path_string).collect();
+    let mut load_path: Vec<_> = options.include_paths.iter().map(path_string).collect();
+    if let Some(runtime) = &options.runtime_path {
+        load_path.push(path_string(&runtime.join("lib").join("ocaml")));
+    }
+    let include_dirs = include_dirs.iter().map(|s| string(s)).collect();
+    let load_path = load_path.iter().map(|s| string(s)).collect();
+    let open_modules = options.open_modules.iter().rev().map(|s| string(s)).collect();
+    let fields = vec![
+        (lid(arena, "tool_name"), string("ReScript")),
+        (lid(arena, "include_dirs"), list(arena, include_dirs)),
+        (lid(arena, "load_path"), list(arena, load_path)),
+        (lid(arena, "open_modules"), list(arena, open_modules)),
+        (
+            lid(arena, "debug"),
+            mk(pt0::ExpressionDesc::Construct(
+                lid(arena, if options.debug { "true" } else { "false" }),
+                None,
+            )),
+        ),
+        (lid(arena, "cookies"), list(arena, Vec::new())),
+    ];
+    let record = mk(pt0::ExpressionDesc::Record(fields, None));
+    (
+        OldLocated::new("ocaml.ppx.context".to_string(), none.clone()),
+        pt0::Payload::PStr(vec![pt0::StructureItem {
+            pstr_desc: pt0::StructureItemDesc::Eval(record, vec![]),
+            pstr_loc: none,
+        }]),
+    )
+}
+
+fn ppx_output_error(filename: &str, error: impl std::fmt::Display) -> anyhow::Error {
+    anyhow!("External preprocessor output for {filename} could not be read: {error}")
+}
+
+/// `Cmd_ppx_apply.apply_rewriters_str` (cmd_ppx_apply.ml:97-110) with
+/// `~restore:false`: add the ppx context, run the rewriters over the
+/// Parsetree0 form, read the result back and drop the context again.
 pub fn apply_external_structure_ppxs(
-    ppxs: &[String],
+    options: &CompilerOptions,
     filename: &str,
     arena: &mut ParseArena,
-    structure: &Structure,
-) -> Result<()> {
-    run_external_ppxs(
-        ppxs,
-        filename,
-        arena,
-        |path, filename, arena| {
-            write_external_ppx_structure_input(path, filename, arena, structure)
+    structure: Structure,
+) -> Result<Structure> {
+    use crate::binary_ast::parsetree0 as pt0;
+    arena.set_builtin_spice(options.builtin_spice());
+    let ppxs = external_ppxs_to_run(options);
+    if ppxs.is_empty() {
+        return Ok(structure);
+    }
+    let context = ppx_context_attribute(arena, options);
+    let none = arena.to_location(arena.none_loc());
+    let mut ast0 = crate::binary_ast::mapper_to0::map_structure(arena, &structure);
+    ast0.insert(
+        0,
+        pt0::StructureItem {
+            pstr_desc: pt0::StructureItemDesc::Attribute(context),
+            pstr_loc: none,
         },
+    );
+    let output = run_external_ppxs(
+        &ppxs,
+        filename,
+        |path| crate::binary_ast::writer::write_external_ppx_input0(path, filename, arena, AST_IMPL_MAGIC_NUMBER, &ast0),
         AST_IMPL_MAGIC_NUMBER,
-    )
+    )?;
+    let output = crate::binary_ast::parsetree0_unmarshal::read_ppx_output(&output, AST_IMPL_MAGIC_NUMBER)
+        .map_err(|e| ppx_output_error(filename, e.0))?;
+    let mut ast0 = crate::binary_ast::parsetree0_unmarshal::Decoder::new(arena)
+        .structure(&output.ast)
+        .map_err(|e| ppx_output_error(filename, e.0))?;
+    if matches!(
+        ast0.first().map(|item| &item.pstr_desc),
+        Some(pt0::StructureItemDesc::Attribute((name, _))) if name.txt == "ocaml.ppx.context"
+    ) {
+        ast0.remove(0);
+    }
+    Ok(crate::binary_ast::mapper_from0::map_structure(arena, &ast0))
 }
 
+/// `Cmd_ppx_apply.apply_rewriters_sig` (cmd_ppx_apply.ml:112-125).
 pub fn apply_external_signature_ppxs(
-    ppxs: &[String],
+    options: &CompilerOptions,
     filename: &str,
     arena: &mut ParseArena,
-    signature: &Signature,
-) -> Result<()> {
-    run_external_ppxs(
-        ppxs,
-        filename,
-        arena,
-        |path, filename, arena| {
-            write_external_ppx_signature_input(path, filename, arena, signature)
+    signature: Signature,
+) -> Result<Signature> {
+    use crate::binary_ast::parsetree0 as pt0;
+    arena.set_builtin_spice(options.builtin_spice());
+    let ppxs = external_ppxs_to_run(options);
+    if ppxs.is_empty() {
+        return Ok(signature);
+    }
+    let context = ppx_context_attribute(arena, options);
+    let none = arena.to_location(arena.none_loc());
+    let mut ast0 = crate::binary_ast::mapper_to0::map_signature(arena, &signature);
+    ast0.insert(
+        0,
+        pt0::SignatureItem {
+            psig_desc: pt0::SignatureItemDesc::Attribute(context),
+            psig_loc: none,
         },
+    );
+    let output = run_external_ppxs(
+        &ppxs,
+        filename,
+        |path| crate::binary_ast::writer::write_external_ppx_input0(path, filename, arena, AST_INTF_MAGIC_NUMBER, &ast0),
         AST_INTF_MAGIC_NUMBER,
-    )
+    )?;
+    let output = crate::binary_ast::parsetree0_unmarshal::read_ppx_output(&output, AST_INTF_MAGIC_NUMBER)
+        .map_err(|e| ppx_output_error(filename, e.0))?;
+    let mut ast0 = crate::binary_ast::parsetree0_unmarshal::Decoder::new(arena)
+        .signature(&output.ast)
+        .map_err(|e| ppx_output_error(filename, e.0))?;
+    if matches!(
+        ast0.first().map(|item| &item.psig_desc),
+        Some(pt0::SignatureItemDesc::Attribute((name, _))) if name.txt == "ocaml.ppx.context"
+    ) {
+        ast0.remove(0);
+    }
+    Ok(crate::binary_ast::mapper_from0::map_signature(arena, &ast0))
 }
 
 pub fn jsx_version_for_structure(
@@ -1613,6 +1753,7 @@ fn preprocess_signature_for_typecheck_with_source(
     if options.no_builtin_ppx {
         Ok(signature)
     } else {
+        arena.set_builtin_spice(options.builtin_spice());
         let (rewritten, warnings) = ppx::rewrite_signature_with_warnings(&signature, arena);
         builtin_ppx_warnings.extend(warnings);
         rewritten.map_err(|e| ppx_error_to_anyhow(e, arena, source, filename))
@@ -11142,12 +11283,8 @@ pub fn run_implementation_frontend(
     if parser.has_errors() {
         return Err(parser_error_to_anyhow(&parser, source, filename));
     }
-    apply_external_structure_ppxs(
-        &options.external_ppxs,
-        filename,
-        parser.arena_mut(),
-        &structure,
-    )?;
+    let structure =
+        apply_external_structure_ppxs(options, filename, parser.arena_mut(), structure)?;
     let frontend_warnings =
         ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena());
     let frontend_warning_specs =
@@ -12242,12 +12379,8 @@ pub fn run_interface_frontend(
     if parser.has_errors() {
         return Err(parser_error_to_anyhow(&parser, source, filename));
     }
-    apply_external_signature_ppxs(
-        &options.external_ppxs,
-        filename,
-        parser.arena_mut(),
-        &signature,
-    )?;
+    let signature =
+        apply_external_signature_ppxs(options, filename, parser.arena_mut(), signature)?;
     let frontend_warnings =
         ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena());
     let frontend_warning_specs =
@@ -12884,6 +13017,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             ppx::mark_config_attributes_structure(&structure, parser.arena());
             let structure = ppx::expand_extensions(&structure, parser.arena_mut())
                 .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
+            parser.arena_mut().set_builtin_spice(options.builtin_spice());
             let (rewritten, ppx_warnings) =
                 ppx::rewrite_structure_with_warnings(&structure, parser.arena_mut());
             let _ = emit_ppx_warnings_with_config(
@@ -14170,6 +14304,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     } else {
         let structure = ppx::expand_extensions(&structure, &mut arena)
             .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+        arena.set_builtin_spice(options.builtin_spice());
         ppx::rewrite_structure(&structure, &mut arena)
             .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
     };
