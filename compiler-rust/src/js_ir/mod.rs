@@ -67,6 +67,9 @@ pub struct ModulePathResolver {
     format: ModuleFormat,
     output_suffix: String,
     current_source_path: Option<PathBuf>,
+    /// `Filename.dirname` of the output prefix, which script-mode imports are
+    /// relative to (js_name_of_module_id.ml `~output_dir`).
+    output_dir: Option<PathBuf>,
     current_package_name: Option<String>,
     current_package_has_output: bool,
     runtime_path: Option<PathBuf>,
@@ -116,6 +119,9 @@ impl ModulePathResolver {
             output_suffix: output_suffix_from_path(output_path),
             current_source_path: source_filename
                 .map(|path| normalize_absolute_path(FsPath::new(path))),
+            output_dir: output_path
+                .or(source_filename.map(FsPath::new))
+                .and_then(|path| normalize_absolute_path(path).parent().map(FsPath::to_path_buf)),
             current_package_name: package_name.map(ToOwned::to_owned),
             current_package_has_output: package_name.is_some() && output_module_format.is_some(),
             runtime_path: runtime_path.map(normalize_absolute_path),
@@ -175,7 +181,9 @@ impl ModulePathResolver {
                 if let Some(cached) = self.module_path_cache.borrow().get(module_name).cloned() {
                     return cached;
                 }
-                let resolved = if self.is_runtime_module(module_name) {
+                let resolved = if let Some(path) = self.script_module_path(module_name) {
+                    Some(path)
+                } else if self.is_runtime_module(module_name) {
                     Some(self.runtime_module_path(module.id.name()))
                 } else {
                     let target_source = self
@@ -415,6 +423,41 @@ impl ModulePathResolver {
         resolved
     }
 
+    /// js_name_of_module_id.ml `Package_script, Package_script`: a script
+    /// dependency of a script unit is imported from the `.js` file found on
+    /// the load path, relative to the output directory.
+    fn script_module_path(&self, module_name: &str) -> Option<String> {
+        if self.is_in_process_mode() || !matches!(self.current_package_query(), PackageInfoQuery::Script) {
+            return None;
+        }
+        let env = self.persistent_env.as_ref()?;
+        let import_info = env.module_cmj_import_info(module_name)?;
+        // `Package_found dep, Package_script`: `pkg.pkg_rel_path // js_file`
+        // (js_packages_info.ml `query_package_infos`).
+        let package_name = match &import_info.package_spec.name {
+            crate::cmi::persistent_env::CmjPackageName::Empty => None,
+            crate::cmi::persistent_env::CmjPackageName::Runtime => Some("@rescript/runtime"),
+            crate::cmi::persistent_env::CmjPackageName::Normal(name) => Some(name.as_str()),
+        };
+        if let Some(package_name) = package_name {
+            let info = import_info
+                .package_spec
+                .module_systems
+                .iter()
+                .find(|info| module_system_compatible(info.module_system, self.format))?;
+            let js_file = js_name_of_module_name(module_name, import_info.file_case, &info.suffix);
+            return Some(filename_concat(&filename_concat(package_name, &info.path), &js_file));
+        }
+        let js_file = js_name_of_module_name(module_name, import_info.file_case, ".js");
+        let found = normalize_absolute_path(FsPath::new(&env.find_in_load_path_uncap(&js_file)?));
+        let relative = relative_path_between(self.output_dir.as_ref()?, &found)?;
+        let mut rendered = relative.to_string_lossy().replace('\\', "/");
+        if !rendered.starts_with("./") && !rendered.starts_with("../") {
+            rendered = format!("./{rendered}");
+        }
+        Some(rendered)
+    }
+
     fn relative_output_path(&self, target_source: &FsPath) -> Option<String> {
         let current_source = self.current_source_path.as_ref()?;
         let from_dir = current_source.parent()?;
@@ -528,6 +571,15 @@ fn module_format_from_output_path(output_path: Option<&FsPath>) -> ModuleFormat 
     {
         Some(name) if name.ends_with(".mjs") => ModuleFormat::EsModule,
         _ => ModuleFormat::CommonJs,
+    }
+}
+
+/// OCaml `Filename.concat`.
+fn filename_concat(dir: &str, file: &str) -> String {
+    if dir.is_empty() || dir.ends_with('/') {
+        format!("{dir}{file}")
+    } else {
+        format!("{dir}/{file}")
     }
 }
 

@@ -1354,6 +1354,12 @@ impl PersistentEnv {
         self.in_memory_info_with(name, |_| ()).is_some()
     }
 
+    /// `Config_util.find_opt`: the load-path file, trying the uncapitalized
+    /// name first.
+    pub fn find_in_load_path_uncap(&self, filename: &str) -> Option<String> {
+        self.find_in_path_uncap(filename)
+    }
+
     pub fn file_exists_in_load_path_uncap(&self, filename: &str) -> bool {
         self.find_in_path_uncap(filename).is_some()
     }
