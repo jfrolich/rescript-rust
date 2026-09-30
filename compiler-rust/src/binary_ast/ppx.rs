@@ -14061,6 +14061,7 @@ fn rewrite_signature_items(items: &[SignatureItem], arena: &mut ParseArena) -> V
     })
 }
 
+/// `Ast_tdcls.handle_tdcls_in_sigi` (compiler/frontend/ast_tdcls.ml:38-72).
 fn expand_signature_deriving_items(
     original: &SignatureItem,
     rewritten: SignatureItem,
@@ -14069,27 +14070,174 @@ fn expand_signature_deriving_items(
     let SignatureItemDesc::Psig_type(inner) = &*original.psig_desc else {
         return vec![rewritten];
     };
-    let (_rec_flag, tdcls) = &**inner;
+    let (rec_flag, tdcls) = &**inner;
     let Some(last_tdcl) = tdcls.last() else {
         return vec![rewritten];
     };
-    let (actions, _remaining_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
-    if !actions
-        .iter()
-        .any(|action| matches!(action, DeriveAction::Accessors))
-    {
+    let (actions, new_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
+    if actions.is_empty() {
         return vec![rewritten];
     }
+    let loc = original.psig_loc;
+    let none_loc = arena.none_loc();
 
-    let mut items = vec![rewritten];
-    for tdcl in tdcls.iter() {
-        if let Some((_structure_items, signature_items)) =
-            generate_accessor_items_for_tdcl(tdcl, tdcl.ptype_loc, arena)
-        {
-            items.extend(signature_items);
-        }
+    // `new_tdcls tdcls new_attrs`: the processed `@deriving` is removed from
+    // the last declaration; `new_tdcls_new_attrs` is that list mapped.
+    let SignatureItemDesc::Psig_type(rewritten_inner) = &*rewritten.psig_desc else {
+        return vec![rewritten];
+    };
+    let mut new_tdcls: Vec<TypeDeclaration> = rewritten_inner.1.clone();
+    if let Some(last) = new_tdcls.last_mut() {
+        last.ptype_attributes = rewrite_attributes(&new_attrs, arena).into();
     }
-    items
+    let mut original_tdcls_new_attrs: Vec<TypeDeclaration> = tdcls.clone();
+    if let Some(last) = original_tdcls_new_attrs.last_mut() {
+        last.ptype_attributes = new_attrs.clone().into();
+    }
+
+    let abstract_light = match actions.as_slice() {
+        [DeriveAction::Abstract { light }] => Some(*light),
+        _ => None,
+    };
+
+    let items = if let Some(light) = abstract_light {
+        // `include module type of (struct type ... end : sig end)` followed by
+        // `Ast_derive_abstract.handle_tdcls_in_sig` (ast_derive_abstract.ml:
+        // 215-223): the abstract declarations, then one `val` per generated
+        // external.
+        let type_str_item = StructureItem {
+            pstr_desc: Box::new(StructureItemDesc::Pstr_type(Box::new((
+                *rec_flag,
+                new_tdcls.clone(),
+            )))),
+            pstr_loc: loc,
+        };
+        let inner_mod = arena.push_mod_expr(ModuleExpr {
+            pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(vec![type_str_item]))),
+            pmod_loc: loc,
+            pmod_attributes: Attributes::new(),
+        });
+        let empty_sig = arena.push_mod_type(current::ModuleType {
+            pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_signature(Box::new(vec![]))),
+            pmty_loc: loc,
+            pmty_attributes: Attributes::new(),
+        });
+        let constrained = arena.push_mod_expr(ModuleExpr {
+            pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(inner_mod, empty_sig)),
+            pmod_loc: loc,
+            pmod_attributes: Attributes::new(),
+        });
+        let typeof_mty = arena.push_mod_type(current::ModuleType {
+            pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_typeof(constrained)),
+            pmty_loc: loc,
+            pmty_attributes: Attributes::new(),
+        });
+        let mut items = vec![SignatureItem {
+            psig_desc: Box::new(SignatureItemDesc::Psig_include(Box::new(
+                current::IncludeDescription {
+                    pincl_mod: typeof_mty,
+                    pincl_loc: loc,
+                    pincl_attributes: Attributes::new(),
+                },
+            ))),
+            psig_loc: loc,
+        }];
+        let mut abstract_tdcls = Vec::with_capacity(original_tdcls_new_attrs.len());
+        let mut values = Vec::new();
+        for tdcl in &original_tdcls_new_attrs {
+            let (abstract_tdcl, value_descriptions) = handle_abstract_tdcl(tdcl, light, arena);
+            abstract_tdcls.push(abstract_tdcl);
+            values.extend(value_descriptions);
+        }
+        items.push(SignatureItem {
+            psig_desc: Box::new(SignatureItemDesc::Psig_type(Box::new((
+                *rec_flag,
+                abstract_tdcls,
+            )))),
+            psig_loc: none_loc,
+        });
+        for vd in values {
+            items.push(SignatureItem {
+                psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(vd))),
+                psig_loc: none_loc,
+            });
+        }
+        items
+    } else {
+        // `Sig.type_ ~loc rf new_tdcls_new_attrs ::
+        //  Ast_derive.gen_signature tdcls actions rf` (ast_derive.ml:54-58).
+        let mut items = vec![SignatureItem {
+            psig_desc: Box::new(SignatureItemDesc::Psig_type(Box::new((
+                *rec_flag,
+                new_tdcls,
+            )))),
+            psig_loc: loc,
+        }];
+        for action in &actions {
+            match action {
+                DeriveAction::Accessors => {
+                    for tdcl in tdcls.iter() {
+                        if let Some((_structure_items, signature_items)) =
+                            generate_accessor_items_for_tdcl(tdcl, tdcl.ptype_loc, arena)
+                        {
+                            items.extend(signature_items);
+                        }
+                    }
+                }
+                DeriveAction::JsConverter { new_type } => {
+                    for tdcl in tdcls.iter() {
+                        let inner_loc = tdcl.ptype_loc;
+                        let (_structure_items, signature_items) = match &tdcl.ptype_kind {
+                            TypeKind::Ptype_record(label_declarations) => {
+                                generate_js_converter_record(
+                                    tdcl,
+                                    label_declarations,
+                                    *new_type,
+                                    inner_loc,
+                                    arena,
+                                )
+                            }
+                            TypeKind::Ptype_abstract => {
+                                match is_enum_polyvar(tdcl, arena).map(|rf| rf.to_vec()) {
+                                    Some(row_fields) => generate_js_converter_polyvar(
+                                        tdcl,
+                                        &row_fields,
+                                        *new_type,
+                                        inner_loc,
+                                        arena,
+                                    ),
+                                    None => (vec![], vec![]),
+                                }
+                            }
+                            TypeKind::Ptype_variant(_) | TypeKind::Ptype_open => (vec![], vec![]),
+                        };
+                        items.extend(signature_items);
+                    }
+                }
+                // `abstract` combined with other actions is rejected by
+                // `run_derivers`; nothing is generated for it here.
+                DeriveAction::Abstract { .. } => {}
+            }
+        }
+        items
+    };
+
+    // `Ast_signature.fuse_all ~loc`: `include sig ... end`.
+    let fused = arena.push_mod_type(current::ModuleType {
+        pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_signature(Box::new(items))),
+        pmty_loc: loc,
+        pmty_attributes: Attributes::new(),
+    });
+    vec![SignatureItem {
+        psig_desc: Box::new(SignatureItemDesc::Psig_include(Box::new(
+            current::IncludeDescription {
+                pincl_mod: fused,
+                pincl_loc: loc,
+                pincl_attributes: Attributes::new(),
+            },
+        ))),
+        psig_loc: loc,
+    }]
 }
 
 fn try_rewrite_structure_item(
