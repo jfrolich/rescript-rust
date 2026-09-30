@@ -1860,7 +1860,7 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
             RawLambda::Lapply(ap) => {
                 let func = tr_rec(env, &ap.ap_func, count, next_id)?;
                 let args = tr_recs(env, &ap.ap_args, count, next_id)?;
-                Some(RawLambda::Lapply(RawApply {
+                Some(RawLambda::Lapply(Box::new(RawApply {
                     ap_func: Box::new(func),
                     ap_args: args,
                     ap_info: crate::lambda::ApInfo {
@@ -1868,7 +1868,7 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                         ..ap.ap_info.clone()
                     },
                     ap_transformed_jsx: ap.ap_transformed_jsx,
-                }))
+                })))
             }
             RawLambda::Llet(LetKind::Alias, x, ex, body) => {
                 // Ignore aliases -> substitute
@@ -1905,18 +1905,18 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
             RawLambda::Lprim(info) => {
                 charge_logical_record_fields(count, &info.primitive, info.args.len())?;
                 let args = tr_recs(env, &info.args, count, next_id)?;
-                Some(RawLambda::Lprim(RawPrimInfo {
+                Some(RawLambda::Lprim(Box::new(RawPrimInfo {
                     primitive: info.primitive.clone(),
                     args,
                     loc: Location::none(),
-                }))
+                })))
             }
             RawLambda::Lswitch(scrut, sw, loc) => {
                 let scrut_norm = tr_rec(env, scrut, count, next_id)?;
                 let sw_norm = tr_sw(env, sw, count, next_id)?;
                 Some(RawLambda::Lswitch(
                     Box::new(scrut_norm),
-                    sw_norm,
+                    Box::new(sw_norm),
                     loc.clone(),
                 ))
             }
@@ -4752,11 +4752,11 @@ fn make_field_args(
     let mut result = Vec::new();
     for pos in first_pos..=last_pos {
         result.push((
-            RawLambda::Lprim(RawPrimInfo {
+            RawLambda::Lprim(Box::new(RawPrimInfo {
                 primitive: Primitive::Pfield(pos, fld_info.clone()),
                 args: vec![arg.clone()],
                 loc: loc.clone(),
-            }),
+            })),
             binding_kind,
         ));
     }
@@ -4991,11 +4991,11 @@ fn make_constr_matching(
                             _ => Primitive::PvalFromOption,
                         };
                         let mut result = vec![(
-                            RawLambda::Lprim(RawPrimInfo {
+                            RawLambda::Lprim(Box::new(RawPrimInfo {
                                 primitive: from_option,
                                 args: vec![arg.clone()],
                                 loc: Location::none(),
-                            }),
+                            })),
                             LetKind::Alias,
                         )];
                         result.extend(argl.iter().cloned());
@@ -5151,11 +5151,11 @@ fn make_variant_matching_nonconst(
             );
             let ctx = filter_ctx(None, p, ctx);
             let mut new_args = vec![(
-                RawLambda::Lprim(RawPrimInfo {
+                RawLambda::Lprim(Box::new(RawPrimInfo {
                     primitive: Primitive::Pfield(1, FieldDbgInfo::PolyVarContent),
                     args: vec![arg.clone()],
                     loc: Location::none(),
-                }),
+                })),
                 LetKind::Alias,
             )];
             new_args.extend(argl.iter().cloned());
@@ -5349,11 +5349,11 @@ fn make_tuple_matching(
             let mut new_args = Vec::new();
             for pos in 0..arity {
                 new_args.push((
-                    RawLambda::Lprim(RawPrimInfo {
+                    RawLambda::Lprim(Box::new(RawPrimInfo {
                         primitive: Primitive::Pfield(pos as i32, FieldDbgInfo::Tuple),
                         args: vec![arg.clone()],
                         loc: loc.clone(),
-                    }),
+                    })),
                     LetKind::Alias,
                 ));
             }
@@ -5497,22 +5497,22 @@ fn make_record_matching(
                     RecordRepresentation::RecordFloatUnused => {
                         panic!("Record_float_unused")
                     }
-                    RecordRepresentation::RecordRegular => RawLambda::Lprim(RawPrimInfo {
+                    RecordRepresentation::RecordRegular => RawLambda::Lprim(Box::new(RawPrimInfo {
                         primitive: Primitive::Pfield(lbl.lbl_pos, fld_record(lbl)),
                         args: vec![arg.clone()],
                         loc: loc.clone(),
-                    }),
-                    RecordRepresentation::RecordInlined { .. } => RawLambda::Lprim(RawPrimInfo {
+                    })),
+                    RecordRepresentation::RecordInlined { .. } => RawLambda::Lprim(Box::new(RawPrimInfo {
                         primitive: Primitive::Pfield(lbl.lbl_pos, fld_record_inline(lbl)),
                         args: vec![arg.clone()],
                         loc: loc.clone(),
-                    }),
+                    })),
                     RecordRepresentation::RecordUnboxed(_) => arg.clone(),
-                    RecordRepresentation::RecordExtension => RawLambda::Lprim(RawPrimInfo {
+                    RecordRepresentation::RecordExtension => RawLambda::Lprim(Box::new(RawPrimInfo {
                         primitive: Primitive::Pfield(lbl.lbl_pos + 1, fld_record_extension(lbl)),
                         args: vec![arg.clone()],
                         loc: loc.clone(),
-                    }),
+                    })),
                 };
                 let str_kind = match lbl.lbl_mut {
                     MutableFlag::Immutable => LetKind::Alias,
@@ -5607,7 +5607,7 @@ fn make_array_matching(p: &Pattern, def: &DefaultEnv, ctx: &[Ctx], args: &MatchA
             let mut new_args = Vec::new();
             for pos in 0..len {
                 new_args.push((
-                    RawLambda::Lprim(RawPrimInfo {
+                    RawLambda::Lprim(Box::new(RawPrimInfo {
                         primitive: Primitive::Parrayrefu,
                         args: vec![
                             arg.clone(),
@@ -5617,7 +5617,7 @@ fn make_array_matching(p: &Pattern, def: &DefaultEnv, ctx: &[Ctx], args: &MatchA
                             }),
                         ],
                         loc: Location::none(),
-                    }),
+                    })),
                     LetKind::StrictOpt,
                 ));
             }
@@ -5699,14 +5699,14 @@ fn make_string_test_sequence(
         let mut result = d;
         for (s, lam) in sw.into_iter().rev() {
             result = RawLambda::LifThenElse(
-                Box::new(RawLambda::Lprim(RawPrimInfo {
+                Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
                     primitive: Primitive::Pstringcomp(Comparison::Neq),
                     args: vec![
                         arg.clone(),
                         RawLambda::Lconst(crate::lambda::Constant::ImmString(s)),
                     ],
                     loc: loc.clone(),
-                })),
+                }))),
                 Box::new(result),
                 Box::new(lam),
             );
@@ -5749,18 +5749,18 @@ fn tree_way_test(
     gt: RawLambda,
 ) -> RawLambda {
     RawLambda::LifThenElse(
-        Box::new(RawLambda::Lprim(RawPrimInfo {
+        Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive: Primitive::Pintcomp(Comparison::Lt),
             args: vec![arg.clone(), zero_lam()],
             loc: loc.clone(),
-        })),
+        }))),
         Box::new(lt),
         Box::new(RawLambda::LifThenElse(
-            Box::new(RawLambda::Lprim(RawPrimInfo {
+            Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
                 primitive: Primitive::Pintcomp(Comparison::Lt),
                 args: vec![zero_lam(), arg],
                 loc,
-            })),
+            }))),
             Box::new(gt),
             Box::new(eq),
         )),
@@ -5784,14 +5784,14 @@ fn do_make_string_test_tree(
         let (lt, (s, act), gt) = split(len, sw);
         bind_sw(
             ctx_ref,
-            RawLambda::Lprim(RawPrimInfo {
+            RawLambda::Lprim(Box::new(RawPrimInfo {
                 primitive: Primitive::Pstringcomp(Comparison::Eq),
                 args: vec![
                     arg.clone(),
                     RawLambda::Lconst(crate::lambda::Constant::ImmString(s)),
                 ],
                 loc: loc.clone(),
-            }),
+            })),
             |r| {
                 tree_way_test(
                     loc.clone(),
@@ -6016,11 +6016,11 @@ fn do_tests_fail(
     let (c, act) = &cases[0];
     let rest = &cases[1..];
     RawLambda::LifThenElse(
-        Box::new(RawLambda::Lprim(RawPrimInfo {
+        Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive: tst.clone(),
             args: vec![arg.clone(), typed_const_to_lambda_const(c)],
             loc: loc.clone(),
-        })),
+        }))),
         Box::new(do_tests_fail(loc, fail, tst, arg, rest)),
         Box::new(act.clone()),
     )
@@ -6040,11 +6040,11 @@ fn do_tests_fail_owned(
     // into place instead of recursively cloning them.
     cases.into_iter().rev().fold(fail, |acc, (c, act)| {
         RawLambda::LifThenElse(
-            Box::new(RawLambda::Lprim(RawPrimInfo {
+            Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
                 primitive: tst.clone(),
                 args: vec![arg.clone(), typed_const_to_lambda_const(&c)],
                 loc: loc.clone(),
-            })),
+            }))),
             Box::new(acc),
             Box::new(act),
         )
@@ -6066,11 +6066,11 @@ fn do_tests_nofail(
     let (c, act) = &cases[0];
     let rest = &cases[1..];
     RawLambda::LifThenElse(
-        Box::new(RawLambda::Lprim(RawPrimInfo {
+        Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive: tst.clone(),
             args: vec![arg.clone(), typed_const_to_lambda_const(c)],
             loc: loc.clone(),
-        })),
+        }))),
         Box::new(do_tests_nofail(loc, tst, arg, rest)),
         Box::new(act.clone()),
     )
@@ -6090,11 +6090,11 @@ fn do_tests_nofail_owned(
     // emit `if c1 then a2 else a1`. See compiler/ml/matching.ml:1761-1833.
     cases.into_iter().rev().fold(last_action, |acc, (c, act)| {
         RawLambda::LifThenElse(
-            Box::new(RawLambda::Lprim(RawPrimInfo {
+            Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
                 primitive: tst.clone(),
                 args: vec![arg.clone(), typed_const_to_lambda_const(&c)],
                 loc: loc.clone(),
-            })),
+            }))),
             Box::new(acc),
             Box::new(act),
         )
@@ -6173,11 +6173,11 @@ fn make_test_sequence(
             let list2 = const_lambda_list.split_off(mid);
             let pivot_const = &list2[0].0;
             RawLambda::LifThenElse(
-                Box::new(RawLambda::Lprim(RawPrimInfo {
+                Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
                     primitive: lt_tst.clone(),
                     args: vec![arg.clone(), typed_const_to_lambda_const(pivot_const)],
                     loc: loc.clone(),
-                })),
+                }))),
                 Box::new(make_test_seq_inner_owned(
                     loc,
                     fail.clone(),
@@ -6218,11 +6218,11 @@ fn make_test_sequence(
         let (list1, list2) = const_lambda_list.split_at(mid);
         let pivot_const = &list2[0].0;
         RawLambda::LifThenElse(
-            Box::new(RawLambda::Lprim(RawPrimInfo {
+            Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
                 primitive: lt_tst.clone(),
                 args: vec![arg.clone(), typed_const_to_lambda_const(pivot_const)],
                 loc: loc.clone(),
-            })),
+            }))),
             Box::new(make_test_seq_inner(loc, fail, tst, lt_tst, arg, list1)),
             Box::new(make_test_seq_inner(loc, fail, tst, lt_tst, arg, list2)),
         )
@@ -6242,11 +6242,11 @@ fn make_test_sequence(
 /// SArg: make a primitive application.
 /// Equivalent to OCaml's `SArg.make_prim`.
 fn sarg_make_prim(p: Primitive, args: Vec<RawLambda>) -> RawLambda {
-    RawLambda::Lprim(RawPrimInfo {
+    RawLambda::Lprim(Box::new(RawPrimInfo {
         primitive: p,
         args,
         loc: Location::none(),
-    })
+    }))
 }
 
 /// SArg: add an offset to an argument.
@@ -6255,11 +6255,11 @@ fn sarg_make_offset(arg: RawLambda, n: i32) -> RawLambda {
     if n == 0 {
         arg
     } else {
-        RawLambda::Lprim(RawPrimInfo {
+        RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive: Primitive::Poffsetint(n),
             args: vec![arg],
             loc: Location::none(),
-        })
+        }))
     }
 }
 
@@ -6290,24 +6290,24 @@ fn sarg_make_const(i: i32) -> RawLambda {
 /// SArg: make an `isout` test.
 /// Equivalent to OCaml's `SArg.make_isout`.
 fn sarg_make_isout(h: RawLambda, arg: RawLambda) -> RawLambda {
-    RawLambda::Lprim(RawPrimInfo {
+    RawLambda::Lprim(Box::new(RawPrimInfo {
         primitive: Primitive::Pisout(match h.peel() {
             RawLambda::Lconst(crate::lambda::Constant::Int { i, .. }) => *i,
             _ => 0,
         }),
         args: vec![arg],
         loc: Location::none(),
-    })
+    }))
 }
 
 /// SArg: make an `isin` test.
 /// Equivalent to OCaml's `SArg.make_isin`.
 fn sarg_make_isin(h: RawLambda, arg: RawLambda) -> RawLambda {
-    RawLambda::Lprim(RawPrimInfo {
+    RawLambda::Lprim(Box::new(RawPrimInfo {
         primitive: Primitive::Pnot,
         args: vec![sarg_make_isout(h, arg)],
         loc: Location::none(),
-    })
+    }))
 }
 
 /// SArg: make an if-then-else.
@@ -6333,7 +6333,7 @@ fn sarg_make_switch(
     l.reverse();
     RawLambda::Lswitch(
         Box::new(arg),
-        RawLambdaSwitch {
+        Box::new(RawLambdaSwitch {
             sw_numconsts: cases.len(),
             sw_consts_full: false,
             sw_consts: l
@@ -6345,7 +6345,7 @@ fn sarg_make_switch(
             sw_blocks: Vec::new(),
             sw_failaction: None,
             sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-        },
+        }),
         _loc,
     )
 }
@@ -7315,7 +7315,7 @@ fn transl_normal_path(path: &crate::types::path::Path) -> RawLambda {
                 RawLambda::Lvar(id.clone())
             }
         }
-        Path::Pdot(p, s, pos) => RawLambda::Lprim(RawPrimInfo {
+        Path::Pdot(p, s, pos) => RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive: Primitive::Pfield(
                 *pos,
                 FieldDbgInfo::Module {
@@ -7324,7 +7324,7 @@ fn transl_normal_path(path: &crate::types::path::Path) -> RawLambda {
             ),
             args: vec![transl_normal_path(p)],
             loc: Location::none(),
-        }),
+        })),
         Path::Papply(_, _) => panic!("transl_normal_path: Papply"),
     }
 }
@@ -7490,11 +7490,11 @@ fn combine_constructor(
                     .fold(default, |rem, (path, act)| {
                         let ext = transl_extension_path(ctx_ref, ex_pat.pat_env, &path);
                         RawLambda::LifThenElse(
-                            Box::new(RawLambda::Lprim(RawPrimInfo {
+                            Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
                                 primitive: Primitive::PextensionSlotEq,
                                 args: vec![RawLambda::Lvar(tag.clone()), ext],
                                 loc: loc.clone(),
-                            })),
+                            }))),
                             Box::new(act),
                             Box::new(rem),
                         )
@@ -7557,17 +7557,17 @@ fn combine_constructor(
                 let (_, act1) = consts.pop().expect("one constant constructor case");
                 let (_, act2) = nonconsts.pop().expect("one block constructor case");
                 let test_arg = if is_option {
-                    RawLambda::Lprim(RawPrimInfo {
+                    RawLambda::Lprim(Box::new(RawPrimInfo {
                         primitive: Primitive::PisNotNone,
                         args: vec![arg],
                         loc: loc.clone(),
-                    })
+                    }))
                 } else {
-                    RawLambda::Lprim(RawPrimInfo {
+                    RawLambda::Lprim(Box::new(RawPrimInfo {
                         primitive: Primitive::Pjscomp(Comparison::Neq),
                         args: vec![arg, RawLambda::Lconst(crate::lambda::Constant::int(0))],
                         loc: loc.clone(),
-                    })
+                    }))
                 };
                 RawLambda::LifThenElse(Box::new(test_arg), Box::new(act2), Box::new(act1))
             } else if num_consts == 2
@@ -7623,7 +7623,7 @@ fn combine_constructor(
                 };
                 let (handlers, sw) = share_actions_sw(sw, next_raise_count);
                 let sw = reintroduce_fail(sw);
-                let result = RawLambda::Lswitch(Box::new(arg), sw, loc.clone());
+                let result = RawLambda::Lswitch(Box::new(arg), Box::new(sw), loc.clone());
                 apply_handlers(result, handlers)
             }
         };
@@ -7689,27 +7689,27 @@ fn raw_polyvariant_hash_const(hash: i32, name: &str) -> RawLambda {
 
 fn or_list_polyvar(arg: &RawLambda, hash_names: &[(i32, String)]) -> RawLambda {
     let (first_hash, first_name) = &hash_names[0];
-    let init = RawLambda::Lprim(RawPrimInfo {
+    let init = RawLambda::Lprim(Box::new(RawPrimInfo {
         primitive: Primitive::Pintcomp(Comparison::Eq),
         args: vec![
             arg.clone(),
             raw_polyvariant_hash_const(*first_hash, first_name),
         ],
         loc: Location::none(),
-    });
+    }));
     hash_names[1..].iter().fold(init, |acc, (hash, name)| {
-        RawLambda::Lprim(RawPrimInfo {
+        RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive: Primitive::Psequor,
             args: vec![
                 acc,
-                RawLambda::Lprim(RawPrimInfo {
+                RawLambda::Lprim(Box::new(RawPrimInfo {
                     primitive: Primitive::Pintcomp(Comparison::Eq),
                     args: vec![arg.clone(), raw_polyvariant_hash_const(*hash, name)],
                     loc: Location::none(),
-                }),
+                })),
             ],
             loc: Location::none(),
-        })
+        }))
     })
 }
 
@@ -7792,11 +7792,11 @@ fn call_switcher_variant_constr(
     RawLambda::Llet(
         LetKind::Alias,
         v.clone(),
-        Box::new(RawLambda::Lprim(RawPrimInfo {
+        Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive: Primitive::Pfield(0, FieldDbgInfo::PolyVarTag),
             args: vec![arg],
             loc: loc.clone(),
-        })),
+        }))),
         Box::new(call_switcher_variant_constant(
             loc,
             fail,
@@ -7843,11 +7843,11 @@ fn combine_variant(
 
     let test_int_or_block = |arg: RawLambda, if_int: RawLambda, if_block: RawLambda| -> RawLambda {
         RawLambda::LifThenElse(
-            Box::new(RawLambda::Lprim(RawPrimInfo {
+            Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
                 primitive: Primitive::PisPolyVarBlock,
                 args: vec![arg],
                 loc: loc.clone(),
-            })),
+            }))),
             Box::new(if_block),
             Box::new(if_int),
         )
@@ -7955,11 +7955,11 @@ fn combine_array(
         bind(
             LetKind::Alias,
             &newvar,
-            &RawLambda::Lprim(RawPrimInfo {
+            &RawLambda::Lprim(Box::new(RawPrimInfo {
                 primitive: Primitive::Parraylength,
                 args: vec![arg],
                 loc,
-            }),
+            })),
             switch_result,
         )
     };
@@ -9375,15 +9375,15 @@ pub fn partial_function(_ctx_ref: &TypeContext, loc: Location) -> RawLambda {
         ],
     });
 
-    RawLambda::Lprim(RawPrimInfo {
+    RawLambda::Lprim(Box::new(RawPrimInfo {
         primitive: Primitive::Praise,
-        args: vec![RawLambda::Lprim(RawPrimInfo {
+        args: vec![RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive: Primitive::Pmakeblock(TagInfo::Extension, Mutable::Immutable),
             args: vec![exn, payload],
             loc: loc.clone(),
-        })],
+        }))],
         loc,
-    })
+    }))
 }
 
 /// Compile a match for a function body.
@@ -9423,11 +9423,11 @@ pub fn for_trywith(
         ctx_ref,
         arena,
         || {
-            RawLambda::Lprim(RawPrimInfo {
+            RawLambda::Lprim(Box::new(RawPrimInfo {
                 primitive: Primitive::Praise,
                 args: vec![param_clone],
                 loc: Location::none(),
-            })
+            }))
         },
         param,
         pat_act_list,
@@ -9733,11 +9733,11 @@ pub fn do_for_multiple_match(
         .into_iter()
         .map(|(pat, act)| (vec![pat], MatchAction::new(act)))
         .collect();
-    let tuple_arg = RawLambda::Lprim(RawPrimInfo {
+    let tuple_arg = RawLambda::Lprim(Box::new(RawPrimInfo {
         primitive: Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
         args: paraml.clone(),
         loc: loc.clone(),
-    });
+    }));
     let (raise_num, pm1) = match &partial {
         Partial::Partial => {
             let raise_num = bump_raise_count(next_raise_count, "matching::do_for_multiple_match");

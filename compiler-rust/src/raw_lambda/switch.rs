@@ -222,11 +222,11 @@ fn make_const(i: i32) -> RawLambda {
 }
 
 fn make_prim(prim: Primitive, args: Vec<RawLambda>) -> RawLambda {
-    RawLambda::Lprim(RawPrimInfo {
+    RawLambda::Lprim(Box::new(RawPrimInfo {
         primitive: prim,
         args,
         loc: Location::none(),
-    })
+    }))
 }
 
 fn make_offset(arg: RawLambda, n: i32) -> RawLambda {
@@ -279,7 +279,7 @@ fn build_lswitch(
     cases.reverse();
     RawLambda::Lswitch(
         Box::new(arg),
-        RawLambdaSwitch {
+        Box::new(RawLambdaSwitch {
             sw_numconsts: tbl.len(),
             sw_consts_full: false,
             sw_consts: cases
@@ -291,7 +291,7 @@ fn build_lswitch(
             sw_blocks: Vec::new(),
             sw_failaction: None,
             sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-        },
+        }),
         loc.clone(),
     )
 }

@@ -478,11 +478,13 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
             f.string(")");
             f.close_box();
         }
-        RawLambda::Lprim(RawPrimInfo {
-            primitive,
-            args,
-            loc: _,
-        }) => {
+        RawLambda::Lprim(__prim0) => {
+            let RawPrimInfo {
+                primitive,
+                args,
+                loc: _,
+            } = __prim0.as_ref();
+
             if matches!(primitive, Primitive::Praise) {
                 if let ([RawLambda::Lvar(id)], Some(exn_id)) = (args.as_slice(), reraise_exn) {
                     if id.same(exn_id) {

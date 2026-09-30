@@ -87,17 +87,17 @@ pub enum RawLambda {
     /// Constant value.
     Lconst(Constant),
     /// Function application.
-    Lapply(RawApply),
+    Lapply(Box<RawApply>),
     /// Function definition.
-    Lfunction(RawLFunction),
+    Lfunction(Box<RawLFunction>),
     /// Let binding.
     Llet(LetKind, Ident, Box<RawLambda>, Box<RawLambda>),
     /// Recursive let bindings.
     Lletrec(Vec<(Ident, RawLambda)>, Box<RawLambda>),
     /// Primitive operation.
-    Lprim(RawPrimInfo),
+    Lprim(Box<RawPrimInfo>),
     /// Switch on integer/block tag.
-    Lswitch(Box<RawLambda>, RawLambdaSwitch, Location),
+    Lswitch(Box<RawLambda>, Box<RawLambdaSwitch>, Location),
     /// Switch on string value.
     LstringSwitch(
         Box<RawLambda>,
@@ -251,12 +251,12 @@ impl RawLambda {
         body: RawLambda,
         attr: FunctionAttribute,
     ) -> Self {
-        RawLambda::Lfunction(RawLFunction {
+        RawLambda::Lfunction(Box::new(RawLFunction {
             arity,
             params,
             body: Box::new(body),
             attr,
-        })
+        }))
     }
 
     /// Create a let binding.
@@ -271,11 +271,11 @@ impl RawLambda {
 
     /// Create a primitive operation.
     pub fn prim(primitive: Primitive, args: Vec<RawLambda>, loc: Location) -> Self {
-        RawLambda::Lprim(RawPrimInfo {
+        RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive,
             args,
             loc,
-        })
+        }))
     }
 
     /// Create a sequence.
@@ -304,7 +304,7 @@ impl RawLambda {
                 RawLambda::LglobalModule(id, dynamic_import)
             }
             Lambda::Lconst(c) => RawLambda::Lconst(c),
-            Lambda::Lapply(apply) => RawLambda::Lapply(RawApply {
+            Lambda::Lapply(apply) => RawLambda::Lapply(Box::new(RawApply {
                 ap_func: Box::new(RawLambda::from_lowered(*apply.ap_func)),
                 ap_args: apply
                     .ap_args
@@ -313,13 +313,13 @@ impl RawLambda {
                     .collect(),
                 ap_info: apply.ap_info,
                 ap_transformed_jsx: apply.ap_transformed_jsx,
-            }),
-            Lambda::Lfunction(func) => RawLambda::Lfunction(RawLFunction {
+            })),
+            Lambda::Lfunction(func) => RawLambda::Lfunction(Box::new(RawLFunction {
                 arity: func.arity,
                 params: func.params,
                 body: Box::new(RawLambda::from_lowered(*func.body)),
                 attr: func.attr,
-            }),
+            })),
             Lambda::Llet(kind, id, value, body) => RawLambda::Llet(
                 kind,
                 id,
@@ -333,14 +333,14 @@ impl RawLambda {
                     .collect(),
                 Box::new(RawLambda::from_lowered(*body)),
             ),
-            Lambda::Lprim(info) => RawLambda::Lprim(RawPrimInfo {
+            Lambda::Lprim(info) => RawLambda::Lprim(Box::new(RawPrimInfo {
                 primitive: info.primitive,
                 args: info.args.into_iter().map(RawLambda::from_lowered).collect(),
                 loc: info.loc,
-            }),
+            })),
             Lambda::Lswitch(arg, sw) => RawLambda::Lswitch(
                 Box::new(RawLambda::from_lowered(*arg)),
-                RawLambdaSwitch {
+                Box::new(RawLambdaSwitch {
                     sw_numconsts: sw.sw_consts.len(),
                     sw_consts_full: sw.sw_consts_full,
                     sw_consts: sw
@@ -359,7 +359,7 @@ impl RawLambda {
                         .sw_failaction
                         .map(|lam| Box::new(RawLambda::from_lowered(*lam))),
                     sw_dispatch: sw.sw_dispatch,
-                },
+                }),
                 Location::none(),
             ),
             Lambda::LstringSwitch(arg, cases, default) => RawLambda::LstringSwitch(

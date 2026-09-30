@@ -59,7 +59,7 @@ impl<'a> LoweringContext<'a> {
                 }
             }
             RawLambda::Lconst(c) => Lambda::const_(lower_constant(c)),
-            RawLambda::Lapply(apply) => self.lower_apply(apply),
+            RawLambda::Lapply(apply) => self.lower_apply(*apply),
             RawLambda::Lfunction(func) => {
                 let (renamed_params, renamed_body) =
                     rename_optional_parameters(&self.id_gen, func.params, *func.body);
@@ -81,7 +81,7 @@ impl<'a> LoweringContext<'a> {
             RawLambda::Lprim(info) => {
                 self.lower_primitive(info.primitive, info.args, info.loc, dynamic_import)
             }
-            RawLambda::Lswitch(scrutinee, switch, _) => self.lower_switch(*scrutinee, switch),
+            RawLambda::Lswitch(scrutinee, switch, _) => self.lower_switch(*scrutinee, *switch),
             RawLambda::LstringSwitch(scrutinee, cases, default) => {
                 // `Lam.stringswitch (convert_aux e) ... (convert_aux default)` depends on
                 // OCaml's right-to-left argument evaluation, so lower the tail before
@@ -1908,7 +1908,7 @@ mod tests {
     fn lowers_apply_to_uncurry_status() {
         let func = Ident::create_local("f");
         let arg = Ident::create_local("x");
-        let raw = RawLambda::Lapply(RawApply {
+        let raw = RawLambda::Lapply(Box::new(RawApply {
             ap_func: Box::new(RawLambda::var(func)),
             ap_args: vec![RawLambda::var(arg)],
             ap_info: ApInfo {
@@ -1917,7 +1917,7 @@ mod tests {
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
-        });
+        }));
 
         let lowered = lower_to_lambda(raw);
         let Lambda::Lapply(apply) = lowered else {
@@ -1932,7 +1932,7 @@ mod tests {
         let prim1 = Ident::create_local("prim1");
         let lhs = Ident::create_local("lhs");
         let rhs = Ident::create_local("rhs");
-        let raw = RawLambda::Lapply(RawApply {
+        let raw = RawLambda::Lapply(Box::new(RawApply {
             ap_func: Box::new(RawLambda::function_(
                 2,
                 vec![prim0.clone(), prim1.clone()],
@@ -1950,7 +1950,7 @@ mod tests {
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
-        });
+        }));
 
         let lowered = lower_to_lambda(raw);
         let Lambda::Lprim(info) = lowered else {
@@ -2580,7 +2580,7 @@ mod tests {
     fn marks_switch_full_when_names_cover_all_cases() {
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(RawLambda::var(Ident::create_local("v"))),
-            RawLambdaSwitch {
+            Box::new(RawLambdaSwitch {
                 sw_numconsts: 1,
                 sw_consts_full: false,
                 sw_consts: vec![(
@@ -2608,7 +2608,7 @@ mod tests {
                         has_other_literal: true,
                     },
                 ),
-            },
+            }),
             Location::none(),
         ));
 
@@ -2623,7 +2623,7 @@ mod tests {
     fn keeps_const_only_switch_consts_full_from_input_without_names() {
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(RawLambda::var(Ident::create_local("v"))),
-            RawLambdaSwitch {
+            Box::new(RawLambdaSwitch {
                 sw_numconsts: 3,
                 sw_consts_full: false,
                 sw_consts: vec![
@@ -2641,7 +2641,7 @@ mod tests {
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            },
+            }),
             Location::none(),
         ));
 
@@ -2726,7 +2726,7 @@ mod tests {
 
     #[test]
     fn lowers_apply_arguments_before_function_for_exit_aliases() {
-        let lowered = lower_to_lambda(RawLambda::Lapply(RawApply {
+        let lowered = lower_to_lambda(RawLambda::Lapply(Box::new(RawApply {
             ap_func: Box::new(RawLambda::LstaticRaise(7, Vec::new())),
             ap_args: vec![raw_exit_alias(7, 8)],
             ap_info: ApInfo {
@@ -2735,7 +2735,7 @@ mod tests {
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
-        }));
+        })));
 
         let Lambda::Lapply(apply) = lowered else {
             panic!("expected apply");
@@ -2754,7 +2754,7 @@ mod tests {
     fn lowers_switch_cases_before_scrutinee_for_exit_aliases() {
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(raw_exit_alias(7, 8)),
-            RawLambdaSwitch {
+            Box::new(RawLambdaSwitch {
                 sw_numconsts: 1,
                 sw_consts_full: true,
                 sw_consts: vec![(
@@ -2766,7 +2766,7 @@ mod tests {
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            },
+            }),
             Location::none(),
         ));
 
@@ -2787,7 +2787,7 @@ mod tests {
     fn lowers_switch_failaction_before_scrutinee_for_exit_aliases() {
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(RawLambda::LstaticRaise(7, Vec::new())),
-            RawLambdaSwitch {
+            Box::new(RawLambdaSwitch {
                 sw_numconsts: 0,
                 sw_consts_full: false,
                 sw_consts: Vec::new(),
@@ -2796,7 +2796,7 @@ mod tests {
                 sw_blocks: Vec::new(),
                 sw_failaction: Some(Box::new(raw_exit_alias(7, 8))),
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            },
+            }),
             Location::none(),
         ));
 
@@ -2818,7 +2818,7 @@ mod tests {
         let scrutinee = Ident::create_local("scrutinee");
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(RawLambda::var(scrutinee.clone())),
-            RawLambdaSwitch {
+            Box::new(RawLambdaSwitch {
                 sw_numconsts: 2,
                 sw_consts_full: true,
                 sw_consts: vec![
@@ -2862,7 +2862,7 @@ mod tests {
                         has_other_literal: true,
                     },
                 ),
-            },
+            }),
             Location::none(),
         ));
 
@@ -2894,7 +2894,7 @@ mod tests {
             Box::new(RawLambda::LstaticRaise(exit, Vec::new())),
             Box::new(RawLambda::Lswitch(
                 Box::new(RawLambda::var(scrutinee.clone())),
-                RawLambdaSwitch {
+                Box::new(RawLambdaSwitch {
                     sw_numconsts: 3,
                     sw_consts_full: false,
                     sw_consts: vec![
@@ -2916,7 +2916,7 @@ mod tests {
                     sw_blocks: Vec::new(),
                     sw_failaction: None,
                     sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-                },
+                }),
                 loc,
             )),
         ));
