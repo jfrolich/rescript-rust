@@ -1424,7 +1424,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                         < get_level_with_lookup_capture(ctx, env, path, pending_type_lookup_paths)
                 {
                     row.row_name = None;
-                    ctx.set_desc(ty, TypeDesc::Tvariant(row));
+                    ctx.set_desc(ty, TypeDesc::Tvariant(Box::new(row)));
                 }
                 ctx.set_level(ty, level);
                 iter_type_expr(ctx, ty, |child| {
@@ -6402,10 +6402,10 @@ fn unify_rows<'a>(
             return unify(ctx, state, rm, more);
         }
 
-        let ty = ctx.new_generic_type(TypeDesc::Tvariant(RowDesc {
+        let ty = ctx.new_generic_type(TypeDesc::Tvariant(Box::new(RowDesc {
             row_fields: rest.into(),
             ..row0.clone()
-        }));
+        })));
         update_level(ctx, ctx.get_level(rm), ty);
         link_type(ctx, rm, ty);
         Ok(())
@@ -7070,11 +7070,11 @@ fn moregen_row(
         _ if may_inst => {
             drop(rm1_desc);
             drop(rm2_desc);
-            let ext = ctx.new_generic_type(TypeDesc::Tvariant(RowDesc {
+            let ext = ctx.new_generic_type(TypeDesc::Tvariant(Box::new(RowDesc {
                 row_fields: r2.into(),
                 row_name: None,
                 ..row2.clone()
-            }));
+            })));
             moregen_occur(ctx, env, ctx.get_level(rm1), ext)?;
             link_type(ctx, rm1, ext);
         }
@@ -7454,7 +7454,7 @@ fn closed_schema_rec(
                 typ: *typ,
                 rest: *rest,
             },
-            TypeDesc::Tvariant(row) => Action::Tvariant(row.clone()),
+            TypeDesc::Tvariant(row) => Action::Tvariant(*row.clone()),
             _ => {
                 let mut children = Vec::new();
                 iter_type_expr(ctx, ty, |child| children.push(child));
@@ -9245,7 +9245,7 @@ fn copy_sep_inner(
                 delayed_copy,
             );
             let fixed_prime = fixed && super::btype::is_tvar(ctx, ctx.repr(more_copy));
-            TypeDesc::Tvariant(copy_sep_row(
+            TypeDesc::Tvariant(Box::new(copy_sep_row(
                 ctx,
                 &row,
                 fixed_prime,
@@ -9255,7 +9255,7 @@ fn copy_sep_inner(
                 bound,
                 &visited_for_children,
                 delayed_copy,
-            ))
+            )))
         }
         TypeDesc::Tpoly { body, vars } => {
             let vars: Vec<_> = vars.into_iter().map(|v| ctx.repr(v)).collect();
@@ -10473,13 +10473,13 @@ fn subst_identity_copy_rec(
                                     .collect(),
                             )
                         });
-                        let row_copy = TypeDesc::Tvariant(RowDesc {
+                        let row_copy = TypeDesc::Tvariant(Box::new(RowDesc {
                             row_fields: fields_copy.into(),
                             row_more: more_copy,
                             row_closed: row.row_closed,
                             row_fixed: row.row_fixed,
                             row_name: name_copy,
-                        });
+                        }));
                         row_copy
                     }
                 }
@@ -10675,10 +10675,10 @@ pub(crate) fn copy_type_cached(
                     body: *body,
                     vars: vars.clone(),
                 },
-                TypeDesc::Tvariant(row) => CopyAction::Variant(row.clone()),
+                TypeDesc::Tvariant(row) => CopyAction::Variant(*row.clone()),
                 TypeDesc::Tpackage { path, lids, args } => CopyAction::Package {
                     path: path.clone(),
-                    lids: lids.clone(),
+                    lids: *lids.clone(),
                     args: args.clone(),
                 },
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => CopyAction::Link(*target),
@@ -10956,7 +10956,7 @@ pub(crate) fn copy_type_cached(
                             }
                         }
                     }
-                    TypeDesc::Tvariant(row_copy)
+                    TypeDesc::Tvariant(Box::new(row_copy))
                 }
                 CopyAction::Package { path, lids, args } => {
                     let args_copy: Vec<_> = args
@@ -10965,7 +10965,7 @@ pub(crate) fn copy_type_cached(
                         .collect();
                     TypeDesc::Tpackage {
                         path,
-                        lids,
+                        lids: Box::new(lids),
                         args: args_copy.into(),
                     }
                 }
@@ -11198,13 +11198,13 @@ pub fn normalize_all_types(ctx: &TypeContext) {
                 drop(desc);
                 ctx.set_desc(
                     ty,
-                    TypeDesc::Tvariant(RowDesc {
+                    TypeDesc::Tvariant(Box::new(RowDesc {
                         row_fields: fields.into(),
                         row_more: row.row_more,
                         row_closed: row.row_closed,
                         row_fixed: row.row_fixed,
                         row_name: row.row_name.clone(),
-                    }),
+                    })),
                 );
             }
             TypeDesc::Tobject { fields: fi, .. } => {
@@ -11268,13 +11268,13 @@ fn normalize_type_rec(ctx: &TypeContext, visited: &mut HashSet<TypeExprRef>, ty:
             drop(desc);
             ctx.set_desc(
                 ty,
-                TypeDesc::Tvariant(RowDesc {
+                TypeDesc::Tvariant(Box::new(RowDesc {
                     row_fields: fields.into(),
                     row_more: row.row_more,
                     row_closed: row.row_closed,
                     row_fixed: row.row_fixed,
                     row_name: row.row_name.clone(),
-                }),
+                })),
             );
         }
         TypeDesc::Tobject { fields: fi, .. } => {
@@ -11517,13 +11517,13 @@ fn nondep_type_rec<'a>(
                 }
                 _ => None,
             };
-            TypeDesc::Tvariant(super::type_expr::RowDesc {
+            TypeDesc::Tvariant(Box::new(super::type_expr::RowDesc {
                 row_fields: new_fields?.into(),
                 row_more: new_more,
                 row_closed: row.row_closed,
                 row_fixed: row.row_fixed,
                 row_name: new_name,
-            })
+            }))
         }
         TypeDesc::Tobject { fields, name } => {
             let new_fields = nondep_type_rec(ctx, env, mid, *fields, cache)?;

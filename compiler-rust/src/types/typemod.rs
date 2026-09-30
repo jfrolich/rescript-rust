@@ -4915,7 +4915,7 @@ fn set_fixed_row(
                 crate::types::btype::row_more(ctx, &row)
             };
             row.row_fixed = true;
-            ctx.set_desc(manifest_repr, TypeDesc::Tvariant(row));
+            ctx.set_desc(manifest_repr, TypeDesc::Tvariant(Box::new(row)));
             row_var
         }
         FixedRowTarget::Object(fields) => object_field_rest(ctx, fields),
@@ -13535,7 +13535,7 @@ fn check_usage_of_path_of_substituted_item(
                     TypeAction::Path(path.clone(), args.to_vec())
                 }
                 TypeDesc::Tobject { fields, name } => TypeAction::Object(*fields, name.clone()),
-                TypeDesc::Tvariant(row) => TypeAction::Variant(row.clone()),
+                TypeDesc::Tvariant(row) => TypeAction::Variant(*row.clone()),
                 _ => {
                     let mut children = Vec::new();
                     crate::types::btype::iter_type_expr(tctx.type_ctx, ty, |child| {

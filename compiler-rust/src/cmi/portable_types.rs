@@ -1164,7 +1164,7 @@ fn internalize_desc<S: TypeNodeSink>(
         PortableTypeDesc::Tlink(i) => TypeDesc::Tlink(remap[*i]),
         PortableTypeDesc::Tsubst(i) => TypeDesc::Tsubst(remap[*i]),
         PortableTypeDesc::Tvariant(prd) => {
-            TypeDesc::Tvariant(internalize_row_desc(prd, remap, ctx))
+            TypeDesc::Tvariant(Box::new(internalize_row_desc(prd, remap, ctx)))
         }
         PortableTypeDesc::Tunivar(name) => TypeDesc::Tunivar(name.clone()),
         PortableTypeDesc::Tpoly { body, vars } => TypeDesc::Tpoly {
@@ -1173,10 +1173,11 @@ fn internalize_desc<S: TypeNodeSink>(
         },
         PortableTypeDesc::Tpackage { path, lids, args } => TypeDesc::Tpackage {
             path: path.clone(),
-            lids: lids
-                .iter()
-                .map(|lid| internalize_longident(lid, ctx))
-                .collect(),
+            lids: Box::new(
+                lids.iter()
+                    .map(|lid| internalize_longident(lid, ctx))
+                    .collect(),
+            ),
             args: args.iter().map(|&i| remap[i]).collect(),
         },
     }

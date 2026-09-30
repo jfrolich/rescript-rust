@@ -784,7 +784,7 @@ impl<'a> SigReadContext<'a> {
                 8 => {
                     // Tvariant(row_desc)
                     let row = self.read_row_desc(&fields[0]);
-                    TypeDesc::Tvariant(row)
+                    TypeDesc::Tvariant(Box::new(row))
                 }
                 9 => {
                     // Tunivar(string option)
@@ -814,7 +814,7 @@ impl<'a> SigReadContext<'a> {
                         .iter()
                         .map(|te| self.read_type_expr(te))
                         .collect();
-                    TypeDesc::Tpackage { path, lids, args: args.into() }
+                    TypeDesc::Tpackage { path, lids: Box::new(lids), args: args.into() }
                 }
                 _ => {
                     // Unknown type_desc tag, treat as Tvar

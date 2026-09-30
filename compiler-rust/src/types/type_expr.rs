@@ -422,7 +422,7 @@ pub enum TypeDesc {
     Tsubst(TypeExprRef),
 
     /// Polymorphic variant type
-    Tvariant(RowDesc),
+    Tvariant(Box<RowDesc>),
 
     /// Universal type variable (from forall quantifier)
     Tunivar(Option<String>),
@@ -440,7 +440,7 @@ pub enum TypeDesc {
         /// Module type path
         path: Path,
         /// Longidents for package constraints
-        lids: Vec<Longident>,
+        lids: Box<Vec<Longident>>,
         /// Type arguments
         args: TypeRefList,
     },

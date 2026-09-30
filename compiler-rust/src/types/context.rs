@@ -2159,7 +2159,7 @@ impl TypeContext {
 
     /// Create a variant type.
     pub fn new_variant(&self, row: RowDesc) -> TypeExprRef {
-        self.new_type(TypeDesc::Tvariant(row))
+        self.new_type(TypeDesc::Tvariant(Box::new(row)))
     }
 
     // ========================================================================

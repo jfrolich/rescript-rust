@@ -3281,7 +3281,7 @@ fn transl_type_inner(
 
             let package_ty = ctx.new_type(TypeDesc::Tpackage {
                 path: pack_path.clone(),
-                lids,
+                lids: Box::new(lids),
                 args: args.into(),
             });
             let ctyp = TypedCoreType {
@@ -14040,7 +14040,7 @@ fn pressure_matrix_close_variant_type(tctx: &mut TypeCheckContext<'_>, env: &Env
             row_fixed: row.row_fixed,
             row_name,
         };
-        let closed_ty = ctx.new_generic_type(TypeDesc::Tvariant(closed_row));
+        let closed_ty = ctx.new_generic_type(TypeDesc::Tvariant(Box::new(closed_row)));
         let _ = crate::types::unify(ctx, &mut tctx.unify_state, row.row_more, closed_ty);
     }
 }
@@ -22510,7 +22510,7 @@ fn type_pack(
     let pack_args = if let Some(pack_module_path) = pack_arg_base_path.as_ref() {
         let mut rebuilt_args = Vec::with_capacity(pack_lids.len());
         let mut can_rebuild = true;
-        for lid in &pack_lids {
+        for lid in pack_lids.iter() {
             match mkpath_from_pack_lid(pack_module_path, lid, tctx.arena, ctx) {
                 Some(path) => rebuilt_args.push(ctx.new_generic_constr(path, vec![])),
                 None => {
@@ -25408,7 +25408,7 @@ where
             },
             TypeDesc::Tpackage { path, lids, args } => CopyTypeExprPlan::Tpackage {
                 path: type_path(path),
-                lids: lids.clone(),
+                lids: *lids.clone(),
                 args: args.clone(),
             },
         }
@@ -25586,7 +25586,7 @@ where
                         )
                     }),
                 };
-                TypeDesc::Tvariant(copied_row)
+                TypeDesc::Tvariant(Box::new(copied_row))
             }
             CopyTypeExprPlan::Tunivar(name) => TypeDesc::Tunivar(name),
             CopyTypeExprPlan::Tpoly { body, vars } => {
@@ -25612,7 +25612,7 @@ where
                     .collect();
                 TypeDesc::Tpackage {
                     path,
-                    lids,
+                    lids: Box::new(lids),
                     args: copied_args,
                 }
             }
