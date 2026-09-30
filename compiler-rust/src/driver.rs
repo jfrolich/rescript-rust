@@ -1464,6 +1464,92 @@ fn strip_saved_signature_locations(sig: &mut [crate::types::decl::SignatureItem]
     }
 }
 
+/// Save the `.cmi`/`.cmt` of a namespace module: js_implementation.ml:207-226
+/// `implementation_map` types `module A = A-Ns` for every member listed in the
+/// `.mlmap` (sorted) and saves the unit like any implementation.
+pub fn save_namespace_typed_artifacts(
+    namespace: &str,
+    module_aliases: &[(String, String)],
+    out: &TypedArtifactOutput,
+) -> Result<()> {
+    use crate::types::decl::{AliasPresence, ModuleDeclaration, ModuleType, RecStatus, SignatureItem};
+    use crate::types::typedtree as tt;
+
+    let mut arena = crate::parse_arena::ParseArena::new();
+    let none_loc = arena.none_loc();
+    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
+    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+
+    let mut items = Vec::with_capacity(module_aliases.len());
+    let mut signature = Vec::with_capacity(module_aliases.len());
+    for (short_name, internal_name) in module_aliases {
+        let target = crate::types::Path::Pident(crate::ident::Ident::create_persistent(
+            internal_name.as_str(),
+        ));
+        let internal_idx = arena.intern(internal_name);
+        let lid = arena.push_longident(crate::parser::longident::Longident::Lident(internal_idx));
+        let id = type_ctx.create_ident(short_name);
+        let mty = ModuleType::MtyAlias(AliasPresence::MtaPresent, target.clone());
+        items.push(tt::StructureItem {
+            str_desc: tt::StructureItemDesc::Tstr_module(tt::ModuleBinding {
+                mb_id: id.clone(),
+                mb_name: crate::parse_arena::Located {
+                    txt: short_name.clone(),
+                    loc: none_loc,
+                },
+                mb_expr: tt::ModuleExpr {
+                    mod_desc: tt::ModuleExprDesc::Tmod_ident(
+                        target,
+                        crate::parse_arena::Located { txt: lid, loc: none_loc },
+                    ),
+                    mod_loc: none_loc,
+                    mod_type: mty.clone(),
+                    mod_env: tt::EnvRef(0),
+                    mod_attributes: crate::parser::ast::Attributes::new(),
+                },
+                mb_attributes: crate::parser::ast::Attributes::new(),
+                mb_loc: none_loc,
+            }),
+            str_loc: none_loc,
+            str_env: tt::EnvRef(0),
+        });
+        signature.push(SignatureItem::SigModule(
+            id,
+            ModuleDeclaration {
+                md_type: mty,
+                md_attributes: vec![],
+                md_loc: crate::location::Location::none(),
+                md_path: None,
+            },
+            RecStatus::TrecNot,
+        ));
+    }
+    let structure = tt::Structure {
+        str_items: items,
+        str_type: signature.clone(),
+        str_final_env: tt::EnvRef(0),
+    };
+    let options = CompilerOptions {
+        module_name: Some(namespace.to_string()),
+        typed_artifacts: Some(std::sync::Arc::new(out.clone())),
+        ..Default::default()
+    };
+    // bsc compiles the map from lib/bs as `<Ns>.mlmap` (namespaces.rs).
+    let mlmap = format!("{namespace}.mlmap");
+    save_typed_artifacts(
+        &options,
+        &arena,
+        &type_ctx,
+        &mlmap,
+        namespace,
+        TypedArtifactKind::Implementation {
+            structure: &structure,
+            cmi: Some((signature.as_slice(), None)),
+        },
+    )
+}
+
 impl Default for CompilerOptions {
     fn default() -> Self {
         Self {

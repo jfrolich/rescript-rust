@@ -2332,6 +2332,24 @@ fn register_namespace_signatures(build_state: &BuildCommandState) {
 
         if !module_aliases.is_empty() {
             build_state.register_namespace_in_registry(&namespace_suffix, &module_aliases);
+            // Editor tooling reads the namespace unit from lib/bs like the
+            // bsc-compiled `.mlmap` (js_implementation.ml:207-226).
+            let mut sorted_aliases = module_aliases.clone();
+            sorted_aliases.sort();
+            let build_path = package.get_build_path();
+            let output = rescript_compiler::driver::TypedArtifactOutput {
+                output_prefix: build_path.join(&namespace_suffix),
+                copy_dirs: vec![package.get_ocaml_build_path()],
+                builddir: build_path.to_string_lossy().into_owned(),
+                args: std::env::args().collect(),
+            };
+            if let Err(err) = rescript_compiler::driver::save_namespace_typed_artifacts(
+                &namespace_suffix,
+                &sorted_aliases,
+                &output,
+            ) {
+                log::warn!("Could not write namespace artifacts for {namespace_suffix}: {err}");
+            }
         }
     }
 }
