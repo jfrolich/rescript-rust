@@ -67,6 +67,18 @@ fn mark_all_modules_dirty(build_state: &mut BuildCommandState) {
     }
 }
 
+fn mark_all_source_modules_dirty(build_state: &mut BuildCommandState) {
+    for module in build_state.modules.values_mut() {
+        module.compile_dirty = true;
+        if let SourceType::SourceFile(source_file) = &mut module.source_type {
+            source_file.implementation.parse_dirty = true;
+            if let Some(interface) = &mut source_file.interface {
+                interface.parse_dirty = true;
+            }
+        }
+    }
+}
+
 #[derive(Serialize, Debug, Clone)]
 pub struct CompilerArgs {
     pub compiler_args: Vec<String>,
@@ -400,7 +412,9 @@ pub fn incremental_build_without_lock(
     let needs_in_process_seed =
         build_state.build_mode().is_in_process() && build_state.module_registry.lock().unwrap().is_empty();
     if needs_in_process_seed {
-        mark_all_modules_dirty(build_state);
+        // Namespace maps are generated with the package, not parsed: leave
+        // them as the file build does, so the parse count matches it.
+        mark_all_source_modules_dirty(build_state);
     }
 
     let num_dirty_modules = build_state.modules.values().filter(|m| is_dirty(m)).count() as u64;
