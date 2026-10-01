@@ -6599,44 +6599,40 @@ fn print_package_type(
 /// OCaml's `print_doc_comments` takes a `sep` parameter that defaults to `hard_line`.
 /// For type expressions, we use `space` as the separator to keep doc comments inline.
 fn print_doc_comments_with_sep(
-    _state: &PrinterState,
+    state: &PrinterState,
     doc_attrs: &[&Attribute],
-    _cmt_tbl: &mut CommentTable,
+    cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
     sep: Doc,
 ) -> Doc {
-    let docs: Vec<Doc> = doc_attrs
-        .iter()
-        .filter_map(|attr| {
-            // Doc comments are stored as Payload::PStr containing a Pstr_eval
-            // with a Pexp_constant(Constant::String(...))
-            if let Payload::PStr(items) = &attr.1 {
-                if let Some(item) = items.first() {
-                    if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc {
-                        let (ref expr_idx, _) = **eval_inner;
-                        let expr = arena.get_expr(*expr_idx);
-                        if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc {
-                            if let Constant::String(content, _) = &**c {
-                                // OCaml uses `/**` + txt + `*/` without extra spaces
-                                // The content already includes the spacing from the parser
-                                return Some(Doc::concat(vec![
-                                    Doc::text("/**"),
-                                    Doc::text(content.clone()),
-                                    Doc::text("*/"),
-                                ]));
-                            }
-                        }
-                    }
-                }
-            }
-            None
-        })
-        .collect();
-    if docs.is_empty() {
-        Doc::nil()
-    } else {
-        Doc::concat(vec![Doc::group(Doc::concat(docs)), sep])
+    // res_printer.ml:5979-5986
+    Doc::concat(vec![
+        Doc::group(join_attributes_with_sep(state, doc_attrs, cmt_tbl, arena)),
+        sep,
+    ])
+}
+
+/// `Doc.join_with_sep (List.map print_attribute attrs)`: each attribute is
+/// followed by its own separator, a hard line after a doc comment
+/// (res_printer.ml:6117-6143, res_doc.ml:134-141).
+fn join_attributes_with_sep(
+    state: &PrinterState,
+    attrs: &[&Attribute],
+    cmt_tbl: &mut CommentTable,
+    arena: &ParseArena,
+) -> Doc {
+    let mut docs = Vec::with_capacity(attrs.len() * 2);
+    for (i, attr) in attrs.iter().enumerate() {
+        if i > 0 {
+            docs.push(if parsetree_viewer::is_doc_comment_attribute(arena, attrs[i - 1]) {
+                Doc::hard_line()
+            } else {
+                Doc::line()
+            });
+        }
+        docs.push(print_attribute(state, attr, false, cmt_tbl, arena));
     }
+    Doc::concat(docs)
 }
 
 /// Print doc comments with default separator (hard_line).
@@ -7018,7 +7014,14 @@ fn print_module_type(
         ModuleTypeDesc::Pmty_ident(lid) => {
             // Print attributes with the identifier
             Doc::concat(vec![
-                print_attributes(state, &mty.pmty_attributes, cmt_tbl, arena),
+                print_attributes_with_loc(
+                    state,
+                    &mty.pmty_attributes,
+                    Some(lid.loc),
+                    cmt_tbl,
+                    arena,
+                    false,
+                ),
                 print_longident_location(lid, cmt_tbl, arena),
             ])
         }
@@ -8078,64 +8081,40 @@ fn print_attributes_with_loc(
         return Doc::nil();
     }
 
-    // Partition doc comments from regular attributes
-    // Only "res.doc" is a doc comment (printed as /** ... */), not "ocaml.doc"
-    let (doc_comment_attrs, regular_attrs): (Vec<_>, Vec<_>) = filtered
+    // res_printer.ml:5999-6031
+    let (comment_attrs, attrs): (Vec<&Attribute>, Vec<&Attribute>) = filtered
         .into_iter()
-        .partition(|attr| arena.get_string(attr.0.txt) == "res.doc");
-
-    // Print doc comments with hard_line after each (they go on their own lines)
-    let doc_comment_doc = if doc_comment_attrs.is_empty() {
-        Doc::nil()
-    } else {
-        let docs: Vec<Doc> = doc_comment_attrs
-            .iter()
-            .map(|attr| print_attribute(state, attr, false, cmt_tbl, arena))
-            .collect();
-        // Doc comments each on their own line, with hard_line after
-        Doc::concat(vec![Doc::join(Doc::hard_line(), docs), Doc::hard_line()])
-    };
-
-    // Print regular attributes
-    let attrs_doc = if regular_attrs.is_empty() {
-        Doc::nil()
-    } else {
-        let docs: Vec<Doc> = regular_attrs
-            .iter()
-            .map(|attr| print_attribute(state, attr, false, cmt_tbl, arena))
-            .collect();
-
-        // Determine trailing separator: use hard_line if attributed item is on a different line
-        let has_doc_comments = !doc_comment_attrs.is_empty();
-        let line_break = if inline {
-            Doc::space()
-        } else {
-            match (loc, regular_attrs.last()) {
-                (Some(item_loc), Some(last_attr)) => {
-                    let (attr_name, _) = last_attr;
-                    // If item starts on a later line than the last attribute, force hard line
-                    if arena.loc_start(item_loc).line > arena.loc_end(attr_name.loc).line {
-                        Doc::hard_line()
-                    } else if has_doc_comments {
-                        // If there were doc comments, use space (so @attr let x stays together)
-                        Doc::space()
-                    } else {
-                        Doc::line()
-                    }
-                }
-                _ => {
-                    if has_doc_comments {
-                        Doc::space()
-                    } else {
-                        Doc::line()
-                    }
+        .partition(|attr| parsetree_viewer::is_doc_comment_attribute(arena, attr));
+    let line_break = match loc {
+        None => Doc::line(),
+        Some(loc) => match attrs.last() {
+            Some((first_loc, _))
+                if arena.loc_start(loc).line > arena.loc_end(first_loc.loc).line =>
+            {
+                Doc::hard_line()
+            }
+            _ => {
+                if comment_attrs.is_empty() {
+                    Doc::line()
+                } else {
+                    Doc::space()
                 }
             }
-        };
-
-        Doc::concat(vec![Doc::group(Doc::join(Doc::line(), docs)), line_break])
+        },
     };
-
+    let doc_comment_doc = if comment_attrs.is_empty() {
+        Doc::nil()
+    } else {
+        print_doc_comments(state, &comment_attrs, cmt_tbl, arena)
+    };
+    let attrs_doc = if attrs.is_empty() {
+        Doc::nil()
+    } else {
+        Doc::concat(vec![
+            Doc::group(join_attributes_with_sep(state, &attrs, cmt_tbl, arena)),
+            if inline { Doc::space() } else { line_break },
+        ])
+    };
     Doc::concat(vec![doc_comment_doc, attrs_doc])
 }
 
@@ -8461,7 +8440,14 @@ fn print_module_declaration(
     arena: &ParseArena,
 ) -> Doc {
     let decl_mod_type = arena.get_mod_type(decl.pmd_type);
-    let attrs_doc = print_attributes(state, &decl.pmd_attributes, cmt_tbl, arena);
+    let attrs_doc = print_attributes_with_loc(
+                state,
+                &decl.pmd_attributes,
+                Some(decl.pmd_name.loc),
+                cmt_tbl,
+                arena,
+                false,
+            );
     let name_doc = Doc::text(arena.get_string(decl.pmd_name.txt));
     let name_doc = print_comments(name_doc, cmt_tbl, decl.pmd_name.loc, arena);
 
@@ -8493,7 +8479,14 @@ fn print_rec_module_declarations(
         decls,
         |decl: &ModuleDeclaration, cmt_tbl: &mut CommentTable, i: usize| {
             let decl_mod_type = arena.get_mod_type(decl.pmd_type);
-            let attrs_doc = print_attributes(state, &decl.pmd_attributes, cmt_tbl, arena);
+            let attrs_doc = print_attributes_with_loc(
+                state,
+                &decl.pmd_attributes,
+                Some(decl.pmd_name.loc),
+                cmt_tbl,
+                arena,
+                false,
+            );
             let prefix = if i == 0 {
                 Doc::text("module rec ")
             } else {
@@ -8992,31 +8985,12 @@ fn print_constructor_declarations(
         PrivateFlag::Public => Doc::nil(),
     };
 
-    // Check if first constructor has attributes or is spread - if so, always show the bar
-    let first_has_attrs = constrs.first().map_or(false, |c| {
-        !c.pcd_attributes.is_empty() || arena.get_string(c.pcd_name.txt) == "..."
-    });
-
     // Use print_listi for proper comment handling between constructors
     let rows = print_listi(
         |constr: &ConstructorDeclaration| constr.pcd_loc,
         constrs,
         |constr: &ConstructorDeclaration, cmt_tbl: &mut CommentTable, i: usize| {
-            let bar = if i == 0 {
-                if first_has_attrs {
-                    // Always show bar when first constructor has attributes or is spread
-                    Doc::text("| ")
-                } else {
-                    Doc::if_breaks(Doc::text("| "), Doc::nil())
-                }
-            } else {
-                Doc::text("| ")
-            };
-            let doc = Doc::concat(vec![
-                bar,
-                print_constructor_declaration(state, constr, cmt_tbl, arena),
-            ]);
-            // Wrap with print_comments for this constructor's location (matches OCaml)
+            let doc = print_constructor_declaration2(state, i, constr, cmt_tbl, arena);
             print_comments(doc, cmt_tbl, constr.pcd_loc, arena)
         },
         cmt_tbl,
@@ -9031,41 +9005,49 @@ fn print_constructor_declarations(
     )
 }
 
-/// Print a constructor declaration.
-fn print_constructor_declaration(
+/// res_printer.ml:1761-1806 print_constructor_declaration2.
+fn print_constructor_declaration2(
     state: &PrinterState,
-    constr: &ConstructorDeclaration,
+    i: usize,
+    cd: &ConstructorDeclaration,
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    let attrs_doc = print_attributes(state, &constr.pcd_attributes, cmt_tbl, arena);
-    let is_spread = arena.get_string(constr.pcd_name.txt) == "...";
-    // Wrap constructor name with print_comments for its location (like OCaml)
-    let name_doc = Doc::text(arena.get_string(constr.pcd_name.txt));
-    let name_doc = print_comments(name_doc, cmt_tbl, constr.pcd_name.loc, arena);
-
-    let args_doc = if is_spread {
-        match &constr.pcd_args {
-            ConstructorArguments::Pcstr_tuple(types) if types.len() == 1 => {
-                // Spread constructors print the type directly without parens: ...aa
-                print_typ_expr(state, arena.get_core_type(types[0]), cmt_tbl, arena)
-            }
-            _ => print_constructor_arguments(state, &constr.pcd_args, true, true, cmt_tbl, arena),
-        }
+    let (comment_attrs, attrs) =
+        parsetree_viewer::partition_doc_comment_attributes(arena, &cd.pcd_attributes);
+    let comment_doc = if comment_attrs.is_empty() {
+        Doc::nil()
     } else {
-        print_constructor_arguments(state, &constr.pcd_args, false, true, cmt_tbl, arena)
+        print_doc_comments_with_sep(state, &comment_attrs, cmt_tbl, arena, Doc::hard_line())
     };
-
-    let res_doc = match &constr.pcd_res {
-        Some(typ) => Doc::concat(vec![
+    let attrs: Vec<Attribute> = attrs.into_iter().cloned().collect();
+    let attrs = print_attributes(state, &attrs, cmt_tbl, arena);
+    let is_dot_dot_dot = arena.get_string(cd.pcd_name.txt) == "...";
+    let bar = if i > 0 || !cd.pcd_attributes.is_empty() || is_dot_dot_dot {
+        Doc::text("| ")
+    } else {
+        Doc::if_breaks(Doc::text("| "), Doc::nil())
+    };
+    let constr_name = print_comments(
+        Doc::text(arena.get_string(cd.pcd_name.txt)),
+        cmt_tbl,
+        cd.pcd_name.loc,
+        arena,
+    );
+    let constr_args =
+        print_constructor_arguments(state, &cd.pcd_args, is_dot_dot_dot, true, cmt_tbl, arena);
+    let gadt = match &cd.pcd_res {
+        None => Doc::nil(),
+        Some(typ) => Doc::indent(Doc::concat(vec![
             Doc::text(": "),
             print_typ_expr(state, arena.get_core_type(*typ), cmt_tbl, arena),
-        ]),
-        None => Doc::nil(),
+        ])),
     };
-
-    // Wrap in group so constructor can be flat even when outer group breaks
-    Doc::group(Doc::concat(vec![attrs_doc, name_doc, args_doc, res_doc]))
+    Doc::concat(vec![
+        comment_doc,
+        bar,
+        Doc::group(Doc::concat(vec![attrs, constr_name, constr_args, gadt])),
+    ])
 }
 
 /// Print record declaration.
@@ -9498,7 +9480,14 @@ fn print_module_binding(
     arena: &ParseArena,
 ) -> Doc {
     let binding_expr = arena.get_mod_expr(binding.pmb_expr);
-    let attrs_doc = print_attributes(state, &binding.pmb_attributes, cmt_tbl, arena);
+    let attrs_doc = print_attributes_with_loc(
+                state,
+                &binding.pmb_attributes,
+                Some(binding.pmb_name.loc),
+                cmt_tbl,
+                arena,
+                false,
+            );
 
     // Wrap module name with print_comments for its location (like OCaml reference)
     let name_doc = Doc::text(arena.get_string(binding.pmb_name.txt));
@@ -9555,7 +9544,14 @@ fn print_rec_module_bindings(
         bindings,
         |binding: &ModuleBinding, cmt_tbl: &mut CommentTable, i: usize| {
             let binding_expr = arena.get_mod_expr(binding.pmb_expr);
-            let attrs_doc = print_attributes(state, &binding.pmb_attributes, cmt_tbl, arena);
+            let attrs_doc = print_attributes_with_loc(
+                state,
+                &binding.pmb_attributes,
+                Some(binding.pmb_name.loc),
+                cmt_tbl,
+                arena,
+                false,
+            );
             let prefix = if i == 0 {
                 Doc::text("module rec ")
             } else {

@@ -1686,6 +1686,27 @@ pub fn is_rewritten_underscore_apply_sugar(
 }
 
 /// Partition attributes into doc comments and regular attributes.
+/// res_parsetree_viewer.ml:581-597: a `res.doc` attribute whose payload is
+/// one string constant.
+pub fn is_doc_comment_attribute(arena: &ParseArena, attr: &Attribute) -> bool {
+    if arena.get_string(attr.0.txt) != "res.doc" {
+        return false;
+    }
+    let Payload::PStr(items) = &attr.1 else {
+        return false;
+    };
+    let [item] = items.as_slice() else {
+        return false;
+    };
+    let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
+        return false;
+    };
+    matches!(
+        &*arena.get_expr(eval.0).pexp_desc,
+        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(..))
+    )
+}
+
 pub fn partition_doc_comment_attributes<'a>(
     arena: &ParseArena,
     attrs: &'a Attributes,
@@ -1693,8 +1714,7 @@ pub fn partition_doc_comment_attributes<'a>(
     let mut doc_comments = Vec::new();
     let mut others = Vec::new();
     for attr in attrs {
-        let name = arena.get_string(attr.0.txt);
-        if name == "res.doc" || name == "ocaml.doc" {
+        if is_doc_comment_attribute(arena, attr) {
             doc_comments.push(attr);
         } else {
             others.push(attr);
