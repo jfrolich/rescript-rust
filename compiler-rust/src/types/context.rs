@@ -470,6 +470,9 @@ pub struct TypeContext {
 
     /// Cached full normalize_path results keyed by environment identity.
     normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
+    /// Outcome of expanding a `Pdot`-headed constructor, per module scope
+    /// (see `ctype::PdotExpansion`).
+    pdot_expansions: RefCell<hashbrown::HashMap<PdotExpansionKey, super::ctype::PdotExpansion, ahash::RandomState>>,
 
     /// Cached forward-only (unification) normalize_path results, keyed like
     /// `normalized_path_full_cache`.
@@ -735,6 +738,34 @@ impl std::hash::Hash for SamePathKey {
     }
 }
 
+/// Key of `TypeContext::pdot_expansions`.
+#[derive(PartialEq, Eq, Hash)]
+struct PdotExpansionKey {
+    scope_id: u64,
+    mode: u8,
+    arity: usize,
+    path: Path,
+}
+
+/// Borrowed form of [`PdotExpansionKey`], so lookups do not clone the path.
+/// Field order and hashing match the owned key.
+#[derive(Hash)]
+struct PdotExpansionKeyRef<'a> {
+    scope_id: u64,
+    mode: u8,
+    arity: usize,
+    path: &'a Path,
+}
+
+impl hashbrown::Equivalent<PdotExpansionKey> for PdotExpansionKeyRef<'_> {
+    fn equivalent(&self, key: &PdotExpansionKey) -> bool {
+        self.scope_id == key.scope_id
+            && self.mode == key.mode
+            && self.arity == key.arity
+            && *self.path == key.path
+    }
+}
+
 fn push_unique_path(paths: &mut Vec<Path>, path: Path) {
     if !paths.iter().any(|existing| existing.same(&path)) {
         paths.push(path);
@@ -818,6 +849,7 @@ impl TypeContext {
             qualified_module_decl_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_type_item_cache: RefCell::new(ahash::AHashMap::new()),
             normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
+            pdot_expansions: RefCell::new(hashbrown::HashMap::default()),
             normalized_path_forward_cache: RefCell::new(ahash::AHashMap::new()),
             occur_variance_masks: RefCell::new(ahash::AHashMap::new()),
             type_newtype_levels: RefCell::new(ahash::AHashMap::new()),
@@ -1642,6 +1674,34 @@ impl TypeContext {
             .entry((env_id, module_path.clone()))
             .or_default()
             .insert(type_name.to_string(), (access_path, id, decl));
+    }
+
+    /// The cached expansion outcome of a `Pdot` head (`ctype::PdotExpansion`).
+    pub(crate) fn find_pdot_expansion(
+        &self,
+        scope_id: u64,
+        mode: u8,
+        arity: usize,
+        path: &Path,
+    ) -> Option<super::ctype::PdotExpansion> {
+        self.pdot_expansions
+            .borrow()
+            .get(&PdotExpansionKeyRef { scope_id, mode, arity, path })
+            .cloned()
+    }
+
+    pub(crate) fn register_pdot_expansion(
+        &self,
+        scope_id: u64,
+        mode: u8,
+        arity: usize,
+        path: &Path,
+        expansion: super::ctype::PdotExpansion,
+    ) {
+        self.pdot_expansions.borrow_mut().insert(
+            PdotExpansionKey { scope_id, mode, arity, path: path.clone() },
+            expansion,
+        );
     }
 
     /// Look up a cached dotted type lookup for a resolved module access path.

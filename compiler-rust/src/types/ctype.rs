@@ -3028,6 +3028,91 @@ fn proper_abbrevs(
     }
 }
 
+/// How a `Pdot`-headed constructor expands in one module scope.
+#[derive(Clone)]
+pub(crate) enum PdotExpansion {
+    /// Substitute the arguments into the declaration's manifest.
+    Expand {
+        params: Vec<TypeExprRef>,
+        manifest: TypeExprRef,
+    },
+    /// Rebuild the head at another path: an alias target (strengthened
+    /// self-manifest) or the normalized path (OCaml ctype.ml:1370).
+    Rewrite(Path),
+    /// No expansion.
+    None,
+}
+
+/// The `Pdot` route of `try_expand_head_with_mode`: OCaml
+/// `expand_abbrev_gen` (compiler/ml/ctype.ml:1346-1372) through
+/// `Env.find_type_expansion` and then `Env.normalize_path`.
+fn pdot_expansion(
+    ctx: &TypeContext,
+    env: &Env,
+    path: &Path,
+    arity: usize,
+    mode: ExpandHeadMode,
+    can_expand_decl_manifest: &dyn Fn(&super::decl::TypeDeclaration, TypeExprRef) -> bool,
+) -> PdotExpansion {
+    // The general route looks the path up in the flat Env first; for a
+    // dotted path that result is not used, but the lookup is kept so the
+    // first expansion touches the Env exactly as before.
+    let _ = env.lookup_type(path);
+    if let Some(decl) = resolve_type_through_env(ctx, env, path, true)
+        && let Some(manifest) = decl.type_manifest
+    {
+        let synthetic_self_manifest = {
+            let manifest_repr = ctx.repr(manifest);
+            let manifest_desc = ctx.borrow_desc(manifest_repr);
+            matches!(
+                &*manifest_desc,
+                TypeDesc::Tconstr {
+                    path: manifest_path,
+                    args: manifest_args,
+                    ..
+                } if manifest_path.same(path)
+                    && manifest_args.len() == arity
+                    && matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract)
+            )
+        };
+        // See the general route: parameterized strengthened self-manifests
+        // rewrite to the alias target instead of substituting.
+        if matches!(mode, ExpandHeadMode::General) && synthetic_self_manifest && arity != 0 {
+            if let Path::Pdot(parent, type_name, pos) = path {
+                let mut persistent_env = in_process_module_resolution_env(ctx);
+                let target = crate::types::typecore::module_alias_target_for_path(
+                    parent,
+                    env,
+                    &mut persistent_env,
+                    ctx,
+                )
+                .filter(|target_module_path| !target_module_path.same(parent))
+                .map(|target_module_path| {
+                    Path::Pdot(std::sync::Arc::new(target_module_path), type_name.clone(), *pos)
+                });
+                if let Some(target) = target {
+                    return PdotExpansion::Rewrite(target);
+                }
+            }
+        }
+        if can_expand_decl_manifest(&decl, manifest) && decl.type_params.len() == arity {
+            return PdotExpansion::Expand {
+                params: decl.type_params.clone(),
+                manifest,
+            };
+        }
+    }
+    let path_norm = match mode {
+        ExpandHeadMode::General | ExpandHeadMode::Optimize => normalize_path_full(ctx, env, path),
+        ExpandHeadMode::Unify => normalize_path_forward_only(ctx, env, path),
+    };
+    if path_norm != *path {
+        PdotExpansion::Rewrite(path_norm)
+    } else {
+        PdotExpansion::None
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ExpandHeadMode {
     General,
@@ -3133,6 +3218,45 @@ fn try_expand_head_with_mode<'a>(
                         return Some(expanded);
                     }
                 }
+            }
+
+            // Qualified heads: the outcome depends only on the module scope,
+            // the path, the mode and the arity (each lookup on this route is
+            // memoized per `Env::scope_id`), so it is computed once per key.
+            if matches!(&path, Path::Pdot(..)) {
+                let scope_id = env.scope_id();
+                let mode_tag = mode as u8;
+                let expansion = match ctx.find_pdot_expansion(scope_id, mode_tag, args.len(), &path) {
+                    Some(expansion) => expansion,
+                    None => {
+                        let expansion =
+                            pdot_expansion(ctx, env, &path, args.len(), mode, &can_expand_decl_manifest);
+                        ctx.register_pdot_expansion(
+                            scope_id,
+                            mode_tag,
+                            args.len(),
+                            &path,
+                            expansion.clone(),
+                        );
+                        expansion
+                    }
+                };
+                return match expansion {
+                    PdotExpansion::Expand { params, manifest } => {
+                        Some(expand_with_subst(&params, manifest))
+                    }
+                    PdotExpansion::Rewrite(target) => {
+                        let level = ctx.get_level(ty);
+                        let rewritten = ctx.new_type(TypeDesc::Tconstr {
+                            path: target,
+                            args: args.clone(),
+                            abbrev: orig_abbrev,
+                        });
+                        ctx.set_level(rewritten, level);
+                        Some(rewritten)
+                    }
+                    PdotExpansion::None => None,
+                };
             }
 
             // 1. Prefer environment lookup when the declaration matches the
