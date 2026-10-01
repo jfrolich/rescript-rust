@@ -11977,6 +11977,7 @@ fn compile_source_to_js_with_options_inner(
         source,
         filename,
         has_resi,
+        None,
     )?;
 
     // OCaml compiler/ml/typemod.ml:1755-1758 reads the compiled interface
@@ -12584,9 +12585,51 @@ fn format_compunit_mismatch_report(
     message.push_str(
         &crate::types::includemod::format_error_without_signature_header(type_ctx, filename, error),
     );
+    // The report is located where the error is (location.ml prints
+    // `loc.loc_start.pos_fname`), e.g. at a value only the interface declares.
+    let loc_file = crate::types::includemod::location_filename(type_ctx, filename, loc);
+    if loc_file != filename
+        && let Ok(bytes) = std::fs::read(&loc_file)
+    {
+        let loc_source = crate::source_text::latin1_bytes_to_string(bytes);
+        return format_compiler_error_report_raw_message_from_location(
+            &loc_source,
+            &loc_file,
+            loc,
+            &message,
+        );
+    }
     format_compiler_error_report_raw_message_from_location(source, filename, loc, &message)
 }
 
+/// The `.cmi` name `Typemod.type_implementation` reports for an interface:
+/// `find_in_path_uncap !Config.load_path (modulename ^ ".cmi")`
+/// (typemod.ml:1742-1749, misc.ml `find_in_path_uncap`) spelled with the
+/// `-I` entry the file build passes. In-process builds put the package's own
+/// `lib/ocaml` first, which the file build passes as `-I ../ocaml` from
+/// `lib/bs`.
+fn in_process_interface_display_name(options: &CompilerOptions, module_name: &str) -> Option<String> {
+    let filename = format!("{module_name}.cmi");
+    let mut uncap = filename.clone();
+    if let Some(first) = uncap.get_mut(0..1) {
+        first.make_ascii_lowercase();
+    }
+    for (index, dir) in options.include_paths.iter().enumerate() {
+        let display_dir = if index == 0 {
+            std::path::PathBuf::from("../ocaml")
+        } else {
+            dir.clone()
+        };
+        for name in [&uncap, &filename] {
+            if dir.join(name).exists() {
+                return Some(display_dir.join(name).to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 fn check_compunit_inclusion_for_errors(
     tctx: &mut TypeCheckContext<'_>,
     type_ctx: &TypeContext,
@@ -12596,6 +12639,7 @@ fn check_compunit_inclusion_for_errors(
     source: &str,
     filename: &str,
     has_resi: bool,
+    interface_file: Option<&str>,
 ) -> Result<()> {
     if !has_resi || !source_file.ends_with(".res") {
         return Ok(());
@@ -12640,7 +12684,9 @@ fn check_compunit_inclusion_for_errors(
         env,
         source_file,
         &typed_structure.str_type,
-        &interface_cmi_name(source_file),
+        &interface_file
+            .map(str::to_string)
+            .unwrap_or_else(|| interface_cmi_name(source_file)),
         target_sig.as_ref(),
         &mut inclusion_warnings,
     ) {
@@ -12651,7 +12697,9 @@ fn check_compunit_inclusion_for_errors(
                 source,
                 filename,
                 source_file,
-                &interface_cmi_name(source_file),
+                &interface_file
+            .map(str::to_string)
+            .unwrap_or_else(|| interface_cmi_name(source_file)),
                 &error,
             ),
             2,
@@ -15664,6 +15712,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // against it (marking the included declarations used) before the delayed
     // checks, as the file compile does.
     if has_interface {
+        let interface_file = in_process_interface_display_name(options, module_name);
         if let Err(error) = check_compunit_inclusion_for_errors(
             &mut tctx,
             &type_ctx,
@@ -15673,6 +15722,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             source(),
             filename,
             true,
+            interface_file.as_deref(),
         ) {
             let warnings = format_type_warnings(arena, source(), filename, &tctx.warnings);
             return Err(prefix_diagnostic(&warnings, error));
@@ -16416,9 +16466,17 @@ pub fn typecheck_preprocessed_signature_in_process(
     // env.ml:669-678), before registration substitutes component paths in
     // place. The implementation is checked against it (typemod.ml:1742-1758),
     // as the file compile checks against the `.cmi`.
-    let raw_signature = std::sync::Arc::new(
-        crate::types::typecore::copy_lookup_signature_for_subst(&published_signature, &type_ctx),
-    );
+    let raw_signature = {
+        let mut raw =
+            crate::types::typecore::copy_lookup_signature_for_subst(&published_signature, &type_ctx);
+        // The check reads the signature as saved in the `.cmi`
+        // (env.ml:1949-1952 reads the file back), so drop the same locations.
+        if !options.keep_locs {
+            strip_saved_signature_locations(&mut raw);
+        }
+        strip_saved_extension_locations(&mut raw);
+        std::sync::Arc::new(raw)
+    };
     let mut saved_signature = published_signature.clone();
     if !options.keep_locs {
         strip_saved_signature_locations(&mut saved_signature);

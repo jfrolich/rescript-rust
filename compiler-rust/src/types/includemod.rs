@@ -649,7 +649,7 @@ fn is_compact_type_declaration_mismatch(error: &IncludeModError) -> bool {
     )
 }
 
-fn location_filename(type_ctx: &TypeContext, fallback: &str, loc: &Location) -> String {
+pub(crate) fn location_filename(type_ctx: &TypeContext, fallback: &str, loc: &Location) -> String {
     type_ctx
         .resolve_cmi_longident_component(loc.loc_start.file_name)
         .filter(|name| !name.is_empty() && name != "_none_")

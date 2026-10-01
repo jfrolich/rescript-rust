@@ -538,7 +538,11 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
 /// column of -1 (a dummy position) prints the file name alone, with no code
 /// frame.
 pub fn has_printable_range(start_pos: &Position, end_pos: &Position) -> bool {
-    start_pos.cnum - start_pos.bol != -1 && end_pos.cnum - end_pos.bol != -1
+    // Rust's `Location::none()` (line 0) stands for OCaml's `Location.none`,
+    // whose `pos_cnum = -1` makes the range unprintable (location.ml).
+    start_pos.line != 0
+        && start_pos.cnum - start_pos.bol != -1
+        && end_pos.cnum - end_pos.bol != -1
 }
 
 pub fn format_location(filename: &str, start_pos: &Position, end_pos: &Position) -> String {
