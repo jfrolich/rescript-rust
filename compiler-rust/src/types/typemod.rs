@@ -8945,7 +8945,15 @@ pub fn lookup_module_type_by_lid<'b>(
             }
             if let Some(pers) = pers_env.as_mut() {
                 if let Some(sig) = pers.get_renamed_sig(mod_name, ctx) {
-                    return Some(DeclMty::MtySignature(sig));
+                    // env.ml:865-875: `find_module` of a persistent unit is
+                    // its forced `ps_sig`, with local item paths.
+                    let root = Path::Pident(Ident::create_persistent(mod_name));
+                    return Some(DeclMty::MtySignature(localize_scraped_signature(
+                        ctx,
+                        Some(&*pers),
+                        &sig,
+                        &root,
+                    )));
                 }
             }
             None
@@ -12379,7 +12387,20 @@ pub(crate) fn resolve_module_path_module_type(
     ctx: &crate::types::context::TypeContext,
 ) -> Option<crate::types::decl::ModuleType> {
     let mut visiting = HashSet::new();
-    scrape_resolve_module_path(path, env, pers_env, ctx, &mut visiting, false)
+    // `Env.find_module path env` (env.ml:865-882, via
+    // includemod.ml `expand_module_alias`): the declaration's own module
+    // type, whose items refer to each other locally.
+    match scrape_resolve_module_path(path, env, pers_env, ctx, &mut visiting, false)? {
+        crate::types::decl::ModuleType::MtySignature(sig) => Some(
+            crate::types::decl::ModuleType::MtySignature(localize_scraped_signature(
+                ctx,
+                pers_env.as_ref(),
+                &sig,
+                path,
+            )),
+        ),
+        other => Some(other),
+    }
 }
 
 /// Mirror OCaml `Env.scrape_alias` enough for functor-application typing:
@@ -12397,6 +12418,17 @@ pub(crate) fn scrape_alias_module_type<'b>(
         DeclMty::MtyAlias(_, path) => {
             let mut visiting = HashSet::new();
             let resolved = scrape_resolve_module_path(path, env, pers_env, ctx, &mut visiting, true)?;
+            // `find_module path env` (env.ml:865-882) is the declaration's own
+            // module type, whose items refer to each other locally.
+            let resolved = match resolved {
+                DeclMty::MtySignature(sig) => DeclMty::MtySignature(localize_scraped_signature(
+                    ctx,
+                    pers_env.as_ref(),
+                    &sig,
+                    path,
+                )),
+                other => other,
+            };
             // OCaml compiler/ml/env.ml:1435-1449 strengthens the concrete
             // module type found through an alias using the alias path, and
             // compiler/ml/mtype.ml:365-385 then removes aliases recursively.
@@ -12793,6 +12825,64 @@ fn remove_module_type_aliases_for_typeof<'b>(
         DeclMty::MtyIdent(_) => mty.clone(),
         _ => mty.clone(),
     }
+}
+
+/// `Env.scrape_alias` (env.ml:865-882, mtype.ml:356-364) returns the module
+/// declaration's own signature, whose items refer to each other by their
+/// local idents; for a persistent unit that is the saved `ps_sig`
+/// (env.ml:677). Rust's loaded signatures name those items through the
+/// module's path (`Root.t`), so turn references rooted at the alias target
+/// back into the local idents of the signature, on a copy.
+fn localize_scraped_signature(
+    ctx: &crate::types::context::TypeContext,
+    pers_env: Option<&crate::cmi::persistent_env::PersistentEnv>,
+    sig: &[crate::types::decl::SignatureItem],
+    root: &Path,
+) -> Vec<crate::types::decl::SignatureItem> {
+    use crate::types::decl::SignatureItem as SigItem;
+    // The flattened unit names registered as aliases of `root` (as for
+    // `include`, include_module_alias_heads).
+    let mut heads = pers_env
+        .map(|pers| pers.flattened_alias_heads_for_path(root))
+        .unwrap_or_default();
+    for alias_source in ctx.alias_sources_for_component_path(root) {
+        if let Path::Pident(id) = alias_source
+            && (id.is_persistent() || id.stamp() == 0)
+            && !heads.iter().any(|existing| existing == id.name())
+        {
+            heads.push(id.name().to_string());
+        }
+    }
+    let mut sig = crate::types::typecore::copy_lookup_signature_for_subst(sig, ctx);
+    let mut types = HashMap::new();
+    let mut modules = HashMap::new();
+    let mut modtypes = HashMap::new();
+    for item in &sig {
+        match item {
+            SigItem::SigType(id, _, _) => {
+                types.insert(id.name().to_string(), id.clone());
+            }
+            SigItem::SigModule(id, _, _) => {
+                modules.insert(id.name().to_string(), id.clone());
+            }
+            SigItem::SigModtype(id, _) => {
+                modtypes.insert(id.name().to_string(), id.clone());
+            }
+            _ => {}
+        }
+    }
+    let mut visited = HashSet::new();
+    rewrite_included_signature_paths_to_local(
+        ctx,
+        &mut sig,
+        Some(root),
+        &heads,
+        &types,
+        &modules,
+        &modtypes,
+        &mut visited,
+    );
+    sig
 }
 
 /// Look up semantic module type information for parsed module expressions.
