@@ -1278,7 +1278,7 @@ impl<'a> RawLambdaConverter<'a> {
         &mut self,
         handler_fun: impl FnOnce() -> RawLambda,
         arg: RawLambda,
-        pat_act_list: Vec<(Pattern, RawLambda)>,
+        pat_act_list: Vec<(&Pattern, RawLambda)>,
         partial: Partial,
     ) -> RawLambda {
         self.sync_matching_stamps();
@@ -1325,7 +1325,7 @@ impl<'a> RawLambdaConverter<'a> {
         &mut self,
         loc: Location,
         param: RawLambda,
-        pat_act_list: Vec<(Pattern, RawLambda)>,
+        pat_act_list: Vec<(&Pattern, RawLambda)>,
         partial: Partial,
     ) -> RawLambda {
         self.sync_matching_stamps();
@@ -1345,7 +1345,7 @@ impl<'a> RawLambdaConverter<'a> {
     fn for_trywith_with_synced_stamps(
         &mut self,
         param: RawLambda,
-        pat_act_list: Vec<(Pattern, RawLambda)>,
+        pat_act_list: Vec<(&Pattern, RawLambda)>,
     ) -> RawLambda {
         self.sync_matching_stamps();
         let lambda = full_matching::for_trywith(
@@ -1363,7 +1363,7 @@ impl<'a> RawLambdaConverter<'a> {
         &mut self,
         loc: Location,
         paraml: Vec<RawLambda>,
-        pat_act_list: Vec<(Pattern, RawLambda)>,
+        pat_act_list: Vec<(&Pattern, RawLambda)>,
         partial: Partial,
     ) -> RawLambda {
         self.sync_matching_stamps();
@@ -1400,7 +1400,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// Convert typed tree cases to `(Pattern, RawLambda)` pairs for the full
     /// matching compiler. Guards are encoded as
     /// `if guard then body else staticraise(0, [])` per OCaml convention.
-    fn cases_to_pat_act_list(&mut self, cases: &[Case]) -> Vec<(Pattern, RawLambda)> {
+    fn cases_to_pat_act_list<'c>(&mut self, cases: &'c [Case]) -> Vec<(&'c Pattern, RawLambda)> {
         cases
             .iter()
             .map(|case| {
@@ -1416,7 +1416,7 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                     None => body,
                 };
-                (case.c_lhs.clone(), act)
+                (&case.c_lhs, act)
             })
             .collect()
     }
@@ -10896,7 +10896,7 @@ impl<'a> RawLambdaConverter<'a> {
                             acc = RawLambda::let_(kind, id, value, acc);
                         } else {
                             // Use matching compiler's for_let (OCaml: Matching.for_let)
-                            let pat_act_list = vec![(binding.vb_pat.clone(), acc)];
+                            let pat_act_list = vec![(&binding.vb_pat, acc)];
                             let loc = self.loc(binding.vb_pat.pat_loc);
                             let fname = self.basename_for_loc(loc.clone());
                             let loc_for_handler = loc.clone();
@@ -11086,7 +11086,7 @@ impl<'a> RawLambdaConverter<'a> {
         let return_unit = self.is_base_type(body.exp_type, "unit");
         let mut lambda_body = self.convert_expr_raw(body);
         for param in params.iter().rev() {
-            let pat = param.fp_pat.clone();
+            let pat = &param.fp_pat;
             let id = &param.fp_param;
             lambda_body = match &pat.pat_desc {
                 PatternDesc::Tpat_any => lambda_body,
