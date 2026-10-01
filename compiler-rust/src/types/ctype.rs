@@ -9226,11 +9226,13 @@ fn compute_variance_type(
                     variance = variance.union(&required_variance);
                 }
             }
+            // typedecl.ml:1222: `set May_weak (mem May_neg v) v`, the
+            // upper (may) bound, not the lower `Neg`.
             if is_abstract && private == PrivateFlag::Public {
                 variance
             } else {
-                let (_, lower_neg, _, _) = variance.get_lower();
-                variance.set(VarianceFlag::MayWeak, lower_neg)
+                let may_neg = variance.mem(VarianceFlag::MayNeg);
+                variance.set(VarianceFlag::MayWeak, may_neg)
             }
         })
         .collect()
