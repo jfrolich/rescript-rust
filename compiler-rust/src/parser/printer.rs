@@ -1412,11 +1412,15 @@ pub fn print_expression(
                         typ.ptyp_loc,
                         arena,
                     );
+                    // res_printer.ml:3789-3809
                     Doc::group(Doc::concat(vec![
                         Doc::text("module("),
-                        Doc::indent(Doc::concat(vec![Doc::soft_line(), mod_doc])),
-                        Doc::text(": "),
-                        type_doc,
+                        Doc::indent(Doc::concat(vec![
+                            Doc::soft_line(),
+                            mod_doc,
+                            Doc::text(": "),
+                            type_doc,
+                        ])),
                         Doc::soft_line(),
                         Doc::rparen(),
                     ]))
@@ -1618,11 +1622,16 @@ pub fn print_expression(
             )
         }
         // Pack: module(M)
-        ExpressionDesc::Pexp_pack(mod_expr_idx) => Doc::concat(vec![
+        // res_printer.ml:3829-3838
+        ExpressionDesc::Pexp_pack(mod_expr_idx) => Doc::group(Doc::concat(vec![
             Doc::text("module("),
-            print_mod_expr(state, arena.get_mod_expr(*mod_expr_idx), cmt_tbl, arena),
-            Doc::text(")"),
-        ]),
+            Doc::indent(Doc::concat(vec![
+                Doc::soft_line(),
+                print_mod_expr(state, arena.get_mod_expr(*mod_expr_idx), cmt_tbl, arena),
+            ])),
+            Doc::soft_line(),
+            Doc::rparen(),
+        ])),
         // JSX element
         ExpressionDesc::Pexp_jsx_element(jsx) => {
             print_jsx_element(state, jsx, e.pexp_loc, cmt_tbl, arena)
@@ -4272,13 +4281,12 @@ fn print_pexp_apply(
         ParenKind::Nothing => funct_doc,
     };
 
-    // Print attributes - Pexp_apply handles its own attributes
-    let attrs_doc = print_attributes(state, &expr.pexp_attributes, cmt_tbl, arena);
-
-    // Check for callback in first or last position for special formatting
+    // res_printer.ml:4778-4817: the attributes are printed after the
+    // arguments, and the plain call is not grouped on its own.
     if parsetree_viewer::requires_special_callback_printing_first_arg(arena, args, partial) {
         let args_doc =
             print_arguments_with_callback_in_first_position(state, args, partial, cmt_tbl, arena);
+        let attrs_doc = print_attributes(state, &expr.pexp_attributes, cmt_tbl, arena);
         Doc::concat(vec![attrs_doc, funct_doc, args_doc])
     } else if parsetree_viewer::requires_special_callback_printing_last_arg(arena, args, partial) {
         let args_doc =
@@ -4290,10 +4298,12 @@ fn print_pexp_apply(
         } else {
             Doc::nil()
         };
+        let attrs_doc = print_attributes(state, &expr.pexp_attributes, cmt_tbl, arena);
         Doc::concat(vec![maybe_break_parent, attrs_doc, funct_doc, args_doc])
     } else {
         let args_doc = print_arguments(state, args, partial, cmt_tbl, arena);
-        Doc::group(Doc::concat(vec![attrs_doc, funct_doc, args_doc]))
+        let attrs_doc = print_attributes(state, &expr.pexp_attributes, cmt_tbl, arena);
+        Doc::concat(vec![attrs_doc, funct_doc, args_doc])
     }
 }
 
@@ -5485,7 +5495,7 @@ pub fn print_pattern(
                 (&*inner.ppat_desc, &*typ.ptyp_desc)
             {
                 let name_doc = Doc::text(arena.get_string(name.txt));
-                let name_doc = print_comments(name_doc, cmt_tbl, inner.ppat_loc, arena);
+                let name_doc = print_comments(name_doc, cmt_tbl, name.loc, arena);
                 let pkg_doc = print_package_type(state, &**package_type, false, cmt_tbl, arena);
                 let pkg_doc = print_comments(pkg_doc, cmt_tbl, typ.ptyp_loc, arena);
                 Doc::concat(vec![
@@ -5650,42 +5660,30 @@ fn print_list_pattern(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
+    // res_printer.ml:2669-2710
     let (patterns, tail) = parsetree_viewer::collect_list_patterns(arena, pat);
-
-    let should_hug = matches!((&patterns[..], tail),
-        ([single], Some(t)) if is_huggable_pattern(single)
-            && matches!(&*t.ppat_desc, PatternDesc::Ppat_construct(lid, None)
-                if arena.is_lident(lid.txt, "[]")));
-
-    let tail_doc = match tail {
-        Some(t) => match &*t.ppat_desc {
-            PatternDesc::Ppat_construct(lid, None) if arena.is_lident(lid.txt, "[]") => Doc::nil(),
-            _ => Doc::concat(vec![
-                Doc::text(","),
-                Doc::line(),
-                Doc::text("..."),
-                print_pattern(state, t, cmt_tbl, arena),
-            ]),
-        },
-        None => Doc::nil(),
+    let tail_is_nil = matches!(
+        &*tail.ppat_desc,
+        PatternDesc::Ppat_construct(lid, _) if arena.is_lident(lid.txt, "[]")
+    );
+    let should_hug = matches!(patterns.as_slice(), [single] if is_huggable_pattern(single))
+        && tail_is_nil;
+    let mut docs: Vec<Doc> = Vec::with_capacity(patterns.len());
+    for p in &patterns {
+        docs.push(print_pattern(state, p, cmt_tbl, arena));
+    }
+    let tail_doc = if tail_is_nil {
+        Doc::nil()
+    } else {
+        let doc = Doc::concat(vec![Doc::text("..."), print_pattern(state, tail, cmt_tbl, arena)]);
+        let tail_doc = print_comments(doc, cmt_tbl, tail.ppat_loc, arena);
+        Doc::concat(vec![Doc::text(","), Doc::line(), tail_doc])
     };
-
     let children = Doc::concat(vec![
-        if should_hug {
-            Doc::nil()
-        } else {
-            Doc::soft_line()
-        },
-        Doc::join(
-            Doc::concat(vec![Doc::text(","), Doc::line()]),
-            patterns
-                .iter()
-                .map(|p| print_pattern(state, *p, cmt_tbl, arena))
-                .collect(),
-        ),
+        if should_hug { Doc::nil() } else { Doc::soft_line() },
+        Doc::join(Doc::concat(vec![Doc::text(","), Doc::line()]), docs),
         tail_doc,
     ]);
-
     Doc::group(Doc::concat(vec![
         Doc::text("list{"),
         if should_hug {
@@ -5738,7 +5736,7 @@ fn print_record_pattern(
                     // 1. Individual component locations (label and pattern)
                     // 2. The combined row location
                     // Like OCaml: print_lident_path (with comments on label), then print_comments on row
-                    let label = print_comments(label, cmt_tbl, field.lid.loc, arena);
+                    // res_printer.ml:3004-3026
                     let pat_doc = print_pattern(state, field_pat, cmt_tbl, arena);
                     // Check if pattern needs parentheses in record row context
                     let pat_doc = if parens::pattern_record_row_rhs(arena, field_pat) {
@@ -5751,7 +5749,16 @@ fn print_record_pattern(
                     } else {
                         pat_doc
                     };
-                    let doc = Doc::group(Doc::concat(vec![label, Doc::text(": "), rhs_doc]));
+                    let label = print_comments(label, cmt_tbl, field.lid.loc, arena);
+                    let doc = Doc::group(Doc::concat(vec![
+                        label,
+                        Doc::text(":"),
+                        if is_huggable_pattern(field_pat) {
+                            Doc::concat(vec![Doc::space(), rhs_doc])
+                        } else {
+                            Doc::indent(Doc::concat(vec![Doc::line(), rhs_doc]))
+                        },
+                    ]));
                     // Create combined location and use position-based lookup explicitly
                     // This is needed because during walking, a new LocIdx is created for the combined
                     // location that won't match any AST node's LocIdx during printing
@@ -7543,19 +7550,10 @@ fn print_try_expression(
 
 /// Check if a pattern needs parentheses in a case context.
 /// Constraint patterns like `(p: typ)` need parens at the case level.
-fn case_pattern_needs_parens(arena: &ParseArena, pattern: &Pattern) -> bool {
-    match &*pattern.ppat_desc {
-        // Constraint patterns need parens: | (p: typ) => ...
-        // Exception: module(M: S) doesn't need extra parens
-        PatternDesc::Ppat_constraint(inner) => {
-            let (ref inner_idx, ref typ) = **inner;
-            let inner = arena.get_pat(*inner_idx);
-            let typ = arena.get_core_type(*typ);
-            !(matches!(&*inner.ppat_desc, PatternDesc::Ppat_unpack(_))
-                && matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)))
-        }
-        _ => false,
-    }
+fn case_pattern_needs_parens(_arena: &ParseArena, pattern: &Pattern) -> bool {
+    // res_printer.ml:5545-5549: every constrained case pattern is
+    // parenthesized, `(module(M: S))` included.
+    matches!(&*pattern.ppat_desc, PatternDesc::Ppat_constraint(_))
 }
 
 /// Get the position range for a case (from pattern start to rhs end).
@@ -9216,8 +9214,9 @@ fn print_constructor_arguments(
                 Doc::rbrace(),
                 Doc::rparen(),
             ]);
-            let result = Doc::group(if indent { Doc::indent(inner) } else { inner });
-            result
+            // res_printer.ml:1833-1857: no group of its own; the record
+            // breaks with the constructor declaration's group.
+            if indent { Doc::indent(inner) } else { inner }
         }
     }
 }

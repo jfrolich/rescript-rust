@@ -796,39 +796,27 @@ pub fn collect_list_expressions<'a>(
     }
 }
 
-/// Collect patterns from a list constructor (::).
+/// res_parsetree_viewer.ml:646-653 collect_patterns_from_list_construct:
+/// the `::` heads and the remaining tail pattern.
 pub fn collect_list_patterns<'a>(
     arena: &'a crate::parse_arena::ParseArena,
     pat: &'a Pattern,
-) -> (Vec<&'a Pattern>, Option<&'a Pattern>) {
+) -> (Vec<&'a Pattern>, &'a Pattern) {
     let mut acc = Vec::new();
     let mut current = pat;
-
     loop {
-        match &*current.ppat_desc {
-            PatternDesc::Ppat_construct(lid, None) if arena.is_lident(lid.txt, "[]") => {
-                return (acc, None);
-            }
-            PatternDesc::Ppat_construct(lid, Some(arg_idx)) if arena.is_lident(lid.txt, "::") => {
-                // The argument should be a tuple of (head, tail)
-                let arg: &Pattern = arena.get_pat(*arg_idx);
-                if let PatternDesc::Ppat_tuple(pats) = &*arg.ppat_desc {
-                    if pats.len() == 2 {
-                        let head: &Pattern = arena.get_pat(pats[0]);
-                        let tail: &Pattern = arena.get_pat(pats[1]);
-                        acc.push(head);
-                        current = tail;
+        if let PatternDesc::Ppat_construct(lid, Some(arg_idx)) = &*current.ppat_desc {
+            if arena.is_lident(lid.txt, "::") {
+                if let PatternDesc::Ppat_tuple(pats) = &*arena.get_pat(*arg_idx).ppat_desc {
+                    if let [head, rest] = pats.as_slice() {
+                        acc.push(arena.get_pat(*head));
+                        current = arena.get_pat(*rest);
                         continue;
                     }
                 }
-                // Malformed list, return what we have with spread
-                return (acc, Some(current));
-            }
-            _ => {
-                // Not a list constructor, this is a spread
-                return (acc, Some(current));
             }
         }
+        return (acc, current);
     }
 }
 
