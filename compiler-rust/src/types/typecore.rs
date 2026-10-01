@@ -28024,7 +28024,6 @@ pub(crate) fn rebind_direct_sig_type_family_to_access_path<'a>(
     sig_items: &mut [crate::types::decl::SignatureItem],
 ) {
     use crate::types::decl::SignatureItem;
-    use crate::types::type_expr::TypeDesc;
 
     let mut rewrites = Vec::<(Path, Path)>::new();
     for item in sig_items.iter() {
@@ -28033,18 +28032,6 @@ pub(crate) fn rebind_direct_sig_type_family_to_access_path<'a>(
             if let Some(old_path) = decl.type_path.as_ref() {
                 if !old_path.same(&rebound_path) {
                     rewrites.push((old_path.clone(), rebound_path.clone()));
-                }
-                continue;
-            }
-            if let Some(manifest) = decl.type_manifest {
-                let manifest = ctx.repr(manifest);
-                if let TypeDesc::Tconstr { path, args, .. } = &*ctx.get_desc(manifest) {
-                    if path.last() == id.name()
-                        && args.len() == decl.type_params.len()
-                        && !path.same(&rebound_path)
-                    {
-                        rewrites.push((path.clone(), rebound_path.clone()));
-                    }
                 }
             }
         }
