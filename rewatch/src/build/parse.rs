@@ -620,7 +620,8 @@ fn generate_ast(
     let build_path_abs = package.get_build_path();
     let ast_path = helpers::get_ast_path(filename);
     let ast_output_path = build_path_abs.join(&ast_path);
-    let source_path_str = file_path.to_string_lossy().to_string();
+    // `bsc -absname` names the source by its normalized absolute path.
+    let source_path_str = helpers::ocaml_absname(&file_path).to_string_lossy().to_string();
     let bsc_flags = config::flatten_flags(&package.config.compiler_flags);
     let open_deps = open_dependencies_from_bsc_flags(&bsc_flags);
 

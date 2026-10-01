@@ -2559,7 +2559,7 @@ fn js_output_path_for_spec(
 ) -> PathBuf {
     let suffix = root_config.get_suffix(spec);
     if spec.in_source {
-        let source_abs = Path::new(&package.path).join(source_file_path);
+        let source_abs = helpers::ocaml_absname(&Path::new(&package.path).join(source_file_path));
         helpers::get_source_file_from_rescript_file(&source_abs, &suffix)
     } else {
         let js_relative = helpers::get_source_file_from_rescript_file(source_file_path, &suffix);
@@ -2716,7 +2716,7 @@ fn write_js_output(
         let suffix = root_config.get_suffix(&spec);
         let js_path = if spec.in_source {
             // In-source: JS goes alongside the .res file, within the package root
-            let source_abs = Path::new(&package.path).join(source_file_path);
+            let source_abs = helpers::ocaml_absname(&Path::new(&package.path).join(source_file_path));
             helpers::get_source_file_from_rescript_file(&source_abs, &suffix)
         } else {
             // Out-of-source: JS goes in lib/js/ or lib/es6/ preserving relative path
@@ -3685,7 +3685,7 @@ fn compile_module_in_process_to_js_boundary(
     let mut options = build_compiler_options(package, module_name, implementation_path, build_command_state)?;
     let root_config = build_state.get_root_config();
 
-    let source_abs = Path::new(&package.path).join(implementation_path);
+    let source_abs = helpers::ocaml_absname(&Path::new(&package.path).join(implementation_path));
     let cmi_path = helpers::get_compiler_asset(package, &package.namespace, implementation_path, "cmi");
     let previous_cmi_hash = helpers::compute_file_hash(&cmi_path);
     let is_runtime = package.name == "@rescript/runtime";
@@ -3722,7 +3722,7 @@ fn compile_module_in_process_to_js_boundary(
             path = %interface.path.display()
         )
         .entered();
-        let intf_source_abs = Path::new(&package.path).join(&interface.path);
+        let intf_source_abs = helpers::ocaml_absname(&Path::new(&package.path).join(&interface.path));
         let intf_key = format!("{module_name}:intf");
         let intf_result = match stored_asts.get(&intf_key) {
             Some(StoredAst::Signature(stored)) => {
