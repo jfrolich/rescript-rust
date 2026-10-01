@@ -1147,6 +1147,17 @@ impl PersistentEnv {
         Some(ps)
     }
 
+    /// `Env.check_pers_struct` (env.ml:741-748): under `-no-alias-deps`, a
+    /// module looked up without loading is still recorded as a (weak) import,
+    /// with no CRC unless a loaded unit's CRC list supplies one.
+    pub fn check_pers_struct(&self, name: &str) {
+        self.imported_units
+            .lock()
+            .unwrap()
+            .entry(name.to_string())
+            .or_insert(None);
+    }
+
     fn record_import(&self, ps: &PersStruct) {
         let mut imported = self.imported_units.lock().unwrap();
         imported.entry(ps.ps_name.clone()).or_insert(None);

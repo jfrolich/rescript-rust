@@ -8616,6 +8616,10 @@ fn lookup_module_path_for_module_expr<'a>(
             return Err(TypeModError::CoreError(error));
         }
 
+        // env.ml:1044-1045: `check_pers_struct` records the weak import.
+        if let Some(pers) = tctx.persistent_env.as_ref() {
+            pers.check_pers_struct(mod_name);
+        }
         let has_cmi = tctx
             .persistent_env
             .as_ref()
@@ -13910,21 +13914,17 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
             check_recursive_module_reference_lid(lid, arena, env)?;
             let longident = tctx.resolve_lid(lid.txt).clone();
             crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module, None);
-            let path = lookup_module_path_by_lid(
-                &longident,
-                arena,
+            // typemod.ml:670 `transl_module_alias` uses `Typetexp.lookup_module`,
+            // whose default `~load:false` (typetexp.ml:126) leaves the unit
+            // unloaded under `-no-alias-deps` (env.ml:1044-1045).
+            let path = lookup_module_path_for_module_expr(
+                tctx,
                 env,
-                &mut tctx.persistent_env,
-                tctx.type_ctx,
-            )
-            .ok_or_else(|| {
-                TypeModError::CoreError(crate::types::typecore::unbound_module_lookup_error(
-                    tctx,
-                    env,
-                    mty.pmty_loc,
-                    &longident,
-                ))
-            })?;
+                arena,
+                &longident,
+                false,
+                mty.pmty_loc,
+            )?;
             Ok(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path))
         }
         // OCaml `compiler/ml/typemod.ml:519-520` (approx_modtype) and
@@ -14207,21 +14207,17 @@ fn approx_modtype_rec<'a>(
             check_recursive_module_reference_lid(lid, arena, env)?;
             let longident = tctx.resolve_lid(lid.txt).clone();
             crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module, Some(mty.pmty_loc));
-            let path = lookup_module_path_by_lid(
-                &longident,
-                arena,
+            // typemod.ml:670 `transl_module_alias` uses `Typetexp.lookup_module`,
+            // whose default `~load:false` (typetexp.ml:126) leaves the unit
+            // unloaded under `-no-alias-deps` (env.ml:1044-1045).
+            let path = lookup_module_path_for_module_expr(
+                tctx,
                 env,
-                &mut tctx.persistent_env,
-                tctx.type_ctx,
-            )
-            .ok_or_else(|| {
-                TypeModError::CoreError(crate::types::typecore::unbound_module_lookup_error(
-                    tctx,
-                    env,
-                    mty.pmty_loc,
-                    &longident,
-                ))
-            })?;
+                arena,
+                &longident,
+                false,
+                mty.pmty_loc,
+            )?;
             Ok(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path))
         }
         PMtyDesc::Pmty_signature(sig_items) => Ok(DeclMty::MtySignature(approx_signature(
@@ -17385,21 +17381,17 @@ fn transl_modtype<'a>(
             check_recursive_module_reference_lid(lid, arena, env)?;
             let longident = tctx.resolve_lid(lid.txt).clone();
             crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, arena, &longident, crate::types::env::OpenLookupKind::Module, Some(smty.pmty_loc));
-            let path = lookup_module_path_by_lid(
-                &longident,
-                arena,
+            // typemod.ml:670 `transl_module_alias` uses `Typetexp.lookup_module`,
+            // whose default `~load:false` (typetexp.ml:126) leaves the unit
+            // unloaded under `-no-alias-deps` (env.ml:1044-1045).
+            let path = lookup_module_path_for_module_expr(
+                tctx,
                 env,
-                &mut tctx.persistent_env,
-                tctx.type_ctx,
-            )
-            .ok_or_else(|| {
-                TypeModError::CoreError(crate::types::typecore::unbound_module_lookup_error(
-                    tctx,
-                    env,
-                    smty.pmty_loc,
-                    &longident,
-                ))
-            })?;
+                arena,
+                &longident,
+                false,
+                smty.pmty_loc,
+            )?;
             TMtyDesc::Tmty_alias(path, lid.clone())
         }
         // OCaml `compiler/ml/typemod.ml:743-744`.
