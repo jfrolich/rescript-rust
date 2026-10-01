@@ -373,6 +373,9 @@ pub(crate) struct OpenSlotEvent {
     pub shadowed: bool,
 }
 
+/// A saved position: resolved file name (or raw handle), line, bol, cnum.
+type PositionKey = (Result<u32, String>, i32, i32, i32);
+
 /// Type checking context.
 ///
 /// This context is created for each type checking session (typically one
@@ -1967,9 +1970,40 @@ impl TypeContext {
         vd1: &super::decl::ValueDescription,
         vd2: &super::decl::ValueDescription,
     ) {
-        if vd1.val_loc != vd2.val_loc {
+        // OCaml compares the locations structurally (`<>`), so two
+        // `Location.none`s are equal whichever way they were spelled here.
+        let same = self.location_key(&vd1.val_loc) == self.location_key(&vd2.val_loc);
+        if !same {
             self.value_deps.borrow_mut().push((vd1.clone(), vd2.clone()));
         }
+    }
+
+    /// A location as the saved `Location.t` value: positions with resolved
+    /// file names, and Rust's `Location::none` spelled as OCaml's `in_file
+    /// "_none_"` position (location.ml).
+    fn location_key(&self, loc: &crate::location::Location) -> (PositionKey, PositionKey, bool) {
+        (
+            self.position_key(&loc.loc_start),
+            self.position_key(&loc.loc_end),
+            loc.loc_ghost,
+        )
+    }
+
+    fn position_key(&self, pos: &crate::location::Position) -> PositionKey {
+        if pos.file_name == crate::intern::StrIdx::default() && pos.line == 0 {
+            return (Err("_none_".to_string()), 1, 0, -1);
+        }
+        let name = self
+            .resolve_cmi_longident_component(pos.file_name)
+            .or_else(|| {
+                self.arena_longident_names
+                    .borrow()
+                    .get(&pos.file_name.raw())
+                    .cloned()
+            })
+            .map(Err)
+            .unwrap_or(Ok(pos.file_name.raw()));
+        (name, pos.line, pos.bol, pos.cnum)
     }
 
     /// `Cmt_format.record_deprecated_used`.
