@@ -1106,47 +1106,6 @@ fn primitive_description_from_value_decl(
     }
 }
 
-fn primitive_arity_from_typed_core_type(ty: &crate::types::typedtree::TypedCoreType) -> i32 {
-    match &ty.ctyp_desc {
-        crate::types::typedtree::TypedCoreTypeDesc::Ttyp_arrow(args, ret) => {
-            args.len() as i32 + primitive_arity_from_typed_core_type(ret)
-        }
-        crate::types::typedtree::TypedCoreTypeDesc::Ttyp_poly(_, inner)
-        | crate::types::typedtree::TypedCoreTypeDesc::Ttyp_alias(inner, _) => {
-            primitive_arity_from_typed_core_type(inner)
-        }
-        _ => 0,
-    }
-}
-
-fn primitive_description_from_typed_value_desc(
-    ctx: Option<&crate::types::context::TypeContext>,
-    env: Option<&Env>,
-    vd: &crate::types::typedtree::TypedValueDescription,
-) -> crate::types::PrimitiveDescription {
-    let prim_name = vd.val_prim.first().cloned().unwrap_or_default();
-    let prim_native_name = vd.val_prim.get(1).cloned().unwrap_or_default();
-    let (prim_arity, prim_from_constructor) = match (ctx, env) {
-        (Some(ctx), Some(env)) => {
-            let arity_from_type = get_primitive_arity_from_type(ctx, env, vd.val_desc.ctyp_type);
-            let from_constructor =
-                arity_from_type.is_some() && is_type_constructor(ctx, vd.val_desc.ctyp_type);
-            let arity = arity_from_type
-                .unwrap_or_else(|| primitive_arity_from_typed_core_type(&vd.val_desc));
-            (arity, from_constructor)
-        }
-        _ => (primitive_arity_from_typed_core_type(&vd.val_desc), false),
-    };
-
-    crate::types::PrimitiveDescription {
-        prim_name,
-        prim_arity,
-        prim_native_name,
-        prim_native_float: false,
-        prim_from_constructor,
-    }
-}
-
 fn decl_attrs_to_parser_attrs(
     arena: &ParseArena,
     attrs: &[crate::types::decl::Attribute],
@@ -14385,17 +14344,8 @@ pub(crate) fn decl_signature_from_typed_signature(
     for item in &sig.sig_items {
         match &item.sig_desc {
             TypedSignatureItemDesc::Tsig_value(vd) => {
-                let val_kind = if vd.val_prim.is_empty() {
-                    ValueKind::ValReg
-                } else {
-                    ValueKind::ValPrim(crate::types::PrimitiveDescription {
-                        prim_name: vd.val_prim.first().cloned().unwrap_or_default(),
-                        prim_arity: primitive_arity_from_typed_core_type(&vd.val_desc),
-                        prim_native_name: vd.val_prim.get(1).cloned().unwrap_or_default(),
-                        prim_native_float: false,
-                        prim_from_constructor: false,
-                    })
-                };
+                // typedecl.ml:1878-1915: the value's kind as typed.
+                let val_kind = vd.val_kind.clone();
                 out.push(SigItem::SigValue(
                     vd.val_id.clone(),
                     ValueDescription {
@@ -15400,13 +15350,8 @@ where
                         let id = vd.val_id.clone();
                         let value_desc = ValueDescription {
                             val_type: vd.val_desc.ctyp_type,
-                            val_kind: crate::types::decl::ValueKind::ValPrim(
-                                primitive_description_from_typed_value_desc(
-                                    type_ctx,
-                                    current_env,
-                                    vd,
-                                ),
-                            ),
+                            // typedecl.ml:1878-1915: the kind as typed.
+                            val_kind: vd.val_kind.clone(),
                             val_loc: crate::location::Location::none(),
                             val_attributes: vec![],
                             val_path: None,
@@ -17452,15 +17397,24 @@ pub fn transl_signature<'a>(
                     transl_type(tctx, &sig_env, arena.get_core_type(vd.pval_type))?;
                 ctx.end_def();
                 crate::types::ctype::generalize(ctx, val_ty);
-                if !vd.pval_prim.is_empty() {
-                    // OCaml compiler/ml/typemod.ml:756-763 delegates Psig_value
-                    // to compiler/ml/typedecl.ml:1875-1914. The extra
-                    // parse_arity/get_arity expansion happens only in the
-                    // primitive branch at typedecl.ml:1888-1907; ordinary
-                    // signature values must not force constructor heads before
-                    // Env.enter_value allocates val_id at typedecl.ml:1908-1911.
-                    let _ = get_primitive_arity_from_type(ctx, &sig_env, val_ty);
-                }
+                // OCaml compiler/ml/typemod.ml:756-763 delegates Psig_value
+                // to compiler/ml/typedecl.ml:1878-1915. The extra
+                // parse_arity/get_arity expansion happens only in the
+                // primitive branch at typedecl.ml:1897-1898; ordinary
+                // signature values must not force constructor heads before
+                // Env.enter_value allocates val_id at typedecl.ml:1916-1919.
+                let val_kind = if vd.pval_prim.is_empty() {
+                    crate::types::decl::ValueKind::ValReg
+                } else {
+                    crate::types::decl::ValueKind::ValPrim(primitive_description_from_value_decl(
+                        arena,
+                        ctx,
+                        &sig_env,
+                        &vd.pval_prim,
+                        vd.pval_type,
+                        val_ty,
+                    ))
+                };
                 // OCaml typedecl.ml:1875-1914 translates the type scheme before
                 // Env.enter_value creates the value ident. Keep the same order so
                 // lazy signature forcing during type translation consumes stamps
@@ -17492,6 +17446,7 @@ pub fn transl_signature<'a>(
                     },
                     val_desc: typed_ctype,
                     val_prim,
+                    val_kind,
                     val_loc: vd.pval_loc,
                     val_attributes: vd.pval_attributes.clone(),
                 })
@@ -18764,6 +18719,7 @@ fn type_structure_item<'a>(
                     name: name_str.clone(),
                 },
             );
+            let val_kind = val_desc_for_env.val_kind.clone();
             new_env.add_value(id.clone(), val_desc_for_env);
 
             let desc =
@@ -18775,6 +18731,7 @@ fn type_structure_item<'a>(
                     },
                     val_desc: typed_ctype,
                     val_prim,
+                    val_kind,
                     val_loc: vd.pval_loc,
                     val_attributes: vd.pval_attributes.clone(),
                 });

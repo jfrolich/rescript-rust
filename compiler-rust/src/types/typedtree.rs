@@ -1047,6 +1047,10 @@ pub struct TypedValueDescription {
     pub val_desc: TypedCoreType,
     /// Primitive names.
     pub val_prim: Vec<String>,
+    /// `val_val.val_kind` (compiler/ml/typedtree.mli `value_description`):
+    /// the kind `Typedecl.transl_value_decl` computed (typedecl.ml:1878-1915),
+    /// including a primitive's arity from `parse_arity`.
+    pub val_kind: crate::types::decl::ValueKind,
     /// Location.
     pub val_loc: LocIdx,
     /// Attributes.
