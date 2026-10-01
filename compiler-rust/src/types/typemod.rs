@@ -9362,6 +9362,12 @@ struct WithTypeConstraint {
     path: Vec<String>,
     manifest: TypeExprRef,
     kind: WithTypeConstraintKind,
+    /// `sdecl.ptype_loc` / `sdecl.ptype_attributes` of a `with type`
+    /// constraint: OCaml's `Typedecl.transl_with_constraint`
+    /// (compiler/ml/typedecl.ml:1997-1998) gives the replacing declaration
+    /// these, and `merge_constraint` (compiler/ml/typemod.ml:349-355) puts it
+    /// in the signature.
+    decl_loc: Option<(crate::location::Location, Vec<crate::types::decl::Attribute>)>,
 }
 
 fn flatten_package_constraint_path(
@@ -9405,6 +9411,7 @@ fn nested_with_type_constraints(
                     path: tail.to_vec(),
                     manifest: constraint.manifest,
                     kind: constraint.kind,
+                    decl_loc: constraint.decl_loc.clone(),
                 })
             } else {
                 None
@@ -10292,6 +10299,10 @@ fn apply_with_type_constraints_to_module_type<'b>(
                             if td.type_params.is_empty() {
                                 td.type_manifest = Some(constraint.manifest);
                             }
+                            if let Some((loc, attrs)) = &constraint.decl_loc {
+                                td.type_loc = loc.clone();
+                                td.type_attributes = attrs.clone();
+                            }
                             rewritten_sig.push(SignatureItem::SigType(id.clone(), td, *rec_status));
                         }
                         None => rewritten_sig.push(item.clone()),
@@ -10611,6 +10622,10 @@ fn collect_pmty_with_type_constraints<'a>(
                         path,
                         manifest: manifest_ty,
                         kind: WithTypeConstraintKind::Manifest,
+                        decl_loc: Some((
+                            arena.to_location(decl.ptype_loc),
+                            parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes),
+                        )),
                     });
                 }
             }
@@ -10662,6 +10677,7 @@ fn collect_pmty_with_type_constraints<'a>(
                                 path,
                                 manifest: manifest_ty,
                                 kind: WithTypeConstraintKind::Substitute,
+                                decl_loc: None,
                             });
                         }
                     }
@@ -10672,6 +10688,7 @@ fn collect_pmty_with_type_constraints<'a>(
                         path,
                         manifest: manifest_ty,
                         kind: WithTypeConstraintKind::Substitute,
+                        decl_loc: None,
                     });
                 }
             }
