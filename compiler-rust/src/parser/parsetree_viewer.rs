@@ -225,7 +225,7 @@ pub fn is_binary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expre
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 2 {
+            if args.len() != 2 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
@@ -233,7 +233,7 @@ pub fn is_binary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expre
                 ExpressionDesc::Pexp_ident(ident) => {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         let op = arena.get_string(*op_idx);
-                        not_ghost_operator(op, ident.loc.is_none())
+                        not_ghost_operator(op, arena.loc_ghost(ident.loc))
                     } else {
                         false
                     }
@@ -257,7 +257,7 @@ pub fn get_binary_operator(
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 2 {
+            if args.len() != 2 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
                 return None;
             }
             let funct_expr = arena.get_expr(*funct);
@@ -265,7 +265,7 @@ pub fn get_binary_operator(
                 ExpressionDesc::Pexp_ident(ident) => {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         let op = arena.get_string(*op_idx);
-                        if not_ghost_operator(op, ident.loc.is_none()) {
+                        if not_ghost_operator(op, arena.loc_ghost(ident.loc)) {
                             return Some(op.to_string());
                         }
                     }
@@ -389,10 +389,18 @@ pub fn expr_is_uncurried_fun(arena: &ParseArena, expr: &Expression) -> bool {
 /// all other arguments are NOT functions/newtypes.
 /// Note: underscore apply sugar is NOT considered a callback here because
 /// OCaml rewrites it before this check, and after rewriting it becomes Pexp_apply.
+///
+/// `partial` stands for the dummy `~...` argument res_printer.ml:4764-4769
+/// appends to a partial application before these checks; a callback is then
+/// never the last argument.
 pub fn requires_special_callback_printing_last_arg(
     arena: &ParseArena,
     args: &[(ArgLabel, ExprIdx)],
+    partial: bool,
 ) -> bool {
+    if partial {
+        return false;
+    }
     let mut iter = args.iter().peekable();
     while let Some((_, expr_idx)) = iter.next() {
         let expr = arena.get_expr(*expr_idx);
@@ -417,6 +425,7 @@ pub fn requires_special_callback_printing_last_arg(
 pub fn requires_special_callback_printing_first_arg(
     arena: &ParseArena,
     args: &[(ArgLabel, ExprIdx)],
+    partial: bool,
 ) -> bool {
     // Helper: is it a real callback (not underscore apply sugar)
     let is_real_callback = |expr_idx: &ExprIdx| -> bool {
@@ -424,8 +433,9 @@ pub fn requires_special_callback_printing_first_arg(
         is_fun_newtype(expr) && !is_underscore_apply_sugar(arena, expr)
     };
     match args {
-        // Single argument callback - use normal printing
-        [(_, expr_idx)] if is_real_callback(expr_idx) => false,
+        // Single argument callback - use normal printing (a partial
+        // application has the dummy `~...` argument after it).
+        [(_, expr_idx)] if is_real_callback(expr_idx) => partial,
         // First is callback, need to check rest
         [(_, expr_idx), rest @ ..] if is_real_callback(expr_idx) => {
             // All remaining args must NOT be callbacks
@@ -547,7 +557,7 @@ pub fn is_unary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expres
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 1 {
+            if args.len() != 1 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
@@ -1588,7 +1598,7 @@ pub fn is_array_access(arena: &crate::parse_arena::ParseArena, expr: &Expression
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 2 {
+            if args.len() != 2 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
@@ -1616,7 +1626,7 @@ pub fn is_array_set(arena: &crate::parse_arena::ParseArena, expr: &Expression) -
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 3 {
+            if args.len() != 3 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);

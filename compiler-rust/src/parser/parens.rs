@@ -224,7 +224,7 @@ pub fn rhs_binary_expr_operand(
                 ExpressionDesc::Pexp_ident(ident) if funct_expr.pexp_attributes.is_empty() => {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         let operator = arena.get_string(*op_idx);
-                        if parsetree_viewer::not_ghost_operator(operator, ident.loc.is_none()) {
+                        if parsetree_viewer::not_ghost_operator(operator, arena.loc_ghost(ident.loc)) {
                             let prec_parent =
                                 parsetree_viewer::operator_precedence(parent_operator);
                             let prec_child = parsetree_viewer::operator_precedence(operator);
@@ -261,7 +261,7 @@ pub fn flatten_operand_rhs(
                 ExpressionDesc::Pexp_ident(ident) => {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         let operator = arena.get_string(*op_idx);
-                        if parsetree_viewer::not_ghost_operator(operator, ident.loc.is_none()) {
+                        if parsetree_viewer::not_ghost_operator(operator, arena.loc_ghost(ident.loc)) {
                             let prec_parent =
                                 parsetree_viewer::operator_precedence(parent_operator);
                             let prec_child = parsetree_viewer::operator_precedence(operator);
@@ -325,7 +325,7 @@ pub fn flatten_operand_rhs_without_attrs(
                 ExpressionDesc::Pexp_ident(ident) => {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         let operator = arena.get_string(*op_idx);
-                        if parsetree_viewer::not_ghost_operator(operator, ident.loc.is_none()) {
+                        if parsetree_viewer::not_ghost_operator(operator, arena.loc_ghost(ident.loc)) {
                             let prec_parent =
                                 parsetree_viewer::operator_precedence(parent_operator);
                             let prec_child = parsetree_viewer::operator_precedence(operator);
