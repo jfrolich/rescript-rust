@@ -492,15 +492,71 @@ fn lookup_rebind_constructor<'a>(
     })
 }
 
+/// The arguments of a rebound extension constructor (compiler/ml/
+/// typedecl.ml:1701-1718): the instanced arguments, or for an inline record
+/// the labels of an instance of its declaration whose parameters are unified
+/// with the instanced record type's. The caller generalizes them.
 fn rebind_constructor_arguments(
+    tctx: &mut TypeCheckContext<'_>,
     desc: &crate::types::decl::ConstructorDescription,
+    inst_args: &[TypeExprRef],
 ) -> crate::types::ConstructorArguments {
+    let ctx = tctx.type_ctx;
     if let Some(inlined) = &desc.cstr_inlined {
-        if let crate::types::TypeKind::TypeRecord(labels, _) = &inlined.type_kind {
-            return crate::types::ConstructorArguments::CstrRecord(labels.clone());
+        let tl = match inst_args {
+            [arg] => match &*ctx.get_desc(ctx.repr(*arg)) {
+                crate::types::TypeDesc::Tconstr { args, .. } => args.clone(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        let decl = crate::types::ctype::instance_declaration(ctx, inlined);
+        for (param, ty) in decl.type_params.iter().zip(tl.iter()) {
+            let _ = crate::types::ctype::unify(ctx, &mut tctx.unify_state, *param, *ty);
+        }
+        if let crate::types::TypeKind::TypeRecord(labels, _) = decl.type_kind {
+            return crate::types::ConstructorArguments::CstrRecord(labels);
         }
     }
-    crate::types::ConstructorArguments::CstrTuple(desc.cstr_args.clone())
+    crate::types::ConstructorArguments::CstrTuple(inst_args.to_vec())
+}
+
+/// `Datarepr.constructor_args` (compiler/ml/datarepr.ml:64-92) for a
+/// rebound constructor whose arguments are an inline record: the record type
+/// at `path` and its declaration. `None` for tuple arguments.
+fn rebound_constructor_args(
+    ctx: &crate::types::context::TypeContext,
+    path: &Path,
+    parent_type_params: &[TypeExprRef],
+    ext_args: &crate::types::ConstructorArguments,
+) -> (
+    Option<Vec<TypeExprRef>>,
+    Option<Box<crate::types::TypeDeclaration>>,
+) {
+    let crate::types::ConstructorArguments::CstrRecord(labels) = ext_args else {
+        return (None, None);
+    };
+    let type_params = inline_record_type_params(ctx, parent_type_params, labels);
+    let inline_ty = ctx.new_generic_constr(path.clone(), type_params.clone());
+    let decl = crate::types::TypeDeclaration {
+        type_arity: type_params.len() as i32,
+        type_variance: type_params.iter().map(|_| crate::types::Variance::FULL).collect(),
+        type_params,
+        type_kind: crate::types::TypeKind::TypeRecord(
+            labels.clone(),
+            crate::types::RecordRepresentation::RecordExtension,
+        ),
+        type_private: crate::types::PrivateFlag::Public,
+        type_manifest: None,
+        type_newtype_level: None,
+        type_loc: Location::none(),
+        type_attributes: vec![],
+        type_immediate: false,
+        type_representation: crate::types::TypeRepresentation::Boxed,
+        type_inlined_types: vec![],
+        type_path: None,
+    };
+    (Some(vec![inline_ty]), Some(Box::new(decl)))
 }
 
 fn parser_private_to_type_private(
@@ -20642,19 +20698,24 @@ fn type_structure_item<'a>(
                                 lid: tctx.resolve_lid(lid.txt).clone(),
                             });
                         }
-                        let ext_args = if rebind_desc.cstr_inlined.is_some() {
-                            rebind_constructor_arguments(&rebind_desc)
-                        } else {
-                            crate::types::ConstructorArguments::CstrTuple(inst_args.clone())
-                        };
+                        let ext_args =
+                            rebind_constructor_arguments(tctx, &rebind_desc, &inst_args);
+                        // `Datarepr.extension_descr` -> `constructor_args`
+                        // (compiler/ml/datarepr.ml:64-92).
+                        let (cstr_args, cstr_inlined) = rebound_constructor_args(
+                            ctx,
+                            &Path::pident(id.clone()),
+                            &typed_param_type_refs,
+                            &ext_args,
+                        );
                         (
                             crate::types::typedtree::ExtensionConstructorKind::Text_rebind(
                                 rebind_path,
                                 lid.clone(),
                             ),
                             ext_args,
-                            inst_args,
-                            rebind_desc.cstr_inlined.clone(),
+                            cstr_args.unwrap_or(inst_args),
+                            cstr_inlined.or_else(|| rebind_desc.cstr_inlined.clone()),
                             ret_type,
                         )
                     }
@@ -20995,15 +21056,20 @@ fn type_structure_item<'a>(
                             lid: tctx.resolve_lid(lid.txt).clone(),
                         });
                     }
-                    let ext_args = rebind_constructor_arguments(&rebind_desc);
+                    let ext_args = rebind_constructor_arguments(tctx, &rebind_desc, &inst_args);
+                    // `Datarepr.extension_descr` -> `constructor_args`
+                    // (compiler/ml/datarepr.ml:64-92): an inline record
+                    // becomes a record type at the new constructor's path.
+                    let (cstr_args, cstr_inlined) =
+                        rebound_constructor_args(ctx, &Path::pident(id.clone()), &[], &ext_args);
                     (
                         crate::types::typedtree::ExtensionConstructorKind::Text_rebind(
                             rebind_path,
                             lid.clone(),
                         ),
                         ext_args,
-                        inst_args,
-                        rebind_desc.cstr_inlined.clone(),
+                        cstr_args.unwrap_or(inst_args),
+                        cstr_inlined.or_else(|| rebind_desc.cstr_inlined.clone()),
                         ret_type,
                     )
                 }
