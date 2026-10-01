@@ -203,6 +203,14 @@ fn run() {
         let signature = if has_parse_errors {
             signature
         } else {
+            // res_cli.ml:305-317: the parsetree0 round trip runs before the
+            // JSX transform.
+            let signature = if args.test_ast_conversion {
+                let tree0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
+                mapper_from0::map_signature(parser.arena_mut(), &tree0)
+            } else {
+                signature
+            };
             // Apply JSX PPX transformation and emit JSX preprocessor warnings.
             let (signature, jsx_warnings) = match jsx_ppx::transform_signature_with_warnings_result(
                 signature,
@@ -216,14 +224,7 @@ fn run() {
                 }
             };
             print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
-
-            // Apply AST conversion round-trip if requested (for testing)
-            if args.test_ast_conversion {
-                let sig0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
-                mapper_from0::map_signature(parser.arena_mut(), &sig0)
-            } else {
-                signature
-            }
+            signature
         };
 
         // Print in requested format
@@ -334,6 +335,14 @@ fn run() {
         let structure = if has_parse_errors {
             structure
         } else {
+            // res_cli.ml:305-317: the parsetree0 round trip runs before the
+            // JSX transform.
+            let structure = if args.test_ast_conversion {
+                let tree0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
+                mapper_from0::map_structure(parser.arena_mut(), &tree0)
+            } else {
+                structure
+            };
             // Apply JSX PPX transformation and emit JSX preprocessor warnings.
             let (structure, jsx_warnings) = match jsx_ppx::transform_structure_with_warnings_result(
                 structure,
@@ -347,14 +356,7 @@ fn run() {
                 }
             };
             print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
-
-            // Apply AST conversion round-trip if requested (for testing)
-            if args.test_ast_conversion {
-                let str0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
-                mapper_from0::map_structure(parser.arena_mut(), &str0)
-            } else {
-                structure
-            }
+            structure
         };
 
         // Print in requested format
