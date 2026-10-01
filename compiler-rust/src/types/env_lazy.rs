@@ -514,6 +514,7 @@ pub(crate) struct QualifiedModuleComponents {
 
 fn scan_child_component_from_signature(
     access_path: &Path,
+    source_prefix: Option<&Path>,
     signature: &Arc<Signature>,
     child_components: &mut HashMap<String, Option<(usize, Arc<StoredModuleComponents>)>>,
     state: &mut ChildComponentScanState,
@@ -560,6 +561,11 @@ fn scan_child_component_from_signature(
                         .local_module_components_arc(&Path::pident(id.clone()))
                         .map(|stored| (runtime_pos, stored))
                 };
+                if let (Some(source), Some((_, stored))) = (source_prefix, &stored) {
+                    let _ = stored
+                        .source_prefix
+                        .set(Path::pdot(source.clone(), id.name()));
+                }
                 // OCaml `Tbl.add` shadows earlier entries with the same name
                 // (compiler/ml/env.ml:1577-1578), so keep the latest scanned
                 // child component for this name.
@@ -969,6 +975,12 @@ impl QualifiedModuleComponents {
         }
     }
 
+    /// The unit-rooted path these components' signature names its own items
+    /// through, for an in-process unit reached through an alias.
+    pub(crate) fn value_source_prefix(&self) -> Option<&Path> {
+        self.value_source_prefix.as_deref()
+    }
+
     pub(crate) fn lookup_value_for_access(
         &self,
         name: &str,
@@ -990,10 +1002,11 @@ impl QualifiedModuleComponents {
         // Keep the alias-strengthening boundary from compiler/ml/mtype.ml:41-49:
         // only the component substitution is applied here; alias target value
         // descriptions are not rewritten wholesale.
-        crate::cmi::persistent_env::substitute_type_paths_in_value_from_sig(
+        crate::cmi::persistent_env::substitute_type_paths_in_value_from_sig_with_source(
             &mut desc,
             self.signature.as_ref(),
             self.access_path(),
+            self.value_source_prefix.as_deref(),
             ctx,
         );
         // OCaml compiler/ml/env.ml:1513-1516 memoizes the whole
@@ -1136,6 +1149,7 @@ impl QualifiedModuleComponents {
         let mut child_components = self.tables.child_components.borrow_mut();
         let (built, scanned_items) = scan_child_component_from_signature(
             self.access_path(),
+            self.value_source_prefix.as_deref(),
             &self.signature,
             &mut child_components,
             &mut scan,
@@ -1517,6 +1531,7 @@ fn build_local_module_components<'a>(
     access_path: &Path,
     md: &ModuleDeclaration,
     parent_substitution_context: Option<(&Path, &[SignatureItem])>,
+    source_prefix: Option<&Path>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a super::context::TypeContext,
     cache_mode: super::typecore::ComponentLookupApi,
@@ -1716,6 +1731,19 @@ fn build_local_module_components<'a>(
     if raw_sig.len() != qualified_sig.len() {
         return None;
     }
+    if let Some(source) = source_prefix
+        && !source.same(access_path)
+    {
+        // A child of an in-process unit's components: its items name each
+        // other through the unit (`Unit.Sub.u`); `prefix_idents`
+        // (env.ml:1454-1481, 1530-1538) puts them at the access path.
+        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(&qualified_sig, source, access_path, ctx);
+        crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
+            &mut qualified_sig,
+            source,
+            access_path,
+        );
+    }
 
     let qualified_sig = Arc::new(qualified_sig);
     // OCaml compiler/ml/env.ml:1548-1578 closes child `comp_components`
@@ -1830,6 +1858,9 @@ pub(crate) struct StoredModuleComponents {
     access_path: Path,
     module_decl: ModuleDeclaration,
     parent_context: Option<(Path, Arc<Signature>)>,
+    /// For a child of components whose signature names its items through an
+    /// in-process unit (`Unit.Sub.t`), that unit-rooted path of this child.
+    source_prefix: OnceCell<Path>,
     cached: OnceCell<Arc<QualifiedModuleComponents>>,
     functor_component_result: OnceCell<ModuleType>,
     functor_result_subst_cache: OnceCell<RefCell<HashMap<Path, ModuleType>>>,
@@ -1855,6 +1886,7 @@ impl StoredModuleComponents {
             access_path,
             module_decl,
             parent_context,
+            source_prefix: OnceCell::new(),
             cached: OnceCell::new(),
             functor_component_result: OnceCell::new(),
             functor_result_subst_cache: OnceCell::new(),
@@ -1886,6 +1918,7 @@ impl StoredModuleComponents {
             &self.access_path,
             &self.module_decl,
             parent_substitution_context,
+            self.source_prefix.get(),
             pers_env,
             ctx,
             cache_mode,

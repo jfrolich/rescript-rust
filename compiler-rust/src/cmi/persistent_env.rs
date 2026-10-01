@@ -4757,6 +4757,20 @@ pub fn substitute_type_paths_in_value_from_sig(
     module_path: &Path,
     ctx: &TypeContext,
 ) {
+    substitute_type_paths_in_value_from_sig_with_source(desc, sig_items, module_path, None, ctx);
+}
+
+/// [`substitute_type_paths_in_value_from_sig`] for components whose signature
+/// names its own items through `source_prefix` (an in-process unit's
+/// signature, `Unit.t`): OCaml's `prefix_idents` re-roots those local items at
+/// the access path (env.ml:1454-1481, 1530-1538).
+pub fn substitute_type_paths_in_value_from_sig_with_source(
+    desc: &mut crate::types::decl::ValueDescription,
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    source_prefix: Option<&Path>,
+    ctx: &TypeContext,
+) {
     let maps = build_subst_maps_for_module(sig_items, module_path);
     let type_stamp_map = &maps.type_stamp_map;
     // OCaml compiler/ml/env.ml:1530-1538 builds component substitutions with
@@ -4800,7 +4814,13 @@ pub fn substitute_type_paths_in_value_from_sig(
         &mut visited,
     );
 
-    for alias_source in component_alias_sources(module_path, ctx) {
+    let mut alias_sources = component_alias_sources(module_path, ctx);
+    if let Some(source) = source_prefix
+        && !alias_sources.iter().any(|existing| existing.same(source))
+    {
+        alias_sources.push(source.clone());
+    }
+    for alias_source in alias_sources {
         for item in sig_items {
             // `prefix_idents` (env.ml:1454-1481) re-roots type and module
             // binders alike: `Result.t` inside the aliased unit becomes
@@ -6283,7 +6303,16 @@ fn add_signature_to_env_with_options(
     // only value-bearing items (non-primitive values, modules, extension constructors)
     // get runtime field positions. Types and module types are skipped.
     let mut pos: i32 = 0;
-    let reroot_prefixes = alias_reroot_prefixes(module_path, ctx);
+    let mut reroot_prefixes = alias_reroot_prefixes(module_path, ctx);
+    // Components of an in-process unit name its items through the unit
+    // (`Unit.t`); the opened component values are re-rooted at the component
+    // path like `prefix_idents` does (env.ml:1454-1481, 1530-1538).
+    if let Some(source) = precomputed_components.and_then(|c| c.value_source_prefix())
+        && !source.same(module_path)
+        && !reroot_prefixes.iter().any(|(from, _)| from.same(source))
+    {
+        reroot_prefixes.push((source.clone(), module_path.clone()));
+    }
     let mut opened_values = Vec::new();
     let mut opened_types = Vec::new();
     let mut opened_constructors = Vec::new();
