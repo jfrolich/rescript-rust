@@ -168,6 +168,26 @@ impl LayoutRef {
         Self(raw | super::type_expr::STORE_REF_TAG)
     }
 
+    /// Layout `idx` of the process-wide shared pool.
+    #[inline]
+    pub(crate) fn from_shared_index(idx: u32) -> Self {
+        let bits = super::type_expr::STORE_REF_TAG | super::type_expr::SHARED_REF_TAG;
+        assert!(idx & bits == 0, "shared variant layout index exceeds the tag range");
+        Self(idx | bits)
+    }
+
+    #[inline]
+    pub(crate) fn is_shared(self) -> bool {
+        let bits = super::type_expr::STORE_REF_TAG | super::type_expr::SHARED_REF_TAG;
+        self.0 & bits == bits
+    }
+
+    #[inline]
+    pub(crate) fn shared_index(self) -> u32 {
+        debug_assert!(self.is_shared());
+        self.0 & !(super::type_expr::STORE_REF_TAG | super::type_expr::SHARED_REF_TAG)
+    }
+
     /// Whether this layout lives in the per-thread store.
     #[inline]
     pub(crate) fn is_store(self) -> bool {

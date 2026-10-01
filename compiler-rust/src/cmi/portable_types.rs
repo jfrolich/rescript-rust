@@ -1026,6 +1026,23 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
             store.type_count()
         );
     }
+    if shareable {
+        // Internalize once per build for every worker; the worker store
+        // keeps the result so later units on this worker skip the pool map.
+        let pool = store.shared_pool();
+        let shared = pool.pers_struct(&pps, || {
+            let sig = internalize_signature_into_shared(&pps.ps_sig, &pps.type_graph, pool)?;
+            Some(Arc::new(PersStruct {
+                ps_name: pps.ps_name.clone(),
+                ps_sig: Arc::new(sig),
+                ps_filename: pps.ps_filename.clone(),
+            }))
+        });
+        if let Some(ps) = shared {
+            store.insert_pers_struct(pps, ps.clone());
+            return ps;
+        }
+    }
     let sig = if shareable {
         internalize_signature_into_store(&pps.ps_sig, &pps.type_graph, store)
     } else {
@@ -1075,6 +1092,64 @@ fn internalize_signature_into_store(
     let mut sig = portable_sig.clone();
     remap_signature_refs(&mut sig, &remap, &layout_remap);
     sig
+}
+
+/// Allocation sink for a graph being published to the shared pool: each
+/// `Tconstr` gets the memo cell keyed by its own node index.
+struct SharedSink<'a> {
+    pool: &'a crate::types::shared_store::SharedTypePool,
+    current: std::cell::Cell<u32>,
+}
+
+impl TypeNodeSink for SharedSink<'_> {
+    fn abbrev_nil(&self) -> AbbrevMemoRef {
+        AbbrevMemoRef::from_shared_index(self.current.get())
+    }
+
+    fn longident_name(&self, name: &str) -> crate::intern::StrIdx {
+        self.pool.intern_longident_name(name)
+    }
+}
+
+/// Internalize a graph into the process-wide shared pool. The graph is built
+/// completely before it is published, and is immutable afterwards. `None`
+/// when the pool has no room.
+fn internalize_signature_into_shared(
+    portable_sig: &Signature,
+    graph: &PortableTypeGraph,
+    pool: &crate::types::shared_store::SharedTypePool,
+) -> Option<Signature> {
+    let mut remap = Vec::new();
+    let base = pool.publish(graph.entries.len(), graph.variant_layouts.len(), |base| {
+        remap = (0..graph.entries.len())
+            .map(|i| crate::types::shared_store::shared_ref(base, i))
+            .collect();
+        let sink = SharedSink {
+            pool,
+            current: std::cell::Cell::new(base),
+        };
+        let nodes = graph
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                sink.current.set(base + i as u32);
+                let desc = internalize_desc(&entry.desc, &remap, &sink);
+                let level = match entry.desc {
+                    PortableTypeDesc::Tlink(_) => GENERIC_LEVEL,
+                    _ => entry.level,
+                };
+                (desc, level)
+            })
+            .collect();
+        (nodes, graph.variant_layouts.clone())
+    })?;
+    let layout_remap: Vec<_> = (0..graph.variant_layouts.len())
+        .map(|i| crate::types::VariantLayoutRef::from_shared_index(base + i as u32))
+        .collect();
+    let mut sig = portable_sig.clone();
+    remap_signature_refs(&mut sig, &remap, &layout_remap);
+    Some(sig)
 }
 
 pub(crate) fn internalize_raw_signature(

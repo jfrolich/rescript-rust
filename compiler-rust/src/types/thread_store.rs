@@ -169,10 +169,14 @@ pub(crate) struct ThreadTypeStore {
     longident_names: RefCell<HashMap<u32, String>>,
     next_longident_idx: Cell<u32>,
     generation: u64,
+    /// The build's process-wide pool of immutable dependency graphs; holding
+    /// it keeps every shared node this store's signatures refer to alive.
+    shared: Arc<super::shared_store::SharedTypePool>,
 }
 
 impl ThreadTypeStore {
     fn new() -> Self {
+        let generation = BUILD_GENERATION.load(Ordering::SeqCst);
         ThreadTypeStore {
             types: TypeArena::new(),
             abbrevs: RefCell::new(Vec::new()),
@@ -188,8 +192,15 @@ impl ThreadTypeStore {
             shared_components: RefCell::new(HashMap::new()),
             longident_names: RefCell::new(HashMap::new()),
             next_longident_idx: Cell::new(STORE_LONGIDENT_IDX_BASE),
-            generation: BUILD_GENERATION.load(Ordering::SeqCst),
+            generation,
+            shared: super::shared_store::pool_for(generation),
         }
+    }
+
+    /// The process-wide pool of this store's build.
+    #[inline]
+    pub(crate) fn shared_pool(&self) -> &super::shared_store::SharedTypePool {
+        &self.shared
     }
 
     /// The shared internalization of `pps`, if this thread already built one.

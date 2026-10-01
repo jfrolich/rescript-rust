@@ -44,6 +44,7 @@ pub mod includemod;
 pub mod path;
 pub mod predef;
 pub mod sexp_typedtree;
+pub mod shared_store;
 pub mod thread_store;
 pub mod type_expr;
 pub mod typecore;

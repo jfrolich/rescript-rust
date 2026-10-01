@@ -96,24 +96,9 @@ impl TypeArena {
     }
 }
 
-/// A descriptor borrowed from a mutable local node or an immutable dependency
-/// node. Immutable dependency descriptors can be read without a `RefCell`;
-/// writes to those nodes belong in the compilation's descriptor overlay.
-pub enum TypeDescRef<'a> {
-    Local(std::cell::Ref<'a, TypeDesc>),
-    Shared(&'a TypeDesc),
-}
-
-impl Deref for TypeDescRef<'_> {
-    type Target = TypeDesc;
-
-    fn deref(&self) -> &TypeDesc {
-        match self {
-            Self::Local(desc) => desc,
-            Self::Shared(desc) => desc,
-        }
-    }
-}
+/// Borrow of a type descriptor. Shared dependency nodes are borrowed through
+/// `TypeContext::shared_pages` (`Ref::map`), so every borrow is a `Ref`.
+pub type TypeDescRef<'a> = std::cell::Ref<'a, TypeDesc>;
 
 /// Cloned snapshot of a type descriptor, for cases where the caller
 /// needs to hold the desc while also mutating the same type node.
@@ -137,6 +122,9 @@ pub(crate) struct TypeMutationSnapshot {
     abbrev_states: Vec<AbbrevMemo>,
     store_abbrev_overlay: super::thread_store::PagedOverlay<AbbrevMemo>,
     store_row_field_overlay: super::thread_store::PagedOverlay<Option<RowField>>,
+    shared_desc_overlay: super::thread_store::PagedOverlay<usize>,
+    shared_level_overlay: super::thread_store::PagedOverlay<i32>,
+    shared_abbrev_overlay: super::thread_store::PagedOverlay<AbbrevMemo>,
     memoized_abbrev_refs: Vec<AbbrevMemoRef>,
     current_abbreviations: AbbrevMemoRef,
     current_level: i32,
@@ -327,6 +315,15 @@ pub struct TypeContext {
     store_abbrev_overlay: RefCell<super::thread_store::PagedOverlay<AbbrevMemo>>,
     /// This compilation's writes to row field cells of store rows.
     store_row_field_overlay: RefCell<super::thread_store::PagedOverlay<Option<RowField>>>,
+    /// The same overlays for nodes of the process-wide shared pool, keyed by
+    /// shared index (descriptor overlays point into `store_descs`).
+    shared_desc_overlay: RefCell<super::thread_store::PagedOverlay<usize>>,
+    shared_level_overlay: RefCell<super::thread_store::PagedOverlay<i32>>,
+    shared_abbrev_overlay: RefCell<super::thread_store::PagedOverlay<AbbrevMemo>>,
+    /// Direct handle to the shared pool's page table for node reads. Never
+    /// borrowed mutably: the `RefCell` only lets shared descriptor borrows be
+    /// `Ref`s like local ones (`Ref::map`), so callers see one borrow type.
+    shared_pages: RefCell<super::shared_store::SharedPages>,
 
     /// Nesting depth of `build_in_store`; allocations go to the worker store
     /// while it is non-zero.
@@ -758,6 +755,8 @@ pub(crate) struct DeferredRenamedSig {
 impl TypeContext {
     /// Create a new type context.
     pub fn new(id_gen: Arc<IdGenerator>) -> Self {
+        let store = super::thread_store::current();
+        let shared_pages = store.shared_pool().pages();
         TypeContext {
             id_gen,
             current_level: Cell::new(0),
@@ -770,12 +769,16 @@ impl TypeContext {
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: TypeArena::new(),
-            store: super::thread_store::current(),
+            store,
             store_descs: TypeArena::new(),
             store_desc_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             store_level_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             store_abbrev_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             store_row_field_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            shared_desc_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            shared_level_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            shared_abbrev_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            shared_pages: RefCell::new(shared_pages),
             store_build_depth: Cell::new(0),
             store_build_type_start: Cell::new(0),
             store_build_row_start: Cell::new(0),
@@ -902,6 +905,9 @@ impl TypeContext {
         layout_ref: super::variant_runtime::LayoutRef,
         read: impl FnOnce(&super::variant_runtime::Layout) -> R,
     ) -> R {
+        if layout_ref.is_shared() {
+            return read(self.store.shared_pool().layout(layout_ref));
+        }
         if layout_ref.is_store() {
             return self.store.with_variant_layout(layout_ref, read);
         }
@@ -968,6 +974,7 @@ impl TypeContext {
             .get(&idx.raw())
             .cloned()
             .or_else(|| self.store.longident_name(idx))
+            .or_else(|| self.store.shared_pool().longident_name(idx))
     }
 
     /// The worker's persistent store leased by this compilation.
@@ -978,7 +985,9 @@ impl TypeContext {
     /// Whether `r` names an allocated node of this compilation's arena or of
     /// the worker store.
     pub fn contains_type_ref(&self, r: TypeExprRef) -> bool {
-        if r.is_store() {
+        if r.is_shared() {
+            self.store.shared_pool().contains(r.shared_index())
+        } else if r.is_store() {
             r.store_index() < self.store.type_count()
         } else {
             r.index() < self.types.len()
@@ -1029,6 +1038,7 @@ impl TypeContext {
             .map(|(raw, name)| (*raw, name.clone()))
             .collect();
         names.extend(self.store.snapshot_longident_names());
+        names.extend(self.store.shared_pool().snapshot_longident_names());
         names
     }
 
@@ -2182,42 +2192,57 @@ impl TypeContext {
     // Type Access
     // ========================================================================
 
-    /// The node behind `r`, in this compilation's arena or the thread store.
-    #[inline]
-    /// The node behind `r`. Local nodes are by far the most common (hundreds
-    /// of millions of reads per build), so their path is inlined into callers;
-    /// store nodes take the out-of-line path.
-    #[inline]
-    fn node(&self, r: TypeExprRef) -> &TypeExpr {
-        if r.is_store() {
-            self.store_node(r)
-        } else {
-            self.poison_store_build();
-            self.types.get(r)
-        }
-    }
-
+    /// Borrow the descriptor of a stored (worker-store or shared) node:
+    /// this compilation's overlay copy if it wrote one, else the immutable
+    /// published descriptor.
     #[inline(never)]
-    fn store_node(&self, r: TypeExprRef) -> &TypeExpr {
-        if let Some(index) = self.store_desc_overlay.borrow().get(r.store_index()) {
-            return self.store_descs.get_at(*index);
+    fn store_desc_ref(&self, r: TypeExprRef) -> TypeDescRef<'_> {
+        if r.is_shared() {
+            let idx = r.shared_index();
+            if let Some(index) = self.shared_desc_overlay.borrow().get(idx as usize) {
+                return self.store_descs.get_at(*index).desc();
+            }
+            return std::cell::Ref::map(self.shared_pages.borrow(), |pages| {
+                &super::shared_store::page_node(pages, idx).desc
+            });
         }
-        self.store.node(r)
+        if let Some(index) = self.store_desc_overlay.borrow().get(r.store_index()) {
+            return self.store_descs.get_at(*index).desc();
+        }
+        self.store.node(r).desc()
     }
 
     /// Clone the descriptor so callers can hold it across node mutations.
     #[inline]
     pub fn get_desc(&self, r: TypeExprRef) -> TypeDescSnapshot {
-        TypeDescSnapshot(self.node(r).desc().clone())
+        TypeDescSnapshot(self.with_desc(r, TypeDesc::clone))
+    }
+
+    /// Apply `f` to the descriptor of `r`. The local path is a plain
+    /// `RefCell` borrow, so hot readers (`repr`, `get_desc`) inline exactly as
+    /// they did before stored nodes had two representations.
+    #[inline(always)]
+    pub(crate) fn with_desc<R>(&self, r: TypeExprRef, f: impl FnOnce(&TypeDesc) -> R) -> R {
+        if r.is_store() {
+            return f(&self.store_desc_ref(r));
+        }
+        self.poison_store_build();
+        f(&self.types.get(r).desc())
     }
 
     /// Borrow the descriptor of a type without cloning it.
     ///
     /// Prefer this in short read-only hot paths. Use `get_desc()` when the
     /// descriptor must be held across code that may mutate the same type node.
+    /// Local nodes are by far the most common (hundreds of millions of reads
+    /// per build), so their path is inlined into callers.
     #[inline]
     pub fn borrow_desc(&self, r: TypeExprRef) -> TypeDescRef<'_> {
-        TypeDescRef::Local(self.node(r).desc())
+        if r.is_store() {
+            return self.store_desc_ref(r);
+        }
+        self.poison_store_build();
+        self.types.get(r).desc()
     }
 
     /// Get the level of a type.
@@ -2232,6 +2257,15 @@ impl TypeContext {
 
     #[inline(never)]
     fn store_level(&self, r: TypeExprRef) -> i32 {
+        if r.is_shared() {
+            let idx = r.shared_index();
+            return self
+                .shared_level_overlay
+                .borrow()
+                .get(idx as usize)
+                .copied()
+                .unwrap_or_else(|| super::shared_store::page_node(&self.shared_pages.borrow(), idx).level);
+        }
         self.store_level_overlay
             .borrow()
             .get(r.store_index())
@@ -2244,10 +2278,18 @@ impl TypeContext {
         self.types.len()
     }
 
-    /// Set the level of a type.
+    /// Set the level of a type. Stored nodes are never written in place
+    /// unless the current store build is still creating them: the write goes
+    /// to this compilation's overlay.
     #[inline]
     pub fn set_level(&self, r: TypeExprRef, level: i32) {
         if r.is_store() {
+            if r.is_shared() {
+                self.shared_level_overlay
+                    .borrow_mut()
+                    .set(r.shared_index() as usize, level);
+                return;
+            }
             if self.store_build_owns(r) {
                 self.store.set_level_backing(r, level);
                 return;
@@ -2265,6 +2307,10 @@ impl TypeContext {
     #[inline]
     pub fn set_desc(&self, r: TypeExprRef, desc: TypeDesc) {
         if r.is_store() {
+            if r.is_shared() {
+                self.set_shared_desc(r, desc);
+                return;
+            }
             if self.store_build_owns(r) {
                 self.check_store_desc(&desc);
                 self.store.set_desc_backing(r, desc);
@@ -2289,6 +2335,27 @@ impl TypeContext {
         } else {
             self.poison_store_build();
             self.types.get(r).set_desc(desc);
+        }
+    }
+
+    /// Descriptor write to a shared dependency node: copy-on-write into this
+    /// compilation's overlay; the published node is never mutated.
+    #[inline(never)]
+    fn set_shared_desc(&self, r: TypeExprRef, desc: TypeDesc) {
+        let idx = r.shared_index();
+        let index = self.shared_desc_overlay.borrow().get(idx as usize).copied();
+        if let Some(index) = index {
+            self.store_descs.get_at(index).set_desc(desc);
+        } else {
+            let (level, id) = {
+                let pages = self.shared_pages.borrow();
+                let original = super::shared_store::page_node(&pages, idx);
+                (original.level, original.id)
+            };
+            let index = self.store_descs.push_raw(TypeExpr::new(desc, level, id));
+            self.shared_desc_overlay
+                .borrow_mut()
+                .set(idx as usize, index);
         }
     }
 
@@ -2332,6 +2399,9 @@ impl TypeContext {
             abbrev_states,
             store_abbrev_overlay: self.store_abbrev_overlay.borrow().clone(),
             store_row_field_overlay: self.store_row_field_overlay.borrow().clone(),
+            shared_desc_overlay: self.shared_desc_overlay.borrow().clone(),
+            shared_level_overlay: self.shared_level_overlay.borrow().clone(),
+            shared_abbrev_overlay: self.shared_abbrev_overlay.borrow().clone(),
             memoized_abbrev_refs: self.memoized_abbrev_refs.borrow().clone(),
             current_abbreviations: self.current_abbreviations.get(),
             current_level: self.current_level.get(),
@@ -2374,6 +2444,9 @@ impl TypeContext {
         *self.store_level_overlay.borrow_mut() = snapshot.store_level_overlay;
         *self.store_abbrev_overlay.borrow_mut() = snapshot.store_abbrev_overlay;
         *self.store_row_field_overlay.borrow_mut() = snapshot.store_row_field_overlay;
+        *self.shared_desc_overlay.borrow_mut() = snapshot.shared_desc_overlay;
+        *self.shared_level_overlay.borrow_mut() = snapshot.shared_level_overlay;
+        *self.shared_abbrev_overlay.borrow_mut() = snapshot.shared_abbrev_overlay;
         *self.memoized_abbrev_refs.borrow_mut() = snapshot.memoized_abbrev_refs;
         self.current_abbreviations
             .set(snapshot.current_abbreviations);
@@ -2590,6 +2663,14 @@ impl TypeContext {
     /// Current value of a memo cell: this compilation's overlay for store
     /// cells, the local table otherwise. Missing cells read as `Mnil`.
     fn read_abbrev(&self, memo: AbbrevMemoRef) -> AbbrevMemo {
+        if memo.is_shared() {
+            return self
+                .shared_abbrev_overlay
+                .borrow()
+                .get(memo.shared_index())
+                .cloned()
+                .unwrap_or(AbbrevMemo::Mnil);
+        }
         if memo.is_store() {
             if let Some(value) = self.store_abbrev_overlay.borrow().get(memo.store_index()) {
                 return value.clone();
@@ -2606,6 +2687,12 @@ impl TypeContext {
     /// Apply `f` to a memo cell without copying it (the chain scans below
     /// only compare paths and follow `next`).
     fn with_abbrev<R>(&self, memo: AbbrevMemoRef, f: impl FnOnce(&AbbrevMemo) -> R) -> R {
+        if memo.is_shared() {
+            return match self.shared_abbrev_overlay.borrow().get(memo.shared_index()) {
+                Some(value) => f(value),
+                None => f(&AbbrevMemo::Mnil),
+            };
+        }
         if memo.is_store() {
             if let Some(value) = self.store_abbrev_overlay.borrow().get(memo.store_index()) {
                 return f(value);
@@ -2622,6 +2709,12 @@ impl TypeContext {
     /// Write a memo cell; store cells are written to this compilation's
     /// overlay only. Missing local cells are ignored.
     fn write_abbrev(&self, memo: AbbrevMemoRef, value: AbbrevMemo) {
+        if memo.is_shared() {
+            self.shared_abbrev_overlay
+                .borrow_mut()
+                .set(memo.shared_index(), value);
+            return;
+        }
         if memo.is_store() {
             self.store_abbrev_overlay
                 .borrow_mut()
@@ -3359,7 +3452,9 @@ impl TypeContext {
     /// Whether `r` is a store node created by the current store build.
     #[inline]
     fn store_build_owns(&self, r: TypeExprRef) -> bool {
-        self.in_store_build() && r.store_index() >= self.store_build_type_start.get()
+        self.in_store_build()
+            && !r.is_shared()
+            && r.store_index() >= self.store_build_type_start.get()
     }
 
     #[inline]
@@ -3753,17 +3848,17 @@ impl TypeContext {
     #[inline]
     pub fn repr(&self, t: TypeExprRef) -> TypeExprRef {
         // Fast path, inlined into callers: `t` is already a representative.
-        let first_next = {
-            let desc = self.borrow_desc(t);
-            match &*desc {
-                TypeDesc::Tlink(next) => *next,
-                TypeDesc::Tfield {
-                    kind: FieldKind::Fabsent,
-                    rest,
-                    ..
-                } => *rest,
-                _ => return t,
-            }
+        let next = self.with_desc(t, |desc| match desc {
+            TypeDesc::Tlink(next) => Some(*next),
+            TypeDesc::Tfield {
+                kind: FieldKind::Fabsent,
+                rest,
+                ..
+            } => Some(*rest),
+            _ => None,
+        });
+        let Some(first_next) = next else {
+            return t;
         };
         self.repr_chain(t, first_next)
     }
@@ -3782,18 +3877,15 @@ impl TypeContext {
 
         let mut current = first_next;
         for _ in 0..10_000 {
-            let next = {
-                let desc = self.borrow_desc(current);
-                match &*desc {
-                    TypeDesc::Tlink(next) => Some(*next),
-                    TypeDesc::Tfield {
-                        kind: FieldKind::Fabsent,
-                        rest,
-                        ..
-                    } => Some(*rest),
-                    _ => None,
-                }
-            };
+            let next = self.with_desc(current, |desc| match desc {
+                TypeDesc::Tlink(next) => Some(*next),
+                TypeDesc::Tfield {
+                    kind: FieldKind::Fabsent,
+                    rest,
+                    ..
+                } => Some(*rest),
+                _ => None,
+            });
             match next {
                 Some(next_ref) => {
                     if chain_len < 32 {
@@ -3831,11 +3923,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn immutable_descriptor_borrow_does_not_mutate_source() {
-        let desc = TypeDesc::Tnil;
-        let borrow = TypeDescRef::Shared(&desc);
-        assert!(matches!(&*borrow, TypeDesc::Tnil));
-        assert!(matches!(desc, TypeDesc::Tnil));
+    fn shared_node_writes_stay_in_the_writing_compilation() {
+        let a = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
+        let pool = a.store.shared_pool();
+        let base = pool
+            .publish(2, 0, |_| {
+                (
+                    vec![(TypeDesc::Tvar(None), GENERIC_LEVEL), (TypeDesc::Tnil, GENERIC_LEVEL)],
+                    Vec::new(),
+                )
+            })
+            .expect("pool has room");
+        let var = super::super::shared_store::shared_ref(base, 0);
+        let nil = super::super::shared_store::shared_ref(base, 1);
+        assert!(var.is_shared() && a.contains_type_ref(var));
+
+        // OCaml `link_type`/level updates on a dependency node: visible in this
+        // compilation only.
+        a.set_desc(var, TypeDesc::Tlink(nil));
+        a.set_level(var, 3);
+        assert_eq!(a.repr(var), nil);
+        assert_eq!(a.get_level(var), 3);
+
+        let b = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
+        assert!(matches!(*b.borrow_desc(var), TypeDesc::Tvar(None)));
+        assert_eq!(b.get_level(var), GENERIC_LEVEL);
+        std::thread::spawn(move || {
+            let c = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
+            assert!(matches!(*c.borrow_desc(var), TypeDesc::Tvar(None)));
+            assert!(matches!(*c.borrow_desc(nil), TypeDesc::Tnil));
+        })
+        .join()
+        .unwrap();
+
+        // Backtracking restores the published view.
+        let snapshot = b.snapshot_type_state();
+        b.set_desc(var, TypeDesc::Tnil);
+        b.restore_type_state(snapshot);
+        assert!(matches!(*b.borrow_desc(var), TypeDesc::Tvar(None)));
     }
 
     #[test]
