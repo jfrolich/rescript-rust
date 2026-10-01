@@ -12960,6 +12960,17 @@ fn localize_scraped_signature(
         &modtypes,
         &mut visited,
     );
+    // The raw `ps_sig` (env.ml:719-721, 872-875) names members locally at
+    // every level: a nested module's items refer to each other by their own
+    // identifiers, not through the module (`chunk`, not `M.chunk`).
+    for item in sig.iter_mut() {
+        if let SigItem::SigModule(id, md, _) = item
+            && let crate::types::decl::ModuleType::MtySignature(nested) = &md.md_type
+        {
+            let localized = localize_scraped_signature(ctx, None, nested, &Path::pident(id.clone()));
+            md.md_type = crate::types::decl::ModuleType::MtySignature(localized);
+        }
+    }
     sig
 }
 
