@@ -669,6 +669,43 @@ impl QualifiedModuleComponents {
         child_component_scan_complete: bool,
         ctx: &super::context::TypeContext,
     ) -> Self {
+        // An in-process unit's signature names its own items through the unit
+        // (`Unit.t`); OCaml's `prefix_idents` puts them at the component path
+        // (env.ml:1454-1481, 1530-1538). Re-root a copy once, so values,
+        // types, labels, constructors and child modules all see it.
+        let signature = match &value_source_prefix {
+            Some(source) if !source.same(&access_path) => {
+                let mut rerooted =
+                    super::typecore::copy_lookup_signature_for_subst(signature.as_ref(), ctx);
+                // A child module of the scraped unit is strengthened into an
+                // alias of the unit's own child (mtype.ml:28-40 via
+                // env.ml:1435-1449), whose components name the parent unit's
+                // items through the unit; only the child's own items move to
+                // the access path (`Unit.Sub.u` -> `Cat.Sub.u`).
+                for item in &rerooted {
+                    let (old_prefix, new_prefix) = match item {
+                        SignatureItem::SigModule(id, _, _) => (
+                            Path::pdot(source.clone(), id.name()),
+                            Path::pdot(access_path.clone(), id.name()),
+                        ),
+                        _ => (source.clone(), access_path.clone()),
+                    };
+                    crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                        std::slice::from_ref(item),
+                        &old_prefix,
+                        &new_prefix,
+                        ctx,
+                    );
+                }
+                crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix_shallow(
+                    &mut rerooted,
+                    source,
+                    &access_path,
+                );
+                Arc::new(rerooted)
+            }
+            _ => signature,
+        };
         let mut values = HashMap::new();
         let mut types = HashMap::new();
         let mut modules = HashMap::new();
@@ -975,12 +1012,6 @@ impl QualifiedModuleComponents {
         }
     }
 
-    /// The unit-rooted path these components' signature names its own items
-    /// through, for an in-process unit reached through an alias.
-    pub(crate) fn value_source_prefix(&self) -> Option<&Path> {
-        self.value_source_prefix.as_deref()
-    }
-
     pub(crate) fn lookup_value_for_access(
         &self,
         name: &str,
@@ -1002,11 +1033,10 @@ impl QualifiedModuleComponents {
         // Keep the alias-strengthening boundary from compiler/ml/mtype.ml:41-49:
         // only the component substitution is applied here; alias target value
         // descriptions are not rewritten wholesale.
-        crate::cmi::persistent_env::substitute_type_paths_in_value_from_sig_with_source(
+        crate::cmi::persistent_env::substitute_type_paths_in_value_from_sig(
             &mut desc,
             self.signature.as_ref(),
             self.access_path(),
-            self.value_source_prefix.as_deref(),
             ctx,
         );
         // OCaml compiler/ml/env.ml:1513-1516 memoizes the whole
