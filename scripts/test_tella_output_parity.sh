@@ -295,6 +295,18 @@ run_build() {
     return 1
 }
 
+# TELLA_ARTIFACTS_DIR=<dir> keeps the typed artifacts (.cmi/.cmt/.cmti) of
+# both builds in <dir>/ocaml and <dir>/rust for comparing in-process typing.
+snapshot_artifacts() {
+    [[ -n "${TELLA_ARTIFACTS_DIR:-}" ]] || return 0
+    local dest="$TELLA_ARTIFACTS_DIR/$1"
+    mkdir -p "$dest"
+    find "$dest" -type f \( -name '*.cmi' -o -name '*.cmt' -o -name '*.cmti' \) -delete
+    (cd "$TELLA_BUILD_DIR" && find . -path '*/node_modules' -prune -o -path '*/lib/bs/*' \
+        \( -name '*.cmi' -o -name '*.cmt' -o -name '*.cmti' \) -print) \
+        | rsync -a --files-from=- "$TELLA_BUILD_DIR/" "$dest/"
+}
+
 touch "$TEMP_DIR/ocaml-build-start.marker"
 if ! run_build "Step 3: Building expected outputs with OCaml bsc..." "$TEMP_DIR/ocaml-build.log" bash -c '
     set -e
@@ -328,6 +340,8 @@ with open(candidates_path, encoding="utf-8") as candidates, open(manifest_path, 
         print(key, path, expected, sep="\t", file=manifest)
 PY
 
+snapshot_artifacts ocaml
+
 EXPECTED_COUNT=$(wc -l < "$TEMP_DIR/expected-manifest.tsv" | tr -d ' ')
 if [[ "$EXPECTED_COUNT" -eq 0 ]]; then
     echo -e "${RED}Error: OCaml build did not produce any JS outputs to compare${RESET}" >&2
@@ -346,6 +360,7 @@ if ! run_build "Step 4: Building actual outputs with rewatch --in-process..." "$
     echo -e "${RED}Rust in-process build failed; log saved to $CACHE_DIR/errors/rust-build.err${RESET}" >&2
     exit 1
 fi
+snapshot_artifacts rust
 # Keep both build logs so their diagnostics can be compared.
 mkdir -p "$CACHE_DIR/logs"
 cp "$TEMP_DIR/ocaml-build.log" "$CACHE_DIR/logs/ocaml-build.log" 2>/dev/null || true
