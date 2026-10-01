@@ -305,6 +305,17 @@ snapshot_artifacts() {
     (cd "$TELLA_BUILD_DIR" && find . -path '*/node_modules' -prune -o -path '*/lib/bs/*' \
         \( -name '*.cmi' -o -name '*.cmt' -o -name '*.cmti' \) -print) \
         | rsync -a --files-from=- "$TELLA_BUILD_DIR/" "$dest/"
+    # ReScript dependency packages are built too.
+    local pkg
+    while IFS= read -r pkg; do
+        pkg=$(dirname "$pkg")
+        [[ -d "$pkg/lib/bs" ]] || continue
+        local name=${pkg#"$TELLA_BUILD_DIR/"}
+        mkdir -p "$dest/$name"
+        (cd "$pkg" && find -L lib/bs \( -name '*.cmi' -o -name '*.cmt' -o -name '*.cmti' \) -print) \
+            | rsync -aL --files-from=- "$pkg/" "$dest/$name/"
+    done < <(find "$TELLA_BUILD_DIR" -maxdepth 6 -path '*/node_modules/*' \
+        \( -name rescript.json -o -name bsconfig.json \) -not -path '*/node_modules/*/node_modules/*' 2>/dev/null)
 }
 
 touch "$TEMP_DIR/ocaml-build-start.marker"
