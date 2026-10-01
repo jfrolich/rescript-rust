@@ -26473,19 +26473,13 @@ fn build_record_label_descriptions_info<'a>(
             lbl_attributes: ld.ld_attributes.clone(),
         })
         .collect::<Vec<_>>();
-    let can_delay_large_record_qualification = descriptions.len() >= 20
-        && matches!(repr, crate::types::RecordRepresentation::RecordRegular);
-    if !can_delay_large_record_qualification {
-        // OCaml compiler/ml/env.ml:1542-1549 installs labels from
-        // `Subst.type_declaration sub decl`; compiler/ml/subst.ml:173-177 rewrites
-        // field argument paths while building the selected `lbl_all` array.
-        for label in &mut descriptions {
-            qualify_label_description_paths(label, env, pers_env, ctx);
-        }
-    } else {
-        // Sparse record typing qualifies the selected labels before use. For
-        // huge regular records, leave omitted labels untouched here so JSX DOM
-        // prop records don't copy thousands of unused field argument paths.
+    // OCaml compiler/ml/env.ml:1542-1549 installs labels from
+    // `Subst.type_declaration sub decl`; compiler/ml/subst.ml:173-177 rewrites
+    // every field argument path while building the `lbl_all` array, which
+    // also types the omitted optional fields of a record literal
+    // (typecore.ml:2833-2842). The array is cached per record path.
+    for label in &mut descriptions {
+        qualify_label_description_paths(label, env, pers_env, ctx);
     }
     let descriptions = std::sync::Arc::new(descriptions);
     ctx.register_record_label_descriptions(&record_path, descriptions.clone());
