@@ -28641,53 +28641,6 @@ fn build_module_components_from_parent_path<'a>(
         return None;
     };
 
-    // OCaml compiler/ml/env.ml:1516-1518 always calls scrape_alias while
-    // building module components; env.ml:1440-1442 resolves Mty_alias through
-    // find_module, independent of typedtree output mode.
-    if ctx.persistent_env_is_in_process()
-        && let Some(Some((runtime_pos, alias_target, parent_access_path))) =
-            with_resolved_module_components_for_path_with_cache_mode(
-                parent,
-                env,
-                pers_env,
-                ctx,
-                cache_mode,
-                |components| {
-                    components.lookup_module(module_name.as_str()).and_then(
-                        |(runtime_pos, _, md)| match &md.md_type {
-                            crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
-                            | crate::types::decl::ModuleType::MtyIdent(Path::Pident(alias_id))
-                                if alias_id.is_persistent() =>
-                            {
-                                Some((
-                                    runtime_pos,
-                                    alias_id.name().to_string(),
-                                    components.access_path().clone(),
-                                ))
-                            }
-                            _ => None,
-                        },
-                    )
-                },
-            )
-    {
-        let pers = pers_env.as_mut()?;
-        if let Some(ps) = pers.find_pers_struct(&alias_target, ctx) {
-            let source_prefix = Path::pident(Ident::create_persistent(&alias_target));
-            let access_path =
-                Path::pdot_pos(parent_access_path, module_name.as_str(), runtime_pos as i32);
-            return Some(
-                crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
-                    access_path,
-                    ps.ps_sig.clone(),
-                    HashMap::new(),
-                    Some(source_prefix),
-                    ctx,
-                ),
-            );
-        }
-    }
-
     if let Some(Some((_, stored))) = with_resolved_module_components_for_path_with_cache_mode(
         parent,
         env,

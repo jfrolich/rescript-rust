@@ -1566,37 +1566,6 @@ fn build_local_module_components<'a>(
     ctx: &'a super::context::TypeContext,
     cache_mode: super::typecore::ComponentLookupApi,
 ) -> Option<QualifiedModuleComponents> {
-    if ctx.persistent_env_is_in_process()
-        && let super::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
-        | super::decl::ModuleType::MtyIdent(Path::Pident(alias_id)) = &md.md_type
-        && alias_id.is_persistent()
-        && cache_mode.forces_alias_sig()
-    {
-        let ps = {
-            let pers = pers_env.as_mut()?;
-            pers.find_pers_struct(alias_id.name(), ctx)
-        };
-        if let Some(ps) = ps {
-            let source_prefix = Path::pident(Ident::create_persistent(alias_id.name()));
-            // OCaml compiler/ml/env.ml:1516-1518 calls `scrape_alias` before
-            // component-table construction; scrape_alias at env.ml:1435-1446
-            // reaches `find_module`, whose persistent Pident branch at
-            // env.ml:872-875 reads the persistent structure. In in-process
-            // mode the portable signature has already been internalized into
-            // this TypeContext, so share that component signature and let the
-            // view apply the selected access path lazily to forced items.
-            return Some(
-                QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
-                    access_path.clone(),
-                    ps.ps_sig.clone(),
-                    HashMap::new(),
-                    Some(source_prefix),
-                    ctx,
-                ),
-            );
-        }
-    }
-
     if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
         // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` before building
         // component tables. `scrape_alias` at env.ml:1440-1446 resolves an
