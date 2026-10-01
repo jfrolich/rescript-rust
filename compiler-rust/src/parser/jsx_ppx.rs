@@ -978,7 +978,9 @@ fn transform_react_component_binding(
             }),
             pvb_expr: arena.push_expr(final_full_expression),
             pvb_attributes: filtered_attrs,
-            pvb_loc: *pstr_loc,
+            // jsx_v4.ml:419-424 `Vb.mk ~loc:binding_loc`: the component
+            // binding's own location, not its `let rec ... and` group's.
+            pvb_loc: original_binding_loc,
         })
     } else {
         None
