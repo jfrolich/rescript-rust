@@ -16011,7 +16011,10 @@ fn type_record(
         let final_expr = if label_desc.lbl_optional && !field.opt {
             let some_cstr = make_some_constructor(ctx);
             let some_lid = Located::mknoloc(tctx.arena.some_lid());
-            let wrapped_loc = typed_expr.exp_loc;
+            // typecore.ml:2373-2379 builds `Some e` with `~loc:e.pexp_loc`
+            // before typing, so it keeps the field expression's own location
+            // (for `{ open M; body }` the block's, not the body's).
+            let wrapped_loc = tctx.arena.get_expr(field.expr).pexp_loc;
             let wrapped_env = typed_expr.exp_env;
             Expression::new(
                 ExpressionDesc::Texp_construct(some_lid.clone(), some_cstr, vec![typed_expr]),
