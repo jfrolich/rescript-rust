@@ -1593,6 +1593,34 @@ fn rewrite_included_type_paths_to_local(
             );
         }
         TypeDesc::Tvariant(row) => {
+            // `Subst.typexp` (compiler/ml/subst.ml:226-231) also rewrites the
+            // row's `row_name` path and arguments.
+            if let Some((name_path, name_args)) = &row.row_name {
+                if let Some(rewritten_path) = rewrite_included_path_to_local(
+                    name_path,
+                    include_root_path,
+                    include_alias_heads,
+                    local_type_ids,
+                    local_module_ids,
+                    local_modtype_ids,
+                ) {
+                    let mut new_row = row.clone();
+                    new_row.row_name = Some((rewritten_path, name_args.clone()));
+                    ctx.set_desc(ty_ref, TypeDesc::Tvariant(new_row));
+                }
+                for arg in name_args {
+                    rewrite_included_type_paths_to_local(
+                        ctx,
+                        *arg,
+                        include_root_path,
+                        include_alias_heads,
+                        local_type_ids,
+                        local_module_ids,
+                        local_modtype_ids,
+                        visited,
+                    );
+                }
+            }
             rewrite_included_type_paths_to_local(
                 ctx,
                 row.row_more,
