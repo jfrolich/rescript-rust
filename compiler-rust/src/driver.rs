@@ -310,6 +310,7 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
             ExpressionDesc::Texp_record {
                 fields,
                 extended_expression,
+                ..
             } => {
                 for (_, _, field, _) in fields {
                     match field {

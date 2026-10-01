@@ -1241,6 +1241,7 @@ fn sexp_expression_desc(
         ExpressionDesc::Texp_record {
             fields,
             extended_expression,
+            ..
         } => {
             let mut field_items = Vec::new();
             for (_li, ld, def, opt_flag) in fields.iter() {

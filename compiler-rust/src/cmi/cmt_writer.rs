@@ -1570,11 +1570,15 @@ impl<'a> CmtWriter<'a> {
             }
             E::Texp_record {
                 fields,
+                empty_representation,
                 extended_expression,
             } => {
                 self.w.write_block_header(10, 3);
                 self.array(fields, |w, (_, lbl, def, opt)| w.record_field(lbl, def, *opt));
-                self.record_representation_of(fields.first().map(|f| &f.1));
+                match empty_representation.as_deref() {
+                    Some(repr) if fields.is_empty() => self.record_representation(repr),
+                    _ => self.record_representation_of(fields.first().map(|f| &f.1)),
+                }
                 self.option(extended_expression.as_deref(), |w, e| w.expression(e));
             }
             E::Texp_record_sparse {

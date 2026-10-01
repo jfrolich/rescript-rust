@@ -7978,6 +7978,7 @@ fn expression_uses_unqualified_value_path(
         crate::types::typedtree::ExpressionDesc::Texp_record {
             fields,
             extended_expression,
+            ..
         }
         | crate::types::typedtree::ExpressionDesc::Texp_record_sparse {
             fields,
@@ -8167,6 +8168,7 @@ fn expression_uses_unqualified_module_path(
         crate::types::typedtree::ExpressionDesc::Texp_record {
             fields,
             extended_expression,
+            ..
         }
         | crate::types::typedtree::ExpressionDesc::Texp_record_sparse {
             fields,

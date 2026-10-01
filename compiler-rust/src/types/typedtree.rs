@@ -342,6 +342,12 @@ pub enum ExpressionDesc {
     /// Fields are (lid, label_desc, definition, optional).
     Texp_record {
         fields: Vec<RecordField>,
+        /// OCaml `representation` (compiler/ml/typedtree.ml `Texp_record`).
+        /// When `fields` is non-empty OCaml takes it from the first label's
+        /// `lbl_repres` (compiler/ml/typecore.ml:2767-2771), so Rust derives it
+        /// from `fields[0]`. Only the empty-field case (typecore.ml:2772-2788)
+        /// carries it separately; sparse storage keeps the common node small.
+        empty_representation: Option<Box<crate::types::RecordRepresentation>>,
         extended_expression: Option<Box<Expression>>,
     },
 

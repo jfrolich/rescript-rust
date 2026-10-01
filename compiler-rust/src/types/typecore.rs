@@ -9587,6 +9587,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             Ok(Expression::new(
                 ExpressionDesc::Texp_record {
                     fields: typed_fields,
+                    empty_representation: None,
                     extended_expression: None,
                 },
                 loc,
@@ -11590,6 +11591,7 @@ fn collect_expression_ident_heads(exp: &Expression, ids: &mut Vec<Ident>) {
         ExpressionDesc::Texp_record {
             fields,
             extended_expression,
+            ..
         }
         | ExpressionDesc::Texp_record_sparse {
             fields,
@@ -16706,8 +16708,25 @@ fn type_record(
             extended_expression: typed_base.map(Box::new),
         }
     } else {
+        // OCaml compiler/ml/typecore.ml:2767-2788: a non-empty field array
+        // takes `representation` from its first label (kept implicit in
+        // `fields[0]`); an empty one uses the expected concrete record's
+        // representation (`repr_opt` from `extract_concrete_record`), else
+        // `Record_regular`.
+        let empty_representation = typed_fields.is_empty().then(|| {
+            Box::new(
+                expected_record_info
+                    .as_ref()
+                    .and_then(|(_, _, decl)| match &decl.type_kind {
+                        crate::types::TypeKind::TypeRecord(_, repr) => Some(repr.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or(crate::types::RecordRepresentation::RecordRegular),
+            )
+        });
         ExpressionDesc::Texp_record {
             fields: typed_fields,
+            empty_representation,
             extended_expression: typed_base.map(Box::new),
         }
     };
@@ -20145,6 +20164,7 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
         ExpressionDesc::Texp_record {
             fields,
             extended_expression,
+            ..
         } => {
             fields
                 .iter()
@@ -20641,6 +20661,7 @@ pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> 
         ExpressionDesc::Texp_record {
             fields,
             extended_expression,
+            ..
         }
         | ExpressionDesc::Texp_record_sparse {
             fields,
@@ -21269,6 +21290,7 @@ fn rec_expression(ctx: &TypeContext, env: &RecEnv, expr: &Expression) -> RecUse 
         ExpressionDesc::Texp_record {
             fields,
             extended_expression,
+            ..
         }
         | ExpressionDesc::Texp_record_sparse {
             fields,
@@ -32302,6 +32324,7 @@ fn contains_ident_reference(expr: &Expression, name: &str) -> bool {
         ExpressionDesc::Texp_record {
             fields,
             extended_expression,
+            ..
         }
         | ExpressionDesc::Texp_record_sparse {
             fields,
@@ -32378,6 +32401,7 @@ fn substitute_ident(expr: &mut Expression, name: &str, replacement: &Expression)
         ExpressionDesc::Texp_record {
             fields,
             extended_expression,
+            ..
         } => {
             for (_, _, def, _) in fields {
                 if let super::typedtree::RecordLabelDefinition::Overridden(_, e) = def {

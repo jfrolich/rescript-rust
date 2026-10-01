@@ -3668,6 +3668,7 @@ impl<'a> RawLambdaConverter<'a> {
                     ExpressionDesc::Texp_record {
                         fields,
                         extended_expression,
+                        ..
                     } => self.convert_record_raw(
                         self.loc(arg.exp_loc),
                         fields,
@@ -6678,6 +6679,7 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_record {
                 fields,
                 extended_expression,
+                ..
             } => self.convert_record_raw(
                 self.loc(expr.exp_loc),
                 fields,
@@ -6912,6 +6914,7 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_record {
                 fields,
                 extended_expression,
+                ..
             } => self.convert_record(
                 self.loc(expr.exp_loc),
                 fields,

@@ -1120,6 +1120,7 @@ pub fn specialize_expression(
         // Record — specialize field values
         typedtree::ExpressionDesc::Texp_record {
             fields,
+            empty_representation,
             extended_expression,
         } => {
             // Clone and specialize each field expression
@@ -1147,6 +1148,7 @@ pub fn specialize_expression(
                 .transpose()?;
             typedtree::ExpressionDesc::Texp_record {
                 fields: spec_fields,
+                empty_representation: empty_representation.clone(),
                 extended_expression: spec_ext.map(Box::new),
             }
         }
