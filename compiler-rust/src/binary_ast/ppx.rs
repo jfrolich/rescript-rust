@@ -5322,13 +5322,14 @@ fn handle_debugger(
     let j_lident = arena.push_lident_static("J");
     let j_unsafe_expr = arena.push_ldot_static(j_lident, "unsafe_expr");
 
-    // Create the unit literal: ()
+    // `Ast_literal.val_unit ~loc ()` (ast_literal.ml:100-103): the
+    // constructor has the default (none) location, its name the extension's.
     let unit_construct = arena.push_lident_static("()");
     let unit_expr = Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
             Located {
                 txt: unit_construct,
-                loc: none_loc,
+                loc,
             },
             None,
         )),
