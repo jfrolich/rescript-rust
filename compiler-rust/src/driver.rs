@@ -12124,7 +12124,7 @@ fn compile_source_to_js_with_options_inner(
     }
 
     if let Some(simple_signature) = inferred_simple_signature.as_deref() {
-        prepare_inferred_signature_for_saving(&type_ctx, simple_signature, has_resi);
+        drop(prepare_inferred_signature_for_saving(&type_ctx, simple_signature, has_resi));
     }
 
     // `process_with_gentype` runs after the JS is emitted
@@ -15118,16 +15118,31 @@ fn rename_saved_signature_idents(
     }
 }
 
+/// `Env.save_signature` (env.ml:1886-1892) writes `Subst.signature
+/// (Subst.for_saving Subst.identity) sg`: a copy whose bound identifiers are
+/// renamed (subst.ml:322-364). Returns that copy for the `.cmi`, made at the
+/// point where OCaml saves it so the renaming takes the same stamps.
 fn prepare_inferred_signature_for_saving(
     type_ctx: &TypeContext,
     simple_sig: &[crate::types::decl::SignatureItem],
     has_resi: bool,
-) {
+) -> Option<crate::types::decl::Signature> {
     if has_resi {
-        return;
+        return None;
     }
 
-    rename_saved_signature_idents(type_ctx, simple_sig);
+    Some(saved_signature_copy(type_ctx, simple_sig))
+}
+
+fn saved_signature_copy(
+    type_ctx: &TypeContext,
+    sig: &[crate::types::decl::SignatureItem],
+) -> crate::types::decl::Signature {
+    crate::cmi::persistent_env::freshened_signature_bound_idents_from_kind(
+        "save_signature",
+        sig,
+        type_ctx,
+    )
 }
 
 fn synchronize_lambda_start_stamp(type_ctx: &TypeContext) -> i32 {
@@ -15726,6 +15741,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     }
 
     let mut inferred_implementation_coercion = None;
+    let mut saved_cmi_signature = None;
     let mut published_signature = {
         let _phase = info_span!("compiler.signature_prepare").entered();
         if has_interface {
@@ -15775,7 +15791,8 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             normalize_signature_types(&type_ctx, &typed_structure, &final_env);
         }
 
-        prepare_inferred_signature_for_saving(&type_ctx, &simple_signature, has_interface);
+        saved_cmi_signature =
+            prepare_inferred_signature_for_saving(&type_ctx, &simple_signature, has_interface);
 
         simple_signature
     };
@@ -15821,7 +15838,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             structure: &typed_structure,
             cmi: (!has_interface).then(|| {
                 (
-                    published_signature.as_slice(),
+                    saved_cmi_signature.as_deref().unwrap_or(published_signature.as_slice()),
                     crate::types::typemod::deprecated_of_str(arena, structure),
                 )
             }),
@@ -16530,6 +16547,9 @@ pub fn typecheck_preprocessed_signature_in_process(
     if let crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature) =
         &typed_module_type.mty_desc
     {
+        // `Env.save_signature` writes the `Subst.for_saving` copy
+        // (env.ml:1886-1892).
+        let saved_signature = saved_signature_copy(&type_ctx, &published_signature);
         saved_cmi_crc = save_typed_artifacts(
             options,
             arena,
@@ -16538,7 +16558,7 @@ pub fn typecheck_preprocessed_signature_in_process(
             module_name,
             TypedArtifactKind::Interface {
                 signature: typed_signature,
-                sig_type: &published_signature,
+                sig_type: &saved_signature,
                 deprecated: crate::types::typemod::deprecated_of_sig(arena, signature),
             },
             !file_config.no_bin_annot,
