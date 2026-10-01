@@ -101,6 +101,9 @@ impl ArenaIdx for LocIdx {
     }
 }
 
+/// First index of typechecker-generated synthetic locations.
+const SYNTHETIC_LOCATION_BASE: u32 = 0x8000_0000;
+
 impl LocIdx {
     /// Check if this is the "none" location (index 0).
     /// The "none" location is pre-allocated at index 0 in every ParseArena.
@@ -541,6 +544,10 @@ pub struct ParseArena {
     /// Append-only stable storage for OCaml-shaped synthetic pattern rewrites.
     synthetic_patterns: elsa::sync::FrozenVec<Box<Pattern>>,
     synthetic_pattern_base: u32,
+    /// Typechecker-generated locations (e.g. OCaml's `{loc with loc_ghost =
+    /// true}` copies), appended while the arena is shared. Addressed from
+    /// `SYNTHETIC_LOCATION_BASE` so they never collide with primary indices.
+    synthetic_locations: elsa::sync::FrozenVec<Box<InternedLocation>>,
     /// Slots reserved before type checking for strings discovered only after
     /// environment lookup (notably omitted record labels).
     synthetic_strings: elsa::sync::FrozenVec<Box<String>>,
@@ -955,6 +962,7 @@ impl Default for ParseArena {
             patterns: Arena::default(),
             synthetic_patterns: elsa::sync::FrozenVec::new(),
             synthetic_pattern_base: u32::MAX,
+            synthetic_locations: elsa::sync::FrozenVec::new(),
             synthetic_strings: elsa::sync::FrozenVec::new(),
             synthetic_string_base: u32::MAX,
             core_types,
@@ -1452,7 +1460,26 @@ impl ParseArena {
 
     /// Look up a location by index.
     pub fn get_location(&self, idx: LocIdx) -> &InternedLocation {
-        self.locations.get(idx)
+        let raw = idx.to_u32();
+        if raw < SYNTHETIC_LOCATION_BASE {
+            self.locations.get(idx)
+        } else {
+            self.synthetic_locations
+                .get((raw - SYNTHETIC_LOCATION_BASE) as usize)
+                .expect("typechecker synthetic location read before initialization")
+        }
+    }
+
+    /// Append a typechecker-generated ghost copy of `idx` (OCaml
+    /// `{loc with Location.loc_ghost = true}`) to storage reserved before the
+    /// arena became shared. These indices live in a separate range, so scans
+    /// over `locations()` do not see them.
+    pub fn push_typecheck_ghost_loc(&self, idx: LocIdx) -> LocIdx {
+        let loc = self.get_location(idx);
+        let ghost = InternedLocation::new(loc.loc_start, loc.loc_end, true);
+        let slot = self.synthetic_locations.len();
+        self.synthetic_locations.push(Box::new(ghost));
+        LocIdx::from_u32(SYNTHETIC_LOCATION_BASE + slot as u32)
     }
 
     /// Get all locations (for marshalling).

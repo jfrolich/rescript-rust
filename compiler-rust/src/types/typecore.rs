@@ -4115,7 +4115,8 @@ fn build_or_pat(
     // OCaml's fold_left builds pats with :: prepend, implicitly reversing them.
     // We must reverse to match OCaml's order in the or-pattern chain.
     pats.reverse();
-    let ghost_loc = loc.clone(); // OCaml uses ghost location
+    // typecore.ml:594: `let gloc = {loc with Location.loc_ghost = true}`.
+    let ghost_loc = tctx.arena.push_typecheck_ghost_loc(loc);
     let typed_pats: Vec<Pattern> = pats
         .into_iter()
         .map(|(label, arg)| {
