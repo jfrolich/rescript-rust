@@ -870,6 +870,11 @@ impl TypeContext {
         &self,
         layout: super::variant_runtime::Layout,
     ) -> super::variant_runtime::LayoutRef {
+        // Like `alloc_type`: a store build allocates in the worker store, where
+        // layouts are complete on allocation.
+        if self.in_store_build() {
+            return self.store.alloc_complete_variant_layout(layout);
+        }
         let layout_ref = self.pending_variant_layout();
         self.complete_variant_layout(layout_ref, layout);
         layout_ref

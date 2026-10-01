@@ -1955,7 +1955,26 @@ impl Default for Env {
 /// - Defines abstract types (int, float, string, char, bigint, etc.)
 /// - Defines variant types with constructors (bool, unit, option, list, result)
 /// - Registers constructors in the environment so they can be looked up
+/// The initial environment (OCaml `Predef.build_initial_env`,
+/// compiler/ml/predef.ml:239-424, as installed by `Env.initial_safe_string`).
+///
+/// OCaml builds the predefined declarations once per process. The worker
+/// store keeps one copy per worker: the first compilation builds it as a
+/// store build, and later compilations clone the environment and replay
+/// the build's effects instead of rebuilding every predefined type.
 pub fn initial_env(ctx: &TypeContext) -> Env {
+    if let Some((env, piece)) = ctx.thread_store().cached_initial_env() {
+        ctx.touch_store_piece(&piece);
+        return env;
+    }
+    let (env, piece) = ctx.build_in_store(|| build_initial_env(ctx));
+    if let Some(piece) = piece {
+        ctx.thread_store().publish_initial_env(env.clone(), piece);
+    }
+    env
+}
+
+fn build_initial_env(ctx: &TypeContext) -> Env {
     let mut env = Env::empty();
 
     // Helper: create an abstract type declaration
@@ -2739,6 +2758,28 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initial_env_is_built_once_per_worker_store() {
+        use crate::context::IdGenerator;
+        use crate::types::predef;
+        let first_ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let first = initial_env(&first_ctx);
+        assert!(
+            first_ctx.thread_store().cached_initial_env().is_some(),
+            "building the predefined environment must not touch compilation-local state"
+        );
+        let second_ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let second = initial_env(&second_ctx);
+        assert_ne!(first.id(), second.id());
+        let int_path = Path::Pident(predef::ident_int());
+        assert!(first.lookup_type(&int_path).is_ok());
+        assert!(second.lookup_type(&int_path).is_ok());
+        let option = second.lookup_type(&Path::Pident(predef::ident_option())).expect("option");
+        for param in &option.type_params {
+            assert!(param.is_store(), "predef declarations live in the worker store");
+        }
+    }
 
     #[test]
     fn test_empty_env() {

@@ -12640,6 +12640,7 @@ mod tests {
         let id_gen = IdGenerator::new();
         let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
+        let any_ty = ctx.new_var(None);
 
         let directive_expr = crate::parser::ast::Expression {
             pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_constant(Box::new(
@@ -12663,7 +12664,7 @@ mod tests {
         let param_pat = Pattern::new(
             PatternDesc::Tpat_var(param_id.clone(), Located::mknoloc("name".to_string())),
             LocIdx::none(),
-            crate::types::TypeExprRef(0),
+            any_ty,
             EnvRef(0),
             Attributes::new(),
         );
@@ -12678,14 +12679,14 @@ mod tests {
                 body: Box::new(Expression::new(
                     ExpressionDesc::Texp_constant(TConstant::Int(1)),
                     LocIdx::none(),
-                    crate::types::TypeExprRef(0),
+                    any_ty,
                     EnvRef(0),
                     Attributes::new(),
                 )),
                 async_: false,
             },
             LocIdx::none(),
-            crate::types::TypeExprRef(0),
+            any_ty,
             EnvRef(0),
             directive_attrs,
         );

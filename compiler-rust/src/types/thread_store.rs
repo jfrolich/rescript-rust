@@ -168,6 +168,14 @@ pub(crate) struct ThreadTypeStore {
     /// Synthetic longident component names used by store `Tpackage` nodes.
     longident_names: RefCell<HashMap<u32, String>>,
     next_longident_idx: Cell<u32>,
+    /// The predefined environment built as a store build, with its replay
+    /// record (see `env::initial_env`).
+    initial_env: RefCell<
+        Option<(
+            crate::types::env::Env,
+            Arc<crate::types::context::StorePiece>,
+        )>,
+    >,
     generation: u64,
     /// The build's process-wide pool of immutable dependency graphs; holding
     /// it keeps every shared node this store's signatures refer to alive.
@@ -192,6 +200,7 @@ impl ThreadTypeStore {
             shared_components: RefCell::new(HashMap::new()),
             longident_names: RefCell::new(HashMap::new()),
             next_longident_idx: Cell::new(STORE_LONGIDENT_IDX_BASE),
+            initial_env: RefCell::new(None),
             generation,
             shared: super::shared_store::pool_for(generation),
         }
@@ -298,6 +307,23 @@ impl ThreadTypeStore {
             .borrow_mut()
             .entry(key)
             .or_insert((components, piece));
+    }
+
+    pub(crate) fn cached_initial_env(
+        &self,
+    ) -> Option<(
+        crate::types::env::Env,
+        Arc<crate::types::context::StorePiece>,
+    )> {
+        self.initial_env.borrow().clone()
+    }
+
+    pub(crate) fn publish_initial_env(
+        &self,
+        env: crate::types::env::Env,
+        piece: Arc<crate::types::context::StorePiece>,
+    ) {
+        self.initial_env.borrow_mut().get_or_insert((env, piece));
     }
 
     pub(crate) fn pers_struct_count(&self) -> usize {
