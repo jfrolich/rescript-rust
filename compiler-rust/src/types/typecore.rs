@@ -329,22 +329,6 @@ fn convert_loc(loc: LocIdx, arena: &ParseArena) -> Location {
     arena.to_location(loc)
 }
 
-fn find_loc_idx_by_bounds(arena: &ParseArena, start: PosIdx, end: PosIdx) -> Option<LocIdx> {
-    let mut fallback = None;
-    for (idx, loc) in arena.locations().iter().enumerate() {
-        if loc.loc_start == start && loc.loc_end == end {
-            let found = LocIdx(idx as u32);
-            if loc.loc_ghost {
-                return Some(found);
-            }
-            if fallback.is_none() {
-                fallback = Some(found);
-            }
-        }
-    }
-    fallback
-}
-
 /// Convert a Located<StrIdx> to a Located<String> (for typedtree which uses String).
 fn convert_located_stridx(loc: &Located<StrIdx>, arena: &ParseArena) -> Located<String> {
     Located {
@@ -13463,8 +13447,9 @@ fn desugar_nary_function_defaults(
             let source_pat_loc = arena.get_pat(param.p_pat).ppat_loc;
             let sloc_start = arena.loc_start_idx(source_pat_loc);
             let sloc_end = arena.loc_end_idx(default_loc);
-            let sloc =
-                find_loc_idx_by_bounds(arena, sloc_start, sloc_end).unwrap_or(source_pat_loc);
+            // typecore.ml:3567-3573: from the pattern's start to the
+            // default's end, ghost.
+            let sloc = arena.push_loc(sloc_start, sloc_end, true);
 
             let label_name = arena.get_string(label.txt).to_owned();
             // typecore.ml:3550-3582 names the synthesized binders with `mknoloc`.
