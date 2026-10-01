@@ -29834,7 +29834,13 @@ fn build_module_signature_for_path<'a>(
                     cache_mode,
                 )?;
                 Some((access_path, sig))
-            } else if let Some(pers) = pers_env.as_mut() {
+            } else if let Some(pers) = pers_env
+                .as_mut()
+                // env.ml:865-882: only a persistent ident names a unit; a
+                // local ident (e.g. the type of an inline record path
+                // `variant.Two`) is just not a module.
+                .filter(|_| id.is_persistent() || id.stamp() == 0)
+            {
                 if let Some(ps) = pers.find_pers_struct(id.name(), ctx) {
                     let access_path = Path::pident(Ident::create_persistent(id.name()));
                     let mut sig = copy_lookup_signature_for_subst(&ps.ps_sig, ctx);

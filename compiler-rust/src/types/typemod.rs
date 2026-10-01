@@ -8630,16 +8630,28 @@ fn lookup_module_path_for_module_expr<'a>(
         return Ok(Path::pident(Ident::create_persistent(mod_name)));
     }
 
-    lookup_module_path_by_lid(lid, arena, env, &mut tctx.persistent_env, tctx.type_ctx).ok_or_else(
-        || {
+    let path = lookup_module_path_by_lid(lid, arena, env, &mut tctx.persistent_env, tctx.type_ctx)
+        .ok_or_else(|| {
             if module_lid_references_recursive_placeholder(lid, arena, env) {
                 return illegal_recursive_reference();
             }
             TypeModError::CoreError(crate::types::typecore::unbound_module_lookup_error(
                 tctx, env, loc, lid,
             ))
-        },
-    )
+        })?;
+    // env.ml:1035-1037: looking up a module bound to an alias of a
+    // persistent unit loads that unit (and records it as an import), unless
+    // `-no-alias-deps`.
+    if !tctx.transparent_modules
+        && let Longident::Lident(mod_idx) = lid
+        && let Ok((_, md)) = env.find_module_with_id(arena.get_string(*mod_idx))
+        && let crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(target)) = &md.md_type
+        && target.is_persistent()
+        && let Some(pers) = tctx.persistent_env.as_mut()
+    {
+        let _ = pers.find_pers_struct(target.name(), tctx.type_ctx);
+    }
+    Ok(path)
 }
 
 /// Look up a module-type path by longident in the module-type namespace.
