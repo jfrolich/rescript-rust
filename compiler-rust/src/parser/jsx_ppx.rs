@@ -682,38 +682,10 @@ fn transform_react_component_binding(
             }]
         }
     } else {
+        // jsx_v4.ml:788-792.
         named_type_list
             .iter()
-            .filter(|nt| nt.label != "key")
-            .filter_map(|nt| {
-                // For forwardRef, 'ref' param should be Ptyp_var "ref" when interior_type is Ptyp_any
-                // OCaml: if interior_type is Ptyp_any, use ref_type_var loc (actual location)
-                // Otherwise, strip Js.Nullable wrapper when has_forward_ref
-                if nt.label == "ref" && has_forward_ref {
-                    match &*nt.interior_type.ptyp_desc {
-                        CoreTypeDesc::Ptyp_any => {
-                            // OCaml uses actual param location for Ptyp_var when interior is Ptyp_any
-                            return Some(CoreType {
-                                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(
-                                    Cow::Borrowed("ref"),
-                                ))),
-                                ptyp_loc: nt.loc.clone(),
-                                ptyp_attributes: Attributes::new(),
-                            });
-                        }
-                        _ => {
-                            // Strip explicit Stdlib.Nullable.t in case of forwardRef
-                            return strip_js_nullable(arena, &nt.interior_type);
-                        }
-                    }
-                }
-                // For optional args, OCaml strips the option wrapper
-                if nt.is_optional && nt.has_explicit_type {
-                    strip_option(arena, &nt.interior_type)
-                } else {
-                    Some(nt.interior_type.clone())
-                }
-            })
+            .filter_map(|nt| make_props_type_param(arena, nt, true, has_forward_ref))
             .collect()
     };
 
@@ -2013,10 +1985,13 @@ fn transform_react_component_sig(
                 .collect()
         }
     } else {
+        // jsx_v4.ml:986 / 1080: `make_props_type_params named_type_list`.
         named_type_list
             .iter()
-            .filter(|nt| nt.label != "key")
-            .map(|nt| arena.push_core_type(nt.interior_type.clone()))
+            .filter_map(|nt| make_props_type_param(arena, nt, false, false))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|ct| arena.push_core_type(ct))
             .collect()
     };
 
@@ -2153,10 +2128,13 @@ fn transform_react_component_external(
                 .collect()
         }
     } else {
+        // jsx_v4.ml:986 / 1080: `make_props_type_params named_type_list`.
         named_type_list
             .iter()
-            .filter(|nt| nt.label != "key")
-            .map(|nt| arena.push_core_type(nt.interior_type.clone()))
+            .filter_map(|nt| make_props_type_param(arena, nt, false, false))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|ct| arena.push_core_type(ct))
             .collect()
     };
 
@@ -2817,19 +2795,48 @@ fn make_module_name(config: &JsxConfig, fn_name: &str) -> String {
 }
 
 /// Strip `option<T>` wrapper from a type, returning just `T`
+/// jsx_v4.ml:114-118 `strip_option`: the first argument of an
+/// `option<...>` (unqualified `Lident "option"`); any other type is kept.
 fn strip_option(arena: &ParseArena, core_type: &CoreType) -> Option<CoreType> {
     match &*core_type.ptyp_desc {
-        CoreTypeDesc::Ptyp_constr(inner) if inner.1.len() == 1 => {
+        CoreTypeDesc::Ptyp_constr(inner) => {
             let (ref lid, ref args) = **inner;
-            let last_idx = arena.get_longident(lid.txt).last_idx();
-            let last_str = arena.get_string(last_idx);
-            if last_str == "option" {
-                args.first().map(|t| arena.get_core_type(*t).clone())
-            } else {
-                Some(core_type.clone())
+            match arena.get_longident(lid.txt) {
+                Longident::Lident(name) if arena.get_string(*name) == "option" => {
+                    args.first().map(|t| arena.get_core_type(*t).clone())
+                }
+                _ => Some(core_type.clone()),
             }
         }
         _ => Some(core_type.clone()),
+    }
+}
+
+/// jsx_v4.ml:138-158 `make_props_type_params`, for one prop.
+fn make_props_type_param(
+    arena: &ParseArena,
+    nt: &NamedType,
+    strip_explicit_option: bool,
+    strip_explicit_nullable_of_ref: bool,
+) -> Option<CoreType> {
+    if nt.label == "key" {
+        None
+    } else if nt.label == "ref" {
+        // If ref has a type annotation then use it, else 'ref (at the
+        // prop's location).
+        match &*nt.interior_type.ptyp_desc {
+            CoreTypeDesc::Ptyp_any => Some(CoreType {
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Borrowed("ref")))),
+                ptyp_loc: nt.loc.clone(),
+                ptyp_attributes: Attributes::new(),
+            }),
+            _ if strip_explicit_nullable_of_ref => strip_js_nullable(arena, &nt.interior_type),
+            _ => Some(nt.interior_type.clone()),
+        }
+    } else if nt.is_optional && strip_explicit_option {
+        strip_option(arena, &nt.interior_type)
+    } else {
+        Some(nt.interior_type.clone())
     }
 }
 
