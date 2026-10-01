@@ -96,8 +96,24 @@ impl TypeArena {
     }
 }
 
-/// Type alias for the desc borrow returned by get_desc().
-pub type TypeDescRef<'a> = std::cell::Ref<'a, TypeDesc>;
+/// A descriptor borrowed from a mutable local node or an immutable dependency
+/// node. Immutable dependency descriptors can be read without a `RefCell`;
+/// writes to those nodes belong in the compilation's descriptor overlay.
+pub enum TypeDescRef<'a> {
+    Local(std::cell::Ref<'a, TypeDesc>),
+    Shared(&'a TypeDesc),
+}
+
+impl Deref for TypeDescRef<'_> {
+    type Target = TypeDesc;
+
+    fn deref(&self) -> &TypeDesc {
+        match self {
+            Self::Local(desc) => desc,
+            Self::Shared(desc) => desc,
+        }
+    }
+}
 
 /// Cloned snapshot of a type descriptor, for cases where the caller
 /// needs to hold the desc while also mutating the same type node.
@@ -2201,7 +2217,7 @@ impl TypeContext {
     /// descriptor must be held across code that may mutate the same type node.
     #[inline]
     pub fn borrow_desc(&self, r: TypeExprRef) -> TypeDescRef<'_> {
-        self.node(r).desc()
+        TypeDescRef::Local(self.node(r).desc())
     }
 
     /// Get the level of a type.
@@ -3813,6 +3829,14 @@ impl TypeContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn immutable_descriptor_borrow_does_not_mutate_source() {
+        let desc = TypeDesc::Tnil;
+        let borrow = TypeDescRef::Shared(&desc);
+        assert!(matches!(&*borrow, TypeDesc::Tnil));
+        assert!(matches!(desc, TypeDesc::Tnil));
+    }
 
     #[test]
     fn store_build_allocates_shared_nodes_and_replays_stamps() {
