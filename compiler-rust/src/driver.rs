@@ -15653,6 +15653,11 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         }
     };
     tctx.drain_open_slot_uses();
+    // Debugging aid: `RESCRIPT_DUMP_TYPED_SEXP=<Module>` prints the
+    // in-process typed tree of that module like `bsc -dtyped-sexp`.
+    if std::env::var("RESCRIPT_DUMP_TYPED_SEXP").is_ok_and(|name| name == module_name) {
+        let _ = print_typed_structure(arena, &type_ctx, &typed_structure, &mut std::io::stderr());
+    }
 
     let mut inferred_implementation_coercion = None;
     let mut published_signature = {
