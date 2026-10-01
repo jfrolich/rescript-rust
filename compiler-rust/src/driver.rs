@@ -1895,26 +1895,17 @@ fn run_external_ppxs(
 /// External PPXs the compiler implements itself: `@rescript/ppx-spice` style
 /// rewriters are covered by the builtin spice mapper (`binary_ast::spice_ppx`),
 /// which runs as part of the builtin PPX.
-fn is_builtin_external_ppx(ppx: &str) -> bool {
-    let command = ppx.split_whitespace().next().unwrap_or(ppx);
-    command.contains("ppx-spice") || command.contains("ppx_spice")
-}
-
 impl CompilerOptions {
-    /// Whether a configured `-ppx` is the spice PPX the builtin mapper
-    /// implements.
+    /// Whether the builtin spice mapper rewrites the AST. OCaml runs every
+    /// configured `-ppx` executable (cmd_ppx_apply.ml:97-110), so the CLI
+    /// never substitutes the builtin mapper for an external spice PPX.
     pub fn builtin_spice(&self) -> bool {
-        self.external_ppxs.iter().any(|ppx| is_builtin_external_ppx(ppx))
+        false
     }
 }
 
 fn external_ppxs_to_run(options: &CompilerOptions) -> Vec<String> {
-    options
-        .external_ppxs
-        .iter()
-        .filter(|ppx| !is_builtin_external_ppx(ppx))
-        .cloned()
-        .collect()
+    options.external_ppxs.clone()
 }
 
 /// `Ast_mapper.ppx_context` (ast_mapper.ml:571-640): the
