@@ -2396,6 +2396,9 @@ fn build_compiler_options(
         keep_locs: parsed_flags.keep_locs,
         binary_annotations: parsed_flags.binary_annotations,
         visible_package_roots: Some(visible_package_roots),
+        // The file build passes `-bs-ns <Namespace>`, which leaves the
+        // namespace out of the saved import lists (js_packages_state.ml:38-42).
+        dont_record_crc_unit: package.config.get_namespace().to_suffix().map(|ns| ns.to_string()),
         ..Default::default()
     })
 }

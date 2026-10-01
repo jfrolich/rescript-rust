@@ -71,6 +71,8 @@ pub struct CmtInfo<'s> {
     pub source_digest: Option<[u8; 16]>,
     /// `cmt_imports`.
     pub imports: &'s [(String, Option<[u8; 16]>)],
+    /// The `cmi_crcs` imports of a `.cmi` saved with the `.cmt`.
+    pub cmi_imports: &'s [(String, Option<[u8; 16]>)],
 }
 
 /// Serialize the `(cmi_name, cmi_sign)` pair of a `.cmi`, prefixed with the
@@ -133,10 +135,10 @@ pub fn cmi_bytes(
     sign: &[SignatureItem],
     imports: &[(String, Option<[u8; 16]>)],
     deprecated: Option<&str>,
-) -> Vec<u8> {
+) -> (Vec<u8>, [u8; 16]) {
     let (mut content, crc) = cmi_head(arena, ctx, modname, sign);
     content.extend(cmi_tail(arena, ctx, modname, crc, imports, deprecated));
-    content
+    (content, crc)
 }
 
 /// Bytes of a `.cmt`/`.cmti` file (compiler/ml/cmt_format.ml:17-50
@@ -159,7 +161,7 @@ pub fn cmt_bytes(
             ctx,
             info.modname,
             crc,
-            info.imports,
+            info.cmi_imports,
             deprecated,
         ));
         interface_digest = Some(crc);

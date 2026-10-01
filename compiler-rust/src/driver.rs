@@ -1194,6 +1194,9 @@ pub struct CompilerOptions {
     pub nopervasives: bool,
     /// The module name being compiled. Used to filter self-opens.
     pub module_name: Option<String>,
+    /// `Clflags.dont_record_crc_unit` (js_packages_state.ml:38-42): the
+    /// package namespace, left out of the saved import lists.
+    pub dont_record_crc_unit: Option<String>,
     /// Current npm package name from `-bs-package-name`.
     pub package_name: Option<String>,
     /// Compile the runtime package (`-make-runtime`).
@@ -1282,11 +1285,13 @@ fn save_typed_artifacts(
     module_name: &str,
     kind: TypedArtifactKind<'_>,
     binary_annotations: bool,
-) -> Result<()> {
+    imports: &[(String, Option<[u8; 16]>)],
+) -> Result<Option<[u8; 16]>> {
     use crate::cmi::cmt_writer;
     let Some(out) = options.typed_artifacts.as_deref() else {
-        return Ok(());
+        return Ok(None);
     };
+
     let _phase = info_span!("compiler.save_typed_artifacts").entered();
     let (load_path, _) = build_load_path_with_display(options);
     let load_path: Vec<String> = load_path
@@ -1305,6 +1310,7 @@ fn save_typed_artifacts(
         args: &out.args,
         source_digest,
         imports: &[],
+        cmi_imports: imports,
     };
     // The `.cmi` holds the `Subst.for_saving` copy of the signature.
     let stripped: Option<Vec<crate::types::decl::SignatureItem>> = Some({
@@ -1329,14 +1335,44 @@ fn save_typed_artifacts(
         }
         (kind, _) => kind,
     };
+    // The `.cmi` CRC: `Env.save_signature` (env.ml:1924-1940) then records
+    // the unit as an import, so the `.cmt` lists it too, sorted
+    // (cmt_format_persistence.ml:46).
+    let cmi_file = match &kind {
+        TypedArtifactKind::Implementation { cmi, .. } => cmi.as_ref().map(|(sign, deprecated)| {
+            cmt_writer::cmi_bytes(arena, type_ctx, module_name, sign, imports, deprecated.as_deref())
+        }),
+        TypedArtifactKind::Interface {
+            sig_type,
+            deprecated,
+            ..
+        } => Some(cmt_writer::cmi_bytes(
+            arena,
+            type_ctx,
+            module_name,
+            stripped.as_deref().unwrap_or(sig_type),
+            imports,
+            deprecated.as_deref(),
+        )),
+    };
+    let saved_crc = cmi_file.as_ref().map(|(_, crc)| *crc);
+    let mut cmt_imports = imports.to_vec();
+    if let Some(crc) = saved_crc {
+        cmt_imports.retain(|(name, _)| name != module_name);
+        cmt_imports.push((module_name.to_string(), Some(crc)));
+    }
+    cmt_imports.sort();
+    let info = cmt_writer::CmtInfo {
+        imports: &cmt_imports,
+        ..info
+    };
     let mut files: Vec<(&str, Vec<u8>)> = Vec::new();
+    let mut cmi_crc = None;
     match kind {
         TypedArtifactKind::Implementation { structure, cmi } => {
-            if let Some((sign, deprecated)) = &cmi {
-                files.push((
-                    "cmi",
-                    cmt_writer::cmi_bytes(arena, type_ctx, module_name, sign, &[], deprecated.as_deref()),
-                ));
+            if let Some((bytes, crc)) = cmi_file {
+                cmi_crc = Some(crc);
+                files.push(("cmi", bytes));
             }
             files.push((
                 "cmt",
@@ -1355,10 +1391,10 @@ fn save_typed_artifacts(
             deprecated,
         } => {
             let cmi_sign = stripped.as_deref().unwrap_or(sig_type);
-            files.push((
-                "cmi",
-                cmt_writer::cmi_bytes(arena, type_ctx, module_name, cmi_sign, &[], deprecated.as_deref()),
-            ));
+            if let Some((bytes, crc)) = cmi_file {
+                cmi_crc = Some(crc);
+                files.push(("cmi", bytes));
+            }
             files.push((
                 "cmti",
                 cmt_writer::cmt_bytes(
@@ -1389,7 +1425,7 @@ fn save_typed_artifacts(
             }
         }
     }
-    Ok(())
+    Ok(cmi_crc)
 }
 
 /// `Subst.signature (Subst.for_saving ...)` with `Clflags.keep_locs = false`
@@ -1431,6 +1467,32 @@ fn strip_saved_extension_locations(sig: &mut [crate::types::decl::SignatureItem]
             _ => {}
         }
     }
+}
+
+/// The CRC list a saved unit carries (env.ml:1924-1930: itself first, then
+/// its imports), which importers record (env.ml:627-638). A unit typed here
+/// without writing its `.cmi` (the runtime, whose `.cmi` is prebuilt) reads
+/// the list from the `.cmi` beside its source, as OCaml loads it.
+fn unit_crcs(
+    options: &CompilerOptions,
+    module_name: &str,
+    filename: &str,
+    saved_crc: Option<[u8; 16]>,
+    imports: &[(String, Option<[u8; 16]>)],
+) -> Vec<(String, Option<[u8; 16]>)> {
+    if saved_crc.is_none()
+        && let Some(crcs) = crate::cmi::cmi_format::read_cmi_crcs(
+            &std::path::Path::new(filename).with_extension("cmi").to_string_lossy(),
+        )
+    {
+        return crcs;
+    }
+    let unit = options
+        .current_unit_name()
+        .unwrap_or_else(|| module_name.to_string());
+    std::iter::once((unit, saved_crc))
+        .chain(imports.iter().cloned())
+        .collect()
 }
 
 /// `bsc -format` (rescript_compiler_main.ml:168-182 via
@@ -1596,7 +1658,9 @@ pub fn save_namespace_typed_artifacts(
             cmi: Some((signature.as_slice(), None)),
         },
         true,
+        &[],
     )
+    .map(|_| ())
 }
 
 impl Default for CompilerOptions {
@@ -1633,6 +1697,7 @@ impl Default for CompilerOptions {
             external_ppxs: Vec::new(),
             nopervasives: false,
             module_name: None,
+            dont_record_crc_unit: None,
             package_name: None,
             make_runtime: false,
             assume_compiled_interface: false,
@@ -15740,7 +15805,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
 
     // typemod.ml:1761-1788: save the `.cmt` (and, without an interface, the
     // inferred `.cmi`) before Lambda translation.
-    save_typed_artifacts(
+    let imports = tctx
+        .persistent_env
+        .as_ref()
+        .map(|pers| pers.imports(options.dont_record_crc_unit.as_deref()))
+        .unwrap_or_default();
+    let saved_cmi_crc = save_typed_artifacts(
         options,
         arena,
         &type_ctx,
@@ -15756,7 +15826,13 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             }),
         },
         !file_config.no_bin_annot,
+        &imports,
     )?;
+    // env.ml:1924-1930 saves `(modname, Some crc) :: imports` as the unit's
+    // CRC list, which importers record (env.ml:627-638).
+    let saved_cmi_crcs = |crc: Option<[u8; 16]>| -> Vec<(String, Option<[u8; 16]>)> {
+        unit_crcs(options, module_name, filename, crc, &imports)
+    };
 
     // OCaml saves the inferred `.cmi` only in the no-interface branch before
     // Lambda translation mutates any shared type nodes
@@ -15806,6 +15882,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             signature_for_save,
             filename,
             crate::types::typemod::deprecated_of_str(arena, structure),
+            saved_cmi_crcs(saved_cmi_crc),
             &type_ctx,
         );
         // OCaml saves the current unit into the persistent table before
@@ -16442,11 +16519,17 @@ pub fn typecheck_preprocessed_signature_in_process(
             }
         };
 
+    let imports = tctx
+        .persistent_env
+        .as_ref()
+        .map(|pers| pers.imports(options.dont_record_crc_unit.as_deref()))
+        .unwrap_or_default();
+    let mut saved_cmi_crc = None;
     // js_implementation.ml:66-70: save the `.cmi` and the `.cmti`.
     if let crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature) =
         &typed_module_type.mty_desc
     {
-        save_typed_artifacts(
+        saved_cmi_crc = save_typed_artifacts(
             options,
             arena,
             &type_ctx,
@@ -16458,6 +16541,7 @@ pub fn typecheck_preprocessed_signature_in_process(
                 deprecated: crate::types::typemod::deprecated_of_sig(arena, signature),
             },
             !file_config.no_bin_annot,
+            &imports,
         )?;
     }
 
@@ -16487,11 +16571,13 @@ pub fn typecheck_preprocessed_signature_in_process(
         strip_saved_signature_locations(&mut saved_signature);
     }
     strip_saved_extension_locations(&mut saved_signature);
+    let crcs = unit_crcs(options, module_name, filename, saved_cmi_crc, &imports);
     internal_env.register_in_memory_signature(
         module_name,
         saved_signature,
         filename,
         crate::types::typemod::deprecated_of_sig(arena, signature),
+        crcs,
         &type_ctx,
     );
     type_ctx.register_raw_module_sig(module_name, raw_signature);
@@ -16600,6 +16686,7 @@ pub fn typecheck_implementation_in_process(
         published_signature.clone(),
         filename,
         crate::types::typemod::deprecated_of_str(parser.arena(), &structure),
+        Vec::new(),
         &type_ctx,
     );
 

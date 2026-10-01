@@ -532,6 +532,8 @@ fn run() -> Result<()> {
         external_ppxs: opts.external_ppxs.clone(),
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
+        // js_packages_state.ml:38-42: `-bs-ns` sets `dont_record_crc_unit`.
+        dont_record_crc_unit: opts.namespace.clone(),
         package_name: opts.package_name.clone(),
         make_runtime: opts.make_runtime,
         assume_compiled_interface: opts.read_cmi,

@@ -180,6 +180,8 @@ pub struct PersStruct {
     /// The `Deprecated` persistence flag (`cmi_flags`, env.ml:663-668),
     /// reported when the unit is looked up (env.ml:1044-1048).
     pub ps_deprecated: Option<String>,
+    /// `ps_crcs` (env.ml:669-678): the unit's `.cmi` CRC list, itself first.
+    pub ps_crcs: Vec<(String, Option<[u8; 16]>)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -520,6 +522,7 @@ impl ModuleRegistry {
             ps_name: namespace_name.to_string(),
             ps_filename: format!("{}.mlmap", namespace_name),
             ps_deprecated: None,
+            ps_crcs: Vec::new(),
             ps_sig: sig_items,
             raw_ps_sig: None,
             cmi_longident_names: Vec::new(),
@@ -703,6 +706,9 @@ pub struct PersistentEnv {
     last_error: Arc<Mutex<Option<PersistentEnvError>>>,
     /// Consistency table for imported CMI digests, matching OCaml `Consistbl`.
     crc_units: Arc<Mutex<HashMap<String, (Vec<u8>, String)>>>,
+    /// `imported_units` with their recorded CRCs (env.ml:612-646): the
+    /// units this compilation found and the units their CRC lists name.
+    imported_units: Arc<Mutex<std::collections::BTreeMap<String, Option<[u8; 16]>>>>,
     view: Arc<ResolutionView>,
 }
 
@@ -770,6 +776,7 @@ impl PersistentEnv {
             visible_package_roots: None,
             last_error: Arc::new(Mutex::new(None)),
             crc_units: Arc::new(Mutex::new(HashMap::new())),
+            imported_units: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             view: Arc::new(ResolutionView {
                 alias_prefix_rewrites: AliasPrefixRewrites::new(),
                 compiling_module: None,
@@ -803,6 +810,7 @@ impl PersistentEnv {
             visible_package_roots: None,
             last_error: Arc::new(Mutex::new(None)),
             crc_units: Arc::new(Mutex::new(HashMap::new())),
+            imported_units: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             view: Arc::new(ResolutionView {
                 alias_prefix_rewrites: AliasPrefixRewrites::from_base(
                     registry.alias_rewrites.clone(),
@@ -1126,7 +1134,45 @@ impl PersistentEnv {
 
     /// Find and load a module by name.
     /// Returns the cached signature, or None if the module cannot be found.
+    /// `Env.find_pers_struct` (env.ml:711-731): a found unit is an import
+    /// (`add_import`), and so is every unit its CRC list names, with that
+    /// CRC (`check_consistency`, env.ml:627-638).
     pub fn find_pers_struct<'a>(
+        &mut self,
+        name: &str,
+        ctx: &'a TypeContext,
+    ) -> Option<Arc<PersStruct>> {
+        let ps = self.find_pers_struct_unrecorded(name, ctx)?;
+        self.record_import(&ps);
+        Some(ps)
+    }
+
+    fn record_import(&self, ps: &PersStruct) {
+        let mut imported = self.imported_units.lock().unwrap();
+        imported.entry(ps.ps_name.clone()).or_insert(None);
+        for (unit, crc) in &ps.ps_crcs {
+            if let Some(crc) = crc {
+                let slot = imported.entry(unit.clone()).or_insert(None);
+                if slot.is_none() {
+                    *slot = Some(*crc);
+                }
+            }
+        }
+    }
+
+    /// `Env.imports ()` (env.ml:1873-1882, consistbl.ml:36-44): the imported
+    /// units in decreasing name order, without `dont_record_crc_unit`.
+    pub fn imports(&self, dont_record_crc_unit: Option<&str>) -> Vec<(String, Option<[u8; 16]>)> {
+        let imported = self.imported_units.lock().unwrap();
+        imported
+            .iter()
+            .rev()
+            .filter(|(name, _)| Some(name.as_str()) != dont_record_crc_unit)
+            .map(|(name, crc)| (name.clone(), *crc))
+            .collect()
+    }
+
+    fn find_pers_struct_unrecorded<'a>(
         &mut self,
         name: &str,
         ctx: &'a TypeContext,
@@ -1283,6 +1329,7 @@ impl PersistentEnv {
         mut signature: Signature,
         ps_filename: String,
         ps_deprecated: Option<String>,
+        ps_crcs: Vec<(String, Option<[u8; 16]>)>,
         ctx: &'a TypeContext,
     ) -> PersStruct {
         let module_path = Path::Pident(Ident::create_persistent(name));
@@ -1319,6 +1366,7 @@ impl PersistentEnv {
             ps_sig: signature,
             ps_filename,
             ps_deprecated,
+            ps_crcs,
         }
     }
 
@@ -1607,6 +1655,8 @@ impl PersistentEnv {
             visible_package_roots: self.visible_package_roots.clone(),
             last_error: self.last_error.clone(),
             crc_units: self.crc_units.clone(),
+            // A unit compiled from source has its own imports.
+            imported_units: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             view: Arc::new(ResolutionView {
                 alias_prefix_rewrites: self.view.alias_prefix_rewrites.clone(),
                 compiling_module: self.view.compiling_module.clone(),
@@ -1761,12 +1811,17 @@ impl PersistentEnv {
             }
         }
 
+        // OCaml reads this unit's `.cmi`; report the CRCs saved beside the
+        // source it was typed from.
+        let crcs = cmi_format::read_cmi_crcs(&preferred_path.with_extension("cmi").to_string_lossy())
+            .unwrap_or_default();
         Some(self.finalize_loaded_signature(
             name,
             name.to_string(),
             signature,
             preferred_path.to_string_lossy().into_owned(),
             deprecated,
+            crcs,
             ctx,
         ))
     }
@@ -1817,12 +1872,23 @@ impl PersistentEnv {
             let deprecated = cmi.cmi_flags.iter().fold(None, |_, flag| match flag {
                 crate::cmi::cmi_format::PersFlags::Deprecated(s) => Some(s.clone()),
             });
+            let crcs = cmi
+                .cmi_crcs
+                .iter()
+                .map(|(unit, crc)| {
+                    (
+                        unit.clone(),
+                        crc.as_deref().and_then(|crc| <[u8; 16]>::try_from(crc).ok()),
+                    )
+                })
+                .collect();
             return Some(self.finalize_loaded_signature(
                 name,
                 name.to_string(),
                 signature,
                 display_path,
                 deprecated,
+                crcs,
                 ctx,
             ));
         }
@@ -1863,12 +1929,17 @@ impl PersistentEnv {
             }
         }
 
+        // OCaml reads this unit's `.cmi`; report the CRCs saved beside the
+        // source it was typed from.
+        let crcs = cmi_format::read_cmi_crcs(&source_path.with_extension("cmi").to_string_lossy())
+            .unwrap_or_default();
         Some(self.finalize_loaded_signature(
             name,
             name.to_string(),
             signature,
             source_path.to_string_lossy().into_owned(),
             deprecated,
+            crcs,
             ctx,
         ))
     }
@@ -2111,6 +2182,7 @@ impl PersistentEnv {
         signature: Signature,
         source_filename: &str,
         deprecated: Option<String>,
+        crcs: Vec<(String, Option<[u8; 16]>)>,
         ctx: &'a TypeContext,
     ) {
         let ps = self.finalize_loaded_signature(
@@ -2119,6 +2191,7 @@ impl PersistentEnv {
             signature,
             source_filename.to_string(),
             deprecated,
+            crcs,
             ctx,
         );
         self.view_mut().hidden_modules.remove(name);
@@ -2187,6 +2260,7 @@ impl PersistentEnv {
             ps_sig: Arc::new(sig_items),
             ps_filename: format!("{}.mlmap", namespace_name),
             ps_deprecated: None,
+            ps_crcs: Vec::new(),
         };
         self.view_mut().hidden_modules.remove(namespace_name);
         self.cache_insert(namespace_name.to_string(), Some(Arc::new(ps)));
@@ -6871,6 +6945,7 @@ mod resolution_view_tests {
             ps_name: "Portable".to_string(),
             ps_filename: "Portable.res".to_string(),
             ps_deprecated: None,
+            ps_crcs: Vec::new(),
             ps_sig: vec![],
             raw_ps_sig: None,
             cmi_longident_names: vec![],
