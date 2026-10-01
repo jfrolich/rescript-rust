@@ -3473,6 +3473,22 @@ fn freshen_module_type_bound_idents_with_maps(
     maps: &SubstMaps,
     ctx: &TypeContext,
 ) {
+    let mut visited = HashSet::new();
+    freshen_module_type_bound_idents_rec(module_type, maps, ctx, &mut visited);
+}
+
+/// OCaml `Subst.modtype` (compiler/ml/subst.ml:345-376) with the composed
+/// substitution `maps`. Each path is substituted exactly once, through the
+/// substitution in scope where it occurs (as `Subst` rewrites the original
+/// identifiers), and each type node once (`visited`): renamed stamps can
+/// coincide with original ones, so substituting a rewritten path again would
+/// reach an unrelated identifier.
+fn freshen_module_type_bound_idents_rec(
+    module_type: &mut ModuleType,
+    maps: &SubstMaps,
+    ctx: &TypeContext,
+    visited: &mut HashSet<usize>,
+) {
     match module_type {
         ModuleType::MtyIdent(path) => {
             if !maps.is_empty() {
@@ -3505,7 +3521,7 @@ fn freshen_module_type_bound_idents_with_maps(
             }
         }
         ModuleType::MtySignature(sig) => {
-            freshen_signature_bound_idents_with_maps(sig, maps, ctx);
+            freshen_signature_bound_idents_rec(sig, maps, ctx, visited);
         }
         ModuleType::MtyFunctor {
             param,
@@ -3522,26 +3538,25 @@ fn freshen_module_type_bound_idents_with_maps(
             let mut param_maps = SubstMaps::default();
             insert_module_subst_path(&mut param_maps, &old_param, &new_param);
             let result_maps = merge_subst_maps(maps, &param_maps);
-            freshen_module_type_bound_idents_with_maps(result, &result_maps, ctx);
+            freshen_module_type_bound_idents_rec(result, &result_maps, ctx, visited);
             if let Some(param_type) = param_type.as_mut() {
-                freshen_module_type_bound_idents_with_maps(param_type, maps, ctx);
+                freshen_module_type_bound_idents_rec(param_type, maps, ctx, visited);
             }
         }
     }
 }
 
-fn freshen_signature_bound_idents_with_maps(
+/// OCaml `Subst.signature` (compiler/ml/subst.ml:322-364): rename this
+/// level's bound identifiers, then rewrite its components once through the
+/// outer substitution extended with those renamings; nested module types
+/// continue with that composed substitution.
+fn freshen_signature_bound_idents_rec(
     sig_items: &mut [SignatureItem],
     maps: &SubstMaps,
     ctx: &TypeContext,
+    visited: &mut HashSet<usize>,
 ) {
     let mut local_maps = SubstMaps::default();
-    let mut has_nested_module_types = false;
-
-    if !maps.is_empty() {
-        substitute_type_paths_in_sig_with_maps(sig_items, maps, ctx);
-        substitute_sig_decl_paths_in_place_with_maps(sig_items, maps);
-    }
 
     for item in sig_items.iter_mut() {
         match item {
@@ -3554,15 +3569,13 @@ fn freshen_signature_bound_idents_with_maps(
                 insert_type_subst_path(&mut local_maps, &old_id, &new_id);
                 *id = new_id;
             }
-            SignatureItem::SigModtype(id, mtd) => {
-                has_nested_module_types |= mtd.mtd_type.is_some();
+            SignatureItem::SigModtype(id, _) => {
                 let old_id = id.clone();
                 let new_id = ctx.rename_ident(&old_id);
                 insert_type_subst_path(&mut local_maps, &old_id, &new_id);
                 *id = new_id;
             }
             SignatureItem::SigModule(id, _, _) => {
-                has_nested_module_types = true;
                 let old_id = id.clone();
                 let new_id = ctx.rename_ident(&old_id);
                 insert_module_subst_path(&mut local_maps, &old_id, &new_id);
@@ -3572,36 +3585,25 @@ fn freshen_signature_bound_idents_with_maps(
         }
     }
 
-    if !local_maps.is_empty() {
-        substitute_type_paths_in_sig_with_maps(sig_items, &local_maps, ctx);
-        substitute_sig_decl_paths_in_place_with_maps(sig_items, &local_maps);
-    }
-
-    if !has_nested_module_types {
-        return;
-    }
-
-    let owned_combined_maps = if local_maps.is_empty() {
-        None
+    let combined_maps = if local_maps.is_empty() {
+        maps.clone()
     } else if maps.is_empty() && maps.protected_module_head.is_none() {
-        None
+        local_maps
     } else {
-        Some(merge_subst_maps(maps, &local_maps))
+        merge_subst_maps(maps, &local_maps)
     };
-    let combined_maps = match owned_combined_maps.as_ref() {
-        Some(combined_maps) => combined_maps,
-        None if local_maps.is_empty() => maps,
-        None => &local_maps,
-    };
+
+    substitute_type_paths_in_sig_items(sig_items, &combined_maps, ctx, visited, false);
+    substitute_sig_decl_paths_in_place_with_maps_rec(sig_items, &combined_maps, false);
 
     for item in sig_items.iter_mut() {
         match item {
             SignatureItem::SigModule(_, md, _) => {
-                freshen_module_type_bound_idents_with_maps(&mut md.md_type, combined_maps, ctx);
+                freshen_module_type_bound_idents_rec(&mut md.md_type, &combined_maps, ctx, visited);
             }
             SignatureItem::SigModtype(_, mtd) => {
                 if let Some(module_type) = mtd.mtd_type.as_mut() {
-                    freshen_module_type_bound_idents_with_maps(module_type, combined_maps, ctx);
+                    freshen_module_type_bound_idents_rec(module_type, &combined_maps, ctx, visited);
                 }
             }
             _ => {}
@@ -3649,22 +3651,16 @@ fn freshened_signature_ident_plan(
 }
 
 fn freshen_nested_signature_module_types(sig_items: &mut [SignatureItem], ctx: &TypeContext) {
+    let mut visited = HashSet::new();
+    let no_maps = SubstMaps::default();
     for item in sig_items.iter_mut() {
         match item {
             SignatureItem::SigModule(_, md, _) => {
-                freshen_module_type_bound_idents_with_maps(
-                    &mut md.md_type,
-                    &SubstMaps::default(),
-                    ctx,
-                );
+                freshen_module_type_bound_idents_rec(&mut md.md_type, &no_maps, ctx, &mut visited);
             }
             SignatureItem::SigModtype(_, mtd) => {
                 if let Some(module_type) = mtd.mtd_type.as_mut() {
-                    freshen_module_type_bound_idents_with_maps(
-                        module_type,
-                        &SubstMaps::default(),
-                        ctx,
-                    );
+                    freshen_module_type_bound_idents_rec(module_type, &no_maps, ctx, &mut visited);
                 }
             }
             _ => {}
@@ -3887,6 +3883,16 @@ fn substitute_module_type_paths_with_maps(module_type: &mut ModuleType, maps: &S
 }
 
 fn substitute_sig_decl_paths_in_place_with_maps(sig_items: &mut [SignatureItem], maps: &SubstMaps) {
+    substitute_sig_decl_paths_in_place_with_maps_rec(sig_items, maps, true);
+}
+
+/// Substitute the declaration paths of `sig_items`; without `recurse`, the
+/// module types of nested modules and module types are left alone.
+fn substitute_sig_decl_paths_in_place_with_maps_rec(
+    sig_items: &mut [SignatureItem],
+    maps: &SubstMaps,
+    recurse: bool,
+) {
     if maps.is_empty() {
         return;
     }
@@ -3938,10 +3944,12 @@ fn substitute_sig_decl_paths_in_place_with_maps(sig_items: &mut [SignatureItem],
                         maps.protected_module_head.as_ref(),
                     );
                 }
-                substitute_module_type_paths_with_maps(&mut md.md_type, maps);
+                if recurse {
+                    substitute_module_type_paths_with_maps(&mut md.md_type, maps);
+                }
             }
             SignatureItem::SigModtype(_, mtd) => {
-                if let Some(module_type) = mtd.mtd_type.as_mut() {
+                if recurse && let Some(module_type) = mtd.mtd_type.as_mut() {
                     substitute_module_type_paths_with_maps(module_type, maps);
                 }
             }
@@ -3960,11 +3968,23 @@ fn substitute_type_paths_in_sig_with_maps(
     maps: &SubstMaps,
     ctx: &TypeContext,
 ) {
+    let mut visited = HashSet::new();
+    substitute_type_paths_in_sig_items(sig_items, maps, ctx, &mut visited, true);
+}
+
+/// Substitute the type paths of `sig_items`' type expressions, visiting each
+/// type node once per `visited` set. With `recurse`, nested module
+/// signatures are included; without it only this level's items are.
+fn substitute_type_paths_in_sig_items(
+    sig_items: &[SignatureItem],
+    maps: &SubstMaps,
+    ctx: &TypeContext,
+    visited: &mut HashSet<usize>,
+    recurse: bool,
+) {
     if maps.is_empty() {
         return;
     }
-
-    let mut visited = HashSet::new();
 
     for item in sig_items {
         match item {
@@ -3977,7 +3997,7 @@ fn substitute_type_paths_in_sig_with_maps(
                     &maps.module_name_map,
                     maps.protected_module_head.as_ref(),
                     ctx,
-                    &mut visited,
+                    visited,
                 );
             }
             SignatureItem::SigType(_id, decl, _) => {
@@ -3990,7 +4010,7 @@ fn substitute_type_paths_in_sig_with_maps(
                         &maps.module_name_map,
                         maps.protected_module_head.as_ref(),
                         ctx,
-                        &mut visited,
+                        visited,
                     );
                 }
 
@@ -4003,7 +4023,7 @@ fn substitute_type_paths_in_sig_with_maps(
                         &maps.module_name_map,
                         maps.protected_module_head.as_ref(),
                         ctx,
-                        &mut visited,
+                        visited,
                     );
                 }
 
@@ -4021,7 +4041,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                             &maps.module_name_map,
                                             maps.protected_module_head.as_ref(),
                                             ctx,
-                                            &mut visited,
+                                            visited,
                                         );
                                     }
                                 }
@@ -4035,7 +4055,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                             &maps.module_name_map,
                                             maps.protected_module_head.as_ref(),
                                             ctx,
-                                            &mut visited,
+                                            visited,
                                         );
                                     }
                                 }
@@ -4049,7 +4069,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                     &maps.module_name_map,
                                     maps.protected_module_head.as_ref(),
                                     ctx,
-                                    &mut visited,
+                                    visited,
                                 );
                             }
                         }
@@ -4064,7 +4084,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                 &maps.module_name_map,
                                 maps.protected_module_head.as_ref(),
                                 ctx,
-                                &mut visited,
+                                visited,
                             );
                         }
                     }
@@ -4081,7 +4101,7 @@ fn substitute_type_paths_in_sig_with_maps(
                         &maps.module_name_map,
                         maps.protected_module_head.as_ref(),
                         ctx,
-                        &mut visited,
+                        visited,
                     );
                 }
                 match &ext.ext_args {
@@ -4095,7 +4115,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                 &maps.module_name_map,
                                 maps.protected_module_head.as_ref(),
                                 ctx,
-                                &mut visited,
+                                visited,
                             );
                         }
                     }
@@ -4109,7 +4129,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                 &maps.module_name_map,
                                 maps.protected_module_head.as_ref(),
                                 ctx,
-                                &mut visited,
+                                visited,
                             );
                         }
                     }
@@ -4123,13 +4143,13 @@ fn substitute_type_paths_in_sig_with_maps(
                         &maps.module_name_map,
                         maps.protected_module_head.as_ref(),
                         ctx,
-                        &mut visited,
+                        visited,
                     );
                 }
             }
             SignatureItem::SigModule(_id, md, _) => {
-                if let ModuleType::MtySignature(sub_sig) = &md.md_type {
-                    substitute_type_paths_in_sig_with_maps(sub_sig, maps, ctx);
+                if recurse && let ModuleType::MtySignature(sub_sig) = &md.md_type {
+                    substitute_type_paths_in_sig_items(sub_sig, maps, ctx, visited, true);
                 }
             }
             SignatureItem::SigModtype(..)
