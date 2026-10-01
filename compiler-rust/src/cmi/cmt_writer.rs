@@ -184,6 +184,15 @@ struct CmtWriter<'a> {
     /// `Types.value_description` of every value bound in the signatures being
     /// written, for `Typedtree.value_description.val_val`.
     values: HashMap<(i32, String), ValueDescription>,
+    /// The marshalled file-name string of each file positions name: OCaml's
+    /// positions of one file point to one `pos_fname` string (and every
+    /// `Location.none` to one "_none_"), which Marshal writes once.
+    file_names: HashMap<String, u32>,
+    /// OCaml's `Ident.t` records are single objects referenced from every
+    /// path that names them; Marshal writes each once.
+    idents: HashMap<(i32, String, i64), u32>,
+    /// Positions of `Types` locations, written once per value.
+    positions: HashMap<(String, i32, i32, i32), u32>,
 }
 
 impl<'a> CmtWriter<'a> {
@@ -199,7 +208,20 @@ impl<'a> CmtWriter<'a> {
             env_obj: None,
             option_layout: None,
             values: HashMap::new(),
+            file_names: HashMap::new(),
+            idents: HashMap::new(),
+            positions: HashMap::new(),
         }
+    }
+
+    fn file_name_str(&mut self, name: &str) {
+        if let Some(&obj) = self.file_names.get(name) {
+            self.shared(obj);
+            return;
+        }
+        let obj = self.w.obj_counter();
+        self.str(name);
+        self.file_names.insert(name.to_string(), obj);
     }
 
     // ------------------------------------------------------------------
@@ -288,9 +310,6 @@ impl<'a> CmtWriter<'a> {
 
     /// `Ident.t = {stamp; name; flags}` (compiler/ext/ident.ml:18-22).
     fn ident(&mut self, id: &Ident) {
-        self.w.write_block_header(0, 3);
-        self.int(i64::from(id.stamp()));
-        self.str(id.name());
         let mut flags = 0;
         if id.is_global() {
             flags |= 1;
@@ -298,6 +317,15 @@ impl<'a> CmtWriter<'a> {
         if id.is_predef_exn() {
             flags |= 2;
         }
+        let key = (id.stamp(), id.name().to_string(), flags);
+        if let Some(&obj) = self.idents.get(&key) {
+            self.shared(obj);
+            return;
+        }
+        self.idents.insert(key, self.w.obj_counter());
+        self.w.write_block_header(0, 3);
+        self.int(i64::from(id.stamp()));
+        self.str(id.name());
         self.int(flags);
     }
 
@@ -383,17 +411,31 @@ impl<'a> CmtWriter<'a> {
     }
 
     fn position(&mut self, pos: &Position) {
+        let key = if pos.file_name == StrIdx::default() && pos.line == 0 {
+            ("_none_".to_string(), 1, 0, -1)
+        } else {
+            (self.file_name(pos.file_name), pos.line, pos.bol, pos.cnum)
+        };
+        if let Some(&obj) = self.positions.get(&key) {
+            self.shared(obj);
+            return;
+        }
+        self.positions.insert(key, self.w.obj_counter());
+        self.position_block(pos);
+    }
+
+    fn position_block(&mut self, pos: &Position) {
         self.w.write_block_header(0, 4);
         if pos.file_name == StrIdx::default() && pos.line == 0 {
             // `Location.none` (compiler/ml/location.ml `in_file "_none_"`).
-            self.str("_none_");
+            self.file_name_str("_none_");
             self.int(1);
             self.int(0);
             self.int(-1);
             return;
         }
         let name = self.file_name(pos.file_name);
-        self.str(&name);
+        self.file_name_str(&name);
         self.int(i64::from(pos.line));
         self.int(i64::from(pos.bol));
         self.int(i64::from(pos.cnum));
