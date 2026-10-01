@@ -78,6 +78,8 @@ fn default_runtime_path() -> Option<PathBuf> {
 
 #[derive(Default, Debug)]
 struct Options {
+    ignore_parse_errors: bool,
+    formatted: bool,
     bs_ast: bool,
     debug: bool,
     dump_lambda: bool,
@@ -168,6 +170,35 @@ fn main() {
         }
         panic!("Compiler thread panicked: {payload:?}");
     }
+}
+
+/// rescript_compiler_main.ml:168-182 `format_file`.
+fn format_file(input: &str, output: Option<&Path>, ignore_parse_errors: bool) -> Result<()> {
+    let is_res = input.ends_with(".res") || input.ends_with(".resi");
+    if !is_res {
+        return Err(UserDiagnostic::new(
+            format!("bsc: don't know what to do with {input}\n"),
+            2,
+        )
+        .into());
+    }
+    let source = fs::read(input).with_context(|| input.to_string())?;
+    let (report, formatted) =
+        rescript_compiler::driver::format_source_with(&source, input, ignore_parse_errors);
+    if !report.is_empty() {
+        eprint!("{report}");
+    }
+    let Some(formatted) = formatted else {
+        let _ = std::io::stderr().flush();
+        std::process::exit(1);
+    };
+    match output {
+        None => {
+            std::io::stdout().write_all(&formatted)?;
+        }
+        Some(path) => fs::write(path, &formatted)?,
+    }
+    Ok(())
 }
 
 fn run() -> Result<()> {
@@ -394,6 +425,14 @@ fn run() -> Result<()> {
                 | "-bs-no-check-cmi" => {
                     // Boolean flags - no argument to consume
                 }
+                // rescript_compiler_main.ml:440-450
+                "-ignore-parse-errors" | "-editor-mode" => opts.ignore_parse_errors = true,
+                "-format" => {
+                    let file = args.next().ok_or_else(|| anyhow!("-format requires a file"))?;
+                    code_frame::set_color_mode(opts.color_mode);
+                    format_file(&file, opts.output.as_deref(), opts.ignore_parse_errors)?;
+                    opts.formatted = true;
+                }
                 "-make-runtime" => opts.make_runtime = true,
                 "-nopervasives" => opts.nopervasives = true,
                 _ => {
@@ -405,6 +444,9 @@ fn run() -> Result<()> {
         }
     }
 
+    if opts.input.is_none() && opts.formatted {
+        return Ok(());
+    }
     let input = opts
         .input
         .clone()

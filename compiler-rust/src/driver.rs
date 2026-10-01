@@ -1433,6 +1433,85 @@ fn strip_saved_extension_locations(sig: &mut [crate::types::decl::SignatureItem]
     }
 }
 
+/// `bsc -format` (rescript_compiler_main.ml:168-182 via
+/// res_multi_printer.ml:1-30): parse `.res`/`.resi` source in printer mode and
+/// print it back with its comments. Sources are Latin-1 byte strings like the
+/// parser's input; the result keeps the original byte encoding. A file with
+/// parse errors fails with the diagnostic report (`Res_diagnostics.print_report`).
+pub fn format_source(source: &[u8], filename: &str) -> std::result::Result<Vec<u8>, String> {
+    let (report, output) = format_source_with(source, filename, false);
+    output.ok_or(report)
+}
+
+/// `Res_multi_printer.print ~ignore_parse_errors`: the parse diagnostics
+/// report (empty without errors) and the formatted source, which is `None`
+/// when parse errors are not ignored.
+pub fn format_source_with(
+    source: &[u8],
+    filename: &str,
+    ignore_parse_errors: bool,
+) -> (String, Option<Vec<u8>>) {
+    let source = crate::source_text::latin1_bytes_to_string(source.to_vec());
+    let is_interface = filename.ends_with(".resi");
+    let mut parser = Parser::with_mode(filename, &source, crate::parser::ParserMode::Default);
+    let (report, output) = if is_interface {
+        let signature = module::parse_signature(&mut parser);
+        let report = parse_diagnostics_report(&parser, &source, filename);
+        if parser.has_errors() && !ignore_parse_errors {
+            return (report, None);
+        }
+        let comments = parser.comments().to_vec();
+        let output = crate::parser::printer::print_signature_with_comments(
+            &signature,
+            comments,
+            parser.arena_mut(),
+        );
+        (report, output)
+    } else {
+        let structure = module::parse_structure(&mut parser);
+        let report = parse_diagnostics_report(&parser, &source, filename);
+        if parser.has_errors() && !ignore_parse_errors {
+            return (report, None);
+        }
+        let comments = parser.comments().to_vec();
+        let output = crate::parser::printer::print_structure_with_comments(
+            &structure,
+            comments,
+            parser.arena_mut(),
+        );
+        (report, output)
+    };
+    (report, Some(output.chars().map(|c| c as u8).collect()))
+}
+
+fn parse_diagnostics_report(parser: &Parser<'_>, source: &str, filename: &str) -> String {
+    let report: String = parser
+        .diagnostics()
+        .iter()
+        .map(|diag| {
+            code_frame::format_error(
+                filename,
+                source,
+                &diag.start_pos,
+                &diag.end_pos,
+                &diag.explain_with_source(Some(source)),
+            )
+        })
+        .collect();
+    // Source text is Latin-1 chars standing for bytes; the frame adds real
+    // Unicode (box drawing). Write each back as the bytes OCaml prints.
+    let mut bytes = Vec::with_capacity(report.len());
+    for c in report.chars() {
+        if (c as u32) <= 0xFF {
+            bytes.push(c as u8);
+        } else {
+            let mut buf = [0u8; 4];
+            bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 /// Save the `.cmi`/`.cmt` of a namespace module: js_implementation.ml:207-226
 /// `implementation_map` types `module A = A-Ns` for every member listed in the
 /// `.mlmap` (sorted) and saves the unit like any implementation.
