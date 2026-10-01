@@ -205,6 +205,72 @@ fn load_js_metadata(
     ))
 }
 
+/// Recover dependency lists before parsing a fresh one-shot build. The cache is
+/// valid only for modules whose typed outputs are still current; changed sources
+/// must regenerate both their AST and their dependency list.
+pub fn seed_clean_in_process_dependencies(build_state: &mut BuildCommandState) {
+    let deps_cache = &build_state.in_memory_deps;
+    let root_config = build_state.get_root_config().clone();
+    let state = &mut build_state.build_state;
+    for (name, module) in &mut state.modules {
+        let SourceType::SourceFile(source) = &mut module.source_type else {
+            continue;
+        };
+        let package = &state.packages[&module.package_name];
+        let source_time = source
+            .interface
+            .as_ref()
+            .map_or(source.implementation.last_modified, |iface| {
+                source.implementation.last_modified.max(iface.last_modified)
+            });
+        let metadata = metadata_path(package, &source.implementation.path);
+        let deps_path = super::parse::dependencies_path(package, &source.implementation.path);
+        if [metadata, deps_path].iter().any(|path| {
+            std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .map_or(true, |t| t < source_time)
+        }) {
+            continue;
+        }
+        let Some(deps) = super::parse::load_dependencies(package, &source.implementation.path) else {
+            continue;
+        };
+        if source.interface.is_some() != deps.interface.is_some() {
+            continue;
+        }
+        let cmi =
+            helpers::get_compiler_asset(package, &package.namespace, &source.implementation.path, "cmi");
+        let cmt = cmi.with_extension("cmt");
+        let cmti = cmi.with_extension("cmti");
+        let Some((_, has_cmt, has_cmti, _)) = load_js_metadata(package, &source.implementation.path) else {
+            continue;
+        };
+        if !cmi.exists()
+            || (has_cmt && !cmt.exists())
+            || (has_cmti && !cmti.exists())
+            || root_config
+                .get_package_specs()
+                .iter()
+                .map(|spec| js_output_path_for_spec(package, &source.implementation.path, &root_config, spec))
+                .any(|output| !output.exists())
+            || rescript_compiler::cmi::cmi_format::read_cmi(&cmi.to_string_lossy()).is_err()
+        {
+            continue;
+        }
+        source.implementation.parse_dirty = false;
+        if let Some(interface) = &mut source.interface {
+            interface.parse_dirty = false;
+        }
+        deps_cache
+            .lock()
+            .unwrap()
+            .insert(format!("{name}:impl"), deps.implementation);
+        if let Some(deps) = deps.interface {
+            deps_cache.lock().unwrap().insert(format!("{name}:intf"), deps);
+        }
+    }
+}
+
 /// Recover one-shot outputs after the parse phase has reconstructed the dependency
 /// graph. Only a complete set of artifacts from this compiler is eligible.
 pub fn seed_clean_in_process_modules(build_state: &mut BuildCommandState) {
@@ -271,6 +337,43 @@ pub fn seed_clean_in_process_modules(build_state: &mut BuildCommandState) {
             .unwrap()
             .register_disk_module(&name, info);
     }
+}
+
+/// On a fresh process the dependency graph is available from sidecars, but
+/// clean modules have no stored AST. Prepare the entire potential compile
+/// universe before scheduling: an interface change can make any dependent
+/// compile even if its own source has not changed.
+pub fn mark_potential_in_process_compiles_for_parsing(build_state: &mut BuildCommandState) -> Vec<String> {
+    let stored = build_state.stored_asts.lock().unwrap();
+    let mut frontier = build_state
+        .modules
+        .iter()
+        .filter(|(_, module)| module.compile_dirty)
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let mut seen = frontier.iter().cloned().collect::<ahash::AHashSet<_>>();
+    while let Some(name) = frontier.pop() {
+        for dependent in &build_state.modules[&name].dependents {
+            if seen.insert(dependent.clone()) {
+                frontier.push(dependent.clone());
+            }
+        }
+    }
+    let mut clean_dependents = Vec::new();
+    for name in seen {
+        let module = build_state.build_state.modules.get_mut(&name).unwrap();
+        if let SourceType::SourceFile(source) = &mut module.source_type {
+            let missing = !stored.contains_key(&format!("{name}:impl"))
+                || (source.interface.is_some() && !stored.contains_key(&format!("{name}:intf")));
+            if missing && !source.implementation.parse_dirty {
+                source.implementation.parse_dirty = true;
+                if !module.compile_dirty {
+                    clean_dependents.push(name);
+                }
+            }
+        }
+    }
+    clean_dependents
 }
 
 /// Recover dependents of an interrupted build: a changed dependency CMI may
@@ -2398,7 +2501,11 @@ fn build_compiler_options(
         visible_package_roots: Some(visible_package_roots),
         // The file build passes `-bs-ns <Namespace>`, which leaves the
         // namespace out of the saved import lists (js_packages_state.ml:38-42).
-        dont_record_crc_unit: package.config.get_namespace().to_suffix().map(|ns| ns.to_string()),
+        dont_record_crc_unit: package
+            .config
+            .get_namespace()
+            .to_suffix()
+            .map(|ns| ns.to_string()),
         ..Default::default()
     })
 }

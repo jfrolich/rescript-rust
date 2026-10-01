@@ -17,10 +17,35 @@ use rescript_compiler::binary_ast::{
     write_structure_ast_current_with_extra_deps_and_builtin_ppx,
 };
 use rescript_compiler::parser::{Parser, module};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use tracing::info_span;
+
+#[derive(Serialize, Deserialize)]
+pub(super) struct DiskDependencies {
+    pub implementation: Dependencies,
+    pub interface: Option<Dependencies>,
+}
+
+pub(super) fn dependencies_path(package: &Package, source: &Path) -> PathBuf {
+    helpers::get_compiler_asset(package, &package.namespace, source, "cmi")
+        .with_extension("in-process-deps.json")
+}
+
+pub(super) fn load_dependencies(package: &Package, source: &Path) -> Option<DiskDependencies> {
+    let bytes = std::fs::read(dependencies_path(package, source)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn save_dependencies(package: &Package, source: &Path, deps: &DiskDependencies) -> anyhow::Result<()> {
+    let path = dependencies_path(package, source);
+    let tmp = path.with_extension("in-process-deps.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(deps)?)?;
+    std::fs::rename(tmp, path)?;
+    Ok(())
+}
 
 struct GeneratedAst {
     path: PathBuf,
@@ -150,6 +175,21 @@ pub fn generate_asts(
                         )
                     };
 
+                    if in_process && dirty {
+                        if let (Ok(implementation), Ok(interface)) = (&ast_result, &iast_result) {
+                            if let Some(implementation) = &implementation.deps {
+                                let deps = DiskDependencies {
+                                    implementation: implementation.clone(),
+                                    interface: interface.as_ref().and_then(|ast| ast.deps.clone()),
+                                };
+                                if let Err(err) =
+                                    save_dependencies(package, &source_file.implementation.path, &deps)
+                                {
+                                    return (module_name.to_owned(), Err(err.to_string()), Ok(None), true);
+                                }
+                            }
+                        }
+                    }
                     (module_name.to_owned(), ast_result, iast_result, dirty)
                 }
             }

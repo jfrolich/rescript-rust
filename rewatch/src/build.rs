@@ -67,18 +67,6 @@ fn mark_all_modules_dirty(build_state: &mut BuildCommandState) {
     }
 }
 
-fn mark_all_source_modules_dirty(build_state: &mut BuildCommandState) {
-    for module in build_state.modules.values_mut() {
-        module.compile_dirty = true;
-        if let SourceType::SourceFile(source_file) = &mut module.source_type {
-            source_file.implementation.parse_dirty = true;
-            if let Some(interface) = &mut source_file.interface {
-                interface.parse_dirty = true;
-            }
-        }
-    }
-}
-
 #[derive(Serialize, Debug, Clone)]
 pub struct CompilerArgs {
     pub compiler_args: Vec<String>,
@@ -406,18 +394,15 @@ pub fn incremental_build_without_lock(
         mark_all_modules_dirty(build_state);
     }
 
-    // A fresh --in-process build has no disk-backed .cmi cache to consult.
-    // Seed the in-memory registry by parsing and compiling every module once;
-    // watch-mode rebuilds can then keep using the retained registry.
+    // A fresh in-process process recovers clean dependency lists before parsing;
+    // watch-mode rebuilds already retain them in memory.
     let needs_in_process_seed =
         build_state.build_mode().is_in_process() && build_state.module_registry.lock().unwrap().is_empty();
     if needs_in_process_seed {
-        // Namespace maps are generated with the package, not parsed: leave
-        // them as the file build does, so the parse count matches it.
-        mark_all_source_modules_dirty(build_state);
+        compile::seed_clean_in_process_dependencies(build_state);
     }
 
-    let num_dirty_modules = build_state.modules.values().filter(|m| is_dirty(m)).count() as u64;
+    let mut num_dirty_modules = build_state.modules.values().filter(|m| is_dirty(m)).count() as u64;
     let pb = if !plain_output && show_progress {
         ProgressBar::new(num_dirty_modules)
     } else {
@@ -439,7 +424,7 @@ pub fn incremental_build_without_lock(
     let result_asts = parse::generate_asts(build_state, || pb.inc(1));
     let timing_ast_elapsed = timing_ast.elapsed();
 
-    let parse_warnings = match result_asts {
+    let mut parse_warnings = match result_asts {
         Ok(warnings) => {
             pb.finish();
             warnings
@@ -475,6 +460,42 @@ pub fn incremental_build_without_lock(
     deps::get_deps(build_state, &deleted_modules);
     if needs_in_process_seed && initial_build {
         compile::mark_clean_with_expired_interfaces_dirty(build_state);
+    }
+    // An unchanged source may need recompilation when a dependency's interface
+    // changes. Parse those potential dependents now, before the scheduler takes
+    // its immutable snapshot of stored ASTs.
+    if needs_in_process_seed && initial_build {
+        mark_modules_with_deleted_deps_dirty(&mut build_state.build_state);
+        let before = build_state
+            .modules
+            .values()
+            .filter(|module| is_dirty(module))
+            .count();
+        let clean_dependents = compile::mark_potential_in_process_compiles_for_parsing(build_state);
+        let additional = (build_state
+            .modules
+            .values()
+            .filter(|module| is_dirty(module))
+            .count()
+            - before) as u64;
+        if additional > 0 {
+            num_dirty_modules += additional;
+            match parse::generate_asts(build_state, || pb.inc(1)) {
+                Ok(warnings) => parse_warnings.push_str(&warnings),
+                Err(err) => {
+                    logs::finalize(&build_state.packages);
+                    eprintln!("{err}");
+                    return Err(IncrementalBuildError {
+                        kind: IncrementalBuildErrorKind::SourceFileParseError,
+                        plain_output,
+                    });
+                }
+            }
+            deps::get_deps(build_state, &deleted_modules);
+            for name in clean_dependents {
+                build_state.modules.get_mut(&name).unwrap().compile_dirty = false;
+            }
+        }
     }
     let timing_parse_total = timing_parse_start.elapsed();
 
