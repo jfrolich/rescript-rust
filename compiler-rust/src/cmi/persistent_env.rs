@@ -478,7 +478,7 @@ impl ModuleRegistry {
         namespace_name: &str,
         module_aliases: &[(String, String)],
     ) {
-        self.register_namespace_for_package(namespace_name, module_aliases, None);
+        self.register_namespace_for_package(namespace_name, module_aliases, None, Vec::new());
     }
 
     /// [`Self::register_namespace`] for a namespace owned by the package at
@@ -488,6 +488,7 @@ impl ModuleRegistry {
         namespace_name: &str,
         module_aliases: &[(String, String)],
         package_root: Option<PathBuf>,
+        ps_crcs: Vec<(String, Option<[u8; 16]>)>,
     ) {
         if let Some(root) = package_root {
             self.module_package_roots.insert(namespace_name.to_string(), root);
@@ -497,8 +498,10 @@ impl ModuleRegistry {
             sig_items.push(SignatureItem::SigModule(
                 Ident::create_persistent(short_name.as_str()),
                 ModuleDeclaration {
+                    // As saved in the namespace `.cmi`: an alias typed by
+                    // `type_module_aux` is `Mty_alias (Mta_absent, path)`.
                     md_type: ModuleType::MtyAlias(
-                        AliasPresence::MtaPresent,
+                        AliasPresence::MtaAbsent,
                         Path::Pident(Ident::create_persistent(internal_name.as_str())),
                     ),
                     md_attributes: vec![],
@@ -522,7 +525,9 @@ impl ModuleRegistry {
             ps_name: namespace_name.to_string(),
             ps_filename: format!("{}.mlmap", namespace_name),
             ps_deprecated: None,
-            ps_crcs: Vec::new(),
+            // The saved `.cmi`'s CRC list, recorded by importers like any
+            // loaded unit's (env.ml:627-638, 1924-1930).
+            ps_crcs,
             ps_sig: sig_items,
             raw_ps_sig: None,
             cmi_longident_names: Vec::new(),
@@ -2250,8 +2255,10 @@ impl PersistentEnv {
             sig_items.push(SignatureItem::SigModule(
                 Ident::create_persistent(short_name.as_str()),
                 ModuleDeclaration {
+                    // As saved in the namespace `.cmi`: an alias typed by
+                    // `type_module_aux` is `Mty_alias (Mta_absent, path)`.
                     md_type: ModuleType::MtyAlias(
-                        AliasPresence::MtaPresent,
+                        AliasPresence::MtaAbsent,
                         Path::Pident(Ident::create_persistent(internal_name.as_str())),
                     ),
                     md_attributes: vec![],

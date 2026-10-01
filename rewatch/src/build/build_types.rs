@@ -509,11 +509,14 @@ impl BuildCommandState {
         namespace_name: &str,
         module_aliases: &[(String, String)],
         package_root: PathBuf,
+        crcs: Vec<(String, Option<[u8; 16]>)>,
     ) {
-        self.module_registry
-            .lock()
-            .unwrap()
-            .register_namespace_for_package(namespace_name, module_aliases, Some(package_root));
+        self.module_registry.lock().unwrap().register_namespace_for_package(
+            namespace_name,
+            module_aliases,
+            Some(package_root),
+            crcs,
+        );
     }
 
     /// Store extracted dependencies from the parse phase for a module file.

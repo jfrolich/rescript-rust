@@ -2786,11 +2786,6 @@ fn register_namespace_signatures(build_state: &BuildCommandState) {
             .collect();
 
         if !module_aliases.is_empty() {
-            build_state.register_namespace_in_registry(
-                &namespace_suffix,
-                &module_aliases,
-                package.path.clone(),
-            );
             // Editor tooling reads the namespace unit from lib/bs like the
             // bsc-compiled `.mlmap` (js_implementation.ml:207-226).
             let mut sorted_aliases = module_aliases.clone();
@@ -2802,13 +2797,26 @@ fn register_namespace_signatures(build_state: &BuildCommandState) {
                 builddir: build_path.to_string_lossy().into_owned(),
                 args: std::env::args().collect(),
             };
-            if let Err(err) = rescript_compiler::driver::save_namespace_typed_artifacts(
+            let runtime_path = get_runtime_path(&package.config, &build_state.project_context).ok();
+            // Importers record the saved unit's CRC list (env.ml:627-638).
+            let crcs = match rescript_compiler::driver::save_namespace_typed_artifacts(
                 &namespace_suffix,
                 &sorted_aliases,
                 &output,
+                runtime_path.as_deref(),
             ) {
-                log::warn!("Could not write namespace artifacts for {namespace_suffix}: {err}");
-            }
+                Ok(crcs) => crcs,
+                Err(err) => {
+                    log::warn!("Could not write namespace artifacts for {namespace_suffix}: {err}");
+                    Vec::new()
+                }
+            };
+            build_state.register_namespace_in_registry(
+                &namespace_suffix,
+                &module_aliases,
+                package.path.clone(),
+                crcs,
+            );
         }
     }
 }

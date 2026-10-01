@@ -1578,11 +1578,15 @@ fn parse_diagnostics_report(parser: &Parser<'_>, source: &str, filename: &str) -
 /// Save the `.cmi`/`.cmt` of a namespace module: js_implementation.ml:207-226
 /// `implementation_map` types `module A = A-Ns` for every member listed in the
 /// `.mlmap` (sorted) and saves the unit like any implementation.
+///
+/// Returns the unit's CRC list (`(namespace, crc) :: imports`, env.ml:
+/// 1924-1930), which importers record (env.ml:627-638).
 pub fn save_namespace_typed_artifacts(
     namespace: &str,
     module_aliases: &[(String, String)],
     out: &TypedArtifactOutput,
-) -> Result<()> {
+    runtime_path: Option<&std::path::Path>,
+) -> Result<Vec<(String, Option<[u8; 16]>)>> {
     use crate::types::decl::{AliasPresence, ModuleDeclaration, ModuleType, RecStatus, SignatureItem};
     use crate::types::typedtree as tt;
 
@@ -1590,7 +1594,32 @@ pub fn save_namespace_typed_artifacts(
     let none_loc = arena.none_loc();
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    // `Parmatch.extra_pat` takes stamp 1000 at initialization, as in every
+    // compile (see `compile_source_to_js_with_options_inner`).
+    let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+
+    // The map is typed like any implementation (js_implementation.ml:207-226)
+    // in `Res_compmisc.initial_env`, which opens Pervasives and Stdlib
+    // (res_compmisc.ml:56-62), with `-no-alias-deps` (namespaces.rs): each
+    // member is a weak `check_pers_struct` import (env.ml:741-748, 1044-1045).
+    let options = CompilerOptions {
+        module_name: Some(namespace.to_string()),
+        typed_artifacts: Some(std::sync::Arc::new(out.clone())),
+        runtime_path: runtime_path.map(std::path::Path::to_path_buf),
+        transparent_modules: true,
+        ..Default::default()
+    };
+    let mut pers_env = PersistentEnv::new();
+    let (load_path, load_path_display) = build_load_path_with_display(&options);
+    type_ctx.set_load_paths(load_path.clone());
+    pers_env.set_load_path_with_display(load_path, load_path_display);
+    pers_env.set_compiling_module(Some(namespace.to_string()));
+    let mut env = initial_env(&type_ctx);
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &[], false, Some(namespace));
+    for (_, internal_name) in module_aliases {
+        pers_env.check_pers_struct(internal_name);
+    }
 
     let mut items = Vec::with_capacity(module_aliases.len());
     let mut signature = Vec::with_capacity(module_aliases.len());
@@ -1601,7 +1630,9 @@ pub fn save_namespace_typed_artifacts(
         let internal_idx = arena.intern(internal_name);
         let lid = arena.push_longident(crate::parser::longident::Longident::Lident(internal_idx));
         let id = type_ctx.create_ident(short_name);
-        let mty = ModuleType::MtyAlias(AliasPresence::MtaPresent, target.clone());
+        // typemod.ml `type_module_aux` types an alias as
+        // `Mty_alias (Mta_absent, path)`.
+        let mty = ModuleType::MtyAlias(AliasPresence::MtaAbsent, target.clone());
         items.push(tt::StructureItem {
             str_desc: tt::StructureItemDesc::Tstr_module(tt::ModuleBinding {
                 mb_id: id.clone(),
@@ -1641,14 +1672,12 @@ pub fn save_namespace_typed_artifacts(
         str_type: signature.clone(),
         str_final_env: tt::EnvRef(0),
     };
-    let options = CompilerOptions {
-        module_name: Some(namespace.to_string()),
-        typed_artifacts: Some(std::sync::Arc::new(out.clone())),
-        ..Default::default()
-    };
+    let imports = pers_env.imports(None);
+    // `Env.save_signature` writes the `Subst.for_saving` copy (env.ml:1886-1892).
+    let saved_signature = saved_signature_copy(&type_ctx, &signature);
     // bsc compiles the map from lib/bs as `<Ns>.mlmap` (namespaces.rs).
     let mlmap = format!("{namespace}.mlmap");
-    save_typed_artifacts(
+    let crc = save_typed_artifacts(
         &options,
         &arena,
         &type_ctx,
@@ -1656,12 +1685,15 @@ pub fn save_namespace_typed_artifacts(
         namespace,
         TypedArtifactKind::Implementation {
             structure: &structure,
-            cmi: Some((signature.as_slice(), None)),
+            cmi: Some((saved_signature.as_slice(), None)),
         },
         true,
-        &[],
-    )
-    .map(|_| ())
+        &imports,
+    )?;
+    let mut crcs = Vec::with_capacity(imports.len() + 1);
+    crcs.push((namespace.to_string(), crc));
+    crcs.extend(imports);
+    Ok(crcs)
 }
 
 impl Default for CompilerOptions {
