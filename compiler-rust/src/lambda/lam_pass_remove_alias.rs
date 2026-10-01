@@ -17,6 +17,7 @@ use crate::lambda::lam_hit::hit_variable;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::lam_util::field_flatten_get;
+use crate::lambda::map_prim_args;
 use crate::lambda::{Apply, Lambda, LambdaSwitch, PrimInfo};
 use crate::lambda::{LFunction, map_box};
 use crate::location::Location;
@@ -339,18 +340,7 @@ impl<'a> Simplifier<'a> {
             Lambda::LglobalModule(_, _) => lam,
 
             // lam_pass_remove_alias.ml:81-82 — fallback Lprim.
-            Lambda::Lprim(__prim5) => {
-                let PrimInfo {
-                    primitive,
-                    args,
-                    loc,
-                } = *__prim5;
-                Lambda::prim(
-                    primitive,
-                    args.into_iter().map(|arg| self.simpl_owned(arg)).collect(),
-                    loc,
-                )
-            }
+            Lambda::Lprim(info) => map_prim_args(info, |arg| self.simpl_owned(arg)),
 
             // lam_pass_remove_alias.ml:83-117 — Lifthenelse special cases,
             // followed by the generic boolean simplification fallback.
