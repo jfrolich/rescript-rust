@@ -17001,7 +17001,8 @@ fn inline_record_decl_from_variant_type<'a>(
             let inline_params = inline_record_type_params(ctx, &type_decl.type_params, labels);
             let inline_repr =
                 if type_decl.type_representation == crate::types::TypeRepresentation::Unboxed {
-                    crate::types::RecordRepresentation::RecordUnboxed(false)
+                    // compiler/ml/datarepr.ml:163-164: unboxed inline records use `Record_unboxed true`.
+                    crate::types::RecordRepresentation::RecordUnboxed(true)
                 } else {
                     crate::types::RecordRepresentation::RecordInlined {
                         name: cstr_name.to_string(),
@@ -27646,7 +27647,8 @@ fn lookup_constructor_by_expected_type<'b>(
                                 if concrete_type_decl.type_representation
                                     == crate::types::TypeRepresentation::Unboxed
                                 {
-                                    crate::types::RecordRepresentation::RecordUnboxed(false)
+                                    // compiler/ml/datarepr.ml:163-164: unboxed inline records use `Record_unboxed true`.
+                                    crate::types::RecordRepresentation::RecordUnboxed(true)
                                 } else {
                                     crate::types::RecordRepresentation::RecordInlined {
                                         name: cstr_name.to_string(),
@@ -30432,7 +30434,8 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                                     if parent_decl.type_representation
                                         == crate::types::TypeRepresentation::Unboxed
                                     {
-                                        crate::types::RecordRepresentation::RecordUnboxed(false)
+                                        // compiler/ml/datarepr.ml:163-164: unboxed inline records use `Record_unboxed true`.
+                                        crate::types::RecordRepresentation::RecordUnboxed(true)
                                     } else {
                                         crate::types::RecordRepresentation::RecordInlined {
                                             name: type_name.to_string(),

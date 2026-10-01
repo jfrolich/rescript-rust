@@ -19547,7 +19547,8 @@ fn type_structure_item<'a>(
                                         Path::pdot(type_path.clone(), cstr_name_str.to_string());
                                     // Create synthetic inline type declaration
                                     let inline_repres = if has_unboxed {
-                                        crate::types::RecordRepresentation::RecordUnboxed(false)
+                                        // compiler/ml/datarepr.ml:163-164: unboxed inline records use `Record_unboxed true`.
+                                        crate::types::RecordRepresentation::RecordUnboxed(true)
                                     } else {
                                         crate::types::RecordRepresentation::RecordInlined {
                                             name: cstr_name_str.to_string(),
