@@ -2164,17 +2164,6 @@ fn path_binding_time(path: &Path) -> i32 {
     }
 }
 
-/// Check if a path is "local" (non-persistent root identifier with non-zero stamp).
-/// Matches OCaml's `Path.binding_time > 0` — local module aliases and type aliases
-/// have high stamps, while persistent (CMI-loaded) modules have stamp 0.
-fn is_local_path(path: &Path) -> bool {
-    match path {
-        Path::Pident(id) => id.stamp() != 0,
-        Path::Pdot(parent, _, _) => is_local_path(parent),
-        Path::Papply(p1, p2) => is_local_path(p1) || is_local_path(p2),
-    }
-}
-
 // ============================================================================
 // Predef Type Names
 // ============================================================================
@@ -11913,7 +11902,11 @@ pub(crate) fn copy_type_cached(
                     let abbrevs = ctx.current_abbreviations();
                     let lookup_abbrevs = proper_abbrevs(ctx, &path, &args, abbrevs);
 
-                    let is_local_nonpersistent = is_local_path(&path);
+                    // OCaml compiler/ml/ctype.ml:761-763: a memoized
+                    // expansion of `p` (`find_repr p !abbrevs`) is linked to
+                    // whenever it is not the stub being built. The memo's
+                    // lifetime is governed by its clearing points
+                    // (`generalize*`, `check_abbrev_env`, `cleanup_abbrev`).
                     if let Some(found_ty) = ctx.find_abbrev_repr(lookup_abbrevs, &path) {
                         let found_source = ctx.repr(found_ty);
                         // OCaml copy() mutates source nodes to Tsubst stubs while
@@ -11921,40 +11914,13 @@ pub(crate) fn copy_type_cached(
                         // Rust keeps source nodes immutable during copy, so we must
                         // project through the local copy cache to recover the same
                         // representative.
-                        let found_cached = cache
+                        let found_repr = cache
                             .nodes
                             .get(&found_ty)
                             .copied()
-                            .or_else(|| cache.nodes.get(&found_source).copied());
-                        let stale_relinked_alias_hit = found_cached.is_none()
-                            && {
-                                let found_desc = ctx.get_desc(found_source);
-                                matches!(
-                                    &*found_desc,
-                                    TypeDesc::Tconstr { path: found_path, .. } if !found_path.same(&path)
-                                )
-                            };
-                        // OCaml ctype.ml:916-925 installs Tsubst stubs only for
-                        // the active copy window, so local-path abbreviation hits
-                        // from an older window are not reusable.
-                        // OCaml compiler/ml/ctype.ml:894-945 also restores
-                        // source descriptors through `cleanup_types` after
-                        // copying, so a memo whose source now reprs to a
-                        // different constructor path is a stale Rust relink,
-                        // not a valid `find_repr` result.
-                        // OCaml compiler/ml/ctype.ml:1052-1060 calls
-                        // `cleanup_types` after each `instance`, so a non-generic
-                        // abbreviation copy from a previous instance is likewise
-                        // outside the current `Tsubst` window.
-                        let stale_local_hit = is_local_nonpersistent && found_cached.is_none();
-                        let stale_previous_copy_hit = found_cached.is_none()
-                            && ctx.get_level(ctx.repr(found_ty)) != GENERIC_LEVEL;
-                        let found_repr = found_cached.unwrap_or(found_ty);
-                        if !stale_local_hit
-                            && !stale_relinked_alias_hit
-                            && !stale_previous_copy_hit
-                            && found_repr != placeholder
-                        {
+                            .or_else(|| cache.nodes.get(&found_source).copied())
+                            .unwrap_or(found_ty);
+                        if found_repr != placeholder {
                             cache.nodes.insert(ty, found_repr);
                             ctx.set_desc(placeholder, TypeDesc::Tlink(found_repr));
                             return found_repr;
