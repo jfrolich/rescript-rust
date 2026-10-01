@@ -260,6 +260,9 @@ pub struct InMemoryModuleInfo {
     pub cmj_export_constants: Arc<HashMap<String, CmjExportConstant>>,
     /// Arity metadata for exports (replaces `.cmj` arity lookup)
     pub cmj_export_arities: Arc<HashMap<String, CmjExportArity>>,
+    /// Non-constant `persistent_closed_lambda` exports (replaces the `.cmj`
+    /// lookup used for cross-module inlining, js_cmj_format.ml:112-121).
+    pub cmj_export_lambdas: Arc<HashMap<String, Lambda>>,
     /// Flat hoisted-export path metadata (replaces `.cmj` lookup).
     pub cmj_hoisted_exports: Arc<Vec<crate::lambda::HoistedExport>>,
     /// Whether this module belongs to `@rescript/runtime`
@@ -284,12 +287,18 @@ impl InMemoryModuleInfo {
             is_pure,
             cmj_export_constants: Arc::new(cmj_export_constants),
             cmj_export_arities: Arc::new(HashMap::new()),
+            cmj_export_lambdas: Arc::new(HashMap::new()),
             cmj_hoisted_exports: Arc::new(Vec::new()),
             is_runtime,
             package_name: None,
             package_root: None,
             js_output_suffix: None,
         }
+    }
+
+    pub fn with_cmj_export_lambdas(mut self, cmj_export_lambdas: HashMap<String, Lambda>) -> Self {
+        self.cmj_export_lambdas = Arc::new(cmj_export_lambdas);
+        self
     }
 
     pub fn with_cmj_export_arities(
@@ -1603,6 +1612,10 @@ impl PersistentEnv {
     /// `js_cmj_format.ml:112-121`, where non-constant
     /// `persistent_closed_lambda` values are preserved for backend inlining.
     pub fn module_cmj_export_lambdas(&self, name: &str) -> Option<Arc<HashMap<String, Lambda>>> {
+        if let Some(lambdas) = self.in_memory_info_with(name, |info| info.cmj_export_lambdas.clone())
+        {
+            return Some(lambdas);
+        }
         // In in-process mode the registry is authoritative; do not fall back to
         // disk `.cmj` files behind the scheduler's back.
         if self.in_process_mode {

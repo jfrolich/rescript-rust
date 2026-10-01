@@ -359,6 +359,9 @@ pub struct LambdaCompiler {
     /// 274-279).
     pub(crate) cmj_lambda_cache: HashMap<String, Option<Arc<AHashMap<String, Lambda>>>>,
     pub(crate) cmj_export_constants: AHashMap<String, CmjExportConstant>,
+    /// Non-constant `persistent_closed_lambda` exports recorded for
+    /// cross-module inlining (compiler/core/lam_stats_export.ml:53-89).
+    pub(crate) cmj_export_lambdas: AHashMap<String, Lambda>,
     pub(crate) cmj_export_arities: AHashMap<String, CmjExportArity>,
     hoisted_functions: Vec<crate::lambda::HoistedFunction>,
     pub(crate) external_module_ids: HashMap<ExternalModuleCacheKey, Ident>,
@@ -468,6 +471,7 @@ impl LambdaCompiler {
             cmj_arity_cache: HashMap::new(),
             cmj_lambda_cache: HashMap::new(),
             cmj_export_constants: AHashMap::new(),
+            cmj_export_lambdas: AHashMap::new(),
             cmj_export_arities: AHashMap::new(),
             hoisted_functions: Vec::new(),
             external_module_ids: HashMap::new(),
@@ -669,6 +673,11 @@ impl LambdaCompiler {
         );
         self.cmj_export_constants =
             collect_cmj_export_constants_from_simplified_lambda(&simplified_result.lambda);
+        self.cmj_export_lambdas = if self.cross_module_inline {
+            collect_cmj_export_lambdas_from_simplified_lambda(&simplified_result.lambda)
+        } else {
+            AHashMap::new()
+        };
         self.cmj_export_arities = collect_cmj_export_arities_from_simplified_lambda(
             &simplified_result.lambda,
             &simplified_result.meta,
@@ -805,6 +814,10 @@ impl LambdaCompiler {
 
     pub(crate) fn take_cmj_export_constants(&mut self) -> AHashMap<String, CmjExportConstant> {
         std::mem::take(&mut self.cmj_export_constants)
+    }
+
+    pub(crate) fn take_cmj_export_lambdas(&mut self) -> AHashMap<String, Lambda> {
+        std::mem::take(&mut self.cmj_export_lambdas)
     }
 
     pub(crate) fn take_cmj_export_arities(&mut self) -> AHashMap<String, CmjExportArity> {
@@ -7254,6 +7267,56 @@ fn collect_cmj_export_constants_from_simplified_lambda(
         }
     }
     constants
+}
+
+/// The non-constant `persistent_closed_lambda` of each export under
+/// `-bs-cross-module-opt` (compiler/core/lam_stats_export.ml:53-89):
+/// safe-to-inline lambdas that are closed always-inline functions or
+/// functors, or small (`Lam_analysis.small_inline_size`) and free of free
+/// variables. Constant exports travel as `CmjExportConstant`s.
+fn collect_cmj_export_lambdas_from_simplified_lambda(lam: &Lambda) -> AHashMap<String, Lambda> {
+    let mut bindings = Vec::new();
+    let Some((exports, args)) = collect_toplevel_export_bindings(lam, &mut bindings) else {
+        return AHashMap::new();
+    };
+    let mut lambdas = AHashMap::new();
+    for (export, arg) in exports.iter().zip(args) {
+        let value = match arg {
+            Lambda::Lvar(id) => bindings
+                .iter()
+                .rev()
+                .find_map(|(binding, value)| binding.same(id).then_some(*value))
+                .unwrap_or(arg),
+            _ => arg,
+        };
+        if cmj_export_constant_from_lambda(value).is_some()
+            || !crate::lambda::lam_analysis::safe_to_inline(value)
+        {
+            continue;
+        }
+        let inline = match value {
+            Lambda::Lfunction(func)
+                if matches!(func.attr.inline, crate::lambda::InlineAttribute::Always)
+                    || func.attr.is_a_functor =>
+            {
+                crate::lambda::lam_closure::is_closed(value)
+            }
+            _ => {
+                crate::lambda::lam_analysis::size(value)
+                    < crate::lambda::lam_analysis::SMALL_INLINE_SIZE
+                    && crate::lambda::lam_closure::free_variables_with_stats(
+                        &Default::default(),
+                        Default::default(),
+                        value,
+                    )
+                    .is_empty()
+            }
+        };
+        if inline {
+            lambdas.insert(export.name().to_string(), value.clone());
+        }
+    }
+    lambdas
 }
 
 fn collect_cmj_export_arities_from_simplified_lambda(

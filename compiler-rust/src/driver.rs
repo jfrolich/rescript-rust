@@ -15099,6 +15099,9 @@ pub struct InProcessCompileResult {
     pub is_pure: bool,
     pub cmj_export_constants: ahash::AHashMap<String, CmjExportConstant>,
     pub cmj_export_arities: ahash::AHashMap<String, CmjExportArity>,
+    /// `.cmj` `persistent_closed_lambda` exports for cross-module inlining
+    /// (lam_stats_export.ml:53-89).
+    pub cmj_export_lambdas: ahash::AHashMap<String, crate::lambda::Lambda>,
     pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
     /// Intermediate-representation sexps, populated when
     /// `CompilerOptions::capture_intermediates` is true (for the playground).
@@ -15137,6 +15140,7 @@ pub struct InProcessJsMetadataReady {
     pub is_pure: bool,
     pub cmj_export_constants: ahash::AHashMap<String, CmjExportConstant>,
     pub cmj_export_arities: ahash::AHashMap<String, CmjExportArity>,
+    pub cmj_export_lambdas: ahash::AHashMap<String, crate::lambda::Lambda>,
     pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
     pub pers_struct: Option<PortablePersStruct>,
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
@@ -15345,6 +15349,7 @@ fn compile_js_program_for_output(
     ModulePathResolver,
     ahash::AHashMap<String, CmjExportConstant>,
     ahash::AHashMap<String, CmjExportArity>,
+    ahash::AHashMap<String, crate::lambda::Lambda>,
 ) {
     let _span = info_span!(
         "compiler.js_backend",
@@ -15390,12 +15395,14 @@ fn compile_js_program_for_output(
         .expect("lambda compiler retained module path resolver");
     let cmj_export_constants = compiler.take_cmj_export_constants();
     let cmj_export_arities = compiler.take_cmj_export_arities();
+    let cmj_export_lambdas = compiler.take_cmj_export_lambdas();
 
     (
         program,
         module_path_resolver,
         cmj_export_constants,
         cmj_export_arities,
+        cmj_export_lambdas,
     )
 }
 
@@ -15413,6 +15420,7 @@ fn compile_js_program_for_output_owned(
     ModulePathResolver,
     ahash::AHashMap<String, CmjExportConstant>,
     ahash::AHashMap<String, CmjExportArity>,
+    ahash::AHashMap<String, crate::lambda::Lambda>,
 ) {
     let mut collected_possible_required_modules =
         crate::timing::measure(crate::timing::Phase::Codegen, || {
@@ -15447,6 +15455,7 @@ fn compile_js_program_for_output_owned_with_collected_modules(
     ModulePathResolver,
     ahash::AHashMap<String, CmjExportConstant>,
     ahash::AHashMap<String, CmjExportArity>,
+    ahash::AHashMap<String, crate::lambda::Lambda>,
 ) {
     let _span = info_span!(
         "compiler.js_backend",
@@ -15493,12 +15502,14 @@ fn compile_js_program_for_output_owned_with_collected_modules(
         .expect("lambda compiler retained module path resolver");
     let cmj_export_constants = compiler.take_cmj_export_constants();
     let cmj_export_arities = compiler.take_cmj_export_arities();
+    let cmj_export_lambdas = compiler.take_cmj_export_lambdas();
 
     (
         program,
         module_path_resolver,
         cmj_export_constants,
         cmj_export_arities,
+        cmj_export_lambdas,
     )
 }
 pub fn compile_preprocessed_structure_in_process(
@@ -16094,7 +16105,13 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         .or(options.output_module_format);
     let compile_multiple_js_targets = !options.skip_js_render && js_targets.len() > 1;
     let mut lowered_lambda = Some(pre_js.lowered_lambda);
-    let (program, module_path_resolver, mut cmj_export_constants, mut cmj_export_arities) = {
+    let (
+        program,
+        module_path_resolver,
+        mut cmj_export_constants,
+        mut cmj_export_arities,
+        mut cmj_export_lambdas,
+    ) = {
         let _phase = info_span!(
             "compiler.js_compile",
             multiple_targets = compile_multiple_js_targets
@@ -16141,6 +16158,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
             is_pure,
             cmj_export_constants: std::mem::take(&mut cmj_export_constants),
             cmj_export_arities: std::mem::take(&mut cmj_export_arities),
+            cmj_export_lambdas: std::mem::take(&mut cmj_export_lambdas),
             hoisted_exports: pre_js.hoisted_exports.clone(),
             pers_struct: pre_js.pers_struct.take(),
             new_alias_rewrites: std::mem::take(&mut pre_js.new_alias_rewrites),
@@ -16156,7 +16174,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
             module_path_resolver,
         )];
         for target in js_targets.iter().skip(1) {
-            let (program, module_path_resolver, _, _) = compile_js_program_for_output(
+            let (program, module_path_resolver, _, _, _) = compile_js_program_for_output(
                 lowered_lambda
                     .as_ref()
                     .expect("lowered lambda retained for secondary JS targets"),
@@ -16246,6 +16264,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         is_pure,
         cmj_export_constants,
         cmj_export_arities,
+        cmj_export_lambdas,
         hoisted_exports: pre_js.hoisted_exports,
         typed_tree_sexp: pre_js.typed_tree_sexp,
         raw_lambda_sexp: pre_js.raw_lambda_sexp,

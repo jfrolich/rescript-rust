@@ -50,6 +50,11 @@ struct DiskJsMetadata {
     constants: std::collections::HashMap<String, DiskConstant>,
     arities: std::collections::HashMap<String, DiskExportArity>,
     hoisted_exports: Vec<(Vec<String>, String)>,
+    /// The module exports `persistent_closed_lambda`s for cross-module
+    /// inlining. They are not persisted, so such a module is recompiled
+    /// rather than reused: its dependents need the lambdas to inline.
+    #[serde(default)]
+    inline_lambdas: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -101,6 +106,7 @@ fn save_js_metadata(
     constants: &AHashMap<String, CmjExportConstant>,
     arities: &AHashMap<String, CmjExportArity>,
     hoisted: &[rescript_compiler::lambda::HoistedExport],
+    inline_lambdas: bool,
     warning: Option<&str>,
 ) -> Result<()> {
     let cmi_path = helpers::get_compiler_asset(package, &package.namespace, source, "cmi");
@@ -140,6 +146,7 @@ fn save_js_metadata(
             .iter()
             .map(|item| (item.path.clone(), item.export_name.clone()))
             .collect(),
+        inline_lambdas,
     };
     let path = metadata_path(package, source);
     let bytes = serde_json::to_vec(&metadata)?;
@@ -156,6 +163,9 @@ fn load_js_metadata(
 ) -> Option<(InMemoryModuleInfo, bool, bool, Option<String>)> {
     let bytes = std::fs::read(metadata_path(package, source)).ok()?;
     let metadata: DiskJsMetadata = serde_json::from_slice(&bytes).ok()?;
+    if metadata.inline_lambdas {
+        return None;
+    }
     let constants = metadata
         .constants
         .into_iter()
@@ -2582,6 +2592,7 @@ fn js_output_suffix_for_registry(root_config: &config::Config) -> Option<String>
         .map(|spec| root_config.get_suffix(spec))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn in_memory_module_info_for_package(
     package: &packages::Package,
     root_config: &config::Config,
@@ -2589,11 +2600,13 @@ fn in_memory_module_info_for_package(
     is_pure: bool,
     cmj_export_constants: AHashMap<String, CmjExportConstant>,
     cmj_export_arities: AHashMap<String, CmjExportArity>,
+    cmj_export_lambdas: AHashMap<String, rescript_compiler::lambda::Lambda>,
     hoisted_exports: Vec<rescript_compiler::lambda::HoistedExport>,
     is_runtime: bool,
 ) -> InMemoryModuleInfo {
     InMemoryModuleInfo::new(source_path, is_pure, cmj_export_constants, is_runtime)
         .with_cmj_export_arities(cmj_export_arities)
+        .with_cmj_export_lambdas(cmj_export_lambdas)
         .with_cmj_hoisted_exports(hoisted_exports)
         .with_package(
             package.name.clone(),
@@ -2611,6 +2624,7 @@ fn js_metadata_registry_updates_for_package(
     is_pure: bool,
     cmj_export_constants: AHashMap<String, CmjExportConstant>,
     cmj_export_arities: AHashMap<String, CmjExportArity>,
+    cmj_export_lambdas: AHashMap<String, rescript_compiler::lambda::Lambda>,
     hoisted_exports: Vec<rescript_compiler::lambda::HoistedExport>,
     is_runtime: bool,
     has_interface: bool,
@@ -2625,6 +2639,7 @@ fn js_metadata_registry_updates_for_package(
         is_pure,
         cmj_export_constants,
         cmj_export_arities,
+        cmj_export_lambdas,
         hoisted_exports,
         is_runtime,
     );
@@ -3265,6 +3280,7 @@ fn compile_runtime_module_from_source(
         true,
     )
     .with_cmj_export_arities(compile_result.cmj_export_arities)
+    .with_cmj_export_lambdas(compile_result.cmj_export_lambdas)
     .with_cmj_hoisted_exports(compile_result.hoisted_exports);
 
     let mut shared_registry = build_state.module_registry.lock().unwrap();
@@ -3681,6 +3697,7 @@ fn compile_module_in_process_to_js_boundary(
         provisional_is_pure,
         AHashMap::new(),
         AHashMap::new(),
+        AHashMap::new(),
         Vec::new(),
         is_runtime,
     );
@@ -4061,6 +4078,7 @@ fn finish_in_process_js_inner(
             metadata.is_pure,
             metadata.cmj_export_constants,
             metadata.cmj_export_arities,
+            metadata.cmj_export_lambdas,
             metadata.hoisted_exports,
             is_runtime,
         );
@@ -4113,6 +4131,7 @@ fn finish_in_process_js_inner(
             compile_result.is_pure,
             compile_result.cmj_export_constants.clone(),
             compile_result.cmj_export_arities.clone(),
+            compile_result.cmj_export_lambdas.clone(),
             compile_result.hoisted_exports.clone(),
             is_runtime,
             has_interface,
@@ -4190,6 +4209,7 @@ fn finish_in_process_js_inner(
         &compile_result.cmj_export_constants,
         &compile_result.cmj_export_arities,
         &compile_result.hoisted_exports,
+        !compile_result.cmj_export_lambdas.is_empty(),
         warning.as_deref(),
     )?;
 
