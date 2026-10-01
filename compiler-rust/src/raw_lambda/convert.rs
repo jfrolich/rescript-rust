@@ -4342,6 +4342,9 @@ impl<'a> RawLambdaConverter<'a> {
             self.no_assert_false = true;
         }
         self.register_signature_type_paths(None, &structure.str_type);
+        // The typed tree is complete: repeated type queries on it have one
+        // answer per (env, type).
+        self.type_ctx.set_typeopt_cache(true);
         let mut fields = Vec::new();
         let result = self.convert_structure_items_raw(
             &mut fields,
@@ -4351,6 +4354,7 @@ impl<'a> RawLambdaConverter<'a> {
             cc,
             Location::none(),
         );
+        self.type_ctx.set_typeopt_cache(false);
         self.materialize_hoisted_exports(result)
     }
 

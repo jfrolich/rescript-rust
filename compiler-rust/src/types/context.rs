@@ -470,6 +470,9 @@ pub struct TypeContext {
 
     /// Cached full normalize_path results keyed by environment identity.
     normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
+    /// Answers of `raw_lambda::typeopt` queries while the finished typed tree
+    /// is lowered (`None` outside that phase): the types no longer change.
+    typeopt_answers: RefCell<Option<ahash::AHashMap<(u64, TypeExprRef, u8), bool>>>,
     /// Outcome of expanding a `Pdot`-headed constructor, per module scope
     /// (see `ctype::PdotExpansion`).
     pdot_expansions: RefCell<hashbrown::HashMap<PdotExpansionKey, super::ctype::PdotExpansion, ahash::RandomState>>,
@@ -850,6 +853,7 @@ impl TypeContext {
             resolved_type_item_cache: RefCell::new(ahash::AHashMap::new()),
             normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
             pdot_expansions: RefCell::new(hashbrown::HashMap::default()),
+            typeopt_answers: RefCell::new(None),
             normalized_path_forward_cache: RefCell::new(ahash::AHashMap::new()),
             occur_variance_masks: RefCell::new(ahash::AHashMap::new()),
             type_newtype_levels: RefCell::new(ahash::AHashMap::new()),
@@ -1674,6 +1678,40 @@ impl TypeContext {
             .entry((env_id, module_path.clone()))
             .or_default()
             .insert(type_name.to_string(), (access_path, id, decl));
+    }
+
+    /// Start or stop answering repeated `typeopt` queries from a cache. Only
+    /// enabled while a finished typed tree is lowered to lambda.
+    pub(crate) fn set_typeopt_cache(&self, enabled: bool) {
+        *self.typeopt_answers.borrow_mut() = enabled.then(ahash::AHashMap::new);
+    }
+
+    /// Answer a `typeopt` query `query` about `ty` in the env `env_id`,
+    /// reusing an earlier answer while the cache is enabled.
+    pub(crate) fn typeopt_answer(
+        &self,
+        env_id: u64,
+        ty: TypeExprRef,
+        query: u8,
+        compute: impl FnOnce() -> bool,
+    ) -> bool {
+        if self.typeopt_answers.borrow().is_none() {
+            return compute();
+        }
+        let ty = self.repr(ty);
+        if let Some(answer) = self
+            .typeopt_answers
+            .borrow()
+            .as_ref()
+            .and_then(|answers| answers.get(&(env_id, ty, query)))
+        {
+            return *answer;
+        }
+        let answer = compute();
+        if let Some(answers) = self.typeopt_answers.borrow_mut().as_mut() {
+            answers.insert((env_id, ty, query), answer);
+        }
+        answer
     }
 
     /// The cached expansion outcome of a `Pdot` head (`ctype::PdotExpansion`).
