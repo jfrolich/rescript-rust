@@ -455,7 +455,13 @@ pub fn incremental_build_without_lock(
         }
     };
     let deleted_modules = build_state.deleted_modules.clone();
+    if needs_in_process_seed && initial_build {
+        compile::seed_clean_in_process_modules(build_state);
+    }
     deps::get_deps(build_state, &deleted_modules);
+    if needs_in_process_seed && initial_build {
+        compile::mark_clean_with_expired_interfaces_dirty(build_state);
+    }
     let timing_parse_total = timing_parse_start.elapsed();
 
     if show_progress {

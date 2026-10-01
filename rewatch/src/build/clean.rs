@@ -379,7 +379,7 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
             removed += 1;
             let basename = helpers::file_path_to_compiler_asset_basename(&path, &package.namespace);
             let dir = path.parent().unwrap_or_else(|| Path::new(""));
-            for extension in ["cmi", "cmt", "cmti", "cmj"] {
+            for extension in ["cmi", "cmt", "cmti", "cmj", "in-process-js.json"] {
                 let file = format!("{basename}.{extension}");
                 let _ = std::fs::remove_file(package.get_build_path().join(dir).join(&file));
                 let _ = std::fs::remove_file(package.get_ocaml_build_path().join(&file));

@@ -11,6 +11,7 @@ rewatch build &> /dev/null
 mv ./packages/new-namespace/src/Other_module.res ./packages/new-namespace/src/Other_module2.res
 rewatch build &> ../tests/snapshots/rename-file-internal-dep-namespace.txt
 normalize_paths ../tests/snapshots/rename-file-internal-dep-namespace.txt
+normalize_incremental_count ../tests/snapshots/rename-file-internal-dep-namespace.txt
 mv ./packages/new-namespace/src/Other_module2.res ./packages/new-namespace/src/Other_module.res
 
 rewatch build &> /dev/null

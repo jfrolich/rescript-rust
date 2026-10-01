@@ -395,6 +395,8 @@ pub struct ModuleRegistry {
     /// published signatures and type graphs.
     /// Keyed by module name.
     cached_modules: SharedRegistryMap<Arc<PortablePersStruct>>,
+    /// Clean one-shot modules with validated typed artifacts on disk.
+    disk_modules: SharedRegistryMap<bool>,
     /// Module metadata (source paths, purity, runtime status).
     module_info: SharedRegistryMap<InMemoryModuleInfo>,
     /// Alias prefix rewrites (flattened_name -> qualified_path).
@@ -446,8 +448,13 @@ impl ModuleRegistry {
         self.local_cached_modules.contains_key(name) || self.cached_modules.contains_key(name)
     }
 
+    pub fn register_disk_module(&mut self, name: &str, info: InMemoryModuleInfo) {
+        self.disk_modules.insert(name.to_string(), true);
+        self.insert_module_info(name.to_string(), info);
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.local_cached_modules.is_empty() && self.cached_modules.len() == 0
+        self.local_cached_modules.is_empty() && self.cached_modules.len() == 0 && self.disk_modules.len() == 0
     }
 
     pub fn module_info_is_runtime(&self, name: &str) -> bool {
@@ -532,6 +539,7 @@ impl ModuleRegistry {
     pub fn purge_module(&mut self, name: &str) {
         self.cached_modules.remove(name);
         self.local_cached_modules.remove(name);
+        self.disk_modules.remove(name);
         self.module_info.remove(name);
         self.local_module_info.remove(name);
         self.source_fallback_paths.remove(name);
@@ -671,6 +679,7 @@ pub struct PersistentEnv {
     /// When true, all module resolution uses the in-memory registry only.
     /// Disk fallbacks (`.ast`, `.cmj`, `.cmi` probes) are skipped entirely.
     in_process_mode: bool,
+    disk_modules: SharedRegistryMap<bool>,
     /// Source file paths for on-demand lazy type checking in `--in-process` mode.
     /// When `find_pers_struct` can't find a module in the cache and this map
     /// has its source path, the module is type-checked from source on the fly.
@@ -753,6 +762,7 @@ impl PersistentEnv {
             renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: SharedRegistryMap::default(),
             in_process_mode: false,
+            disk_modules: SharedRegistryMap::default(),
             source_fallback_paths: SharedRegistryMap::default(),
             source_fallback_depth: 0,
             portable_cache: SharedRegistryMap::default(),
@@ -785,6 +795,7 @@ impl PersistentEnv {
             renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: registry.module_info.clone(),
             in_process_mode: true,
+            disk_modules: registry.disk_modules.clone(),
             source_fallback_paths: registry.source_fallback_paths.clone(),
             source_fallback_depth: 0,
             portable_cache: registry.cached_modules.clone(),
@@ -1109,7 +1120,8 @@ impl PersistentEnv {
             || self.portable_cache.contains_key(name)
             || self.in_memory_modules.contains_key(name)
             || self.source_fallback_paths.contains_key(name)
-            || (!self.in_process_mode && self.find_in_path_uncap(&format!("{name}.cmi")).is_some())
+            || ((!self.in_process_mode || self.disk_modules.contains_key(name))
+                && self.find_in_path_uncap(&format!("{name}.cmi")).is_some())
     }
 
     /// Find and load a module by name.
@@ -1587,6 +1599,7 @@ impl PersistentEnv {
             renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: self.in_memory_modules.clone(),
             in_process_mode: self.in_process_mode,
+            disk_modules: self.disk_modules.clone(),
             source_fallback_paths: self.source_fallback_paths.clone(),
             source_fallback_depth: self.source_fallback_depth + 1,
             portable_cache: self.portable_cache.clone(),
@@ -1764,7 +1777,7 @@ impl PersistentEnv {
         // In in-process mode, never fall through to .cmi loading. The registry
         // is authoritative for normal project modules. Runtime/bootstrap code
         // may register source fallback paths, which are also source-only.
-        if self.in_process_mode {
+        if self.in_process_mode && !self.disk_modules.contains_key(name) {
             if let Some((source_key, _)) = self.source_fallback_path_entry(name) {
                 return self.load_module_from_source_path_fallback(&source_key, ctx);
             }

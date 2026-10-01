@@ -19,9 +19,11 @@ use rescript_compiler::cmi::persistent_env::{
     CmjExportArity, CmjExportConstant, InMemoryModuleInfo, ModuleRegistry,
 };
 use rescript_compiler::cmi::portable_types::PortablePersStruct;
+use rescript_compiler::lambda::lam_arity::Arity;
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::ast::{Signature, Structure};
 use rescript_compiler::types::path::Path as TypePath;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -35,6 +37,285 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use tracing::{Span, info_span, instrument};
+
+/// Backend data not stored in the typed `.cmi`. Keep it next to the typed
+/// artifacts so a fresh one-shot process can resolve clean modules exactly as
+/// the in-memory registry does during a full build.
+#[derive(Serialize, Deserialize)]
+struct DiskJsMetadata {
+    is_pure: bool,
+    cmt: bool,
+    cmti: bool,
+    warning: Option<String>,
+    constants: std::collections::HashMap<String, DiskConstant>,
+    arities: std::collections::HashMap<String, DiskExportArity>,
+    hoisted_exports: Vec<(Vec<String>, String)>,
+}
+
+#[derive(Serialize, Deserialize)]
+enum DiskConstant {
+    Bool(bool),
+    Null,
+    Undefined(bool),
+}
+
+#[derive(Serialize, Deserialize)]
+enum DiskArity {
+    Na,
+    Info(Vec<i32>, bool),
+}
+
+#[derive(Serialize, Deserialize)]
+enum DiskExportArity {
+    Single(DiskArity),
+    Submodule(Vec<DiskArity>),
+}
+
+impl From<&Arity> for DiskArity {
+    fn from(arity: &Arity) -> Self {
+        match arity {
+            Arity::Na => Self::Na,
+            Arity::Info { arities, variadic } => Self::Info(arities.clone(), *variadic),
+        }
+    }
+}
+
+impl From<DiskArity> for Arity {
+    fn from(arity: DiskArity) -> Self {
+        match arity {
+            DiskArity::Na => Self::Na,
+            DiskArity::Info(arities, variadic) => Self::Info { arities, variadic },
+        }
+    }
+}
+
+fn metadata_path(package: &packages::Package, source: &Path) -> PathBuf {
+    helpers::get_compiler_asset(package, &package.namespace, source, "cmi")
+        .with_extension("in-process-js.json")
+}
+
+fn save_js_metadata(
+    package: &packages::Package,
+    source: &Path,
+    is_pure: bool,
+    constants: &AHashMap<String, CmjExportConstant>,
+    arities: &AHashMap<String, CmjExportArity>,
+    hoisted: &[rescript_compiler::lambda::HoistedExport],
+    warning: Option<&str>,
+) -> Result<()> {
+    let cmi_path = helpers::get_compiler_asset(package, &package.namespace, source, "cmi");
+    let metadata = DiskJsMetadata {
+        cmt: cmi_path.with_extension("cmt").exists(),
+        cmti: cmi_path.with_extension("cmti").exists(),
+        warning: warning.map(str::to_owned),
+        is_pure,
+        constants: constants
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    match value {
+                        CmjExportConstant::Bool(value) => DiskConstant::Bool(*value),
+                        CmjExportConstant::Null => DiskConstant::Null,
+                        CmjExportConstant::Undefined { is_unit } => DiskConstant::Undefined(*is_unit),
+                    },
+                )
+            })
+            .collect(),
+        arities: arities
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    match value {
+                        CmjExportArity::Single(arity) => DiskExportArity::Single(arity.into()),
+                        CmjExportArity::Submodule(items) => {
+                            DiskExportArity::Submodule(items.iter().map(Into::into).collect())
+                        }
+                    },
+                )
+            })
+            .collect(),
+        hoisted_exports: hoisted
+            .iter()
+            .map(|item| (item.path.clone(), item.export_name.clone()))
+            .collect(),
+    };
+    let path = metadata_path(package, source);
+    let bytes = serde_json::to_vec(&metadata)?;
+    // A failed build must not leave a partially-written cache entry.
+    let tmp = path.with_extension("in-process-js.tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(tmp, path)?;
+    Ok(())
+}
+
+fn load_js_metadata(
+    package: &packages::Package,
+    source: &Path,
+) -> Option<(InMemoryModuleInfo, bool, bool, Option<String>)> {
+    let bytes = std::fs::read(metadata_path(package, source)).ok()?;
+    let metadata: DiskJsMetadata = serde_json::from_slice(&bytes).ok()?;
+    let constants = metadata
+        .constants
+        .into_iter()
+        .map(|(key, value)| {
+            (
+                key,
+                match value {
+                    DiskConstant::Bool(value) => CmjExportConstant::Bool(value),
+                    DiskConstant::Null => CmjExportConstant::Null,
+                    DiskConstant::Undefined(is_unit) => CmjExportConstant::Undefined { is_unit },
+                },
+            )
+        })
+        .collect();
+    let arities = metadata
+        .arities
+        .into_iter()
+        .map(|(key, value)| {
+            (
+                key,
+                match value {
+                    DiskExportArity::Single(arity) => CmjExportArity::Single(arity.into()),
+                    DiskExportArity::Submodule(items) => {
+                        CmjExportArity::Submodule(items.into_iter().map(Into::into).collect())
+                    }
+                },
+            )
+        })
+        .collect();
+    let hoisted = metadata
+        .hoisted_exports
+        .into_iter()
+        .map(|(path, export_name)| rescript_compiler::lambda::HoistedExport { path, export_name })
+        .collect();
+    Some((
+        InMemoryModuleInfo::new(
+            package.path.join(source),
+            metadata.is_pure,
+            constants,
+            package.name == "@rescript/runtime",
+        )
+        .with_cmj_export_arities(arities)
+        .with_cmj_hoisted_exports(hoisted),
+        metadata.cmt,
+        metadata.cmti,
+        metadata.warning,
+    ))
+}
+
+/// Recover one-shot outputs after the parse phase has reconstructed the dependency
+/// graph. Only a complete set of artifacts from this compiler is eligible.
+pub fn seed_clean_in_process_modules(build_state: &mut BuildCommandState) {
+    let root_config = build_state.get_root_config();
+    let mut clean = Vec::new();
+    for (name, module) in &build_state.modules {
+        let SourceType::SourceFile(source) = &module.source_type else {
+            continue;
+        };
+        let package = &build_state.packages[&module.package_name];
+        let path = &source.implementation.path;
+        let cmi = helpers::get_compiler_asset(package, &package.namespace, path, "cmi");
+        let cmt = cmi.with_extension("cmt");
+        let cmti = cmi.with_extension("cmti");
+        let metadata = metadata_path(package, path);
+        let source_time = source
+            .interface
+            .as_ref()
+            .map_or(source.implementation.last_modified, |iface| {
+                source.implementation.last_modified.max(iface.last_modified)
+            });
+        // Typed artifacts and JS may deliberately retain their mtime when their
+        // contents are unchanged. The metadata file is rewritten after each
+        // successful compilation, so its mtime is the build generation marker.
+        if std::fs::metadata(&metadata)
+            .and_then(|m| m.modified())
+            .map_or(true, |t| t < source_time)
+        {
+            continue;
+        }
+        let Some((info, has_cmt, has_cmti, warning)) = load_js_metadata(package, path) else {
+            continue;
+        };
+        if !cmi.exists()
+            || (has_cmt && !cmt.exists())
+            || (has_cmti && !cmti.exists())
+            || root_config
+                .get_package_specs()
+                .iter()
+                .map(|spec| js_output_path_for_spec(package, path, root_config, spec))
+                .any(|output| !output.exists())
+        {
+            continue;
+        }
+        if rescript_compiler::cmi::cmi_format::read_cmi(&cmi.to_string_lossy()).is_err() {
+            continue;
+        }
+        let info = info.with_package(
+            package.name.clone(),
+            package.path.clone(),
+            js_output_suffix_for_registry(root_config),
+        );
+        clean.push((name.clone(), info, warning));
+    }
+    for (name, info, warning) in clean {
+        let module = build_state.modules.get_mut(&name).unwrap();
+        module.compile_dirty = false;
+        if let SourceType::SourceFile(source) = &mut module.source_type {
+            source.implementation.compile_warnings = warning;
+        }
+        build_state
+            .module_registry
+            .lock()
+            .unwrap()
+            .register_disk_module(&name, info);
+    }
+}
+
+/// Recover dependents of an interrupted build: a changed dependency CMI may
+/// have been written before its dependents were reached. Unchanged CMI files
+/// retain their mtime, so implementation-only edits do not invalidate users.
+pub fn mark_clean_with_expired_interfaces_dirty(build_state: &mut BuildCommandState) {
+    let mut expired = Vec::new();
+    for (name, module) in &build_state.modules {
+        if module.compile_dirty {
+            continue;
+        }
+        let SourceType::SourceFile(source) = &module.source_type else {
+            continue;
+        };
+        let package = &build_state.packages[&module.package_name];
+        let Ok(compiled_at) = std::fs::metadata(metadata_path(package, &source.implementation.path))
+            .and_then(|metadata| metadata.modified())
+        else {
+            continue;
+        };
+        if module.deps.iter().any(|dep| {
+            let Some(dependency) = build_state.modules.get(dep) else {
+                return false;
+            };
+            let SourceType::SourceFile(dep_source) = &dependency.source_type else {
+                return false;
+            };
+            let dep_package = &build_state.packages[&dependency.package_name];
+            let cmi = helpers::get_compiler_asset(
+                dep_package,
+                &dep_package.namespace,
+                &dep_source.implementation.path,
+                "cmi",
+            );
+            std::fs::metadata(cmi)
+                .and_then(|metadata| metadata.modified())
+                .is_ok_and(|modified| modified > compiled_at)
+        }) {
+            expired.push(name.clone());
+        }
+    }
+    for name in expired {
+        build_state.modules.get_mut(&name).unwrap().compile_dirty = true;
+    }
+}
 
 /// Decode captured compiler output (stdout or stderr) into a String.
 ///
@@ -156,6 +437,8 @@ struct SignatureReadyMsg {
     module_name: String,
     fingerprint: u64,
     is_pure: bool,
+    previous_cmi_hash: Option<blake3::Hash>,
+    cmi_path: PathBuf,
     registry_updates: Vec<PendingRegistryUpdate>,
 }
 
@@ -333,11 +616,17 @@ fn apply_pending_registry_updates(
 }
 
 fn apply_signature_ready(build_command_state: &BuildCommandState, msg: SignatureReadyMsg) -> bool {
+    let previous_cmi_hash = msg.previous_cmi_hash;
+    let cmi_path = msg.cmi_path.clone();
     apply_pending_registry_updates(build_command_state, msg.registry_updates);
     let generation_before = build_command_state.get_interface_generation(&msg.module_name);
     let generation_after =
         build_command_state.register_in_memory_interface(msg.module_name, msg.fingerprint, msg.is_pure);
-    generation_before.is_some() && generation_before == Some(generation_after)
+    if generation_before.is_some() {
+        generation_before == Some(generation_after)
+    } else {
+        previous_cmi_hash.is_some() && previous_cmi_hash == helpers::compute_file_hash(&cmi_path)
+    }
 }
 
 fn unblock_dependents(
@@ -808,6 +1097,16 @@ pub fn compile(
     )
     .entered();
     let compile_parent_span = Span::current();
+    if dirty_modules.is_empty() {
+        set_length(0);
+        let mut warnings = String::new();
+        append_compile_warnings(
+            &build_state.build_state,
+            collect_stored_warnings_for_modules_not_recompiled(&build_state.build_state, &AHashSet::new()),
+            &mut warnings,
+        );
+        return Ok((String::new(), warnings, 0));
+    }
 
     // In --in-process mode, purge deleted/renamed modules from the in-memory
     // registries so stale entries don't remain resolvable in watch mode.
@@ -1168,8 +1467,8 @@ pub fn compile(
                             );
                         }
 
-                        let module_failed = msg.result.is_err()
-                            || msg.interface_result.as_ref().is_some_and(|r| r.is_err());
+                        let module_failed =
+                            msg.result.is_err() || msg.interface_result.as_ref().is_some_and(|r| r.is_err());
                         if module_failed {
                             has_errors = true;
                         }
@@ -1280,9 +1579,7 @@ pub fn compile(
     // neither reported nor counted, and leave the module dirty.
     let failed: AHashSet<String> = results_buffer
         .iter()
-        .filter(|msg| {
-            msg.result.is_err() || matches!(msg.interface_result, Some(Err(_)))
-        })
+        .filter(|msg| msg.result.is_err() || matches!(msg.interface_result, Some(Err(_))))
         .map(|msg| msg.module_name.clone())
         .collect();
     if !failed.is_empty() {
@@ -2092,7 +2389,10 @@ fn build_compiler_options(
         make_runtime: parsed_flags.make_runtime,
         gentype_config,
         gentype_resolver,
-        typed_artifacts: Some(std::sync::Arc::new(typed_artifact_output(package, source_file_path))),
+        typed_artifacts: Some(std::sync::Arc::new(typed_artifact_output(
+            package,
+            source_file_path,
+        ))),
         keep_locs: parsed_flags.keep_locs,
         binary_annotations: parsed_flags.binary_annotations,
         visible_package_roots: Some(visible_package_roots),
@@ -3245,6 +3545,8 @@ fn compile_module_in_process_to_js_boundary(
     let root_config = build_state.get_root_config();
 
     let source_abs = Path::new(&package.path).join(implementation_path);
+    let cmi_path = helpers::get_compiler_asset(package, &package.namespace, implementation_path, "cmi");
+    let previous_cmi_hash = helpers::compute_file_hash(&cmi_path);
     let is_runtime = package.name == "@rescript/runtime";
     let provisional_is_pure = false;
     let provisional_module_info = in_memory_module_info_for_package(
@@ -3300,11 +3602,13 @@ fn compile_module_in_process_to_js_boundary(
                 intf_source_abs.display()
             ),
         }
-        .map_err(|e| match e.downcast::<rescript_compiler::driver::UserDiagnostic>() {
-            // A compiler diagnostic is reported as the text bsc prints.
-            Ok(diagnostic) => anyhow!("{}", diagnostic.output()),
-            Err(e) => anyhow!("Interface typecheck failed for {}: {}", module_name, e),
-        });
+        .map_err(
+            |e| match e.downcast::<rescript_compiler::driver::UserDiagnostic>() {
+                // A compiler diagnostic is reported as the text bsc prints.
+                Ok(diagnostic) => anyhow!("{}", diagnostic.output()),
+                Err(e) => anyhow!("Interface typecheck failed for {}: {}", module_name, e),
+            },
+        );
 
         let intf_result = match intf_result {
             Ok(r) => r,
@@ -3354,6 +3658,8 @@ fn compile_module_in_process_to_js_boundary(
                     module_name: module_name.to_string(),
                     fingerprint: intf_fingerprint,
                     is_pure: provisional_is_pure,
+                    previous_cmi_hash,
+                    cmi_path: cmi_path.clone(),
                     registry_updates: interface_registry_update.iter().cloned().collect::<Vec<_>>(),
                 }))
                 .map_err(|err| anyhow!("failed to publish interface signature for {module_name}: {err}"))?;
@@ -3374,6 +3680,7 @@ fn compile_module_in_process_to_js_boundary(
     let signature_hooks = scheduler_hooks.cloned();
     let signature_module_name = module_name.to_string();
     let signature_module_info = provisional_module_info.clone();
+    let signature_cmi_path = cmi_path.clone();
     let mut signature_hook =
         move |ready: rescript_compiler::driver::InProcessSignatureReady| -> Result<Option<ModuleRegistry>> {
             let Some(hooks) = signature_hooks.as_ref() else {
@@ -3402,6 +3709,8 @@ fn compile_module_in_process_to_js_boundary(
                     module_name: signature_module_name.clone(),
                     fingerprint,
                     is_pure: provisional_is_pure,
+                    previous_cmi_hash,
+                    cmi_path: signature_cmi_path.clone(),
                     registry_updates,
                 }))
                 .map_err(|err| {
@@ -3748,6 +4057,16 @@ fn finish_in_process_js_inner(
             js_output_count
         );
     }
+
+    save_js_metadata(
+        package,
+        &implementation_path,
+        compile_result.is_pure,
+        &compile_result.cmj_export_constants,
+        &compile_result.cmj_export_arities,
+        &compile_result.hoisted_exports,
+        warning.as_deref(),
+    )?;
 
     Ok(InProcessModuleResult {
         warning,

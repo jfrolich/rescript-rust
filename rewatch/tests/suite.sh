@@ -132,6 +132,7 @@ fi
 ./compile/17-prod-flag.sh &&
 ./compile/18-external-dep-uncurried-dot.sh &&
 ./compile/19-in-process-namespaced-package-module.sh &&
+./compile/20-one-shot-incremental.sh &&
 ./compile/19-utf8-warning.sh &&
 ./compile/14-no-testrepo-changes.sh &&
 ./compile/15-no-new-files.sh &&

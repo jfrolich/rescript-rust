@@ -1,7 +1,8 @@
-[2K No implementation file found for interface file (skipping): src/ModuleWithInterface2.resi
+[2K
+ No implementation file found for interface file (skipping): src/ModuleWithInterface2.resi
 Cleaned 1/512
 Parsed 479 source files
-Compiled 472 modules
+Compiled incremental modules
 
   [1;33mWarning number 32[0m
   [36m/packages/watch-warnings/src/ModuleA.res[0m:[2m1:5-15[0m
