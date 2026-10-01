@@ -2158,6 +2158,8 @@ pub(crate) struct InProcessCompilerFlags {
     pub(crate) cross_module_inline: bool,
     pub(crate) no_assert_false: bool,
     pub(crate) noassert: bool,
+    /// `Clflags.transparent_modules` (`-no-alias-deps`).
+    pub(crate) transparent_modules: bool,
     pub(crate) no_builtin_ppx: bool,
     pub(crate) make_runtime: bool,
     pub(crate) debug: bool,
@@ -2182,6 +2184,7 @@ impl Default for InProcessCompilerFlags {
             cross_module_inline: false,
             no_assert_false: false,
             noassert: false,
+            transparent_modules: false,
             no_builtin_ppx: false,
             make_runtime: false,
             debug: false,
@@ -2210,6 +2213,8 @@ pub(crate) fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessComp
             // OCaml compiler/bsc/rescript_compiler_main.ml:391-392
             // parses -noassert into Clflags.noassert.
             "-noassert" => parsed.noassert = true,
+            // compiler/bsc/rescript_compiler_main.ml:325-327.
+            "-no-alias-deps" => parsed.transparent_modules = true,
             "-bs-no-builtin-ppx" => parsed.no_builtin_ppx = true,
             "-make-runtime" => parsed.make_runtime = true,
             "-bs-g" => parsed.debug = true,
@@ -2484,6 +2489,7 @@ fn build_compiler_options(
         cross_module_inline: parsed_flags.cross_module_inline,
         no_assert_false: parsed_flags.no_assert_false,
         noassert: parsed_flags.noassert,
+        transparent_modules: parsed_flags.transparent_modules,
         no_builtin_ppx: parsed_flags.no_builtin_ppx,
         nopervasives: parsed_flags.nopervasives,
         no_version_header: parsed_flags.no_version_header,
@@ -3586,6 +3592,7 @@ fn runtime_compiler_options(
         cross_module_inline: parsed_flags.cross_module_inline,
         no_assert_false: parsed_flags.no_assert_false,
         noassert: parsed_flags.noassert,
+        transparent_modules: parsed_flags.transparent_modules,
         no_builtin_ppx: parsed_flags.no_builtin_ppx,
         nopervasives: parsed_flags.nopervasives,
         module_name: Some(module_name.to_string()),
