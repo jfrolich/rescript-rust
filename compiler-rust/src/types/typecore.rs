@@ -25662,7 +25662,18 @@ fn qualify_label_description_paths<'a>(
         Path::Papply(_, _) => return,
     }
 
-    if let Path::Pdot(_, _, _) = &res_path {
+    // An inline record's type (`M.t.C`) has no manifest, so
+    // `extract_concrete_typedecl` stops there (compiler/ml/ctype.ml:1249-1265)
+    // and `lookup_from_type` takes the alias component's own labels
+    // (typecore.ml:852-870); only a regular record reaches the alias target
+    // through its strengthened manifest (mtype.ml:56-60).
+    let is_inline_record_label = matches!(
+        label.lbl_repres,
+        crate::types::RecordRepresentation::RecordInlined { .. }
+    );
+    if let Path::Pdot(_, _, _) = &res_path
+        && !is_inline_record_label
+    {
         let root = path_root_module(&res_path);
         if !root.same(&res_path) {
             if let Some(alias_target) = raw_alias_target_for_module_path(&root, env, pers_env, ctx)
