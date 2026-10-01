@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::driver::{
     CompilerOptions, experimental_let_unwrap_for_structure, jsx_version_for_structure,
-    load_pervasives, normalize_signature_types,
+    load_pervasives, normalize_signature,
 };
 use crate::ident::Ident;
 use crate::lambda::lam_arity::Arity;
@@ -1761,7 +1761,7 @@ impl PersistentEnv {
         let mut tctx = TypeCheckContext::new(ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         tctx.set_persistent_env(fallback_pers);
-        let (typed_structure, final_env) =
+        let (typed_structure, _final_env) =
             type_structure(&mut tctx, &env, parser.arena(), &structure).ok()?;
 
         let has_resi = source_path
@@ -1771,7 +1771,10 @@ impl PersistentEnv {
             && !self.in_process_mode
             && FsPath::new(&format!("{}i", filename)).exists();
         if !has_resi {
-            normalize_signature_types(ctx, &typed_structure, &final_env);
+            normalize_signature(
+                ctx,
+                &crate::types::includemod::simplify_signature(&typed_structure.str_type),
+            );
         }
 
         let fallback_pers = tctx.persistent_env.take()?;

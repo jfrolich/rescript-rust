@@ -12121,7 +12121,7 @@ fn compile_source_to_js_with_options_inner(
                 suppress_info_style,
             ));
         }
-        normalize_signature_types(&type_ctx, &typed_structure, &final_env);
+        normalize_signature(&type_ctx, &simple_signature);
         (Some(simple_signature), Some(implementation_coercion))
     } else {
         (None, None)
@@ -14956,134 +14956,33 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
 /// uses `build_as_type(inner)` for alias patterns. For `Tpat_alias(Tpat_any, "v")`,
 /// val_type = Tpat_any's pat_type, NOT the outer pattern's pat_type. We look up
 /// val_type from the env to match this behavior exactly.
-pub(crate) fn normalize_signature_types(
+/// `Typemod.normalize_signature` (compiler/ml/typemod.ml:1634-1645): run
+/// `Ctype.normalize_type` over the value types of the (simplified)
+/// signature, recursing into module types. typemod.ml:1765-1766 applies it to
+/// `simplify_signature sg`, so shadowed items are left as typed.
+pub(crate) fn normalize_signature(
     type_ctx: &TypeContext,
-    typed_structure: &crate::types::typedtree::Structure,
-    final_env: &crate::types::env::Env,
+    sig: &[crate::types::decl::SignatureItem],
 ) {
-    use crate::types::ctype::normalize_type;
     use crate::types::decl::SignatureItem;
-    use crate::types::typedtree::{ModuleExprDesc, PatternDesc, StructureItemDesc};
-
-    /// Collect bound variable names from a pattern.
-    fn collect_bound_names(pat: &crate::types::typedtree::Pattern, names: &mut Vec<String>) {
-        match &pat.pat_desc {
-            PatternDesc::Tpat_var(id, _) => {
-                names.push(id.name().to_string());
+    for item in sig {
+        match item {
+            SignatureItem::SigValue(_, desc) => {
+                crate::types::ctype::normalize_type(type_ctx, desc.val_type);
             }
-            PatternDesc::Tpat_alias(inner, id, _) => {
-                collect_bound_names(inner, names);
-                names.push(id.name().to_string());
-            }
-            PatternDesc::Tpat_tuple(pats)
-            | PatternDesc::Tpat_construct(_, _, pats)
-            | PatternDesc::Tpat_array(pats) => {
-                for p in pats {
-                    collect_bound_names(p, names);
-                }
-            }
-            PatternDesc::Tpat_record(fields, _, _) => {
-                for (_, _, p, _) in fields {
-                    collect_bound_names(p, names);
-                }
-            }
-            PatternDesc::Tpat_variant(_, Some(inner), _) => collect_bound_names(inner, names),
-            PatternDesc::Tpat_or(left, _, _) => collect_bound_names(left, names),
+            SignatureItem::SigModule(_, md, _) => normalize_modtype(type_ctx, &md.md_type),
             _ => {}
         }
     }
+}
 
-    fn local_sig_values(
-        sig: &[SignatureItem],
-    ) -> ahash::AHashMap<String, crate::types::type_expr::TypeExprRef> {
-        let mut map = ahash::AHashMap::new();
-        for item in sig {
-            if let SignatureItem::SigValue(id, vd) = item {
-                map.insert(id.name().to_string(), vd.val_type);
-            }
-        }
-        map
+fn normalize_modtype(type_ctx: &TypeContext, mty: &crate::types::decl::ModuleType) {
+    use crate::types::decl::ModuleType;
+    match mty {
+        ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
+        ModuleType::MtySignature(sig) => normalize_signature(type_ctx, sig),
+        ModuleType::MtyFunctor { result, .. } => normalize_modtype(type_ctx, result),
     }
-
-    fn norm_structure(
-        ctx: &TypeContext,
-        env: &crate::types::env::Env,
-        s: &crate::types::typedtree::Structure,
-        allow_local_sig_values: bool,
-    ) {
-        let local_values = if allow_local_sig_values {
-            local_sig_values(&s.str_type)
-        } else {
-            ahash::AHashMap::new()
-        };
-
-        for item in &s.str_items {
-            match &item.str_desc {
-                StructureItemDesc::Tstr_value(_, bindings) => {
-                    for b in bindings {
-                        // Look up val_type from env for each bound variable,
-                        // matching OCaml's normalize_signature_item(Sig_value).
-                        let mut names = Vec::new();
-                        collect_bound_names(&b.vb_pat, &mut names);
-                        let mut normalized_from_env = false;
-                        for name in &names {
-                            if let Some(&val_type) = local_values.get(name) {
-                                normalize_type(ctx, val_type);
-                                normalized_from_env = true;
-                            } else if let Ok(vd) = env.find_value(name) {
-                                normalize_type(ctx, vd.val_type);
-                                normalized_from_env = true;
-                            }
-                        }
-                        // Module-local generated bindings are not visible through
-                        // the outer env threaded into nested structures. When no
-                        // lookup succeeds, fall back to the binding pattern type
-                        // so recursively reachable function/variant types still
-                        // get normalized before typedtree sexp printing.
-                        if !normalized_from_env {
-                            normalize_type(ctx, b.vb_pat.pat_type);
-                        }
-                    }
-                }
-                StructureItemDesc::Tstr_primitive(vd) => {
-                    if let Some(&val_type) = local_values.get(vd.val_id.name()) {
-                        normalize_type(ctx, val_type);
-                    } else {
-                        normalize_type(ctx, vd.val_desc.ctyp_type);
-                    }
-                }
-                StructureItemDesc::Tstr_module(mb) => {
-                    norm_modexpr(ctx, env, &mb.mb_expr);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn norm_modexpr(
-        ctx: &TypeContext,
-        env: &crate::types::env::Env,
-        me: &crate::types::typedtree::ModuleExpr,
-    ) {
-        match &me.mod_desc {
-            ModuleExprDesc::Tmod_structure(s) => {
-                norm_structure(ctx, env, s, true);
-            }
-            ModuleExprDesc::Tmod_constraint(me, _, _, _) => {
-                norm_modexpr(ctx, env, me);
-            }
-            ModuleExprDesc::Tmod_functor(_, _, _, me) => {
-                norm_modexpr(ctx, env, me);
-            }
-            ModuleExprDesc::Tmod_apply(me1, me2, _) => {
-                norm_modexpr(ctx, env, me1);
-                norm_modexpr(ctx, env, me2);
-            }
-            _ => {}
-        }
-    }
-
-    norm_structure(type_ctx, final_env, typed_structure, false);
 }
 
 fn rename_saved_module_type_idents(type_ctx: &TypeContext, mty: &crate::types::decl::ModuleType) {
@@ -15820,7 +15719,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                     ),
                 ));
             }
-            normalize_signature_types(&type_ctx, &typed_structure, &final_env);
+            normalize_signature(&type_ctx, &simple_signature);
         }
 
         saved_cmi_signature =
