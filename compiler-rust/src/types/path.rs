@@ -32,7 +32,7 @@ use std::sync::Arc;
 /// Paths are used to refer to types, modules, and values throughout
 /// the type checker. Unlike `Longident`, they use `Ident` with stamps
 /// for unique identification.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Path {
     /// A simple identifier: `String`, `int`
     Pident(Ident),
@@ -41,6 +41,35 @@ pub enum Path {
     Pdot(Arc<Path>, crate::name::Name, i32),
     /// Functor application: `F(X)` is `Papply(F, X)`
     Papply(Arc<Path>, Arc<Path>),
+}
+
+/// Consistent with the derived equality (`Ident` compares with `same`: by
+/// stamp when stamped, else by name). Identifiers hash by stamp or by the
+/// interned name's precomputed hash, so hashing a path never reads name text.
+impl std::hash::Hash for Path {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Path::Pident(id) => {
+                if id.stamp() != 0 {
+                    state.write_u8(0);
+                    state.write_i32(id.stamp());
+                } else {
+                    state.write_u8(1);
+                    std::hash::Hash::hash(&id.name_atom(), state);
+                }
+            }
+            Path::Pdot(parent, name, _) => {
+                state.write_u8(2);
+                std::hash::Hash::hash(name, state);
+                std::hash::Hash::hash(&**parent, state);
+            }
+            Path::Papply(functor, argument) => {
+                state.write_u8(3);
+                std::hash::Hash::hash(&**functor, state);
+                std::hash::Hash::hash(&**argument, state);
+            }
+        }
+    }
 }
 
 /// Position constant for no position hint.
