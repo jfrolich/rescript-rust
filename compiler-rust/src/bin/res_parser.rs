@@ -215,6 +215,7 @@ fn run() {
             let (signature, jsx_warnings) = match jsx_ppx::transform_signature_with_warnings_result(
                 signature,
                 args.jsx_version,
+                &args.jsx_module,
                 parser.arena_mut(),
             ) {
                 Ok(result) => result,
@@ -347,6 +348,7 @@ fn run() {
             let (structure, jsx_warnings) = match jsx_ppx::transform_structure_with_warnings_result(
                 structure,
                 args.jsx_version,
+                &args.jsx_module,
                 parser.arena_mut(),
             ) {
                 Ok(result) => result,

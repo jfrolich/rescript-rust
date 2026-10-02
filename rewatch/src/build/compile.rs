@@ -1779,6 +1779,7 @@ pub(crate) struct InProcessCompilerFlags {
     pub(crate) debug: bool,
     pub(crate) jsx_preserve: bool,
     pub(crate) jsx_version: Option<i32>,
+    pub(crate) jsx_module: Option<String>,
     pub(crate) experimental_let_unwrap: bool,
     pub(crate) open_modules: Vec<String>,
     pub(crate) warning_specs: Vec<String>,
@@ -1804,6 +1805,7 @@ impl Default for InProcessCompilerFlags {
             debug: false,
             jsx_preserve: false,
             jsx_version: None,
+            jsx_module: None,
             experimental_let_unwrap: false,
             open_modules: Vec::new(),
             warning_specs: Vec::new(),
@@ -1840,6 +1842,15 @@ pub(crate) fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessComp
             "-bs-jsx" => {
                 if let Some(version) = iter.next().and_then(|v| v.parse::<i32>().ok()) {
                     parsed.jsx_version = Some(version);
+                }
+            }
+            "-bs-jsx-module" => {
+                if let Some(module) = iter.next() {
+                    rescript_compiler::driver::apply_jsx_module_flag(
+                        module,
+                        &mut parsed.jsx_module,
+                        &mut parsed.jsx_version,
+                    );
                 }
             }
             "-enable-experimental" => {
@@ -2096,6 +2107,7 @@ fn build_compiler_options(
         source_map_sources_content,
         source_map_root,
         jsx_version,
+        jsx_module: parsed_flags.jsx_module.clone(),
         experimental_let_unwrap,
         jsx_preserve: parsed_flags.jsx_preserve,
         debug: parsed_flags.debug,
@@ -3373,6 +3385,7 @@ fn runtime_compiler_options(
         output_module_format,
         js_output_targets,
         jsx_version: parsed_flags.jsx_version,
+        jsx_module: parsed_flags.jsx_module.clone(),
         experimental_let_unwrap: parsed_flags.experimental_let_unwrap
             || runtime_config.has_experimental_feature(config::ExperimentalFeature::LetUnwrap),
         jsx_preserve: parsed_flags.jsx_preserve,

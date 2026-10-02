@@ -103,6 +103,7 @@ struct Options {
     warning_specs: Vec<String>,
     warning_error_specs: Vec<String>,
     jsx_version: Option<i32>,
+    jsx_module: Option<String>,
     experimental_let_unwrap: bool,
     jsx_preserve: bool,
     nopervasives: bool,
@@ -310,6 +311,15 @@ fn run() -> Result<()> {
                         opts.jsx_version = val.parse::<i32>().ok();
                     }
                 }
+                "-bs-jsx-module" => {
+                    if let Some(val) = args.next() {
+                        rescript_compiler::driver::apply_jsx_module_flag(
+                            &val,
+                            &mut opts.jsx_module,
+                            &mut opts.jsx_version,
+                        );
+                    }
+                }
                 "-enable-experimental" => {
                     if let Some(val) = args.next() {
                         if val == "LetUnwrap" {
@@ -470,6 +480,7 @@ fn run() -> Result<()> {
                 warning_specs: opts.warning_specs.clone(),
                 warning_error_specs: opts.warning_error_specs.clone(),
                 jsx_version: opts.jsx_version,
+                jsx_module: opts.jsx_module.clone(),
                 experimental_let_unwrap: opts.experimental_let_unwrap,
                 jsx_preserve: opts.jsx_preserve,
                 no_builtin_ppx: opts.no_builtin_ppx,
@@ -524,6 +535,7 @@ fn run() -> Result<()> {
         source_map_sources_content: opts.source_map_sources_content,
         source_map_root: opts.source_map_root.clone(),
         jsx_version: opts.jsx_version,
+        jsx_module: opts.jsx_module.clone(),
         experimental_let_unwrap: opts.experimental_let_unwrap,
         jsx_preserve: opts.jsx_preserve,
         debug: opts.debug,

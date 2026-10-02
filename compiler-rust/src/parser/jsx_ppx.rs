@@ -170,19 +170,21 @@ const JSX_SPREAD_AFTER_PROP_MSG: &str =
 pub fn transform_structure(
     structure: Structure,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> Structure {
-    transform_structure_result(structure, initial_version, arena).expect("JSX PPX transform failed")
+    transform_structure_result(structure, initial_version, initial_module, arena).expect("JSX PPX transform failed")
 }
 
 /// Transform a structure, applying JSX PPX transformations.
 pub fn transform_structure_result(
     structure: Structure,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> JsxPreprocessorResult<Structure> {
     let (structure, _) =
-        transform_structure_with_warnings_result(structure, initial_version, arena)?;
+        transform_structure_with_warnings_result(structure, initial_version, initial_module, arena)?;
     Ok(structure)
 }
 
@@ -190,9 +192,10 @@ pub fn transform_structure_result(
 pub fn transform_structure_with_warnings(
     structure: Structure,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> (Structure, Vec<JsxPreprocessorWarning>) {
-    transform_structure_with_warnings_result(structure, initial_version, arena)
+    transform_structure_with_warnings_result(structure, initial_version, initial_module, arena)
         .expect("JSX PPX transform failed")
 }
 
@@ -200,10 +203,11 @@ pub fn transform_structure_with_warnings(
 pub fn transform_structure_with_warnings_result(
     structure: Structure,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> JsxPreprocessorResult<(Structure, Vec<JsxPreprocessorWarning>)> {
     let (result, warnings) =
-        transform_structure_collecting_warnings(structure, initial_version, arena);
+        transform_structure_collecting_warnings(structure, initial_version, initial_module, arena);
     result.map(|structure| (structure, warnings))
 }
 
@@ -213,6 +217,7 @@ pub fn transform_structure_with_warnings_result(
 pub fn transform_structure_collecting_warnings(
     structure: Structure,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> (JsxPreprocessorResult<Structure>, Vec<JsxPreprocessorWarning>) {
     // Extract file name from first item's location
@@ -229,6 +234,7 @@ pub fn transform_structure_collecting_warnings(
     };
     let mut config = JsxConfig {
         version: initial_version,
+        module_name: initial_module.to_string(),
         file_name,
         empty_loc,
         ..Default::default()
@@ -250,19 +256,21 @@ pub fn transform_structure_collecting_warnings(
 pub fn transform_signature(
     signature: Signature,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> Signature {
-    transform_signature_result(signature, initial_version, arena).expect("JSX PPX transform failed")
+    transform_signature_result(signature, initial_version, initial_module, arena).expect("JSX PPX transform failed")
 }
 
 /// Transform a signature, applying JSX PPX transformations.
 pub fn transform_signature_result(
     signature: Signature,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> JsxPreprocessorResult<Signature> {
     let (signature, _) =
-        transform_signature_with_warnings_result(signature, initial_version, arena)?;
+        transform_signature_with_warnings_result(signature, initial_version, initial_module, arena)?;
     Ok(signature)
 }
 
@@ -270,9 +278,10 @@ pub fn transform_signature_result(
 pub fn transform_signature_with_warnings(
     signature: Signature,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> (Signature, Vec<JsxPreprocessorWarning>) {
-    transform_signature_with_warnings_result(signature, initial_version, arena)
+    transform_signature_with_warnings_result(signature, initial_version, initial_module, arena)
         .expect("JSX PPX transform failed")
 }
 
@@ -280,6 +289,7 @@ pub fn transform_signature_with_warnings(
 pub fn transform_signature_with_warnings_result(
     signature: Signature,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> JsxPreprocessorResult<(Signature, Vec<JsxPreprocessorWarning>)> {
     // Extract file name from first item's location
@@ -296,6 +306,7 @@ pub fn transform_signature_with_warnings_result(
     };
     let mut config = JsxConfig {
         version: initial_version,
+        module_name: initial_module.to_string(),
         file_name,
         empty_loc,
         ..Default::default()
@@ -5000,7 +5011,7 @@ let make = (~value: string) => React.null
         let mut parser = Parser::new("test.res".to_string(), source);
         let structure = module::parse_structure(&mut parser);
         assert!(!parser.has_errors());
-        let transformed = transform_structure(structure, 4, parser.arena_mut());
+        let transformed = transform_structure(structure, 4, "react", parser.arena_mut());
 
         let StructureItemDesc::Pstr_value(value) = &*transformed
             .last()
@@ -5041,7 +5052,7 @@ let make = (~priority as _, ~text="Test") => React.string(text)
         let mut parser = Parser::new("test.res".to_string(), source);
         let structure = module::parse_structure(&mut parser);
         assert!(!parser.has_errors());
-        let transformed = transform_structure(structure, 4, parser.arena_mut());
+        let transformed = transform_structure(structure, 4, "react", parser.arena_mut());
 
         let mut output = Vec::new();
         sexp_locs::print_structure(&transformed, parser.arena(), &mut output);
@@ -5081,7 +5092,7 @@ module MakePreset = (Preset: { let value: int }) => {
             before
         );
 
-        let transformed = transform_structure(structure, 4, parser.arena_mut());
+        let transformed = transform_structure(structure, 4, "react", parser.arena_mut());
 
         let mut after = Vec::new();
         sexp_locs::print_structure(&transformed, parser.arena(), &mut after);

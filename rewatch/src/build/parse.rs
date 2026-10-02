@@ -639,6 +639,7 @@ fn generate_ast(
             warning_specs: parsed.warning_specs,
             warning_error_specs: parsed.warning_error_specs,
             jsx_version: parsed.jsx_version,
+            jsx_module: parsed.jsx_module.clone(),
             jsx_preserve: parsed.jsx_preserve,
             experimental_let_unwrap: parsed.experimental_let_unwrap
                 || rust_parser_let_unwrap_enabled(root_config, &package.config),

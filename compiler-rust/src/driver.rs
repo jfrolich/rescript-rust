@@ -1169,6 +1169,9 @@ pub struct CompilerOptions {
     pub source_map_root: String,
     /// JSX version from CLI `-bs-jsx` (e.g. 4). When set, enables JSX PPX rewrite.
     pub jsx_version: Option<i32>,
+    /// JSX module from CLI `-bs-jsx-module` (`Js_config.jsx_module`); `None`
+    /// is OCaml's default `React`.
+    pub jsx_module: Option<String>,
     /// Experimental LetUnwrap feature from `-enable-experimental LetUnwrap`.
     pub experimental_let_unwrap: bool,
     /// Preserve transformed JSX syntax in the final JS dumper.
@@ -1767,6 +1770,7 @@ impl Default for CompilerOptions {
             source_map_sources_content: false,
             source_map_root: String::new(),
             jsx_version: None,
+            jsx_module: None,
             experimental_let_unwrap: false,
             jsx_preserve: false,
             debug: false,
@@ -2215,6 +2219,35 @@ pub fn apply_external_signature_ppxs(
     Ok(crate::binary_ast::mapper_from0::map_signature(arena, &ast0))
 }
 
+/// `Js_config.string_of_jsx_module !Js_config.jsx_module`
+/// (compiler/common/js_config.ml:66-76): the module the JSX rewrite targets.
+/// File-level `@@config` flags are parsed after the command line, so they win.
+pub fn jsx_module_name<'a>(
+    options: &'a CompilerOptions,
+    file_config: Option<&'a FileConfigOverrides>,
+) -> &'a str {
+    let configured = file_config
+        .and_then(|config| config.jsx_module.as_deref())
+        .or(options.jsx_module.as_deref());
+    match configured {
+        Some(module) if !module.eq_ignore_ascii_case("react") => module,
+        _ => "react",
+    }
+}
+
+/// `-bs-jsx-module` (compiler/bsc/rescript_compiler_main.ml:267-276): set the
+/// JSX module; any module but `react` is generic JSX, which implies JSX v4.
+pub fn apply_jsx_module_flag(
+    module: &str,
+    jsx_module: &mut Option<String>,
+    jsx_version: &mut Option<i32>,
+) {
+    *jsx_module = Some(module.to_string());
+    if !module.eq_ignore_ascii_case("react") {
+        *jsx_version = Some(4);
+    }
+}
+
 pub fn jsx_version_for_structure(
     structure: &Structure,
     options: &CompilerOptions,
@@ -2270,7 +2303,12 @@ fn preprocess_signature_for_typecheck_with_source(
     builtin_ppx_warnings: &mut Vec<ppx::PpxWarning>,
 ) -> Result<Signature> {
     let signature = if let Some(jsx_version) = options.jsx_version {
-        jsx_ppx::transform_signature_result(signature, jsx_version, arena)
+        jsx_ppx::transform_signature_result(
+            signature,
+            jsx_version,
+            jsx_module_name(options, None),
+            arena,
+        )
             .map_err(|e| jsx_ppx_error_to_anyhow(e, arena, source, filename))?
     } else {
         signature
@@ -11963,6 +12001,7 @@ pub fn run_implementation_frontend(
         let (structure, jsx_warnings) = jsx_ppx::transform_structure_collecting_warnings(
             structure,
             jsx_version,
+            jsx_module_name(options, Some(&file_config)),
             parser.arena_mut(),
         );
         let jsx_warnings = jsx_preprocessor_warnings_to_ppx(parser.arena_mut(), jsx_warnings);
@@ -12117,6 +12156,7 @@ fn compile_source_to_js_with_options_inner(
     pers_env.set_load_path_shared(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
     pers_env.set_compiling_module(current_unit_name.clone());
     load_pervasives(
@@ -13207,6 +13247,7 @@ pub fn typecheck_interface_source(
     pers_env.set_load_path_shared(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
     pers_env.set_compiling_module(current_unit_name.clone());
     load_pervasives(
@@ -13636,6 +13677,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         pers_env.set_load_path_shared(load_path, load_path_display);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
+        pers_env.set_jsx_module(options.jsx_module.clone());
         let current_unit_name = options.current_unit_name();
         pers_env.set_compiling_module(current_unit_name.clone());
         load_pervasives(
@@ -13694,6 +13736,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             let (structure, jsx_warnings) = jsx_ppx::transform_structure_collecting_warnings(
                 structure,
                 jsx_version,
+                jsx_module_name(options, Some(&file_config)),
                 parser.arena_mut(),
             );
             let jsx_warnings = jsx_preprocessor_warnings_to_ppx(parser.arena_mut(), jsx_warnings);
@@ -13765,6 +13808,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         pers_env.set_load_path_shared(load_path, load_path_display);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
+        pers_env.set_jsx_module(options.jsx_module.clone());
         let current_unit_name = options.current_unit_name();
         pers_env.set_compiling_module(current_unit_name.clone());
         load_pervasives(
@@ -14393,6 +14437,8 @@ pub struct FileConfigOverrides {
     /// `-bs-no-bin-annot` (`Clflags.binary_annotations := false`).
     pub no_bin_annot: bool,
     pub jsx_version: Option<i32>,
+    /// `-bs-jsx-module`.
+    pub jsx_module: Option<String>,
     /// `-w`/`-warn-error` specs in application order (`true` = `-warn-error`).
     pub warning_ops: Vec<(bool, String)>,
 }
@@ -14484,6 +14530,9 @@ fn run_file_level_flags(
                     return false;
                 }
                 overrides.jsx_version = Some(4);
+            }
+            "-bs-jsx-module" => {
+                apply_jsx_module_flag(arg, &mut overrides.jsx_module, &mut overrides.jsx_version);
             }
             "-enable-experimental" => {
                 if arg == "LetUnwrap" {
@@ -15000,7 +15049,12 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
 
     let jsx_version = options.jsx_version.or(file_config.jsx_version);
     let structure = if let Some(jsx_version) = jsx_version {
-        jsx_ppx::transform_structure_result(structure, jsx_version, &mut arena)
+        jsx_ppx::transform_structure_result(
+            structure,
+            jsx_version,
+            jsx_module_name(options, Some(&file_config)),
+            &mut arena,
+        )
             .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
     } else {
         structure
@@ -15041,6 +15095,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     pers_env.set_load_path_shared(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
     pers_env.set_compiling_module(current_unit_name.clone());
     load_pervasives(
@@ -15099,6 +15154,7 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     pers_env.set_load_path_shared(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
     pers_env.set_compiling_module(current_unit_name.clone());
     load_pervasives(
@@ -15801,6 +15857,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     pers_env.set_load_path_shared(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_jsx_module(options.jsx_module.clone());
     pers_env.set_nopervasives(options.nopervasives);
     pers_env.set_compiling_module(Some(module_name.to_string()));
     load_pervasives(
@@ -16277,6 +16334,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
     persistent_env_for_js.set_load_path_shared(load_path, load_path_display);
     persistent_env_for_js.set_open_modules(options.open_modules.clone());
     persistent_env_for_js.set_jsx_version(options.jsx_version);
+    persistent_env_for_js.set_jsx_module(options.jsx_module.clone());
     persistent_env_for_js.set_nopervasives(options.nopervasives);
     persistent_env_for_js.set_compiling_module(options.module_name.clone());
     if let Some(module_name) = options.module_name.as_deref() {
@@ -16573,6 +16631,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     pers_env.set_load_path_shared(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_jsx_module(options.jsx_module.clone());
     pers_env.set_nopervasives(options.nopervasives);
     pers_env.set_compiling_module(Some(module_name.to_string()));
     load_pervasives(
@@ -16813,6 +16872,7 @@ pub fn typecheck_implementation_in_process(
     pers_env.set_load_path_shared(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_jsx_module(options.jsx_module.clone());
     pers_env.set_nopervasives(options.nopervasives);
     pers_env.set_compiling_module(Some(module_name.to_string()));
     load_pervasives(

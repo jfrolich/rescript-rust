@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::driver::{
-    CompilerOptions, experimental_let_unwrap_for_structure, jsx_version_for_structure,
+    CompilerOptions, experimental_let_unwrap_for_structure, jsx_module_name, jsx_version_for_structure,
     load_pervasives, normalize_signature,
 };
 use crate::ident::Ident;
@@ -687,6 +687,7 @@ pub struct PersistentEnv {
     open_modules: Arc<Vec<String>>,
     /// Default JSX version from CLI flags, if any.
     jsx_version: Option<i32>,
+    jsx_module: Option<String>,
     /// Whether the current compilation uses `-nopervasives`.
     nopervasives: bool,
     /// Cache of renamed signatures (matching OCaml's lazy Subst.signature).
@@ -792,6 +793,7 @@ impl PersistentEnv {
             load_path_display: Arc::new(Vec::new()),
             open_modules: Arc::new(Vec::new()),
             jsx_version: None,
+            jsx_module: None,
             nopervasives: false,
             renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: SharedRegistryMap::default(),
@@ -827,6 +829,7 @@ impl PersistentEnv {
             load_path_display: Arc::new(Vec::new()),
             open_modules: Arc::new(Vec::new()),
             jsx_version: None,
+            jsx_module: None,
             nopervasives: false,
             renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: registry.module_info.clone(),
@@ -1127,6 +1130,10 @@ impl PersistentEnv {
 
     pub fn set_open_modules(&mut self, open_modules: Vec<String>) {
         self.open_modules = Arc::new(open_modules);
+    }
+
+    pub fn set_jsx_module(&mut self, jsx_module: Option<String>) {
+        self.jsx_module = jsx_module;
     }
 
     pub fn set_jsx_version(&mut self, jsx_version: Option<i32>) {
@@ -1755,6 +1762,7 @@ impl PersistentEnv {
             load_path_display: self.load_path_display.clone(),
             open_modules: self.open_modules.clone(),
             jsx_version: self.jsx_version,
+            jsx_module: self.jsx_module.clone(),
             nopervasives: self.nopervasives,
             renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: self.in_memory_modules.clone(),
@@ -1842,13 +1850,20 @@ impl PersistentEnv {
         let options = CompilerOptions {
             open_modules: self.open_modules.as_ref().clone(),
             jsx_version: self.jsx_version,
+            jsx_module: self.jsx_module.clone(),
             ..CompilerOptions::default()
         };
         let experimental_let_unwrap =
             experimental_let_unwrap_for_structure(&structure, &options, parser.arena());
         let jsx_version = jsx_version_for_structure(&structure, &options, parser.arena());
         let structure = if let Some(jsx_version) = jsx_version {
-            jsx_ppx::transform_structure_result(structure, jsx_version, parser.arena_mut()).ok()?
+            jsx_ppx::transform_structure_result(
+                structure,
+                jsx_version,
+                jsx_module_name(&options, None),
+                parser.arena_mut(),
+            )
+            .ok()?
         } else {
             structure
         };
