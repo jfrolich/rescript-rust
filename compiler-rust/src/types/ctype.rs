@@ -1822,18 +1822,43 @@ pub(crate) fn occur_check(
         if ty.is_store() && !ty0.is_store() {
             return true;
         }
+        // Children in `iter_type_expr` order, read under one borrow; leaves
+        // and the nodes `occur_rec` stops at need no bookkeeping.
+        let mut children: smallvec::SmallVec<[TypeExprRef; 8]> = smallvec::SmallVec::new();
+        {
+            let desc = ctx.borrow_desc(ty);
+            match &*desc {
+                TypeDesc::Tvar(_)
+                | TypeDesc::Tnil
+                | TypeDesc::Tunivar(_)
+                | TypeDesc::Tobject { .. }
+                | TypeDesc::Tvariant(_) => return true,
+                TypeDesc::Tconstr { args, .. } | TypeDesc::Tpackage { args, .. } if args.is_empty() => {
+                    return true;
+                }
+                TypeDesc::Tconstr { args, .. } | TypeDesc::Tpackage { args, .. } => {
+                    children.extend(args.iter().copied())
+                }
+                TypeDesc::Ttuple(types) => children.extend(types.iter().copied()),
+                TypeDesc::Tarrow { args, ret } => {
+                    children.extend(args.iter().map(|arg| arg.typ));
+                    children.push(*ret);
+                }
+                TypeDesc::Tfield { typ, rest, .. } => children.extend([*typ, *rest]),
+                TypeDesc::Tlink(t) | TypeDesc::Tsubst(t) => children.push(*t),
+                TypeDesc::Tpoly { body, vars } => {
+                    children.push(*body);
+                    children.extend(vars.iter().copied());
+                }
+            }
+        }
         if !seen.insert(ty) {
             return !on_path.contains(&ty);
         }
         on_path.push(ty);
-        let stops = matches!(&*ctx.borrow_desc(ty), TypeDesc::Tobject { .. } | TypeDesc::Tvariant(_));
-        if !stops {
-            let mut children: smallvec::SmallVec<[TypeExprRef; 8]> = smallvec::SmallVec::new();
-            iter_type_expr(ctx, ty, |child| children.push(child));
-            for child in children {
-                if !surely_occur_free(ctx, ty0, child, seen, on_path) {
-                    return false;
-                }
+        for child in children {
+            if !surely_occur_free(ctx, ty0, child, seen, on_path) {
+                return false;
             }
         }
         on_path.pop();

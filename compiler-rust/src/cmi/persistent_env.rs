@@ -3544,13 +3544,38 @@ fn nonpersistent_path_head(path: &Path) -> Option<(i32, String)> {
     }
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Debug)]
 struct SubstMaps {
     type_stamp_map: HashMap<i32, Path>,
     type_name_map: HashMap<String, Path>,
     module_stamp_map: ModuleStampSubstMap,
     module_name_map: HashMap<String, Path>,
     protected_module_head: Option<(i32, String)>,
+}
+
+/// Fixed hasher keys: `AHashMap::default()` derives fresh random keys per
+/// map, and substitution maps are built for every qualified signature.
+static SUBST_MAP_STATE: ahash::RandomState = ahash::RandomState::with_seeds(
+    0x452821e6_38d01377,
+    0xbe5466cf_34e90c6c,
+    0xc0ac29b7_c97c50dd,
+    0x3f84d5b5_b5470917,
+);
+
+fn subst_map<K, V>() -> HashMap<K, V> {
+    std::collections::HashMap::with_hasher(SUBST_MAP_STATE.clone()).into()
+}
+
+impl Default for SubstMaps {
+    fn default() -> Self {
+        Self {
+            type_stamp_map: subst_map(),
+            type_name_map: subst_map(),
+            module_stamp_map: subst_map(),
+            module_name_map: subst_map(),
+            protected_module_head: None,
+        }
+    }
 }
 
 impl SubstMaps {
