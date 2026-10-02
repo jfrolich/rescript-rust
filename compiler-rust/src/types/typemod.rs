@@ -568,10 +568,31 @@ fn parser_private_to_type_private(
     }
 }
 
+/// The attribute's `Parsetree.payload` in portable form: marshal it exactly as
+/// the parsetree writer does and decode the result.
+fn parser_attr_payload_raw(
+    arena: &ParseArena,
+    attr: &ParsedAttribute,
+) -> Option<Box<crate::types::decl::PayloadValue>> {
+    let mut writer = crate::binary_ast::marshal::MarshalWriter::new();
+    writer.set_arena(arena);
+    crate::binary_ast::current_marshal::marshal_attributes_plain(
+        &Attributes::from_vec(vec![attr.clone()]),
+        &mut writer,
+    );
+    let list = crate::cmi::marshal_reader::MarshalReader::new()
+        .read_value(&mut std::io::Cursor::new(writer.payload()))
+        .ok()?;
+    // `[(name, payload)]`: the list cell's head is the attribute pair.
+    let payload = list.field(0).field(1);
+    crate::cmi::sig_reader::payload_value_from_ocaml(payload).map(Box::new)
+}
+
 fn parser_attr_to_decl_attr(
     arena: &ParseArena,
     attr: &ParsedAttribute,
 ) -> crate::types::decl::Attribute {
+    let attr_payload_raw = parser_attr_payload_raw(arena, attr);
     let (name, payload) = attr;
     let attr_name = arena.get_string(name.txt);
     let attr_payload = match payload {
@@ -586,6 +607,7 @@ fn parser_attr_to_decl_attr(
                     },
                     attr_payload: payload,
                     attr_loc: arena.to_location(name.loc),
+                    attr_payload_raw,
                 };
             }
             // OCaml's Lambda.find_name: extract string from @as("name") payloads.
@@ -656,6 +678,7 @@ fn parser_attr_to_decl_attr(
         },
         attr_payload,
         attr_loc: arena.to_location(name.loc),
+        attr_payload_raw,
     }
 }
 
@@ -3617,7 +3640,10 @@ fn make_typed_spread_label(
     };
     // OCaml record_type_spread.mk_lbl uses the expanded source field location
     // for both ld_name.loc and ld_loc (not the spread marker location).
-    let source_loc = find_loc_idx_by_location(arena, &field.ld_loc).unwrap_or(template.ld_loc);
+    // `mk_lbl` (compiler/ml/record_type_spread.ml:110-121): `ld_loc = l.ld_loc`,
+    // which for a label read from a `.cmi` may lie outside this file.
+    let source_loc = find_loc_idx_by_location(arena, &field.ld_loc)
+        .unwrap_or_else(|| arena.push_typecheck_location(&field.ld_loc));
     TypedLabelDeclaration {
         ld_id: field.ld_id.clone(),
         ld_name: Located {
@@ -3629,6 +3655,7 @@ fn make_typed_spread_label(
         ld_type: typed_ld_type,
         ld_loc: source_loc,
         ld_attributes: decl_attrs_to_parser_attrs(arena, &field.ld_attributes),
+        ld_types_attributes: Some(field.ld_attributes.clone().into_boxed_slice()),
     }
 }
 
@@ -5703,6 +5730,7 @@ fn build_spread_constructor(
                             arena,
                             &l.ld_attributes,
                         ),
+                        ld_types_attributes: Some(l.ld_attributes.clone().into_boxed_slice()),
                     })
                     .collect();
             let args_vec = normalized_lbls
@@ -18557,6 +18585,7 @@ fn type_structure_item<'a>(
                                 },
                                 ld_loc: LocIdx(0),
                                 ld_attributes: crate::parser::ast::Attributes::new(),
+                                ld_types_attributes: None,
                             });
                         }
 
@@ -19443,6 +19472,7 @@ fn type_structure_item<'a>(
                                             ld_type: poly_typed_core_type,
                                             ld_loc: lbl.pld_loc,
                                             ld_attributes: lbl.pld_attributes.clone(),
+                                            ld_types_attributes: None,
                                         });
                                     }
                                     let has_spread = internal_labels
@@ -19813,6 +19843,7 @@ fn type_structure_item<'a>(
                                 ld_type: poly_typed_core_type,
                                 ld_loc: lbl.pld_loc,
                                 ld_attributes: lbl.pld_attributes.clone(),
+                                ld_types_attributes: None,
                             });
                         }
                         // Match OCaml typedecl + record_type_spread behavior:
@@ -22333,6 +22364,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                             ld_type: poly_typed_core_type,
                             ld_loc: label.pld_loc,
                             ld_attributes: label.pld_attributes.clone(),
+                            ld_types_attributes: None,
                         });
                     }
                     // OCaml compiler/ml/typedecl.ml:631-646 runs
@@ -22540,6 +22572,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                         ld_type: poly_typed_core_type,
                                         ld_loc: label.pld_loc,
                                         ld_attributes: label.pld_attributes.clone(),
+                                        ld_types_attributes: None,
                                     });
                                 }
                                 (

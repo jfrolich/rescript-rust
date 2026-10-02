@@ -103,6 +103,8 @@ impl ArenaIdx for LocIdx {
 
 /// First index of typechecker-generated synthetic locations.
 const SYNTHETIC_LOCATION_BASE: u32 = 0x8000_0000;
+/// First index of the positions of typechecker-interned locations.
+const SYNTHETIC_POSITION_BASE: u32 = 0x8000_0000;
 
 impl LocIdx {
     /// Check if this is the "none" location (index 0).
@@ -548,6 +550,9 @@ pub struct ParseArena {
     /// true}` copies), appended while the arena is shared. Addressed from
     /// `SYNTHETIC_LOCATION_BASE` so they never collide with primary indices.
     synthetic_locations: elsa::sync::FrozenVec<Box<InternedLocation>>,
+    /// Positions of typechecker-interned locations, addressed from
+    /// `SYNTHETIC_POSITION_BASE`.
+    synthetic_positions: elsa::sync::FrozenVec<Box<Position>>,
     /// Slots reserved before type checking for strings discovered only after
     /// environment lookup (notably omitted record labels).
     synthetic_strings: elsa::sync::FrozenVec<Box<String>>,
@@ -963,6 +968,7 @@ impl Default for ParseArena {
             synthetic_patterns: elsa::sync::FrozenVec::new(),
             synthetic_pattern_base: u32::MAX,
             synthetic_locations: elsa::sync::FrozenVec::new(),
+            synthetic_positions: elsa::sync::FrozenVec::new(),
             synthetic_strings: elsa::sync::FrozenVec::new(),
             synthetic_string_base: u32::MAX,
             core_types,
@@ -1226,7 +1232,14 @@ impl ParseArena {
 
     /// Look up a position by index.
     pub fn get_position(&self, idx: PosIdx) -> &Position {
-        self.positions.get(idx)
+        let raw = idx.to_u32();
+        if raw < SYNTHETIC_POSITION_BASE {
+            self.positions.get(idx)
+        } else {
+            self.synthetic_positions
+                .get((raw - SYNTHETIC_POSITION_BASE) as usize)
+                .expect("typechecker synthetic position read before initialization")
+        }
     }
 
     /// Get all positions (for marshalling).
@@ -1468,6 +1481,27 @@ impl ParseArena {
                 .get((raw - SYNTHETIC_LOCATION_BASE) as usize)
                 .expect("typechecker synthetic location read before initialization")
         }
+    }
+
+    /// Intern a `Location` that comes from outside this arena (e.g. a label
+    /// declaration read from a `.cmi`) while the arena is shared.
+    pub fn push_typecheck_location(&self, loc: &crate::location::Location) -> LocIdx {
+        let push_pos = |pos: &Position| {
+            // `Location::none()` is Rust's spelling of OCaml `Location.none`
+            // (`in_file "_none_"`: line 1, bol 0, cnum -1).
+            if pos.file_name == StrIdx::default() && pos.line == 0 {
+                return self.none_pos();
+            }
+            let slot = self.synthetic_positions.len();
+            self.synthetic_positions.push(Box::new(pos.clone()));
+            PosIdx::from_u32(SYNTHETIC_POSITION_BASE + slot as u32)
+        };
+        let start = push_pos(&loc.loc_start);
+        let end = push_pos(&loc.loc_end);
+        let slot = self.synthetic_locations.len();
+        self.synthetic_locations
+            .push(Box::new(InternedLocation::new(start, end, loc.loc_ghost)));
+        LocIdx::from_u32(SYNTHETIC_LOCATION_BASE + slot as u32)
     }
 
     /// Append a typechecker-generated ghost copy of `idx` (OCaml

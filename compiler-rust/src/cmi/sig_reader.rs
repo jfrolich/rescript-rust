@@ -1257,10 +1257,18 @@ fn read_location(ctx: &TypeContext, value: &OcamlValue) -> Location {
     }
 }
 
-fn read_attribute_name(value: &OcamlValue) -> crate::types::asttypes::Located<String> {
+fn read_attribute_name(
+    ctx: &TypeContext,
+    value: &OcamlValue,
+) -> crate::types::asttypes::Located<String> {
     match value {
         OcamlValue::String(name) => crate::types::asttypes::Located::noloc(name.clone()),
         OcamlValue::Block(_, fields) if !fields.is_empty() => match &fields[0] {
+            // `string Asttypes.loc` = `{txt; loc}`.
+            OcamlValue::String(name) if fields.len() == 2 => crate::types::asttypes::Located {
+                txt: name.clone(),
+                loc: read_location(ctx, &fields[1]),
+            },
             OcamlValue::String(name) => crate::types::asttypes::Located::noloc(name.clone()),
             inner => crate::types::asttypes::Located::noloc(
                 read_first_string(inner).unwrap_or_else(|| "?".to_string()),
@@ -1285,13 +1293,51 @@ fn read_first_string(value: &OcamlValue) -> Option<String> {
 /// The JS backend relies on simple constructor `@as(...)` payloads from loaded
 /// interfaces, so preserve the payload forms the OCaml backend observes for
 /// null/undefined identifiers and simple string literals.
+/// Convert a marshalled `Parsetree.payload` into its portable form. The only
+/// Parsetree record laid out as `{string; int; int; int}` is
+/// `Lexing.position`, which is kept explicit for the writers' position
+/// sharing. Returns `None` for values a payload cannot contain (floats).
+pub(crate) fn payload_value_from_ocaml(
+    value: &OcamlValue,
+) -> Option<crate::types::decl::PayloadValue> {
+    use crate::types::decl::PayloadValue;
+    Some(match value {
+        OcamlValue::Int(n) => PayloadValue::Int(*n),
+        OcamlValue::String(s) => PayloadValue::Str(s.clone()),
+        OcamlValue::Float(_) => return None,
+        OcamlValue::Block(tag, fields) => match (&**fields, *tag) {
+            (
+                [
+                    OcamlValue::String(file),
+                    OcamlValue::Int(line),
+                    OcamlValue::Int(bol),
+                    OcamlValue::Int(cnum),
+                ],
+                0,
+            ) => PayloadValue::Position {
+                file: file.clone(),
+                line: *line as i32,
+                bol: *bol as i32,
+                cnum: *cnum as i32,
+            },
+            _ => PayloadValue::Block(
+                *tag,
+                fields
+                    .iter()
+                    .map(payload_value_from_ocaml)
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+        },
+    })
+}
+
 fn read_attributes(ctx: &TypeContext, value: &OcamlValue) -> Vec<Attribute> {
     value
         .as_list()
         .iter()
         .filter_map(|attr| match attr {
             OcamlValue::Block(_, fields) if !fields.is_empty() => {
-                let attr_name = read_attribute_name(&fields[0]);
+                let attr_name = read_attribute_name(ctx, &fields[0]);
                 let payload = if fields.len() > 1 {
                     if attr_name.txt == "deprecated" {
                         read_deprecated_attribute_payload(&fields[1])
@@ -1308,6 +1354,10 @@ fn read_attributes(ctx: &TypeContext, value: &OcamlValue) -> Vec<Attribute> {
                         .get(2)
                         .map(|loc| read_location(ctx, loc))
                         .unwrap_or_else(Location::none),
+                    attr_payload_raw: fields
+                        .get(1)
+                        .and_then(payload_value_from_ocaml)
+                        .map(Box::new),
                 })
             }
             _ => None,

@@ -1433,9 +1433,22 @@ fn save_typed_artifacts(
 /// (subst.ml:57-67): saved signatures replace every location, including the
 /// attributes', with `Location.none`.
 fn strip_saved_signature_locations(sig: &mut [crate::types::decl::SignatureItem]) {
-    crate::types::decl::for_each_signature_location(sig, &mut |loc| {
-        *loc = crate::location::Location::none();
-    });
+    use crate::types::decl::{Attribute, SignatureLocationVisitor};
+    // `Subst.loc` and `Subst.attrs` (compiler/ml/subst.ml:57-67).
+    struct Strip;
+    impl SignatureLocationVisitor for Strip {
+        fn location(&mut self, loc: &mut crate::location::Location) {
+            *loc = crate::location::Location::none();
+        }
+        fn attribute(&mut self, attr: &mut Attribute) {
+            self.location(&mut attr.attr_loc);
+            self.location(&mut attr.attr_name.loc);
+            if let Some(payload) = &mut attr.attr_payload_raw {
+                payload.remove_locations();
+            }
+        }
+    }
+    crate::types::decl::walk_signature_locations(sig, &mut Strip);
 }
 
 /// `Subst.extension_constructor` for saving drops `ext_loc` whatever

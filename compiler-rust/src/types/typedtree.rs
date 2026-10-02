@@ -959,6 +959,12 @@ pub struct TypedLabelDeclaration {
     pub ld_loc: LocIdx,
     /// Attributes.
     pub ld_attributes: Attributes,
+    /// For a label built from a `Types.label_declaration` (record spreads,
+    /// `Record_type_spread.mk_lbl` in compiler/ml/record_type_spread.ml:110-121),
+    /// OCaml reuses `l.ld_attributes` verbatim. That declaration may belong to
+    /// another compilation unit, so its payloads are kept in portable form here
+    /// and writers emit them instead of `ld_attributes`.
+    pub ld_types_attributes: Option<Box<[crate::types::decl::Attribute]>>,
 }
 
 /// A type extension.

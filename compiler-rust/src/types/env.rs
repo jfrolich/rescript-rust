@@ -2725,6 +2725,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                     ),
                     attr_payload: crate::types::decl::AttributePayload::Structure(vec![]),
                     attr_loc: Location::none(),
+                    attr_payload_raw: None,
                 };
                 let cstr_desc = ConstructorDescription {
                     cstr_name: id.name().to_string(),

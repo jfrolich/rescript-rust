@@ -474,6 +474,10 @@ impl<'a> CmtWriter<'a> {
         self.w.write_block_header(0, 2);
         self.str(&attr.attr_name.txt);
         self.location(&attr.attr_name.loc);
+        if let Some(raw) = &attr.attr_payload_raw {
+            self.payload_value(raw);
+            return;
+        }
         // payload: PStr structure
         self.w.write_block_header(0, 1);
         let loc = attr.attr_loc.clone();
@@ -551,6 +555,40 @@ impl<'a> CmtWriter<'a> {
                 self.w.write_int(0);
                 self.location(&loc);
                 self.w.write_int(0);
+            }
+        }
+    }
+
+    /// A `Parsetree.payload` kept verbatim from the parser or a `.cmi`.
+    fn payload_value(&mut self, value: &crate::types::decl::PayloadValue) {
+        use crate::types::decl::PayloadValue;
+        match value {
+            PayloadValue::Int(n) => self.w.write_int(*n),
+            PayloadValue::Str(s) => self.str(s),
+            PayloadValue::Block(tag, fields) if fields.is_empty() => self.atom(*tag),
+            PayloadValue::Block(tag, fields) => {
+                self.w.write_block_header(*tag, fields.len());
+                for field in fields {
+                    self.payload_value(field);
+                }
+            }
+            PayloadValue::Position {
+                file,
+                line,
+                bol,
+                cnum,
+            } => {
+                let key = (file.clone(), *line, *bol, *cnum);
+                if let Some(&obj) = self.positions.get(&key) {
+                    self.shared(obj);
+                    return;
+                }
+                self.positions.insert(key, self.w.obj_counter());
+                self.w.write_block_header(0, 4);
+                self.file_name_str(file);
+                self.int(i64::from(*line));
+                self.int(i64::from(*bol));
+                self.int(i64::from(*cnum));
             }
         }
     }
@@ -2247,6 +2285,7 @@ impl<'a> CmtWriter<'a> {
                                     &ld.ld_type,
                                     ld.ld_loc,
                                     &ld.ld_attributes,
+                                    ld.ld_types_attributes.as_deref(),
                                 )
                             });
                         }
@@ -2267,6 +2306,7 @@ impl<'a> CmtWriter<'a> {
                         &ld.ld_type,
                         ld.ld_loc,
                         &ld.ld_attributes,
+                        ld.ld_types_attributes.as_deref(),
                     )
                 });
             }
@@ -2287,6 +2327,7 @@ impl<'a> CmtWriter<'a> {
         ct: &tt::TypedCoreType,
         loc: LocIdx,
         attrs: &Attributes,
+        types_attrs: Option<&[Attribute]>,
     ) {
         self.w.write_block_header(0, 7);
         self.ident(id);
@@ -2295,7 +2336,10 @@ impl<'a> CmtWriter<'a> {
         self.bool(optional);
         self.core_type(ct);
         self.loc_idx(loc);
-        self.parsetree_attributes(attrs);
+        match types_attrs {
+            Some(types_attrs) => self.types_attributes(types_attrs),
+            None => self.parsetree_attributes(attrs),
+        }
     }
 
     fn type_extension(&mut self, te: &tt::TypeExtension) {
@@ -2337,6 +2381,7 @@ impl<'a> CmtWriter<'a> {
                                 &ld.ld_type,
                                 ld.ld_loc,
                                 &ld.ld_attributes,
+                                None,
                             )
                         });
                     }
