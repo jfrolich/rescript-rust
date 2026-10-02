@@ -114,6 +114,9 @@ fn should_share_singleton_attr_list(name: &str) -> bool {
     matches!(
         name,
         "react.component" | "jsx.component" | "react.componentWithProps" | "jsx.componentWithProps"
+    // `Typemod_hide.attrs` (compiler/frontend/typemod_hide.ml:26) is one global
+    // list that `expand_reverse` puts on every `%%private` local module.
+            | "internal.local"
     )
 }
 
@@ -480,6 +483,11 @@ fn marshal_attribute_list(
 /// When sharing is enabled and attrs match `[(name, PStr [])]` where name uses
 /// `Location.none` (LocIdx::default()), the attribute tuple is shared via
 /// `singleton_attr_list_table`.
+/// Marshal an attribute list without any parser-specific sharing.
+pub fn marshal_attributes_plain(attrs: &Attributes, w: &mut MarshalWriter<'_>) {
+    marshal_attributes(attrs, w, false, false, None);
+}
+
 fn marshal_attributes(
     attrs: &Attributes,
     w: &mut MarshalWriter<'_>,
@@ -821,7 +829,7 @@ impl Marshal for Constant {
             }
             Constant::String(s, delim) => {
                 w.write_block_header(2, 2);
-                if std::env::var("DEBUG_CONST_SHARE").is_ok()
+                if w.debug_const_share
                     && matches!(s.as_ref(), "None" | "Mic" | "Camera")
                 {
                     eprintln!(
@@ -1121,8 +1129,7 @@ impl Marshal for Pattern {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 3);
         if let PatternDesc::Ppat_record(inner) = &*self.ppat_desc {
-            let (fields, flag) = &**inner;
-            let rest = w.get_arena().record_pat_rest(self.ppat_loc).cloned();
+            let (fields, flag, rest) = &**inner;
             w.write_block_header(7, 3);
             fields.marshal(w);
             flag.marshal(w);
@@ -1208,10 +1215,11 @@ impl Marshal for PatternDesc {
                 pat.marshal(w);
             }
             PatternDesc::Ppat_record(inner) => {
-                let (ref fields, ref flag) = **inner;
-                w.write_block_header(7, 2);
+                let (ref fields, ref flag, ref rest) = **inner;
+                w.write_block_header(7, 3);
                 fields.marshal(w);
                 flag.marshal(w);
+                rest.marshal(w);
             }
             PatternDesc::Ppat_array(pats) => {
                 w.write_block_header(8, 1);

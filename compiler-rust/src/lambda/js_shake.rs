@@ -267,38 +267,12 @@ fn same_name_export_alias_binding_ref<'a>(
         })
 }
 
-fn toplevel_declared_ident(stmt: &Statement) -> Option<&Ident> {
-    match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration { ident, .. }) => Some(ident),
-        _ => None,
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TailMoveInitializerKind {
     Qualified,
     Function,
     Literal,
     Other,
-}
-
-fn same_name_export_initializer_kind(
-    block: &Block,
-    initializer: &Expression,
-) -> TailMoveInitializerKind {
-    match &initializer.desc {
-        ExpressionDesc::Number(_)
-        | ExpressionDesc::Str { .. }
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null => TailMoveInitializerKind::Literal,
-        ExpressionDesc::Var(VIdent::Qualified(_, _)) => TailMoveInitializerKind::Qualified,
-        ExpressionDesc::Var(VIdent::Id(target)) => {
-            resolve_tail_move_initializer_kind(block, target)
-                .unwrap_or(TailMoveInitializerKind::Other)
-        }
-        _ => TailMoveInitializerKind::Other,
-    }
 }
 
 fn same_name_export_initializer_kind_ref(
@@ -469,45 +443,6 @@ fn resolve_tail_move_replacement_expression_ref(
     }
 }
 
-pub(crate) fn tail_move_materialized_root_ident(
-    block: &Block,
-    initializer: &Expression,
-) -> Option<Ident> {
-    let ExpressionDesc::Var(VIdent::Id(start)) = &initializer.desc else {
-        return None;
-    };
-
-    let mut current = start.clone();
-    let mut seen = HashSet::new();
-
-    loop {
-        if !seen.insert(current.clone()) {
-            return None;
-        }
-
-        let stmt = block.iter().find(|stmt| {
-            matches!(
-                &stmt.desc,
-                StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(&current)
-            )
-        })?;
-
-        let StatementDesc::Variable(VariableDeclaration {
-            value: Some(value), ..
-        }) = &stmt.desc
-        else {
-            return Some(current);
-        };
-
-        match &value.desc {
-            ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
-                current = next.clone();
-            }
-            _ => return Some(current),
-        }
-    }
-}
-
 fn tail_move_materialized_root_ident_ref(
     block: &[&Statement],
     initializer: &Expression,
@@ -650,15 +585,6 @@ fn tail_move_uses_are_safe_to_inline_ref(block: &[&Statement], target: &Ident) -
         .all(|stmt| statement_uses_ident_only_in_tail_move_safe_positions(stmt, target))
 }
 
-fn qualified_tail_move_uses_are_safe_to_inline(
-    block: &[Statement],
-    target: &Ident,
-    replacement: &Expression,
-) -> bool {
-    same_name_ml_module_field_tail_move_replacement(replacement, target.name())
-        || tail_move_uses_are_safe_to_inline(block, target)
-}
-
 fn qualified_tail_move_uses_are_safe_to_inline_ref(
     block: &[&Statement],
     target: &Ident,
@@ -684,36 +610,6 @@ fn ml_module_field_tail_move_replacement(replacement: &Expression) -> bool {
         &replacement.desc,
         ExpressionDesc::Var(VIdent::Qualified(module, _)) if module.kind.eq(&Kind::Ml)
     )
-}
-
-pub(crate) fn later_toplevel_effect_allows_tail_move(
-    block: &[Statement],
-    target: &Ident,
-    initializer_kind: TailMoveInitializerKind,
-    replacement: &Expression,
-    replacement_is_recursive_function: bool,
-) -> bool {
-    if !later_toplevel_effect_statement(block) {
-        return true;
-    }
-    if matches!(initializer_kind, TailMoveInitializerKind::Literal) {
-        return true;
-    }
-    let has_remaining_use = block
-        .iter()
-        .any(|stmt| statement_mentions_ident_anywhere(stmt, target));
-    if !has_remaining_use {
-        return matches!(initializer_kind, TailMoveInitializerKind::Function)
-            && replacement_is_recursive_function;
-    }
-
-    match initializer_kind {
-        TailMoveInitializerKind::Function => tail_move_uses_are_safe_to_inline(block, target),
-        TailMoveInitializerKind::Qualified => {
-            qualified_tail_move_uses_are_safe_to_inline(block, target, replacement)
-        }
-        TailMoveInitializerKind::Literal | TailMoveInitializerKind::Other => false,
-    }
 }
 
 fn later_toplevel_effect_allows_tail_move_ref(
@@ -744,26 +640,6 @@ fn later_toplevel_effect_allows_tail_move_ref(
         }
         TailMoveInitializerKind::Literal | TailMoveInitializerKind::Other => false,
     }
-}
-
-fn replacement_resolves_to_recursive_function(block: &Block, replacement: &Expression) -> bool {
-    let ExpressionDesc::Var(VIdent::Id(binding)) = &replacement.desc else {
-        return false;
-    };
-    block.iter().any(|stmt| match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            ident,
-            value:
-                Some(Expression {
-                    desc: ExpressionDesc::Fun { body, .. },
-                    ..
-                }),
-            ..
-        }) if ident.same(binding) => body
-            .iter()
-            .any(|stmt| statement_mentions_ident_anywhere(stmt, binding)),
-        _ => false,
-    })
 }
 
 fn replacement_resolves_to_recursive_function_ref(
@@ -1080,21 +956,6 @@ pub(crate) fn keeps_declared_same_name_reusable_export_binding(
     )
 }
 
-fn has_later_toplevel_function_binding(block: &[Statement]) -> bool {
-    block.iter().any(|stmt| {
-        matches!(
-            &stmt.desc,
-            StatementDesc::Variable(VariableDeclaration {
-                value: Some(Expression {
-                    desc: ExpressionDesc::Fun { .. },
-                    ..
-                }),
-                ..
-            })
-        )
-    })
-}
-
 fn has_later_toplevel_function_binding_ref(block: &[&Statement]) -> bool {
     block.iter().any(|stmt| {
         matches!(
@@ -1107,20 +968,6 @@ fn has_later_toplevel_function_binding_ref(block: &[&Statement]) -> bool {
                 ..
             })
         )
-    })
-}
-
-fn later_toplevel_function_mentions_ident(block: &[Statement], target: &Ident) -> bool {
-    block.iter().any(|stmt| match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            value:
-                Some(Expression {
-                    desc: ExpressionDesc::Fun { .. },
-                    ..
-                }),
-            ..
-        }) => statement_mentions_ident_anywhere(stmt, target),
-        _ => false,
     })
 }
 
@@ -1138,15 +985,6 @@ fn later_toplevel_function_mentions_ident_ref(block: &[&Statement], target: &Ide
     })
 }
 
-fn later_toplevel_initializer_mentions_ident(block: &[Statement], target: &Ident) -> bool {
-    block.iter().any(|stmt| match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            value: Some(value), ..
-        }) => expression_mentions_ident_outside_nested_functions(value, target),
-        _ => false,
-    })
-}
-
 fn later_toplevel_initializer_mentions_ident_ref(block: &[&Statement], target: &Ident) -> bool {
     block.iter().any(|stmt| match &stmt.desc {
         StatementDesc::Variable(VariableDeclaration {
@@ -1156,22 +994,8 @@ fn later_toplevel_initializer_mentions_ident_ref(block: &[&Statement], target: &
     })
 }
 
-fn later_toplevel_effect_statement(block: &[Statement]) -> bool {
-    block.iter().any(statement_has_toplevel_effect)
-}
-
 fn later_toplevel_effect_statement_ref(block: &[&Statement]) -> bool {
     block.iter().any(|stmt| statement_has_toplevel_effect(stmt))
-}
-
-fn uses_ident_before_first_toplevel_effect(block: &[Statement], target: &Ident) -> bool {
-    let effect_index = block
-        .iter()
-        .position(statement_has_toplevel_effect)
-        .unwrap_or(block.len());
-    block[..effect_index]
-        .iter()
-        .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
 }
 
 fn statement_has_toplevel_effect(stmt: &Statement) -> bool {

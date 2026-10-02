@@ -1,7 +1,38 @@
 # In-Process Cold-Build Performance TODO
 
-**Last Updated:** 2026-08-30
+**Last Updated:** 2026-08-31
 **Status:** Two explicitly different Tella corpora are tracked. The expanded v13-migration checkout compiles 3,248 modules in roughly `5.1s` at 16 workers after the merge-review correctness hardening, down from `15.686s` before scoped variant-layout borrowing and subsequent GenType/Env ownership work. The smaller 2,127-module output-parity checkout measures `2.478s +/- 0.024s`, range `2.452s..2.528s`, after shared persistent component views and shallow signature freshening. Do not compare these numbers as one continuous corpus. The project goal remains a subsecond clean compile with 100% codegen parity.
+
+## Session update: prune unused-case matrices like OCaml
+
+A focused profile of Tella's 12,875-line `Layout__Types.res` showed that type
+declaration translation was not the problem. `Pstr_type` translation took
+`1.6-3.5ms`, including `0.14-0.32ms` for 175 owned `TypeDeclaration` copies.
+Changing declaration ownership to `Arc` would have added reference counting to
+a cold path, so that candidate was rejected without an implementation.
+
+Unused-case analysis was the actual bottleneck. Before this change,
+`report_unused_match_cases` took `1,118ms` of a `1,569ms` typecheck, and
+`pressure_matrix_satisfiables` accounted for `775ms`. Rust passed every earlier
+unguarded case into each query. OCaml first filters to compatible rows and then
+runs the two-pass `get_mins le_pats` reduction in
+`compiler/ml/parmatch.ml:1779-1786,2193-2196`.
+
+The retained change ports that compatibility and minima reduction before the
+existing pressure-matrix analysis. On the same focused build, pressure-matrix
+work fell to `7.9ms`, unused-case analysis to `156ms`, and typecheck time to
+`712ms`. A final build without profiling measured `Layout__Types` at `668ms`
+typecheck and `1,147ms` wall time, down from `1,592ms` and `1,935ms`.
+
+The expanded 3,248-module Tella cold build improved from
+`5.039s +/- 0.035s` (`4.988s..5.098s`, 10 runs) to
+`4.755s +/- 0.049s` (`4.717s..4.888s`, 10 runs). Mean user CPU moved from
+`41.616s` to `41.126s`, mean system CPU from `2.183s` to `2.126s`, and peak RSS
+from `3,247,800,320` to `3,178,168,320` bytes. The canonical 657-file
+parser-free benchmark completed without failures at `0.92x` aggregate
+Rust/OCaml time. Release parity remained 610/610 for typedtree, raw Lambda,
+optimized Lambda, and JS, with 344/344 focused JS fixtures and 1432/1432
+diagnostics after adding one overlap/or/guarded-row fixture.
 
 ## Goal
 
@@ -40,6 +71,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
 - [ ] **2. Keep typecheck/signature work on the critical path.**
   The JS/typecheck split is useful, but cold builds must prioritize signature-producing typecheck work that unlocks downstream modules. JS/codegen should run when no typecheck work is ready or under a separate cap. A previous naive scheduler priority flip regressed Tella, so this needs measured tuning.
   - [x] Measure ready typecheck queue depth, ready JS queue depth, and worker idle time.
+  - [x] Replace whole-state failed-unification snapshots with a frontier-aware mutation trail and validate its sparse Tella counter shape.
   - [ ] Add a scheduler policy that keeps signature-producing work ahead of JS without starving JS.
   - [ ] Benchmark the policy against the retained Tella baseline.
 

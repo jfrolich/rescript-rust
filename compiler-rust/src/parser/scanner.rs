@@ -37,7 +37,7 @@ pub enum ScannerMode {
 
 /// A snapshot of scanner state for lookahead/restore.
 #[derive(Debug, Clone)]
-pub struct ScannerSnapshot<'src> {
+pub struct ScannerSnapshot {
     ch: char,
     offset: usize,
     ch_len: usize,
@@ -46,9 +46,7 @@ pub struct ScannerSnapshot<'src> {
     line_offset: usize,
     lnum: i32,
     mode: Vec<ScannerMode>,
-    prev_token_allows_regex: bool,
     diagnostics_len: usize,
-    _src: std::marker::PhantomData<&'src str>,
 }
 
 /// The lexical scanner state.
@@ -80,8 +78,6 @@ pub struct Scanner<'src> {
     mode: Vec<ScannerMode>,
     /// Collected diagnostics.
     diagnostics: Vec<ParserDiagnostic>,
-    /// Previous non-comment token (for context-sensitive lexing like regex literals).
-    prev_token_allows_regex: bool,
 }
 
 /// Result of scanning a token.
@@ -122,7 +118,6 @@ impl<'src> Scanner<'src> {
             lnum: 1,
             mode: Vec::new(),
             diagnostics: Vec::new(),
-            prev_token_allows_regex: true,
         }
     }
 
@@ -149,7 +144,7 @@ impl<'src> Scanner<'src> {
     }
 
     /// Create a snapshot of the scanner state for lookahead.
-    pub fn snapshot(&self) -> ScannerSnapshot<'src> {
+    pub fn snapshot(&self) -> ScannerSnapshot {
         ScannerSnapshot {
             ch: self.ch,
             offset: self.offset,
@@ -159,14 +154,12 @@ impl<'src> Scanner<'src> {
             line_offset: self.line_offset,
             lnum: self.lnum,
             mode: self.mode.clone(),
-            prev_token_allows_regex: self.prev_token_allows_regex,
-            _src: std::marker::PhantomData,
             diagnostics_len: self.diagnostics.len(),
         }
     }
 
     /// Restore scanner state from a snapshot.
-    pub fn restore(&mut self, snapshot: ScannerSnapshot<'src>) {
+    pub fn restore(&mut self, snapshot: ScannerSnapshot) {
         self.ch = snapshot.ch;
         self.offset = snapshot.offset;
         self.ch_len = snapshot.ch_len;
@@ -175,7 +168,6 @@ impl<'src> Scanner<'src> {
         self.line_offset = snapshot.line_offset;
         self.lnum = snapshot.lnum;
         self.mode = snapshot.mode;
-        self.prev_token_allows_regex = snapshot.prev_token_allows_regex;
         self.diagnostics.truncate(snapshot.diagnostics_len);
     }
 
@@ -297,6 +289,11 @@ impl<'src> Scanner<'src> {
         let (ch, ch_len) = self.decode_at(next_byte_offset);
         self.ch = ch;
         self.ch_len = ch_len;
+        // res_scanner.ml:111-114: at EOF the column becomes the byte count
+        // since the line start (`offset16 <- offset - line_offset`).
+        if next_byte_offset >= self.bytes.len() {
+            self.offset16 = self.char_pos - self.line_offset;
+        }
     }
 
     /// Advance by 2 characters.
@@ -315,6 +312,19 @@ impl<'src> Scanner<'src> {
     /// Peek at the next character without advancing.
     ///
     /// Uses byte-level access: skips past current character's bytes to find the next.
+    /// OCaml `Scanner.peek_slash` (res_scanner.ml:140-151): whether the next
+    /// non-whitespace source character after the current token is `/`.
+    pub fn peek_slash(&self) -> bool {
+        let mut offset = self.offset;
+        while offset < self.bytes.len() {
+            match self.bytes[offset] {
+                b' ' | b'\t' | b'\n' | b'\r' => offset += 1,
+                c => return c == b'/',
+            }
+        }
+        false
+    }
+
     fn peek(&self) -> char {
         let next_offset = self.offset + self.ch_len;
         if next_offset >= self.bytes.len() {
@@ -691,17 +701,10 @@ impl<'src> Scanner<'src> {
                     self.scan_string_escape_digits(start_pos, 4, 16, 0x10FFFF);
                 }
             }
-            c if c == EOF_CHAR => {
-                let end_pos = self.position();
-                self.error(
-                    start_pos.clone(),
-                    end_pos,
-                    DiagnosticCategory::message("unclosed escape sequence"),
-                );
-            }
             _ => {
-                // Unknown escape - skip the character
-                self.next();
+                // OCaml `scan_string_escape_sequence` (res_scanner.ml:405-416):
+                // an unknown escape, or the end of input, is left to the
+                // string loop without a diagnostic.
             }
         }
     }
@@ -828,13 +831,14 @@ impl<'src> Scanner<'src> {
 
         // Content ends 2 bytes before current position (before closing */)
         // But we need to compute this in byte offsets
-        let content_end_off = if self.offset >= 2 {
-            // Walk back 2 characters from current byte offset
-            // Since */ is ASCII, we just subtract 2 bytes
-            self.offset - 2
-        } else {
-            0
-        };
+        // OCaml `scanner.offset - 2`: two source bytes back, i.e. two chars
+        // of the Latin-1 source view (each possibly two UTF-8 bytes here, when
+        // an unclosed comment ends at EOF on non-ASCII text).
+        let content_end_off = self.src[..self.offset.min(self.src.len())]
+            .char_indices()
+            .rev()
+            .nth(1)
+            .map_or(0, |(idx, _)| idx);
 
         let content: Cow<'src, str> =
             if content_start_off <= content_end_off && content_start_off < self.src.len() {
@@ -920,10 +924,14 @@ impl<'src> Scanner<'src> {
                     );
                     // OCaml uses (max (scanner.offset - 1 - start_off) 0) to exclude the last char
                     let end_off = if self.offset > start_off {
-                        // Go back 1 character's worth of bytes
-                        // At EOF, the previous char was the last real char
-                        // We need to compute its byte offset
-                        self.offset.saturating_sub(1).max(start_off)
+                        // OCaml drops the last source byte, which is the last
+                        // char of the Latin-1 source view (one char per byte,
+                        // possibly two bytes in the Rust string).
+                        let prev_len = self.src[..self.offset.min(self.src.len())]
+                            .chars()
+                            .next_back()
+                            .map_or(1, char::len_utf8);
+                        self.offset.saturating_sub(prev_len).max(start_off)
                     } else {
                         start_off
                     };
@@ -1124,20 +1132,9 @@ impl<'src> Scanner<'src> {
                 }
                 '*' => self.scan_multi_line_comment(),
                 _ => {
-                    if self.can_start_regex_literal() && !self.is_jsx_close_slash() {
-                        if let Some(tok) = self.try_scan_regex_literal() {
-                            tok
-                        } else {
-                            // Fall back to division operators
-                            if self.peek() == '.' {
-                                self.next2();
-                                Token::ForwardslashDot
-                            } else {
-                                self.next();
-                                Token::Forwardslash
-                            }
-                        }
-                    } else if self.peek() == '.' {
+                    // OCaml's scanner always yields `/` or `/.`; the parser rescans
+                    // a regex literal with `next_regex_token` in expression position.
+                    if self.peek() == '.' {
                         self.next2();
                         Token::ForwardslashDot
                     } else {
@@ -1355,145 +1352,11 @@ impl<'src> Scanner<'src> {
         };
 
         let end_pos = self.position();
-        if !matches!(token, Token::Comment(_)) {
-            self.prev_token_allows_regex = Self::token_allows_regex_after(&token);
-        }
         ScanResult {
             start_pos,
             end_pos,
             token,
         }
-    }
-
-    fn is_jsx_close_slash(&self) -> bool {
-        // Check if the byte before current offset is '<'
-        // offset points to '/', so we need to check the character before it
-        if self.offset == 0 {
-            return false;
-        }
-        // The previous byte must be '<' (ASCII, single byte)
-        // We check the raw byte since '<' is ASCII
-        self.bytes.get(self.offset.wrapping_sub(1)).copied() == Some(b'<')
-    }
-
-    fn can_start_regex_literal(&self) -> bool {
-        self.prev_token_allows_regex
-    }
-
-    /// Whether a regex literal may start right after `prev` (the previous
-    /// non-comment token). Only this answer is kept, not the token itself.
-    fn token_allows_regex_after(prev: &Token<'_>) -> bool {
-        {
-            {
-                if prev.precedence() > 0 {
-                    return true;
-                }
-                matches!(
-                    prev,
-                    Token::Lparen
-                        | Token::Lbracket
-                        | Token::Lbrace
-                        | Token::Comma
-                        | Token::Semicolon
-                        | Token::Colon
-                        | Token::Equal
-                        | Token::EqualGreater
-                        | Token::MinusGreater
-                        | Token::Question
-                        | Token::Bar
-                        | Token::Lor
-                        | Token::Land
-                        | Token::And
-                        | Token::As
-                        | Token::If
-                        | Token::Else
-                        | Token::Try
-                        | Token::When
-                        | Token::In
-                        | Token::For
-                        | Token::While
-                        | Token::Let { .. }
-                        | Token::Await
-                        | Token::Assert
-                        | Token::Open
-                        | Token::Module
-                        | Token::Typ
-                        | Token::External
-                        | Token::Exception
-                        | Token::Include
-                        | Token::Of
-                )
-            }
-        }
-    }
-
-    fn try_scan_regex_literal(&mut self) -> Option<Token<'src>> {
-        let snapshot = self.snapshot();
-        let start_pos = self.position();
-
-        // Consume opening '/'
-        self.next();
-        let pattern_start = self.offset;
-
-        let mut escaped = false;
-        let mut in_char_class = false;
-
-        loop {
-            match self.ch {
-                '\n' | '\r' => {
-                    // Invalid regex literal, restore and fall back to '/'
-                    self.restore(snapshot);
-                    return None;
-                }
-                c if c == EOF_CHAR => {
-                    // Invalid regex literal, restore and fall back to '/'
-                    self.restore(snapshot);
-                    return None;
-                }
-                '\\' if !escaped => {
-                    escaped = true;
-                    self.next();
-                }
-                '[' if !escaped => {
-                    in_char_class = true;
-                    self.next();
-                }
-                ']' if !escaped && in_char_class => {
-                    in_char_class = false;
-                    self.next();
-                }
-                '/' if !escaped && !in_char_class => {
-                    break;
-                }
-                _ => {
-                    escaped = false;
-                    self.next();
-                }
-            }
-        }
-
-        // Current char is closing '/'
-        let pattern = Cow::Borrowed(self.substring(pattern_start, self.offset));
-        self.next(); // consume closing '/'
-
-        let flags_start = self.offset;
-        while self.ch.is_ascii_alphabetic() {
-            self.next();
-        }
-        let flags = Cow::Borrowed(self.substring(flags_start, self.offset));
-
-        let end_pos = self.position();
-        // Record a scanner-level diagnostic if the literal is empty and we didn't advance.
-        // (Helps debugging invalid recovery cases; parser can still proceed.)
-        if pattern_start == flags_start && pattern.is_empty() {
-            self.error(
-                start_pos,
-                end_pos,
-                DiagnosticCategory::message("Empty regex literal".to_string()),
-            );
-        }
-
-        Some(Token::Regex { pattern, flags })
     }
 
     /// Scan a regex literal from the current position (after the opening `/` has been consumed).
@@ -1505,58 +1368,43 @@ impl<'src> Scanner<'src> {
         let start_pos = self.position();
         let pattern_start = self.offset;
 
-        let mut escaped = false;
+        // OCaml `scan_regex` (compiler/syntax/src/res_scanner.ml:562-624).
         let mut in_char_class = false;
 
         let (pattern, flags) = loop {
             match self.ch {
-                '\n' | '\r' => {
-                    let end_pos = self.position();
-                    self.error(
-                        start_pos.clone(),
-                        end_pos,
-                        DiagnosticCategory::message("unterminated regex".to_string()),
-                    );
-                    break (Cow::Borrowed(""), Cow::Borrowed(""));
-                }
-                c if c == EOF_CHAR => {
-                    let end_pos = self.position();
-                    self.error(
-                        start_pos.clone(),
-                        end_pos,
-                        DiagnosticCategory::message("unterminated regex".to_string()),
-                    );
-                    break (Cow::Borrowed(""), Cow::Borrowed(""));
-                }
-                '\\' if !escaped => {
-                    escaped = true;
-                    self.next();
-                }
-                '[' if !escaped => {
-                    in_char_class = true;
-                    escaped = false;
-                    self.next();
-                }
-                ']' if !escaped && in_char_class => {
-                    in_char_class = false;
-                    self.next();
-                }
-                '/' if !escaped && !in_char_class => {
-                    // Closing /
+                '/' if !in_char_class => {
                     let pattern = Cow::Borrowed(self.substring(pattern_start, self.offset));
-                    self.next(); // consume closing '/'
-
+                    self.next();
                     let flags_start = self.offset;
-                    while self.ch.is_ascii_alphabetic() {
+                    while matches!(self.ch, 'd' | 'g' | 'i' | 'm' | 's' | 'u' | 'v' | 'y') {
                         self.next();
                     }
                     let flags = Cow::Borrowed(self.substring(flags_start, self.offset));
                     break (pattern, flags);
                 }
-                _ => {
-                    escaped = false;
+                c if c == '\n' || c == EOF_CHAR => {
+                    let end_pos = self.position();
+                    self.error(
+                        start_pos.clone(),
+                        end_pos,
+                        DiagnosticCategory::message("unterminated regex".to_string()),
+                    );
+                    break (Cow::Borrowed(""), Cow::Borrowed(""));
+                }
+                '\\' => {
+                    self.next();
                     self.next();
                 }
+                '[' if !in_char_class => {
+                    in_char_class = true;
+                    self.next();
+                }
+                ']' if in_char_class => {
+                    in_char_class = false;
+                    self.next();
+                }
+                _ => self.next(),
             }
         };
 
@@ -1634,10 +1482,9 @@ impl<'src> Scanner<'src> {
         // Capture the escape sequence contents BEFORE consuming the closing quote
         let contents = Cow::Borrowed(self.substring(escape_byte_start, self.offset));
 
-        // Consume closing quote
-        if self.ch == '\'' {
-            self.next();
-        }
+        // OCaml res_scanner.ml scan_escape: `next scanner` unconditionally
+        // (the closing quote is assumed, not checked).
+        self.next();
 
         Token::Codepoint {
             c: codepoint,
@@ -1647,13 +1494,13 @@ impl<'src> Scanner<'src> {
 
     /// Convert a sequence of digits to a number.
     fn convert_number(&mut self, n: usize, base: u32) -> i32 {
+        // res_scanner.ml:495-503: exactly `n` chars are consumed and
+        // accumulated, digits or not.
         let mut x = 0i32;
         for _ in 0..n {
             let d = Self::digit_value(self.ch);
-            if d < base {
-                x = x * base as i32 + d as i32;
-                self.next();
-            }
+            x = x * base as i32 + d as i32;
+            self.next();
         }
         if utf8::is_valid_codepoint(x) {
             x

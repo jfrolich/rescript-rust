@@ -109,6 +109,8 @@ impl LambdaCompiler {
                 Some(crate::types::VariantTagType::Int(value)) => {
                     Expression::number(Number::int(*value))
                 }
+                // lam_compile_const.ml:57 `E.tag_type t`, which is
+                // `str s ~delim:DStarJ` for strings (js_exp_make.ml:1360-1361).
                 Some(crate::types::VariantTagType::String(value)) => {
                     Expression::new(ExpressionDesc::Str {
                         delim: Delim::StarJ,

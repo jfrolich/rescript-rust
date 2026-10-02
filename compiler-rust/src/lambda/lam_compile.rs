@@ -68,7 +68,6 @@ use super::lam_coercion::{
     max_ident_stamp_in_expression, push_effect_expression, push_s_exp,
     resolve_declared_same_name_self_alias_target, resolve_export_aliases,
     reusable_same_name_export_binding,
-    rewrite_toplevel_variable_initializers_through_rewriteable_aliases,
 };
 use super::lam_compile_variant::{empty_switch_case_clause, stable_group_switch_cases};
 
@@ -360,6 +359,9 @@ pub struct LambdaCompiler {
     /// 274-279).
     pub(crate) cmj_lambda_cache: HashMap<String, Option<Arc<AHashMap<String, Lambda>>>>,
     pub(crate) cmj_export_constants: AHashMap<String, CmjExportConstant>,
+    /// Non-constant `persistent_closed_lambda` exports recorded for
+    /// cross-module inlining (compiler/core/lam_stats_export.ml:53-89).
+    pub(crate) cmj_export_lambdas: AHashMap<String, Lambda>,
     pub(crate) cmj_export_arities: AHashMap<String, CmjExportArity>,
     hoisted_functions: Vec<crate::lambda::HoistedFunction>,
     pub(crate) external_module_ids: HashMap<ExternalModuleCacheKey, Ident>,
@@ -469,6 +471,7 @@ impl LambdaCompiler {
             cmj_arity_cache: HashMap::new(),
             cmj_lambda_cache: HashMap::new(),
             cmj_export_constants: AHashMap::new(),
+            cmj_export_lambdas: AHashMap::new(),
             cmj_export_arities: AHashMap::new(),
             hoisted_functions: Vec::new(),
             external_module_ids: HashMap::new(),
@@ -670,11 +673,16 @@ impl LambdaCompiler {
         );
         self.cmj_export_constants =
             collect_cmj_export_constants_from_simplified_lambda(&simplified_result.lambda);
+        self.cmj_export_lambdas = if self.cross_module_inline {
+            collect_cmj_export_lambdas_from_simplified_lambda(&simplified_result.lambda)
+        } else {
+            AHashMap::new()
+        };
         self.cmj_export_arities = collect_cmj_export_arities_from_simplified_lambda(
             &simplified_result.lambda,
             &simplified_result.meta,
         );
-        let simplified = simplified_result.lambda;
+        let simplified = drop_toplevel_pure_sequence_heads(simplified_result.lambda);
         // OCaml's `Ext_ident.create` allocations in lam_compile.ml share the
         // same global `Ident.currentstamp` as the Lambda identifiers entering
         // this phase. See compiler/core/lam_compile.ml:60, 771-782, 911 and
@@ -704,9 +712,6 @@ impl LambdaCompiler {
                     (vec![], vec![])
                 }
             };
-            rewrite_toplevel_variable_initializers_through_rewriteable_aliases(
-                &mut block, &exports,
-            );
             let exports = resolve_export_aliases(&block, exports);
             let side_effect = module_side_effect_reason(&simplified);
 
@@ -809,6 +814,10 @@ impl LambdaCompiler {
 
     pub(crate) fn take_cmj_export_constants(&mut self) -> AHashMap<String, CmjExportConstant> {
         std::mem::take(&mut self.cmj_export_constants)
+    }
+
+    pub(crate) fn take_cmj_export_lambdas(&mut self) -> AHashMap<String, Lambda> {
+        std::mem::take(&mut self.cmj_export_lambdas)
     }
 
     pub(crate) fn take_cmj_export_arities(&mut self) -> AHashMap<String, CmjExportArity> {
@@ -3289,6 +3298,13 @@ impl LambdaCompiler {
         {
             return false;
         }
+        // lam_compile.ml:937-962: the pseudo-jmp arm needs
+        // `Tail_with_name {in_staticcatch = false}`; a staticcatch compiled
+        // inside another one's body or dispatched handlers has
+        // `in_staticcatch = true` and takes the exit-variable arm.
+        if !self.static_handlers.is_empty() || !self.static_jump_handlers.is_empty() {
+            return false;
+        }
         // OCaml flattens nested staticcatch chains before deciding whether the
         // current handler can fall through after the switch. Once we're already
         // under an enclosing static handler/jump chain, keep plain handlers
@@ -4875,6 +4891,38 @@ impl LambdaCompiler {
             }
             Lambda::LifThenElse(cond, then_, else_) => {
                 self.compile_if_assignment_block(result, cond, then_, else_)
+            }
+            // compile_sequand / compile_sequor with an `Assign v` continuation
+            // (lam_compile.ml:1138-1210).
+            Lambda::Lprim(info) if short_circuit_primitive(&info.primitive, &info.args).is_some() => {
+                let (op, lhs, rhs) =
+                    short_circuit_primitive(&info.primitive, &info.args).expect("checked above");
+                let lhs_compiled = self.compile_expr(lhs);
+                let rhs_compiled = self.compile_expr(rhs);
+                let assign = |value: Expression| {
+                    Statement::exp(Expression::bin(
+                        BinOp::Eq,
+                        Expression::var(result.clone()),
+                        value,
+                    ))
+                };
+                let mut block = lhs_compiled.prelude;
+                if rhs_compiled.prelude.is_empty() {
+                    let op = match op {
+                        ShortCircuitOp::And => BinOp::And,
+                        ShortCircuitOp::Or => BinOp::Or,
+                    };
+                    block.push(assign(Expression::bin(op, lhs_compiled.expr, rhs_compiled.expr)));
+                    return block;
+                }
+                let mut rhs_block = rhs_compiled.prelude;
+                rhs_block.push(assign(rhs_compiled.expr));
+                block.push(Statement::if_(
+                    op.test_expr(lhs_compiled.expr),
+                    rhs_block,
+                    vec![assign(op.default_expr())],
+                ));
+                block
             }
             Lambda::Lswitch(scrut, switch) => {
                 self.compile_switch_assignment_block(result, scrut, switch)
@@ -7257,6 +7305,56 @@ fn collect_cmj_export_constants_from_simplified_lambda(
     constants
 }
 
+/// The non-constant `persistent_closed_lambda` of each export under
+/// `-bs-cross-module-opt` (compiler/core/lam_stats_export.ml:53-89):
+/// safe-to-inline lambdas that are closed always-inline functions or
+/// functors, or small (`Lam_analysis.small_inline_size`) and free of free
+/// variables. Constant exports travel as `CmjExportConstant`s.
+fn collect_cmj_export_lambdas_from_simplified_lambda(lam: &Lambda) -> AHashMap<String, Lambda> {
+    let mut bindings = Vec::new();
+    let Some((exports, args)) = collect_toplevel_export_bindings(lam, &mut bindings) else {
+        return AHashMap::new();
+    };
+    let mut lambdas = AHashMap::new();
+    for (export, arg) in exports.iter().zip(args) {
+        let value = match arg {
+            Lambda::Lvar(id) => bindings
+                .iter()
+                .rev()
+                .find_map(|(binding, value)| binding.same(id).then_some(*value))
+                .unwrap_or(arg),
+            _ => arg,
+        };
+        if cmj_export_constant_from_lambda(value).is_some()
+            || !crate::lambda::lam_analysis::safe_to_inline(value)
+        {
+            continue;
+        }
+        let inline = match value {
+            Lambda::Lfunction(func)
+                if matches!(func.attr.inline, crate::lambda::InlineAttribute::Always)
+                    || func.attr.is_a_functor =>
+            {
+                crate::lambda::lam_closure::is_closed(value)
+            }
+            _ => {
+                crate::lambda::lam_analysis::size(value)
+                    < crate::lambda::lam_analysis::SMALL_INLINE_SIZE
+                    && crate::lambda::lam_closure::free_variables_with_stats(
+                        &Default::default(),
+                        Default::default(),
+                        value,
+                    )
+                    .is_empty()
+            }
+        };
+        if inline {
+            lambdas.insert(export.name().to_string(), value.clone());
+        }
+    }
+    lambdas
+}
+
 fn collect_cmj_export_arities_from_simplified_lambda(
     lam: &Lambda,
     meta: &LamStats,
@@ -8427,3 +8525,27 @@ mod input_js_tests;
 
 #[path = "lam_compile_indexed.rs"]
 mod indexed_consumer;
+
+/// `Lam_coercion.flatten` groups the top-level spine and `Lam_group.nop_cons`
+/// drops sequence heads that are a variable, constant or function
+/// (compiler/core/lam_coercion.ml:179-194, lam_group.ml:36-39), so such
+/// heads are never compiled.
+fn drop_toplevel_pure_sequence_heads(lam: Lambda) -> Lambda {
+    match lam {
+        Lambda::Llet(kind, id, value, body) => {
+            Lambda::Llet(kind, id, value, Box::new(drop_toplevel_pure_sequence_heads(*body)))
+        }
+        Lambda::Lletrec(bindings, body) => {
+            Lambda::Lletrec(bindings, Box::new(drop_toplevel_pure_sequence_heads(*body)))
+        }
+        Lambda::Lsequence(first, second) => {
+            let second = drop_toplevel_pure_sequence_heads(*second);
+            if matches!(*first, Lambda::Lvar(_) | Lambda::Lconst(_) | Lambda::Lfunction(_)) {
+                second
+            } else {
+                Lambda::Lsequence(first, Box::new(second))
+            }
+        }
+        lam => lam,
+    }
+}

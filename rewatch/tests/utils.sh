@@ -42,6 +42,23 @@ normalize_paths() {
   fi
 }
 
+# Rename/error snapshots verify diagnostics, not scheduler-dependent counts.
+# Still reject a rebuild of the full graph.
+normalize_incremental_count() {
+  local count
+  count=$(grep -o 'Compiled [0-9]* modules' "$1" | head -1 | grep -o '[0-9]*')
+  if [ -z "$count" ] || [ "$count" -gt 20 ]; then
+    error "Unexpected incremental compile count: $count"
+    return 1
+  fi
+  node -e 'const fs = require("fs"); const p = process.argv[1]; fs.writeFileSync(p, fs.readFileSync(p, "utf8").replaceAll("\x1b[2K\r", "\x1b[2K\n"))' "$1"
+  if [[ $OSTYPE == 'darwin'* ]]; then
+    sed -i '' 's/Compiled [0-9][0-9]* modules/Compiled incremental modules/' "$1"
+  else
+    sed -i 's/Compiled [0-9][0-9]* modules/Compiled incremental modules/' "$1"
+  fi
+}
+
 replace() {
   if [[ $OSTYPE == 'darwin'* ]];
   then

@@ -1702,12 +1702,24 @@ impl<'a> RawLambdaConverter<'a> {
         lam: &RawLambda,
         target_loc: LocIdx,
     ) {
-        let Some((attr_name, payload)) = attrs
+        // `Translattribute.find_attribute` (translattribute.ml:28-38): a
+        // repeated attribute reports warning 54 at the second one and counts
+        // as absent.
+        let mut matching = attrs
             .iter()
-            .find(|(name, _)| self.arena.get_string(name.txt) == "res.hoistedFunction")
-        else {
+            .filter(|(name, _)| self.arena.get_string(name.txt) == "res.hoistedFunction");
+        let Some((attr_name, payload)) = matching.next() else {
             return;
         };
+        if let Some((second, _)) = matching.next() {
+            self.report_warning(
+                second.loc,
+                Warning::DuplicatedAttribute {
+                    name: "res.hoistedFunction".to_string(),
+                },
+            );
+            return;
+        }
         let warning_loc = attr_name.loc;
         if !matches!(payload, crate::parser::ast::Payload::PStr(items) if items.is_empty()) {
             self.report_warning(
@@ -2892,6 +2904,15 @@ impl<'a> RawLambdaConverter<'a> {
         };
 
         Some(match prim_name {
+            // unified_ops.ml:60-71: unary `+` is the identity on every
+            // supported operand type.
+            "%plus" => choose(
+                Primitive::Pidentity,
+                None,
+                Some(Primitive::Pidentity),
+                Some(Primitive::Pidentity),
+                None,
+            ),
             "%neg" => choose(
                 Primitive::Pnegint,
                 None,
@@ -3589,25 +3610,19 @@ impl<'a> RawLambdaConverter<'a> {
         &self,
         cstr: &crate::types::ConstructorDescription,
         args: &[Expression],
-        fallback_env: EnvRef,
     ) -> TagInfo {
         match &cstr.cstr_kind {
             crate::types::ConstructorKind::Ordinary(_) if constructor_has_optional_shape(cstr) => {
                 match args {
                     [arg] => {
-                        let arg_env_skip = self.type_ctx.get_typed_env(arg.exp_env).map(|env| {
-                            type_cannot_contain_undefined(self.type_ctx, env.as_ref(), arg.exp_type)
-                        });
-                        let fallback_env_skip =
-                            self.type_ctx.get_typed_env(fallback_env).map(|env| {
-                                type_cannot_contain_undefined(
-                                    self.type_ctx,
-                                    env.as_ref(),
-                                    arg.exp_type,
-                                )
+                        // translcore.ml:818-824: `type_cannot_contain_undefined
+                        // arg.exp_type arg.exp_env`.
+                        let can_skip = self
+                            .type_ctx
+                            .get_typed_env(arg.exp_env)
+                            .is_some_and(|env| {
+                                type_cannot_contain_undefined(self.type_ctx, env.as_ref(), arg.exp_type)
                             });
-                        let can_skip = arg_env_skip.unwrap_or(false)
-                            || fallback_env_skip.unwrap_or(false);
                         if can_skip {
                             TagInfo::SomeNotNested
                         } else {
@@ -3647,7 +3662,6 @@ impl<'a> RawLambdaConverter<'a> {
     fn convert_construct_raw(
         &mut self,
         loc: Location,
-        fallback_env: EnvRef,
         cstr: &crate::types::ConstructorDescription,
         args: &[Expression],
     ) -> RawLambda {
@@ -3657,6 +3671,7 @@ impl<'a> RawLambdaConverter<'a> {
                     ExpressionDesc::Texp_record {
                         fields,
                         extended_expression,
+                        ..
                     } => self.convert_record_raw(
                         self.loc(arg.exp_loc),
                         fields,
@@ -3721,7 +3736,7 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 crate::types::VariantConstructorCase::Block(_) => {
                     let elems = args.iter().map(|arg| self.convert_expr_raw(arg)).collect();
-                    let tag_info = self.raw_constructor_tag_info(cstr, args, fallback_env);
+                    let tag_info = self.raw_constructor_tag_info(cstr, args);
                     self.raw_block_or_prim(
                         reference.block_index(self.type_ctx) as i32,
                         tag_info,
@@ -5278,27 +5293,10 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> RawLambda {
         match cc {
             ModuleCoercion::Tcoerce_none => {
-                // Deduplicate fields by name, keeping only the LAST occurrence.
-                // This matches OCaml's simplify_signature behavior: when a structure
-                // has duplicate value names (e.g., from %%private with shadowing),
-                // OCaml wraps in Tmod_constraint with Tcoerce_structure that selects
-                // only the final binding. Since Rust doesn't compute that coercion,
-                // we achieve the same result by deduplicating here.
-                let deduped_fields = {
-                    let mut seen = AHashSet::with_capacity(fields.len());
-                    let mut indices = Vec::new();
-                    // Walk from the end to find which indices to keep
-                    for i in (0..fields.len()).rev() {
-                        if seen.insert(fields[i].name()) {
-                            indices.push(i);
-                        }
-                    }
-                    indices.reverse();
-                    indices
-                        .iter()
-                        .map(|&i| fields[i].clone())
-                        .collect::<Vec<_>>()
-                };
+                // OCaml translmod `make_module_block` exports every field; a
+                // shadowed value is dropped by the `simplify_signature`
+                // coercion (typemod.ml:1738-1768), not here.
+                let deduped_fields = fields.to_vec();
                 let block_fields = deduped_fields.iter().cloned().map(RawLambda::var).collect();
                 let tag = if is_top_level {
                     TagInfo::ModuleExport(deduped_fields)
@@ -5592,6 +5590,15 @@ impl<'a> RawLambdaConverter<'a> {
         cc: &ModuleCoercion,
         dynamic_import: bool,
     ) -> RawLambda {
+        // Each level is a `transl_module` call in OCaml, which starts with
+        // `check_attribute_on_module` (translmod.ml:278-279); the fallback
+        // below checks in `convert_module_expr_raw_with_coercion`.
+        if matches!(
+            module_expr.mod_desc,
+            ModuleExprDesc::Tmod_constraint(..) | ModuleExprDesc::Tmod_ident(..)
+        ) {
+            self.check_module_attribute(module_expr);
+        }
         match &module_expr.mod_desc {
             ModuleExprDesc::Tmod_constraint(inner, _, _, inner_cc) => {
                 let composed = Self::compose_coercions_raw(cc, inner_cc);
@@ -5603,6 +5610,9 @@ impl<'a> RawLambdaConverter<'a> {
                         crate::types::decl::ModuleType::MtyAlias(_, _)
                     )
                 {
+                    // OCaml recurses with `transl_module` into `inner` first,
+                    // which checks its attributes (translmod.ml:278-279).
+                    self.check_module_attribute(inner);
                     self.note_possible_required_modules_from_module_expr(inner, dynamic_import);
                     return self.apply_coercion_raw(
                         self.loc(inner.mod_loc),
@@ -6189,11 +6199,21 @@ impl<'a> RawLambdaConverter<'a> {
                     for binding in bindings {
                         match &binding.vb_pat.pat_desc {
                             PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_alias(_, _, _) => {}
-                            _ if !self.is_irrefutable_pattern(&binding.vb_pat) => {
+                            _ if !crate::types::typecore::parmatch_irrefutable(
+                                self.type_ctx,
+                                self.arena,
+                                self.env,
+                                &mut self.persistent_env,
+                                &binding.vb_pat,
+                            ) =>
+                            {
                                 self.report_diagnostic(
                                     self.loc(binding.vb_pat.pat_loc),
                                     "This pattern can fail to match, so it is not allowed in a top-level `let` binding.".to_string(),
                                 );
+                                // translmod.ml:392 raises here, so the binding
+                                // itself is never translated.
+                                return body;
                             }
                             _ => {}
                         }
@@ -6444,13 +6464,43 @@ impl<'a> RawLambdaConverter<'a> {
             return f(self);
         }
         let previous = self.warning_config.clone();
+        // `Builtin_attributes.warning_attribute` (builtin_attributes.ml:180-212):
+        // an unusable payload is reported, a usable one updates the state.
         for attr in attrs.iter().rev() {
-            if let Some((is_error, spec)) = self.warning_attribute_spec(attr) {
-                if is_error {
-                    let _ = self.warning_config.parse_as_error(&spec);
-                } else {
-                    let _ = self.warning_config.parse(&spec);
-                }
+            let name = self.arena.get_string(attr.0.txt);
+            if !matches!(name, "warning" | "ocaml.warning" | "warnerror" | "ocaml.warnerror") {
+                continue;
+            }
+            let Some((is_error, spec)) = self.warning_attribute_spec(attr) else {
+                self.report_warning(
+                    attr.0.loc,
+                    Warning::AttributePayload {
+                        attr: name.to_string(),
+                        message: "A single string literal is expected".to_string(),
+                    },
+                );
+                continue;
+            };
+            let mut scratch = WarningConfig::new();
+            let parsed = if is_error {
+                scratch.parse_as_error(&spec)
+            } else {
+                scratch.parse(&spec)
+            };
+            if parsed.is_err() {
+                self.report_warning(
+                    attr.0.loc,
+                    Warning::AttributePayload {
+                        attr: name.to_string(),
+                        message: "Ill-formed list of warnings".to_string(),
+                    },
+                );
+                continue;
+            }
+            if is_error {
+                let _ = self.warning_config.parse_as_error(&spec);
+            } else {
+                let _ = self.warning_config.parse(&spec);
             }
         }
         let result = f(self);
@@ -6469,15 +6519,26 @@ impl<'a> RawLambdaConverter<'a> {
         match &expr.exp_desc {
             ExpressionDesc::Texp_ident(path, _, desc) => match &desc.val_kind {
                 ValueKind::ValPrim(prim) => {
+                    // translcore.ml `transl_primitive` warns about a
+                    // polymorphic comparison used as a value.
+                    let warn_loc = Some(expr.exp_loc);
                     if let Some(env) = self.env_for_expr(expr) {
                         self.translate_primitive_raw_in_env(
                             self.loc(expr.exp_loc),
                             prim,
                             expr.exp_type,
                             env.as_ref(),
+                            warn_loc,
                         )
                     } else {
-                        self.translate_primitive_raw(self.loc(expr.exp_loc), prim, expr.exp_type)
+                        let env = self.env;
+                        self.translate_primitive_raw_in_env(
+                            self.loc(expr.exp_loc),
+                            prim,
+                            expr.exp_type,
+                            env,
+                            warn_loc,
+                        )
                     }
                 }
                 ValueKind::ValReg => {
@@ -6610,7 +6671,7 @@ impl<'a> RawLambdaConverter<'a> {
                 self.raw_block_or_prim(0, TagInfo::Tuple, elems, self.loc(expr.exp_loc))
             }
             ExpressionDesc::Texp_construct(_, cstr, args) => {
-                self.convert_construct_raw(self.loc(expr.exp_loc), expr.exp_env, cstr, args)
+                self.convert_construct_raw(self.loc(expr.exp_loc), cstr, args)
             }
             ExpressionDesc::Texp_variant(tag, arg) => match arg {
                 None => raw_polyvariant_const(tag),
@@ -6643,6 +6704,7 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_record {
                 fields,
                 extended_expression,
+                ..
             } => self.convert_record_raw(
                 self.loc(expr.exp_loc),
                 fields,
@@ -6866,7 +6928,6 @@ impl<'a> RawLambdaConverter<'a> {
                 _ => {
                     let raw = self.convert_construct_raw(
                         self.loc(expr.exp_loc),
-                        expr.exp_env,
                         cstr,
                         args,
                     );
@@ -6878,6 +6939,7 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_record {
                 fields,
                 extended_expression,
+                ..
             } => self.convert_record(
                 self.loc(expr.exp_loc),
                 fields,
@@ -9724,9 +9786,12 @@ impl<'a> RawLambdaConverter<'a> {
         match &pat.pat_desc {
             PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => true,
             PatternDesc::Tpat_alias(inner, _, _) => self.is_irrefutable_pattern(inner),
-            PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            PatternDesc::Tpat_tuple(items) => {
                 items.iter().all(|pat| self.is_irrefutable_pattern(pat))
             }
+            // OCaml `Parmatch.irrefutable` = `le_pat pat omega`, which falls back to
+            // `satisfiable` for arrays: an array pattern never covers every length.
+            PatternDesc::Tpat_array(_) => false,
             PatternDesc::Tpat_record(fields, _, _) => fields
                 .iter()
                 .all(|(_, _, pat, _)| self.is_irrefutable_pattern(pat)),
@@ -11700,21 +11765,13 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn translate_primitive_raw(
-        &mut self,
-        loc: Location,
-        prim: &crate::types::PrimitiveDescription,
-        ty: TypeExprRef,
-    ) -> RawLambda {
-        self.translate_primitive_raw_in_env(loc, prim, ty, self.env)
-    }
-
     fn translate_primitive_raw_in_env(
         &mut self,
         loc: Location,
         prim: &crate::types::PrimitiveDescription,
         ty: TypeExprRef,
         env: &crate::types::env::Env,
+        warn_loc: Option<LocIdx>,
     ) -> RawLambda {
         let raw_name = Self::raw_primitive_name(&prim.prim_name);
         if let Some(kind) = Self::raw_loc_kind(raw_name) {
@@ -11765,6 +11822,9 @@ impl<'a> RawLambdaConverter<'a> {
                     transformed_jsx: false,
                 }
             };
+        if let Some(warn_loc) = warn_loc {
+            self.report_polymorphic_comparison_warning(warn_loc, &primitive, &[]);
+        }
 
         if prim.prim_from_constructor || prim.prim_arity == 0 {
             RawLambda::prim(primitive, vec![], loc)
@@ -11869,7 +11929,7 @@ fn decoded_external_arg_types(encoded: &str, arity: usize) -> Vec<ExternalArgSpe
 ///
 /// The same externals (e.g. JSX and stdlib bindings) are applied throughout a
 /// build, so decoded values are memoized per worker thread.
-fn decode_marshaled_ffi_type(encoded: &str) -> Option<std::rc::Rc<OcamlValue>> {
+pub(crate) fn decode_marshaled_ffi_type(encoded: &str) -> Option<std::rc::Rc<OcamlValue>> {
     if encoded.is_empty() {
         return None;
     }
@@ -11893,7 +11953,7 @@ fn decode_marshaled_ffi_type(encoded: &str) -> Option<std::rc::Rc<OcamlValue>> {
     decoded
 }
 
-fn is_bs_primitive(encoded: &str) -> bool {
+pub(crate) fn is_bs_primitive(encoded: &str) -> bool {
     let mut chars = encoded.chars();
     let first = chars.next().map(|c| c as u32 as u8);
     let second = chars.next().map(|c| c as u32 as u8);
@@ -12460,7 +12520,7 @@ mod tests {
             cstr_inlined: None,
         };
 
-        let lowered = converter.convert_construct_raw(Location::none(), EnvRef(0), &cstr, &[]);
+        let lowered = converter.convert_construct_raw(Location::none(), &cstr, &[]);
 
         assert!(matches!(
             lowered,
@@ -12486,6 +12546,7 @@ mod tests {
             ExpressionDesc::Texp_record {
                 fields: vec![],
                 extended_expression: None,
+                empty_representation: None,
             },
             LocIdx::none(),
             crate::types::TypeExprRef(0),
@@ -12526,7 +12587,7 @@ mod tests {
             })),
         };
 
-        let lowered = converter.convert_construct_raw(Location::none(), EnvRef(0), &cstr, &[arg]);
+        let lowered = converter.convert_construct_raw(Location::none(), &cstr, &[arg]);
 
         assert!(matches!(
             lowered,
@@ -13432,6 +13493,7 @@ external myJson: Js.Json.t = "default"
             &prim,
             alias_ty,
             &env,
+            None,
         ));
 
         assert_eq!(primitive, Primitive::Pintorder);
@@ -13529,6 +13591,7 @@ external myJson: Js.Json.t = "default"
             &prim,
             alias_ty,
             &env,
+            None,
         ));
 
         assert_eq!(

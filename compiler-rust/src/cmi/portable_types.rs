@@ -129,6 +129,10 @@ pub enum PortableRowField {
 pub struct PortablePersStruct {
     pub ps_name: String,
     pub ps_filename: String,
+    /// `PersStruct::ps_deprecated`.
+    pub ps_deprecated: Option<String>,
+    /// `PersStruct::ps_crcs`.
+    pub ps_crcs: Vec<(String, Option<[u8; 16]>)>,
     /// Signature with TypeExprRef values being indices into `type_graph.entries`.
     pub ps_sig: Signature,
     /// Raw `ps_sig` copy for OCaml-style lazy alias scraping.
@@ -579,6 +583,8 @@ pub fn serialize_pers_struct(
     PortablePersStruct {
         ps_name: ps.ps_name.clone(),
         ps_filename: ps.ps_filename.clone(),
+        ps_deprecated: ps.ps_deprecated.clone(),
+        ps_crcs: ps.ps_crcs.clone(),
         ps_sig: sig,
         raw_ps_sig,
         cmi_longident_names: ctx.snapshot_cmi_longident_names(),
@@ -600,9 +606,11 @@ fn serialize_signature(
         cache: HashMap::new(),
         variant_layouts: Vec::new(),
         variant_layout_cache: HashMap::new(),
+        file_name_cache: HashMap::new(),
     };
     let mut sig = sig.clone();
     ser.remap_signature(&mut sig);
+    ser.remap_signature_locations(&mut sig);
     let type_graph = PortableTypeGraph {
         entries: ser.entries,
         variant_layouts: ser.variant_layouts,
@@ -617,9 +625,41 @@ struct TypeGraphSerializer<'a> {
     cache: HashMap<TypeExprRef, usize>,
     variant_layouts: Vec<crate::types::VariantLayout>,
     variant_layout_cache: HashMap<crate::types::VariantLayoutRef, usize>,
+    /// Source-arena file names re-interned as synthetic CMI names.
+    file_name_cache: HashMap<crate::intern::StrIdx, crate::intern::StrIdx>,
 }
 
 impl<'a> TypeGraphSerializer<'a> {
+    /// Remap the file names of every location in a signature (declarations
+    /// and attributes) to names portable across contexts.
+    fn remap_signature_locations(&mut self, sig: &mut Signature) {
+        crate::types::decl::for_each_signature_location(sig, &mut |loc| self.remap_loc(loc));
+    }
+
+    /// Declaration locations name their file through the source arena's
+    /// string table, which does not travel with the signature. Re-intern the
+    /// name in the TypeContext's synthetic CMI name table, as reading a `.cmi`
+    /// does (`sig_reader::read_location`), so the importing compile can
+    /// resolve it.
+    fn remap_loc(&mut self, loc: &mut crate::location::Location) {
+        let Some(arena) = self.arena else {
+            return;
+        };
+        for pos in [&mut loc.loc_start, &mut loc.loc_end] {
+            let idx = pos.file_name;
+            if idx == crate::intern::StrIdx::default()
+                || self.ctx.resolve_cmi_longident_component(idx).is_some()
+            {
+                continue;
+            }
+            let ctx = self.ctx;
+            pos.file_name = *self
+                .file_name_cache
+                .entry(idx)
+                .or_insert_with(|| ctx.intern_cmi_longident_name(arena.get_string(idx)));
+        }
+    }
+
     /// Serialize a TypeExprRef, returning the portable index.
     fn serialize_type(&mut self, r: TypeExprRef) -> usize {
         if let Some(&idx) = self.cache.get(&r) {
@@ -789,9 +829,11 @@ impl<'a> TypeGraphSerializer<'a> {
 
     fn remap_value_desc(&mut self, vd: &mut ValueDescription) {
         vd.val_type = TypeExprRef::from_usize(self.serialize_type(vd.val_type));
+        self.remap_loc(&mut vd.val_loc);
     }
 
     fn remap_type_decl(&mut self, td: &mut TypeDeclaration) {
+        self.remap_loc(&mut td.type_loc);
         if let TypeKind::TypeVariant(_, layout_ref) = &mut td.type_kind {
             let index = if let Some(index) = self.variant_layout_cache.get(layout_ref) {
                 *index
@@ -836,9 +878,11 @@ impl<'a> TypeGraphSerializer<'a> {
 
     fn remap_label_decl(&mut self, ld: &mut LabelDeclaration) {
         ld.ld_type = TypeExprRef::from_usize(self.serialize_type(ld.ld_type));
+        self.remap_loc(&mut ld.ld_loc);
     }
 
     fn remap_ctor_decl(&mut self, cd: &mut ConstructorDeclaration) {
+        self.remap_loc(&mut cd.cd_loc);
         match &mut cd.cd_args {
             ConstructorArguments::CstrTuple(types) => {
                 for t in types.iter_mut() {
@@ -857,6 +901,7 @@ impl<'a> TypeGraphSerializer<'a> {
     }
 
     fn remap_ext_ctor(&mut self, ec: &mut ExtensionConstructor) {
+        self.remap_loc(&mut ec.ext_loc);
         for p in ec.ext_type_params.iter_mut() {
             *p = TypeExprRef::from_usize(self.serialize_type(*p));
         }
@@ -878,10 +923,12 @@ impl<'a> TypeGraphSerializer<'a> {
     }
 
     fn remap_module_decl(&mut self, md: &mut ModuleDeclaration) {
+        self.remap_loc(&mut md.md_loc);
         self.remap_module_type(&mut md.md_type);
     }
 
     fn remap_modtype_decl(&mut self, mtd: &mut ModtypeDeclaration) {
+        self.remap_loc(&mut mtd.mtd_loc);
         if let Some(ref mut mt) = mtd.mtd_type {
             self.remap_module_type(mt);
         }
@@ -966,7 +1013,6 @@ fn graph_is_shareable(graph: &PortableTypeGraph) -> bool {
 /// side tables (`cmi_longident_names`, GenType raw signatures) are still
 /// filled for each compilation.
 pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) -> Arc<PersStruct> {
-    ctx.import_cmi_longident_names(&pps.cmi_longident_names);
     if pps.raw_ps_sig.is_some() && pps.raw_type_graph.is_some() {
         ctx.register_gentype_portable_raw_module_sig(&pps.ps_name, pps.clone());
     }
@@ -1031,11 +1077,16 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         // keeps the result so later units on this worker skip the pool map.
         let pool = store.shared_pool();
         let shared = pool.pers_struct(&pps, || {
-            let sig = internalize_signature_into_shared(&pps.ps_sig, &pps.type_graph, pool)?;
+            let mut sig = internalize_signature_into_shared(&pps.ps_sig, &pps.type_graph, pool)?;
+            remap_signature_file_names(&mut sig, &pps.cmi_longident_names, &|name| {
+                pool.intern_longident_name(name)
+            });
             Some(Arc::new(PersStruct {
                 ps_name: pps.ps_name.clone(),
                 ps_sig: Arc::new(sig),
                 ps_filename: pps.ps_filename.clone(),
+                ps_deprecated: pps.ps_deprecated.clone(),
+                ps_crcs: pps.ps_crcs.clone(),
             }))
         });
         if let Some(ps) = shared {
@@ -1044,14 +1095,24 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         }
     }
     let sig = if shareable {
-        internalize_signature_into_store(&pps.ps_sig, &pps.type_graph, store)
+        let mut sig = internalize_signature_into_store(&pps.ps_sig, &pps.type_graph, store);
+        remap_signature_file_names(&mut sig, &pps.cmi_longident_names, &|name| {
+            store.intern_longident_name(name)
+        });
+        sig
     } else {
-        internalize_signature(&pps.ps_sig, &pps.type_graph, ctx)
+        let mut sig = internalize_signature(&pps.ps_sig, &pps.type_graph, ctx);
+        remap_signature_file_names(&mut sig, &pps.cmi_longident_names, &|name| {
+            ctx.intern_cmi_longident_name(name)
+        });
+        sig
     };
     let ps = Arc::new(PersStruct {
         ps_name: pps.ps_name.clone(),
         ps_sig: Arc::new(sig),
         ps_filename: pps.ps_filename.clone(),
+        ps_deprecated: pps.ps_deprecated.clone(),
+        ps_crcs: pps.ps_crcs.clone(),
     });
     if shareable {
         store.insert_pers_struct(pps, ps.clone());
@@ -1156,11 +1217,37 @@ pub(crate) fn internalize_raw_signature(
     pps: &PortablePersStruct,
     ctx: &TypeContext,
 ) -> Option<Signature> {
-    Some(internalize_signature(
+    let mut sig = internalize_signature(
         pps.raw_ps_sig.as_ref()?,
         pps.raw_type_graph.as_ref()?,
         ctx,
-    ))
+    );
+    remap_signature_file_names(&mut sig, &pps.cmi_longident_names, &|name| {
+        ctx.intern_cmi_longident_name(name)
+    });
+    Some(sig)
+}
+
+/// Locations of a portable signature name their files through the
+/// publishing context's synthetic names; every context numbers those from the
+/// same base, so give each imported name a fresh index in `ctx`.
+fn remap_signature_file_names(
+    sig: &mut Signature,
+    names: &[(u32, String)],
+    intern: &dyn Fn(&str) -> crate::intern::StrIdx,
+) {
+    let names: HashMap<u32, &str> = names.iter().map(|(raw, name)| (*raw, name.as_str())).collect();
+    let mut fresh: HashMap<u32, crate::intern::StrIdx> = HashMap::new();
+    crate::types::decl::for_each_signature_location(sig, &mut |loc| {
+        for pos in [&mut loc.loc_start, &mut loc.loc_end] {
+            let raw = pos.file_name.raw();
+            if let Some(name) = names.get(&raw) {
+                pos.file_name = *fresh
+                    .entry(raw)
+                    .or_insert_with(|| intern(name));
+            }
+        }
+    });
 }
 
 fn internalize_signature(
@@ -1500,14 +1587,9 @@ mod type_arg_tests {
             ].into(),
             ret: shared,
         });
-        let mut ser = TypeGraphSerializer {
-            ctx: &ctx,
-            arena: None,
-            entries: Vec::new(),
-            cache: HashMap::new(),
-            variant_layouts: Vec::new(),
-            variant_layout_cache: HashMap::new(),
-        };
+        let mut ser = TypeGraphSerializer { ctx: &ctx, arena: None, entries: Vec::new(),
+            cache: HashMap::new(), variant_layouts: Vec::new(), variant_layout_cache: HashMap::new(),
+            file_name_cache: HashMap::new() };
         let index = ser.serialize_type(arrow);
         let PortableTypeDesc::Tarrow { args, ret } = &ser.entries[index].desc else {
             panic!("not arrow")

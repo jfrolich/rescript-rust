@@ -250,6 +250,8 @@ pub enum PatternDesc {
 pub struct RecordPatternRest {
     /// Identifier bound for the rest value.
     pub rest_ident: Ident,
+    /// Location passed to `enter_variable` (the value's `val_loc`).
+    pub rest_loc: crate::parse_arena::LocIdx,
     /// Source name of the rest binding.
     pub rest_name: Loc<String>,
     /// Inferred record-rest type.
@@ -343,6 +345,12 @@ pub enum ExpressionDesc {
     /// Fields are (lid, label_desc, definition, optional).
     Texp_record {
         fields: Vec<RecordField>,
+        /// OCaml `representation` (compiler/ml/typedtree.ml `Texp_record`).
+        /// When `fields` is non-empty OCaml takes it from the first label's
+        /// `lbl_repres` (compiler/ml/typecore.ml:2767-2771), so Rust derives it
+        /// from `fields[0]`. Only the empty-field case (typecore.ml:2772-2788)
+        /// carries it separately; sparse storage keeps the common node small.
+        empty_representation: Option<Box<crate::types::RecordRepresentation>>,
         extended_expression: Option<Box<Expression>>,
     },
 
@@ -1042,6 +1050,10 @@ pub struct TypedValueDescription {
     pub val_desc: TypedCoreType,
     /// Primitive names.
     pub val_prim: Vec<String>,
+    /// `val_val.val_kind` (compiler/ml/typedtree.mli `value_description`):
+    /// the kind `Typedecl.transl_value_decl` computed (typedecl.ml:1878-1915),
+    /// including a primitive's arity from `parse_arity`.
+    pub val_kind: crate::types::decl::ValueKind,
     /// Location.
     pub val_loc: LocIdx,
     /// Attributes.

@@ -7,7 +7,7 @@ use std::borrow::Cow;
 
 use super::ast::*;
 use super::core::{
-    ast_helper, err_invalid_variant_ident, mknoloc, recover, template_literal_attr, with_loc,
+    ast_helper, mknoloc, recover, template_literal_attr, with_loc,
 };
 use super::diagnostics::DiagnosticCategory;
 use super::grammar::{self, Grammar};
@@ -16,16 +16,6 @@ use super::state::{Parser, ParserMode};
 use super::token::Token;
 use crate::parse_arena::{LocIdx, Located, PatIdx, PosIdx, StrIdx};
 
-/// Check if a constant is valid for an interval pattern.
-/// This includes integers, floats, characters (Constant::Char), and
-/// characters encoded as strings with INTERNAL_RES_CHAR_CONTENTS tag.
-fn is_interval_constant(c: &Constant) -> bool {
-    match c {
-        Constant::Integer(..) | Constant::Char(..) | Constant::Float(..) => true,
-        Constant::String(_, Some(tag)) if tag == "INTERNAL_RES_CHAR_CONTENTS" => true,
-        _ => false,
-    }
-}
 
 // ============================================================================
 // Attribute Parsing for Patterns
@@ -33,6 +23,9 @@ fn is_interval_constant(c: &Constant) -> bool {
 
 /// Parse attributes (including doc comments which become res.doc attributes).
 fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
+    // OCaml `parse_attributes` = `parse_region ~grammar:Grammar.Attribute`
+    // (compiler/syntax/src/res_core.ml:7635-7636, 1177-1192).
+    p.leave_breadcrumb(super::grammar::Grammar::Attribute);
     let mut attrs = vec![];
     loop {
         match &p.token {
@@ -55,6 +48,7 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
             _ => break,
         }
     }
+    p.eat_breadcrumb();
     Attributes::from_vec(attrs)
 }
 
@@ -69,17 +63,7 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
 
     let attr_id = parse_attribute_id(p, start_pos_idx);
 
-    // Only parse Lparen as payload if it's immediately adjacent to the attribute ID
-    // (no whitespace between them). e.g., @attr(payload) vs @attr (expression)
-    let is_adjacent = p.start_pos.cnum == p.prev_end_pos.cnum;
-    let payload = if p.token == Token::Lparen && is_adjacent {
-        p.next();
-        let payload = parse_payload(p);
-        p.expect(Token::Rparen);
-        payload
-    } else {
-        Payload::PStr(Box::new(vec![]))
-    };
+    let payload = super::module::parse_payload_region(p);
 
     Some((attr_id, payload))
 }
@@ -87,303 +71,333 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
 /// Parse an attribute identifier.
 /// The `start_pos_idx` parameter should be the position BEFORE the `@` was consumed.
 fn parse_attribute_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Located<StrIdx> {
-    let mut parts = vec![];
+    // OCaml `parse_attribute_id` (compiler/syntax/src/res_core.ml:7531-7556).
+    super::module::parse_extension_id(p, start_pos_idx)
+}
 
-    loop {
-        let name = match &p.token {
-            Token::Lident(name) | Token::Uident(name) => {
-                let name = name.to_string();
-                p.next();
-                name
-            }
-            _ if p.token.is_keyword() => {
-                let name = p.token.to_string();
-                p.next();
-                name
-            }
-            _ => break,
-        };
-        parts.push(name);
-        if p.token == Token::Dot {
+// ============================================================================
+// Main Pattern Parsing (OCaml res_core.ml:1210-1830)
+// ============================================================================
+
+/// OCaml `make_pat_variant_spread_attr` (res_core.ml:278-279).
+fn make_pat_variant_spread_attr(p: &mut Parser<'_>) -> Attribute {
+    let name = p.arena_mut().intern("res.patVariantSpread");
+    (mknoloc(name), Payload::PStr(Box::new(vec![])))
+}
+
+fn pat(desc: PatternDesc, loc: LocIdx, attrs: Attributes) -> Pattern {
+    Pattern {
+        ppat_desc: Box::new(desc),
+        ppat_loc: loc,
+        ppat_attributes: attrs,
+    }
+}
+
+/// `Ast_helper.Pat.construct ~loc (mkloc (Lident name) loc) None`.
+fn construct_lident(p: &mut Parser<'_>, name: &'static str, loc: LocIdx, attrs: Attributes) -> Pattern {
+    let lid_idx = if name == "()" {
+        p.push_lident_static("()")
+    } else {
+        let name_idx = p.arena_mut().intern_string(name);
+        p.push_longident(Longident::Lident(name_idx))
+    };
+    pat(PatternDesc::Ppat_construct(with_loc(lid_idx, loc), None), loc, attrs)
+}
+
+/// OCaml `parse_template_constant ~prefix` (res_core.ml:1045-1066).
+fn parse_template_constant(p: &mut Parser<'_>, prefix: Option<Cow<'static, str>>) -> Constant {
+    let start_pos = p.start_pos;
+    p.next_template_literal_token();
+    if let Token::TemplateTail { text, .. } = &p.token {
+        let text = text.to_string();
+        p.next();
+        return Constant::String(Cow::Owned(text), prefix);
+    }
+    fn skip_tokens(p: &mut Parser<'_>) {
+        if p.token != Token::Eof {
             p.next();
-        } else {
-            break;
-        }
-    }
-
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    let str_idx = p.arena_mut().push_string(parts.join("."));
-    with_loc(str_idx, loc)
-}
-
-/// Parse an attribute payload.
-fn parse_payload(p: &mut Parser<'_>) -> Payload {
-    // For patterns, we mainly need to handle string payloads like @attr("value")
-    // and simple structure payloads
-    let mut items = vec![];
-
-    while p.token != Token::Rparen && p.token != Token::Eof {
-        // Try to parse an expression for the payload
-        let expr = super::expr::parse_expr(p);
-        let expr_idx = p.arena_mut().push_expr(expr);
-        items.push(StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                expr_idx,
-                Attributes::new(),
-            )))),
-            pstr_loc: LocIdx::none(),
-        });
-
-        if !p.optional(&Token::Comma) && !p.optional(&Token::Semicolon) {
-            break;
-        }
-    }
-
-    Payload::PStr(Box::new(items))
-}
-
-/// Parse a type longident (for #...type pattern).
-/// Type paths can be like: typevar, Module.typevar, etc.
-fn parse_type_longident(p: &mut Parser<'_>) -> crate::parse_arena::LidentIdx {
-    let mut parts = vec![];
-
-    loop {
-        match &p.token {
-            Token::Uident(name) => {
-                parts.push(name.to_string());
+            if p.token == Token::Backtick {
                 p.next();
-                if p.token == Token::Dot {
+            } else {
+                skip_tokens(p);
+            }
+        }
+    }
+    skip_tokens(p);
+    p.err_at(
+        start_pos,
+        p.prev_end_pos,
+        DiagnosticCategory::Message(
+            super::core::error_messages::STRING_INTERPOLATION_IN_PATTERN.to_string(),
+        ),
+    );
+    Constant::String(Cow::Borrowed(""), None)
+}
+
+/// OCaml `parse_pattern` with the default `~alias:true ~or_:true`.
+pub fn parse_pattern(p: &mut Parser<'_>) -> Pattern {
+    parse_pattern_with(p, true, true)
+}
+
+/// OCaml `parse_pattern ?(alias = true) ?(or_ = true)` (res_core.ml:1210-1352).
+fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
+    let start_pos_idx = p.start_pos_idx();
+    let attrs = parse_attributes(p);
+    let token = p.token.clone().into_owned();
+    let pattern = match token {
+        Token::True | Token::False => {
+            let end_pos = p.end_pos_idx();
+            p.next();
+            let loc = p.mk_loc_idx_full(start_pos_idx, end_pos);
+            let name = if token == Token::True { "true" } else { "false" };
+            construct_lident(p, name, loc, Attributes::new())
+        }
+        Token::Int { .. }
+        | Token::String(_)
+        | Token::Float { .. }
+        | Token::Codepoint { .. }
+        | Token::Minus
+        | Token::Plus => {
+            let c = super::expr::parse_constant(p);
+            if p.token == Token::DotDot {
+                p.next();
+                let c2 = super::expr::parse_constant(p);
+                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                pat(PatternDesc::Ppat_interval(Box::new((c, c2))), loc, Attributes::new())
+            } else {
+                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                pat(PatternDesc::Ppat_constant(Box::new(c)), loc, Attributes::new())
+            }
+        }
+        Token::Backtick => {
+            let constant = parse_template_constant(p, Some(Cow::Borrowed("js")));
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            let template_attr = template_literal_attr(p.arena_mut());
+            pat(
+                PatternDesc::Ppat_constant(Box::new(constant)),
+                loc,
+                Attributes::from_vec(vec![template_attr]),
+            )
+        }
+        Token::Lparen => {
+            p.next();
+            if p.token == Token::Rparen {
+                p.next();
+                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                construct_lident(p, "()", loc, Attributes::new())
+            } else {
+                let inner = parse_constrained_pattern(p);
+                if p.token == Token::Comma {
                     p.next();
+                    parse_tuple_pattern(p, start_pos_idx, inner, attrs.as_slice().to_vec())
                 } else {
-                    break;
+                    p.expect(Token::Rparen);
+                    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                    let Pattern {
+                        ppat_desc,
+                        ppat_attributes,
+                        ..
+                    } = inner;
+                    Pattern {
+                        ppat_desc,
+                        ppat_loc: loc,
+                        ppat_attributes: attrs.clone().concat(ppat_attributes),
+                    }
                 }
             }
-            Token::Lident(name) => {
-                parts.push(name.to_string());
-                p.next();
-                break;
-            }
-            _ => break,
         }
-    }
-
-    let lid = if parts.is_empty() {
-        let underscore_idx = p.arena_mut().intern_string("_");
-        Longident::Lident(underscore_idx)
-    } else {
-        super::core::build_longident(p.arena_mut(), &parts)
-    };
-    p.push_longident(lid)
-}
-
-// ============================================================================
-// Main Pattern Parsing
-// ============================================================================
-
-/// Parse a single pattern (atomic + interval), used by or-pattern parsing.
-/// This parses one "branch" of an or-pattern without consuming further `|`.
-fn parse_single_pattern(p: &mut Parser<'_>) -> Pattern {
-    let start_pos_idx = p.start_pos_idx();
-
-    // Parse leading attributes
-    let attrs = parse_attributes(p);
-
-    let mut pat = parse_atomic_pattern(p);
-
-    // Handle interval patterns: 1 .. 2, 'a' .. 'z', -1 .. -1., etc.
-    if p.token == Token::DotDot {
-        if let PatternDesc::Ppat_constant(from) = &*pat.ppat_desc {
-            if is_interval_constant(from) {
-                let from = (**from).clone();
-                p.next();
-                let to = match &p.token {
-                    Token::Int { .. } | Token::Codepoint { .. } | Token::Float { .. } => {
-                        super::expr::parse_constant(p)
-                    }
-                    Token::Minus => {
-                        // Handle negative numbers: -1, -1.0
-                        p.next();
-                        match &p.token {
-                            Token::Int { i, suffix } => {
-                                let value = Cow::Owned(format!("-{}", i));
-                                let suffix = suffix.clone();
-                                p.next();
-                                Constant::Integer(value, suffix)
-                            }
-                            Token::Float { f, suffix } => {
-                                let value = Cow::Owned(format!("-{}", f));
-                                let suffix = suffix.clone();
-                                p.next();
-                                Constant::Float(value, suffix)
-                            }
-                            _ => {
-                                p.err(DiagnosticCategory::Message(
-                                    "Expected number after '-' in interval pattern".to_string(),
-                                ));
-                                Constant::Integer(Cow::Borrowed("0"), None)
-                            }
-                        }
-                    }
-                    _ => {
-                        p.err(DiagnosticCategory::Message(
-                            "Expected constant after '..' in pattern".to_string(),
-                        ));
-                        Constant::Integer(Cow::Borrowed("0"), None)
-                    }
-                };
+        Token::Lbracket => parse_array_pattern(p, attrs.clone()),
+        Token::Lbrace => parse_record_pattern(p, attrs.clone()),
+        Token::Underscore => {
+            let end_pos = p.end_pos_idx();
+            let loc = p.mk_loc_idx_full(start_pos_idx, end_pos);
+            p.next();
+            pat(PatternDesc::Ppat_any, loc, attrs.clone())
+        }
+        Token::Lident(ident) => {
+            let ident = ident.to_string();
+            let end_pos = p.end_pos_idx();
+            let loc = p.mk_loc_idx_full(start_pos_idx, end_pos);
+            p.next();
+            if p.token == Token::Backtick {
+                let constant = parse_template_constant(p, Some(Cow::Owned(ident)));
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                pat = Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_interval(Box::new((from, to)))),
-                    ppat_loc: loc,
-                    ppat_attributes: Attributes::new(),
-                };
+                pat(PatternDesc::Ppat_constant(Box::new(constant)), loc, Attributes::new())
+            } else {
+                let name_idx = p.arena_mut().push_interned_string(&ident);
+                pat(PatternDesc::Ppat_var(with_loc(name_idx, loc)), loc, attrs.clone())
             }
         }
-    }
-
-    // Apply leading attributes to the pattern
-    if !attrs.is_empty() {
-        let loc = p.mk_loc_idx_to_end_of(start_pos_idx, pat.ppat_loc);
-        // OCaml also extends the inner StringLoc in Ppat_var to include attributes
-        let new_desc = match *pat.ppat_desc {
-            PatternDesc::Ppat_var(var_loc) => {
-                let extended_loc = p.mk_loc_idx_to_end_of(start_pos_idx, var_loc.loc);
-                PatternDesc::Ppat_var(with_loc(var_loc.txt, extended_loc))
+        Token::Uident(_) => {
+            let constr = super::module::parse_module_long_ident(p);
+            if p.token == Token::Lparen {
+                parse_constructor_pattern_args(p, constr, start_pos_idx, attrs.clone())
+            } else {
+                let loc = constr.loc;
+                pat(PatternDesc::Ppat_construct(constr, None), loc, attrs.clone())
             }
-            other => other,
-        };
-        pat = Pattern {
-            ppat_desc: Box::new(new_desc),
-            ppat_loc: loc,
-            ppat_attributes: attrs.concat(pat.ppat_attributes),
-        };
-    }
-
-    pat
-}
-
-/// Parse a single pattern with optional alias (atomic + interval + as name).
-/// Used by or-pattern parsing so each branch can have its own alias.
-fn parse_single_pattern_with_alias(p: &mut Parser<'_>) -> Pattern {
-    let start_pos_idx = p.start_pos_idx();
-    let mut pat = parse_single_pattern(p);
-
-    // Handle pattern aliases (pat as name) for this single branch
-    // Supports attributes on the alias: `pat as @attr name`
-    while p.token == Token::As {
-        p.next();
-        // Parse any attributes before the alias name (e.g., @zz in `as @zz z`)
-        let alias_start_idx = p.start_pos_idx();
-        let alias_attrs = parse_attributes(p);
-        let (name, name_loc) = match &p.token {
-            Token::Lident(name) => {
-                let name = name.to_string();
-                let name_loc = p.mk_loc_current();
+        }
+        Token::DotDotDot => {
+            p.next();
+            let (parts, lid_loc) = super::module::parse_value_path(p);
+            let lid_unloc = super::core::build_longident(p.arena_mut(), &parts);
+            let lid = p.push_longident(lid_unloc);
+            let loc = p.mk_loc_idx_to_end_of(start_pos_idx, lid_loc);
+            let mut spread_attrs = vec![make_pat_variant_spread_attr(p)];
+            spread_attrs.extend(attrs.iter().cloned());
+            pat(
+                PatternDesc::Ppat_type(with_loc(lid, lid_loc)),
+                loc,
+                Attributes::from_vec(spread_attrs),
+            )
+        }
+        Token::Hash => {
+            p.next();
+            if p.token == Token::DotDotDot {
                 p.next();
-                (name, name_loc)
+                let (parts, lid_loc) = super::module::parse_value_path(p);
+                let lid_unloc = super::core::build_longident(p.arena_mut(), &parts);
+                let lid = p.push_longident(lid_unloc);
+                let loc = p.mk_loc_idx_to_end_of(start_pos_idx, lid_loc);
+                pat(PatternDesc::Ppat_type(with_loc(lid, lid_loc)), loc, attrs.clone())
+            } else {
+                let (ident, loc) = super::core::parse_hash_ident(p, start_pos_idx);
+                if p.token == Token::Lparen {
+                    parse_variant_pattern_args(p, ident, start_pos_idx, attrs.clone())
+                } else {
+                    pat(
+                        PatternDesc::Ppat_variant(Box::new((Cow::Owned(ident), None))),
+                        loc,
+                        attrs.clone(),
+                    )
+                }
             }
-            _ => {
-                p.err(DiagnosticCategory::Message(
-                    "Expected identifier after 'as'".to_string(),
-                ));
-                let err_loc = p.mk_loc_current();
-                ("_".to_string(), err_loc)
+        }
+        Token::Exception => {
+            p.next();
+            let inner = parse_pattern_with(p, false, false);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            let inner_idx = p.arena_mut().push_pat(inner);
+            pat(PatternDesc::Ppat_exception(inner_idx), loc, attrs.clone())
+        }
+        Token::List => {
+            p.next();
+            parse_list_pattern(p, start_pos_idx, attrs.clone())
+        }
+        Token::Dict => {
+            p.next();
+            parse_dict_pattern(p, start_pos_idx, attrs.clone())
+        }
+        Token::Module => parse_module_pattern(p, attrs.clone()),
+        Token::Percent => {
+            let extension = super::module::parse_extension(p, false);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            pat(PatternDesc::Ppat_extension(Box::new(extension)), loc, attrs.clone())
+        }
+        Token::Eof => {
+            p.err_unexpected();
+            recover::default_pattern(p.arena_mut())
+        }
+        _ => {
+            p.err_unexpected();
+            if recover::skip_tokens_and_maybe_retry(p, grammar::is_atomic_pattern_start) {
+                parse_pattern(p)
+            } else {
+                recover::default_pattern(p.arena_mut())
             }
-        };
-        // If there are attributes, extend the name location to include them (OCaml behavior)
-        let name_with_attrs_loc = if alias_attrs.is_empty() {
-            name_loc
-        } else {
-            p.mk_loc_idx_to_prev_end(alias_start_idx)
-        };
-        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-        let name_idx = p.arena_mut().push_interned_string(&name);
-        let pat_idx = p.arena_mut().push_pat(pat);
-        pat = Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_alias(
-                pat_idx,
-                with_loc(name_idx, name_with_attrs_loc),
-            )),
-            ppat_loc: loc,
-            ppat_attributes: alias_attrs,
-        };
+        }
+    };
+    let pattern = if alias {
+        parse_alias_pattern(p, pattern, attrs.as_slice().to_vec())
+    } else {
+        pattern
+    };
+    if or_ {
+        parse_or_pattern(p, pattern)
+    } else {
+        pattern
     }
-
-    pat
 }
 
-/// Parse a pattern.
-pub fn parse_pattern(p: &mut Parser<'_>) -> Pattern {
-    let start_pos_idx = p.start_pos_idx();
-
-    // Parse first pattern with its alias (if any)
-    let mut pat = parse_single_pattern_with_alias(p);
-
-    // Handle or-patterns - each branch can have its own alias
-    if p.token == Token::Bar {
-        pat = parse_or_pattern(p, pat, start_pos_idx);
+/// OCaml `parse_alias_pattern ~attrs` (res_core.ml:1377-1386).
+pub fn parse_alias_pattern(p: &mut Parser<'_>, pattern: Pattern, attrs: Vec<Attribute>) -> Pattern {
+    if p.token != Token::As {
+        return pattern;
     }
-
-    // Note: Type constraints (pat : type) are NOT handled here.
-    // Callers that need constraints should use parse_constrained_pattern.
-    // This matches OCaml's design where parse_pattern doesn't consume `:`.
-
-    pat
+    p.next();
+    let (name, name_loc) = super::core::parse_lident(p);
+    let name_idx = p.arena_mut().push_interned_string(&name);
+    let loc = p.mk_loc_extend_to_prev_end(pattern.ppat_loc);
+    let pattern_idx = p.arena_mut().push_pat(pattern);
+    pat(
+        PatternDesc::Ppat_alias(pattern_idx, with_loc(name_idx, name_loc)),
+        loc,
+        Attributes::from_vec(attrs),
+    )
 }
 
-/// Parse an or-pattern (pat1 | pat2).
-fn parse_or_pattern(p: &mut Parser<'_>, first: Pattern, _start_pos_idx: PosIdx) -> Pattern {
-    let mut patterns = vec![first];
-
+/// OCaml `parse_or_pattern` (res_core.ml:1390-1402).
+fn parse_or_pattern(p: &mut Parser<'_>, pattern1: Pattern) -> Pattern {
+    let mut pattern1 = pattern1;
     while p.token == Token::Bar {
         p.next();
-        // Use parse_single_pattern_with_alias so each branch can have its own alias
-        // e.g., `_ as _y | _ as _x` parses as `(_ as _y) | (_ as _x)`
-        patterns.push(parse_single_pattern_with_alias(p));
+        let pattern2 = parse_pattern_with(p, true, false);
+        let loc = p.mk_loc_spanning_preserve_ghost(pattern1.ppat_loc, pattern2.ppat_loc);
+        let left = p.arena_mut().push_pat(pattern1);
+        let right = p.arena_mut().push_pat(pattern2);
+        pattern1 = pat(PatternDesc::Ppat_or(left, right), loc, Attributes::new());
     }
-
-    // Build left-associative or-pattern chain: A | B | C => ((A | B) | C)
-    // This matches OCaml's behavior
-    patterns
-        .into_iter()
-        .reduce(|acc, pat| {
-            // Reuse the existing PosIdx from acc.ppat_loc to match OCaml's sharing
-            let start_idx = p.loc_start_idx(acc.ppat_loc);
-            let end_idx = p.loc_end_idx(pat.ppat_loc);
-            let loc = p.mk_loc_idx_full(start_idx, end_idx);
-            let acc_idx = p.arena_mut().push_pat(acc);
-            let pat_idx = p.arena_mut().push_pat(pat);
-            Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_or(acc_idx, pat_idx)),
-                ppat_loc: loc,
-                ppat_attributes: Attributes::new(),
-            }
-        })
-        .unwrap_or_else(|| recover::default_pattern(p.arena_mut()))
+    pattern1
 }
 
-/// Parse a constrained pattern (pattern : type).
-pub fn parse_constrained_pattern(p: &mut Parser<'_>) -> Pattern {
-    let pat = parse_pattern(p);
+/// `Ast_helper.Pat.constraint_ ~loc:(mk_loc pat.loc_start typ.loc_end)`.
+fn constrain_pattern(p: &mut Parser<'_>, pattern: Pattern) -> Pattern {
+    let typ = super::typ::parse_typ_expr(p);
+    let loc = p.mk_loc_spanning(pattern.ppat_loc, typ.ptyp_loc);
+    let pattern_idx = p.arena_mut().push_pat(pattern);
+    let typ_idx = p.arena_mut().push_core_type(typ);
+    pat(
+        PatternDesc::Ppat_constraint(Box::new((pattern_idx, typ_idx))),
+        loc,
+        Attributes::new(),
+    )
+}
 
+/// OCaml `parse_non_spread_pattern ~msg` (res_core.ml:1404-1422).
+fn parse_non_spread_pattern(p: &mut Parser<'_>, msg: &str) -> Option<Pattern> {
+    if p.token == Token::DotDotDot {
+        p.err(DiagnosticCategory::Message(msg.to_string()));
+        p.next();
+    }
+    if !grammar::is_pattern_start(&p.token) {
+        return None;
+    }
+    let pattern = parse_pattern(p);
     if p.token == Token::Colon {
         p.next();
-        // OCaml uses parse_typ_expr (with es6_arrow=true) here, not no-arrow.
-        // Switch cases use parse_pattern (not constrained), so => is safe here.
-        let typ = super::typ::parse_typ_expr(p);
-        // Reuse the existing PosIdx from pat.ppat_loc to match OCaml's sharing
-        let start_idx = p.loc_start_idx(pat.ppat_loc);
-        let end_idx = p.loc_end_idx(typ.ptyp_loc);
-        let loc = p.mk_loc_idx_full(start_idx, end_idx);
-        let pat_idx = p.arena_mut().push_pat(pat);
-        let typ_idx = p.arena_mut().push_core_type(typ);
-        Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
-            ppat_loc: loc,
-            ppat_attributes: Attributes::new(),
-        }
+        Some(constrain_pattern(p, pattern))
     } else {
-        pat
+        Some(pattern)
+    }
+}
+
+/// OCaml `parse_constrained_pattern` (res_core.ml:1424-1432).
+pub fn parse_constrained_pattern(p: &mut Parser<'_>) -> Pattern {
+    let pattern = parse_pattern(p);
+    if p.token == Token::Colon {
+        p.next();
+        constrain_pattern(p, pattern)
+    } else {
+        pattern
+    }
+}
+
+/// OCaml `parse_constrained_pattern_region` (res_core.ml:1434-1438).
+fn parse_constrained_pattern_region(p: &mut Parser<'_>) -> Option<Pattern> {
+    if grammar::is_pattern_start(&p.token) {
+        Some(parse_constrained_pattern(p))
+    } else {
+        None
     }
 }
 
@@ -396,1014 +410,246 @@ pub fn make_unit_construct_pattern(p: &mut super::state::Parser<'_>, lid_loc: Lo
     ast_helper::make_construct_pat(p.arena_mut(), lid_idx, None, lid_loc, LocIdx::none())
 }
 
-/// Parse an optional alias `as name` after a pattern.
-///
-/// This is used in for loops where we need to parse aliases separately
-/// from the main pattern parsing.
-pub fn parse_alias_pattern(
-    p: &mut Parser<'_>,
-    mut pat: Pattern,
-    _attrs: Vec<Attribute>,
-) -> Pattern {
-    while p.token == Token::As {
-        p.next();
-        let name = match &p.token {
-            Token::Lident(name) => {
-                let name = name.clone();
-                let loc = p.mk_loc_current();
-                p.next();
-                let str_idx = p.arena_mut().push_interned_string(&name);
-                with_loc(str_idx, loc)
-            }
-            _ => {
-                p.err(DiagnosticCategory::Message(
-                    "Expected identifier after 'as'".to_string(),
-                ));
-                let str_idx = p.arena_mut().intern("_");
-                with_loc(str_idx, p.mk_loc_current())
-            }
-        };
-        // OCaml: {pattern.ppat_loc with loc_end = p.prev_end_pos}
-        // This preserves loc_start and loc_ghost from the pattern's location
-        let loc = p.mk_loc_extend_to_prev_end(pat.ppat_loc);
-        let pat_idx = p.arena_mut().push_pat(pat);
-        pat = Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_alias(pat_idx, name)),
-            ppat_loc: loc,
-            ppat_attributes: Attributes::new(),
-        };
-    }
-    pat
-}
-
-/// Parse a tuple pattern from a starting position and first pattern.
-///
-/// The caller must have already consumed the first comma between the first
-/// pattern and the second. This function continues parsing subsequent patterns.
-///
-/// Example: for `(a, b, c)`, after parsing `a` and consuming the comma,
-/// this function parses `b, c)`.
+/// OCaml `parse_tuple_pattern ~attrs ~first ~start_pos` (res_core.ml:1602-1617).
+/// The comma after `first` has been consumed by the caller.
 pub fn parse_tuple_pattern(
     p: &mut Parser<'_>,
     start_pos_idx: PosIdx,
     first: Pattern,
-    _attrs: Vec<Attribute>,
+    attrs: Vec<Attribute>,
 ) -> Pattern {
     let mut patterns = vec![first];
-
-    // Parse remaining patterns (first comma already consumed by caller)
-    loop {
-        if p.token == Token::Rparen {
-            break;
-        }
-        patterns.push(parse_constrained_pattern(p));
-        if p.token == Token::Comma {
-            p.next();
-        } else {
-            break;
-        }
-    }
-
+    patterns.extend(super::core::parse_comma_delimited_region(
+        p,
+        Grammar::PatternList,
+        Token::Rparen,
+        parse_constrained_pattern_region,
+    ));
     p.expect(Token::Rparen);
-
-    // OCaml: A tuple needs at least two elements
     if patterns.len() == 1 {
         p.err_at(
-            p.arena().get_position(start_pos_idx).clone(),
-            p.prev_end_pos.clone(),
+            *p.arena().get_position(start_pos_idx),
+            p.prev_end_pos,
             DiagnosticCategory::Message("A tuple needs at least two elements".to_string()),
         );
     }
-
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    let pat_indices: Vec<PatIdx> = patterns
+    let pattern_indices: Vec<PatIdx> = patterns
         .into_iter()
-        .map(|p_| p.arena_mut().push_pat(p_))
+        .map(|pattern| p.arena_mut().push_pat(pattern))
         .collect();
-    Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(pat_indices))),
-        ppat_loc: loc,
-        ppat_attributes: Attributes::new(),
-    }
+    pat(
+        PatternDesc::Ppat_tuple(Box::new(pattern_indices)),
+        loc,
+        Attributes::from_vec(attrs),
+    )
 }
 
-// ============================================================================
-// Atomic Pattern Parsing
-// ============================================================================
-
-/// Parse an atomic pattern.
-fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
-    let start_pos_idx = p.start_pos_idx();
-
-    match &p.token {
-        Token::Underscore => {
-            p.next();
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_any),
-                ppat_loc: loc,
-                ppat_attributes: Attributes::new(),
-            }
-        }
-        Token::Lident(name) => {
-            let name = name.to_string();
-            p.next();
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-            // Check for alias (as)
-            if p.token == Token::As {
-                p.next();
-                // Capture alias name position BEFORE parsing it
-                let alias_start_idx = p.start_pos_idx();
-                let alias = parse_lident(p);
-                // OCaml: alias name location is just the name, not the whole pattern
-                let alias_name_loc = p.mk_loc_idx_to_prev_end(alias_start_idx);
-                let overall_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                let name_idx = p.arena_mut().push_interned_string(&name);
-                let inner = ast_helper::make_var_pat(name_idx, loc);
-                let inner_idx = p.arena_mut().push_pat(inner);
-                let alias_idx = p.arena_mut().push_interned_string(&alias);
-                Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_alias(
-                        inner_idx,
-                        with_loc(alias_idx, alias_name_loc),
-                    )),
-                    ppat_loc: overall_loc,
-                    ppat_attributes: Attributes::new(),
-                }
-            } else {
-                let name_idx = p.arena_mut().push_interned_string(&name);
-                ast_helper::make_var_pat(name_idx, loc)
-            }
-        }
-        Token::Uident(_) => parse_constructor_pattern(p),
-        Token::Int { .. }
-        | Token::String { .. }
-        | Token::Float { .. }
-        | Token::Codepoint { .. } => {
-            let c = super::expr::parse_constant(p);
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(c))),
-                ppat_loc: loc,
-                ppat_attributes: Attributes::new(),
-            }
-        }
-        Token::True | Token::False => {
-            let is_true = p.token == Token::True;
-            p.next();
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            let bool_str = if is_true { "true" } else { "false" };
-            // Intern the string to enable sharing, but create new Lident each time
-            let bool_str_idx = p.arena_mut().intern_string(bool_str);
-            let lid = Longident::Lident(bool_str_idx);
-            let lid_idx = p.push_longident(lid);
-            ast_helper::make_construct_pat(p.arena_mut(), lid_idx, None, loc.clone(), loc)
-        }
-        Token::Lparen => {
-            p.next();
-            if p.token == Token::Rparen {
-                // Unit pattern: ()
-                p.next();
-                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                let lid_idx = p.push_lident_static("()");
-                ast_helper::make_construct_pat(p.arena_mut(), lid_idx, None, loc.clone(), loc)
-            } else {
-                // Parenthesized pattern or tuple
-                let mut pat = parse_constrained_pattern(p);
-                if p.token == Token::Comma {
-                    // Tuple pattern - consume first comma, then parse rest
-                    p.next();
-                    parse_tuple_pattern(p, start_pos_idx, pat, vec![])
-                } else {
-                    p.expect(Token::Rparen);
-                    // Extend the pattern's location to include the parentheses
-                    pat.ppat_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                    pat
-                }
-            }
-        }
-        Token::Lbracket => parse_array_pattern(p),
-        Token::Lbrace => parse_record_pattern(p),
-        Token::List => {
-            p.next();
-            parse_list_pattern(p, start_pos_idx)
-        }
-        Token::Dict => {
-            p.next();
-            parse_dict_pattern(p, start_pos_idx)
-        }
-        Token::Exception => {
-            p.next();
-            let pat = parse_atomic_pattern(p);
-            let loc = p.mk_loc_idx_to_end_of(start_pos_idx, pat.ppat_loc);
-            let pat_idx = p.arena_mut().push_pat(pat);
-            Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_exception(pat_idx)),
-                ppat_loc: loc,
-                ppat_attributes: Attributes::new(),
-            }
-        }
-        Token::Module => {
-            // Unpack pattern: module(M) or module(M: S)
-            p.next();
-            p.expect(Token::Lparen);
-
-            let name_loc = match &p.token {
-                Token::Uident(name) => {
-                    let name = name.to_string();
-                    let loc = p.mk_loc_current();
-                    p.next();
-                    let str_idx = p.arena_mut().push_interned_string(&name);
-                    with_loc(str_idx, loc)
-                }
-                _ => {
-                    let str_idx = p.arena_mut().intern("_");
-                    mknoloc(str_idx)
-                }
-            };
-
-            let pkg_type = if p.token == Token::Colon {
-                // OCaml: core_type location starts from after the colon
-                let colon_pos_idx = p.start_pos_idx();
-                p.next();
-                let mut typ = super::typ::parse_package_type(p);
-                // Recreate location starting from colon position
-                typ.ptyp_loc = p.mk_loc_idx_to_end_of(colon_pos_idx, typ.ptyp_loc);
-                Some(typ)
-            } else {
-                None
-            };
-
-            p.expect(Token::Rparen);
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-            // OCaml: When there's a constraint, Ppat_unpack's ppat_loc is just the name location.
-            // Without constraint, it spans the full module(...) syntax.
-            if let Some(typ) = pkg_type {
-                let unpack = Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_unpack(name_loc.clone())),
-                    ppat_loc: name_loc.loc.clone(),
-                    ppat_attributes: Attributes::new(),
-                };
-                let unpack_idx = p.arena_mut().push_pat(unpack);
-                let typ_idx = p.arena_mut().push_core_type(typ);
-                Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
-                        unpack_idx, typ_idx,
-                    )))),
-                    ppat_loc: loc,
-                    ppat_attributes: Attributes::new(),
-                }
-            } else {
-                Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_unpack(name_loc.clone())),
-                    ppat_loc: loc,
-                    ppat_attributes: Attributes::new(),
-                }
-            }
-        }
-        Token::Hash => parse_poly_variant_pattern(p),
-        Token::DotDotDot => {
-            // Variant spread pattern: ...a or ...Foo.zz
-            // Creates Ppat_type with res.patVariantSpread attribute
-            p.next();
-            let type_start_idx = p.start_pos_idx();
-            let lid = parse_type_longident(p);
-            let lid_loc = p.mk_loc_idx_to_prev_end(type_start_idx);
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            // Add res.patVariantSpread attribute with ghost location
-            let spread_attr_name_idx = p.arena_mut().intern("res.patVariantSpread");
-            let spread_attr: Attribute = (
-                with_loc(spread_attr_name_idx, LocIdx::none()),
-                Payload::PStr(Box::new(vec![])),
-            );
-            Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_type(with_loc(lid, lid_loc))),
-                ppat_loc: loc,
-                ppat_attributes: Attributes::from_vec(vec![spread_attr]),
-            }
-        }
-        Token::Percent => parse_extension_pattern(p, start_pos_idx),
-        Token::Backtick | Token::TemplateTail { .. } | Token::TemplatePart { .. } => {
-            parse_template_literal_pattern(p, start_pos_idx)
-        }
-        Token::Colon => {
-            // List cons constructor: :: (printed by the current list pattern printer)
-            p.next();
-            if p.token != Token::Colon {
-                // Use err_unexpected for proper error message
-                p.err_unexpected();
-                recover::default_pattern(p.arena_mut())
-            } else {
-                p.next();
-
-                let lid_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                let lid_idx = p.pat_cons();
-                let lid = mknoloc(lid_idx);
-
-                let arg = if p.token == Token::Lparen {
-                    // Capture position of ( for tuple location (OCaml includes parens)
-                    let lparen_pos_idx = p.start_pos_idx();
-                    p.next();
-                    if p.token == Token::Rparen {
-                        p.next();
-                        let unit_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                        let unit_lid_idx = p.push_lident_static("()");
-                        Some(ast_helper::make_construct_pat(
-                            p.arena_mut(),
-                            unit_lid_idx,
-                            None,
-                            unit_loc.clone(),
-                            unit_loc,
-                        ))
-                    } else {
-                        let first = parse_pattern(p);
-                        if p.token == Token::Comma {
-                            // OCaml includes the ( in the tuple location
-                            let mut patterns = vec![first];
-                            while p.token == Token::Comma {
-                                p.next();
-                                if p.token == Token::Rparen {
-                                    break; // Trailing comma
-                                }
-                                patterns.push(parse_pattern(p));
-                            }
-                            p.expect(Token::Rparen);
-
-                            // If we only have one pattern (trailing comma case), treat as single argument
-                            if patterns.len() == 1 {
-                                let single = patterns.into_iter().next().unwrap();
-                                if matches!(*single.ppat_desc, PatternDesc::Ppat_tuple(_)) {
-                                    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                                    let single_idx = p.arena_mut().push_pat(single);
-                                    Some(Pattern {
-                                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(
-                                            vec![single_idx],
-                                        ))),
-                                        ppat_loc: loc,
-                                        ppat_attributes: Attributes::new(),
-                                    })
-                                } else {
-                                    Some(single)
-                                }
-                            } else {
-                                // OCaml uses p.end_pos (end of next token after `)`) for tuple location
-                                let tuple_loc = p.mk_loc_idx_to_end(lparen_pos_idx);
-                                let pat_indices: Vec<PatIdx> = patterns
-                                    .into_iter()
-                                    .map(|pat| p.arena_mut().push_pat(pat))
-                                    .collect();
-                                Some(Pattern {
-                                    ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(
-                                        pat_indices,
-                                    ))),
-                                    ppat_loc: tuple_loc,
-                                    ppat_attributes: Attributes::new(),
-                                })
-                            }
-                        } else {
-                            p.expect(Token::Rparen);
-                            // If the single argument is itself a tuple, wrap it in another
-                            // single-element tuple. This distinguishes C((a,b)) from C(a,b).
-                            // C((a,b)) = single tuple argument = Ppat_tuple(Box::new([Ppat_tuple([a,b])]))
-                            // C(a,b) = multiple arguments = Ppat_tuple([a, b])
-                            if matches!(*first.ppat_desc, PatternDesc::Ppat_tuple(_)) {
-                                let loc = p.mk_loc_idx_to_end(start_pos_idx);
-                                let first_idx = p.arena_mut().push_pat(first);
-                                Some(Pattern {
-                                    ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(vec![
-                                        first_idx,
-                                    ]))),
-                                    ppat_loc: loc,
-                                    ppat_attributes: Attributes::new(),
-                                })
-                            } else {
-                                Some(first)
-                            }
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                // OCaml uses just the constructor name location, not including the argument
-                let arg_idx = arg.map(|a| p.arena_mut().push_pat(a));
-                Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_construct(lid, arg_idx)),
-                    ppat_loc: lid_loc,
-                    ppat_attributes: Attributes::new(),
-                }
-            }
-        }
-        Token::Minus | Token::Plus => {
-            // Negative or positive number pattern: -1 or +1
-            let is_negative = p.token == Token::Minus;
-            p.next();
-            match &p.token {
-                Token::Int { i, suffix } => {
-                    let value = if is_negative {
-                        Cow::Owned(format!("-{}", i))
-                    } else {
-                        extend_cow_lifetime(i.clone())
-                    };
-                    let suffix = suffix.clone();
-                    p.next();
-                    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                    Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(
-                            Constant::Integer(value, suffix),
-                        ))),
-                        ppat_loc: loc,
-                        ppat_attributes: Attributes::new(),
-                    }
-                }
-                Token::Float { f, suffix } => {
-                    let value = if is_negative {
-                        Cow::Owned(format!("-{}", f))
-                    } else {
-                        extend_cow_lifetime(f.clone())
-                    };
-                    let suffix = suffix.clone();
-                    p.next();
-                    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                    Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::Float(
-                            value, suffix,
-                        )))),
-                        ppat_loc: loc,
-                        ppat_attributes: Attributes::new(),
-                    }
-                }
-                _ => {
-                    p.err(DiagnosticCategory::Message(
-                        "Expected number after sign in pattern".to_string(),
-                    ));
-                    recover::default_pattern(p.arena_mut())
-                }
-            }
-        }
-        Token::Eof => {
-            // EOF: just report error and return default (no skip_tokens_and_maybe_retry)
-            // OCaml: | Eof -> Parser.err ~start_pos:p.prev_end_pos p ...; Recover.default_pattern ()
-            p.err_unexpected_at(p.prev_end_pos.clone());
-            recover::default_pattern(p.arena_mut())
-        }
-        _ => {
-            // Other unexpected tokens: report error and try to skip/retry
-            // OCaml: | token -> Parser.err p ...; match skip_tokens_and_maybe_retry ...
-            p.err_unexpected();
-            if recover::skip_tokens_and_maybe_retry(p, grammar::is_atomic_pattern_start) {
-                // Found a valid pattern start after skipping, retry parsing
-                parse_atomic_pattern(p)
-            } else {
-                recover::default_pattern(p.arena_mut())
-            }
-        }
-    }
-}
-
-/// Parse a lowercase identifier.
-fn parse_lident(p: &mut Parser<'_>) -> String {
-    match &p.token {
-        Token::Lident(name) => {
-            let name = name.to_string();
-            p.next();
-            name
-        }
-        _ => {
-            // OCaml: parse_lident recovery - emit error, skip tokens, try to find an Lident
-            p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
-            if p.token.is_keyword() && p.prev_end_pos.line == p.start_pos.line {
-                p.next();
-            } else {
-                p.next(); // skip the bad token
-                // Skip tokens until we find an Lident or should abort list parse
-                while !super::core::recover::should_abort_list_parse(p) && p.token != Token::Eof {
-                    p.next();
-                }
-                if matches!(p.token, Token::Lident(_)) {
-                    return parse_lident(p);
-                }
-            }
-            "_".to_string()
-        }
-    }
-}
-
-// ============================================================================
-// Constructor Pattern
-// ============================================================================
-
-/// Parse a constructor pattern (Foo or Foo(pat)).
-fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
-    let start_pos_idx = p.start_pos_idx();
-
-    // Parse the constructor path
-    let mut path_parts = vec![];
-    while let Token::Uident(name) = &p.token {
-        path_parts.push(name.to_string());
-        p.next();
-        if p.token == Token::Dot {
-            p.next();
-        } else {
-            break;
-        }
-    }
-
-    // Handle lowercase at the end
-    if let Token::Lident(name) = &p.token {
-        path_parts.push(name.to_string());
-        p.next();
-    }
-
-    let lid = super::core::build_longident(p.arena_mut(), &path_parts);
-    let lid_idx = p.push_longident(lid);
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    // Check for constructor argument
-    let arg = if p.token == Token::Lparen {
-        // Capture position of ( for tuple location (OCaml includes parens)
-        let lparen_pos_idx = p.start_pos_idx();
-        p.next();
-        if p.token == Token::Rparen {
-            p.next();
-            // Empty parentheses - unit pattern
-            // OCaml: unit pattern location starts at ( not at constructor name
-            let unit_loc = p.mk_loc_idx_to_prev_end(lparen_pos_idx);
-            let unit_lid_idx = p.push_lident_static("()");
-            Some(ast_helper::make_construct_pat(
-                p.arena_mut(),
-                unit_lid_idx,
-                None,
-                unit_loc.clone(),
-                unit_loc,
-            ))
-        } else {
-            // Use parse_constrained_pattern to support (pat: type) inside constructors
-            let first = parse_constrained_pattern(p);
-            if p.token == Token::Comma {
-                // Possible multiple arguments - parse remaining
-                // OCaml includes the ( in the tuple location
-                let mut patterns = vec![first];
-                while p.token == Token::Comma {
-                    p.next();
-                    if p.token == Token::Rparen {
-                        break; // Trailing comma
-                    }
-                    patterns.push(parse_constrained_pattern(p));
-                }
-                p.expect(Token::Rparen);
-
-                // If we only have one pattern (trailing comma case), treat as single argument
-                if patterns.len() == 1 {
-                    let single = patterns.into_iter().next().unwrap();
-                    // In printer mode, wrap single tuple arg to distinguish C((a,b)) from C(a,b)
-                    // In type-checker mode, pass through directly
-                    if matches!(*single.ppat_desc, PatternDesc::Ppat_tuple(_))
-                        && p.mode != ParserMode::ParseForTypeChecker
-                    {
-                        // OCaml: wrapper tuple location extends to end of next token
-                        let wrap_loc = p.mk_loc_idx_to_end(lparen_pos_idx);
-                        let single_idx = p.arena_mut().push_pat(single);
-                        Some(Pattern {
-                            ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(vec![
-                                single_idx,
-                            ]))),
-                            ppat_loc: wrap_loc,
-                            ppat_attributes: Attributes::new(),
-                        })
-                    } else {
-                        Some(single)
-                    }
-                } else {
-                    // OCaml uses p.end_pos (end of next token after `)`) for tuple location
-                    let tuple_loc = p.mk_loc_idx_to_end(lparen_pos_idx);
-                    let pat_indices: Vec<PatIdx> = patterns
-                        .into_iter()
-                        .map(|pat| p.arena_mut().push_pat(pat))
-                        .collect();
-                    Some(Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(pat_indices))),
-                        ppat_loc: tuple_loc,
-                        ppat_attributes: Attributes::new(),
-                    })
-                }
-            } else {
-                p.expect(Token::Rparen);
-                // In printer mode, wrap single tuple arg to distinguish C((a,b)) from C(a,b)
-                // In type-checker mode, pass through directly
-                if matches!(*first.ppat_desc, PatternDesc::Ppat_tuple(_))
-                    && p.mode != ParserMode::ParseForTypeChecker
-                {
-                    // OCaml: wrapper tuple location starts at outer ( and extends to end of next token
-                    // This means in `Some((a,b)) =>`, the wrapper tuple includes the ` =>`
-                    let wrap_loc = p.mk_loc_idx_to_end(lparen_pos_idx);
-                    let first_idx = p.arena_mut().push_pat(first);
-                    Some(Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(vec![first_idx]))),
-                        ppat_loc: wrap_loc,
-                        ppat_attributes: Attributes::new(),
-                    })
-                } else {
-                    Some(first)
-                }
-            }
-        }
-    } else {
-        None
-    };
-
-    let full_loc = if arg.is_some() {
-        p.mk_loc_idx_to_prev_end(start_pos_idx)
-    } else {
-        loc.clone()
-    };
-
-    ast_helper::make_construct_pat(p.arena_mut(), lid_idx, arg, loc, full_loc)
-}
-
-// ============================================================================
-// Collection Patterns
-// ============================================================================
-
-/// Parse an array pattern [p1, p2, ...].
-/// Parse a pattern that does NOT allow spread (`...`).
-/// If spread is encountered, emit the provided error message and skip over it,
-/// then continue parsing the pattern normally.
-/// This matches OCaml's `parse_non_spread_pattern`.
-fn parse_non_spread_pattern(p: &mut Parser<'_>, error_msg: &str) -> Option<Pattern> {
-    // Check for spread and emit error if found
+/// OCaml `parse_pattern_region` (res_core.ml:1619-1626).
+fn parse_pattern_region(p: &mut Parser<'_>) -> Option<(bool, Pattern)> {
     if p.token == Token::DotDotDot {
-        p.err(DiagnosticCategory::Message(error_msg.to_string()));
-        p.next(); // Skip past the ...
-    }
-
-    // Now parse the pattern if we can
-    if super::grammar::is_pattern_start(&p.token) {
-        let pat = parse_pattern(p);
-        // Check for type constraint: pat : typ
-        if p.token == Token::Colon {
-            p.next();
-            let typ = super::typ::parse_typ_expr(p);
-            let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
-            let pat_idx = p.arena_mut().push_pat(pat);
-            let typ_idx = p.arena_mut().push_core_type(typ);
-            Some(Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
-                ppat_loc: loc,
-                ppat_attributes: Attributes::new(),
-            })
-        } else {
-            Some(pat)
-        }
+        p.next();
+        Some((true, parse_constrained_pattern(p)))
+    } else if grammar::is_pattern_start(&p.token) {
+        Some((false, parse_constrained_pattern(p)))
     } else {
         None
     }
 }
 
-fn parse_array_pattern(p: &mut Parser<'_>) -> Pattern {
+/// OCaml `parse_module_pattern ~attrs` (res_core.ml:1628-1657).
+fn parse_module_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
     let start_pos_idx = p.start_pos_idx();
-    p.expect(Token::Lbracket);
-
-    let mut patterns = vec![];
-    while p.token != Token::Rbracket && p.token != Token::Eof {
-        // Use parse_non_spread_pattern to disallow spread in array patterns
-        // and emit appropriate error message
-        if let Some(pat) =
-            parse_non_spread_pattern(p, super::core::error_messages::ARRAY_PATTERN_SPREAD)
-        {
-            patterns.push(pat);
-            if !p.optional(&Token::Comma) {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-
-    p.expect(Token::Rbracket);
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    let pat_indices: Vec<PatIdx> = patterns
-        .into_iter()
-        .map(|pat| p.arena_mut().push_pat(pat))
-        .collect();
-    Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_array(Box::new(pat_indices))),
-        ppat_loc: loc,
-        ppat_attributes: Attributes::new(),
+    p.expect(Token::Module);
+    p.expect(Token::Lparen);
+    let uident = if let Token::Uident(uident) = &p.token {
+        let uident = uident.to_string();
+        let loc = p.mk_loc_current();
+        p.next();
+        let str_idx = p.arena_mut().push_interned_string(&uident);
+        with_loc(str_idx, loc)
+    } else {
+        let str_idx = p.arena_mut().intern("_");
+        mknoloc(str_idx)
+    };
+    if p.token == Token::Colon {
+        let colon_start = p.start_pos_idx();
+        p.next();
+        let package_typ_attrs = parse_attributes(p);
+        let package_type = super::typ::parse_package_type(p, colon_start, package_typ_attrs);
+        p.expect(Token::Rparen);
+        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+        let unpack = pat(PatternDesc::Ppat_unpack(uident.clone()), uident.loc, Attributes::new());
+        let unpack_idx = p.arena_mut().push_pat(unpack);
+        let typ_idx = p.arena_mut().push_core_type(package_type);
+        pat(
+            PatternDesc::Ppat_constraint(Box::new((unpack_idx, typ_idx))),
+            loc,
+            attrs,
+        )
+    } else {
+        p.expect(Token::Rparen);
+        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+        pat(PatternDesc::Ppat_unpack(uident), loc, attrs)
     }
 }
 
-/// Parse a list pattern list{p1, p2, ...spread}.
-fn parse_list_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern {
-    // Token::List already includes the opening '{'
-    // OCaml: uses parse_comma_delimited_reversed_list with parse_pattern_region
-    // which collects (has_spread, pattern) tuples, then validates spreads after.
-
-    // Collect items using OCaml's parse_pattern_region approach
-    let mut items: Vec<(bool, Pattern)> = vec![];
-
-    p.leave_breadcrumb(Grammar::PatternOcamlList);
-    loop {
-        // parse_pattern_region: check what token we have
-        let item = if p.token == Token::DotDotDot {
-            p.next();
-            Some((true, parse_constrained_pattern(p)))
-        } else if super::grammar::is_pattern_start(&p.token) {
-            Some((false, parse_constrained_pattern(p)))
-        } else {
-            None
-        };
-
-        match item {
-            Some(node) => {
-                if p.token == Token::Comma {
-                    p.next();
-                    items.push(node);
-                } else if p.token == Token::Rbrace || p.token == Token::Eof {
-                    items.push(node);
-                    break;
-                } else if super::grammar::is_pattern_start(&p.token) || p.token == Token::DotDotDot
-                {
-                    // Missing comma - report and continue
-                    p.expect(Token::Comma);
-                    items.push(node);
-                } else {
-                    items.push(node);
-                    if !(p.token == Token::Eof
-                        || p.token == Token::Rbrace
-                        || super::core::recover::should_abort_list_parse(p))
-                    {
-                        p.expect(Token::Comma);
-                        p.next();
-                    }
-                    break;
-                }
-            }
-            None => {
-                if p.token == Token::Eof
-                    || p.token == Token::Rbrace
-                    || super::core::recover::should_abort_list_parse(p)
-                {
-                    break;
-                } else {
-                    p.err(DiagnosticCategory::unexpected(
-                        p.token.clone().into_owned(),
-                        p.breadcrumbs().to_vec(),
-                    ));
-                    p.next();
-                }
-            }
-        }
-    }
-    p.eat_breadcrumb();
-
+/// OCaml `parse_list_pattern ~start_pos ~attrs` (res_core.ml:1659-1681).
+fn parse_list_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx, attrs: Attributes) -> Pattern {
+    let mut list_patterns = super::core::parse_comma_delimited_reversed_list(
+        p,
+        Grammar::PatternOcamlList,
+        Token::Rbrace,
+        parse_pattern_region,
+    );
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    // OCaml: items collected in reverse order, first reversed item with spread = tail.
-    // We collected in forward order. Reverse to match OCaml's processing.
-    items.reverse();
-
-    match items.as_slice() {
-        [(true, _), ..] => {
-            let (_, spread_pat) = items.remove(0);
-            // Remaining items: report any that also have spread
-            let patterns: Vec<Pattern> = items
-                .into_iter()
-                .map(|(has_spread, pat)| {
-                    if has_spread {
-                        p.err_at(
-                            p.loc_start(pat.ppat_loc),
-                            p.end_pos.clone(),
-                            DiagnosticCategory::Message(
-                                super::core::error_messages::LIST_PATTERN_SPREAD.to_string(),
-                            ),
-                        );
-                    }
-                    pat
-                })
-                .rev()
-                .collect();
-            ast_helper::make_list_pattern(p, loc, patterns, Some(spread_pat))
-        }
-        _ => {
-            let patterns: Vec<Pattern> = items
-                .into_iter()
-                .map(|(has_spread, pat)| {
-                    if has_spread {
-                        p.err_at(
-                            p.loc_start(pat.ppat_loc),
-                            p.end_pos.clone(),
-                            DiagnosticCategory::Message(
-                                super::core::error_messages::LIST_PATTERN_SPREAD.to_string(),
-                            ),
-                        );
-                    }
-                    pat
-                })
-                .rev()
-                .collect();
-            ast_helper::make_list_pattern(p, loc, patterns, None)
-        }
-    }
+    let spread = if matches!(list_patterns.first(), Some((true, _))) {
+        Some(list_patterns.remove(0).1)
+    } else {
+        None
+    };
+    let mut patterns: Vec<Pattern> = list_patterns
+        .into_iter()
+        .map(|(has_spread, pattern)| {
+            if has_spread {
+                p.err_at(
+                    p.loc_start(pattern.ppat_loc),
+                    p.end_pos,
+                    DiagnosticCategory::Message(
+                        super::core::error_messages::LIST_PATTERN_SPREAD.to_string(),
+                    ),
+                );
+            }
+            pattern
+        })
+        .collect();
+    patterns.reverse();
+    let mut pattern = ast_helper::make_list_pattern(p, loc, patterns, spread);
+    pattern.ppat_loc = loc;
+    pattern.ppat_attributes = attrs;
+    pattern
 }
 
-/// Parse a record pattern {field: pat, ...}.
-fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
+/// OCaml `parse_array_pattern ~attrs` (res_core.ml:1706-1716).
+fn parse_array_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
     let start_pos_idx = p.start_pos_idx();
-    p.expect(Token::Lbrace);
+    p.expect(Token::Lbracket);
+    let patterns = super::core::parse_comma_delimited_region(
+        p,
+        Grammar::PatternList,
+        Token::Rbracket,
+        |p| parse_non_spread_pattern(p, super::core::error_messages::ARRAY_PATTERN_SPREAD),
+    );
+    p.expect(Token::Rbracket);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    let pattern_indices: Vec<PatIdx> = patterns
+        .into_iter()
+        .map(|pattern| p.arena_mut().push_pat(pattern))
+        .collect();
+    pat(PatternDesc::Ppat_array(Box::new(pattern_indices)), loc, attrs)
+}
 
-    // OCaml: collects (has_spread, PatField|PatUnderscore) tuples via
-    // parse_comma_delimited_reversed_list, then validates spreads after parsing.
-    let mut raw_fields: Vec<(bool, Option<PatternRecordField>)> = vec![];
-    let mut closed = ClosedFlag::Closed;
-    // OCaml res_core.ml parse_record_pattern_row: a `...` row may carry a
-    // record-rest binding (`...T as name` or `...name`). At most one rest is
-    // allowed; it does not participate in the field list.
-    let mut record_rests: Vec<crate::parser::ast::RecordPatRest> = vec![];
-    // Fallback for old-style `{...foo}` rows: parse them as a spread field so
-    // the existing spread-error diagnostic path still fires.
-    let mut spread_fallback = false;
-
-    while p.token != Token::Rbrace && p.token != Token::Eof {
-        if p.token == Token::Underscore {
-            p.next();
-            raw_fields.push((false, None)); // PatUnderscore
-            // Allow trailing comma after underscore: {a, _,}
-            p.optional(&Token::Comma);
-            continue;
+/// The shared argument handling of OCaml `parse_constructor_pattern_args` and
+/// `parse_variant_pattern_args` (res_core.ml:1718-1778).
+fn pattern_args(
+    p: &mut Parser<'_>,
+    lparen: PosIdx,
+    args: Vec<Pattern>,
+) -> Option<PatIdx> {
+    let arg = match args.len() {
+        0 => {
+            let loc = p.mk_loc_idx_to_prev_end(lparen);
+            construct_lident(p, "()", loc, Attributes::new())
         }
-
-        if p.token == Token::DotDotDot {
-            // OCaml res_core.ml:1489-1545 DotDotDot case in parse_record_pattern_row
-            let rest_start_pos_idx = p.start_pos_idx();
-            p.next();
-            let rest_name_start_pos_idx = p.start_pos_idx();
-            let has_type_annotation = p.lookahead(|p| {
-                let _ = super::typ::parse_atomic_typ_expr(p, Attributes::new(), true);
-                p.token == Token::As
-            });
-            if has_type_annotation {
-                // ...TypeAnnotation as name
-                let core_type = super::typ::parse_atomic_typ_expr(p, Attributes::new(), true);
-                let core_type_idx = p.arena_mut().push_core_type(core_type);
-                p.expect(Token::As);
-                let name_start_idx = p.start_pos_idx();
-                let name = match p.token.clone() {
-                    Token::Lident(ident) => {
-                        // OCaml's lexer allocates a fresh string per token, so
-                        // each source occurrence must keep a distinct StrIdx.
-                        let name_idx = p.arena_mut().push_string(ident);
-                        p.next();
-                        with_loc(name_idx, p.mk_loc_idx_to_prev_end(name_start_idx))
-                    }
-                    _ => {
-                        let name_idx = p.arena_mut().intern("_");
-                        with_loc(name_idx, p.mk_loc_idx_to_prev_end(name_start_idx))
-                    }
-                };
-                let rest_loc = p.mk_loc_idx_to_prev_end(rest_start_pos_idx);
-                record_rests.push(crate::parser::ast::RecordPatRest {
-                    rest_loc,
-                    rest_name: name,
-                    rest_type: Some(core_type_idx),
-                });
+        1 if matches!(*args[0].ppat_desc, PatternDesc::Ppat_tuple(_)) => {
+            if p.mode == ParserMode::ParseForTypeChecker {
+                args.into_iter().next().expect("one argument")
             } else {
-                match p.token.clone() {
-                    Token::Lident(ident) => {
-                        // ...name (no type annotation); fresh StrIdx per token
-                        // to match OCaml's per-token lexer strings.
-                        let name_idx = p.arena_mut().push_string(ident);
-                        p.next();
-                        let rest_loc = p.mk_loc_idx_to_prev_end(rest_start_pos_idx);
-                        let name_loc = p.mk_loc_idx_to_prev_end(rest_name_start_pos_idx);
-                        record_rests.push(crate::parser::ast::RecordPatRest {
-                            rest_loc,
-                            rest_name: with_loc(name_idx, name_loc),
-                            rest_type: None,
-                        });
-                    }
-                    _ => {
-                        // Fallback: treat as old-style spread (error).
-                        // OCaml falls back to parse_record_pattern_row_field; the
-                        // existing spread-field error path below covers it.
-                        spread_fallback = true;
-                    }
-                }
-            }
-            if !spread_fallback {
-                if !p.optional(&Token::Comma) {
-                    break;
-                }
-                continue;
+                let loc = p.mk_loc_idx_to_end(lparen);
+                let indices = args.into_iter().map(|a| p.arena_mut().push_pat(a)).collect();
+                pat(PatternDesc::Ppat_tuple(Box::new(indices)), loc, Attributes::new())
             }
         }
+        1 => args.into_iter().next().expect("one argument"),
+        _ => {
+            let loc = p.mk_loc_idx_to_end(lparen);
+            let indices = args.into_iter().map(|a| p.arena_mut().push_pat(a)).collect();
+            pat(PatternDesc::Ppat_tuple(Box::new(indices)), loc, Attributes::new())
+        }
+    };
+    Some(p.arena_mut().push_pat(arg))
+}
 
-        let field_start_idx = p.start_pos_idx();
+/// OCaml `parse_constructor_pattern_args` (res_core.ml:1718-1748).
+fn parse_constructor_pattern_args(
+    p: &mut Parser<'_>,
+    constr: Located<crate::parse_arena::LidentIdx>,
+    start_pos_idx: PosIdx,
+    attrs: Attributes,
+) -> Pattern {
+    let lparen = p.start_pos_idx();
+    p.expect(Token::Lparen);
+    let args = super::core::parse_comma_delimited_region(
+        p,
+        Grammar::PatternList,
+        Token::Rparen,
+        parse_constrained_pattern_region,
+    );
+    p.expect(Token::Rparen);
+    let arg = pattern_args(p, lparen, args);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    pat(PatternDesc::Ppat_construct(constr, arg), loc, attrs)
+}
 
-        // Check for optional field punning: { ? name, ... }
-        let opt_punning = p.token == Token::Question;
-        if opt_punning {
+/// OCaml `parse_variant_pattern_args` (res_core.ml:1750-1778).
+fn parse_variant_pattern_args(
+    p: &mut Parser<'_>,
+    ident: String,
+    start_pos_idx: PosIdx,
+    attrs: Attributes,
+) -> Pattern {
+    let lparen = p.start_pos_idx();
+    p.expect(Token::Lparen);
+    let patterns = super::core::parse_comma_delimited_region(
+        p,
+        Grammar::PatternList,
+        Token::Rparen,
+        parse_constrained_pattern_region,
+    );
+    let arg = pattern_args(p, lparen, patterns);
+    p.expect(Token::Rparen);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    pat(
+        PatternDesc::Ppat_variant(Box::new((Cow::Owned(ident), arg))),
+        loc,
+        attrs,
+    )
+}
+
+/// A record pattern row (`PatField | PatRest | PatUnderscore`,
+/// compiler/syntax/src/res_core.ml:1480).
+enum RecordPatternRow {
+    Field(PatternRecordField),
+    Rest(crate::parser::ast::RecordPatRest),
+    Underscore,
+}
+
+/// OCaml `parse_record_pattern_row_field ~attrs`
+/// (compiler/syntax/src/res_core.ml:1457-1478).
+fn parse_record_pattern_row_field(p: &mut Parser<'_>, attrs: Attributes) -> PatternRecordField {
+    let (parts, label_loc) = super::module::parse_value_path(p);
+    let lid_unloc = super::core::build_longident(p.arena_mut(), &parts);
+    let lid_idx = p.push_longident(lid_unloc);
+    let label = with_loc(lid_idx, label_loc);
+    let (pat_idx, opt) = match p.token {
+        Token::Colon => {
             p.next();
-        }
-        // For optional punned fields, the pattern location starts after the '?'
-        // OCaml: the pattern location is just the identifier, not including '? '
-        let pat_start_idx = if opt_punning {
-            p.start_pos_idx()
-        } else {
-            field_start_idx
-        };
-
-        // Support qualified record labels in patterns: {Module.label: pat}
-        // (also needed for ambiguity disambiguation, mirroring OCaml syntax).
-        // OCaml: Lident/Uident case in parse_record_pattern_row
-        let mut parts: Vec<String> = vec![];
-        loop {
-            match &p.token {
-                Token::Lident(name) | Token::Uident(name) => {
-                    parts.push(name.to_string());
-                    p.next();
-                }
-                _ => break,
-            }
-            if p.token == Token::Dot {
-                p.next();
-            } else {
-                break;
-            }
-        }
-
-        // If parts is empty, check for keyword field
-        // OCaml: Token.is_keyword p.token case in parse_record_pattern_row
-        if parts.is_empty() {
-            if p.token.is_keyword() {
-                // Try to recover keyword as field name if followed by colon
-                if let Some((recovered_name, loc)) =
-                    super::core::recover_keyword_field_name_if_probably_field(
-                        p,
-                        super::core::error_messages::keyword_field_in_pattern,
-                    )
-                {
-                    // OCaml: Parser.expect Colon p
-                    p.expect(Token::Colon);
-                    // Check for optional marker after colon: name: ? pat
-                    let opt = p.token == Token::Question;
-                    if opt {
-                        p.next();
-                    }
-                    let pat = parse_pattern(p);
-                    let pat_idx = p.arena_mut().push_pat(pat);
-                    let lid_idx = p.push_lident(&recovered_name);
-                    let lid = with_loc(lid_idx, loc);
-                    raw_fields.push((
-                        false,
-                        Some(PatternRecordField {
-                            lid,
-                            pat: pat_idx,
-                            opt,
-                        }),
-                    ));
-                    if !p.optional(&Token::Comma) {
-                        break;
-                    }
-                    continue;
-                } else {
-                    // Just emit the error and break
-                    super::core::emit_keyword_field_error(
-                        p,
-                        super::core::error_messages::keyword_field_in_pattern,
-                    );
-                    break;
-                }
-            }
-            break;
-        }
-
-        // Capture the end of the longident before parsing colon and pattern
-        let lid_end_pos_idx = p.prev_end_pos_idx();
-
-        let lid_unloc = super::core::build_longident(p.arena_mut(), &parts);
-        let lid_idx = p.push_longident(lid_unloc);
-        let (lid, pat_idx, opt) = if p.token == Token::Colon {
-            // field: pattern or field: ? pattern
-            p.next();
-            // Check for optional marker after colon: name: ? pat
-            let opt = p.token == Token::Question;
-            if opt {
-                p.next();
-            }
+            let opt = p.optional(&Token::Question);
             let pat = parse_pattern(p);
-            let pat_idx = p.arena_mut().push_pat(pat);
-            // Longident location only covers the field name, not the pattern
-            let lid_loc = p.mk_loc_idx(field_start_idx, lid_end_pos_idx);
-            (with_loc(lid_idx, lid_loc), pat_idx, opt)
-        } else if p.token == Token::Equal {
-            // OCaml: Token.Equal case in parse_record_pattern_row
-            // {field=value} instead of {field: value}
+            (p.arena_mut().push_pat(pat), opt)
+        }
+        Token::Equal => {
             p.err_at(
                 p.start_pos.clone(),
                 p.end_pos.clone(),
@@ -1411,89 +657,168 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
                     "Record patterns use `:` when matching fields. Example: `{field: value}`",
                 ),
             );
-            p.next(); // consume =
-            let opt = p.token == Token::Question;
-            if opt {
-                p.next();
-            }
-            let pat = parse_pattern(p);
-            let pat_idx = p.arena_mut().push_pat(pat);
-            let lid_loc = p.mk_loc_idx(field_start_idx, lid_end_pos_idx);
-            (with_loc(lid_idx, lid_loc), pat_idx, opt)
-        } else if p.token == Token::Question {
-            // field? (optional punning after field name - less common)
             p.next();
-            let loc = p.mk_loc_idx_to_prev_end(field_start_idx);
-            // Reuse StrIdx from the longident's last component for sharing
-            let pun_name_idx = p.arena().get_longident(lid_idx).last_idx();
-            let pat = ast_helper::make_var_pat(pun_name_idx, loc);
-            let pat_idx = p.arena_mut().push_pat(pat);
-            (with_loc(lid_idx, loc), pat_idx, true)
-        } else {
-            // Punning: field is same as variable (use last identifier in the path)
-            // For optional punned fields, the pattern location is just the identifier (using pat_start)
-            let loc = p.mk_loc_idx_to_prev_end(pat_start_idx);
-            // Reuse StrIdx from the longident's last component for sharing
-            let pun_name_idx = p.arena().get_longident(lid_idx).last_idx();
-            let pat = ast_helper::make_var_pat(pun_name_idx, loc);
-            let pat_idx = p.arena_mut().push_pat(pat);
-            (with_loc(lid_idx, loc), pat_idx, opt_punning)
-        };
+            let opt = p.optional(&Token::Question);
+            let pat = parse_pattern(p);
+            (p.arena_mut().push_pat(pat), opt)
+        }
+        _ => {
+            // `Longident.last label.txt` shares the label's string.
+            let name_idx = p.arena().get_longident(lid_idx).last_idx();
+            let mut pat = ast_helper::make_var_pat(name_idx, label_loc);
+            pat.ppat_attributes = attrs;
+            (p.arena_mut().push_pat(pat), false)
+        }
+    };
+    PatternRecordField {
+        lid: label,
+        pat: pat_idx,
+        opt,
+    }
+}
 
-        raw_fields.push((
-            spread_fallback,
-            Some(PatternRecordField {
-                lid,
-                pat: pat_idx,
-                opt,
-            }),
-        ));
-
-        if !p.optional(&Token::Comma) {
-            break;
+/// OCaml `parse_record_pattern_row` (compiler/syntax/src/res_core.ml:1481-1563).
+fn parse_record_pattern_row(p: &mut Parser<'_>) -> Option<(bool, RecordPatternRow)> {
+    let attrs = parse_attributes(p);
+    match p.token {
+        Token::DotDotDot => {
+            let rest_start_pos_idx = p.start_pos_idx();
+            p.next();
+            let rest_name_start_pos_idx = p.start_pos_idx();
+            let has_type_annotation = p.lookahead(|p| {
+                let _ = super::typ::parse_atomic_typ_expr(p, Attributes::new());
+                p.token == Token::As
+            });
+            if has_type_annotation {
+                // ...TypeAnnotation<'a> as name
+                let core_type = super::typ::parse_atomic_typ_expr(p, Attributes::new());
+                let core_type_idx = p.arena_mut().push_core_type(core_type);
+                p.expect(Token::As);
+                let name_start_idx = p.start_pos_idx();
+                let name = match p.token.clone() {
+                    Token::Lident(ident) => {
+                        // OCaml's lexer allocates a fresh string per token.
+                        let name_idx = p.arena_mut().push_string(ident);
+                        p.next();
+                        with_loc(name_idx, p.mk_loc_idx_to_prev_end(name_start_idx))
+                    }
+                    _ => {
+                        p.err_unexpected();
+                        let name_idx = p.arena_mut().intern("_");
+                        with_loc(name_idx, p.mk_loc_idx_to_prev_end(name_start_idx))
+                    }
+                };
+                let rest_loc = p.mk_loc_idx_to_prev_end(rest_start_pos_idx);
+                Some((
+                    false,
+                    RecordPatternRow::Rest(crate::parser::ast::RecordPatRest {
+                        rest_loc,
+                        rest_name: name,
+                        rest_type: Some(core_type_idx),
+                    }),
+                ))
+            } else {
+                match p.token.clone() {
+                    Token::Lident(ident) => {
+                        // ...name (no type annotation)
+                        let name_idx = p.arena_mut().push_string(ident);
+                        p.next();
+                        let rest_loc = p.mk_loc_idx_to_prev_end(rest_start_pos_idx);
+                        let name_loc = p.mk_loc_idx_to_prev_end(rest_name_start_pos_idx);
+                        Some((
+                            false,
+                            RecordPatternRow::Rest(crate::parser::ast::RecordPatRest {
+                                rest_loc,
+                                rest_name: with_loc(name_idx, name_loc),
+                                rest_type: None,
+                            }),
+                        ))
+                    }
+                    // Fallback: treat as old-style spread (error).
+                    _ => Some((
+                        true,
+                        RecordPatternRow::Field(parse_record_pattern_row_field(p, attrs)),
+                    )),
+                }
+            }
+        }
+        Token::Uident(_) | Token::Lident(_) => Some((
+            false,
+            RecordPatternRow::Field(parse_record_pattern_row_field(p, attrs)),
+        )),
+        Token::Question => {
+            p.next();
+            match p.token {
+                Token::Uident(_) | Token::Lident(_) => {
+                    let field = parse_record_pattern_row_field(p, attrs);
+                    Some((false, RecordPatternRow::Field(PatternRecordField { opt: true, ..field })))
+                }
+                _ => None,
+            }
+        }
+        Token::Underscore => {
+            p.next();
+            Some((false, RecordPatternRow::Underscore))
+        }
+        _ => {
+            if p.token.is_keyword() {
+                match super::core::recover_keyword_field_name_if_probably_field(
+                    p,
+                    super::core::error_messages::keyword_field_in_pattern,
+                ) {
+                    Some((recovered_name, loc)) => {
+                        p.expect(Token::Colon);
+                        let opt = p.optional(&Token::Question);
+                        let pat = parse_pattern(p);
+                        let pat_idx = p.arena_mut().push_pat(pat);
+                        let lid_idx = p.push_lident(&recovered_name);
+                        Some((
+                            false,
+                            RecordPatternRow::Field(PatternRecordField {
+                                lid: with_loc(lid_idx, loc),
+                                pat: pat_idx,
+                                opt,
+                            }),
+                        ))
+                    }
+                    None => {
+                        super::core::emit_keyword_field_error(
+                            p,
+                            super::core::error_messages::keyword_field_in_pattern,
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            }
         }
     }
+}
 
+/// OCaml `parse_record_pattern ~attrs` (compiler/syntax/src/res_core.ml:1565-1600).
+fn parse_record_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
+    let start_pos_idx = p.start_pos_idx();
+    p.expect(Token::Lbrace);
+    let mut raw_fields = super::core::parse_comma_delimited_reversed_list(
+        p,
+        Grammar::PatternRecord,
+        Token::Rbrace,
+        parse_record_pattern_row,
+    );
     p.expect(Token::Rbrace);
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    // OCaml folds the reversed row list: the last rest in source wins, and
-    // earlier rests report errors from their own start through the current token.
-    let mut record_rests = record_rests.into_iter().rev();
-    if let Some(record_rest) = record_rests.next() {
-        p.arena_mut().set_record_pat_rest(loc, record_rest);
-    }
-    for duplicate in record_rests {
-        p.err_at(
-            p.loc_start(duplicate.rest_loc),
-            p.end_pos.clone(),
-            DiagnosticCategory::Message(
-                super::core::error_messages::RECORD_PATTERN_MULTIPLE_REST.to_string(),
-            ),
-        );
-    }
-
-    // OCaml: process raw_fields in reverse order.
-    // Last PatUnderscore becomes Open flag, spread fields emit errors.
-    // Reverse to match OCaml's reversed list processing.
-    raw_fields.reverse();
-
-    // Check if first (last parsed) item is Underscore
-    if let Some((false, None)) = raw_fields.first() {
-        closed = ClosedFlag::Open;
+    let closed = if matches!(raw_fields.first(), Some((_, RecordPatternRow::Underscore))) {
         raw_fields.remove(0);
-    }
-
-    // Process fields in reversed order (matching OCaml's fold_left on reversed list).
-    // Prepend each field to build the correct forward order.
-    // This ensures the LAST spread field's error is emitted first (region silencing).
+        ClosedFlag::Open
+    } else {
+        ClosedFlag::Closed
+    };
     let mut fields = vec![];
-    for (has_spread, field_opt) in raw_fields.into_iter() {
-        match field_opt {
-            Some(field) => {
+    let mut rest: Option<crate::parser::ast::RecordPatRest> = None;
+    for (has_spread, field) in raw_fields {
+        match field {
+            RecordPatternRow::Field(field) => {
                 if has_spread {
-                    // OCaml: Parser.err ~start_pos:pattern.ppat_loc.loc_start p
-                    // end_pos defaults to p.end_pos (current token end)
                     p.err_at(
                         p.loc_start(p.arena().get_pat(field.pat).ppat_loc),
                         p.end_pos.clone(),
@@ -1502,274 +827,77 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
                         ),
                     );
                 }
-                // OCaml: field :: fields (prepend to maintain correct order)
                 fields.insert(0, field);
             }
-            None => {
-                // PatUnderscore in middle - just skip (OCaml: (fields, flag))
+            RecordPatternRow::Rest(rest_pat) => {
+                if rest.is_none() {
+                    rest = Some(rest_pat);
+                } else {
+                    p.err_at(
+                        p.loc_start(rest_pat.rest_loc),
+                        p.end_pos.clone(),
+                        DiagnosticCategory::Message(
+                            super::core::error_messages::RECORD_PATTERN_MULTIPLE_REST.to_string(),
+                        ),
+                    );
+                }
             }
+            RecordPatternRow::Underscore => {}
         }
     }
-
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((fields, closed)))),
+        ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((fields, closed, rest)))),
         ppat_loc: loc,
-        ppat_attributes: Attributes::new(),
+        ppat_attributes: attrs,
     }
 }
 
-/// Parse a dict pattern: dict{"key": pat, ...}.
-/// The `dict{` token is already consumed.
-fn parse_dict_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern {
-    let mut fields = vec![];
+/// OCaml `parse_dict_pattern_row` (compiler/syntax/src/res_core.ml:1683-1693).
+fn parse_dict_pattern_row(p: &mut Parser<'_>) -> Option<PatternRecordField> {
+    let Token::String(key) = &p.token else {
+        return None;
+    };
+    let key = key.to_string();
+    let loc = p.mk_loc_current();
+    p.next();
+    let lid_idx = p.push_lident(&key);
+    p.expect(Token::Colon);
+    let opt = p.optional(&Token::Question);
+    let pat = parse_pattern(p);
+    let pat_idx = p.arena_mut().push_pat(pat);
+    Some(PatternRecordField {
+        lid: with_loc(lid_idx, loc),
+        pat: pat_idx,
+        opt,
+    })
+}
 
-    while p.token != Token::Rbrace && p.token != Token::Eof {
-        match &p.token {
-            Token::String(key) => {
-                let key = key.to_string();
-                // OCaml: let loc = mk_loc p.start_pos p.end_pos - captures key location BEFORE consuming
-                let key_loc = p.mk_loc_current();
-                let lid_idx = p.push_lident(&key);
-                p.next();
-
-                p.expect(Token::Colon);
-
-                // Optional value marker: "key": ?x
-                let opt = p.optional(&Token::Question);
-
-                let pat = parse_pattern(p);
-                let pat_idx = p.arena_mut().push_pat(pat);
-                // OCaml: Location.mkloc (Longident.Lident s) loc - uses key location, not whole field
-                fields.push(PatternRecordField {
-                    lid: with_loc(lid_idx, key_loc),
-                    pat: pat_idx,
-                    opt,
-                });
-            }
-            _ => break,
-        }
-
-        if !p.optional(&Token::Comma) {
-            break;
-        }
-    }
-
+/// OCaml `parse_dict_pattern ~start_pos ~attrs`
+/// (compiler/syntax/src/res_core.ml:1695-1704). The `dict{` token is already
+/// consumed.
+fn parse_dict_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx, attrs: Attributes) -> Pattern {
+    let fields = super::core::parse_comma_delimited_region(
+        p,
+        Grammar::DictRows,
+        Token::Rbrace,
+        parse_dict_pattern_row,
+    );
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    // OCaml: adds (Location.mknoloc "res.dictPattern", PStr []) attribute
-    // Dict patterns are parsed as open record patterns with the dictPattern attribute
     let dict_idx = p.arena_mut().intern("res.dictPattern");
     Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((
             fields,
             ClosedFlag::Open,
+            None,
         )))),
         ppat_loc: loc,
         ppat_attributes: Attributes::from_vec(vec![(
             mknoloc(dict_idx),
             Payload::PStr(Box::new(vec![])),
-        )]),
-    }
-}
-
-/// Parse an extension pattern: %ext or %ext.with.dots(payload)
-fn parse_extension_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern {
-    // OCaml includes the % in the extension name location
-    // start_pos_idx already points to the start (before %)
-    p.expect(Token::Percent);
-    let id = super::module::parse_extension_id(p, start_pos_idx);
-
-    let payload = if p.token == Token::Lparen {
-        p.next();
-        let payload = super::module::parse_payload(p);
-        p.expect(Token::Rparen);
-        payload
-    } else {
-        Payload::PStr(Box::new(vec![]))
-    };
-
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_extension(Box::new((id, payload)))),
-        ppat_loc: loc,
-        ppat_attributes: Attributes::new(),
-    }
-}
-
-/// Parse a template literal pattern: `foo` (and consumes interpolations if present).
-fn parse_template_literal_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern {
-    let mut text = String::new();
-
-    if p.token == Token::Backtick {
-        p.next_template_literal_token();
-    }
-
-    // Check if this is a simple template (no interpolation)
-    let delimiter: Option<Cow<'static, str>> =
-        if let Token::TemplateTail { text: chunk, .. } = &p.token {
-            text.push_str(chunk);
-            p.next();
-            Some(Cow::Borrowed("js"))
-        } else {
-            // Has interpolation - skip all tokens and report error at original start_pos
-            // OCaml: Parser.err ~start_pos ~end_pos:p.prev_end_pos p (message ...)
-            fn skip_tokens(p: &mut Parser<'_>) {
-                if p.token != Token::Eof {
-                    p.next();
-                    if p.token == Token::Backtick {
-                        p.next();
-                    } else {
-                        skip_tokens(p);
-                    }
-                }
-            }
-            skip_tokens(p);
-            p.err_at(
-                p.arena().get_position(start_pos_idx).clone(),
-                p.prev_end_pos.clone(),
-                DiagnosticCategory::Message(
-                    super::core::error_messages::STRING_INTERPOLATION_IN_PATTERN.to_string(),
-                ),
-            );
-            // OCaml returns Pconst_string ("", None) in error case
-            None
-        };
-
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::String(
-            Cow::Owned(text),
-            delimiter,
-        )))),
-        ppat_loc: loc,
-        ppat_attributes: Attributes::from_vec(vec![template_literal_attr(p.arena_mut())]),
-    }
-}
-
-// ============================================================================
-// Poly Variant Pattern
-// ============================================================================
-
-/// Parse a polymorphic variant pattern (#Tag or #Tag(pat) or #...type).
-fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
-    let start_pos_idx = p.start_pos_idx();
-    let hash_start_pos = p.start_pos;
-    p.expect(Token::Hash);
-
-    // Handle #...type - type constraint pattern
-    if p.token == Token::DotDotDot {
-        p.next();
-        // Parse a type identifier - can be lident or Uident.Uident.lident
-        // Track start position of the type path for location
-        let type_start_idx = p.start_pos_idx();
-        let lid = parse_type_longident(p);
-        let lid_loc = p.mk_loc_idx_to_prev_end(type_start_idx);
-        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-        return Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_type(with_loc(lid, lid_loc))),
-            ppat_loc: loc,
-            ppat_attributes: Attributes::new(),
-        };
-    }
-
-    let tag: Label = match &p.token {
-        Token::Lident(name) | Token::Uident(name) => {
-            let name = extend_cow_lifetime(name.clone());
-            p.next();
-            name
-        }
-        Token::Int { i, suffix } => {
-            // Clone values before borrowing p mutably
-            let tag = i.to_string();
-            let has_suffix = suffix.is_some();
-            // OCaml: emit error if numeric poly variant has a suffix
-            if has_suffix {
-                p.err(DiagnosticCategory::Message(format!(
-                    "A numeric polymorphic variant cannot be followed by a letter. Did you mean `#{}`?",
-                    tag
-                )));
-            }
-            p.next();
-            Cow::Owned(tag)
-        }
-        Token::String(s) => {
-            let tag = extend_cow_lifetime(s.clone());
-            p.next();
-            tag
-        }
-        _ => {
-            err_invalid_variant_ident(p, hash_start_pos);
-            Cow::Borrowed("")
-        }
-    };
-
-    // Check for argument
-    let arg: Option<PatIdx> = if p.token == Token::Lparen {
-        let tuple_start_idx = p.start_pos_idx();
-        p.next();
-        if p.token == Token::Rparen {
-            // Empty: #tag()
-            // OCaml creates the unit pattern location BEFORE consuming `)`,
-            // so the location only covers the `(` character.
-            let unit_loc = p.mk_loc_idx_to_prev_end(tuple_start_idx);
-            p.next();
-            let unit_lid_idx = p.push_lident_static("()");
-            let unit_pat = ast_helper::make_construct_pat(
-                p.arena_mut(),
-                unit_lid_idx,
-                None,
-                unit_loc.clone(),
-                unit_loc,
-            );
-            Some(p.arena_mut().push_pat(unit_pat))
-        } else {
-            let first = parse_constrained_pattern(p);
-            if p.token == Token::Comma {
-                // Multiple arguments: #tag(a, b) -> tuple pattern
-                let mut patterns = vec![first];
-                while p.token == Token::Comma {
-                    p.next();
-                    if p.token == Token::Rparen {
-                        break; // Trailing comma
-                    }
-                    patterns.push(parse_constrained_pattern(p));
-                }
-                p.expect(Token::Rparen);
-                // Trailing comma with single element: #tag(a,) -> just the pattern, not a tuple
-                if patterns.len() == 1 {
-                    let single = patterns.into_iter().next().unwrap();
-                    Some(p.arena_mut().push_pat(single))
-                } else {
-                    let tuple_loc = p.mk_loc_idx_to_prev_end(tuple_start_idx);
-                    let pat_indices: Vec<PatIdx> = patterns
-                        .into_iter()
-                        .map(|pat| p.arena_mut().push_pat(pat))
-                        .collect();
-                    let tuple_pat = Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(pat_indices))),
-                        ppat_loc: tuple_loc,
-                        ppat_attributes: Attributes::new(),
-                    };
-                    Some(p.arena_mut().push_pat(tuple_pat))
-                }
-            } else {
-                p.expect(Token::Rparen);
-                Some(p.arena_mut().push_pat(first))
-            }
-        }
-    } else {
-        None
-    };
-
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_variant(Box::new((tag, arg)))),
-        ppat_loc: loc,
-        ppat_attributes: Attributes::new(),
+        )])
+        .concat(attrs),
     }
 }
 

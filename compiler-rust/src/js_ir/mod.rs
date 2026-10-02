@@ -68,6 +68,9 @@ pub struct ModulePathResolver {
     format: ModuleFormat,
     output_suffix: String,
     current_source_path: Option<PathBuf>,
+    /// `Filename.dirname` of the output prefix, which script-mode imports are
+    /// relative to (js_name_of_module_id.ml `~output_dir`).
+    output_dir: Option<PathBuf>,
     current_package_name: Option<String>,
     current_package_has_output: bool,
     runtime_path: Option<PathBuf>,
@@ -117,6 +120,9 @@ impl ModulePathResolver {
             output_suffix: output_suffix_from_path(output_path),
             current_source_path: source_filename
                 .map(|path| normalize_absolute_path(FsPath::new(path))),
+            output_dir: output_path
+                .or(source_filename.map(FsPath::new))
+                .and_then(|path| normalize_absolute_path(path).parent().map(FsPath::to_path_buf)),
             current_package_name: package_name.map(ToOwned::to_owned),
             current_package_has_output: package_name.is_some() && output_module_format.is_some(),
             runtime_path: runtime_path.map(normalize_absolute_path),
@@ -176,7 +182,9 @@ impl ModulePathResolver {
                 if let Some(cached) = self.module_path_cache.borrow().get(module_name).cloned() {
                     return cached;
                 }
-                let resolved = if self.is_runtime_module(module_name) {
+                let resolved = if let Some(path) = self.script_module_path(module_name) {
+                    Some(path)
+                } else if self.is_runtime_module(module_name) {
                     Some(self.runtime_module_path(module.id.name()))
                 } else {
                     let target_source = self
@@ -416,6 +424,41 @@ impl ModulePathResolver {
         resolved
     }
 
+    /// js_name_of_module_id.ml `Package_script, Package_script`: a script
+    /// dependency of a script unit is imported from the `.js` file found on
+    /// the load path, relative to the output directory.
+    fn script_module_path(&self, module_name: &str) -> Option<String> {
+        if self.is_in_process_mode() || !matches!(self.current_package_query(), PackageInfoQuery::Script) {
+            return None;
+        }
+        let env = self.persistent_env.as_ref()?;
+        let import_info = env.module_cmj_import_info(module_name)?;
+        // `Package_found dep, Package_script`: `pkg.pkg_rel_path // js_file`
+        // (js_packages_info.ml `query_package_infos`).
+        let package_name = match &import_info.package_spec.name {
+            crate::cmi::persistent_env::CmjPackageName::Empty => None,
+            crate::cmi::persistent_env::CmjPackageName::Runtime => Some("@rescript/runtime"),
+            crate::cmi::persistent_env::CmjPackageName::Normal(name) => Some(name.as_str()),
+        };
+        if let Some(package_name) = package_name {
+            let info = import_info
+                .package_spec
+                .module_systems
+                .iter()
+                .find(|info| module_system_compatible(info.module_system, self.format))?;
+            let js_file = js_name_of_module_name(module_name, import_info.file_case, &info.suffix);
+            return Some(filename_concat(&filename_concat(package_name, &info.path), &js_file));
+        }
+        let js_file = js_name_of_module_name(module_name, import_info.file_case, ".js");
+        let found = normalize_absolute_path(FsPath::new(&env.find_in_load_path_uncap(&js_file)?));
+        let relative = relative_path_between(self.output_dir.as_ref()?, &found)?;
+        let mut rendered = relative.to_string_lossy().replace('\\', "/");
+        if !rendered.starts_with("./") && !rendered.starts_with("../") {
+            rendered = format!("./{rendered}");
+        }
+        Some(rendered)
+    }
+
     fn relative_output_path(&self, target_source: &FsPath) -> Option<String> {
         let current_source = self.current_source_path.as_ref()?;
         let from_dir = current_source.parent()?;
@@ -529,6 +572,15 @@ fn module_format_from_output_path(output_path: Option<&FsPath>) -> ModuleFormat 
     {
         Some(name) if name.ends_with(".mjs") => ModuleFormat::EsModule,
         _ => ModuleFormat::CommonJs,
+    }
+}
+
+/// OCaml `Filename.concat`.
+fn filename_concat(dir: &str, file: &str) -> String {
+    if dir.is_empty() || dir.ends_with('/') {
+        format!("{dir}{file}")
+    } else {
+        format!("{dir}/{file}")
     }
 }
 
@@ -1460,15 +1512,6 @@ fn fold_strict_equality(left: &Expression, right: &Expression) -> Option<bool> {
     None
 }
 
-pub(crate) fn fold_strict_string_equality_pub(
-    left_txt: &str,
-    left_delim: &Delim,
-    right_txt: &str,
-    right_delim: &Delim,
-) -> Option<bool> {
-    fold_strict_string_equality(left_txt, left_delim, right_txt, right_delim)
-}
-
 fn fold_strict_string_equality(
     left_txt: &str,
     left_delim: &Delim,
@@ -1986,6 +2029,7 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
         return Statement::return_(Expression::cond(cond, then_ret.clone(), else_ret.clone()));
     }
 
+    // js_stmt_make.ml:255-261: `_, [Return _]` flips to an early return.
     if let Some(else_ret) = single_return_expr(&else_) {
         let mut block = Vec::with_capacity(1 + then_.len());
         block.push(Statement::new(StatementDesc::If(
@@ -1997,6 +2041,7 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
         return Statement::block(block);
     }
 
+    // js_stmt_make.ml:262-265.
     if block_last_is_terminal(&then_) {
         let mut block = Vec::with_capacity(1 + else_.len());
         block.push(Statement::new(StatementDesc::If(cond, then_, vec![])));
@@ -2022,14 +2067,12 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
     }
 
     if let Some((nested_cond, nested_then, nested_else)) = single_if_block(&then_) {
-        let preserve_literal_membership_guard =
-            preserves_literal_membership_guard(&cond, nested_cond);
         // OCaml's `S.if_` rule 10 (compiler/core/js_stmt_make.ml:290-292)
         // merges `if c1 { if c2 then2 else2 } else2` into
         // `if (c1 && c2) then2 else2`. `E.and_` then folds
         // `typeof x === "string" && x === "lit"` to `x === "lit"`
         // (compiler/core/js_exp_make.ml:800-813).
-        if !preserve_literal_membership_guard && ocaml_eq_block(nested_else, &else_) {
+        if ocaml_eq_block(nested_else, &else_) {
             return simplify_if_statement(
                 js_and_expression(cond, nested_cond.clone()),
                 nested_then.clone(),
@@ -2037,8 +2080,7 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
             );
         }
 
-        if !preserve_literal_membership_guard
-            && !nested_then.is_empty()
+        if !nested_then.is_empty()
             && ocaml_eq_block(nested_then, &else_)
         {
             return simplify_if_statement(
@@ -2191,73 +2233,6 @@ pub fn unnest_block(block: Block) -> Block {
             }
         }
         _ => block,
-    }
-}
-
-fn preserves_literal_membership_guard(outer_cond: &Expression, inner_cond: &Expression) -> bool {
-    let Some((inner_op, inner_vident, inner_literal)) = strict_var_literal_comparison(inner_cond)
-    else {
-        return false;
-    };
-    if inner_op != BinOp::EqEqEq {
-        return false;
-    }
-    if !matches!(inner_literal.desc, ExpressionDesc::Bool(false)) {
-        return false;
-    }
-
-    let mut saw_inner_literal = false;
-    let mut saw_other_literal = false;
-    if !collect_same_var_literal_membership_terms(
-        outer_cond,
-        inner_vident,
-        inner_literal,
-        &mut saw_inner_literal,
-        &mut saw_other_literal,
-    ) {
-        return false;
-    }
-
-    saw_inner_literal && saw_other_literal
-}
-
-fn collect_same_var_literal_membership_terms(
-    expr: &Expression,
-    expected_vident: &VIdent,
-    inner_literal: &Expression,
-    saw_inner_literal: &mut bool,
-    saw_other_literal: &mut bool,
-) -> bool {
-    match &expr.desc {
-        ExpressionDesc::Bin(BinOp::Or, left, right) => {
-            collect_same_var_literal_membership_terms(
-                left,
-                expected_vident,
-                inner_literal,
-                saw_inner_literal,
-                saw_other_literal,
-            ) && collect_same_var_literal_membership_terms(
-                right,
-                expected_vident,
-                inner_literal,
-                saw_inner_literal,
-                saw_other_literal,
-            )
-        }
-        _ => {
-            let Some((op, vident, literal)) = strict_var_literal_comparison(expr) else {
-                return false;
-            };
-            if op != BinOp::EqEqEq || !same_vident(vident, expected_vident) {
-                return false;
-            }
-            if ocaml_eq_expression(literal, inner_literal) {
-                *saw_inner_literal = true;
-            } else {
-                *saw_other_literal = true;
-            }
-            true
-        }
     }
 }
 
@@ -4002,88 +3977,6 @@ mod tests {
         );
         assert!(then_block.len() == 2);
         assert!(else_block.len() == 2);
-    }
-
-    #[test]
-    fn test_if_statement_keeps_explicit_literal_membership_guards() {
-        let value = Ident::create_local("value");
-        let outer_cond = raw_bin_expression(
-            BinOp::Or,
-            raw_bin_expression(
-                BinOp::Or,
-                Expression::bin(
-                    BinOp::EqEqEq,
-                    Expression::var(value.clone()),
-                    Expression::undefined(true),
-                ),
-                Expression::bin(
-                    BinOp::EqEqEq,
-                    Expression::var(value.clone()),
-                    Expression::null(),
-                ),
-            ),
-            raw_bin_expression(
-                BinOp::Or,
-                Expression::bin(
-                    BinOp::EqEqEq,
-                    Expression::var(value.clone()),
-                    Expression::bool(false),
-                ),
-                Expression::bin(
-                    BinOp::EqEqEq,
-                    Expression::var(value.clone()),
-                    Expression::bool(true),
-                ),
-            ),
-        );
-        let inner_cond = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(value.clone()),
-            Expression::bool(false),
-        );
-        let success = Expression::call(
-            Expression::var(Ident::create_local("success")),
-            vec![],
-            CallInfo::default(),
-        );
-        let failure_expr = Expression::call(
-            Expression::var(Ident::create_local("failure")),
-            vec![],
-            CallInfo::default(),
-        );
-        let success_block = vec![
-            Statement::exp(success),
-            Statement::return_(Expression::undefined(true)),
-        ];
-        let failure_block = vec![
-            Statement::exp(failure_expr.clone()),
-            Statement::return_(Expression::undefined(true)),
-        ];
-
-        assert!(
-            preserves_literal_membership_guard(&outer_cond, &inner_cond),
-            "expected literal membership detection to trigger for {outer_cond:#?} / {inner_cond:#?}"
-        );
-
-        let stmt = Statement::if_(
-            outer_cond.clone(),
-            vec![Statement::new(StatementDesc::If(
-                inner_cond.clone(),
-                success_block,
-                failure_block.clone(),
-            ))],
-            failure_block,
-        );
-
-        let StatementDesc::If(test, then_block, else_block) = &stmt.desc else {
-            panic!("expected the explicit outer literal membership guard to stay materialized");
-        };
-        assert!(ocaml_eq_expression(test, &outer_cond));
-        let Some((nested_test, _, nested_else)) = single_if_block(then_block) else {
-            panic!("expected the literal membership branch to keep the nested refinement");
-        };
-        assert!(ocaml_eq_expression(nested_test, &inner_cond));
-        assert!(ocaml_eq_block(nested_else, else_block));
     }
 
     #[test]

@@ -145,6 +145,72 @@ fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
     root_ident(path).is_some_and(|id| id.is_persistent() || id.stamp() == 0)
 }
 
+/// OCaml builds `comp_constrs` from the declarations after `prefix_idents`
+/// and `Subst.type_declaration` (env.ml:1530-1547), so a component reached
+/// through a module alias sees its own unit's types rooted at the component.
+/// The descriptions here come from the unit's signature; re-root the ones that
+/// still mention the alias source, copying their types like `Subst.type_expr`.
+fn reroot_constructor_descriptions(
+    descs: &mut [ConstructorDescription],
+    signature: &[SignatureItem],
+    access_path: &Path,
+    ctx: &super::context::TypeContext,
+) {
+    let _ = signature;
+    let prefixes = crate::cmi::persistent_env::alias_reroot_prefixes(access_path, ctx);
+    if prefixes.is_empty() {
+        return;
+    }
+    let mentions = |ty: super::type_expr::TypeExprRef| {
+        crate::cmi::persistent_env::type_expr_mentions_path_prefixes(ty, &prefixes, ctx)
+    };
+    let map_path = |p: &Path| crate::cmi::persistent_env::reroot_path(p, &prefixes);
+    for desc in descs.iter_mut() {
+        if !(desc.cstr_args.iter().any(|t| mentions(*t))
+            || desc.cstr_existentials.iter().any(|t| mentions(*t))
+            || mentions(desc.cstr_res))
+        {
+            continue;
+        }
+        let mut cache = super::type_expr::TypeExprRefMap::new();
+        let mut copy = |ty: super::type_expr::TypeExprRef| {
+            super::typecore::copy_type_expr_mapping_paths(ctx, ty, &mut cache, &map_path)
+        };
+        desc.cstr_res = copy(desc.cstr_res);
+        desc.cstr_existentials = desc.cstr_existentials.iter().map(|t| copy(*t)).collect();
+        desc.cstr_args = desc.cstr_args.iter().map(|t| copy(*t)).collect();
+    }
+}
+
+/// Label counterpart of [`reroot_constructor_descriptions`] (env.ml:1548-1559).
+fn reroot_label_descriptions(
+    descs: &mut [LabelDescription],
+    signature: &[SignatureItem],
+    access_path: &Path,
+    ctx: &super::context::TypeContext,
+) {
+    let _ = signature;
+    let prefixes = crate::cmi::persistent_env::alias_reroot_prefixes(access_path, ctx);
+    if prefixes.is_empty() {
+        return;
+    }
+    let mentions = |ty: super::type_expr::TypeExprRef| {
+        crate::cmi::persistent_env::type_expr_mentions_path_prefixes(ty, &prefixes, ctx)
+    };
+    let map_path = |p: &Path| crate::cmi::persistent_env::reroot_path(p, &prefixes);
+    for desc in descs.iter_mut() {
+        if !(mentions(desc.lbl_arg) || mentions(desc.lbl_res)) {
+            continue;
+        }
+        let mut cache = super::type_expr::TypeExprRefMap::new();
+        let mut copy = |ty: super::type_expr::TypeExprRef| {
+            super::typecore::copy_type_expr_mapping_paths(ctx, ty, &mut cache, &map_path)
+        };
+        desc.lbl_res = copy(desc.lbl_res);
+        desc.lbl_arg = copy(desc.lbl_arg);
+    }
+}
+
 fn build_matching_type_constructors(
     out: &mut Vec<ConstructorDescription>,
     access_path: &Path,
@@ -153,13 +219,75 @@ fn build_matching_type_constructors(
     constructor_name: &str,
     ctx: &super::context::TypeContext,
 ) {
+    let type_path = Path::pdot(access_path.clone(), type_name);
+    build_type_constructors(out, &type_path, decl, Some(constructor_name), ctx);
+}
+
+/// `fst (Env.find_type_descrs path env)` for a variant declaration whose
+/// descriptors live at `type_path` (compiler/ml/datarepr.ml:111-172 via
+/// compiler/ml/env.ml:1542-1547), in declaration order.
+pub(crate) fn constructors_of_type_path(
+    type_path: &Path,
+    decl: &TypeDeclaration,
+    ctx: &super::context::TypeContext,
+) -> Vec<ConstructorDescription> {
+    let mut out = Vec::new();
+    build_type_constructors(&mut out, type_path, decl, None, ctx);
+    out.reverse();
+    if let Some(access_path) = type_path.parent() {
+        reroot_constructor_descriptions(&mut out, &[], &access_path, ctx);
+    }
+    out
+}
+
+/// `snd (Env.find_type_descrs path env)` for a record declaration, in label
+/// position order (compiler/ml/datarepr.ml:174-188).
+pub(crate) fn labels_of_type_path(
+    type_path: &Path,
+    decl: &TypeDeclaration,
+    ctx: &super::context::TypeContext,
+) -> Vec<LabelDescription> {
+    let super::decl::TypeKind::TypeRecord(labels, repr) = &decl.type_kind else {
+        return Vec::new();
+    };
+    let res_ty = ctx.new_generic_constr(type_path.clone(), decl.type_params.clone());
+    let mut descs: Vec<LabelDescription> = labels
+        .iter()
+        .enumerate()
+        .map(|(pos, ld)| LabelDescription {
+            lbl_name: ld.ld_id.name().to_string(),
+            lbl_res: res_ty,
+            lbl_arg: super::ctype::remap_label_type_to_params(ctx, ld.ld_type, &decl.type_params),
+            lbl_mut: ld.ld_mutable,
+            lbl_optional: ld.ld_optional,
+            lbl_pos: pos as i32,
+            lbl_all: super::decl::LabelArrayRef(0),
+            lbl_repres: repr.clone(),
+            lbl_private: decl.type_private,
+            lbl_loc: ld.ld_loc,
+            lbl_attributes: ld.ld_attributes.clone(),
+        })
+        .collect();
+    if let Some(access_path) = type_path.parent() {
+        reroot_label_descriptions(&mut descs, &[], &access_path, ctx);
+    }
+    descs
+}
+
+fn build_type_constructors(
+    out: &mut Vec<ConstructorDescription>,
+    type_path: &Path,
+    decl: &TypeDeclaration,
+    constructor_name: Option<&str>,
+    ctx: &super::context::TypeContext,
+) {
     let super::decl::TypeKind::TypeVariant(cstrs, layout) = &decl.type_kind else {
         return;
     };
 
-    let type_path = Path::pdot(access_path.clone(), type_name);
+    let type_path = type_path.clone();
     for (position, cd) in cstrs.iter().enumerate() {
-        if cd.cd_id.name() != constructor_name {
+        if constructor_name.is_some_and(|name| cd.cd_id.name() != name) {
             continue;
         }
 
@@ -511,6 +639,7 @@ pub(crate) struct QualifiedModuleComponents {
 
 fn scan_child_component_from_signature(
     access_path: &Path,
+    source_prefix: Option<&Path>,
     signature: &Arc<Signature>,
     child_components: &mut HashMap<String, Option<(usize, Arc<StoredModuleComponents>)>>,
     state: &mut ChildComponentScanState,
@@ -557,6 +686,11 @@ fn scan_child_component_from_signature(
                         .local_module_components_arc(&Path::pident(id.clone()))
                         .map(|stored| (runtime_pos, stored))
                 };
+                if let (Some(source), Some((_, stored))) = (source_prefix, &stored) {
+                    let _ = stored
+                        .source_prefix
+                        .set(Path::pdot(source.clone(), id.name()));
+                }
                 // OCaml `Tbl.add` shadows earlier entries with the same name
                 // (compiler/ml/env.ml:1577-1578), so keep the latest scanned
                 // child component for this name.
@@ -660,6 +794,43 @@ impl QualifiedModuleComponents {
         child_component_scan_complete: bool,
         ctx: &super::context::TypeContext,
     ) -> Self {
+        // An in-process unit's signature names its own items through the unit
+        // (`Unit.t`); OCaml's `prefix_idents` puts them at the component path
+        // (env.ml:1454-1481, 1530-1538). Re-root a copy once, so values,
+        // types, labels, constructors and child modules all see it.
+        let signature = match &value_source_prefix {
+            Some(source) if !source.same(&access_path) => {
+                let mut rerooted =
+                    super::typecore::copy_lookup_signature_for_subst(signature.as_ref(), ctx);
+                // A child module of the scraped unit is strengthened into an
+                // alias of the unit's own child (mtype.ml:28-40 via
+                // env.ml:1435-1449), whose components name the parent unit's
+                // items through the unit; only the child's own items move to
+                // the access path (`Unit.Sub.u` -> `Cat.Sub.u`).
+                for item in &rerooted {
+                    let (old_prefix, new_prefix) = match item {
+                        SignatureItem::SigModule(id, _, _) => (
+                            Path::pdot(source.clone(), id.name()),
+                            Path::pdot(access_path.clone(), id.name()),
+                        ),
+                        _ => (source.clone(), access_path.clone()),
+                    };
+                    crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                        std::slice::from_ref(item),
+                        &old_prefix,
+                        &new_prefix,
+                        ctx,
+                    );
+                }
+                crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix_shallow(
+                    &mut rerooted,
+                    source,
+                    &access_path,
+                );
+                Arc::new(rerooted)
+            }
+            _ => signature,
+        };
         check_signature_store_resident(&signature, ctx);
         let index = ctx.signature_index(&signature);
         let mut component_modtypes = HashMap::new();
@@ -969,12 +1140,19 @@ impl QualifiedModuleComponents {
         // signature immutable and forces only the requested constructor bucket,
         // preserving env.ml:1132-1137 lookup semantics without materializing
         // every constructor in large dependency signatures.
-        let built = Arc::new(build_constructors_for_name(
+        let mut built = build_constructors_for_name(
             self.access_path(),
             self.signature.as_ref(),
             name,
             ctx,
-        ));
+        );
+        reroot_constructor_descriptions(
+            &mut built,
+            self.signature.as_ref(),
+            self.access_path(),
+            ctx,
+        );
+        let built = Arc::new(built);
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_scan(
                 crate::perf_counters::LazyLookupKind::Constructor,
@@ -1009,12 +1187,14 @@ impl QualifiedModuleComponents {
         // selected component path. For normal compilation, force just the label
         // bucket requested by typecore.ml:1107-1126-style qualified lookup; this
         // avoids constructing hundreds of unused JSX record labels per module view.
-        let built = Arc::new(build_labels_for_name(
+        let mut built = build_labels_for_name(
             self.access_path(),
             self.signature.as_ref(),
             name,
             ctx,
-        ));
+        );
+        reroot_label_descriptions(&mut built, self.signature.as_ref(), self.access_path(), ctx);
+        let built = Arc::new(built);
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_scan(
                 crate::perf_counters::LazyLookupKind::Label,
@@ -1080,6 +1260,7 @@ impl QualifiedModuleComponents {
         let mut child_components = self.tables.child_components.borrow_mut();
         let (built, scanned_items) = scan_child_component_from_signature(
             self.access_path(),
+            self.value_source_prefix.as_deref(),
             &self.signature,
             &mut child_components,
             &mut scan,
@@ -1465,6 +1646,7 @@ fn build_local_module_components<'a>(
     access_path: &Path,
     md: &ModuleDeclaration,
     parent_substitution_context: Option<(&Path, &[SignatureItem])>,
+    source_prefix: Option<&Path>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a super::context::TypeContext,
     cache_mode: super::typecore::ComponentLookupApi,
@@ -1486,8 +1668,11 @@ fn build_local_module_components<'a>(
             // reaches `find_module`, whose persistent Pident branch at
             // env.ml:872-875 reads the persistent structure. In in-process
             // mode the portable signature has already been internalized into
-            // this TypeContext, so share that component signature and let the
-            // view apply the selected access path lazily to forced items.
+            // the worker store, so share that component signature and let the
+            // view apply the selected access path lazily to forced items
+            // instead of renaming and copying the unit's signature. This skips
+            // the rename's stamp consumption, so in-process ident stamps can
+            // differ from OCaml's; in-process builds write no `.cmt` files.
             return Some(
                 QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
                     access_path.clone(),
@@ -1652,9 +1837,27 @@ fn build_local_module_components<'a>(
                 access_path,
             );
         }
+        crate::cmi::persistent_env::substitute_module_alias_paths_in_child_sig(
+            &mut qualified_sig,
+            parent_sig,
+            parent_access_path,
+        );
     }
     if raw_sig.len() != qualified_sig.len() {
         return None;
+    }
+    if let Some(source) = source_prefix
+        && !source.same(access_path)
+    {
+        // A child of an in-process unit's components: its items name each
+        // other through the unit (`Unit.Sub.u`); `prefix_idents`
+        // (env.ml:1454-1481, 1530-1538) puts them at the access path.
+        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(&qualified_sig, source, access_path, ctx);
+        crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
+            &mut qualified_sig,
+            source,
+            access_path,
+        );
     }
 
     let qualified_sig = Arc::new(qualified_sig);
@@ -1770,9 +1973,15 @@ pub(crate) struct StoredModuleComponents {
     access_path: Path,
     module_decl: ModuleDeclaration,
     parent_context: Option<(Path, Arc<Signature>)>,
+    /// For a child of components whose signature names its items through an
+    /// in-process unit (`Unit.Sub.t`), that unit-rooted path of this child.
+    source_prefix: OnceCell<Path>,
     cached: OnceCell<Arc<QualifiedModuleComponents>>,
     /// Built during a store build (see `StructureComponentTables::in_store`).
     in_store: bool,
+    /// Key of this module's compilation-private components (see
+    /// `TypeContext::local_stored_components`).
+    local_id: u64,
     cached_piece: OnceCell<Arc<super::context::StorePiece>>,
     functor_component_result: OnceCell<ModuleType>,
     functor_component_piece: OnceCell<Arc<super::context::StorePiece>>,
@@ -1800,8 +2009,13 @@ impl StoredModuleComponents {
             access_path,
             module_decl,
             parent_context,
+            source_prefix: OnceCell::new(),
             cached: OnceCell::new(),
             in_store: super::thread_store::store_build_active(),
+            local_id: {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            },
             cached_piece: OnceCell::new(),
             functor_component_result: OnceCell::new(),
             functor_component_piece: OnceCell::new(),
@@ -1827,13 +2041,25 @@ impl StoredModuleComponents {
         }
 
         if self.in_store {
+            if let Some(components) = ctx.local_stored_components(self.local_id) {
+                // Compilation-private, like the build that produced it.
+                ctx.poison_store_build_for("local-stored-components");
+                return Some(f(components.as_ref()));
+            }
             let (components, piece) = ctx.build_in_store(|| self.build_components(pers_env, ctx, cache_mode));
             let components = Arc::new(components?);
-            if let Some(piece) = piece
-                && cache_mode.publishes()
-                && self.cached.set(components.clone()).is_ok()
-            {
-                let _ = self.cached_piece.set(piece);
+            if cache_mode.publishes() {
+                match piece {
+                    Some(piece) => {
+                        if self.cached.set(components.clone()).is_ok() {
+                            let _ = self.cached_piece.set(piece);
+                        }
+                    }
+                    // Built from this compilation's private state (such as
+                    // a renamed persistent signature): keep it for this
+                    // compilation only.
+                    None => ctx.set_local_stored_components(self.local_id, components.clone()),
+                }
             }
             return Some(f(components.as_ref()));
         }
@@ -1866,6 +2092,7 @@ impl StoredModuleComponents {
             &self.access_path,
             &self.module_decl,
             parent_substitution_context,
+            self.source_prefix.get(),
             pers_env,
             ctx,
             cache_mode,

@@ -134,6 +134,19 @@ fn normalize_args() -> Vec<String> {
 }
 
 fn main() {
+    // Parse on a thread with a large stack, like `bsc`, so deeply nested input
+    // does not overflow the default main-thread stack.
+    let handle = std::thread::Builder::new()
+        .name("res_parser".into())
+        .stack_size(512 * 1024 * 1024)
+        .spawn(run)
+        .expect("failed to spawn parser thread");
+    if handle.join().is_err() {
+        process::exit(2);
+    }
+}
+
+fn run() {
     let args = Args::parse_from(normalize_args());
 
     // Read file as raw bytes, converting each byte to a char (Latin-1 encoding).
@@ -161,7 +174,8 @@ fn main() {
     // For ML output and type checking, use ParseForTypeChecker mode where strings get Some("js") delimiter
     // This matches OCaml's for_printer flag behavior
     let mode = match args.print.as_str() {
-        "sexp" | "sexp-locs" | "sexp0-locs" | "res" | "ast" => ParserMode::Default,
+        // res_cli.ml: `for_printer` only for res / sexp / sexp-locs.
+        "sexp" | "sexp-locs" | "res" if !args.typechecker => ParserMode::Default,
         _ => ParserMode::ParseForTypeChecker,
     };
 
@@ -189,6 +203,14 @@ fn main() {
         let signature = if has_parse_errors {
             signature
         } else {
+            // res_cli.ml:305-317: the parsetree0 round trip runs before the
+            // JSX transform.
+            let signature = if args.test_ast_conversion {
+                let tree0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
+                mapper_from0::map_signature(parser.arena_mut(), &tree0)
+            } else {
+                signature
+            };
             // Apply JSX PPX transformation and emit JSX preprocessor warnings.
             let (signature, jsx_warnings) = match jsx_ppx::transform_signature_with_warnings_result(
                 signature,
@@ -202,14 +224,7 @@ fn main() {
                 }
             };
             print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
-
-            // Apply AST conversion round-trip if requested (for testing)
-            if args.test_ast_conversion {
-                let sig0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
-                mapper_from0::map_signature(parser.arena_mut(), &sig0)
-            } else {
-                signature
-            }
+            signature
         };
 
         // Print in requested format
@@ -259,7 +274,7 @@ fn main() {
                 // 3. Marshaled signature (using output_value)
 
                 // Write magic
-                let _ = io::stdout().write_all(b"Caml1999N022");
+                let _ = io::stdout().write_all(b"ResIntf01300");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -280,7 +295,7 @@ fn main() {
                 let sig0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
 
                 // Write magic
-                let _ = io::stdout().write_all(b"Caml1999N022");
+                let _ = io::stdout().write_all(b"ResIntf01300");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -320,6 +335,14 @@ fn main() {
         let structure = if has_parse_errors {
             structure
         } else {
+            // res_cli.ml:305-317: the parsetree0 round trip runs before the
+            // JSX transform.
+            let structure = if args.test_ast_conversion {
+                let tree0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
+                mapper_from0::map_structure(parser.arena_mut(), &tree0)
+            } else {
+                structure
+            };
             // Apply JSX PPX transformation and emit JSX preprocessor warnings.
             let (structure, jsx_warnings) = match jsx_ppx::transform_structure_with_warnings_result(
                 structure,
@@ -333,14 +356,7 @@ fn main() {
                 }
             };
             print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
-
-            // Apply AST conversion round-trip if requested (for testing)
-            if args.test_ast_conversion {
-                let str0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
-                mapper_from0::map_structure(parser.arena_mut(), &str0)
-            } else {
-                structure
-            }
+            structure
         };
 
         // Print in requested format
@@ -399,7 +415,7 @@ fn main() {
                 // 3. Marshaled structure (using output_value)
 
                 // Write magic
-                let _ = io::stdout().write_all(b"Caml1999M022");
+                let _ = io::stdout().write_all(b"ResImpl01300");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -420,7 +436,7 @@ fn main() {
                 let str0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
 
                 // Write magic
-                let _ = io::stdout().write_all(b"Caml1999M022");
+                let _ = io::stdout().write_all(b"ResImpl01300");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();

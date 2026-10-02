@@ -1939,6 +1939,8 @@ impl JsPrinter {
                     self.write_char('(');
                 }
                 self.print_member_target_expression(arr, true);
+                // `P.group f 1` around the whole access plus
+                // `P.bracket_group f 1` around the index (js_dump.ml:1039-1043).
                 self.write_char('[');
                 // The index sits inside both the outer `P.group f 1` and
                 // `P.bracket_group f 1` (js_dump.ml `Array_index`).

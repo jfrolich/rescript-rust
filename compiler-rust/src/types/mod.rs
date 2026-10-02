@@ -41,8 +41,10 @@ pub mod decl;
 pub mod env;
 pub(crate) mod env_lazy;
 pub mod includemod;
+pub(crate) mod parmatch;
 pub mod path;
 pub mod predef;
+pub mod printtyp;
 pub mod sexp_typedtree;
 pub mod shared_store;
 pub mod thread_store;
@@ -50,6 +52,7 @@ pub mod type_expr;
 pub mod typecore;
 pub mod typedtree;
 pub mod typemod;
+pub mod usage;
 pub mod variance;
 pub mod variant_runtime;
 

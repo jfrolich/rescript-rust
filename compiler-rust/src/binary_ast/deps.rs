@@ -18,7 +18,7 @@ use crate::parser::ast::{
     LabelDeclaration, ModuleBinding, ModuleDeclaration, ModuleExpr, ModuleExprDesc, ModuleType,
     ModuleTypeDeclaration, ModuleTypeDesc, ObjectField, OpenDescription, Pattern, PatternDesc,
     Payload, RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc,
-    TypeDeclaration, TypeExtension, TypeKind, ValueDescription, WithConstraint,
+    Extension, TypeDeclaration, TypeExtension, TypeKind, ValueDescription, WithConstraint,
 };
 use crate::parser::ast::{PexpApply, PexpFun};
 use crate::parser::longident::Longident;
@@ -31,6 +31,21 @@ pub fn extract_structure_deps(arena: &ParseArena, structure: &[StructureItem]) -
     let mut collector = DependencyCollector::new(arena);
     collector.add_structure(structure);
     collector.finish()
+}
+
+/// The `[%error]` extension OCaml `Depend` raises on while extracting the
+/// dependencies of a structure (depend.ml:92-96), if any.
+pub fn structure_error_extension(arena: &ParseArena, structure: &[StructureItem]) -> Option<Extension> {
+    let mut collector = DependencyCollector::new(arena);
+    collector.add_structure(structure);
+    collector.error_extension
+}
+
+/// The `[%error]` extension OCaml `Depend` raises on for a signature.
+pub fn signature_error_extension(arena: &ParseArena, signature: &[SignatureItem]) -> Option<Extension> {
+    let mut collector = DependencyCollector::new(arena);
+    collector.add_signature(signature);
+    collector.error_extension
 }
 
 /// Extract module dependencies from a signature (interface).
@@ -49,6 +64,9 @@ struct DependencyCollector<'a> {
     /// For locally-bound modules, track names introduced by their inner structure/signature.
     /// Used to model OCaml `open_module` behavior (`open M` brings submodules into scope).
     module_members: HashMap<String, HashSet<String>>,
+    /// The first `[%error]`/`[%ocaml.error]` extension reached; OCaml
+    /// `Depend.handle_extension` (depend.ml:92-96) raises there.
+    error_extension: Option<Extension>,
 }
 
 impl<'a> DependencyCollector<'a> {
@@ -58,6 +76,16 @@ impl<'a> DependencyCollector<'a> {
             deps: BTreeSet::new(),
             bound_modules: HashSet::new(),
             module_members: HashMap::new(),
+            error_extension: None,
+        }
+    }
+
+    /// OCaml `Depend.handle_extension` (depend.ml:92-96).
+    fn handle_extension(&mut self, ext: &Extension) {
+        if self.error_extension.is_none()
+            && matches!(self.arena.get_string(ext.0.txt), "error" | "ocaml.error")
+        {
+            self.error_extension = Some(ext.clone());
         }
     }
 
@@ -314,8 +342,7 @@ impl<'a> DependencyCollector<'a> {
                 // Attributes don't contribute dependencies
             }
             StructureItemDesc::Pstr_extension(inner) => {
-                // Extension payload ignored for dependency extraction
-                // OCaml's handle_extension ignores extension payloads for dependency extraction
+                self.handle_extension(&inner.0);
             }
         }
     }
@@ -399,8 +426,7 @@ impl<'a> DependencyCollector<'a> {
                 // Attributes don't contribute dependencies
             }
             SignatureItemDesc::Psig_extension(inner) => {
-                // Extension payload ignored for dependency extraction
-                // OCaml's handle_extension ignores extension payloads for dependency extraction
+                self.handle_extension(&inner.0);
             }
         }
     }
@@ -689,8 +715,33 @@ impl<'a> DependencyCollector<'a> {
                     self.bound_modules.remove(name);
                 }
             }
-            ExpressionDesc::Pexp_extension(_ext_inner) => {
-                // OCaml's handle_extension ignores extension payloads for dependency extraction
+            ExpressionDesc::Pexp_extension(ext) => {
+                // depend.ml:292-298: `[%extension_constructor C]` depends on
+                // the constructor path.
+                let constructor = match &ext.1 {
+                    Payload::PStr(items)
+                        if items.len() == 1
+                            && matches!(
+                                self.arena.get_string(ext.0.txt),
+                                "ocaml.extension_constructor" | "extension_constructor"
+                            ) =>
+                    {
+                        match items[0].pstr_desc.as_ref() {
+                            StructureItemDesc::Pstr_eval(inner) => {
+                                match self.arena.get_expr(inner.0).pexp_desc.as_ref() {
+                                    ExpressionDesc::Pexp_construct(c, None) => Some(c.txt),
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                match constructor {
+                    Some(c) => self.add_lident_idx(c),
+                    None => self.handle_extension(ext),
+                }
             }
             ExpressionDesc::Pexp_await(expr) => {
                 // expr is ExprIdx
@@ -856,7 +907,7 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             PatternDesc::Ppat_record(inner) => {
-                let (ref fields, ref _closed) = **inner;
+                let (ref fields, ref _closed, ref record_rest) = **inner;
                 for field in fields {
                     self.add_lident_idx(field.lid.txt);
                     // field.pat is PatIdx
@@ -864,9 +915,8 @@ impl<'a> DependencyCollector<'a> {
                 }
                 // OCaml Depend visits the rest pattern's type annotation
                 // (compiler/ml/depend.ml:187): `...M.t as rest` records a
-                // dependency on M. The rest row lives in a sparse side table
-                // keyed by the pattern location.
-                if let Some(rest) = self.arena.record_pat_rest(pat.ppat_loc)
+                // dependency on M.
+                if let Some(rest) = record_rest
                     && let Some(rest_type) = rest.rest_type
                 {
                     self.add_core_type_idx(rest_type);
@@ -900,8 +950,8 @@ impl<'a> DependencyCollector<'a> {
                 let pat_idx = *pat_idx;
                 self.add_pat_idx_inner(pat_idx, unpack_names);
             }
-            PatternDesc::Ppat_extension(_ext_inner) => {
-                // OCaml's handle_extension ignores extension payloads for dependency extraction
+            PatternDesc::Ppat_extension(ext) => {
+                self.handle_extension(ext);
             }
             PatternDesc::Ppat_open(lid, pat_idx) => {
                 // Pattern open uses full module path
@@ -996,8 +1046,8 @@ impl<'a> DependencyCollector<'a> {
                     self.add_core_type_idx(*ty);
                 }
             }
-            CoreTypeDesc::Ptyp_extension(_ext_inner) => {
-                // OCaml's handle_extension ignores extension payloads for dependency extraction
+            CoreTypeDesc::Ptyp_extension(ext) => {
+                self.handle_extension(ext);
             }
         }
     }
@@ -1051,8 +1101,8 @@ impl<'a> DependencyCollector<'a> {
                 let expr = *expr;
                 self.add_expr_idx(expr);
             }
-            ModuleExprDesc::Pmod_extension(_ext_inner) => {
-                // OCaml's handle_extension ignores extension payloads for dependency extraction
+            ModuleExprDesc::Pmod_extension(ext) => {
+                self.handle_extension(ext);
             }
         }
     }
@@ -1104,8 +1154,8 @@ impl<'a> DependencyCollector<'a> {
                 let me = *me;
                 self.add_mod_expr_idx(me);
             }
-            ModuleTypeDesc::Pmty_extension(_ext_inner) => {
-                // OCaml's handle_extension ignores extension payloads for dependency extraction
+            ModuleTypeDesc::Pmty_extension(ext) => {
+                self.handle_extension(ext);
             }
         }
     }

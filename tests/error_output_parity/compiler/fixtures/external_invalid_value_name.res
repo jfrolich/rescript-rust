@@ -1,0 +1,1 @@
+external \"->": int => int = "x"

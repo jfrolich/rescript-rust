@@ -84,20 +84,6 @@ pub enum ArgLabel {
     Optional(StrIdx),
 }
 
-/// Arity annotation for functions (None = inferred, Some(n) = explicit arity)
-pub type Arity = Option<i32>;
-
-/// Record element for both patterns and expressions (current parsetree format)
-/// Used in Ppat_record and Pexp_record
-#[derive(Debug, Clone, PartialEq)]
-pub struct RecordElement<T> {
-    /// Field name
-    pub lid: Located<Longident>,
-    /// Field value (pattern or expression)
-    pub x: T,
-    /// Whether this field is optional
-    pub opt: bool,
-}
 
 // ========== Constants ==========
 
@@ -228,8 +214,8 @@ pub enum PatternDesc {
     /// Polymorphic variant: `A or `A P
     Variant(Label, Option<Box<Pattern>>),
     /// Record: { l1=P1; ...; ln=Pn } or { l1=P1; ...; ln=Pn; _ }
-    /// Uses RecordElement with 3 fields (lid, x, opt) in current parsetree
-    Record(Vec<RecordElement<Pattern>>, ClosedFlag),
+    /// Optional fields carry the `res.optional` attribute.
+    Record(Vec<(Located<Longident>, Pattern)>, ClosedFlag),
     /// Array: [| P1; ...; Pn |]
     Array(Vec<Pattern>),
     /// Or pattern: P1 | P2
@@ -269,22 +255,13 @@ pub enum ExpressionDesc {
     Constant(Constant),
     /// Let binding: let P = E in E
     Let(RecFlag, Vec<ValueBinding>, Box<Expression>),
-    /// Fun: fun P -> E (current parsetree format with arity and async)
-    Fun {
-        arg_label: ArgLabel,
-        default: Option<Box<Expression>>,
-        lhs: Box<Pattern>,
-        rhs: Box<Expression>,
-        arity: Arity,
-        is_async: bool,
-    },
-    /// Application: E0 ~l1:E1 ... ~ln:En (current parsetree format)
-    Apply {
-        funct: Box<Expression>,
-        args: Vec<(ArgLabel, Expression)>,
-        partial: bool,
-        transformed_jsx: bool,
-    },
+    /// function P1 -> E1 | ... | Pn -> En
+    Function(Vec<Case>),
+    /// fun ~l:(P = E0) -> E1: one parameter; `(P1, P2) => E` is a chain
+    /// wrapped in `Function$` with a `res.arity` attribute.
+    Fun(ArgLabel, Option<Box<Expression>>, Box<Pattern>, Box<Expression>),
+    /// E0 ~l1:E1 ... ~ln:En
+    Apply(Box<Expression>, Vec<(ArgLabel, Expression)>),
     /// Match: match E with P1 -> E1 | ... | Pn -> En
     Match(Box<Expression>, Vec<Case>),
     /// Try: try E with P1 -> E1 | ... | Pn -> En
@@ -296,8 +273,8 @@ pub enum ExpressionDesc {
     /// Polymorphic variant: `A or `A E
     Variant(Label, Option<Box<Expression>>),
     /// Record: { l1=E1; ...; ln=En } or { E with l1=E1; ...; ln=En }
-    /// Uses RecordElement with 3 fields (lid, x, opt) in current parsetree
-    Record(Vec<RecordElement<Expression>>, Option<Box<Expression>>),
+    /// Optional fields carry the `res.optional` attribute.
+    Record(Vec<(Located<Longident>, Expression)>, Option<Box<Expression>>),
     /// Field access: E.l
     Field(Box<Expression>, Located<Longident>),
     /// Field update: E1.l <- E2

@@ -36,10 +36,6 @@ use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 /// `IdGenerator` base and never reach this range in practice.
 const STORE_TYPE_ID_BASE: i32 = 1 << 30;
 
-/// First synthetic longident component index owned by a store. Compilation
-/// contexts hand out `0xF000_0000..`; parse arenas count from zero.
-const STORE_LONGIDENT_IDX_BASE: u32 = 0xE000_0000;
-
 /// Build generation. `begin_build` bumps it once per `rescript build`; a
 /// worker whose store was filled during an earlier build (watch mode) drops
 /// that store and starts empty, so no store outlives the build that published
@@ -174,8 +170,6 @@ pub(crate) struct ThreadTypeStore {
         >,
     >,
     /// Synthetic longident component names used by store `Tpackage` nodes.
-    longident_names: RefCell<HashMap<u32, String>>,
-    next_longident_idx: Cell<u32>,
     /// Label descriptions of large regular records of dependency types,
     /// built as store builds (see `typecore::build_record_label_descriptions_info`).
     record_labels: RefCell<HashMap<Path, SharedRecordLabels>>,
@@ -209,8 +203,6 @@ impl ThreadTypeStore {
             sig_type_registrations: RefCell::new(HashMap::new()),
             signature_indexes: RefCell::new(HashMap::new()),
             shared_components: RefCell::new(HashMap::new()),
-            longident_names: RefCell::new(HashMap::new()),
-            next_longident_idx: Cell::new(STORE_LONGIDENT_IDX_BASE),
             record_labels: RefCell::new(HashMap::new()),
             initial_env: RefCell::new(None),
             generation,
@@ -353,26 +345,11 @@ impl ThreadTypeStore {
         self.pers.borrow().len()
     }
 
-    /// Intern a longident component name for a store node.
+    /// Intern a longident component name for a store node. Names live in
+    /// the process-wide pool, so every compilation resolves them without
+    /// copying the table into each exported signature.
     pub(crate) fn intern_longident_name(&self, name: &str) -> StrIdx {
-        let raw = self.next_longident_idx.get();
-        self.next_longident_idx.set(raw + 1);
-        self.longident_names
-            .borrow_mut()
-            .insert(raw, name.to_string());
-        StrIdx::from_raw(raw)
-    }
-
-    pub(crate) fn longident_name(&self, idx: StrIdx) -> Option<String> {
-        self.longident_names.borrow().get(&idx.raw()).cloned()
-    }
-
-    pub(crate) fn snapshot_longident_names(&self) -> Vec<(u32, String)> {
-        self.longident_names
-            .borrow()
-            .iter()
-            .map(|(raw, name)| (*raw, name.clone()))
-            .collect()
+        self.shared_pool().intern_longident_name(name)
     }
 
     #[inline]

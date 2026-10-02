@@ -144,6 +144,18 @@ pub fn write_external_ppx_signature_input(
     )
 }
 
+/// Write the external `-ppx` input for an already converted Parsetree0 AST
+/// (`Cmd_ppx_apply.write_ast`): magic, marshaled input name, marshaled AST.
+pub fn write_external_ppx_input0<A: Marshal>(
+    output_path: &Path,
+    source_path: &str,
+    arena: &ParseArena,
+    magic: &[u8],
+    ast: &A,
+) -> io::Result<()> {
+    write_external_ppx_input(output_path, source_path, arena, magic, ast)
+}
+
 fn write_external_ppx_input<A: Marshal>(
     output_path: &Path,
     source_path: &str,
@@ -226,8 +238,14 @@ pub fn write_structure_ast_current_with_extra_deps_and_builtin_ppx(
         ast.clone()
     };
 
-    // 2. Process @@config attributes (e.g., no_export wrapping)
-    let rewritten_ast = apply_no_export_config(arena, rewritten_ast);
+    // 2. Process @@config attributes (no_export wrapping). When the caller
+    //    ran the frontend (`builtin_ppx == false`), it already applied it
+    //    (js_implementation.ml:130).
+    let rewritten_ast = if builtin_ppx {
+        apply_no_export_config(arena, rewritten_ast)
+    } else {
+        rewritten_ast
+    };
 
     // 3. Extract dependencies from the rewritten AST and merge explicit opens.
     let mut deps = extract_structure_deps(arena, &rewritten_ast);

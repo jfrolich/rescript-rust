@@ -35,20 +35,6 @@ pub fn mknoloc<T>(txt: T) -> Loc<T> {
 
 const VARIANT_IDENT_MESSAGE: &str = "A polymorphic variant (e.g. #id) must start with an alphabetical letter or be a number (e.g. #742)";
 
-/// Report an invalid polymorphic variant tag like OCaml's parse_hash_ident.
-pub fn err_invalid_variant_ident(p: &mut Parser<'_>, hash_start_pos: Position) {
-    if p.token == Token::Eof {
-        p.err_unexpected_at(hash_start_pos);
-    } else {
-        p.err_at(
-            hash_start_pos,
-            p.end_pos,
-            DiagnosticCategory::Message(VARIANT_IDENT_MESSAGE.to_string()),
-        );
-        p.next();
-    }
-}
-
 // ============================================================================
 // Error Recovery
 // ============================================================================
@@ -175,9 +161,11 @@ pub mod recover {
         }
 
         // Case 2: should abort list parse
+        // OCaml `skip_tokens_and_maybe_retry` (compiler/syntax/src/res_core.ml:1354-1365)
+        // consumes the token before retrying; retrying in place recurses forever.
         if should_abort_list_parse(p) {
-            // If current token can start our grammar, retry without advancing
             if is_start_of_grammar(&p.token) {
+                p.next();
                 return true;
             }
             return false;
@@ -191,6 +179,120 @@ pub mod recover {
 
         is_start_of_grammar(&p.token)
     }
+}
+
+/// OCaml `parse_region` (compiler/syntax/src/res_core.ml:1177-1192).
+pub fn parse_region<'a, T>(
+    p: &mut Parser<'a>,
+    grammar: grammar::Grammar,
+    mut f: impl FnMut(&mut Parser<'a>) -> Option<T>,
+) -> Vec<T> {
+    p.leave_breadcrumb(grammar);
+    let mut nodes = vec![];
+    loop {
+        match f(p) {
+            Some(node) => nodes.push(node),
+            None => {
+                if p.token == Token::Eof || recover::should_abort_list_parse(p) {
+                    break;
+                }
+                p.err_unexpected();
+                p.next();
+            }
+        }
+    }
+    p.eat_breadcrumb();
+    nodes
+}
+
+/// OCaml `parse_delimited_region` (compiler/syntax/src/res_core.ml:1158-1175).
+pub fn parse_delimited_region<'a, T>(
+    p: &mut Parser<'a>,
+    grammar: grammar::Grammar,
+    closing: Token<'static>,
+    mut f: impl FnMut(&mut Parser<'a>) -> Option<T>,
+) -> Vec<T> {
+    p.leave_breadcrumb(grammar);
+    let mut nodes = vec![];
+    loop {
+        match f(p) {
+            Some(node) => nodes.push(node),
+            None => {
+                if p.token == Token::Eof
+                    || p.token == closing
+                    || recover::should_abort_list_parse(p)
+                {
+                    break;
+                }
+                p.err_unexpected();
+                p.next();
+            }
+        }
+    }
+    p.eat_breadcrumb();
+    nodes
+}
+
+/// OCaml `parse_comma_delimited_region` (compiler/syntax/src/res_core.ml:1068-1105).
+pub fn parse_comma_delimited_region<'a, T>(
+    p: &mut Parser<'a>,
+    grammar: grammar::Grammar,
+    closing: Token<'static>,
+    mut f: impl FnMut(&mut Parser<'a>) -> Option<T>,
+) -> Vec<T> {
+    p.leave_breadcrumb(grammar.clone());
+    let mut nodes = vec![];
+    loop {
+        match f(p) {
+            Some(node) => {
+                nodes.push(node);
+                if p.token == Token::Comma {
+                    p.next();
+                } else if p.token == closing || p.token == Token::Eof {
+                    break;
+                } else if grammar::is_list_element(&grammar, &p.token) {
+                    // Missing comma, but the next token starts another element.
+                    p.expect(Token::Comma);
+                } else {
+                    if !(p.token == Token::Eof
+                        || p.token == closing
+                        || recover::should_abort_list_parse(p))
+                    {
+                        p.expect(Token::Comma);
+                    }
+                    if p.token == Token::Semicolon {
+                        p.next();
+                    }
+                }
+            }
+            None => {
+                if p.token == Token::Eof
+                    || p.token == closing
+                    || recover::should_abort_list_parse(p)
+                {
+                    break;
+                }
+                p.err_unexpected();
+                p.next();
+            }
+        }
+    }
+    p.eat_breadcrumb();
+    nodes
+}
+
+/// OCaml `parse_comma_delimited_reversed_list`
+/// (compiler/syntax/src/res_core.ml:1113-1156). The result is in reverse
+/// source order, like the OCaml list.
+pub fn parse_comma_delimited_reversed_list<'a, T>(
+    p: &mut Parser<'a>,
+    grammar: grammar::Grammar,
+    closing: Token<'static>,
+    f: impl FnMut(&mut Parser<'a>) -> Option<T>,
+) -> Vec<T> {
+    let mut nodes = parse_comma_delimited_region(p, grammar, closing, f);
+    nodes.reverse();
+    nodes
 }
 
 // ============================================================================
@@ -253,6 +355,10 @@ pub mod error_messages {
     /// Error message for type var.
     pub const TYPE_VAR: &str =
         "A type variable consists of a singlequote followed by a name like `'a` or `'A`";
+
+    /// OCaml `Error_messages.record_type_field_missing_colon`.
+    pub const RECORD_TYPE_FIELD_MISSING_COLON: &str =
+        "Record fields in type declarations use `:`. Example: `{field: string}`";
 
     /// Error message for record field missing colon.
     pub const RECORD_FIELD_MISSING_COLON: &str =
@@ -374,6 +480,65 @@ where
 /// 1. If token is Lident/Uident: return it
 /// 2. If token is a keyword on the same line: emit "keyword reserved" error, return keyword
 /// 3. Otherwise: emit the custom msg, advance and return empty string
+/// OCaml `parse_lident` / `recover_lident` (compiler/syntax/src/res_core.ml:660-695).
+pub fn parse_lident(p: &mut Parser<'_>) -> (String, LocIdx) {
+    let start_pos_idx = p.start_pos_idx();
+    match &p.token {
+        Token::Lident(ident) => {
+            let ident = ident.to_string();
+            p.next();
+            (ident, p.mk_loc_idx_to_prev_end(start_pos_idx))
+        }
+        Token::Eof => {
+            p.err_unexpected();
+            ("_".to_string(), p.mk_loc_idx_to_prev_end(start_pos_idx))
+        }
+        _ => {
+            let same_line_keyword =
+                p.token.is_keyword() && p.prev_end_pos.line == p.start_pos.line;
+            p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
+            p.next();
+            if !same_line_keyword {
+                while !recover::should_abort_list_parse(p) && p.token != Token::Eof {
+                    p.next();
+                }
+                if matches!(p.token, Token::Lident(_)) {
+                    return parse_lident(p);
+                }
+            }
+            ("_".to_string(), p.mk_loc_idx_to_prev_end(start_pos_idx))
+        }
+    }
+}
+
+/// OCaml `parse_hash_ident` (compiler/syntax/src/res_core.ml:720-739), called
+/// after the `#` has been consumed. `start_pos_idx` is the position of the `#`.
+pub fn parse_hash_ident(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> (String, LocIdx) {
+    match &p.token {
+        Token::String(text) => {
+            let text = text.to_string();
+            p.next();
+            (text, p.mk_loc_idx_to_prev_end(start_pos_idx))
+        }
+        Token::Int { i, suffix } => {
+            let i = i.to_string();
+            if suffix.is_some() {
+                p.err(DiagnosticCategory::Message(format!(
+                    "A numeric polymorphic variant cannot be followed by a letter. Did you mean `#{i}`?"
+                )));
+            }
+            p.next();
+            (i, p.mk_loc_idx_to_prev_end(start_pos_idx))
+        }
+        Token::Eof => {
+            let start = *p.arena().get_position(start_pos_idx);
+            p.err_unexpected_at(start);
+            (String::new(), p.mk_loc_idx_to_prev_end(start_pos_idx))
+        }
+        _ => parse_ident(p, VARIANT_IDENT_MESSAGE, start_pos_idx),
+    }
+}
+
 pub fn parse_ident(p: &mut Parser<'_>, msg: &str, start_pos_idx: PosIdx) -> (String, LocIdx) {
     match &p.token {
         Token::Lident(ident) | Token::Uident(ident) => {
@@ -900,20 +1065,6 @@ pub fn make_unary_expr(
     // General unary operator application
     let token_loc = p.mk_loc_idx(start_pos, token_end);
     let token_string = token.to_string();
-    if matches!(token, Token::Question) {
-        // "?" used as unary operator - use interned string
-        let lid = make_lident_static(p.arena_mut(), "?");
-        let op_expr = ast_helper::make_ident(p, lid, token_loc);
-        let operand_end_idx = p.loc_end_idx(operand.pexp_loc);
-        let loc = p.mk_loc_idx(start_pos, operand_end_idx);
-        return ast_helper::make_apply(
-            p.arena_mut(),
-            op_expr,
-            vec![(ArgLabel::Nolabel, operand)],
-            loc,
-        );
-    }
-
     if matches!(token, Token::Bang) {
         // For "not", use push_lident_static to deduplicate the Lident
         // (OCaml shares the Lident for literal "not" via compiler optimization)

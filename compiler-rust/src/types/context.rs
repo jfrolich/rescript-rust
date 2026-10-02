@@ -102,6 +102,24 @@ pub type TypeDescRef<'a> = std::cell::Ref<'a, TypeDesc>;
 
 /// Cloned snapshot of a type descriptor, for cases where the caller
 /// needs to hold the desc while also mutating the same type node.
+/// `Cmt_utils.deprecated_used_context`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeprecatedContext {
+    FunctionCall,
+    Reference,
+}
+
+/// `Cmt_utils.deprecated_used`: a use of a deprecated item, saved in the
+/// `.cmt` for `rescript-tools migrate`.
+#[derive(Debug, Clone)]
+pub struct DeprecatedUse {
+    pub source_loc: crate::location::Location,
+    pub text: String,
+    pub migrate: Option<crate::binary_ast::marshal::MarshalFragment>,
+    pub migrate_in_pipe_chain: Option<crate::binary_ast::marshal::MarshalFragment>,
+    pub context: Option<DeprecatedContext>,
+}
+
 pub struct TypeDescSnapshot(TypeDesc);
 
 impl Deref for TypeDescSnapshot {
@@ -111,26 +129,102 @@ impl Deref for TypeDescSnapshot {
     }
 }
 
-/// Snapshot of mutable type-checker state for OCaml-style failed-unify
-/// backtracking.
-pub(crate) struct TypeMutationSnapshot {
-    type_states: Vec<(TypeDesc, i32)>,
-    store_desc_states: Vec<TypeDesc>,
-    store_desc_overlay: super::thread_store::PagedOverlay<usize>,
-    store_level_overlay: super::thread_store::PagedOverlay<i32>,
-    row_field_states: Vec<Option<RowField>>,
-    abbrev_states: Vec<AbbrevMemo>,
-    store_abbrev_overlay: super::thread_store::PagedOverlay<AbbrevMemo>,
-    store_row_field_overlay: super::thread_store::PagedOverlay<Option<RowField>>,
-    shared_desc_overlay: super::thread_store::PagedOverlay<usize>,
-    shared_level_overlay: super::thread_store::PagedOverlay<i32>,
-    shared_abbrev_overlay: super::thread_store::PagedOverlay<AbbrevMemo>,
-    memoized_abbrev_refs: Vec<AbbrevMemoRef>,
-    current_abbreviations: AbbrevMemoRef,
-    current_level: i32,
-    nongen_level: i32,
-    global_level: i32,
-    saved_levels: Vec<(i32, i32)>,
+/// Cursor into the OCaml-style type mutation trail.
+pub(crate) struct TypeMutationSnapshot<'a> {
+    journal: &'a RefCell<TypeMutationJournal>,
+    logging: &'a Cell<bool>,
+    cursor: usize,
+    id: u64,
+    restored: bool,
+}
+
+impl Drop for TypeMutationSnapshot<'_> {
+    /// Commit this snapshot's mutations. Entries remain available to any
+    /// enclosing snapshot and are discarded once no snapshots are active.
+    fn drop(&mut self) {
+        if self.restored {
+            return;
+        }
+        let mut journal = self.journal.borrow_mut();
+        journal.finish(self.id);
+        self.logging.set(!journal.active.is_empty());
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ActiveTypeSnapshot {
+    id: u64,
+    type_len: usize,
+    row_field_len: usize,
+    abbrev_len: usize,
+}
+
+impl ActiveTypeSnapshot {
+    /// Nodes allocated since the snapshot are dropped with it; worker-store
+    /// and shared nodes always predate it.
+    fn records_type(self, ty: TypeExprRef) -> bool {
+        ty.is_store() || ty.index() < self.type_len
+    }
+
+    fn records_row_field(self, row: RowFieldRef) -> bool {
+        row.is_store() || row.index() < self.row_field_len
+    }
+
+    fn records_abbrev(self, memo: AbbrevMemoRef) -> bool {
+        memo.is_store() || memo.index() < self.abbrev_len
+    }
+}
+
+enum TypeMutation {
+    TypeDesc(TypeExprRef, TypeDesc),
+    /// btype.ml `Ccompress (ty, old_desc, Tlink target)`: path compression by
+    /// `repr`, logged whatever the node's age.
+    Compress(TypeExprRef, TypeDesc, TypeExprRef),
+    TypeLevel(TypeExprRef, i32),
+    RowField(RowFieldRef, Option<RowField>),
+    AbbrevMemo(AbbrevMemoRef, AbbrevMemo),
+    MemoizedAbbrevRefs(Vec<AbbrevMemoRef>),
+    CurrentAbbreviations(AbbrevMemoRef),
+    CurrentLevel(i32),
+    NongenLevel(i32),
+    GlobalLevel(i32),
+    SavedLevels(Vec<(i32, i32)>),
+}
+
+#[derive(Default)]
+struct TypeMutationJournal {
+    entries: Vec<TypeMutation>,
+    active: Vec<ActiveTypeSnapshot>,
+    next_id: u64,
+}
+
+impl TypeMutationJournal {
+    fn finish(&mut self, id: u64) {
+        if let Some(index) = self.active.iter().position(|snapshot| snapshot.id == id) {
+            self.active.remove(index);
+        }
+        if self.active.is_empty() {
+            self.entries.clear();
+        }
+    }
+
+    fn records_type(&self, ty: TypeExprRef) -> bool {
+        self.active
+            .last()
+            .is_some_and(|snapshot| snapshot.records_type(ty))
+    }
+
+    fn records_row_field(&self, row: RowFieldRef) -> bool {
+        self.active
+            .last()
+            .is_some_and(|snapshot| snapshot.records_row_field(row))
+    }
+
+    fn records_abbrev(&self, memo: AbbrevMemoRef) -> bool {
+        self.active
+            .last()
+            .is_some_and(|snapshot| snapshot.records_abbrev(memo))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -238,6 +332,63 @@ impl RecordLabelDescriptionSummary {
 }
 
 
+/// The refs captured by an `Env.open_signature` `using` callback.
+#[derive(Debug, Clone)]
+pub(crate) struct OpenSlotState {
+    /// The open's location (warnings 44/45 are reported there).
+    pub loc: crate::parse_arena::LocIdx,
+    /// `used_slot`.
+    pub used: bool,
+    /// `shadowed`: the `(kind, name)` pairs already reported.
+    pub shadowed: Vec<(&'static str, String)>,
+}
+
+#[derive(Debug, Clone)]
+/// A side effect of an `Env` lookup that OCaml performs during the lookup
+/// itself and Rust replays, in call order, when the lookup events drain.
+pub(crate) enum LookupEvent {
+    /// A `using name shadowed` call of an open's slot (env.ml:1847-1861).
+    OpenSlot(OpenSlotEvent),
+    /// `report_deprecated ?loc p deprecated` (env.ml:989-994).
+    ModuleDeprecated(ModuleDeprecation),
+}
+
+#[derive(Debug, Clone)]
+/// The module whose `deprecated` flag `report_deprecated` checks.
+pub(crate) enum ModuleDeprecation {
+    /// A module resolved in the lookup environment: `Path.name p` and the
+    /// `deprecated_of_attrs md_attributes` of its declaration.
+    Resolved {
+        loc: crate::parse_arena::LocIdx,
+        name: String,
+        deprecated: String,
+    },
+    /// A module inside persistent unit `unit`, reached through the submodule
+    /// `components` (empty for the unit itself, whose flag is `ps_comps`'
+    /// `Deprecated` persistence flag). Resolved once the lookup has loaded
+    /// the unit, without forcing a load.
+    Persistent {
+        loc: crate::parse_arena::LocIdx,
+        name: String,
+        unit: String,
+        components: Vec<String>,
+    },
+}
+
+/// One `using name shadowed` call.
+#[derive(Debug, Clone)]
+pub(crate) struct OpenSlotEvent {
+    pub slot: u32,
+    /// The `Env.check_shadowing` kind.
+    pub kind: &'static str,
+    pub name: String,
+    /// Whether `check_shadowing` returns `Some kind`.
+    pub shadowed: bool,
+}
+
+/// A saved position: resolved file name (or raw handle), line, bol, cnum.
+type PositionKey = (Result<u32, String>, i32, i32, i32);
+
 /// Type checking context.
 ///
 /// This context is created for each type checking session (typically one
@@ -280,6 +431,8 @@ pub struct TypeContext {
 
     /// GADT instance tracking flag
     trace_gadt_instances: Cell<bool>,
+    /// `Ctype.passive_variants` (ctype.ml:2060).
+    passive_variants: Cell<bool>,
 
     /// Dedicated memo ref for OCaml's simple_abbrevs (nullary, non-object
     /// abbreviations). This points to a mutable AbbrevMemo cell.
@@ -340,6 +493,15 @@ pub struct TypeContext {
     store_build_effects: RefCell<Vec<StoreEffect>>,
     /// Shared pieces whose effects this compilation has already applied.
     touched_store_pieces: RefCell<crate::fast_hash::AHashSet<u64>>,
+    /// Component tables of store-resident modules whose build read state
+    /// private to this compilation, so they could not be published to the
+    /// worker store. Keyed by `StoredModuleComponents` id; reused for the rest
+    /// of this compilation instead of being rebuilt on every lookup.
+    local_stored_components:
+        RefCell<crate::fast_hash::AHashMap<u64, Arc<super::env_lazy::QualifiedModuleComponents>>>,
+    /// OCaml-shaped mutation trail. Logging is dormant unless a snapshot lives.
+    mutation_journal: RefCell<TypeMutationJournal>,
+    mutation_logging: Cell<bool>,
 
     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
     compiler_counters_enabled: bool,
@@ -349,6 +511,32 @@ pub struct TypeContext {
     /// Refs that have been written via memorize_abbrev_expansion since the
     /// last cleanup. Mirrors OCaml btype.ml `memo` list used by cleanup_abbrev.
     memoized_abbrev_refs: RefCell<Vec<AbbrevMemoRef>>,
+
+    /// `full_expand` results recorded when a top-level unification fails,
+    /// OCaml's `expand_trace` (ctype.ml:1601-1605, 2589-2594). Error reports
+    /// print "(defined as ...)" from these.
+    trace_expansions: RefCell<ahash::AHashMap<TypeExprRef, TypeExprRef>>,
+
+    /// State of the `used_slot`/`shadowed` refs captured by
+    /// `Env.open_signature`'s `using` callbacks (env.ml:1835-1864), indexed
+    /// by the slot id stored in opened environment layers.
+    open_slots: RefCell<Vec<OpenSlotState>>,
+
+    /// `using` calls made by lookups, processed by the type checker with the
+    /// warning state current at the lookup.
+    open_slot_events: RefCell<Vec<LookupEvent>>,
+
+    /// OCaml `Env`'s usage tables (env.ml:27-53).
+    usage: RefCell<super::usage::UsageTables>,
+
+    /// Parser warnings of the snippets error reports re-parse
+    /// (`Error_message_utils.Parser.parse_source`), printed before the error
+    /// like OCaml's immediate `Location.prerr_warning`.
+    reparse_warnings: RefCell<Vec<crate::parser::ParserWarning>>,
+    /// The warning state outside the implementation's structure, which is
+    /// current when an error is reported (`Typemod.type_structure`'s
+    /// `warning_scope` has been left).
+    report_warning_config: RefCell<Option<crate::diagnostics::WarningConfig>>,
 
     /// Stable forward references for canonical variant layouts. Entries are
     /// allocated before translating a recursive declaration group and completed
@@ -637,6 +825,11 @@ pub struct TypeContext {
 
     /// Reuse EnvRefs for identical logical environments.
     typed_envs_by_id: RefCell<crate::fast_hash::AHashMap<u64, EnvRef>>,
+    /// `Cmt_format.value_deps` (compiler/ml/cmt_format_common.ml:149-183):
+    /// implementation/specification value pairs matched by inclusion checks.
+    value_deps: RefCell<Vec<(super::decl::ValueDescription, super::decl::ValueDescription)>>,
+    /// `Cmt_format.deprecated_used` (cmt_format_common.ml:152-178).
+    deprecated_used: RefCell<Vec<DeprecatedUse>>,
     /// The most recently stored (env id, EnvRef): consecutive typed nodes
     /// usually share their environment.
     last_typed_env: Cell<(u64, EnvRef)>,
@@ -801,6 +994,7 @@ impl TypeContext {
             global_level: Cell::new(1),
             saved_levels: RefCell::new(Vec::new()),
             trace_gadt_instances: Cell::new(false),
+            passive_variants: Cell::new(false),
             simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
             reified_var_counters: RefCell::new(crate::fast_hash::AHashMap::new()),
             previous_env_id: Cell::new(0),
@@ -822,6 +1016,9 @@ impl TypeContext {
             store_build_poisoned: Cell::new(false),
             store_build_effects: RefCell::new(Vec::new()),
             touched_store_pieces: RefCell::new(crate::fast_hash::AHashSet::new()),
+            local_stored_components: RefCell::new(crate::fast_hash::AHashMap::new()),
+            mutation_journal: RefCell::new(TypeMutationJournal::default()),
+            mutation_logging: Cell::new(false),
             compiler_counters_enabled: crate::perf_counters::enabled(),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
@@ -830,6 +1027,12 @@ impl TypeContext {
                 RefCell::new(AbbrevMemo::Mnil),
             ]),
             memoized_abbrev_refs: RefCell::new(Vec::new()),
+            trace_expansions: RefCell::new(ahash::AHashMap::new()),
+            open_slots: RefCell::new(Vec::new()),
+            open_slot_events: RefCell::new(Vec::new()),
+            usage: RefCell::new(super::usage::UsageTables::default()),
+            reparse_warnings: RefCell::new(Vec::new()),
+            report_warning_config: RefCell::new(None),
             variant_layouts: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
@@ -894,6 +1097,8 @@ impl TypeContext {
             typed_envs: RefCell::new(Vec::new()),
             typed_envs_by_id: RefCell::new(crate::fast_hash::AHashMap::new()),
             last_typed_env: Cell::new((u64::MAX, EnvRef(0))),
+            value_deps: RefCell::new(Vec::new()),
+            deprecated_used: RefCell::new(Vec::new()),
         }
     }
 
@@ -1024,7 +1229,6 @@ impl TypeContext {
             .borrow()
             .get(&idx.raw())
             .cloned()
-            .or_else(|| self.store.longident_name(idx))
             .or_else(|| self.store.shared_pool().longident_name(idx))
     }
 
@@ -1082,15 +1286,14 @@ impl TypeContext {
     /// Snapshot synthetic CMI longident component names so portable signatures
     /// can move across TypeContexts without losing the side table.
     pub fn snapshot_cmi_longident_names(&self) -> Vec<(u32, String)> {
-        let mut names: Vec<(u32, String)> = self
-            .cmi_longident_names
+        // Store and shared-pool names resolve process-wide through
+        // `cmi_longident_component_name`; only this context's own names
+        // travel with the signature.
+        self.cmi_longident_names
             .borrow()
             .iter()
             .map(|(raw, name)| (*raw, name.clone()))
-            .collect();
-        names.extend(self.store.snapshot_longident_names());
-        names.extend(self.store.shared_pool().snapshot_longident_names());
-        names
+            .collect()
     }
 
     /// Import synthetic CMI longident names from a portable signature.
@@ -2391,11 +2594,88 @@ impl TypeContext {
         self.types.len()
     }
 
+    #[inline]
+    fn record_type_mutation(
+        &self,
+        mutation: impl FnOnce() -> TypeMutation,
+        ty: TypeExprRef,
+        kind: crate::perf_counters::TypeMutationKind,
+    ) {
+        if !self.mutation_logging.get() || self.store_build_owns(ty) {
+            return;
+        }
+        let mut journal = self.mutation_journal.borrow_mut();
+        if journal.records_type(ty) {
+            journal.entries.push(mutation());
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_type_mutation(kind);
+            }
+        }
+    }
+
+    #[inline]
+    fn record_mutation(
+        &self,
+        mutation: impl FnOnce() -> TypeMutation,
+        kind: crate::perf_counters::TypeMutationKind,
+    ) {
+        if !self.mutation_logging.get() {
+            return;
+        }
+        self.mutation_journal.borrow_mut().entries.push(mutation());
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_type_mutation(kind);
+        }
+    }
+
+    #[inline]
+    fn record_row_field_mutation(&self, mutation: impl FnOnce() -> TypeMutation, row: RowFieldRef) {
+        if !self.mutation_logging.get() || self.store_build_owns_row_field(row) {
+            return;
+        }
+        let mut journal = self.mutation_journal.borrow_mut();
+        if journal.records_row_field(row) {
+            journal.entries.push(mutation());
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_type_mutation(
+                    crate::perf_counters::TypeMutationKind::Row,
+                );
+            }
+        }
+    }
+
+    #[inline]
+    fn record_abbrev_mutation(&self, mutation: impl FnOnce() -> TypeMutation, memo: AbbrevMemoRef) {
+        if !self.mutation_logging.get() {
+            return;
+        }
+        let mut journal = self.mutation_journal.borrow_mut();
+        if journal.records_abbrev(memo) {
+            journal.entries.push(mutation());
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_type_mutation(
+                    crate::perf_counters::TypeMutationKind::Abbrev,
+                );
+            }
+        }
+    }
+
     /// Set the level of a type. Stored nodes are never written in place
     /// unless the current store build is still creating them: the write goes
     /// to this compilation's overlay.
     #[inline]
     pub fn set_level(&self, r: TypeExprRef, level: i32) {
+        self.record_type_mutation(
+            || TypeMutation::TypeLevel(r, self.get_level(r)),
+            r,
+            crate::perf_counters::TypeMutationKind::Level,
+        );
+        self.write_level_raw(r, level);
+    }
+
+    /// Level write without journaling (also used to undo).
+    #[inline]
+    fn write_level_raw(&self, r: TypeExprRef, level: i32) {
         if r.is_store() {
             if r.is_shared() {
                 self.shared_level_overlay
@@ -2419,6 +2699,17 @@ impl TypeContext {
     /// Set the descriptor without changing the immutable dependency graph.
     #[inline]
     pub fn set_desc(&self, r: TypeExprRef, desc: TypeDesc) {
+        self.record_type_mutation(
+            || TypeMutation::TypeDesc(r, self.get_desc(r).0),
+            r,
+            crate::perf_counters::TypeMutationKind::Desc,
+        );
+        self.write_desc_raw(r, desc);
+    }
+
+    /// Descriptor write without journaling (also used to undo).
+    #[inline]
+    fn write_desc_raw(&self, r: TypeExprRef, desc: TypeDesc) {
         if r.is_store() {
             if r.is_shared() {
                 self.set_shared_desc(r, desc);
@@ -2472,101 +2763,274 @@ impl TypeContext {
         }
     }
 
-    /// Save mutable type state before a speculative unification.
-    ///
-    /// OCaml compiler/ml/typecore.ml:3187-3211 and 3321-3329 use
-    /// `Btype.snapshot`/`Btype.backtrack` (with saved Ctype levels) around
-    /// unifications that may fail. Rust keeps type nodes in append-only
-    /// arenas, so this snapshots mutable contents of pre-existing nodes and
-    /// cells, while intentionally leaving newly allocated nodes and lazy
-    /// environment caches alive after restore.
-    pub(crate) fn snapshot_type_state(&self) -> TypeMutationSnapshot {
-        let type_len = self.types.len();
-        let mut type_states = Vec::with_capacity(type_len);
-        for idx in 0..type_len {
-            let ty = TypeExprRef::from_usize(idx);
-            type_states.push((self.get_desc(ty).0, self.get_level(ty)));
-        }
+    /// Create the `used_slot` of a warning-tracked open (env.ml:1842).
+    pub(crate) fn new_open_slot(&self, loc: crate::parse_arena::LocIdx) -> u32 {
+        let mut slots = self.open_slots.borrow_mut();
+        slots.push(OpenSlotState {
+            loc,
+            used: false,
+            shadowed: Vec::new(),
+        });
+        (slots.len() - 1) as u32
+    }
 
-        let row_field_states = self
-            .row_fields
-            .borrow()
-            .iter()
-            .map(|cell| cell.borrow().clone())
-            .collect();
-        let abbrev_states = self
-            .abbrevs
-            .borrow()
-            .iter()
-            .map(|cell| cell.borrow().clone())
-            .collect();
+    /// Record a `using name shadowed` call of an open's slot.
+    pub(crate) fn record_open_slot_use(&self, slot: u32, kind: &'static str, name: &str, shadowed: bool) {
+        self.open_slot_events.borrow_mut().push(LookupEvent::OpenSlot(OpenSlotEvent {
+            slot,
+            kind,
+            name: name.to_string(),
+            shadowed,
+        }));
+    }
 
-        TypeMutationSnapshot {
-            type_states,
-            store_desc_states: (0..self.store_descs.len())
-                .map(|index| self.store_descs.get_at(index).desc().clone())
-                .collect(),
-            store_desc_overlay: self.store_desc_overlay.borrow().clone(),
-            store_level_overlay: self.store_level_overlay.borrow().clone(),
-            row_field_states,
-            abbrev_states,
-            store_abbrev_overlay: self.store_abbrev_overlay.borrow().clone(),
-            store_row_field_overlay: self.store_row_field_overlay.borrow().clone(),
-            shared_desc_overlay: self.shared_desc_overlay.borrow().clone(),
-            shared_level_overlay: self.shared_level_overlay.borrow().clone(),
-            shared_abbrev_overlay: self.shared_abbrev_overlay.borrow().clone(),
-            memoized_abbrev_refs: self.memoized_abbrev_refs.borrow().clone(),
-            current_abbreviations: self.current_abbreviations.get(),
-            current_level: self.current_level.get(),
-            nongen_level: self.nongen_level.get(),
-            global_level: self.global_level.get(),
-            saved_levels: self.saved_levels.borrow().clone(),
+    /// Record a `report_deprecated` call of a module lookup.
+    pub(crate) fn record_module_deprecation(&self, deprecation: ModuleDeprecation) {
+        self.open_slot_events
+            .borrow_mut()
+            .push(LookupEvent::ModuleDeprecated(deprecation));
+    }
+
+    /// Take the recorded `using` calls in call order.
+    pub(crate) fn push_reparse_warnings(&self, warnings: &[crate::parser::ParserWarning]) {
+        self.reparse_warnings.borrow_mut().extend_from_slice(warnings);
+    }
+
+    pub(crate) fn take_reparse_warnings(&self) -> Vec<crate::parser::ParserWarning> {
+        std::mem::take(&mut *self.reparse_warnings.borrow_mut())
+    }
+
+    /// Record the warning state at the outermost structure entry.
+    pub(crate) fn note_report_warning_config(&self, config: &crate::diagnostics::WarningConfig) {
+        let mut slot = self.report_warning_config.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(config.clone());
         }
     }
 
-    /// Restore a snapshot created by `snapshot_type_state`.
-    pub(crate) fn restore_type_state(&self, snapshot: TypeMutationSnapshot) {
-        for (idx, (desc, level)) in snapshot.type_states.into_iter().enumerate() {
-            let ty = TypeExprRef::from_usize(idx);
-            self.set_desc(ty, desc);
-            self.set_level(ty, level);
-        }
+    pub(crate) fn report_warning_config(&self) -> crate::diagnostics::WarningConfig {
+        self.report_warning_config
+            .borrow()
+            .clone()
+            .unwrap_or_else(crate::diagnostics::WarningConfig::new)
+    }
 
-        {
-            let row_fields = self.row_fields.borrow();
-            for (idx, field) in snapshot.row_field_states.into_iter().enumerate() {
-                if let Some(cell) = row_fields.get(idx) {
-                    *cell.borrow_mut() = field;
+    /// `Cmt_format.record_value_dependency` (cmt_format_common.ml:180-183).
+    pub(crate) fn record_value_dependency(
+        &self,
+        vd1: &super::decl::ValueDescription,
+        vd2: &super::decl::ValueDescription,
+    ) {
+        // OCaml compares the locations structurally (`<>`), so two
+        // `Location.none`s are equal whichever way they were spelled here.
+        let same = self.location_key(&vd1.val_loc) == self.location_key(&vd2.val_loc);
+        if !same {
+            self.value_deps.borrow_mut().push((vd1.clone(), vd2.clone()));
+        }
+    }
+
+    /// A location as the saved `Location.t` value: positions with resolved
+    /// file names, and Rust's `Location::none` spelled as OCaml's `in_file
+    /// "_none_"` position (location.ml).
+    fn location_key(&self, loc: &crate::location::Location) -> (PositionKey, PositionKey, bool) {
+        (
+            self.position_key(&loc.loc_start),
+            self.position_key(&loc.loc_end),
+            loc.loc_ghost,
+        )
+    }
+
+    fn position_key(&self, pos: &crate::location::Position) -> PositionKey {
+        if pos.file_name == crate::intern::StrIdx::default() && pos.line == 0 {
+            return (Err("_none_".to_string()), 1, 0, -1);
+        }
+        let name = self
+            .resolve_any_longident_component(pos.file_name)
+            .map(Err)
+            .unwrap_or(Ok(pos.file_name.raw()));
+        (name, pos.line, pos.bol, pos.cnum)
+    }
+
+    /// `Cmt_format.record_deprecated_used`.
+    pub(crate) fn record_deprecated_used(&self, used: DeprecatedUse) {
+        self.deprecated_used.borrow_mut().push(used);
+    }
+
+    /// Recorded deprecated uses, most recent first (as OCaml's list).
+    pub fn deprecated_uses(&self) -> Vec<DeprecatedUse> {
+        self.deprecated_used.borrow().iter().rev().cloned().collect()
+    }
+
+    /// Recorded value dependencies, most recent first (as OCaml's list).
+    pub fn value_dependencies(
+        &self,
+    ) -> Vec<(super::decl::ValueDescription, super::decl::ValueDescription)> {
+        self.value_deps.borrow().iter().rev().cloned().collect()
+    }
+
+    /// The usage tables of OCaml `Env` (env.ml:27-53).
+    pub(crate) fn usage(&self) -> std::cell::RefMut<'_, super::usage::UsageTables> {
+        self.usage.borrow_mut()
+    }
+
+    pub(crate) fn take_open_slot_events(&self) -> Vec<LookupEvent> {
+        std::mem::take(&mut *self.open_slot_events.borrow_mut())
+    }
+
+    /// Run `f` on the state of an open's slot.
+    pub(crate) fn with_open_slot<R>(&self, slot: u32, f: impl FnOnce(&mut OpenSlotState) -> R) -> R {
+        f(&mut self.open_slots.borrow_mut()[slot as usize])
+    }
+
+    /// Record `full_expand env ty` for a type in a failed unification trace.
+    pub(crate) fn record_trace_expansion(&self, ty: TypeExprRef, expansion: TypeExprRef) {
+        self.trace_expansions.borrow_mut().insert(ty, expansion);
+    }
+
+    /// The recorded `full_expand` of a trace type, if its unification failed
+    /// with an environment.
+    pub fn trace_expansion(&self, ty: TypeExprRef) -> Option<TypeExprRef> {
+        self.trace_expansions.borrow().get(&ty).copied()
+    }
+
+    /// Start an OCaml-style speculative mutation trail.
+    ///
+    /// The snapshot is only a journal cursor plus the current type allocation
+    /// frontier. Backtracking replays mutations in reverse. Allocations and
+    /// unrelated lazy caches intentionally remain alive, matching Btype.
+    pub(crate) fn snapshot_type_state(&self) -> TypeMutationSnapshot<'_> {
+        let mut journal = self.mutation_journal.borrow_mut();
+        let id = journal.next_id;
+        journal.next_id += 1;
+        let cursor = journal.entries.len();
+        journal.active.push(ActiveTypeSnapshot {
+            id,
+            type_len: self.types.len(),
+            row_field_len: self.row_fields.borrow().len(),
+            abbrev_len: self.abbrevs.borrow().len(),
+        });
+        let depth = journal.active.len();
+        self.mutation_logging.set(true);
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_type_mutation_snapshot(depth);
+        }
+        TypeMutationSnapshot {
+            journal: &self.mutation_journal,
+            logging: &self.mutation_logging,
+            cursor,
+            id,
+            restored: false,
+        }
+    }
+
+    /// btype.ml `undo_compress`: revert the path compressions made since
+    /// `snapshot` whose nodes still hold the compressed link, leaving every
+    /// other change (and the snapshot) in place.
+    pub(crate) fn undo_compress(&self, snapshot: &TypeMutationSnapshot<'_>) {
+        let compressions: Vec<(TypeExprRef, TypeDesc, TypeExprRef)> = {
+            let journal = self.mutation_journal.borrow();
+            if !journal.active.iter().any(|active| active.id == snapshot.id) {
+                return;
+            }
+            journal.entries[snapshot.cursor.min(journal.entries.len())..]
+                .iter()
+                .filter_map(|mutation| match mutation {
+                    TypeMutation::Compress(ty, old, target) => Some((*ty, old.clone(), *target)),
+                    _ => None,
+                })
+                .collect()
+        };
+        for (ty, old, target) in compressions {
+            if matches!(self.get_desc(ty).0, TypeDesc::Tlink(current) if current == target) {
+                self.write_desc_raw(ty, old);
+            }
+        }
+    }
+
+    /// Backtrack to a mutation-trail cursor.
+    ///
+    /// Restoring an outer snapshot also invalidates every still-live nested
+    /// snapshot. A later restore of one of those descendants is a no-op.
+    pub(crate) fn restore_type_state(&self, mut snapshot: TypeMutationSnapshot<'_>) {
+        let mutations = {
+            let mut journal = self.mutation_journal.borrow_mut();
+            let Some(active_index) = journal
+                .active
+                .iter()
+                .position(|active| active.id == snapshot.id)
+            else {
+                snapshot.restored = true;
+                return;
+            };
+            let mutations = journal.entries.split_off(snapshot.cursor);
+            journal.active.truncate(active_index);
+            if journal.active.is_empty() {
+                journal.entries.clear();
+            }
+            self.mutation_logging.set(!journal.active.is_empty());
+            mutations
+        };
+        // btype.ml:692-700 `backtrack`: when anything was trailed it first
+        // runs `cleanup_abbrev ()`, forgetting every memorized expansion
+        // (including those made since the snapshot); memo contents are not
+        // part of OCaml's trail, so they are not restored either.
+        let has_changes = mutations.iter().any(|mutation| {
+            matches!(
+                mutation,
+                TypeMutation::TypeDesc(..)
+                    | TypeMutation::Compress(..)
+                    | TypeMutation::TypeLevel(..)
+                    | TypeMutation::RowField(..)
+            )
+        });
+        if has_changes {
+            let refs = std::mem::take(&mut *self.memoized_abbrev_refs.borrow_mut());
+            for memo in refs {
+                self.write_abbrev(memo, AbbrevMemo::Mnil);
+            }
+        }
+        let mut restored = 0;
+        for mutation in mutations.into_iter().rev() {
+            match mutation {
+                TypeMutation::TypeDesc(ty, desc) | TypeMutation::Compress(ty, desc, _) => {
+                    self.write_desc_raw(ty, desc);
+                    restored += 1;
+                }
+                TypeMutation::TypeLevel(ty, level) => {
+                    self.write_level_raw(ty, level);
+                    restored += 1;
+                }
+                TypeMutation::RowField(row, field) => {
+                    self.write_row_field_raw(row, field);
+                    restored += 1;
+                }
+                TypeMutation::AbbrevMemo(..) | TypeMutation::MemoizedAbbrevRefs(..) => {}
+                TypeMutation::CurrentAbbreviations(value) => {
+                    self.current_abbreviations.set(value);
+                    restored += 1;
+                }
+                TypeMutation::CurrentLevel(value) => {
+                    self.current_level.set(value);
+                    restored += 1;
+                }
+                TypeMutation::NongenLevel(value) => {
+                    self.nongen_level.set(value);
+                    restored += 1;
+                }
+                TypeMutation::GlobalLevel(value) => {
+                    self.global_level.set(value);
+                    restored += 1;
+                }
+                TypeMutation::SavedLevels(value) => {
+                    *self.saved_levels.borrow_mut() = value;
+                    restored += 1;
                 }
             }
         }
-
-        {
-            let abbrevs = self.abbrevs.borrow();
-            for (idx, memo) in snapshot.abbrev_states.into_iter().enumerate() {
-                if let Some(cell) = abbrevs.get(idx) {
-                    *cell.borrow_mut() = memo;
-                }
-            }
+        snapshot.restored = true;
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_type_mutation_backtrack(restored);
         }
-
-        for (index, desc) in snapshot.store_desc_states.into_iter().enumerate() {
-            self.store_descs.get_at(index).set_desc(desc);
-        }
-        *self.store_desc_overlay.borrow_mut() = snapshot.store_desc_overlay;
-        *self.store_level_overlay.borrow_mut() = snapshot.store_level_overlay;
-        *self.store_abbrev_overlay.borrow_mut() = snapshot.store_abbrev_overlay;
-        *self.store_row_field_overlay.borrow_mut() = snapshot.store_row_field_overlay;
-        *self.shared_desc_overlay.borrow_mut() = snapshot.shared_desc_overlay;
-        *self.shared_level_overlay.borrow_mut() = snapshot.shared_level_overlay;
-        *self.shared_abbrev_overlay.borrow_mut() = snapshot.shared_abbrev_overlay;
-        *self.memoized_abbrev_refs.borrow_mut() = snapshot.memoized_abbrev_refs;
-        self.current_abbreviations
-            .set(snapshot.current_abbreviations);
-        self.current_level.set(snapshot.current_level);
-        self.nongen_level.set(snapshot.nongen_level);
-        self.global_level.set(snapshot.global_level);
-        *self.saved_levels.borrow_mut() = snapshot.saved_levels;
     }
 
     // ========================================================================
@@ -2862,6 +3326,10 @@ impl TypeContext {
 
     /// Set the current abbreviation context.
     pub fn set_current_abbreviations(&self, abbrev: AbbrevMemoRef) {
+        self.record_mutation(
+            || TypeMutation::CurrentAbbreviations(self.current_abbreviations.get()),
+            crate::perf_counters::TypeMutationKind::State,
+        );
         self.current_abbreviations.set(abbrev);
     }
 
@@ -3018,6 +3486,7 @@ impl TypeContext {
 
         if memo.is_store() {
             let previous = self.read_abbrev(memo);
+            self.record_abbrev_mutation(|| TypeMutation::AbbrevMemo(memo, previous.clone()), memo);
             let next = if matches!(previous, AbbrevMemo::Mnil) {
                 AbbrevMemoRef::nil()
             } else {
@@ -3033,6 +3502,10 @@ impl TypeContext {
                     next,
                 },
             );
+            self.record_mutation(
+                || TypeMutation::MemoizedAbbrevRefs(self.memoized_abbrev_refs.borrow().clone()),
+                crate::perf_counters::TypeMutationKind::Abbrev,
+            );
             self.memoized_abbrev_refs.borrow_mut().push(memo);
             return;
         }
@@ -3045,6 +3518,7 @@ impl TypeContext {
             }
 
             let previous = abbrevs[memo_idx].borrow().clone();
+            self.record_abbrev_mutation(|| TypeMutation::AbbrevMemo(memo, previous.clone()), memo);
             let next = if matches!(previous, AbbrevMemo::Mnil) {
                 AbbrevMemoRef::nil()
             } else {
@@ -3061,6 +3535,10 @@ impl TypeContext {
                 next,
             };
         }
+        self.record_mutation(
+            || TypeMutation::MemoizedAbbrevRefs(self.memoized_abbrev_refs.borrow().clone()),
+            crate::perf_counters::TypeMutationKind::Abbrev,
+        );
         self.memoized_abbrev_refs.borrow_mut().push(memo);
     }
 
@@ -3129,50 +3607,59 @@ impl TypeContext {
 
     /// Set the value of a row field reference (like OCaml's set_row_field).
     pub fn set_row_field(&self, rf: RowFieldRef, field: RowField) {
-        if rf.is_null() {
-            return;
-        }
-        if rf.is_store() {
-            if self.in_store_build() && rf.store_index() >= self.store_build_row_start.get() {
-                self.check_store_row_field(&field);
-                self.store.set_row_field_backing(rf, Some(field));
-                return;
-            }
-            self.store_row_field_overlay
-                .borrow_mut()
-                .set(rf.store_index(), Some(field));
-            return;
-        }
-        let row_fields = self.row_fields.borrow();
-        if let Some(cell) = row_fields.get(rf.index()) {
-            *cell.borrow_mut() = Some(field);
-        }
+        self.write_row_field(rf, Some(field));
     }
 
     /// Clear the value stored in a row field reference.
     pub fn clear_row_field(&self, rf: RowFieldRef) {
+        self.write_row_field(rf, None);
+    }
+
+    fn write_row_field(&self, rf: RowFieldRef, value: Option<RowField>) {
+        if rf.is_null() {
+            return;
+        }
+        self.record_row_field_mutation(|| TypeMutation::RowField(rf, self.get_row_field(rf)), rf);
+        self.write_row_field_raw(rf, value);
+    }
+
+    /// Row field write without journaling (also used to undo). Store rows
+    /// still being built are written in place; other store rows go to this
+    /// compilation's overlay.
+    fn write_row_field_raw(&self, rf: RowFieldRef, value: Option<RowField>) {
         if rf.is_null() {
             return;
         }
         if rf.is_store() {
-            if self.in_store_build() && rf.store_index() >= self.store_build_row_start.get() {
-                self.store.set_row_field_backing(rf, None);
+            if self.store_build_owns_row_field(rf) {
+                if let Some(field) = &value {
+                    self.check_store_row_field(field);
+                }
+                self.store.set_row_field_backing(rf, value);
                 return;
             }
             self.store_row_field_overlay
                 .borrow_mut()
-                .set(rf.store_index(), None);
+                .set(rf.store_index(), value);
             return;
         }
         let row_fields = self.row_fields.borrow();
         if let Some(cell) = row_fields.get(rf.index()) {
-            *cell.borrow_mut() = None;
+            *cell.borrow_mut() = value;
         }
     }
 
     // ========================================================================
     // Field Kinds
     // ========================================================================
+
+    /// Read the value stored in a field kind reference (`Fvar` contents).
+    pub fn get_field_kind(&self, r: FieldKindRef) -> Option<FieldKind> {
+        self.field_kinds
+            .borrow()
+            .get(r.0 as usize)
+            .and_then(|cell| cell.borrow().clone())
+    }
 
     /// Allocate a field kind reference.
     fn alloc_field_kind(&self, kind: Option<FieldKind>) -> FieldKindRef {
@@ -3199,6 +3686,10 @@ impl TypeContext {
     /// OCaml's `current_level := level` which ensures fresh copies during
     /// instance_parameterized_type are created at the Tconstr's level.
     pub fn set_current_level(&self, level: i32) {
+        self.record_mutation(
+            || TypeMutation::CurrentLevel(self.current_level.get()),
+            crate::perf_counters::TypeMutationKind::State,
+        );
         self.current_level.set(level);
     }
 
@@ -3277,6 +3768,11 @@ impl TypeContext {
         // current-unit counters after the isolated load completes.
         self.id_gen.restore_current_stamp(id_gen_stamp);
         Ident::set_current_time(local_stamp);
+        self.record_level_state();
+        self.record_mutation(
+            || TypeMutation::GlobalLevel(self.global_level.get()),
+            crate::perf_counters::TypeMutationKind::State,
+        );
         self.current_level.set(current_level);
         self.nongen_level.set(nongen_level);
         self.global_level.set(global_level);
@@ -3579,10 +4075,21 @@ impl TypeContext {
 
     /// Whether `r` is a store node created by the current store build.
     #[inline]
+    /// Whether `r` was allocated by the store build in progress. Such nodes
+    /// are written straight into the store and outlive any type snapshot
+    /// taken before the build, so the undo journal must not record (and
+    /// later roll back) their writes, just as it skips nodes created after
+    /// the snapshot.
     fn store_build_owns(&self, r: TypeExprRef) -> bool {
-        self.in_store_build()
+        r.is_store()
+            && self.in_store_build()
             && !r.is_shared()
             && r.store_index() >= self.store_build_type_start.get()
+    }
+
+    /// Row-field counterpart of [`Self::store_build_owns`].
+    fn store_build_owns_row_field(&self, rf: RowFieldRef) -> bool {
+        rf.is_store() && self.in_store_build() && rf.store_index() >= self.store_build_row_start.get()
     }
 
     #[inline]
@@ -3680,6 +4187,21 @@ impl TypeContext {
     /// worker. Returns the replay record to publish with the result, or
     /// `None` when the build read compilation-local state (the result is
     /// then only valid in this compilation).
+    pub(crate) fn local_stored_components(
+        &self,
+        id: u64,
+    ) -> Option<Arc<super::env_lazy::QualifiedModuleComponents>> {
+        self.local_stored_components.borrow().get(&id).cloned()
+    }
+
+    pub(crate) fn set_local_stored_components(
+        &self,
+        id: u64,
+        components: Arc<super::env_lazy::QualifiedModuleComponents>,
+    ) {
+        self.local_stored_components.borrow_mut().insert(id, components);
+    }
+
     pub(crate) fn build_in_store<R>(&self, build: impl FnOnce() -> R) -> (R, Option<Arc<StorePiece>>) {
         let depth = self.store_build_depth.get();
         let outer_effects = std::mem::take(&mut *self.store_build_effects.borrow_mut());
@@ -3884,14 +4406,31 @@ impl TypeContext {
 
     /// Initialize definition level (equivalent of OCaml's `Ctype.init_def`).
     pub fn init_def(&self, level: i32) {
+        self.record_level_state();
         self.current_level.set(level);
         self.nongen_level.set(level);
+    }
+
+    fn record_level_state(&self) {
+        self.record_mutation(
+            || TypeMutation::CurrentLevel(self.current_level.get()),
+            crate::perf_counters::TypeMutationKind::State,
+        );
+        self.record_mutation(
+            || TypeMutation::NongenLevel(self.nongen_level.get()),
+            crate::perf_counters::TypeMutationKind::State,
+        );
+        self.record_mutation(
+            || TypeMutation::SavedLevels(self.saved_levels.borrow().clone()),
+            crate::perf_counters::TypeMutationKind::State,
+        );
     }
 
     /// Begin a new definition scope.
     pub fn begin_def(&self) {
         let current = self.current_level.get();
         let nongen = self.nongen_level.get();
+        self.record_level_state();
         self.saved_levels.borrow_mut().push((current, nongen));
         self.current_level.set(current + 1);
         self.nongen_level.set(current + 1);
@@ -3901,6 +4440,7 @@ impl TypeContext {
     pub fn begin_class_def(&self) {
         let current = self.current_level.get();
         let nongen = self.nongen_level.get();
+        self.record_level_state();
         self.saved_levels.borrow_mut().push((current, nongen));
         self.current_level.set(current + 1);
     }
@@ -3909,12 +4449,16 @@ impl TypeContext {
     pub fn raise_nongen_level(&self) {
         let current = self.current_level.get();
         let nongen = self.nongen_level.get();
+        self.record_level_state();
         self.saved_levels.borrow_mut().push((current, nongen));
         self.nongen_level.set(current);
     }
 
     /// End a definition scope.
     pub fn end_def(&self) {
+        if !self.saved_levels.borrow().is_empty() {
+            self.record_level_state();
+        }
         if let Some((current, nongen)) = self.saved_levels.borrow_mut().pop() {
             self.current_level.set(current);
             self.nongen_level.set(nongen);
@@ -3923,18 +4467,30 @@ impl TypeContext {
 
     /// Reset the global level.
     pub fn reset_global_level(&self) {
+        self.record_mutation(
+            || TypeMutation::GlobalLevel(self.global_level.get()),
+            crate::perf_counters::TypeMutationKind::State,
+        );
         self.global_level.set(self.current_level.get() + 1);
     }
 
     /// Increase the global level and return the old value.
     pub fn increase_global_level(&self) -> i32 {
         let old = self.global_level.get();
+        self.record_mutation(
+            || TypeMutation::GlobalLevel(old),
+            crate::perf_counters::TypeMutationKind::State,
+        );
         self.global_level.set(self.current_level.get());
         old
     }
 
     /// Restore the global level.
     pub fn restore_global_level(&self, level: i32) {
+        self.record_mutation(
+            || TypeMutation::GlobalLevel(self.global_level.get()),
+            crate::perf_counters::TypeMutationKind::State,
+        );
         self.global_level.set(level);
     }
 
@@ -3960,6 +4516,16 @@ impl TypeContext {
     }
 
     /// Is GADT instance tracing currently enabled?
+    /// `!Ctype.passive_variants`.
+    pub fn passive_variants(&self) -> bool {
+        self.passive_variants.get()
+    }
+
+    /// Sets `Ctype.passive_variants`, returning the previous value.
+    pub fn set_passive_variants(&self, value: bool) -> bool {
+        self.passive_variants.replace(value)
+    }
+
     pub fn trace_gadt_instances(&self) -> bool {
         self.trace_gadt_instances.get()
     }
@@ -4033,11 +4599,19 @@ impl TypeContext {
             let node = chain[i];
             if node != current {
                 // A direct link already points at the representative. OCaml
-                // btype.ml:107-115 does not log/write it (`compress = false`).
+                // btype.ml:107-115 does not log/write it (`compress = false`);
+                // otherwise `repr_link` logs the write as `Ccompress`.
                 let direct =
                     matches!(*self.borrow_desc(node), TypeDesc::Tlink(target) if target == current);
                 if !direct {
-                    self.set_desc(node, TypeDesc::Tlink(current));
+                    if self.mutation_logging.get() && !self.store_build_owns(node) {
+                        let old = self.get_desc(node).0;
+                        self.mutation_journal
+                            .borrow_mut()
+                            .entries
+                            .push(TypeMutation::Compress(node, old, current));
+                    }
+                    self.write_desc_raw(node, TypeDesc::Tlink(current));
                 }
             }
         }
@@ -4049,6 +4623,7 @@ impl TypeContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn shared_node_writes_stay_in_the_writing_compilation() {
@@ -4274,7 +4849,10 @@ mod tests {
         assert!(matches!(ctx.store.abbrev(memo), AbbrevMemo::Mnil));
         assert!(matches!(ctx.store.row_field(row), Some(RowField::Rabsent)));
         ctx.restore_type_state(snapshot);
-        assert!(matches!(ctx.get_abbrev_memo(memo), AbbrevMemo::Mnil));
+        // Memo contents are not part of the trail (btype.ml:692-700); store
+        // memos stay in this compilation's overlay.
+        assert!(matches!(ctx.get_abbrev_memo(memo), AbbrevMemo::Mlink(_)));
+        assert!(matches!(ctx.store.abbrev(memo), AbbrevMemo::Mnil));
         assert!(matches!(ctx.get_row_field(row), Some(RowField::Rabsent)));
 
         ctx.clear_row_field(row);
@@ -4398,6 +4976,310 @@ mod tests {
             TypeDesc::Tlink(target) => assert_eq!(*target, t1),
             _ => panic!("Expected Tlink after path compression"),
         }
+    }
+
+    #[test]
+    fn mutation_trail_restores_repeated_changes() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let ty = ctx.new_var(Some("original".to_string()));
+        let level = ctx.get_level(ty);
+        let snapshot = ctx.snapshot_type_state();
+
+        ctx.set_desc(ty, TypeDesc::Tvar(Some("first".to_string())));
+        ctx.set_desc(ty, TypeDesc::Tnil);
+        ctx.set_level(ty, level + 1);
+        ctx.set_level(ty, level + 2);
+        ctx.restore_type_state(snapshot);
+
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "original"));
+        assert_eq!(ctx.get_level(ty), level);
+    }
+
+    proptest! {
+        #[test]
+        fn mutation_trail_restores_generated_repeated_type_mutations(
+            mutations in prop::collection::vec((0usize..8, any::<bool>(), -10i32..100), 1..128),
+        ) {
+            let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+            let types: Vec<_> = (0..8)
+                .map(|index| ctx.new_var(Some(format!("original-{index}"))))
+                .collect();
+            let original_levels: Vec<_> = types.iter().map(|ty| ctx.get_level(*ty)).collect();
+            let snapshot = ctx.snapshot_type_state();
+
+            for (index, nil, level) in mutations {
+                let ty = types[index];
+                let desc = if nil {
+                    TypeDesc::Tnil
+                } else {
+                    TypeDesc::Tvar(Some(format!("mutated-{index}-{level}")))
+                };
+                ctx.set_desc(ty, desc);
+                ctx.set_level(ty, level);
+            }
+            ctx.restore_type_state(snapshot);
+
+            for (index, ty) in types.into_iter().enumerate() {
+                let expected_name = format!("original-{index}");
+                prop_assert!(matches!(
+                    &*ctx.get_desc(ty),
+                    TypeDesc::Tvar(Some(name)) if name == &expected_name
+                ));
+                prop_assert_eq!(ctx.get_level(ty), original_levels[index]);
+            }
+        }
+    }
+
+    #[test]
+    fn mutation_trail_supports_nested_snapshots() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let ty = ctx.new_var(Some("outer".to_string()));
+        let outer = ctx.snapshot_type_state();
+        ctx.set_desc(ty, TypeDesc::Tvar(Some("middle".to_string())));
+
+        let inner = ctx.snapshot_type_state();
+        ctx.set_desc(ty, TypeDesc::Tnil);
+        ctx.begin_def();
+        ctx.restore_type_state(inner);
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "middle"));
+        assert_eq!(ctx.current_level(), 0);
+
+        ctx.restore_type_state(outer);
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "outer"));
+    }
+
+    #[test]
+    fn mutation_trail_leaves_new_type_allocations_and_their_state_alive() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let old = ctx.new_var(Some("old".to_string()));
+        let snapshot = ctx.snapshot_type_state();
+        let allocated = ctx.new_var(Some("new".to_string()));
+        ctx.set_desc(allocated, TypeDesc::Tnil);
+        ctx.set_level(allocated, 42);
+        ctx.set_desc(old, TypeDesc::Tnil);
+
+        ctx.restore_type_state(snapshot);
+
+        assert_eq!(ctx.type_expr_count(), 2);
+        assert!(matches!(&*ctx.get_desc(allocated), TypeDesc::Tnil));
+        assert_eq!(ctx.get_level(allocated), 42);
+        assert!(matches!(&*ctx.get_desc(old), TypeDesc::Tvar(Some(name)) if name == "old"));
+    }
+
+    #[test]
+    fn mutation_trail_restores_row_cells() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let row = ctx.alloc_row_field(Some(RowField::Rpresent(None)));
+        let snapshot = ctx.snapshot_type_state();
+        ctx.set_row_field(row, RowField::Rabsent);
+        let allocated = ctx.alloc_row_field(Some(RowField::Rpresent(None)));
+        ctx.set_row_field(allocated, RowField::Rabsent);
+
+        ctx.restore_type_state(snapshot);
+
+        assert!(matches!(
+            ctx.get_row_field(row),
+            Some(RowField::Rpresent(None))
+        ));
+        assert!(matches!(
+            ctx.get_row_field(allocated),
+            Some(RowField::Rabsent)
+        ));
+    }
+
+    #[test]
+    fn mutation_trail_leaves_new_abbreviation_memos_alive() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let snapshot = ctx.snapshot_type_state();
+        let memo = ctx.alloc_abbrev_nil();
+        let abbrev = ctx.new_var(None);
+        let expansion = ctx.new_var(None);
+        let path = Path::pident(Ident::create_persistent("Allocated"));
+        ctx.memorize_abbrev_expansion(memo, PrivateFlag::Public, path.clone(), abbrev, expansion);
+
+        ctx.restore_type_state(snapshot);
+
+        // btype.ml:544-553: memorized expansions are not trailed, and a
+        // backtrack with nothing trailed leaves them (and `memo`) alone.
+        assert_eq!(
+            ctx.find_abbrev_expansion(memo, PrivateFlag::Public, &path),
+            Some(expansion)
+        );
+        assert_eq!(&*ctx.memoized_abbrev_refs.borrow(), &[memo]);
+    }
+
+    #[test]
+    fn mutation_trail_does_not_restore_abbreviation_memos() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let memo = ctx.alloc_abbrev_nil();
+        let abbrev = ctx.new_var(None);
+        let first = ctx.new_var(None);
+        let second = ctx.new_var(None);
+        let path = Path::pident(Ident::create_persistent("Alias"));
+        ctx.memorize_abbrev_expansion(memo, PrivateFlag::Public, path.clone(), abbrev, first);
+        let snapshot = ctx.snapshot_type_state();
+        ctx.memorize_abbrev_expansion(
+            memo,
+            PrivateFlag::Public,
+            Path::pident(Ident::create_persistent("Other")),
+            abbrev,
+            second,
+        );
+        ctx.clear_abbrev_memos();
+
+        ctx.restore_type_state(snapshot);
+
+        // btype.ml:544-547 `cleanup_abbrev` is not undone by `backtrack`
+        // (btype.ml:692-702): memo contents are not part of the trail.
+        assert_eq!(
+            ctx.find_abbrev_expansion(memo, PrivateFlag::Public, &path),
+            None
+        );
+        assert!(ctx.memoized_abbrev_refs.borrow().is_empty());
+        let _ = first;
+    }
+
+    #[test]
+    fn mutation_trail_restores_definition_and_abbreviation_state() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let initial_levels = ctx.current_def_level_state();
+        let memo = ctx.alloc_abbrev_nil();
+        let snapshot = ctx.snapshot_type_state();
+
+        ctx.set_current_abbreviations(memo);
+        ctx.begin_def();
+        ctx.reset_global_level();
+        assert_ne!(ctx.current_def_level_state(), initial_levels);
+
+        ctx.restore_type_state(snapshot);
+
+        assert_eq!(ctx.current_abbreviations(), AbbrevMemoRef::nil());
+        assert_eq!(ctx.current_def_level_state(), initial_levels);
+    }
+
+    #[test]
+    fn restoring_a_nested_snapshot_does_not_journal_the_restore() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let ty = ctx.new_var(Some("original".to_string()));
+        let outer = ctx.snapshot_type_state();
+        ctx.set_desc(ty, TypeDesc::Tvar(Some("outer".to_string())));
+        let inner = ctx.snapshot_type_state();
+        ctx.set_desc(ty, TypeDesc::Tnil);
+
+        ctx.restore_type_state(inner);
+
+        assert_eq!(ctx.mutation_journal.borrow().entries.len(), 1);
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "outer"));
+        ctx.restore_type_state(outer);
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "original"));
+    }
+
+    #[test]
+    fn outer_backtrack_restores_committed_inner_mutations() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let pre_type = ctx.new_var(Some("pre".to_string()));
+        let pre_row = ctx.alloc_row_field(Some(RowField::Rpresent(None)));
+        let pre_memo = ctx.alloc_abbrev_nil();
+        let pre_abbrev = ctx.new_var(None);
+        let pre_expansion = ctx.new_var(None);
+        let pre_path = Path::pident(Ident::create_persistent("Pre"));
+        ctx.memorize_abbrev_expansion(
+            pre_memo,
+            PrivateFlag::Public,
+            pre_path.clone(),
+            pre_abbrev,
+            pre_expansion,
+        );
+        let initial_levels = ctx.current_def_level_state();
+        let outer = ctx.snapshot_type_state();
+
+        let post_type = ctx.new_var(Some("post".to_string()));
+        let post_row = ctx.alloc_row_field(Some(RowField::Rpresent(None)));
+        let post_memo = ctx.alloc_abbrev_nil();
+        let post_abbrev = ctx.new_var(None);
+        let post_expansion = ctx.new_var(None);
+        let post_path = Path::pident(Ident::create_persistent("Post"));
+
+        let restored_inner = ctx.snapshot_type_state();
+        ctx.set_desc(post_type, TypeDesc::Tnil);
+        ctx.set_row_field(post_row, RowField::Rabsent);
+        ctx.memorize_abbrev_expansion(
+            post_memo,
+            PrivateFlag::Public,
+            post_path.clone(),
+            post_abbrev,
+            post_expansion,
+        );
+        ctx.restore_type_state(restored_inner);
+
+        assert!(matches!(&*ctx.get_desc(post_type), TypeDesc::Tvar(Some(name)) if name == "post"));
+        assert!(matches!(
+            ctx.get_row_field(post_row),
+            Some(RowField::Rpresent(None))
+        ));
+        assert_eq!(
+            ctx.find_abbrev_expansion(post_memo, PrivateFlag::Public, &post_path),
+            None
+        );
+
+        let committed_inner = ctx.snapshot_type_state();
+        ctx.set_desc(pre_type, TypeDesc::Tnil);
+        ctx.set_row_field(pre_row, RowField::Rabsent);
+        ctx.clear_abbrev_memo(pre_memo);
+        ctx.set_desc(post_type, TypeDesc::Tnil);
+        ctx.set_row_field(post_row, RowField::Rabsent);
+        ctx.memorize_abbrev_expansion(
+            post_memo,
+            PrivateFlag::Public,
+            post_path.clone(),
+            post_abbrev,
+            post_expansion,
+        );
+        ctx.begin_def();
+        drop(committed_inner);
+        ctx.restore_type_state(outer);
+
+        assert!(matches!(&*ctx.get_desc(pre_type), TypeDesc::Tvar(Some(name)) if name == "pre"));
+        assert!(matches!(
+            ctx.get_row_field(pre_row),
+            Some(RowField::Rpresent(None))
+        ));
+        // btype.ml:692-702: a backtrack over trailed changes runs
+        // `cleanup_abbrev`, forgetting every memorized expansion, including
+        // those memorized before the snapshot.
+        assert_eq!(
+            ctx.find_abbrev_expansion(pre_memo, PrivateFlag::Public, &pre_path),
+            None
+        );
+        let _ = pre_expansion;
+        assert!(matches!(&*ctx.get_desc(post_type), TypeDesc::Tvar(Some(name)) if name == "post"));
+        assert!(matches!(
+            ctx.get_row_field(post_row),
+            Some(RowField::Rpresent(None))
+        ));
+        assert_eq!(
+            ctx.find_abbrev_expansion(post_memo, PrivateFlag::Public, &post_path),
+            None
+        );
+        assert_eq!(ctx.current_def_level_state(), initial_levels);
+        assert!(ctx.memoized_abbrev_refs.borrow().is_empty());
+        assert!(!ctx.mutation_logging.get());
+    }
+
+    #[test]
+    fn restoring_an_outer_snapshot_invalidates_nested_snapshots() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let ty = ctx.new_var(Some("original".to_string()));
+        let outer = ctx.snapshot_type_state();
+        ctx.set_desc(ty, TypeDesc::Tvar(Some("outer".to_string())));
+        let inner = ctx.snapshot_type_state();
+        ctx.set_desc(ty, TypeDesc::Tnil);
+
+        ctx.restore_type_state(outer);
+        ctx.restore_type_state(inner);
+
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "original"));
+        assert!(!ctx.mutation_logging.get());
     }
 
     #[test]

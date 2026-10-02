@@ -80,6 +80,9 @@ impl ArenaIdx for LocIdx {
     }
 }
 
+/// First index of typechecker-generated synthetic locations.
+const SYNTHETIC_LOCATION_BASE: u32 = 0x8000_0000;
+
 impl LocIdx {
     /// Check if this is the "none" location (index 0).
     /// The "none" location is pre-allocated at index 0 in every ParseArena.
@@ -474,6 +477,10 @@ pub struct ParseArena {
     /// while the arena is still exclusively borrowed.
     nary_fun_default_bindings_by_first_pattern:
         HashMap<PatIdx, Box<[(FunParam, Option<crate::parser::ast::ValueBinding>)]>>,
+    /// Ghost copies of character-interval pattern locations
+    /// (typecore.ml:1337 `{loc with loc_ghost = true}`), allocated before
+    /// type checking for the same aliasing reason.
+    interval_ghost_locs: HashMap<LocIdx, LocIdx>,
     /// N-ary locally-abstract-type (`newtypes`) lists keyed by the function's
     /// first parameter pattern, mirroring `Pexp_fun.newtypes` in the current
     /// upstream parsetree. Each entry is `(name, attributes)`; the parser puts
@@ -482,6 +489,16 @@ pub struct ParseArena {
     nary_arrow_args_by_first_type: HashMap<CoreTypeIdx, Box<[crate::parser::ast::TypeArg]>>,
     /// Sparse current-Parsetree value constraints keyed by the binding pattern.
     value_constraints_by_pattern: HashMap<PatIdx, ValueConstraint>,
+    /// Bindings whose `Ast_helper.Typ.varify_constructors` raises
+    /// `Syntaxerr.Error`; OCaml only raises it when `type_let` reaches them.
+    value_constraint_varify_errors: HashMap<PatIdx, LocIdx>,
+    /// The first error raised by a nested builtin-ppx rewrite whose caller
+    /// cannot return a `Result`; OCaml's mapper raises it immediately, so the
+    /// public rewrite entry points report it before any later error.
+    ppx_deferred_error: Option<crate::binary_ast::ppx::PpxError>,
+    /// Whether the builtin spice mapper stands in for a configured external
+    /// spice PPX (see `driver::is_builtin_external_ppx`).
+    builtin_spice_disabled: bool,
     /// Sparse side table for case guards, keyed by owning match/try ExprIdx.
     /// Value is a case-indexed list of optional guard expressions.
     expr_case_guards: Vec<Option<Box<[Option<ExprIdx>]>>>,
@@ -494,11 +511,10 @@ pub struct ParseArena {
     /// Sparse side table for record-rest pattern bindings (`...T as r`),
     /// keyed by the record pattern's own location index.
     ///
-    /// OCaml compiler/ml/parsetree.ml:164-168 stores `record_pat_rest` inline
-    /// in `Ppat_record`. The arena parser keeps it in a sparse side table keyed
-    /// by the record pattern's `ppat_loc` (a stable arena index available both
-    /// at parse time and during type checking).
-    pat_record_rests: HashMap<LocIdx, crate::parser::ast::RecordPatRest>,
+    /// OCaml `Used_attributes` (compiler/ml/used_attributes.ml): attribute name
+    /// locations marked as consumed by the builtin PPX, consulted by the
+    /// unused-attribute sweep (`Bs_ast_invariant.warn_unused_attribute`).
+    used_attributes: std::sync::Mutex<HashSet<LocIdx>>,
     /// Sparse side table for if-then-else else branch expression, keyed by if ExprIdx.
     expr_if_else_branches: Vec<Option<ExprIdx>>,
     /// Sparse side table for `Pexp_coerce` source type annotation, keyed by coerce ExprIdx.
@@ -509,6 +525,10 @@ pub struct ParseArena {
     /// Append-only stable storage for OCaml-shaped synthetic pattern rewrites.
     synthetic_patterns: elsa::sync::FrozenVec<Box<Pattern>>,
     synthetic_pattern_base: u32,
+    /// Typechecker-generated locations (e.g. OCaml's `{loc with loc_ghost =
+    /// true}` copies), appended while the arena is shared. Addressed from
+    /// `SYNTHETIC_LOCATION_BASE` so they never collide with primary indices.
+    synthetic_locations: elsa::sync::FrozenVec<Box<InternedLocation>>,
     /// Slots reserved before type checking for strings discovered only after
     /// environment lookup (notably omitted record labels).
     synthetic_strings: elsa::sync::FrozenVec<Box<String>>,
@@ -553,6 +573,7 @@ pub struct ParseArena {
     /// Pre-allocated `Lident "None"` for optional field desugaring.
     /// Allocated in `new()`, not `default()`.
     static_none_lid: LidentIdx,
+    static_option_lid: LidentIdx,
     /// Pre-allocated `Ldot(Lident "*predef*", "None")` for optional-default rewrites.
     static_predef_none_lid: LidentIdx,
     /// Pre-allocated `Lident "Some"` for unqualified option wrapping paths.
@@ -638,7 +659,6 @@ pub struct ParseArena {
     dummy_loc: LocIdx,
     /// Spice PPX local caches for generated location/string/lident nodes.
     spice_cache: SpiceCache,
-    pub(crate) spice_mapper_enabled: bool,
     /// Literal strings that should be value-shared during marshalling.
     shareable_literal_strs: HashSet<String>,
     /// Explicit constant-string identity registration `(ptr,len) -> StrIdx`.
@@ -905,19 +925,24 @@ impl Default for ParseArena {
             nary_fun_params_by_first_pattern: HashMap::new(),
             nary_fun_unknown_arity_by_first_pattern: HashMap::new(),
             nary_fun_default_bindings_by_first_pattern: HashMap::new(),
+            interval_ghost_locs: HashMap::new(),
             nary_fun_newtypes_by_first_pattern: HashMap::new(),
             nary_arrow_args_by_first_type: HashMap::new(),
             value_constraints_by_pattern: HashMap::new(),
+            value_constraint_varify_errors: HashMap::new(),
+            ppx_deferred_error: None,
+            builtin_spice_disabled: false,
             expr_case_guards: Vec::new(),
             expr_construct_args: Vec::new(),
             expr_variant_args: Vec::new(),
             expr_record_spreads: Vec::new(),
-            pat_record_rests: HashMap::new(),
+            used_attributes: std::sync::Mutex::new(HashSet::new()),
             expr_if_else_branches: Vec::new(),
             expr_coerce_from_types: Vec::new(),
             patterns: Arena::default(),
             synthetic_patterns: elsa::sync::FrozenVec::new(),
             synthetic_pattern_base: u32::MAX,
+            synthetic_locations: elsa::sync::FrozenVec::new(),
             synthetic_strings: elsa::sync::FrozenVec::new(),
             synthetic_string_base: u32::MAX,
             core_types,
@@ -935,6 +960,7 @@ impl Default for ParseArena {
             static_ast_literal_type_float_lident,
             static_placeholder_lid: LidentIdx::default(),
             static_none_lid: LidentIdx::default(),
+            static_option_lid: LidentIdx::default(),
             static_predef_none_lid,
             static_some_lid,
             static_predef_some_lid,
@@ -965,7 +991,6 @@ impl Default for ParseArena {
             rewritten_expr_locs: HashSet::new(),
             dummy_loc: LocIdx::default(),
             spice_cache: SpiceCache::new(),
-            spice_mapper_enabled: false,
             shareable_literal_strs: HashSet::new(),
             constant_string_identity_to_idx: HashMap::new(),
             tyvar_source_by_loc: HashMap::new(),
@@ -993,6 +1018,24 @@ impl ParseArena {
     ///
     /// This ensures that `LocIdx::default()` (which is `LocIdx(0)`) always refers to
     /// a valid "none" location, even without calling `none_loc()` first.
+    /// OCaml `Used_attributes.mark_used_attribute`: only non-ghost attributes.
+    pub fn mark_used_attribute(&self, attr: &crate::parser::ast::Attribute) {
+        if !self.loc_ghost(attr.0.loc) {
+            self.used_attributes
+                .lock()
+                .expect("used attributes lock")
+                .insert(attr.0.loc);
+        }
+    }
+
+    /// OCaml `Used_attributes.is_used_attribute`.
+    pub fn is_used_attribute(&self, loc: LocIdx) -> bool {
+        self.used_attributes
+            .lock()
+            .expect("used attributes lock")
+            .contains(&loc)
+    }
+
     pub fn new() -> Self {
         let mut arena = Self::default();
         // Pre-allocate none file name and position at index 0
@@ -1023,6 +1066,9 @@ impl ParseArena {
         // Pre-allocate "*predef*" longident
         let predef_str = arena.strings.intern("*predef*");
         arena.longidents.push(Longident::Lident(predef_str));
+        // Pre-allocate "option" longident (for optional record label types)
+        let option_str = arena.strings.intern("option");
+        arena.static_option_lid = arena.longidents.push(Longident::Lident(option_str));
         arena
     }
 
@@ -1036,6 +1082,13 @@ impl ParseArena {
     /// Used for optional field desugaring (synthesizing None for missing optional fields).
     pub fn none_lid(&self) -> LidentIdx {
         self.static_none_lid
+    }
+
+    /// Get the pre-allocated `Lident "option"` index. Optional record labels
+    /// are typed as `Ptyp_constr (Lident "option", [typ])`
+    /// (compiler/ml/typedecl.ml:314-329, 600-618).
+    pub fn option_lid(&self) -> LidentIdx {
+        self.static_option_lid
     }
 
     /// Get the pre-allocated Ldot(*predef*, "None") longident index.
@@ -1382,7 +1435,26 @@ impl ParseArena {
 
     /// Look up a location by index.
     pub fn get_location(&self, idx: LocIdx) -> &InternedLocation {
-        self.locations.get(idx)
+        let raw = idx.to_u32();
+        if raw < SYNTHETIC_LOCATION_BASE {
+            self.locations.get(idx)
+        } else {
+            self.synthetic_locations
+                .get((raw - SYNTHETIC_LOCATION_BASE) as usize)
+                .expect("typechecker synthetic location read before initialization")
+        }
+    }
+
+    /// Append a typechecker-generated ghost copy of `idx` (OCaml
+    /// `{loc with Location.loc_ghost = true}`) to storage reserved before the
+    /// arena became shared. These indices live in a separate range, so scans
+    /// over `locations()` do not see them.
+    pub fn push_typecheck_ghost_loc(&self, idx: LocIdx) -> LocIdx {
+        let loc = self.get_location(idx);
+        let ghost = InternedLocation::new(loc.loc_start, loc.loc_end, true);
+        let slot = self.synthetic_locations.len();
+        self.synthetic_locations.push(Box::new(ghost));
+        LocIdx::from_u32(SYNTHETIC_LOCATION_BASE + slot as u32)
     }
 
     /// Get all locations (for marshalling).
@@ -1488,7 +1560,7 @@ impl ParseArena {
 
     /// Get an interned string by index.
     pub fn get_interned(&self, idx: StrIdx) -> &str {
-        self.strings.get(idx)
+        self.get_string(idx)
     }
 
     // ========================================================================
@@ -2084,7 +2156,7 @@ impl ParseArena {
     /// Check if a longident is a simple Lident with the given name.
     pub fn is_lident(&self, idx: LidentIdx, name: &str) -> bool {
         match self.get_longident(idx) {
-            Longident::Lident(str_idx) => self.strings.get(*str_idx) == name,
+            Longident::Lident(str_idx) => self.get_string(*str_idx) == name,
             _ => false,
         }
     }
@@ -2102,7 +2174,7 @@ impl ParseArena {
     /// Get the last component of a longident as a string.
     pub fn lident_last(&self, idx: LidentIdx) -> &str {
         let str_idx = self.get_longident(idx).last_idx();
-        self.strings.get(str_idx)
+        self.get_string(str_idx)
     }
 
     /// Convert a Located<LidentIdx> to Located<Longident>.
@@ -2359,6 +2431,15 @@ impl ParseArena {
             .insert(first_type, args.into_boxed_slice());
     }
 
+    /// The n-ary parameters recorded for an arrow whose first parameter is
+    /// `arg`, when the parser grouped more than one.
+    pub fn nary_arrow_args_slice(
+        &self,
+        arg: &crate::parser::ast::TypeArg,
+    ) -> Option<&[crate::parser::ast::TypeArg]> {
+        self.nary_arrow_args_by_first_type.get(&arg.typ).map(|args| &args[..])
+    }
+
     pub fn nary_arrow_args<'a>(
         &'a self,
         arg: &'a crate::parser::ast::TypeArg,
@@ -2393,6 +2474,28 @@ impl ParseArena {
     ) {
         self.nary_fun_default_bindings_by_first_pattern
             .insert(first_pattern, bindings.into_boxed_slice());
+    }
+
+    /// Allocate the ghost locations used by character-interval expansion.
+    pub fn prepare_interval_ghost_locs(&mut self) {
+        // Read the parser-owned pattern storage directly: patterns pushed by
+        // earlier preparation can sit above a previous synthetic base.
+        for i in 0..self.patterns.len() {
+            let pat = self.patterns.get(PatIdx(i as u32));
+            if !matches!(&*pat.ppat_desc, crate::parser::ast::PatternDesc::Ppat_interval(_)) {
+                continue;
+            }
+            let loc = pat.ppat_loc;
+            if !self.interval_ghost_locs.contains_key(&loc) {
+                let ghost = self.mk_ghost_loc(loc);
+                self.interval_ghost_locs.insert(loc, ghost);
+            }
+        }
+    }
+
+    /// The ghost copy of an interval pattern's location.
+    pub fn interval_ghost_loc(&self, loc: LocIdx) -> Option<LocIdx> {
+        self.interval_ghost_locs.get(&loc).copied()
     }
 
     /// Return optional-default lowering prepared before type checking.
@@ -2445,14 +2548,23 @@ impl ParseArena {
         mut constraint: ValueConstraint,
         expression: ExprIdx,
         loc: LocIdx,
-    ) -> Result<(), LocIdx> {
+    ) {
         let names = constraint
             .pvc_newtypes
             .iter()
             .map(|name| self.get_string(name.txt).to_string())
             .collect::<std::collections::HashSet<_>>();
         let source = self.get_core_type(constraint.pvc_type).clone();
-        let body = crate::parser::typ::substitute_type_vars(self, source, &names)?;
+        let body = match crate::parser::typ::substitute_type_vars(self, source, &names) {
+            Ok(body) => body,
+            Err(error_loc) => {
+                // Keep the wire constraint; typing raises the error later.
+                self.value_constraint_varify_errors.insert(pattern, error_loc);
+                self.value_constraints_by_pattern.insert(pattern, constraint);
+                return;
+            }
+        };
+        self.value_constraint_varify_errors.remove(&pattern);
         let body = self.push_core_type(body);
         let poly = self.push_core_type(CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((
@@ -2488,7 +2600,33 @@ impl ParseArena {
         constraint.pvc_expression = Some(wrapped);
         self.value_constraints_by_pattern
             .insert(pattern, constraint);
-        Ok(())
+    }
+
+    /// Enable or disable the builtin spice mapper for this compilation.
+    pub fn set_builtin_spice(&mut self, enabled: bool) {
+        self.builtin_spice_disabled = !enabled;
+    }
+
+    pub fn builtin_spice_enabled(&self) -> bool {
+        !self.builtin_spice_disabled
+    }
+
+    /// Record a nested builtin-ppx error unless an earlier one is pending.
+    pub fn defer_ppx_error(&mut self, error: crate::binary_ast::ppx::PpxError) {
+        if self.ppx_deferred_error.is_none() {
+            self.ppx_deferred_error = Some(error);
+        }
+    }
+
+    /// Take the first deferred builtin-ppx error.
+    pub fn take_ppx_deferred_error(&mut self) -> Option<crate::binary_ast::ppx::PpxError> {
+        self.ppx_deferred_error.take()
+    }
+
+    /// Whether `Ast_helper.Typ.varify_constructors` fails for this binding's
+    /// constraint (compiler/ml/ast_helper.ml:74-78).
+    pub fn value_constraint_varify_error(&self, pattern: PatIdx) -> Option<LocIdx> {
+        self.value_constraint_varify_errors.get(&pattern).copied()
     }
 
     /// Return a value binding's locally abstract constraint, when present.
@@ -2687,23 +2825,6 @@ impl ParseArena {
     }
 
     /// Attach sparse record spread/base expression data to a record expression node.
-    /// Attach record-rest binding data to a record pattern, keyed by its location index.
-    pub fn set_record_pat_rest(&mut self, loc: LocIdx, rest: crate::parser::ast::RecordPatRest) {
-        self.pat_record_rests.insert(loc, rest);
-    }
-
-    /// Get sparse record-rest binding data for a record pattern node.
-    pub fn record_pat_rest(&self, loc: LocIdx) -> Option<&crate::parser::ast::RecordPatRest> {
-        self.pat_record_rests.get(&loc)
-    }
-
-    pub fn take_record_pat_rest(
-        &mut self,
-        loc: LocIdx,
-    ) -> Option<crate::parser::ast::RecordPatRest> {
-        self.pat_record_rests.remove(&loc)
-    }
-
     pub fn set_record_spread(&mut self, owner: ExprIdx, spread: Option<ExprIdx>) {
         let slot = owner.0 as usize;
         if slot >= self.expr_record_spreads.len() {

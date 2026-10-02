@@ -16,7 +16,7 @@ use crate::lambda::js_exp_make::js_expr_no_side_effects;
 use crate::lambda::js_shake::{
     TailMoveInitializerKind, flatten_toplevel_block_owned, flatten_toplevel_block_refs,
     resolve_tail_move_initializer_kind, resolve_tail_move_replacement_expression,
-    statement_mentions_ident_anywhere, tail_move_materialized_root_ident,
+    statement_mentions_ident_anywhere,
 };
 use crate::lambda::lam_compat::LetKind;
 
@@ -162,162 +162,9 @@ pub(crate) fn collect_export_aliases(block: &Block, aliases: &mut HashMap<Ident,
     }
 }
 
-pub(crate) fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases(
-    block: &mut Block,
-    exports: &[Ident],
-) {
-    if exports.is_empty() {
-        return;
-    }
 
-    let exported_idents: HashSet<Ident> = exports.iter().cloned().collect();
-    // OCaml export coercion works over the flattened lambda group list before
-    // JS lowering (`compiler/core/lam_coercion.ml:179-199`) and only
-    // substitutes Strict/Alias/StrictOpt bindings
-    // (`compiler/core/lam_pass_lets_dce.ml:21-23`). This Rust repair pass runs
-    // after JS lowering, owns the top-level block, and mirrors that flattened
-    // traversal by moving statements into one list instead of cloning it.
-    let mut flattened = flatten_toplevel_block_owned(std::mem::take(block));
-    let mut changed = true;
 
-    while changed {
-        changed = false;
-        for index in 0..flattened.len() {
-            let Some((ident, target, current_value)) = (match &flattened[index].desc {
-                StatementDesc::Variable(VariableDeclaration {
-                    ident,
-                    value:
-                        Some(Expression {
-                            desc: ExpressionDesc::Var(VIdent::Id(target)),
-                            ..
-                        }),
-                    ..
-                }) if exported_idents.contains(ident) => Some((
-                    ident.clone(),
-                    target.clone(),
-                    variable_initializer(&flattened[index]).cloned(),
-                )),
-                _ => None,
-            }) else {
-                continue;
-            };
 
-            let Some(current_value) = current_value else {
-                continue;
-            };
-
-            let materialized_root = tail_move_materialized_root_ident(&flattened, &current_value);
-            let Some(mut replacement) =
-                resolve_rewriteable_toplevel_alias_initializer(&flattened, &target)
-            else {
-                continue;
-            };
-            if matches!(
-                replacement.desc,
-                ExpressionDesc::Number(_)
-                    | ExpressionDesc::Str { .. }
-                    | ExpressionDesc::Bool(_)
-                    | ExpressionDesc::Undefined { .. }
-                    | ExpressionDesc::Null
-            ) {
-                if let Some(root) = materialized_root {
-                    // Exported roots are uses too: the final export block is
-                    // counted by Lam_pass_count.collect_occurs. Export coercion
-                    // retains Lvar for a differently named export (lam_coercion.ml:112-121).
-                    if exported_idents.contains(&root)
-                        || rewriteable_alias_root_has_other_toplevel_uses(&flattened, index, &root)
-                    {
-                        replacement = Expression::var(root);
-                    }
-                }
-            }
-
-            if ocaml_eq_expression(&current_value, &replacement) {
-                continue;
-            }
-
-            let StatementDesc::Variable(VariableDeclaration { value, .. }) =
-                &mut flattened[index].desc
-            else {
-                continue;
-            };
-            *value = Some(replacement);
-            debug_assert!(exported_idents.contains(&ident));
-            changed = true;
-        }
-    }
-
-    *block = flattened;
-}
-
-pub(crate) fn rewriteable_alias_root_has_other_toplevel_uses(
-    block: &Block,
-    alias_index: usize,
-    root: &Ident,
-) -> bool {
-    block.iter().enumerate().any(|(index, stmt)| {
-        if index == alias_index {
-            return false;
-        }
-        match &stmt.desc {
-            StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(root) => false,
-            _ => statement_mentions_ident_anywhere(stmt, root),
-        }
-    })
-}
-
-pub(crate) fn resolve_rewriteable_toplevel_alias_initializer(
-    block: &[Statement],
-    start: &Ident,
-) -> Option<Expression> {
-    let mut current = start.clone();
-    let mut seen = HashSet::new();
-
-    loop {
-        if !seen.insert(current.clone()) {
-            return None;
-        }
-
-        let (value, property) = block.iter().find_map(|stmt| match &stmt.desc {
-            StatementDesc::Variable(VariableDeclaration {
-                ident,
-                value: Some(initializer),
-                property,
-                ..
-            }) if ident.same(&current) => Some((initializer, *property)),
-            _ => None,
-        })?;
-
-        // OCaml's `compiler/core/lam_pass_lets_dce.ml:21-23` only substitutes
-        // Strict / Alias / StrictOpt. A Variable-kind binding compiles to a
-        // `let`-mutable JS declaration (post-eliminate_ref ref); folding
-        // through its initial value is unsound because later code may mutate
-        // the binding.
-        if matches!(property, LetKind::Variable) {
-            return None;
-        }
-
-        match &value.desc {
-            ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
-                current = next.clone();
-            }
-            ExpressionDesc::Fun { .. } => return Some(Expression::var(current)),
-            ExpressionDesc::Number(_)
-            | ExpressionDesc::Str { .. }
-            | ExpressionDesc::Bool(_)
-            | ExpressionDesc::Undefined { .. }
-            | ExpressionDesc::Null => return Some(value.clone()),
-            _ => return None,
-        }
-    }
-}
-
-pub(crate) fn variable_initializer(stmt: &Statement) -> Option<&Expression> {
-    match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration { value, .. }) => value.as_ref(),
-        _ => None,
-    }
-}
 
 pub(crate) fn max_ident_stamp_in_block(block: &Block) -> i32 {
     block.iter().fold(0, |max_stamp, stmt| {

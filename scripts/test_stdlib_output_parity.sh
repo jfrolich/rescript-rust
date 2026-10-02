@@ -102,7 +102,7 @@ echo ""
 echo -e "${BOLD}Step 1: Building stdlib/runtime with OCaml bsc...${RESET}"
 (
     cd "$RUNTIME_DIR"
-    RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5
+    RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5
 )
 echo ""
 

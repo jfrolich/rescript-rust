@@ -94,6 +94,17 @@ static MODULE_SIGNATURE_COPIES: OnceLock<Mutex<HashMap<String, SignatureCopySite
 static MODULE_SIGNATURE_FRESHENS: OnceLock<Mutex<HashMap<String, SignatureCopySite>>> =
     OnceLock::new();
 
+static MATCH_ACTION_CLONE_CALLS: AtomicU64 = AtomicU64::new(0);
+static MATCH_ACTION_CLONE_NODES: AtomicU64 = AtomicU64::new(0);
+static MATCH_ACTION_CLONE_BYTES: AtomicU64 = AtomicU64::new(0);
+static MATCH_ACTION_CLONE_NANOS: AtomicU64 = AtomicU64::new(0);
+static MATCH_ACTION_CLONE_MAX_REFERENCES: AtomicU64 = AtomicU64::new(0);
+static MATCH_ACTION_CLONE_SITES: OnceLock<
+    Mutex<HashMap<(&'static str, u32), MatchActionCloneSite>>,
+> = OnceLock::new();
+static MODULE_MATCH_ACTION_CLONES: OnceLock<Mutex<HashMap<String, MatchActionCloneSite>>> =
+    OnceLock::new();
+
 thread_local! {
     static CURRENT_MODULE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
@@ -107,6 +118,46 @@ static REGISTRY_LOCAL_MODULES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static REGISTRY_LOCAL_INFO_TOTAL: AtomicU64 = AtomicU64::new(0);
 static REGISTRY_LOCAL_ALIASES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static REGISTRY_LOCAL_FALLBACKS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+static TYPE_MUTATION_DESC: AtomicU64 = AtomicU64::new(0);
+static TYPE_MUTATION_LEVEL: AtomicU64 = AtomicU64::new(0);
+static TYPE_MUTATION_ROW: AtomicU64 = AtomicU64::new(0);
+static TYPE_MUTATION_ABBREV: AtomicU64 = AtomicU64::new(0);
+static TYPE_MUTATION_STATE: AtomicU64 = AtomicU64::new(0);
+static TYPE_MUTATION_SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
+static TYPE_MUTATION_BACKTRACKS: AtomicU64 = AtomicU64::new(0);
+static TYPE_MUTATION_RESTORES: AtomicU64 = AtomicU64::new(0);
+static TYPE_MUTATION_PEAK_DEPTH: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy)]
+pub(crate) enum TypeMutationKind {
+    Desc,
+    Level,
+    Row,
+    Abbrev,
+    State,
+}
+
+pub(crate) fn record_type_mutation(kind: TypeMutationKind) {
+    let counter = match kind {
+        TypeMutationKind::Desc => &TYPE_MUTATION_DESC,
+        TypeMutationKind::Level => &TYPE_MUTATION_LEVEL,
+        TypeMutationKind::Row => &TYPE_MUTATION_ROW,
+        TypeMutationKind::Abbrev => &TYPE_MUTATION_ABBREV,
+        TypeMutationKind::State => &TYPE_MUTATION_STATE,
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_type_mutation_snapshot(depth: usize) {
+    TYPE_MUTATION_SNAPSHOTS.fetch_add(1, Ordering::Relaxed);
+    TYPE_MUTATION_PEAK_DEPTH.fetch_max(depth as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn record_type_mutation_backtrack(restores: usize) {
+    TYPE_MUTATION_BACKTRACKS.fetch_add(1, Ordering::Relaxed);
+    TYPE_MUTATION_RESTORES.fetch_add(restores as u64, Ordering::Relaxed);
+}
 
 /// Lazy lookup buckets tracked by `RESCRIPT_COMPILER_COUNTERS`.
 #[derive(Clone, Copy)]
@@ -138,6 +189,15 @@ struct SignatureCopySite {
     calls: u64,
     items: u64,
     max_items: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct MatchActionCloneSite {
+    calls: u64,
+    nodes: u64,
+    bytes: u64,
+    nanos: u64,
+    max_references: u64,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -323,6 +383,11 @@ pub fn reset() {
         &SIGNATURE_COPY_CALLS,
         &SIGNATURE_COPY_ITEMS,
         &SIGNATURE_COPY_MAX_ITEMS,
+        &MATCH_ACTION_CLONE_CALLS,
+        &MATCH_ACTION_CLONE_NODES,
+        &MATCH_ACTION_CLONE_BYTES,
+        &MATCH_ACTION_CLONE_NANOS,
+        &MATCH_ACTION_CLONE_MAX_REFERENCES,
         &REGISTRY_SNAPSHOTS,
         &REGISTRY_SHARED_ENTRIES_TOTAL,
         &REGISTRY_LOCAL_ENTRIES_TOTAL,
@@ -332,6 +397,15 @@ pub fn reset() {
         &REGISTRY_LOCAL_INFO_TOTAL,
         &REGISTRY_LOCAL_ALIASES_TOTAL,
         &REGISTRY_LOCAL_FALLBACKS_TOTAL,
+        &TYPE_MUTATION_DESC,
+        &TYPE_MUTATION_LEVEL,
+        &TYPE_MUTATION_ROW,
+        &TYPE_MUTATION_ABBREV,
+        &TYPE_MUTATION_STATE,
+        &TYPE_MUTATION_SNAPSHOTS,
+        &TYPE_MUTATION_BACKTRACKS,
+        &TYPE_MUTATION_RESTORES,
+        &TYPE_MUTATION_PEAK_DEPTH,
     ] {
         counter.store(0, Ordering::Relaxed);
     }
@@ -358,6 +432,12 @@ pub fn reset() {
         modules.lock().unwrap().clear();
     }
     if let Some(modules) = MODULE_SPARSE_RECORDS.get() {
+        modules.lock().unwrap().clear();
+    }
+    if let Some(sites) = MATCH_ACTION_CLONE_SITES.get() {
+        sites.lock().unwrap().clear();
+    }
+    if let Some(modules) = MODULE_MATCH_ACTION_CLONES.get() {
         modules.lock().unwrap().clear();
     }
 }
@@ -653,6 +733,50 @@ fn record_current_module_signature_freshen(item_count: usize) {
     });
 }
 
+/// Record one recursive materialization of a shared match action.
+///
+/// `bytes` is the estimated owned RawLambda footprint cloned at this site;
+/// `references` is the number of Arc handles or logical output uses that require the clone.
+pub(crate) fn record_match_action_clone(
+    location: &'static std::panic::Location<'static>,
+    nodes: usize,
+    bytes: usize,
+    elapsed_nanos: u64,
+    references: usize,
+) {
+    MATCH_ACTION_CLONE_CALLS.fetch_add(1, Ordering::Relaxed);
+    MATCH_ACTION_CLONE_NODES.fetch_add(nodes as u64, Ordering::Relaxed);
+    MATCH_ACTION_CLONE_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    MATCH_ACTION_CLONE_NANOS.fetch_add(elapsed_nanos, Ordering::Relaxed);
+    MATCH_ACTION_CLONE_MAX_REFERENCES.fetch_max(references as u64, Ordering::Relaxed);
+
+    let update = |entry: &mut MatchActionCloneSite| {
+        entry.calls += 1;
+        entry.nodes += nodes as u64;
+        entry.bytes += bytes as u64;
+        entry.nanos += elapsed_nanos;
+        entry.max_references = entry.max_references.max(references as u64);
+    };
+
+    let sites = MATCH_ACTION_CLONE_SITES.get_or_init(|| Mutex::new(HashMap::new()));
+    update(
+        sites
+            .lock()
+            .unwrap()
+            .entry((location.file(), location.line()))
+            .or_default(),
+    );
+
+    CURRENT_MODULE.with(|current| {
+        let current = current.borrow();
+        let Some(module) = current.as_ref() else {
+            return;
+        };
+        let modules = MODULE_MATCH_ACTION_CLONES.get_or_init(|| Mutex::new(HashMap::new()));
+        update(modules.lock().unwrap().entry(module.clone()).or_default());
+    });
+}
+
 /// Record a per-worker in-process module-registry snapshot.
 pub(crate) fn record_module_registry_snapshot(
     shared_entries: usize,
@@ -742,6 +866,19 @@ pub fn print_report() {
     print_signature_freshen_names();
     print_module_signature_copies();
     print_module_signature_freshens();
+    print_match_action_clones();
+    eprintln!(
+        "[compiler-counter] type_mutations desc={} level={} row={} abbrev={} state={} snapshots={} backtracks={} restores={} peak_depth={}",
+        TYPE_MUTATION_DESC.load(Ordering::Relaxed),
+        TYPE_MUTATION_LEVEL.load(Ordering::Relaxed),
+        TYPE_MUTATION_ROW.load(Ordering::Relaxed),
+        TYPE_MUTATION_ABBREV.load(Ordering::Relaxed),
+        TYPE_MUTATION_STATE.load(Ordering::Relaxed),
+        TYPE_MUTATION_SNAPSHOTS.load(Ordering::Relaxed),
+        TYPE_MUTATION_BACKTRACKS.load(Ordering::Relaxed),
+        TYPE_MUTATION_RESTORES.load(Ordering::Relaxed),
+        TYPE_MUTATION_PEAK_DEPTH.load(Ordering::Relaxed),
+    );
     eprintln!(
         "[compiler-counter] module_registry_snapshots count={} shared_entries_total={} local_entries_total={} max_shared_entries={} max_local_entries={} local_modules_total={} local_info_total={} local_aliases_total={} local_fallbacks_total={}",
         REGISTRY_SNAPSHOTS.load(Ordering::Relaxed),
@@ -754,6 +891,49 @@ pub fn print_report() {
         REGISTRY_LOCAL_ALIASES_TOTAL.load(Ordering::Relaxed),
         REGISTRY_LOCAL_FALLBACKS_TOTAL.load(Ordering::Relaxed),
     );
+}
+
+fn print_match_action_clones() {
+    eprintln!(
+        "[compiler-counter] match_action_clones calls={} nodes={} estimated_bytes={} nanos={} max_references={}",
+        MATCH_ACTION_CLONE_CALLS.load(Ordering::Relaxed),
+        MATCH_ACTION_CLONE_NODES.load(Ordering::Relaxed),
+        MATCH_ACTION_CLONE_BYTES.load(Ordering::Relaxed),
+        MATCH_ACTION_CLONE_NANOS.load(Ordering::Relaxed),
+        MATCH_ACTION_CLONE_MAX_REFERENCES.load(Ordering::Relaxed),
+    );
+
+    if let Some(sites) = MATCH_ACTION_CLONE_SITES.get() {
+        let mut sites: Vec<_> = sites
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        sites.sort_by_key(|(_, site)| std::cmp::Reverse(site.nodes));
+        for ((file, line), site) in sites.into_iter().take(12) {
+            eprintln!(
+                "[compiler-counter] match_action_clone_site file={file}:{line} calls={} nodes={} estimated_bytes={} nanos={} max_references={}",
+                site.calls, site.nodes, site.bytes, site.nanos, site.max_references,
+            );
+        }
+    }
+
+    if let Some(modules) = MODULE_MATCH_ACTION_CLONES.get() {
+        let mut modules: Vec<_> = modules
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        modules.sort_by_key(|(_, site)| std::cmp::Reverse(site.nodes));
+        for (module, site) in modules.into_iter().take(20) {
+            eprintln!(
+                "[compiler-counter] module_match_action_clones module={module} calls={} nodes={} estimated_bytes={} nanos={} max_references={}",
+                site.calls, site.nodes, site.bytes, site.nanos, site.max_references,
+            );
+        }
+    }
 }
 
 fn print_module_sparse_records() {

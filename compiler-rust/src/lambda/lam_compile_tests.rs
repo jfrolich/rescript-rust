@@ -8,7 +8,6 @@ pub(super) use crate::js_ir::{
 pub(super) use crate::lambda::js_exp_make::{
     int32_band, int32_bxor, int32_mul, ocaml_typeof_expr, raw_typeof_comparison,
 };
-pub(super) use crate::lambda::js_shake::later_toplevel_effect_allows_tail_move;
 pub(super) use crate::lambda::lam_coercion::resolve_export_aliases;
 pub(super) use crate::lambda::lam_compile_external::external_module_import_attributes;
 pub(super) use crate::lambda::lam_constant::{
@@ -10357,10 +10356,12 @@ fn recursive_self_tailcalls_lower_sequors_to_looping_while_bodies() {
 #[test]
 fn recursive_self_tailcalls_rename_params_before_loop_assignments() {
     let mut compiler = LambdaCompiler::new();
-    let loop_ = Ident::create_local("loop");
-    let a = Ident::create_local("a");
-    let b = Ident::create_local("b");
-    let flag = Ident::create_local("flag");
+    // Allocate from the compiler's generator so the stamps cannot collide
+    // with the loop parameters it creates, whatever ran before on this thread.
+    let loop_ = compiler.id_gen.create("loop");
+    let a = compiler.id_gen.create("a");
+    let b = compiler.id_gen.create("b");
+    let flag = compiler.id_gen.create("flag");
     let tailcall = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::var(loop_.clone())),
         ap_args: vec![
@@ -10412,9 +10413,9 @@ fn recursive_self_tailcalls_rename_params_before_loop_assignments() {
 #[test]
 fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
     let mut compiler = LambdaCompiler::new();
-    let f = Ident::create_local("f");
-    let n = Ident::create_local("n");
-    let acc = Ident::create_local("acc");
+    let f = compiler.id_gen.create("f");
+    let n = compiler.id_gen.create("n");
+    let acc = compiler.id_gen.create("acc");
     let body = Lambda::if_(
         Lambda::var(n.clone()),
         Lambda::Lapply(Box::new(Apply {
@@ -10427,7 +10428,7 @@ fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
                 ),
                 Lambda::function_(
                     1,
-                    vec![Ident::create_local("param")],
+                    vec![compiler.id_gen.create("param")],
                     Lambda::var(acc.clone()),
                     FunctionAttribute::default(),
                 ),
@@ -10454,20 +10455,27 @@ fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
         Lambda::unit(),
     );
 
+    // compile_expr is an internal entry point: unlike compile_program, it
+    // does not seed the lowering generator from the input Lambda. Construct
+    // this fixture with that same generator, as OCaml's Ext_ident.create does.
+    assert!(
+        compiler.id_gen.current_stamp()
+            >= crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(&lam)
+    );
     let compiled = compiler.compile_expr(&lam);
     let rendered = print_block(&compiled.prelude);
     let alias_start = rendered
         .find("let acc = _acc;")
-        .expect("expected acc alias in loop body");
+        .unwrap_or_else(|| panic!("expected acc alias in loop body:\n{rendered}"));
     let alias_next = rendered
         .find("let n = _n;")
-        .expect("expected n alias in loop body");
+        .unwrap_or_else(|| panic!("expected n alias in loop body:\n{rendered}"));
     let assign_start = rendered
         .find("_acc =")
-        .expect("expected acc reassignment in loop body");
+        .unwrap_or_else(|| panic!("expected acc reassignment in loop body:\n{rendered}"));
     let assign_next = rendered
         .find("_n =")
-        .expect("expected n reassignment in loop body");
+        .unwrap_or_else(|| panic!("expected n reassignment in loop body:\n{rendered}"));
 
     assert!(
         alias_start < alias_next,

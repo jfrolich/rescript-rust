@@ -673,7 +673,7 @@ fn pattern(arena: &ParseArena, p: &Pattern) -> Sexp {
             ])
         }
         PatternDesc::Ppat_record(inner) => {
-            let (ref fields, ref flag) = **inner;
+            let (ref fields, ref flag, ref record_rest) = **inner;
             Sexp::list(vec![
                 Sexp::atom("Ppat_record"),
                 closed_flag(flag),
@@ -683,7 +683,7 @@ fn pattern(arena: &ParseArena, p: &Pattern) -> Sexp {
                         pattern(arena, arena.get_pat(f.pat)),
                     ])
                 })),
-                match arena.record_pat_rest(p.ppat_loc) {
+                match record_rest.as_ref() {
                     None => Sexp::atom("None"),
                     Some(rest) => Sexp::list(vec![
                         Sexp::atom("Some"),
@@ -764,7 +764,7 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
             ])
         }
         ExpressionDesc::Pexp_fun(inner) => {
-            let params = arena
+            let params: Vec<Sexp> = arena
                 .nary_fun_params(inner)
                 .iter()
                 .map(|param| {
@@ -783,20 +783,14 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
                 .collect();
             Sexp::list(vec![
                 Sexp::atom("Pexp_fun"),
-                Sexp::list(
-                    arena
-                        .nary_fun_newtypes(inner)
-                        .iter()
-                        .map(|(name, attrs)| {
-                            Sexp::list(vec![
-                                Sexp::atom("newtype"),
-                                Sexp::atom(&quote_string(arena.get_string(name.txt))),
-                                attributes(arena, attrs),
-                            ])
-                        })
-                        .collect(),
-                ),
-                Sexp::list(params),
+                Sexp::list(map_empty(arena.nary_fun_newtypes(inner), |(name, attrs)| {
+                    Sexp::list(vec![
+                        Sexp::atom("newtype"),
+                        Sexp::atom(&quote_string(arena.get_string(name.txt))),
+                        attributes(arena, attrs),
+                    ])
+                })),
+                Sexp::list(if params.is_empty() { vec![Sexp::list(vec![])] } else { params }),
                 expression(arena, arena.get_expr(arena.nary_fun_body(inner))),
             ])
         }

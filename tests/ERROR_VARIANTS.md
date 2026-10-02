@@ -35,6 +35,15 @@ here because there's no constructor to track. If someone wants to add
 coverage for one of those messages, the first step is refactoring it
 into a named variant.
 
+## Forwarded extension errors
+
+Module-type extension errors are forwarded through `Builtin_attributes.error_of_extension`
+rather than a named `typemod` variant. The differential fixtures
+[`builtin_extension_modtype_uninterpreted.res`](error_output_parity/compiler/fixtures/builtin_extension_modtype_uninterpreted.res),
+[`builtin_extension_modtype_recursive.res`](error_output_parity/compiler/fixtures/builtin_extension_modtype_recursive.res), and
+[`builtin_extension_modtype_signature.resi`](error_output_parity/compiler/fixtures/builtin_extension_modtype_signature.resi)
+cover ordinary translation, recursive-module approximation, and signature declarations.
+
 ## Fixture paths
 
 - Single-file fixtures live in [`build_tests/super_errors/fixtures/`](build_tests/super_errors/fixtures/) with expected output in [`build_tests/super_errors/expected/`](build_tests/super_errors/expected/).

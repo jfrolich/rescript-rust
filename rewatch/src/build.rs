@@ -176,8 +176,17 @@ pub fn get_compiler_args(rescript_file_path: &Path) -> Result<String> {
     Ok(result)
 }
 
-pub fn get_compiler_info(project_context: &ProjectContext) -> Result<CompilerInfo> {
-    let bsc_path = helpers::get_bsc();
+pub fn get_compiler_info(project_context: &ProjectContext, build_mode: BuildMode) -> Result<CompilerInfo> {
+    // In-process builds compile with the compiler linked into this
+    // executable, so its identity invalidates previous builds; only the bsc
+    // subprocess modes need an external bsc.
+    let bsc_path = if build_mode.is_in_process() {
+        std::env::current_exe()
+            .and_then(|path| path.canonicalize())
+            .context("Could not resolve the rescript executable")?
+    } else {
+        helpers::get_bsc()
+    };
     let bsc_hash = helpers::compute_file_hash(&bsc_path).ok_or(anyhow!(
         "Failed to compute bsc hash for {}",
         bsc_path.to_string_lossy()
@@ -219,7 +228,7 @@ pub fn initialize_build(
     // Hashing the compiler binary is independent of package discovery, so
     // overlap the two.
     let (compiler, packages) = std::thread::scope(|scope| {
-        let compiler = scope.spawn(|| get_compiler_info(&project_context));
+        let compiler = scope.spawn(|| get_compiler_info(&project_context, build_mode));
         let packages = packages::make(filter, &project_context, show_progress, prod, features.as_ref());
         let compiler = compiler
             .join()
@@ -255,10 +264,13 @@ pub fn initialize_build(
     packages::parse_packages(&mut build_state)?;
     phase_mark("init:parse-packages");
 
-    let compile_assets_state = read_compile_state::read(&mut build_state)?;
-
+    let (diff_cleanup, total_cleanup) = if build_state.build_mode().is_in_process() {
+        clean::cleanup_previous_in_process_build(&mut build_state)
+    } else {
+        let compile_assets_state = read_compile_state::read(&mut build_state)?;
+        clean::cleanup_previous_build(&mut build_state, compile_assets_state)
+    };
     phase_mark("init:read-compile-state");
-    let (diff_cleanup, total_cleanup) = clean::cleanup_previous_build(&mut build_state, compile_assets_state);
     phase_mark("init:cleanup-previous");
     let timing_clean_total = timing_clean_start.elapsed();
 
@@ -408,12 +420,12 @@ pub fn incremental_build_without_lock(
         mark_all_modules_dirty(build_state);
     }
 
-    // A fresh --in-process build has no disk-backed .cmi cache to consult.
-    // Seed the in-memory registry by parsing and compiling every module once;
-    // watch-mode rebuilds can then keep using the retained registry.
-    let needs_in_process_seed =
+
+    // A fresh in-process build has nothing compiled in memory, so every
+    // module compiles (in-process builds keep no artifacts on disk).
+    let fresh_in_process =
         build_state.build_mode().is_in_process() && build_state.module_registry.lock().unwrap().is_empty();
-    if needs_in_process_seed {
+    if fresh_in_process {
         mark_all_modules_dirty(build_state);
     }
 
@@ -437,7 +449,7 @@ pub fn incremental_build_without_lock(
     phase_mark("parse-start");
     let timing_parse_start = Instant::now();
     let timing_ast = Instant::now();
-    let result_asts = if needs_in_process_seed {
+    let result_asts = if fresh_in_process {
         // The runtime pre-compilation only needs the registry and the runtime
         // sources, so run it while the project sources are parsed. `compile`
         // later finds the runtime already registered and skips it.

@@ -402,6 +402,7 @@ pub enum Node<'a> {
     Pattern(&'a Pattern),
     PatternIdx(PatIdx),
     PatternRecordRow(&'a Loc<LidentIdx>, PatIdx),
+    PatternRecordRest(&'a crate::parser::ast::RecordPatRest),
     RowField(&'a RowField),
     SignatureItem(&'a SignatureItem),
     StructureItem(&'a StructureItem),
@@ -478,6 +479,7 @@ impl<'a> Node<'a> {
             }
             Node::Pattern(p) => p.ppat_loc,
             Node::PatternIdx(idx) => arena.get_pat(*idx).ppat_loc,
+            Node::PatternRecordRest(rest) => rest.rest_loc,
             Node::PatternRecordRow(li, pat_idx) => {
                 let p = arena.get_pat(*pat_idx);
                 // For punned patterns, li.loc and p.ppat_loc are the same
@@ -775,6 +777,7 @@ fn walk_node(
             let p = arena.get_pat(*pat_idx).clone();
             walk_pattern_record_row(li, &p, t, comments, arena);
         }
+        Node::PatternRecordRest(rest) => walk_pattern_record_rest(rest, t, comments, arena),
         Node::RowField(rf) => walk_row_field(rf, t, comments, arena),
         Node::SignatureItem(si) => walk_signature_item(si, t, comments, arena),
         Node::StructureItem(si) => walk_structure_item(si, t, comments, arena),
@@ -1194,6 +1197,51 @@ fn walk_value_binding(
     comments: Vec<Comment>,
     arena: &mut ParseArena,
 ) {
+    // res_comments_table.ml:911-930: `pvb_constraint = Some {pvc_newtypes;
+    // pvc_type}` walks the pattern, each newtype name, then the type, and
+    // continues with the expression after the type.
+    if let Some(constraint) = arena.value_constraint(vb.pvb_pat).cloned() {
+        let pvb_pat = arena.get_pat(vb.pvb_pat).clone();
+        let (leading, inside, trailing) = partition_by_loc(comments, pvb_pat.ppat_loc, arena);
+        t.attach_leading(pvb_pat.ppat_loc, leading, arena);
+        walk_pattern(&pvb_pat, t, inside, arena);
+        let (after_pattern, rest) = partition_adjacent_trailing(pvb_pat.ppat_loc, trailing, arena);
+        t.attach_trailing(pvb_pat.ppat_loc, after_pattern, arena);
+        let rest = visit_list_but_continue_with_remaining_comments(
+            &constraint.pvc_newtypes,
+            |newtype, _| newtype.loc,
+            |newtype, t, comments, arena| {
+                let (leading, trailing) = partition_leading_trailing(comments, newtype.loc, arena);
+                t.attach_leading(newtype.loc, leading, arena);
+                t.attach_trailing(newtype.loc, trailing, arena);
+            },
+            t,
+            rest,
+            false,
+            arena,
+        );
+        let typ = arena.get_core_type(constraint.pvc_type).clone();
+        let (before_type, inside_type, after_type) = partition_by_loc(rest, typ.ptyp_loc, arena);
+        t.attach_leading(typ.ptyp_loc, before_type, arena);
+        walk_core_type(&typ, t, inside_type, arena);
+        // `walk_expression_after pvc_type.ptyp_loc vb.pvb_expr after_type`.
+        let (after_previous, surrounding_expr) =
+            partition_adjacent_trailing(typ.ptyp_loc, after_type, arena);
+        t.attach_trailing(typ.ptyp_loc, after_previous, arena);
+        let expr = arena.get_expr(vb.pvb_expr).clone();
+        let (before_expr, inside_expr, after_expr) =
+            partition_by_loc(surrounding_expr, expr.pexp_loc, arena);
+        if is_block_expr(arena, &expr) {
+            let combined: Vec<Comment> =
+                before_expr.into_iter().chain(inside_expr).chain(after_expr).collect();
+            walk_expression(&expr, t, combined, arena);
+        } else {
+            t.attach_leading(expr.pexp_loc, before_expr, arena);
+            walk_expression(&expr, t, inside_expr, arena);
+            t.attach_trailing(expr.pexp_loc, after_expr, arena);
+        }
+        return;
+    }
     // OCaml rewrites value binding locations for sugar cases to properly partition comments.
     // This is necessary because the AST locations for sugar forms span the entire binding,
     // which causes all comments to be "inside" the pattern and none for the expression.
@@ -2297,6 +2345,31 @@ fn walk_expression(
                         },
                     })
                     .collect();
+                // res_comments_table.ml:360-392: each newtype becomes a fake
+                // `Nolabel` parameter whose pattern is the name at its own
+                // location, and the parameters are walked in source order.
+                let mut parameters: Vec<OwnedFunParam> = parameters
+                    .into_iter()
+                    .flat_map(|param| match param {
+                        OwnedFunParam::NewTypes { names } => names
+                            .into_iter()
+                            .map(|name| OwnedFunParam::Parameter {
+                                label: ArgLabel::Nolabel,
+                                default_expr: None,
+                                pat: Pattern {
+                                    ppat_desc: Box::new(PatternDesc::Ppat_var(name.clone())),
+                                    ppat_loc: name.loc,
+                                    ppat_attributes: crate::parser::ast::Attributes::new(),
+                                },
+                            })
+                            .collect::<Vec<_>>(),
+                        other => vec![other],
+                    })
+                    .collect();
+                parameters.sort_by_key(|param| match param {
+                    OwnedFunParam::Parameter { pat, .. } => arena.loc_start(pat.ppat_loc).cnum,
+                    OwnedFunParam::NewTypes { .. } => 0,
+                });
                 (is_async, parameters, return_expr.clone())
             };
 
@@ -3003,11 +3076,14 @@ fn walk_pattern(
             walk_list(&nodes, t, comments, arena);
         }
         PatternDesc::Ppat_record(inner) => {
-            let (ref fields, _) = **inner;
-            let nodes: Vec<Node<'_>> = fields
+            let (ref fields, _, ref record_rest) = **inner;
+            let mut nodes: Vec<Node<'_>> = fields
                 .iter()
                 .map(|f| Node::PatternRecordRow(&f.lid, f.pat))
                 .collect();
+            if let Some(rest) = record_rest {
+                nodes.push(Node::PatternRecordRest(rest));
+            }
             walk_list(&nodes, t, comments, arena);
         }
         PatternDesc::Ppat_or(_, _) => {
@@ -3089,6 +3165,39 @@ fn walk_pattern_record_row(
     t.attach_trailing(pat.ppat_loc, after, arena);
 }
 
+/// OCaml `walk_pattern_record_rest` (res_comments_table.ml:2115-2133).
+fn walk_pattern_record_rest(
+    rest: &crate::parser::ast::RecordPatRest,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
+    fn attach_rest_name(
+        rest: &crate::parser::ast::RecordPatRest,
+        t: &mut CommentTable,
+        comments: Vec<Comment>,
+        arena: &mut ParseArena,
+    ) {
+        let (before_name, after_name) =
+            partition_leading_trailing(comments, rest.rest_name.loc, arena);
+        t.attach_leading(rest.rest_name.loc, before_name, arena);
+        t.attach_trailing(rest.rest_name.loc, after_name, arena);
+    }
+    match rest.rest_type {
+        None => attach_rest_name(rest, t, comments, arena),
+        Some(typ) => {
+            let typ = arena.get_core_type(typ).clone();
+            let (before_typ, inside_typ, after_typ) =
+                partition_by_loc(comments, typ.ptyp_loc, arena);
+            t.attach_leading(typ.ptyp_loc, before_typ, arena);
+            walk_core_type(&typ, t, inside_typ, arena);
+            let (after_typ, remaining) = partition_adjacent_trailing(typ.ptyp_loc, after_typ, arena);
+            t.attach_trailing(typ.ptyp_loc, after_typ, arena);
+            attach_rest_name(rest, t, remaining, arena);
+        }
+    }
+}
+
 fn walk_core_type(
     ct: &CoreType,
     t: &mut CommentTable,
@@ -3137,7 +3246,7 @@ fn walk_core_type(
             // This ensures comments between parameters are properly partitioned.
             use crate::parser::parsetree_viewer;
             let (parameters, return_type) = {
-                let (_, parameters, return_type) = parsetree_viewer::arrow_type(arena, ct, None);
+                let (_, parameters, return_type) = parsetree_viewer::arrow_type(arena, ct);
                 let parameters: Vec<OwnedTypeParameter> = parameters
                     .into_iter()
                     .map(|param| OwnedTypeParameter {

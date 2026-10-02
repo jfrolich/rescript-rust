@@ -44,7 +44,7 @@ pub enum RegionStatus {
 /// Used by `parse_attributes_and_binding` to speculatively parse attributes
 /// and restore state if they're not followed by `and`.
 pub struct ParserSnapshot<'src> {
-    scanner_snapshot: super::scanner::ScannerSnapshot<'src>,
+    scanner_snapshot: super::scanner::ScannerSnapshot,
     token: Token<'src>,
     start_pos: Position,
     end_pos: Position,
@@ -137,12 +137,6 @@ pub struct Parser<'src> {
     /// Depth of lookahead nesting. When > 0, next() skips arena position allocations.
     /// This prevents lookahead from affecting position indices for subsequent allocations.
     lookahead_depth: u32,
-    /// Current recursion depth for JSX parsing.
-    /// Used to prevent stack overflow from deeply nested JSX elements.
-    pub jsx_depth: usize,
-    /// General parse depth counter to prevent stack overflow from deeply nested parsing.
-    /// Incremented at major parsing entry points like parse_expr, parse_typ_expr, etc.
-    pub parse_depth: usize,
     /// Current type name path for inline record extraction (e.g., ["options", "extra"]).
     /// Set during type equation parsing to enable nested inline record extraction.
     pub current_type_name_path: Option<Vec<String>>,
@@ -204,8 +198,6 @@ impl<'src> Parser<'src> {
             arena,
             in_external: false,
             lookahead_depth: 0,
-            jsx_depth: 0,
-            parse_depth: 0,
             current_type_name_path: None,
             inline_types_found: None,
             inline_types_params: vec![],
@@ -352,6 +344,11 @@ impl<'src> Parser<'src> {
 
     /// Return the current end position index (no allocation).
     /// This enables sharing - multiple uses of `p.end_pos` return the same PosIdx.
+    /// OCaml `Scanner.peek_slash p.scanner`.
+    pub fn peek_slash(&self) -> bool {
+        self.scanner.peek_slash()
+    }
+
     pub fn end_pos_idx(&mut self) -> PosIdx {
         self.end_pos_idx
     }
@@ -628,29 +625,6 @@ impl<'src> Parser<'src> {
         if !self.regions.is_empty() {
             self.regions.pop();
         }
-    }
-
-    /// Maximum parse depth to prevent stack overflow from deeply nested constructs.
-    pub const MAX_PARSE_DEPTH: usize = 50;
-
-    /// Check if we've exceeded the maximum parse depth.
-    /// Returns true if we're at or beyond the limit.
-    #[inline]
-    pub fn exceeded_parse_depth(&self) -> bool {
-        self.parse_depth >= Self::MAX_PARSE_DEPTH
-    }
-
-    /// Increment parse depth before a potentially recursive parse.
-    /// Call `dec_parse_depth` when done.
-    #[inline]
-    pub fn inc_parse_depth(&mut self) {
-        self.parse_depth += 1;
-    }
-
-    /// Decrement parse depth after a recursive parse.
-    #[inline]
-    pub fn dec_parse_depth(&mut self) {
-        self.parse_depth = self.parse_depth.saturating_sub(1);
     }
 
     /// Advance to the next non-comment token.

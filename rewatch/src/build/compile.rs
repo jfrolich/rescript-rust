@@ -38,6 +38,9 @@ use std::time::Instant;
 use std::time::SystemTime;
 use tracing::{Span, info_span, instrument};
 
+/// Backend data not stored in the typed `.cmi`. Keep it next to the typed
+/// artifacts so a fresh one-shot process can resolve clean modules exactly as
+/// the in-memory registry does during a full build.
 /// Decode captured compiler output (stdout or stderr) into a String.
 ///
 /// The output is not guaranteed to be valid UTF-8: a code frame can truncate a
@@ -158,6 +161,8 @@ struct SignatureReadyMsg {
     module_name: String,
     fingerprint: u64,
     is_pure: bool,
+    previous_cmi_hash: Option<blake3::Hash>,
+    cmi_path: PathBuf,
     registry_updates: Vec<PendingRegistryUpdate>,
 }
 
@@ -338,11 +343,17 @@ fn apply_pending_registry_updates(
 }
 
 fn apply_signature_ready(build_command_state: &BuildCommandState, msg: SignatureReadyMsg) -> bool {
+    let previous_cmi_hash = msg.previous_cmi_hash;
+    let cmi_path = msg.cmi_path.clone();
     apply_pending_registry_updates(build_command_state, msg.registry_updates);
     let generation_before = build_command_state.get_interface_generation(&msg.module_name);
     let generation_after =
         build_command_state.register_in_memory_interface(msg.module_name, msg.fingerprint, msg.is_pure);
-    generation_before.is_some() && generation_before == Some(generation_after)
+    if generation_before.is_some() {
+        generation_before == Some(generation_after)
+    } else {
+        previous_cmi_hash.is_some() && previous_cmi_hash == helpers::compute_file_hash(&cmi_path)
+    }
 }
 
 fn unblock_dependents(
@@ -815,6 +826,16 @@ pub fn compile(
     )
     .entered();
     let compile_parent_span = Span::current();
+    if dirty_modules.is_empty() {
+        set_length(0);
+        let mut warnings = String::new();
+        append_compile_warnings(
+            &build_state.build_state,
+            collect_stored_warnings_for_modules_not_recompiled(&build_state.build_state, &AHashSet::new()),
+            &mut warnings,
+        );
+        return Ok((String::new(), warnings, 0));
+    }
 
     // In --in-process mode, purge deleted/renamed modules from the in-memory
     // registries so stale entries don't remain resolvable in watch mode.
@@ -991,7 +1012,11 @@ pub fn compile(
                     in_flight,
                 );
             }
-            while in_flight < capacity && !has_errors {
+            // A subprocess build stops dispatching at the first error. An
+            // in-process build recompiles everything, so it keeps compiling
+            // the modules that do not depend on a failed one: the result no
+            // longer depends on scheduling and every error is reported.
+            while in_flight < capacity && (in_process_mode || !has_errors) {
                 if let Some(pre_js_msg) = pop_ready_js(&mut ready_js, &waiting_js_by_dep) {
                     if let Some(counters) = scheduler_counters.as_mut() {
                         counters.scheduled_js += 1;
@@ -1208,7 +1233,9 @@ pub fn compile(
                             );
                         }
 
-                        if msg.result.is_err() || msg.interface_result.as_ref().is_some_and(|r| r.is_err()) {
+                        let module_failed =
+                            msg.result.is_err() || msg.interface_result.as_ref().is_some_and(|r| r.is_err());
+                        if module_failed {
                             has_errors = true;
                         }
 
@@ -1234,7 +1261,7 @@ pub fn compile(
 
                         if in_process_mode {
                             let completed_without_signature =
-                                !signature_ready.contains(&finished_name) && !has_errors;
+                                !signature_ready.contains(&finished_name) && !module_failed;
                             if completed_without_signature {
                                 unblock_dependents(
                                     build_state_ref,
@@ -1311,6 +1338,38 @@ pub fn compile(
     // per-package compile.log writes are deterministic across runs, even
     // though modules complete in arbitrary order.
     results_buffer.sort_by(|a, b| a.module_name.cmp(&b.module_name));
+
+    // A module is only dispatched once its dependencies compiled, so a module
+    // that (transitively) depends on a failed one is never compiled in a
+    // subprocess build. In-process builds can start a dependent early, from
+    // its dependency's published interface; drop such results so they are
+    // neither reported nor counted, and leave the module dirty.
+    let failed: AHashSet<String> = results_buffer
+        .iter()
+        .filter(|msg| msg.result.is_err() || matches!(msg.interface_result, Some(Err(_))))
+        .map(|msg| msg.module_name.clone())
+        .collect();
+    if !failed.is_empty() {
+        let depends_on_failed = |name: &str| {
+            let mut stack = vec![name.to_string()];
+            let mut seen = AHashSet::new();
+            while let Some(current) = stack.pop() {
+                let Some(module) = build_state.build_state.modules.get(&current) else {
+                    continue;
+                };
+                for dep in &module.deps {
+                    if failed.contains(dep) {
+                        return true;
+                    }
+                    if seen.insert(dep.clone()) {
+                        stack.push(dep.clone());
+                    }
+                }
+            }
+            false
+        };
+        results_buffer.retain(|msg| !depends_on_failed(&msg.module_name));
+    }
 
     // These timestamps are used as a compile-generation marker by
     // mark_modules_with_expired_deps_dirty, not as precise wall-clock compile
@@ -1765,22 +1824,28 @@ fn get_dependency_paths(
         .concat()
 }
 
-struct InProcessCompilerFlags {
-    nopervasives: bool,
-    no_version_header: bool,
-    check_div_by_zero: bool,
-    cross_module_inline: bool,
-    no_assert_false: bool,
-    noassert: bool,
-    no_builtin_ppx: bool,
-    make_runtime: bool,
-    debug: bool,
-    jsx_preserve: bool,
-    jsx_version: Option<i32>,
-    experimental_let_unwrap: bool,
-    open_modules: Vec<String>,
-    warning_specs: Vec<String>,
-    warning_error_specs: Vec<String>,
+pub(crate) struct InProcessCompilerFlags {
+    pub(crate) nopervasives: bool,
+    pub(crate) no_version_header: bool,
+    pub(crate) check_div_by_zero: bool,
+    pub(crate) cross_module_inline: bool,
+    pub(crate) no_assert_false: bool,
+    pub(crate) noassert: bool,
+    /// `Clflags.transparent_modules` (`-no-alias-deps`).
+    pub(crate) transparent_modules: bool,
+    pub(crate) no_builtin_ppx: bool,
+    pub(crate) make_runtime: bool,
+    pub(crate) debug: bool,
+    pub(crate) jsx_preserve: bool,
+    pub(crate) jsx_version: Option<i32>,
+    pub(crate) experimental_let_unwrap: bool,
+    pub(crate) open_modules: Vec<String>,
+    pub(crate) warning_specs: Vec<String>,
+    pub(crate) warning_error_specs: Vec<String>,
+    /// `Clflags.keep_locs` (`-keep-locs`/`-no-keep-locs`, default on).
+    pub(crate) keep_locs: bool,
+    /// `Clflags.binary_annotations` (`-bs-no-bin-annot` turns it off).
+    pub(crate) binary_annotations: bool,
 }
 
 impl Default for InProcessCompilerFlags {
@@ -1792,6 +1857,7 @@ impl Default for InProcessCompilerFlags {
             cross_module_inline: false,
             no_assert_false: false,
             noassert: false,
+            transparent_modules: false,
             no_builtin_ppx: false,
             make_runtime: false,
             debug: false,
@@ -1801,11 +1867,13 @@ impl Default for InProcessCompilerFlags {
             open_modules: Vec::new(),
             warning_specs: Vec::new(),
             warning_error_specs: Vec::new(),
+            keep_locs: true,
+            binary_annotations: true,
         }
     }
 }
 
-fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessCompilerFlags {
+pub(crate) fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessCompilerFlags {
     let mut parsed = InProcessCompilerFlags::default();
     let mut iter = flags.iter();
     while let Some(flag) = iter.next() {
@@ -1818,10 +1886,16 @@ fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessCompilerFlags {
             // OCaml compiler/bsc/rescript_compiler_main.ml:391-392
             // parses -noassert into Clflags.noassert.
             "-noassert" => parsed.noassert = true,
+            // compiler/bsc/rescript_compiler_main.ml:325-327.
+            "-no-alias-deps" => parsed.transparent_modules = true,
             "-bs-no-builtin-ppx" => parsed.no_builtin_ppx = true,
             "-make-runtime" => parsed.make_runtime = true,
             "-bs-g" => parsed.debug = true,
             "-bs-jsx-preserve" => parsed.jsx_preserve = true,
+            // compiler/bsc/rescript_compiler_main.ml:454-458.
+            "-keep-locs" => parsed.keep_locs = true,
+            "-no-keep-locs" => parsed.keep_locs = false,
+            "-bs-no-bin-annot" => parsed.binary_annotations = false,
             "-bs-jsx" => {
                 if let Some(version) = iter.next().and_then(|v| v.parse::<i32>().ok()) {
                     parsed.jsx_version = Some(version);
@@ -1891,8 +1965,29 @@ fn build_compiler_options(
         }
     }
 
-    // Add dev dependency paths if the module is type:dev
-    // (omitted for simplicity in first cut; can be added later)
+    // OCaml compiles with `-I` for the package, its dependencies and, for
+    // `type: dev` sources, its dev dependencies (`get_dependency_paths`);
+    // units of other packages are not visible.
+    let is_type_dev = build_state
+        .modules
+        .get(module_name)
+        .is_some_and(|module| module.is_type_dev);
+    let mut visible_package_roots = vec![package.path.clone()];
+    let visible_deps = package.config.get_dependency_names().into_iter().chain(
+        is_type_dev
+            .then(|| package.config.get_dev_dependency_names())
+            .into_iter()
+            .flatten(),
+    );
+    for dep_name in visible_deps {
+        if let Some(dep_pkg) = build_state.packages.get(&dep_name) {
+            visible_package_roots.push(dep_pkg.path.clone());
+            let dep_include = dep_pkg.get_ocaml_build_path();
+            if !include_paths.contains(&dep_include) {
+                include_paths.push(dep_include);
+            }
+        }
+    }
 
     // Extract JSX version from root config
     let jsx_version = parsed_flags.jsx_version.or_else(|| {
@@ -2067,6 +2162,7 @@ fn build_compiler_options(
         cross_module_inline: parsed_flags.cross_module_inline,
         no_assert_false: parsed_flags.no_assert_false,
         noassert: parsed_flags.noassert,
+        transparent_modules: parsed_flags.transparent_modules,
         no_builtin_ppx: parsed_flags.no_builtin_ppx,
         nopervasives: parsed_flags.nopervasives,
         no_version_header: parsed_flags.no_version_header,
@@ -2075,6 +2171,19 @@ fn build_compiler_options(
         make_runtime: parsed_flags.make_runtime,
         gentype_config,
         gentype_resolver,
+        // In-process builds keep typed results in memory; they write no
+        // `.cmi`/`.cmt`/`.cmti` files.
+        typed_artifacts: None,
+        keep_locs: parsed_flags.keep_locs,
+        binary_annotations: parsed_flags.binary_annotations,
+        visible_package_roots: Some(visible_package_roots),
+        // The file build passes `-bs-ns <Namespace>`, which leaves the
+        // namespace out of the saved import lists (js_packages_state.ml:38-42).
+        dont_record_crc_unit: package
+            .config
+            .get_namespace()
+            .to_suffix()
+            .map(|ns| ns.to_string()),
         ..Default::default()
     })
 }
@@ -2094,7 +2203,7 @@ fn js_output_path_for_spec(
 ) -> PathBuf {
     let suffix = root_config.get_suffix(spec);
     if spec.in_source {
-        let source_abs = Path::new(&package.path).join(source_file_path);
+        let source_abs = helpers::ocaml_absname(&Path::new(&package.path).join(source_file_path));
         helpers::get_source_file_from_rescript_file(&source_abs, &suffix)
     } else {
         let js_relative = helpers::get_source_file_from_rescript_file(source_file_path, &suffix);
@@ -2127,6 +2236,7 @@ fn js_output_suffix_for_registry(root_config: &config::Config) -> Option<String>
         .map(|spec| root_config.get_suffix(spec))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn in_memory_module_info_for_package(
     package: &packages::Package,
     root_config: &config::Config,
@@ -2134,11 +2244,13 @@ fn in_memory_module_info_for_package(
     is_pure: bool,
     cmj_export_constants: AHashMap<String, CmjExportConstant>,
     cmj_export_arities: AHashMap<String, CmjExportArity>,
+    cmj_export_lambdas: AHashMap<String, rescript_compiler::lambda::Lambda>,
     hoisted_exports: Vec<rescript_compiler::lambda::HoistedExport>,
     is_runtime: bool,
 ) -> InMemoryModuleInfo {
     InMemoryModuleInfo::new(source_path, is_pure, cmj_export_constants, is_runtime)
         .with_cmj_export_arities(cmj_export_arities)
+        .with_cmj_export_lambdas(cmj_export_lambdas)
         .with_cmj_hoisted_exports(hoisted_exports)
         .with_package(
             package.name.clone(),
@@ -2156,6 +2268,7 @@ fn js_metadata_registry_updates_for_package(
     is_pure: bool,
     cmj_export_constants: AHashMap<String, CmjExportConstant>,
     cmj_export_arities: AHashMap<String, CmjExportArity>,
+    cmj_export_lambdas: AHashMap<String, rescript_compiler::lambda::Lambda>,
     hoisted_exports: Vec<rescript_compiler::lambda::HoistedExport>,
     is_runtime: bool,
     has_interface: bool,
@@ -2170,6 +2283,7 @@ fn js_metadata_registry_updates_for_package(
         is_pure,
         cmj_export_constants,
         cmj_export_arities,
+        cmj_export_lambdas,
         hoisted_exports,
         is_runtime,
     );
@@ -2216,7 +2330,13 @@ fn send_js_metadata_ready(
 }
 
 /// Write JS output to the correct location(s) based on package specs.
+///
+/// In-process builds recompile every module, so leave files whose content is
+/// unchanged untouched: bundlers and watchers key off modification times.
 fn write_file_creating_parent_on_missing(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    if std::fs::read(path).is_ok_and(|existing| existing == contents.as_ref()) {
+        return Ok(());
+    }
     match std::fs::write(path, contents.as_ref()) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -2240,7 +2360,7 @@ fn write_js_output(
         let suffix = root_config.get_suffix(&spec);
         let js_path = if spec.in_source {
             // In-source: JS goes alongside the .res file, within the package root
-            let source_abs = Path::new(&package.path).join(source_file_path);
+            let source_abs = helpers::ocaml_absname(&Path::new(&package.path).join(source_file_path));
             helpers::get_source_file_from_rescript_file(&source_abs, &suffix)
         } else {
             // Out-of-source: JS goes in lib/js/ or lib/es6/ preserving relative path
@@ -2384,7 +2504,18 @@ fn register_namespace_signatures(build_state: &BuildCommandState) {
             .collect();
 
         if !module_aliases.is_empty() {
-            build_state.register_namespace_in_registry(&namespace_suffix, &module_aliases);
+            // Editor tooling reads the namespace unit from lib/bs like the
+            // bsc-compiled `.mlmap` (js_implementation.ml:207-226).
+            let mut sorted_aliases = module_aliases.clone();
+            sorted_aliases.sort();
+            // In-process builds write no namespace `.cmi`/`.cmt`, so there
+            // is no saved CRC list for importers to record.
+            build_state.register_namespace_in_registry(
+                &namespace_suffix,
+                &module_aliases,
+                package.path.clone(),
+                Vec::new(),
+            );
         }
     }
 }
@@ -2841,6 +2972,7 @@ fn compile_runtime_module_from_source(
         true,
     )
     .with_cmj_export_arities(compile_result.cmj_export_arities)
+    .with_cmj_export_lambdas(compile_result.cmj_export_lambdas)
     .with_cmj_hoisted_exports(compile_result.hoisted_exports);
 
     let mut shared_registry = registry.lock().unwrap();
@@ -3187,11 +3319,13 @@ fn runtime_compiler_options(
         cross_module_inline: parsed_flags.cross_module_inline,
         no_assert_false: parsed_flags.no_assert_false,
         noassert: parsed_flags.noassert,
+        transparent_modules: parsed_flags.transparent_modules,
         no_builtin_ppx: parsed_flags.no_builtin_ppx,
         nopervasives: parsed_flags.nopervasives,
         module_name: Some(module_name.to_string()),
         package_name: Some(runtime_config.name.clone()),
         make_runtime: parsed_flags.make_runtime,
+        keep_locs: parsed_flags.keep_locs,
         skip_js_render: true,
         ..Default::default()
     }
@@ -3254,7 +3388,9 @@ fn compile_module_in_process_to_js_boundary(
     let mut options = build_compiler_options(package, module_name, implementation_path, build_command_state)?;
     let root_config = build_state.get_root_config();
 
-    let source_abs = Path::new(&package.path).join(implementation_path);
+    let source_abs = helpers::ocaml_absname(&Path::new(&package.path).join(implementation_path));
+    let cmi_path = helpers::get_compiler_asset(package, &package.namespace, implementation_path, "cmi");
+    let previous_cmi_hash = helpers::compute_file_hash(&cmi_path);
     let is_runtime = package.name == "@rescript/runtime";
     let provisional_is_pure = false;
     let provisional_module_info = in_memory_module_info_for_package(
@@ -3262,6 +3398,7 @@ fn compile_module_in_process_to_js_boundary(
         root_config,
         source_abs.clone(),
         provisional_is_pure,
+        AHashMap::new(),
         AHashMap::new(),
         AHashMap::new(),
         Vec::new(),
@@ -3273,6 +3410,9 @@ fn compile_module_in_process_to_js_boundary(
     let mut local_registry = registry.clone();
     let mut interface_registry_update: Option<PendingRegistryUpdate> = None;
     let mut gentype_ignore_interface = false;
+    // The interface's warnings, reported before the implementation's (the
+    // subprocess path compiles the interface first).
+    let mut interface_warnings = String::new();
 
     // Register this module's metadata in the local registry
     local_registry.insert_module_info(module_name.to_string(), provisional_module_info.clone());
@@ -3285,7 +3425,7 @@ fn compile_module_in_process_to_js_boundary(
             path = %interface.path.display()
         )
         .entered();
-        let intf_source_abs = Path::new(&package.path).join(&interface.path);
+        let intf_source_abs = helpers::ocaml_absname(&Path::new(&package.path).join(&interface.path));
         let intf_key = format!("{module_name}:intf");
         let intf_result = match stored_asts.get(&intf_key) {
             Some(StoredAst::Signature(stored)) => {
@@ -3307,7 +3447,13 @@ fn compile_module_in_process_to_js_boundary(
                 intf_source_abs.display()
             ),
         }
-        .map_err(|e| anyhow!("Interface typecheck failed for {}: {}", module_name, e));
+        .map_err(
+            |e| match e.downcast::<rescript_compiler::driver::UserDiagnostic>() {
+                // A compiler diagnostic is reported as the text bsc prints.
+                Ok(diagnostic) => anyhow!("{}", diagnostic.output()),
+                Err(e) => anyhow!("Interface typecheck failed for {}: {}", module_name, e),
+            },
+        );
 
         let intf_result = match intf_result {
             Ok(r) => r,
@@ -3315,6 +3461,7 @@ fn compile_module_in_process_to_js_boundary(
                 return Err(e);
             }
         };
+        interface_warnings = intf_result.warnings;
 
         // Register the .resi's PersStruct in the local registry so the
         // .res compilation can find it for moregen constraints.
@@ -3356,6 +3503,8 @@ fn compile_module_in_process_to_js_boundary(
                     module_name: module_name.to_string(),
                     fingerprint: intf_fingerprint,
                     is_pure: provisional_is_pure,
+                    previous_cmi_hash,
+                    cmi_path: cmi_path.clone(),
                     registry_updates: interface_registry_update.iter().cloned().collect::<Vec<_>>(),
                 }))
                 .map_err(|err| anyhow!("failed to publish interface signature for {module_name}: {err}"))?;
@@ -3376,6 +3525,7 @@ fn compile_module_in_process_to_js_boundary(
     let signature_hooks = scheduler_hooks.cloned();
     let signature_module_name = module_name.to_string();
     let signature_module_info = provisional_module_info.clone();
+    let signature_cmi_path = cmi_path.clone();
     let mut signature_hook =
         move |ready: rescript_compiler::driver::InProcessSignatureReady| -> Result<Option<ModuleRegistry>> {
             let Some(hooks) = signature_hooks.as_ref() else {
@@ -3404,6 +3554,8 @@ fn compile_module_in_process_to_js_boundary(
                     module_name: signature_module_name.clone(),
                     fingerprint,
                     is_pure: provisional_is_pure,
+                    previous_cmi_hash,
+                    cmi_path: signature_cmi_path.clone(),
                     registry_updates,
                 }))
                 .map_err(|err| {
@@ -3457,9 +3609,17 @@ fn compile_module_in_process_to_js_boundary(
     };
 
     let pre_js = match pre_js {
-        Ok(Ok(result)) => result,
+        Ok(Ok(mut result)) => {
+            result.warnings.insert_str(0, &interface_warnings);
+            result
+        }
         Ok(Err(e)) => {
-            return Err(anyhow!("Compilation failed for {}: {}", module_name, e));
+            let e = in_process_compile_error(module_name, e);
+            return Err(if interface_warnings.is_empty() {
+                e
+            } else {
+                anyhow!("{interface_warnings}{e}")
+            });
         }
         Err(panic) => {
             let msg = if let Some(s) = panic.downcast_ref::<String>() {
@@ -3587,7 +3747,7 @@ fn finish_in_process_js_inner(
 ) -> Result<InProcessModuleResult> {
     let PreJsMsg {
         module_name,
-        pre_js,
+        mut pre_js,
         needed_modules: _,
         interface_registry_update,
         source_abs,
@@ -3603,6 +3763,8 @@ fn finish_in_process_js_inner(
     let package = build_state
         .get_package(&module.package_name)
         .expect("Package not found");
+    // The warnings bsc prints to stderr, filtered like the subprocess path.
+    let warning = visible_compiler_warnings(&std::mem::take(&mut pre_js.warnings), package.is_local_dep);
     let _span = if tracing::enabled!(tracing::Level::INFO) {
         info_span!(
             parent: &parent_span,
@@ -3626,6 +3788,7 @@ fn finish_in_process_js_inner(
             metadata.is_pure,
             metadata.cmj_export_constants,
             metadata.cmj_export_arities,
+            metadata.cmj_export_lambdas,
             metadata.hoisted_exports,
             is_runtime,
         );
@@ -3678,6 +3841,7 @@ fn finish_in_process_js_inner(
             compile_result.is_pure,
             compile_result.cmj_export_constants.clone(),
             compile_result.cmj_export_arities.clone(),
+            compile_result.cmj_export_lambdas.clone(),
             compile_result.hoisted_exports.clone(),
             is_runtime,
             has_interface,
@@ -3764,7 +3928,7 @@ fn finish_in_process_js_inner(
     }
 
     Ok(InProcessModuleResult {
-        warning: None,
+        warning,
         registry_updates,
     })
 }
@@ -4158,6 +4322,15 @@ fn compile_file(
 
             Ok(visible_compiler_warnings(&err, package.is_local_dep))
         }
+    }
+}
+
+/// An in-process compile failure. A compiler diagnostic is reported as the
+/// text bsc prints, like the subprocess path does.
+fn in_process_compile_error(module_name: &str, err: anyhow::Error) -> anyhow::Error {
+    match err.downcast::<rescript_compiler::driver::UserDiagnostic>() {
+        Ok(diagnostic) => anyhow!("{}", diagnostic.output()),
+        Err(err) => anyhow!("Compilation failed for {}: {}", module_name, err),
     }
 }
 

@@ -45,8 +45,6 @@ pub enum DiagnosticCategory {
     UnclosedComment,
     /// Unknown character.
     UnknownUchar(char),
-    /// OCaml `Syntaxerr.Error(_)` escaping from parser helpers.
-    FatalSyntaxerr,
 }
 
 /// A category of parser warning.
@@ -152,11 +150,13 @@ impl ParserDiagnostic {
                 let base = explain_unexpected(token, context);
                 // OCaml: special handling for old data-last pipe |> and array syntax [|...|]
                 if let (Token::Bar, Some(source)) = (token, src) {
+                    // res_diagnostics.ml:140-160 indexes the raw source bytes,
+                    // i.e. the chars of the Latin-1 source view.
                     let idx_prev = self.start_pos.cnum.saturating_sub(1) as usize;
                     let idx_next = self.end_pos.cnum as usize;
-                    let bytes = source.as_bytes();
+                    let byte_at = |idx: usize| source.chars().nth(idx);
                     // Check for [| (old array literal syntax)
-                    if idx_prev < bytes.len() && bytes[idx_prev] == b'[' {
+                    if self.start_pos.cnum >= 1 && byte_at(idx_prev) == Some('[') {
                         return base
                             + "\n\n  Did you mean to write an array literal? \
                             Arrays are written with `[ ... ]` (not `[| ... |]`).\n  \
@@ -164,7 +164,7 @@ impl ParserDiagnostic {
                             Example: `[|1, 2, 3|]` -> `[1, 2, 3]`";
                     }
                     // Check for |> (old data-last pipe)
-                    if idx_next < bytes.len() && bytes[idx_next] == b'>' {
+                    if byte_at(idx_next) == Some('>') {
                         return base
                             + "\n\n  The old data-last pipe `|>` has been removed \
                             from the language.\n  Refactor to use a data-first `->` pipe instead.";
@@ -217,12 +217,26 @@ impl ParserDiagnostic {
                 "This comment seems to be missing a closing `*/`".to_string()
             }
             DiagnosticCategory::UnknownUchar(ch) => {
-                format!("Not sure what to do with this character: \"{}\".", ch)
-            }
-            DiagnosticCategory::FatalSyntaxerr => {
-                "Fatal error: exception Syntaxerr.Error(_)".to_string()
+                format!(
+                    "Not sure what to do with this character: \"{}\".",
+                    char_escaped(*ch)
+                )
             }
         }
+    }
+}
+
+/// OCaml `Char.escaped` for a source byte (kept as a Latin-1 `char`).
+fn char_escaped(ch: char) -> String {
+    match ch {
+        '\'' => "\\'".to_string(),
+        '\\' => "\\\\".to_string(),
+        '\n' => "\\n".to_string(),
+        '\t' => "\\t".to_string(),
+        '\r' => "\\r".to_string(),
+        '\u{8}' => "\\b".to_string(),
+        ' '..='~' => ch.to_string(),
+        _ => format!("\\{:03}", ch as u32),
     }
 }
 

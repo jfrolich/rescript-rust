@@ -225,7 +225,7 @@ pub fn is_binary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expre
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 2 {
+            if args.len() != 2 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
@@ -233,7 +233,7 @@ pub fn is_binary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expre
                 ExpressionDesc::Pexp_ident(ident) => {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         let op = arena.get_string(*op_idx);
-                        not_ghost_operator(op, ident.loc.is_none())
+                        not_ghost_operator(op, arena.loc_ghost(ident.loc))
                     } else {
                         false
                     }
@@ -257,7 +257,7 @@ pub fn get_binary_operator(
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 2 {
+            if args.len() != 2 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
                 return None;
             }
             let funct_expr = arena.get_expr(*funct);
@@ -265,7 +265,7 @@ pub fn get_binary_operator(
                 ExpressionDesc::Pexp_ident(ident) => {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         let op = arena.get_string(*op_idx);
-                        if not_ghost_operator(op, ident.loc.is_none()) {
+                        if not_ghost_operator(op, arena.loc_ghost(ident.loc)) {
                             return Some(op.to_string());
                         }
                     }
@@ -389,10 +389,18 @@ pub fn expr_is_uncurried_fun(arena: &ParseArena, expr: &Expression) -> bool {
 /// all other arguments are NOT functions/newtypes.
 /// Note: underscore apply sugar is NOT considered a callback here because
 /// OCaml rewrites it before this check, and after rewriting it becomes Pexp_apply.
+///
+/// `partial` stands for the dummy `~...` argument res_printer.ml:4764-4769
+/// appends to a partial application before these checks; a callback is then
+/// never the last argument.
 pub fn requires_special_callback_printing_last_arg(
     arena: &ParseArena,
     args: &[(ArgLabel, ExprIdx)],
+    partial: bool,
 ) -> bool {
+    if partial {
+        return false;
+    }
     let mut iter = args.iter().peekable();
     while let Some((_, expr_idx)) = iter.next() {
         let expr = arena.get_expr(*expr_idx);
@@ -417,6 +425,7 @@ pub fn requires_special_callback_printing_last_arg(
 pub fn requires_special_callback_printing_first_arg(
     arena: &ParseArena,
     args: &[(ArgLabel, ExprIdx)],
+    partial: bool,
 ) -> bool {
     // Helper: is it a real callback (not underscore apply sugar)
     let is_real_callback = |expr_idx: &ExprIdx| -> bool {
@@ -424,8 +433,9 @@ pub fn requires_special_callback_printing_first_arg(
         is_fun_newtype(expr) && !is_underscore_apply_sugar(arena, expr)
     };
     match args {
-        // Single argument callback - use normal printing
-        [(_, expr_idx)] if is_real_callback(expr_idx) => false,
+        // Single argument callback - use normal printing (a partial
+        // application has the dummy `~...` argument after it).
+        [(_, expr_idx)] if is_real_callback(expr_idx) => partial,
         // First is callback, need to check rest
         [(_, expr_idx), rest @ ..] if is_real_callback(expr_idx) => {
             // All remaining args must NOT be callbacks
@@ -547,7 +557,7 @@ pub fn is_unary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expres
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 1 {
+            if args.len() != 1 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
@@ -786,39 +796,27 @@ pub fn collect_list_expressions<'a>(
     }
 }
 
-/// Collect patterns from a list constructor (::).
+/// res_parsetree_viewer.ml:646-653 collect_patterns_from_list_construct:
+/// the `::` heads and the remaining tail pattern.
 pub fn collect_list_patterns<'a>(
     arena: &'a crate::parse_arena::ParseArena,
     pat: &'a Pattern,
-) -> (Vec<&'a Pattern>, Option<&'a Pattern>) {
+) -> (Vec<&'a Pattern>, &'a Pattern) {
     let mut acc = Vec::new();
     let mut current = pat;
-
     loop {
-        match &*current.ppat_desc {
-            PatternDesc::Ppat_construct(lid, None) if arena.is_lident(lid.txt, "[]") => {
-                return (acc, None);
-            }
-            PatternDesc::Ppat_construct(lid, Some(arg_idx)) if arena.is_lident(lid.txt, "::") => {
-                // The argument should be a tuple of (head, tail)
-                let arg: &Pattern = arena.get_pat(*arg_idx);
-                if let PatternDesc::Ppat_tuple(pats) = &*arg.ppat_desc {
-                    if pats.len() == 2 {
-                        let head: &Pattern = arena.get_pat(pats[0]);
-                        let tail: &Pattern = arena.get_pat(pats[1]);
-                        acc.push(head);
-                        current = tail;
+        if let PatternDesc::Ppat_construct(lid, Some(arg_idx)) = &*current.ppat_desc {
+            if arena.is_lident(lid.txt, "::") {
+                if let PatternDesc::Ppat_tuple(pats) = &*arena.get_pat(*arg_idx).ppat_desc {
+                    if let [head, rest] = pats.as_slice() {
+                        acc.push(arena.get_pat(*head));
+                        current = arena.get_pat(*rest);
                         continue;
                     }
                 }
-                // Malformed list, return what we have with spread
-                return (acc, Some(current));
-            }
-            _ => {
-                // Not a list constructor, this is a spread
-                return (acc, Some(current));
             }
         }
+        return (acc, current);
     }
 }
 
@@ -859,6 +857,20 @@ pub enum FunParam<'a> {
         attrs: &'a [Attribute],
         names: Vec<&'a StringLoc>,
     },
+}
+
+/// `newtype_params` (res_parsetree_viewer.ml:191-211) for a function's n-ary
+/// newtypes: a newtype without attributes joins the previous group.
+fn push_nary_newtypes<'a>(arena: &'a ParseArena, fun: &'a PexpFun, params: &mut Vec<FunParam<'a>>) {
+    for (name, attrs) in arena.nary_fun_newtypes(fun) {
+        match params.last_mut() {
+            Some(FunParam::NewTypes { names, .. }) if attrs.is_empty() => names.push(name),
+            _ => params.push(FunParam::NewTypes {
+                attrs: attrs.as_slice(),
+                names: vec![name],
+            }),
+        }
+    }
 }
 
 /// Extract function parameters from a potentially nested function expression.
@@ -914,24 +926,16 @@ pub fn fun_expr<'a>(
         match &*current.pexp_desc {
             ExpressionDesc::Pexp_fun(inner) => {
                 if let Some(source_params) = arena.stored_nary_fun_params(inner) {
+                    // A function with its own parameter list is a separate
+                    // `Pexp_fun` in the body (res_parsetree_viewer.ml:213-216
+                    // reads only the outer node's params).
+                    if n_fun > 0 {
+                        break;
+                    }
                     if !found_first_pexp_fun {
                         is_async = is_async || inner.is_async;
                     }
-                    // OCaml res_parsetree_viewer.ml:209-216 puts the
-                    // function's newtypes before its regular parameters.
-                    // Attribute-bearing names start a new printable group.
-                    for (name, attrs) in arena.nary_fun_newtypes(inner) {
-                        if attrs.is_empty() {
-                            if let Some(FunParam::NewTypes { names, .. }) = params.last_mut() {
-                                names.push(name);
-                                continue;
-                            }
-                        }
-                        params.push(FunParam::NewTypes {
-                            attrs,
-                            names: vec![name],
-                        });
-                    }
+                    push_nary_newtypes(arena, inner, &mut params);
                     for source in source_params {
                         params.push(FunParam::Parameter {
                             attrs: &source.p_attrs,
@@ -961,6 +965,9 @@ pub fn fun_expr<'a>(
                 // OCaml's condition: arity = None || n_fun = 0
                 // ArityIdx: arena.get_arity() returns None for unknown, Some(_) for known
                 // Only collect if this is the first function OR there's no arity marker
+                if n_fun == 0 {
+                    push_nary_newtypes(arena, inner, &mut params);
+                }
                 if n_fun == 0 || arena.get_arity(*arity).is_none() {
                     // OCaml's fun_expr passes {expr_ with pexp_attributes = []} to collect_params,
                     // which means the FIRST parameter always gets empty attrs. For nested functions,
@@ -1001,7 +1008,9 @@ pub fn fun_expr<'a>(
 // Attribute Processing
 // ============================================================================
 
-/// Filter out fragile match attributes (used internally).
+/// `Res_parsetree_viewer.filter_fragile_match_attributes`
+/// (res_parsetree_viewer.ml:506-521): drop the `@warning("-4")` that the
+/// parser attaches to if-let matches.
 pub fn filter_fragile_match_attributes<'a>(
     arena: &ParseArena,
     attrs: &'a Attributes,
@@ -1009,8 +1018,23 @@ pub fn filter_fragile_match_attributes<'a>(
     attrs
         .iter()
         .filter(|attr| {
-            let name = arena.get_string(attr.0.txt);
-            name != "res.braces" && name != "res.ternary"
+            if arena.get_string(attr.0.txt) != "warning" {
+                return true;
+            }
+            let Payload::PStr(items) = &attr.1 else {
+                return true;
+            };
+            let [item] = items.as_slice() else {
+                return true;
+            };
+            let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
+                return true;
+            };
+            !matches!(
+                &*arena.get_expr(inner.0).pexp_desc,
+                ExpressionDesc::Pexp_constant(constant)
+                    if matches!(&**constant, Constant::String(s, _) if s.as_ref() == "-4")
+            )
         })
         .collect()
 }
@@ -1076,6 +1100,7 @@ pub fn filter_parsing_attrs_slice<'a>(
                     | "res.taggedTemplate"
                     | "res.patVariantSpread"
                     | "res.dictPattern"
+                    | "res.dictSpread"
                     | "res.inlineRecordDefinition"
             )
         })
@@ -1135,8 +1160,9 @@ pub fn partition_printable_attributes<'a>(
 /// Check if expression has any attributes (excluding internal parsing ones).
 pub fn has_attributes(arena: &ParseArena, attrs: &Attributes) -> bool {
     attrs.iter().any(|attr| {
-        !matches!(
-            arena.get_string(attr.0.txt),
+        let name = arena.get_string(attr.0.txt);
+        if matches!(
+            name,
             "res.braces"
                 | "ns.braces"
                 | "res.iflet"
@@ -1144,8 +1170,34 @@ pub fn has_attributes(arena: &ParseArena, attrs: &Attributes) -> bool {
                 | "res.await"
                 | "res.template"
                 | "res.inlineRecordDefinition"
-        )
+        ) {
+            return false;
+        }
+        // res_parsetree_viewer.ml:395-405: the fragile-match warning of an
+        // if-let does not count.
+        if name == "warning" && is_fragile_match_warning_payload(arena, &attr.1) {
+            return !has_if_let_attribute(arena, attrs);
+        }
+        true
     })
+}
+
+/// `PStr [Pstr_eval (Pexp_constant (Pconst_string ("-4", None)), _)]`.
+fn is_fragile_match_warning_payload(arena: &ParseArena, payload: &Payload) -> bool {
+    let Payload::PStr(items) = payload else {
+        return false;
+    };
+    let [item] = items.as_slice() else {
+        return false;
+    };
+    let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
+        return false;
+    };
+    matches!(
+        &*arena.get_expr(inner.0).pexp_desc,
+        ExpressionDesc::Pexp_constant(constant)
+            if matches!(&**constant, Constant::String(s, None) if s.as_ref() == "-4")
+    )
 }
 
 /// Check if an attribute is the inline record definition marker.
@@ -1410,113 +1462,29 @@ fn has_as_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
         .any(|attr| arena.get_string(attr.0.txt) == "as")
 }
 
-/// Extract arrow type components: (attrs_before, args, return_type)
-///
-/// This decomposes an arrow type like `(a, b) => c` into its argument list
-/// and return type. The `max_arity` parameter limits how many arguments to extract.
+/// `Res_parsetree_viewer.arrow_type` (res_parsetree_viewer.ml:3-7): an arrow
+/// is its attributes, its n-ary parameters and its return type.
 pub fn arrow_type<'a>(
     arena: &'a ParseArena,
     typ: &'a CoreType,
-    max_arity: Option<usize>,
 ) -> (&'a Attributes, Vec<TypeParameter<'a>>, &'a CoreType) {
-    // The current OCaml parsetree has one arrow containing all parameters
-    // (res_parsetree_viewer.ml:3-6). The arena stores that same n-ary shape
-    // beside the compact first argument used for frozen-v0 conversion.
-    if let CoreTypeDesc::Ptyp_arrow(inner) = &*typ.ptyp_desc {
-        let (first, ret, arity) = &**inner;
-        let args = arena.nary_arrow_args(first, *arity);
-        if let std::borrow::Cow::Borrowed(args) = args {
-            return (
-                &typ.ptyp_attributes,
-                args.iter()
-                    .map(|arg| TypeParameter {
-                        attrs: &arg.attrs,
-                        lbl: &arg.lbl,
-                        typ: arena.get_core_type(arg.typ),
-                    })
-                    .collect(),
-                arena.get_core_type(*ret),
-            );
-        }
-    }
-
-    // Legacy curried arrows still use the arity-limited traversal.
-    let max_arity: isize = max_arity.map(|n| n as isize).unwrap_or(isize::MAX);
-
-    fn process<'a>(
-        arena: &'a ParseArena,
-        attrs_before: &'a Attributes,
-        acc: Vec<TypeParameter<'a>>,
-        typ: &'a CoreType,
-        remaining_arity: isize,
-    ) -> (&'a Attributes, Vec<TypeParameter<'a>>, &'a CoreType) {
-        // OCaml: | _ when max_arity < 0 -> (attrs_before, List.rev acc, typ)
-        // Stop when we've exhausted our arity budget (gone negative means we
-        // tried to consume one more than allowed)
-        if remaining_arity < 0 {
-            return (attrs_before, acc, typ);
-        }
-
-        match &*typ.ptyp_desc {
-            CoreTypeDesc::Ptyp_arrow(inner) => {
-                let (ref arg, ref ret_idx, ref arity) = **inner;
-                // Stop at explicitly-aritied arrow if we already have arguments
-                // Arity is now ArityIdx, look up to check if it's Full
-                if arena.get_arity(*arity).is_some() && !acc.is_empty() && arg.attrs.is_empty() {
-                    return (attrs_before, acc, typ);
-                }
-
-                let ret: &CoreType = arena.get_core_type(*ret_idx);
-                let arg_typ: &CoreType = arena.get_core_type(arg.typ);
-
-                // Unlabeled argument with no attrs - continue processing
-                if matches!(arg.lbl, ArgLabel::Nolabel) && arg.attrs.is_empty() {
-                    let mut new_acc = acc;
-                    new_acc.push(TypeParameter {
-                        attrs: &arg.attrs,
-                        lbl: &arg.lbl,
-                        typ: arg_typ,
-                    });
-                    return process(arena, attrs_before, new_acc, ret, remaining_arity - 1);
-                }
-
-                // Unlabeled argument with attrs - return as final type
-                if matches!(arg.lbl, ArgLabel::Nolabel) {
-                    return (attrs_before, acc, typ);
-                }
-
-                // Labeled argument - continue processing
-                // Calculate adjusted arity for @as workaround
-                // OCaml: When arg is Ptyp_any with @as attr, don't decrement arity
-                let adjusted_arity = if matches!(&*arg_typ.ptyp_desc, CoreTypeDesc::Ptyp_any)
-                    && has_as_attr(arena, &arg_typ.ptyp_attributes)
-                {
-                    remaining_arity
-                } else {
-                    remaining_arity - 1
-                };
-
-                let mut new_acc = acc;
-                new_acc.push(TypeParameter {
-                    attrs: &arg.attrs,
-                    lbl: &arg.lbl,
-                    typ: arg_typ,
-                });
-                process(arena, attrs_before, new_acc, ret, adjusted_arity)
-            }
-
-            _ => (attrs_before, acc, typ),
-        }
-    }
-
     match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (..) = **inner;
-            // Start processing with the type's attributes as attrs_before,
-            // and process the type without those attributes
-            process(arena, &typ.ptyp_attributes, Vec::new(), typ, max_arity)
+            let (arg, ret, _) = &**inner;
+            let params = arena
+                .nary_arrow_args_slice(arg)
+                .unwrap_or(std::slice::from_ref(&**arg));
+            let params = params
+                .iter()
+                .map(|param| TypeParameter {
+                    attrs: &param.attrs,
+                    lbl: &param.lbl,
+                    typ: arena.get_core_type(param.typ),
+                })
+                .collect();
+            (&typ.ptyp_attributes, params, arena.get_core_type(*ret))
         }
-        _ => process(arena, &EMPTY_ATTRS, Vec::new(), typ, max_arity),
+        _ => (&EMPTY_ATTRS, Vec::new(), typ),
     }
 }
 
@@ -1618,7 +1586,7 @@ pub fn is_array_access(arena: &crate::parse_arena::ParseArena, expr: &Expression
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 2 {
+            if args.len() != 2 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
@@ -1646,7 +1614,7 @@ pub fn is_array_set(arena: &crate::parse_arena::ParseArena, expr: &Expression) -
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 3 {
+            if args.len() != 3 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
@@ -1706,6 +1674,27 @@ pub fn is_rewritten_underscore_apply_sugar(
 }
 
 /// Partition attributes into doc comments and regular attributes.
+/// res_parsetree_viewer.ml:581-597: a `res.doc` attribute whose payload is
+/// one string constant.
+pub fn is_doc_comment_attribute(arena: &ParseArena, attr: &Attribute) -> bool {
+    if arena.get_string(attr.0.txt) != "res.doc" {
+        return false;
+    }
+    let Payload::PStr(items) = &attr.1 else {
+        return false;
+    };
+    let [item] = items.as_slice() else {
+        return false;
+    };
+    let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
+        return false;
+    };
+    matches!(
+        &*arena.get_expr(eval.0).pexp_desc,
+        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(..))
+    )
+}
+
 pub fn partition_doc_comment_attributes<'a>(
     arena: &ParseArena,
     attrs: &'a Attributes,
@@ -1713,8 +1702,7 @@ pub fn partition_doc_comment_attributes<'a>(
     let mut doc_comments = Vec::new();
     let mut others = Vec::new();
     for attr in attrs {
-        let name = arena.get_string(attr.0.txt);
-        if name == "res.doc" || name == "ocaml.doc" {
+        if is_doc_comment_attribute(arena, attr) {
             doc_comments.push(attr);
         } else {
             others.push(attr);

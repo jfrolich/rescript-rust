@@ -588,7 +588,7 @@ fn pattern(p: &Pattern, arena: &ParseArena) -> Sexp {
             ])
         }
         PatternDesc::Ppat_record(inner) => {
-            let (ref fields, ref flag) = **inner;
+            let (ref fields, ref flag, ref record_rest) = **inner;
             Sexp::list(vec![
                 Sexp::atom("Ppat_record"),
                 closed_flag(flag),
@@ -607,7 +607,7 @@ fn pattern(p: &Pattern, arena: &ParseArena) -> Sexp {
                         })
                         .collect()
                 }),
-                match arena.record_pat_rest(p.ppat_loc) {
+                match record_rest.as_ref() {
                     None => Sexp::atom("None"),
                     Some(rest) => Sexp::list(vec![
                         match rest.rest_type {

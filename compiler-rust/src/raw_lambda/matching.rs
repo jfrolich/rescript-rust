@@ -694,7 +694,7 @@ fn normalize_pat_owned(q: &Pattern) -> Pattern {
             q.pat_env,
         ),
         PatternDesc::Tpat_or(..) => {
-            panic!("Parmatch.normalize_pat: Tpat_or")
+            crate::misc::fatal_error("Parmatch.normalize_pat")
         }
     }
 }
@@ -778,7 +778,7 @@ fn do_set_args<'p>(
             result.extend_from_slice(r);
             return result;
         }
-        _ => panic!("Parmatch.set_args"),
+        _ => crate::misc::fatal_error("Parmatch.set_args"),
     };
     let mut result = Vec::with_capacity(rest.len() + 1);
     result.push(&*pa.alloc(head));
@@ -1304,7 +1304,7 @@ pub fn filter_matrix<'p>(
         match row.split_first() {
             Some((p, ps)) => filter_row(matcher, p, ps, &mut out),
             // Empty rows shouldn't appear here — fatal error in OCaml.
-            None => panic!("Matching.filter_matrix: empty row"),
+            None => crate::misc::fatal_error("Matching.filter_matrix"),
         }
     }
     out
@@ -1456,7 +1456,7 @@ where
                 _ => Err(MatchError::NoMatch),
             })
         }
-        _ => panic!("Matching.ctx_matcher: unsupported pattern"),
+        _ => crate::misc::fatal_error("Matching.ctx_matcher"),
     }
 }
 
@@ -1507,7 +1507,7 @@ pub fn filter_ctx<'p>(
     for l in ctx {
         match l.right.split_first() {
             Some((p, ps)) => filter_one(&*matcher, &l.left, p, ps, &mut out),
-            None => panic!("Matching.filter_ctx: empty right"),
+            None => crate::misc::fatal_error("Matching.filter_ctx"),
         }
     }
     out
@@ -1555,7 +1555,7 @@ pub fn ctx_lub<'p>(pa: &'p PatArena, p: &'p Pattern, ctx: &[Ctx<'p>]) -> Vec<Ctx
                     });
                 }
             }
-            None => panic!("Matching.ctx_lub: empty right"),
+            None => crate::misc::fatal_error("Matching.ctx_lub"),
         }
     }
     result
@@ -3454,7 +3454,7 @@ fn is_guarded(lam: &RawLambda) -> bool {
 fn pat_as_constr<'p>(p: &'p Pattern) -> &crate::types::ConstructorDescription {
     match &p.pat_desc {
         PatternDesc::Tpat_construct(_, cstr, _) => cstr,
-        _ => panic!("Matching.pat_as_constr"),
+        _ => crate::misc::fatal_error("Matching.pat_as_constr"),
     }
 }
 
@@ -3517,7 +3517,7 @@ fn get_group(p: &Pattern) -> fn(&Pattern) -> bool {
         PatternDesc::Tpat_record(_, _, _) => group_record,
         PatternDesc::Tpat_array(_) => group_array,
         PatternDesc::Tpat_variant(_, _, _) => group_variant,
-        _ => panic!("Matching.get_group"),
+        _ => crate::misc::fatal_error("Matching.get_group"),
     }
 }
 
@@ -4725,7 +4725,7 @@ fn make_constant_matching<'p>(
     args: &MatchArgs,
 ) -> MatchCell<'p> {
     match args.split_first() {
-        None => panic!("Matching.make_constant_matching"),
+        None => crate::misc::fatal_error("Matching.make_constant_matching"),
         Some(_) => {
             let key = get_key_constant("make", p);
             let def = make_default(&|p2, rem| matcher_const(&key, p2, rem), def);
@@ -4964,7 +4964,7 @@ fn make_constr_matching<'p>(
     args: &MatchArgs,
 ) -> MatchCell<'p> {
     match args.split_first() {
-        None => panic!("Matching.make_constr_matching"),
+        None => crate::misc::fatal_error("Matching.make_constr_matching"),
         Some(((arg, _mut), _)) => {
             let argl = args.tail(1);
             let cstr = pat_as_constr(p);
@@ -5112,7 +5112,7 @@ fn make_variant_matching_constant<'p>(
     args: &MatchArgs,
 ) -> MatchCell<'p> {
     match args.split_first() {
-        None => panic!("Matching.make_variant_matching_constant"),
+        None => crate::misc::fatal_error("Matching.make_variant_matching_constant"),
         Some(_) => {
             let lab_owned = lab.to_string();
             let def = make_default(&|p2, rem| matcher_variant_const(&lab_owned, p2, rem), def);
@@ -5164,7 +5164,7 @@ fn make_variant_matching_nonconst<'p>(
     args: &MatchArgs,
 ) -> MatchCell<'p> {
     match args.split_first() {
-        None => panic!("Matching.make_variant_matching_nonconst"),
+        None => crate::misc::fatal_error("Matching.make_variant_matching_nonconst"),
         Some(((arg, _mut), _)) => {
             let argl = args.tail(1);
             let lab_owned = lab.to_string();
@@ -5298,7 +5298,7 @@ fn matcher_get_args_var<'p>(_p: &'p Pattern, rem: &[&'p Pattern]) -> Result<Vec<
 /// Equivalent to OCaml's `make_var_matching`.
 fn make_var_matching<'p>(def: &DefaultEnv<'p>, args: &MatchArgs) -> PatternMatching<'p> {
     match args.split_first() {
-        None => panic!("Matching.make_var_matching"),
+        None => crate::misc::fatal_error("Matching.make_var_matching"),
         Some(_) => PatternMatching {
             cases: Vec::new(),
             args: args.tail(1),
@@ -5365,7 +5365,7 @@ fn make_tuple_matching<'p>(
     args: &MatchArgs,
 ) -> PatternMatching<'p> {
     match args.split_first() {
-        None => panic!("Matching.make_tuple_matching"),
+        None => crate::misc::fatal_error("Matching.make_tuple_matching"),
         Some(((arg, _mut), _)) => {
             let argl = args.tail(1);
             let mut new_args = Vec::new();
@@ -5511,7 +5511,7 @@ fn make_record_matching<'p>(
     args: &MatchArgs,
 ) -> PatternMatching<'p> {
     match args.split_first() {
-        None => panic!("Matching.make_record_matching"),
+        None => crate::misc::fatal_error("Matching.make_record_matching"),
         Some(((arg, _mut), _)) => {
             let argl = args.tail(1);
             let mut new_args = Vec::new();
@@ -5619,7 +5619,7 @@ fn matcher_array<'p>(len: usize, p: &'p Pattern, rem: &[&'p Pattern]) -> Result<
 /// Equivalent to OCaml's `make_array_matching`.
 fn make_array_matching<'p>(pa: &'p PatArena, p: &'p Pattern, def: &DefaultEnv<'p>, ctx: &[Ctx<'p>], args: &MatchArgs) -> MatchCell<'p> {
     match args.split_first() {
-        None => panic!("Matching.make_array_matching"),
+        None => crate::misc::fatal_error("Matching.make_array_matching"),
         Some(((arg, _mut), _)) => {
             let argl = args.tail(1);
             let len = get_key_array(p);
@@ -6780,7 +6780,7 @@ pub fn call_switcher(
 /// Equivalent to OCaml's `list_as_pat`.
 fn list_as_pat<'p>(pa: &'p PatArena, pats: &[&'p Pattern]) -> &'p Pattern {
     match pats {
-        [] => panic!("Matching.list_as_pat"),
+        [] => crate::misc::fatal_error("Matching.list_as_pat"),
         [pat] => pat,
         _ => pa.alloc(list_as_pat_owned(pats)),
     }
@@ -6788,7 +6788,7 @@ fn list_as_pat<'p>(pa: &'p PatArena, pats: &[&'p Pattern]) -> &'p Pattern {
 
 fn list_as_pat_owned(pats: &[&Pattern]) -> Pattern {
     match pats {
-        [] => panic!("Matching.list_as_pat"),
+        [] => crate::misc::fatal_error("Matching.list_as_pat"),
         [pat] => (*pat).clone(),
         [pat, rest @ ..] => with_desc(
             pat,
@@ -8268,7 +8268,7 @@ fn comp_exit<'p>(ctx: &[Ctx<'p>], m: &PatternMatching<'p>) -> Result<(RawLambda,
             RawLambda::LstaticRaise(*i, Vec::new()),
             jumps_singleton(*i, ctx.to_vec()),
         )),
-        None => panic!("Matching.comp_exit"),
+        None => crate::misc::fatal_error("Matching.comp_exit"),
     }
 }
 

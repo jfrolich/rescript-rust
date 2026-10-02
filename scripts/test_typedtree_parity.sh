@@ -317,21 +317,21 @@ if [[ "$STDLIB_MODE" == "true" ]]; then
     # Runtime package artifacts are ignored, while JS outputs are checked in.
     # Build without cleaning so this diagnostic mode does not delete snapshots.
     echo "Building stdlib/runtime with OCaml bsc to generate AST artifacts..."
-    if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
+    if ! RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
         echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
     fi
 elif [[ "$TELLA_MODE" == "true" ]]; then
     # Build with OCaml bsc to ensure all .ast artifacts exist.
     # Rust parity is measured per-file below with the same compiler args.
     echo "Building with OCaml bsc to generate AST artifacts..."
-    RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
-    if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
+    RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
+    if ! RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
         echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
     fi
 else
     # Use the standard OCaml bsc for the initial build
-    RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
-    if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
+    RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
+    if ! RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
         echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
     fi
 fi
@@ -736,6 +736,11 @@ if [[ "$RUST_AVAILABLE" == "true" && -n "$PARITY_FAILURES" && "$PARITY_FAIL" -gt
 fi
 
 # Calculate and display parity percentage
+# A matching subset is not a successful parity run when either compiler failed.
+if [[ "$OCAML_FAIL" -gt 0 || ("$RUST_AVAILABLE" == "true" && ("$RUST_FAIL" -gt 0 || "$PARITY_FAIL" -gt 0)) ]]; then
+    exit 1
+fi
+
 if [[ "$RUST_AVAILABLE" == "true" ]]; then
     # Only count files where both compilers succeeded
     BOTH_SUCCEEDED=$((PARITY_PASS + PARITY_FAIL))

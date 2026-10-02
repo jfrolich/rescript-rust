@@ -18,6 +18,8 @@ use std::{borrow::Cow, fmt};
 
 use crate::diagnostics::{Warning, WarningConfig};
 use crate::intern::StrIdx;
+
+mod check;
 use crate::parse_arena::{
     CoreTypeIdx, ExprIdx, LidentIdx, LocIdx, Located, ModExprIdx, ModTypeIdx, ParseArena, PatIdx,
 };
@@ -460,12 +462,14 @@ fn classify_recovered_arrow_function_arity(code: &str) -> Option<usize> {
     let trimmed = code.trim();
     let arrow_pos = trimmed.find("=>")?;
     let after_arrow = trimmed.get(arrow_pos + 2..)?.trim();
-    let completed = if after_arrow.is_empty() {
-        format!("{trimmed} undefined")
-    } else if after_arrow == "{" {
+    // Flow recovers an arrow function whose body has parse errors and
+    // Classify_function.classify_exp still sees the arrow root
+    // (compiler/ml/ast_payload.ml:134-150); classify the parameter list with a
+    // placeholder body.
+    let completed = if after_arrow == "{" {
         format!("{trimmed}}}")
     } else {
-        return None;
+        format!("{} undefined", &trimmed[..arrow_pos + 2])
     };
 
     match classify_js_exp(&completed) {
@@ -724,6 +728,13 @@ fn flow_like_raw_js_expression_parse_warning(
         );
     }
 
+    if oxc_message == "Unexpected token"
+        && start_offset < code.trim_end().len()
+        && let Some(token) = code.get(start_offset..).and_then(|s| s.chars().next())
+    {
+        return (format!("Unexpected token `{token}`"), start_offset, end_offset);
+    }
+
     (
         flow_like_raw_js_parse_message(code, oxc_message, start_offset),
         start_offset,
@@ -937,27 +948,6 @@ fn push_raw_re_warning(payload: &Payload, arena: &mut ParseArena, warnings: &mut
     }
 }
 
-fn push_ffi_function_warning(
-    payload: &Payload,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    let payload_info = payload_single_string_literal_info(payload, arena)
-        .map(|(code, loc, offset)| (code.to_string(), loc, offset));
-    if let Some((code, loc, offset)) = payload_info {
-        if is_js_function(&code) {
-            if let Some(warning) = raw_js_expression_parse_warning(&code, loc, offset, arena) {
-                warnings.push(PpxWarning {
-                    loc: warning.loc,
-                    warning: Warning::BsFfiWarning {
-                        message: warning.message,
-                    },
-                });
-            }
-        }
-    }
-}
-
 fn push_raw_js_program_warning(
     payload: &Payload,
     arena: &mut ParseArena,
@@ -974,104 +964,6 @@ fn push_raw_js_program_warning(
                 },
             });
         }
-    }
-}
-
-fn collect_raw_js_warnings_from_expr_idx(
-    expr_idx: ExprIdx,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    let expr = arena.get_expr(expr_idx).clone();
-    collect_raw_js_warnings_from_expr(&expr, arena, warnings);
-}
-
-fn collect_raw_js_warnings_from_mod_expr_idx(
-    mod_expr_idx: ModExprIdx,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    let mod_expr = arena.get_mod_expr(mod_expr_idx).clone();
-    match &*mod_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(items) => {
-            collect_raw_js_warnings_from_structure(items, arena, warnings)
-        }
-        ModuleExprDesc::Pmod_functor(inner) => {
-            let (_name, _mty, body) = &**inner;
-            collect_raw_js_warnings_from_mod_expr_idx(*body, arena, warnings);
-        }
-        ModuleExprDesc::Pmod_apply(left, right) => {
-            collect_raw_js_warnings_from_mod_expr_idx(*left, arena, warnings);
-            collect_raw_js_warnings_from_mod_expr_idx(*right, arena, warnings);
-        }
-        ModuleExprDesc::Pmod_constraint(inner, _mty) => {
-            collect_raw_js_warnings_from_mod_expr_idx(*inner, arena, warnings);
-        }
-        ModuleExprDesc::Pmod_unpack(expr) => {
-            collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
-        }
-        _ => {}
-    }
-}
-
-fn collect_raw_js_warnings_from_structure_item(
-    item: &StructureItem,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    match &*item.pstr_desc {
-        StructureItemDesc::Pstr_primitive(vd) => {
-            collect_obj_optional_as_warnings(vd, arena, warnings);
-            collect_external_string_redundant_warnings(vd, arena, warnings);
-        }
-        StructureItemDesc::Pstr_eval(inner) => {
-            let (expr, attrs) = &**inner;
-            collect_unused_bs_attributes(attrs, arena, warnings);
-            collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
-        }
-        StructureItemDesc::Pstr_value(inner) => {
-            let (_rec, bindings) = &**inner;
-            for binding in bindings {
-                collect_raw_js_warnings_from_value_binding(binding, arena, warnings);
-            }
-        }
-        StructureItemDesc::Pstr_type(inner) => {
-            let (_rec_flag, tdcls) = &**inner;
-            for declaration in tdcls {
-                collect_unused_bs_attributes(&declaration.ptype_attributes, arena, warnings);
-            }
-            collect_deriving_not_applicable_warnings(
-                tdcls,
-                arena,
-                warnings,
-                DerivingExpansionContext::StructureItem,
-            );
-        }
-        StructureItemDesc::Pstr_module(mb) => {
-            collect_raw_js_warnings_from_mod_expr_idx(mb.pmb_expr, arena, warnings);
-        }
-        StructureItemDesc::Pstr_recmodule(bindings) => {
-            for binding in bindings.iter() {
-                collect_raw_js_warnings_from_mod_expr_idx(binding.pmb_expr, arena, warnings);
-            }
-        }
-        StructureItemDesc::Pstr_include(include_decl) => {
-            collect_raw_js_warnings_from_mod_expr_idx(include_decl.pincl_mod, arena, warnings);
-        }
-        StructureItemDesc::Pstr_extension(inner) => {
-            let (extension, attrs) = &**inner;
-            collect_unused_bs_attributes(attrs, arena, warnings);
-            let (ext_name, payload) = extension;
-            let name = arena.get_string(ext_name.txt);
-            if name == "raw" {
-                push_raw_js_program_warning(payload, arena, warnings);
-            } else if name == "private" {
-                if let Payload::PStr(items) = payload {
-                    collect_raw_js_warnings_from_structure(items, arena, warnings);
-                }
-            }
-        }
-        _ => {}
     }
 }
 
@@ -1115,9 +1007,13 @@ fn collect_builtin_warning_attribute(
             }
         }
         "ppwarning" | "ocaml.ppwarning" => {
-            if let Some((message, loc)) = payload_single_string_literal_with_loc(payload, arena) {
+            if let Some((message, _)) = payload_single_string_literal_with_loc(payload, arena) {
+                // builtin_attributes.ml:202-212 reports at the item's `pstr_loc`.
+                let Payload::PStr(items) = payload else {
+                    unreachable!("a single string literal payload is a structure");
+                };
                 warnings.push(PpxWarning {
-                    loc,
+                    loc: items[0].pstr_loc,
                     warning: Warning::Preprocessor {
                         message: message.to_string(),
                     },
@@ -1241,252 +1137,361 @@ fn is_bs_unused_attribute_candidate(name: &str) -> bool {
     )
 }
 
-fn collect_unused_bs_attributes_from_slice(
+/// OCaml `Bs_ast_invariant.warn_unused_attribute` (bs_ast_invariant.ml:36-45).
+pub(crate) fn warn_unused_attribute(
+    attr: &Attribute,
+    arena: &ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    let (attr_name, _) = attr;
+    let name = arena.get_string(attr_name.txt);
+    if is_bs_unused_attribute_candidate(name)
+        && !arena.loc_ghost(attr_name.loc)
+        && !arena.is_used_attribute(attr_name.loc)
+    {
+        warnings.push(PpxWarning {
+            loc: attr_name.loc,
+            warning: Warning::BsUnusedAttribute {
+                name: name.to_string(),
+            },
+        });
+    }
+}
+
+/// OCaml `Bs_ast_invariant.warn_discarded_unused_attributes`.
+pub(crate) fn warn_discarded_unused_attributes(
     attrs: &[Attribute],
     arena: &ParseArena,
     warnings: &mut Vec<PpxWarning>,
 ) {
-    for (attr_name, _) in attrs {
-        let name = arena.get_string(attr_name.txt);
-        if is_bs_unused_attribute_candidate(name) && !arena.loc_ghost(attr_name.loc) {
+    for attr in attrs {
+        warn_unused_attribute(attr, arena, warnings);
+    }
+}
+
+/// Whether an `@as` payload is one `Ast_untagged_variants.process_tag_type`
+/// accepts (and therefore marks used): a string, number, bigint, bool, or the
+/// identifiers `null` / `undefined`.
+fn is_valid_tag_as_payload(payload: &Payload, arena: &ParseArena) -> bool {
+    let Payload::PStr(items) = payload else {
+        return false;
+    };
+    let [item] = items.as_slice() else {
+        return false;
+    };
+    let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
+        return false;
+    };
+    let expr = arena.get_expr(inner.0);
+    match &*expr.pexp_desc {
+        // `is_single_string`/`int`/`float`/`bigint`; a character is none of
+        // them.
+        ExpressionDesc::Pexp_constant(constant) => !matches!(&**constant, Constant::Char(_)),
+        // `is_single_bool` accepts `true`/`false` with any argument.
+        ExpressionDesc::Pexp_construct(lid, _) => matches!(
+            arena.get_longident(lid.txt),
+            crate::parser::longident::Longident::Lident(idx)
+                if matches!(arena.get_string(*idx), "true" | "false")
+        ),
+        ExpressionDesc::Pexp_ident(lid) => matches!(
+            arena.get_longident(lid.txt),
+            crate::parser::longident::Longident::Lident(idx)
+                if matches!(arena.get_string(*idx), "null" | "undefined")
+        ),
+        _ => false,
+    }
+}
+
+/// OCaml `Ext_string.is_valid_hash_number`.
+fn is_valid_hash_number(value: &str) -> bool {
+    match value.as_bytes() {
+        [] => false,
+        [b'0'..=b'9'] => true,
+        [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
+        _ => false,
+    }
+}
+
+/// OCaml `Bs_ast_invariant.check_constant` (bs_ast_invariant.ml:54-64): an
+/// integer literal without suffix that `Int32.of_string` rejects warns.
+fn check_constant(loc: LocIdx, constant: &Constant, warnings: &mut Vec<PpxWarning>) {
+    if let Constant::Integer(s, None) = constant {
+        if !crate::types::typecore::int32_literal_fits_ocaml(s) {
             warnings.push(PpxWarning {
-                loc: attr_name.loc,
-                warning: Warning::BsUnusedAttribute {
-                    name: name.to_string(),
-                },
+                loc,
+                warning: Warning::BsIntegerLiteralOverflow,
             });
         }
     }
 }
 
-fn collect_unused_bs_attributes(
-    attrs: &Attributes,
-    arena: &ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    collect_unused_bs_attributes_from_slice(attrs.as_slice(), arena, warnings);
+/// OCaml `Bs_ast_invariant.emit_external_warnings` (bs_ast_invariant.ml:68-148),
+/// run over the rewritten tree. The sweep stops at the first error it raises;
+/// warnings emitted before it are printed first.
+struct UnusedAttributeSweep<'w> {
+    warnings: &'w mut Vec<PpxWarning>,
+    /// Set when OCaml's sweep would raise (invalid/duplicated constructor
+    /// `@as` in `process_tag_type`); later warnings are never reached. The
+    /// error itself is reported by the type checker.
+    stopped: bool,
+    /// An error raised by the sweep (`Location.raise_errorf`).
+    error: Option<PpxError>,
 }
 
-fn collect_unused_bs_attributes_from_core_type_idx(
-    typ_idx: CoreTypeIdx,
-    arena: &ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    let typ = arena.get_core_type(typ_idx);
-    collect_unused_bs_attributes_from_core_type(typ, arena, warnings);
+impl UnusedAttributeSweep<'_> {
+    fn raise(&mut self, loc: LocIdx, message: impl Into<String>) {
+        if !self.stopped {
+            self.stopped = true;
+            self.error = Some(PpxError::at_loc(loc, message));
+        }
+    }
 }
 
-fn collect_unused_bs_attributes_from_core_type(
-    typ: &CoreType,
-    arena: &ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    collect_unused_bs_attributes(&typ.ptyp_attributes, arena, warnings);
+impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
+    fn type_declaration(&mut self, arena: &ParseArena, td: &TypeDeclaration) {
+        if self.stopped {
+            return;
+        }
+        let name = arena.get_string(td.ptype_name.txt);
+        if is_builtin_rank0_type_name(name) {
+            self.raise(
+                td.ptype_loc,
+                format!("built-in type `{name}` can not be redefined "),
+            );
+            return;
+        }
+        super::ast_iter::walk_type_declaration(self, arena, td);
+    }
 
-    match &*typ.ptyp_desc {
-        CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (arg, result, _) = &**inner;
-            collect_unused_bs_attributes(&arg.attrs, arena, warnings);
-            collect_unused_bs_attributes_from_core_type_idx(arg.typ, arena, warnings);
-            collect_unused_bs_attributes_from_core_type_idx(*result, arena, warnings);
+    fn structure_item(&mut self, arena: &ParseArena, item: &StructureItem) {
+        if self.stopped {
+            return;
         }
-        CoreTypeDesc::Ptyp_tuple(types) => {
-            for typ_idx in types.iter() {
-                collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
+        // `Pstr_type (Nonrecursive, [{ptype_kind = Ptype_variant ({pcd_res =
+        // Some _} :: _)}])` raises (bs_ast_invariant.ml:81-89).
+        if let StructureItemDesc::Pstr_type(inner) = &*item.pstr_desc {
+            let (rec_flag, decls) = &**inner;
+            if *rec_flag == RecFlag::Nonrecursive
+                && let [decl] = decls.as_slice()
+                && let TypeKind::Ptype_variant(cstrs) = &decl.ptype_kind
+                && cstrs.first().is_some_and(|cd| cd.pcd_res.is_some())
+            {
+                self.raise(
+                    item.pstr_loc,
+                    "GADTs require recursive type syntax.\nDefine your type using `type rec` instead of `type`.\nExample: type rec t = ...",
+                );
+                return;
             }
         }
-        CoreTypeDesc::Ptyp_constr(inner) => {
-            let (_, args) = &**inner;
-            for typ_idx in args.iter() {
-                collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
+        super::ast_iter::walk_structure_item(self, arena, item);
+    }
+
+    fn value_description(&mut self, arena: &ParseArena, vd: &ValueDescription) {
+        if self.stopped {
+            return;
+        }
+        // bs_ast_invariant.ml:119-142.
+        if let [byte_name] = vd.pval_prim.as_slice() {
+            let byte_name = arena.get_string(*byte_name);
+            if matches!(byte_name, "%identity" | "%component_identity")
+                && !core_type_is_arity_one(vd.pval_type, arena)
+            {
+                self.raise(
+                    vd.pval_loc,
+                    format!("{byte_name} expects a function type of the form 'a => 'b (arity 1)"),
+                );
+                return;
+            }
+            let safe = byte_name
+                .as_bytes()
+                .first()
+                .is_some_and(|c| matches!(c, b'%' | b'#' | b'?'));
+            if !safe {
+                self.warnings.push(PpxWarning {
+                    loc: vd.pval_loc,
+                    warning: Warning::BsFfiWarning {
+                        message: format!("{byte_name} such externals are unsafe"),
+                    },
+                });
+                return;
             }
         }
-        CoreTypeDesc::Ptyp_object(inner) => {
-            let (fields, _) = &**inner;
-            for field in fields.iter() {
-                match field {
-                    ObjectField::Otag(_, attrs, typ_idx) => {
-                        collect_unused_bs_attributes(attrs, arena, warnings);
-                        collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
-                    }
-                    ObjectField::Oinherit(typ_idx) => {
-                        collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
-                    }
+        super::ast_iter::walk_value_description(self, arena, vd);
+    }
+
+    fn attribute(&mut self, arena: &ParseArena, attr: &Attribute) {
+        // `attribute = fun _ attr -> warn_unused_attribute attr`: payloads are
+        // not traversed.
+        if !self.stopped {
+            warn_unused_attribute(attr, arena, self.warnings);
+        }
+    }
+
+    fn value_binding(&mut self, arena: &ParseArena, vb: &ValueBinding) {
+        // OCaml `Bs_builtin_ppx.mark_hoisted_function_attributes` marks
+        // `@res.hoistedFunction` on every let binding during mapping.
+        for attr in vb.pvb_attributes.iter() {
+            if arena.get_string(attr.0.txt) == "res.hoistedFunction" {
+                arena.mark_used_attribute(attr);
+            }
+        }
+        super::ast_iter::walk_value_binding(self, arena, vb);
+    }
+
+    fn expr(&mut self, arena: &ParseArena, idx: ExprIdx) {
+        // `Pexp_constant` and hash-number `Pexp_variant (s, None)` only run
+        // literal checks and do not call `super.expr`, so their attributes
+        // are never swept (bs_ast_invariant.ml:90-100).
+        let expr = arena.get_expr(idx);
+        match &*expr.pexp_desc {
+            ExpressionDesc::Pexp_constant(constant) => {
+                if !self.stopped {
+                    check_constant(expr.pexp_loc, constant, self.warnings);
                 }
             }
-        }
-        CoreTypeDesc::Ptyp_alias(inner) => {
-            let (typ_idx, _) = &**inner;
-            collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
-        }
-        CoreTypeDesc::Ptyp_variant(inner) => {
-            let (rows, _, _) = &**inner;
-            for row in rows.iter() {
-                match row {
-                    RowField::Rtag(_, attrs, _, types) => {
-                        collect_unused_bs_attributes(attrs, arena, warnings);
-                        for typ_idx in types.iter() {
-                            collect_unused_bs_attributes_from_core_type_idx(
-                                *typ_idx, arena, warnings,
-                            );
-                        }
-                    }
-                    RowField::Rinherit(typ_idx) => {
-                        collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
-                    }
+            ExpressionDesc::Pexp_variant(inner)
+                if inner.1.is_none() && is_valid_hash_number(&inner.0) =>
+            {
+                if inner.0.parse::<i32>().is_err() {
+                    self.raise(
+                        expr.pexp_loc,
+                        "Integer literal exceeds int32 range. Use float or BigInt if larger values are required.",
+                    );
                 }
             }
+            _ => super::ast_iter::walk_expr(self, arena, idx),
         }
-        CoreTypeDesc::Ptyp_poly(inner) => {
-            let (_, typ_idx) = &**inner;
-            collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
+    }
+
+    fn pat(&mut self, arena: &ParseArena, idx: PatIdx) {
+        // `Ppat_constant` only runs `check_constant` (bs_ast_invariant.ml:143-147).
+        let pat = arena.get_pat(idx);
+        if let PatternDesc::Ppat_constant(constant) = &*pat.ppat_desc {
+            if !self.stopped {
+                check_constant(pat.ppat_loc, constant, self.warnings);
+            }
+        } else {
+            super::ast_iter::walk_pat(self, arena, idx);
         }
-        CoreTypeDesc::Ptyp_package(pkg) => {
-            let (_, constraints) = &**pkg;
-            for (_, typ_idx) in constraints.iter() {
-                collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
+    }
+
+    fn label_declaration(&mut self, arena: &ParseArena, ld: &LabelDeclaration) {
+        for attr in ld.pld_attributes.iter() {
+            if arena.get_string(attr.0.txt) == "as" {
+                arena.mark_used_attribute(attr);
             }
         }
-        CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) | CoreTypeDesc::Ptyp_extension(_) => {}
+        super::ast_iter::walk_label_declaration(self, arena, ld);
+    }
+
+    fn constructor_declaration(&mut self, arena: &ParseArena, cd: &ConstructorDeclaration) {
+        if self.stopped {
+            return;
+        }
+        // `Ast_untagged_variants.process_tag_type` (ast_untagged_variants.ml:
+        // 113-143) marks a valid `@as` and raises for an invalid payload or a
+        // second `@as`.
+        let mut seen_as = false;
+        for attr in cd.pcd_attributes.iter() {
+            if arena.get_string(attr.0.txt) != "as" {
+                continue;
+            }
+            if seen_as {
+                self.raise(attr.0.loc, "Duplicate @as annotation; only one @as is allowed here.");
+                return;
+            }
+            if !is_valid_tag_as_payload(&attr.1, arena) {
+                self.raise(
+                    attr.0.loc,
+                    "A variant case annotation @as(...) must be a string, integer, boolean, null, or undefined.",
+                );
+                return;
+            }
+            seen_as = true;
+            arena.mark_used_attribute(attr);
+        }
+        let name = arena.get_string(cd.pcd_name.txt);
+        if matches!(name, "false" | "true" | "()") {
+            self.raise(cd.pcd_name.loc, format!("{name} can not be redefined "));
+            return;
+        }
+        super::ast_iter::walk_constructor_declaration(self, arena, cd);
     }
 }
 
-fn collect_unused_bs_attributes_from_pat_idx(
-    pat_idx: PatIdx,
-    arena: &ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    let pat = arena.get_pat(pat_idx);
-    collect_unused_bs_attributes(&pat.ppat_attributes, arena, warnings);
-
-    match &*pat.ppat_desc {
-        PatternDesc::Ppat_alias(inner, _) | PatternDesc::Ppat_exception(inner) => {
-            collect_unused_bs_attributes_from_pat_idx(*inner, arena, warnings);
-        }
-        PatternDesc::Ppat_tuple(items) | PatternDesc::Ppat_array(items) => {
-            for item in items.iter() {
-                collect_unused_bs_attributes_from_pat_idx(*item, arena, warnings);
-            }
-        }
-        PatternDesc::Ppat_construct(_, payload) => {
-            if let Some(payload) = payload {
-                collect_unused_bs_attributes_from_pat_idx(*payload, arena, warnings);
-            }
-        }
-        PatternDesc::Ppat_variant(inner) => {
-            let (_, payload) = &**inner;
-            if let Some(payload) = payload {
-                collect_unused_bs_attributes_from_pat_idx(*payload, arena, warnings);
-            }
-        }
-        PatternDesc::Ppat_record(inner) => {
-            let (fields, _) = &**inner;
-            for field in fields.iter() {
-                collect_unused_bs_attributes_from_pat_idx(field.pat, arena, warnings);
-            }
-        }
-        PatternDesc::Ppat_or(left, right) => {
-            collect_unused_bs_attributes_from_pat_idx(*left, arena, warnings);
-            collect_unused_bs_attributes_from_pat_idx(*right, arena, warnings);
-        }
-        PatternDesc::Ppat_constraint(inner) => {
-            let (inner_pat, typ_idx) = &**inner;
-            collect_unused_bs_attributes_from_pat_idx(*inner_pat, arena, warnings);
-            collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
-        }
-        PatternDesc::Ppat_open(_, inner) => {
-            collect_unused_bs_attributes_from_pat_idx(*inner, arena, warnings);
-        }
-        PatternDesc::Ppat_any
-        | PatternDesc::Ppat_var(_)
-        | PatternDesc::Ppat_constant(_)
-        | PatternDesc::Ppat_interval(_)
-        | PatternDesc::Ppat_type(_)
-        | PatternDesc::Ppat_unpack(_)
-        | PatternDesc::Ppat_extension(_) => {}
-    }
-}
-
-fn collect_raw_js_warnings_from_value_binding(
-    binding: &ValueBinding,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    // `Bs_builtin_ppx.mark_hoisted_function_attributes` marks this attribute
-    // used on every value binding before the unused-attribute invariant runs.
-    // Keep all other attributes on the existing warning path.
-    for attr in &binding.pvb_attributes {
-        if arena.get_string(attr.0.txt) != "res.hoistedFunction" {
-            collect_unused_bs_attributes_from_slice(std::slice::from_ref(attr), arena, warnings);
-        }
-    }
-    collect_unused_bs_attributes_from_pat_idx(binding.pvb_pat, arena, warnings);
-    collect_raw_js_warnings_from_expr_idx(binding.pvb_expr, arena, warnings);
-}
-
-fn collect_obj_optional_as_warnings(
-    vd: &ValueDescription,
-    arena: &ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    if !attr_named(vd.pval_attributes.as_slice(), "obj", arena) {
-        return;
-    }
-
-    let vd_type = arena.get_core_type(vd.pval_type);
-    let (args, _) = list_of_arrow(vd_type, arena);
-    for arg in args {
-        let arg_type = arena.get_core_type(arg.typ);
-        let warn_type_as = match arg.lbl {
-            // Rust collects warnings in a pre-pass, but OCaml reaches the same
-            // optional-arg helper before unused `@as` warnings can be reported.
-            ArgLabel::Optional(_) => get_opt_arg_type(false, arg_type, arena).is_ok(),
-            ArgLabel::Labelled(_) => !matches!(&*arg_type.ptyp_desc, CoreTypeDesc::Ptyp_any),
-            ArgLabel::Nolabel => false,
+/// OCaml `Ast_config.iter_on_config_str` marks the first leading `@@config`.
+fn mark_leading_config_structure(items: &[StructureItem], arena: &ParseArena) {
+    for item in items {
+        let StructureItemDesc::Pstr_attribute(attr) = &*item.pstr_desc else {
+            return;
         };
-        if !warn_type_as {
-            continue;
-        }
-        // OCaml leaves these @as payloads unused for @obj arguments, then
-        // warns once during FFI processing and once during the remaining
-        // unused-attribute sweep.
-        for _ in 0..2 {
-            for (attr_name, _) in arg_type.ptyp_attributes.iter() {
-                if arena.get_string(attr_name.txt) == "as" {
-                    warnings.push(PpxWarning {
-                        loc: attr_name.loc,
-                        warning: Warning::BsUnusedAttribute {
-                            name: "as".to_string(),
-                        },
-                    });
-                }
-            }
+        if arena.get_string(attr.0.txt) == "config" {
+            arena.mark_used_attribute(attr);
+            return;
         }
     }
 }
 
-fn collect_external_string_redundant_warnings(
-    vd: &ValueDescription,
-    arena: &ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    if !is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
-        return;
-    }
-
-    let vd_type = arena.get_core_type(vd.pval_type).clone();
-    let (args, _) = list_of_arrow(&vd_type, arena);
-    for arg in args {
-        let typ = arena.get_core_type(arg.typ).clone();
-        collect_string_redundant_warning_from_type(&typ, arena, warnings);
+fn mark_leading_config_signature(items: &[SignatureItem], arena: &ParseArena) {
+    for item in items {
+        let SignatureItemDesc::Psig_attribute(attr) = &*item.psig_desc else {
+            return;
+        };
+        if arena.get_string(attr.0.txt) == "config" {
+            arena.mark_used_attribute(attr);
+            return;
+        }
     }
 }
 
-fn collect_string_redundant_warning_from_type(
-    typ: &CoreType,
+/// Mark the leading `@@config` (OCaml `Ast_config.process_str`), which runs
+/// before the builtin mapper.
+pub fn mark_config_attributes_structure(items: &[StructureItem], arena: &ParseArena) {
+    mark_leading_config_structure(items, arena);
+}
+
+pub fn mark_config_attributes_signature(items: &[SignatureItem], arena: &ParseArena) {
+    mark_leading_config_signature(items, arena);
+}
+
+/// OCaml `Bs_ast_invariant.emit_external_warnings_on_structure`: the warnings
+/// in traversal order, and the error the sweep raised (if any).
+pub fn collect_unused_attribute_warnings_structure(
+    items: &[StructureItem],
     arena: &ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
+) -> (Vec<PpxWarning>, Option<PpxError>) {
+    let mut warnings = Vec::new();
+    let mut sweep = UnusedAttributeSweep {
+        warnings: &mut warnings,
+        stopped: false,
+        error: None,
+    };
+    super::ast_iter::walk_structure(&mut sweep, arena, items);
+    let error = sweep.error.take();
+    (warnings, error)
+}
+
+/// OCaml `Bs_ast_invariant.emit_external_warnings_on_signature`.
+pub fn collect_unused_attribute_warnings_signature(
+    items: &[SignatureItem],
+    arena: &ParseArena,
+) -> (Vec<PpxWarning>, Option<PpxError>) {
+    let mut warnings = Vec::new();
+    let mut sweep = UnusedAttributeSweep {
+        warnings: &mut warnings,
+        stopped: false,
+        error: None,
+    };
+    super::ast_iter::walk_signature(&mut sweep, arena, items);
+    let error = sweep.error.take();
+    (warnings, error)
+}
+
+/// The `@string is redundant here` warning `spec_of_ptyp` emits through
+/// `Ast_polyvar.map_row_fields_into_strings` (ast_polyvar.ml:70-78) for a
+/// closed polyvariant of nullary tags without `@as`. Called wherever the
+/// external checks run `spec_of_ptyp`.
+fn spec_of_ptyp_warning(typ: &CoreType, arena: &ParseArena, warnings: &mut Vec<PpxWarning>) {
     if check_type_ffi_attrs(typ, arena) != Some("string") || type_ffi_attr_count(typ, arena) != 1 {
         return;
     }
@@ -1525,319 +1530,6 @@ fn type_ffi_attr_count(typ: &CoreType, arena: &ParseArena) -> usize {
             )
         })
         .count()
-}
-
-fn collect_raw_js_warnings_from_expr(
-    expr: &Expression,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    collect_unused_bs_attributes(&expr.pexp_attributes, arena, warnings);
-
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_extension(ext) => {
-            let (ext_name, payload) = &**ext;
-            match arena.get_string(ext_name.txt) {
-                "raw" => push_raw_js_expression_warning(payload, arena, warnings),
-                "re" => push_raw_re_warning(payload, arena, warnings),
-                "ffi" => push_ffi_function_warning(payload, arena, warnings),
-                _ => {}
-            }
-        }
-        ExpressionDesc::Pexp_let(inner) => {
-            let (_rec_flag, bindings, body) = &**inner;
-            for binding in bindings {
-                collect_raw_js_warnings_from_value_binding(binding, arena, warnings);
-            }
-            collect_raw_js_warnings_from_expr_idx(*body, arena, warnings);
-        }
-        ExpressionDesc::Pexp_fun(fun) => {
-            collect_unused_bs_attributes_from_pat_idx(fun.lhs, arena, warnings);
-            if let Some(default) = fun.default {
-                collect_raw_js_warnings_from_expr_idx(default, arena, warnings);
-            }
-            collect_raw_js_warnings_from_expr_idx(fun.rhs, arena, warnings);
-        }
-        ExpressionDesc::Pexp_apply(apply) => {
-            collect_raw_js_warnings_from_expr_idx(apply.funct, arena, warnings);
-            for (_label, arg) in &apply.args {
-                collect_raw_js_warnings_from_expr_idx(*arg, arena, warnings);
-            }
-        }
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            let (scrutinee, cases) = &**inner;
-            collect_raw_js_warnings_from_expr_idx(*scrutinee, arena, warnings);
-            for case in cases {
-                collect_unused_bs_attributes_from_pat_idx(case.pc_lhs, arena, warnings);
-                if let Some(guard) = case.pc_guard {
-                    collect_raw_js_warnings_from_expr_idx(guard, arena, warnings);
-                }
-                collect_raw_js_warnings_from_expr_idx(case.pc_rhs, arena, warnings);
-            }
-        }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
-            for item in items.iter() {
-                collect_raw_js_warnings_from_expr_idx(*item, arena, warnings);
-            }
-        }
-        ExpressionDesc::Pexp_construct(_lid, payload) => {
-            if let Some(payload) = payload {
-                collect_raw_js_warnings_from_expr_idx(*payload, arena, warnings);
-            }
-        }
-        ExpressionDesc::Pexp_variant(inner) => {
-            let (_label, payload) = &**inner;
-            if let Some(payload) = payload {
-                collect_raw_js_warnings_from_expr_idx(*payload, arena, warnings);
-            }
-        }
-        ExpressionDesc::Pexp_record(fields_and_spread) => {
-            let (fields, spread) = &**fields_and_spread;
-            for field in fields {
-                collect_raw_js_warnings_from_expr_idx(field.expr, arena, warnings);
-            }
-            if let Some(spread) = spread {
-                collect_raw_js_warnings_from_expr_idx(*spread, arena, warnings);
-            }
-        }
-        ExpressionDesc::Pexp_field(expr, _)
-        | ExpressionDesc::Pexp_assert(expr)
-        | ExpressionDesc::Pexp_await(expr)
-        | ExpressionDesc::Pexp_comptime_compile_error(expr)
-        | ExpressionDesc::Pexp_comptime_build_variant(expr)
-        | ExpressionDesc::Pexp_comptime_variant_case(expr)
-        | ExpressionDesc::Pexp_comptime_build_record(expr)
-        | ExpressionDesc::Pexp_comptime_record_field(expr) => {
-            collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
-        }
-        ExpressionDesc::Pexp_send(inner) => {
-            let (expr, _method) = &**inner;
-            collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
-        }
-        ExpressionDesc::Pexp_newtype(inner) => {
-            let (_name, expr) = &**inner;
-            collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
-        }
-        ExpressionDesc::Pexp_open(inner) => {
-            let (_override, _lid, expr) = &**inner;
-            collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
-        }
-        ExpressionDesc::Pexp_setfield(inner) => {
-            let (record, _field, value) = &**inner;
-            collect_raw_js_warnings_from_expr_idx(*record, arena, warnings);
-            collect_raw_js_warnings_from_expr_idx(*value, arena, warnings);
-        }
-        ExpressionDesc::Pexp_ifthenelse(inner) => {
-            let (condition, consequent, alternate) = &**inner;
-            collect_raw_js_warnings_from_expr_idx(*condition, arena, warnings);
-            collect_raw_js_warnings_from_expr_idx(*consequent, arena, warnings);
-            if let Some(alternate) = alternate {
-                collect_raw_js_warnings_from_expr_idx(*alternate, arena, warnings);
-            }
-        }
-        ExpressionDesc::Pexp_sequence(left, right) | ExpressionDesc::Pexp_while(left, right) => {
-            collect_raw_js_warnings_from_expr_idx(*left, arena, warnings);
-            collect_raw_js_warnings_from_expr_idx(*right, arena, warnings);
-        }
-        ExpressionDesc::Pexp_comptime_field(inner) => {
-            let (value, field) = &**inner;
-            collect_raw_js_warnings_from_expr_idx(*value, arena, warnings);
-            collect_raw_js_warnings_from_expr_idx(*field, arena, warnings);
-        }
-        ExpressionDesc::Pexp_comptime_record(inner) => {
-            let (typ, fields) = &**inner;
-            collect_unused_bs_attributes_from_core_type_idx(*typ, arena, warnings);
-            collect_raw_js_warnings_from_expr_idx(*fields, arena, warnings);
-        }
-        ExpressionDesc::Pexp_for(inner) => {
-            let (_pat, from, to, _dir, body) = &**inner;
-            collect_unused_bs_attributes_from_pat_idx(*_pat, arena, warnings);
-            collect_raw_js_warnings_from_expr_idx(*from, arena, warnings);
-            collect_raw_js_warnings_from_expr_idx(*to, arena, warnings);
-            collect_raw_js_warnings_from_expr_idx(*body, arena, warnings);
-        }
-        ExpressionDesc::Pexp_for_of(inner)
-        | ExpressionDesc::Pexp_for_await_of(inner)
-        | ExpressionDesc::Pexp_inline_for(inner) => {
-            let (_pat, collection, body) = &**inner;
-            collect_unused_bs_attributes_from_pat_idx(*_pat, arena, warnings);
-            collect_raw_js_warnings_from_expr_idx(*collection, arena, warnings);
-            collect_raw_js_warnings_from_expr_idx(*body, arena, warnings);
-        }
-        ExpressionDesc::Pexp_constraint(inner) => {
-            let (expr, typ) = &**inner;
-            collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
-            collect_unused_bs_attributes_from_core_type_idx(*typ, arena, warnings);
-        }
-        ExpressionDesc::Pexp_coerce(inner) => {
-            let (expr, from_type, to_type) = &**inner;
-            collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
-            if let Some(from_type) = from_type {
-                collect_unused_bs_attributes_from_core_type_idx(*from_type, arena, warnings);
-            }
-            collect_unused_bs_attributes_from_core_type_idx(*to_type, arena, warnings);
-        }
-        ExpressionDesc::Pexp_letmodule(inner) => {
-            let (_name, mod_expr, body) = &**inner;
-            collect_raw_js_warnings_from_mod_expr_idx(*mod_expr, arena, warnings);
-            collect_raw_js_warnings_from_expr_idx(*body, arena, warnings);
-        }
-        ExpressionDesc::Pexp_letexception(inner) => {
-            let (_extension, body) = &**inner;
-            collect_raw_js_warnings_from_expr_idx(*body, arena, warnings);
-        }
-        ExpressionDesc::Pexp_pack(mod_expr) => {
-            collect_raw_js_warnings_from_mod_expr_idx(*mod_expr, arena, warnings);
-        }
-        ExpressionDesc::Pexp_comptime_variant(inner) => {
-            let (typ, name, payload) = &**inner;
-            collect_unused_bs_attributes_from_core_type_idx(*typ, arena, warnings);
-            collect_raw_js_warnings_from_expr_idx(*name, arena, warnings);
-            if let Some(payload) = payload {
-                collect_raw_js_warnings_from_expr_idx(*payload, arena, warnings);
-            }
-        }
-        ExpressionDesc::Pexp_comptime_typeinfo(typ)
-        | ExpressionDesc::Pexp_comptime_typename(typ) => {
-            collect_unused_bs_attributes_from_core_type_idx(*typ, arena, warnings);
-        }
-        _ => {}
-    }
-}
-
-fn collect_raw_js_warnings_from_structure(
-    structure: &[StructureItem],
-    arena: &mut ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    for item in structure {
-        collect_raw_js_warnings_from_structure_item(item, arena, warnings);
-    }
-}
-
-pub fn collect_raw_js_warnings(
-    structure: &[StructureItem],
-    arena: &mut ParseArena,
-) -> Vec<PpxWarning> {
-    let mut warnings = Vec::new();
-    collect_raw_js_warnings_from_structure(structure, arena, &mut warnings);
-    warnings
-}
-
-fn collect_signature_warnings_from_value_description(
-    vd: &ValueDescription,
-    arena: &ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    collect_obj_optional_as_warnings(vd, arena, warnings);
-    collect_external_string_redundant_warnings(vd, arena, warnings);
-
-    if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
-        return;
-    }
-
-    collect_unused_bs_attributes(&vd.pval_attributes, arena, warnings);
-    collect_unused_bs_attributes_from_core_type_idx(vd.pval_type, arena, warnings);
-}
-
-fn collect_signature_warnings_from_mod_type_idx(
-    mod_type_idx: ModTypeIdx,
-    arena: &ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    let mod_type = arena.get_mod_type(mod_type_idx);
-    collect_unused_bs_attributes(&mod_type.pmty_attributes, arena, warnings);
-
-    match &*mod_type.pmty_desc {
-        ModuleTypeDesc::Pmty_signature(items) => {
-            collect_signature_warnings_from_items(items, arena, warnings);
-        }
-        ModuleTypeDesc::Pmty_functor(inner) => {
-            let (_, param_type, result_type) = &**inner;
-            if let Some(param_type) = param_type {
-                collect_signature_warnings_from_mod_type_idx(*param_type, arena, warnings);
-            }
-            collect_signature_warnings_from_mod_type_idx(*result_type, arena, warnings);
-        }
-        ModuleTypeDesc::Pmty_with(inner) => {
-            let (mod_type, _constraints) = &**inner;
-            collect_signature_warnings_from_mod_type_idx(*mod_type, arena, warnings);
-        }
-        ModuleTypeDesc::Pmty_ident(_)
-        | ModuleTypeDesc::Pmty_typeof(_)
-        | ModuleTypeDesc::Pmty_extension(_)
-        | ModuleTypeDesc::Pmty_alias(_) => {}
-    }
-}
-
-fn collect_signature_warnings_from_item(
-    item: &SignatureItem,
-    arena: &ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    match &*item.psig_desc {
-        SignatureItemDesc::Psig_value(vd) => {
-            collect_signature_warnings_from_value_description(vd, arena, warnings);
-        }
-        SignatureItemDesc::Psig_module(md) => {
-            collect_unused_bs_attributes(&md.pmd_attributes, arena, warnings);
-            collect_signature_warnings_from_mod_type_idx(md.pmd_type, arena, warnings);
-        }
-        SignatureItemDesc::Psig_recmodule(items) => {
-            for md in items.iter() {
-                collect_unused_bs_attributes(&md.pmd_attributes, arena, warnings);
-                collect_signature_warnings_from_mod_type_idx(md.pmd_type, arena, warnings);
-            }
-        }
-        SignatureItemDesc::Psig_modtype(mtd) => {
-            collect_unused_bs_attributes(&mtd.pmtd_attributes, arena, warnings);
-            if let Some(mod_type) = mtd.pmtd_type {
-                collect_signature_warnings_from_mod_type_idx(mod_type, arena, warnings);
-            }
-        }
-        SignatureItemDesc::Psig_include(include_desc) => {
-            collect_unused_bs_attributes(&include_desc.pincl_attributes, arena, warnings);
-            collect_signature_warnings_from_mod_type_idx(include_desc.pincl_mod, arena, warnings);
-        }
-        SignatureItemDesc::Psig_attribute(attr) => {
-            collect_unused_bs_attributes_from_slice(std::slice::from_ref(attr), arena, warnings);
-        }
-        SignatureItemDesc::Psig_extension(inner) => {
-            let (_, attrs) = &**inner;
-            collect_unused_bs_attributes(attrs, arena, warnings);
-        }
-        SignatureItemDesc::Psig_type(inner) => {
-            let (_rec_flag, tdcls) = &**inner;
-            collect_deriving_not_applicable_warnings(
-                tdcls,
-                arena,
-                warnings,
-                DerivingExpansionContext::SignatureItem,
-            );
-        }
-        SignatureItemDesc::Psig_typext(_)
-        | SignatureItemDesc::Psig_exception(_)
-        | SignatureItemDesc::Psig_open(_) => {}
-    }
-}
-
-fn collect_signature_warnings_from_items(
-    items: &[SignatureItem],
-    arena: &ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    for item in items {
-        collect_signature_warnings_from_item(item, arena, warnings);
-    }
-}
-
-pub fn collect_signature_warnings(
-    signature: &[SignatureItem],
-    arena: &ParseArena,
-) -> Vec<PpxWarning> {
-    let mut warnings = Vec::new();
-    collect_signature_warnings_from_items(signature, arena, &mut warnings);
-    warnings
 }
 
 fn is_js_regex_literal(s: &str) -> bool {
@@ -2121,34 +1813,43 @@ fn external_desc_is_module_as_class(desc: &ExternalDesc) -> bool {
 fn validate_plain_obj_arg_type_errors(
     vd_type: &CoreType,
     external_loc: LocIdx,
-    arena: &ParseArena,
+    arena: &mut ParseArena,
+    warnings: &mut Vec<PpxWarning>,
 ) -> PpxResult<()> {
     let (args, _result) = list_of_arrow(vd_type, arena);
-    for arg in args {
-        let typ = arena.get_core_type(arg.typ);
+    // `Ast_external_process.process_obj` folds right over the arguments
+    // (ast_external_process.ml:440-590), so the last argument is checked first.
+    for arg in args.into_iter().rev() {
+        let typ = arena.get_core_type(arg.typ).clone();
         match arg.lbl {
             ArgLabel::Labelled(label_loc) => {
-                if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any)
-                    && get_as_string_attr(&arg.attrs, arena).is_none()
-                    && get_as_int_attr(&arg.attrs, arena).is_none()
-                    // OCaml compiler/syntax/src/res_core.ml:5018-5026 keeps
-                    // labelled `@as(json`...`) _` external arguments as
-                    // arity-changing constants. The `@as` payload was already
-                    // validated by `validate_external_arg_type_errors`, so only
-                    // reject a truly bare `_` here.
-                    && !typ
+                // `Ast_attributes.iter_process_bs_string_as param_type.attrs`
+                // (ast_external_process.ml:459-464): an argument-level `@as`
+                // must be a single string.
+                validate_string_as_attrs(&arg.attrs, arena)?;
+                // `refine_obj_arg_type` (ast_external_process.ml:96-116): `_`
+                // needs a type-level `@as` constant; any other type goes
+                // through `spec_of_ptyp`.
+                if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
+                    validate_string_or_int_as_attrs(&typ.ptyp_attributes, arena)?;
+                    if !typ
                         .ptyp_attributes
                         .iter()
                         .any(|(attr_name, _)| arena.get_string(attr_name.txt) == "as")
-                {
-                    return Err(PpxError::at_loc(
-                        typ.ptyp_loc,
-                        "_ is not allowed in combination with external optional type",
-                    ));
+                    {
+                        return Err(PpxError::at_loc(
+                            typ.ptyp_loc,
+                            "_ is not allowed in combination with external optional type",
+                        ));
+                    }
+                } else {
+                    validate_external_core_type_arg_errors(&typ, arena)?;
                 }
 
                 let label = arena.get_string(label_loc.txt).to_string();
-                match spec_of_ptyp(false, &typ, arena) {
+                let arg_type = spec_of_ptyp(false, &typ, arena);
+                spec_of_ptyp_warning(&typ, arena, warnings);
+                match arg_type {
                     Attr::PolyVar { .. } => {
                         return Err(PpxError::at_loc(
                             external_loc,
@@ -2165,8 +1866,13 @@ fn validate_plain_obj_arg_type_errors(
                 }
             }
             ArgLabel::Optional(label_loc) => {
+                validate_string_as_attrs(&arg.attrs, arena)?;
                 let label = arena.get_string(label_loc.txt).to_string();
-                match get_opt_arg_type(false, &typ, arena)? {
+                // `get_opt_arg_type` (ast_external_process.ml:127-134).
+                let arg_type = get_opt_arg_type(false, &typ, arena)?;
+                validate_external_core_type_arg_errors(&typ, arena)?;
+                spec_of_ptyp_warning(&typ, arena, warnings);
+                match arg_type {
                     Attr::PolyVar { .. } => {
                         return Err(PpxError::at_loc(
                             external_loc,
@@ -2312,82 +2018,98 @@ fn validate_return_wrapper_result_type(
     Ok(())
 }
 
-fn validate_variadic_arg_type_errors(
+/// The argument fold of the non-`@obj` branch of OCaml `handle_attributes`
+/// (compiler/frontend/ast_external_process.ml:927-983): arguments are visited
+/// right to left, the `@variadic` checks apply while no non-ignored argument
+/// has been seen, then each argument is classified by `get_opt_arg_type` or
+/// `refine_arg_type`.
+fn validate_non_obj_arg_type_errors(
     args: &[TypeArg],
+    splice: bool,
     external_loc: LocIdx,
-    arena: &ParseArena,
+    arena: &mut ParseArena,
+    warnings: &mut Vec<PpxWarning>,
 ) -> PpxResult<()> {
-    let Some(last_arg) = args.last() else {
-        return Ok(());
-    };
+    let mut i = 0;
+    for arg in args.iter().rev() {
+        let typ = arena.get_core_type(arg.typ).clone();
+        if i == 0 && splice {
+            validate_variadic_arg_type(arg, &typ, external_loc, arena, warnings)?;
+        }
+        let arg_type = match arg.lbl {
+            ArgLabel::Optional(label_loc) => {
+                let arg_type = get_opt_arg_type(false, &typ, arena)?;
+                validate_external_core_type_arg_errors(&typ, arena)?;
+                spec_of_ptyp_warning(&typ, arena, warnings);
+                if matches!(arg_type, Attr::PolyVar { .. }) {
+                    let label = arena.get_string(label_loc.txt);
+                    return Err(PpxError::at_loc(
+                        external_loc,
+                        format!(
+                            "@string does not work with optional when it has arities in label {label}"
+                        ),
+                    ));
+                }
+                arg_type
+            }
+            ArgLabel::Labelled(_) | ArgLabel::Nolabel => {
+                validate_external_core_type_arg_errors(&typ, arena)?;
+                let arg_type = refine_arg_type(matches!(arg.lbl, ArgLabel::Nolabel), &typ, arena);
+                spec_of_ptyp_warning(&typ, arena, warnings);
+                arg_type
+            }
+        };
+        if !matches!(arg_type, Attr::Ignore) {
+            i += 1;
+        }
+    }
+    Ok(())
+}
 
-    if matches!(last_arg.lbl, ArgLabel::Optional(_)) {
+/// The `@variadic` checks of `handle_attributes` (ast_external_process.ml:934-950).
+fn validate_variadic_arg_type(
+    arg: &TypeArg,
+    typ: &CoreType,
+    external_loc: LocIdx,
+    arena: &mut ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) -> PpxResult<()> {
+    if matches!(arg.lbl, ArgLabel::Optional(_)) {
         return Err(PpxError::at_loc(
             external_loc,
             "@variadic expect the last type to be a non optional",
         ));
     }
-
-    let typ = arena.get_core_type(last_arg.typ);
     let array_error = || {
         PpxError::at_loc(
             external_loc,
             "@variadic expect the last type to be an array",
         )
     };
-
     if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
         return Err(array_error());
     }
-
-    if !matches!(refine_arg_type(true, &typ, arena), Attr::Nothing) {
+    // `spec_of_ptyp true ty` (ast_external_process.ml:943) raises for
+    // invalid @string/@int/@unwrap payload types (lines 39-70).
+    validate_external_core_type_arg_errors(typ, arena)?;
+    let arg_type = refine_arg_type(true, typ, arena);
+    spec_of_ptyp_warning(typ, arena, warnings);
+    if !matches!(arg_type, Attr::Nothing) {
         return Err(array_error());
     }
-
     match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
             let (ref lid, ref args) = **inner;
-            if args.len() == 1 {
-                if let Longident::Lident(name) = arena.get_longident(lid.txt) {
-                    if arena.get_string(*name) == "array" {
-                        return Ok(());
-                    }
-                }
+            if args.len() == 1
+                && let Longident::Lident(name) = arena.get_longident(lid.txt)
+                && arena.get_string(*name) == "array"
+            {
+                return Ok(());
             }
             Err(array_error())
         }
         _ => Err(array_error()),
     }
-}
-
-fn validate_non_obj_optional_arg_type_errors(
-    args: &[TypeArg],
-    external_loc: LocIdx,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    for arg in args {
-        let ArgLabel::Optional(label_loc) = arg.lbl else {
-            continue;
-        };
-
-        let typ = arena.get_core_type(arg.typ);
-        if matches!(get_opt_arg_type(false, typ, arena)?, Attr::PolyVar { .. }) {
-            let label = arena.get_string(label_loc.txt);
-            return Err(PpxError::at_loc(
-                external_loc,
-                format!("@string does not work with optional when it has arities in label {label}"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_external_arg_type_errors(args: &[TypeArg], arena: &mut ParseArena) -> PpxResult<()> {
-    for arg in args {
-        let typ = arena.get_core_type(arg.typ).clone();
-        validate_external_core_type_arg_errors(&typ, arena)?;
-    }
-    Ok(())
 }
 
 fn validate_external_core_type_arg_errors(typ: &CoreType, arena: &mut ParseArena) -> PpxResult<()> {
@@ -2407,6 +2129,7 @@ fn validate_external_core_type_arg_errors(typ: &CoreType, arena: &mut ParseArena
 fn validate_external_attribute_errors(
     vd: &ValueDescription,
     arena: &mut ParseArena,
+    warnings: &mut Vec<PpxWarning>,
 ) -> PpxResult<()> {
     if !is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
         return Ok(());
@@ -2419,11 +2142,14 @@ fn validate_external_attribute_errors(
     let vd_type = arena.get_core_type(vd.pval_type).clone();
     let (args, result_type) = list_of_arrow(&vd_type, arena);
 
-    validate_external_attribute_payload_errors(&vd.pval_attributes, prim_name.as_str(), arena)?;
-    validate_external_arg_type_errors(&args, arena)?;
+    // OCaml `handle_external_in_stru`/`handle_external_in_sig` map the
+    // attributes with the builtin mapper before `encode_attributes_as_string`
+    // (ast_external.ml:29-39, 58-68), so payload checks see expanded payloads.
+    let mapped_attrs = rewrite_attributes(&vd.pval_attributes, arena);
+    validate_external_attribute_payload_errors(&mapped_attrs, prim_name.as_str(), arena)?;
 
     let desc = parse_external_attrs(
-        &vd.pval_attributes,
+        &mapped_attrs,
         prim_name.as_str(),
         args.is_empty(),
         vd.pval_loc,
@@ -2441,7 +2167,7 @@ fn validate_external_attribute_errors(
                     "@obj expect external names to be empty string",
                 ));
             }
-            validate_plain_obj_arg_type_errors(&vd_type, vd.pval_loc, arena)?;
+            validate_plain_obj_arg_type_errors(&vd_type, vd.pval_loc, arena, warnings)?;
             return Ok(());
         }
         return Err(PpxError::at_loc(
@@ -2450,11 +2176,7 @@ fn validate_external_attribute_errors(
         ));
     }
 
-    if desc.splice {
-        validate_variadic_arg_type_errors(&args, vd.pval_loc, arena)?;
-    }
-
-    validate_non_obj_optional_arg_type_errors(&args, vd.pval_loc, arena)?;
+    validate_non_obj_arg_type_errors(&args, desc.splice, vd.pval_loc, arena, warnings)?;
 
     let (params, arity) = build_arg_type_specs(&vd_type, arena);
 
@@ -2595,9 +2317,12 @@ fn refine_arg_type(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
     // For Ptyp_any with @as attribute, handle constant args
     if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
         // Check for @as attribute on the type
-        for (attr_name, payload) in &typ.ptyp_attributes {
+        for attr in &typ.ptyp_attributes {
+            let (attr_name, payload) = attr;
             let name = arena.get_string(attr_name.txt).to_string();
             if name == "as" {
+                // OCaml `iter_process_bs_string_or_int_as` marks the first @as used.
+                arena.mark_used_attribute(attr);
                 // Try int first (mirrors OCaml's is_single_int check first)
                 if let Some(i) = get_payload_int(payload, arena) {
                     return Attr::ArgCst(Cst::ArgIntLit(i as i64));
@@ -2805,7 +2530,8 @@ fn payload_string_literals_or_error_loc(
 /// Extract @as("string") from attributes.
 /// Mirrors OCaml's iter_process_bs_string_as.
 fn get_as_string_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
-    for (attr_name, payload) in attrs {
+    for attr in attrs {
+        let (attr_name, payload) = attr;
         let name = arena.get_string(attr_name.txt);
         if name == "as" {
             // Try to get string payload
@@ -2816,6 +2542,7 @@ fn get_as_string_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<String>
                         if let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*expr).pexp_desc
                         {
                             if let Constant::String(s, _) = &**c {
+                                arena.mark_used_attribute(attr);
                                 return Some(s.to_string());
                             }
                         }
@@ -2830,7 +2557,8 @@ fn get_as_string_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<String>
 /// Extract @as(int) from attributes.
 /// Mirrors OCaml's iter_process_bs_int_as.
 fn get_as_int_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<i64> {
-    for (attr_name, payload) in attrs {
+    for attr in attrs {
+        let (attr_name, payload) = attr;
         let name = arena.get_string(attr_name.txt);
         if name == "as" {
             // Try to get int payload
@@ -2845,7 +2573,11 @@ fn get_as_int_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<i64> {
                                 if matches!(suffix, Some('n')) {
                                     return None;
                                 }
-                                return s.parse::<i64>().ok();
+                                let v = s.parse::<i64>().ok();
+                                if v.is_some() {
+                                    arena.mark_used_attribute(attr);
+                                }
+                                return v;
                             }
                         }
                     }
@@ -2972,8 +2704,10 @@ fn validate_bs_string_type(typ: &CoreType, arena: &ParseArena) -> PpxResult<()> 
         NonNull,
     }
 
+    // `Ast_polyvar.map_row_fields_into_strings` (ast_polyvar.ml:44-71) folds
+    // from the right, so later rows are checked first.
     let mut rows = StringRows::Nothing;
-    for row in row_fields {
+    for row in row_fields.iter().rev() {
         match (&rows, row) {
             (StringRows::Nothing | StringRows::Null, RowField::Rtag(_, attrs, true, types))
                 if types.is_empty() =>
@@ -3004,7 +2738,9 @@ fn validate_bs_int_type(typ: &CoreType, arena: &ParseArena) -> PpxResult<()> {
         return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for @int"));
     };
     let (row_fields, closed, labels) = &**variant_inner;
-    if !matches!(closed, current::ClosedFlag::Closed) || labels.is_some() || row_fields.is_empty() {
+    // `spec_of_ptyp` (ast_external_process.ml:52-59) then
+    // `map_row_fields_into_ints` (ast_polyvar.ml:25-38), which accepts `[]`.
+    if !matches!(closed, current::ClosedFlag::Closed) || labels.is_some() {
         return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for @int"));
     }
 
@@ -3028,9 +2764,10 @@ fn validate_bs_unwrap_type(typ: &CoreType) -> PpxResult<()> {
             "Not a valid type for @unwrap. Type must be an inline variant (closed), and\neach constructor must have an argument.",
         ));
     };
-    let (row_fields, closed, labels) = &**variant_inner;
+    // compiler/frontend/ast_external_process.ml:60-65 matches
+    // `Ptyp_variant (row_fields, Closed, _)`: lower-bound labels are allowed.
+    let (row_fields, closed, _) = &**variant_inner;
     if !matches!(closed, current::ClosedFlag::Closed)
-        || labels.is_some()
         || row_fields.is_empty()
         || !variant_can_unwrap(row_fields)
     {
@@ -3131,8 +2868,28 @@ fn variant_can_unwrap(row_fields: &[RowField]) -> bool {
 
 /// Determine the arg type for a type expression.
 /// Mirrors OCaml's spec_of_ptyp.
+/// OCaml `Ast_attributes.iter_process_bs_string_int_unwrap_uncurry`
+/// (ast_attributes.ml:170-190) marks the attribute when exactly one of
+/// @string/@int/@ignore/@unwrap is present.
+fn mark_single_ffi_type_attr(typ: &CoreType, arena: &ParseArena) {
+    let found: Vec<&Attribute> = typ
+        .ptyp_attributes
+        .iter()
+        .filter(|attr| {
+            matches!(
+                arena.get_string(attr.0.txt),
+                "string" | "int" | "ignore" | "unwrap"
+            )
+        })
+        .collect();
+    if let [attr] = found.as_slice() {
+        arena.mark_used_attribute(attr);
+    }
+}
+
 fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
     // Check for special attributes on the type (@string, @int, @unwrap, @ignore)
+    mark_single_ffi_type_attr(typ, arena);
     let attr_type = check_type_ffi_attrs(typ, arena);
 
     match attr_type {
@@ -3627,6 +3384,8 @@ fn get_opt_arg_type(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> PpxRes
 
 /// Same classifier after the validation pass has already rejected Ptyp_any.
 fn get_opt_arg_type_unchecked(_nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
+    // OCaml `get_opt_arg_type` calls `spec_of_ptyp`.
+    mark_single_ffi_type_attr(typ, arena);
     let attr_type = check_type_ffi_attrs(typ, arena);
     match attr_type {
         Some("ignore") => Attr::Ignore,
@@ -4179,25 +3938,24 @@ fn validate_module_import_attributes_payload(
     };
 
     for field in with_fields {
+        // OCaml checks the value shape before the key (ast_external_process.ml:283-293).
         let field_expr = arena.get_expr(field.expr);
+        let is_string = matches!(
+            &*field_expr.pexp_desc,
+            ExpressionDesc::Pexp_constant(c) if matches!(&**c, current::Constant::String(_, _))
+        );
+        if !is_string {
+            return Err(PpxError::at_loc(
+                field_expr.pexp_loc,
+                "Only string values are allowed here.",
+            ));
+        }
         let Longident::Lident(_) = arena.get_longident(field.lid.txt) else {
             return Err(PpxError::at_loc(
                 field_expr.pexp_loc,
                 "Field must be a regular key.",
             ));
         };
-        let ExpressionDesc::Pexp_constant(c) = &*field_expr.pexp_desc else {
-            return Err(PpxError::at_loc(
-                field_expr.pexp_loc,
-                "Only string values are allowed here.",
-            ));
-        };
-        if !matches!(&**c, current::Constant::String(_, _)) {
-            return Err(PpxError::at_loc(
-                field_expr.pexp_loc,
-                "Only string values are allowed here.",
-            ));
-        }
     }
 
     Ok(true)
@@ -5136,12 +4894,85 @@ fn handle_extension(
     let ext_loc = ext_name.loc;
 
     match name {
+        "todo" => handle_todo(payload, arena, ext_loc),
         "raw" => handle_raw(expr, payload, arena, arena.prim_raw_expr(), ext_loc),
         "ffi" => handle_ffi(expr, payload, arena, ext_loc),
         "re" => handle_re(expr, payload, arena, ext_loc),
         "debugger" => handle_debugger(expr, payload, arena, ext_loc),
         "obj" => handle_obj(expr, payload, arena),
         _ => expr.clone(),
+    }
+}
+
+/// `Ast_payload.is_single_string`: the text of a single string-literal
+/// payload.
+fn todo_payload_message(payload: &Payload, arena: &ParseArena) -> Option<String> {
+    let Payload::PStr(items) = payload else {
+        return None;
+    };
+    let [item] = items.as_slice() else {
+        return None;
+    };
+    let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
+        return None;
+    };
+    let ExpressionDesc::Pexp_constant(constant) = &*arena.get_expr(eval.0).pexp_desc else {
+        return None;
+    };
+    let Constant::String(message, _) = &**constant else {
+        return None;
+    };
+    Some(message.to_string())
+}
+
+/// `%todo` (ast_exp_extension.ml:29-58): `JsError.throwWithMessage` applied
+/// to `"<file>:<line>:<start>-<end> - Todo[: message]"`, located at the
+/// extension name. The warning is emitted by the warning pre-pass.
+fn handle_todo(payload: &Payload, arena: &mut ParseArena, loc: LocIdx) -> Expression {
+    let todo_message = todo_payload_message(payload, arena);
+    let start = arena.loc_start(loc);
+    let end = arena.loc_end(loc);
+    let mut text = format!(
+        "{}:{}:{}-{}",
+        arena.get_string(start.file_name),
+        start.line,
+        start.cnum,
+        end.cnum
+    );
+    match &todo_message {
+        None => text.push_str(" - Todo"),
+        Some(msg) => {
+            text.push_str(" - Todo: ");
+            text.push_str(msg);
+        }
+    }
+    let js_error = arena.push_lident("JsError");
+    let throw_lid = arena.push_ldot(js_error, "throwWithMessage");
+    let funct = Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
+            txt: throw_lid,
+            loc,
+        })),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    };
+    let argument = Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
+            Cow::Owned(text),
+            None,
+        )))),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    };
+    Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            funct: arena.push_expr(funct),
+            args: vec![(ArgLabel::Nolabel, arena.push_expr(argument))],
+            partial: false,
+            transformed_jsx: false,
+        }))),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
     }
 }
 
@@ -5491,13 +5322,14 @@ fn handle_debugger(
     let j_lident = arena.push_lident_static("J");
     let j_unsafe_expr = arena.push_ldot_static(j_lident, "unsafe_expr");
 
-    // Create the unit literal: ()
+    // `Ast_literal.val_unit ~loc ()` (ast_literal.ml:100-103): the
+    // constructor has the default (none) location, its name the extension's.
     let unit_construct = arena.push_lident_static("()");
     let unit_expr = Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
             Located {
                 txt: unit_construct,
-                loc: none_loc,
+                loc,
             },
             None,
         )),
@@ -6101,8 +5933,20 @@ fn private_extension_structure_items<'a>(
     }
 }
 
+/// `%%raw`/`%%private`: the structure items `Bs_builtin_ppx.structure_mapper`
+/// expands itself (bs_builtin_ppx.ml:681-705).
+fn is_structure_mapper_extension(item: &StructureItem, arena: &ParseArena) -> bool {
+    matches!(
+        &*item.pstr_desc,
+        StructureItemDesc::Pstr_extension(inner)
+            if matches!(arena.get_string(inner.0.0.txt), "raw" | "private")
+    )
+}
+
+/// OCaml `Typemod_hide.check` (typemod_hide.ml:53-57). `expand_reverse` passes
+/// the accumulated items in reverse, so the last offending item is reported.
 fn check_private_extension_items(items: &[StructureItem], arena: &ParseArena) -> PpxResult<()> {
-    for item in items {
+    for item in items.iter().rev() {
         if !private_extension_item_allowed(item, arena) {
             return Err(PpxError::at_loc(
                 item.pstr_loc,
@@ -6458,160 +6302,143 @@ fn create_await_module_expression(
 /// For each found, creates a module type declaration to hoist to structure level.
 /// Uses a context HashSet to track already-created module type names to avoid duplicates.
 ///
-/// OCaml: bs_builtin_ppx.ml lines 706-752 (spelunk_vbs and aux)
+/// OCaml `aux` in bs_builtin_ppx.ml `spelunk_vbs` (lines 752-793). OCaml
+/// evaluates the right operand of `@` first, so side effects on `context`
+/// happen right to left while results keep source order.
 fn spelunk_expression_for_await_module_types(
     expr: &Expression,
     context: &mut std::collections::HashSet<String>,
     arena: &mut ParseArena,
 ) -> Vec<StructureItem> {
     match &*expr.pexp_desc {
-        // Main case: Pexp_letmodule with Pmod_ident and @res.await
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (_, ref mod_expr, ref body) = **inner;
-            let mut results = Vec::new();
             let mod_expr_val = arena.get_mod_expr(*mod_expr).clone();
-
-            // Check for Pmod_ident with @res.await
-            if let ModuleExprDesc::Pmod_ident(located_lid) = &*mod_expr_val.pmod_desc {
-                if has_await_attribute(&mod_expr_val.pmod_attributes, arena) {
-                    let module_type_name = local_module_type_name(located_lid.txt, arena);
-
-                    // Only create if not already in context
-                    if !context.contains(&module_type_name) {
-                        context.insert(module_type_name.clone());
-
-                        // Create module type declaration:
-                        // module type __ME__ = module type of ME
-                        let module_type_name_idx = arena.intern_string(&module_type_name);
-                        let lid_loc = located_lid.loc;
-
-                        let typeof_mod_expr_idx = arena.push_mod_expr(current::ModuleExpr {
-                            pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(Located {
-                                txt: located_lid.txt,
-                                loc: lid_loc,
-                            })),
-                            // OCaml: Mty.typeof_ ~loc me - `me` keeps its original
-                            // pmod_loc allocation (distinct from the lid location).
-                            pmod_loc: mod_expr_val.pmod_loc,
-                            // OCaml: Mty.typeof_ ~loc me uses original `me` attrs.
-                            pmod_attributes: mod_expr_val.pmod_attributes.clone(),
-                        });
-                        let module_type_idx = arena.push_mod_type(current::ModuleType {
-                            pmty_desc: Box::new(ModuleTypeDesc::Pmty_typeof(typeof_mod_expr_idx)),
-                            pmty_loc: lid_loc,
-                            pmty_attributes: Attributes::new(),
-                        });
-                        let module_type_decl = StructureItem {
-                            pstr_desc: Box::new(StructureItemDesc::Pstr_modtype(Box::new(
-                                current::ModuleTypeDeclaration {
-                                    pmtd_name: Located {
-                                        txt: module_type_name_idx,
-                                        loc: lid_loc,
-                                    },
-                                    pmtd_type: Some(module_type_idx),
-                                    pmtd_attributes: Attributes::new(),
-                                    pmtd_loc: lid_loc,
-                                },
-                            ))),
-                            pstr_loc: lid_loc,
-                        };
-
-                        results.push(module_type_decl);
-                    }
-                }
+            let ModuleExprDesc::Pmod_ident(located_lid) = &*mod_expr_val.pmod_desc else {
+                return vec![];
+            };
+            if !has_await_attribute(&mod_expr_val.pmod_attributes, arena) {
+                return vec![];
             }
-
-            // Continue spelunking into body (body is ExprIdx)
+            let module_type_name = local_module_type_name(located_lid.txt, arena);
             let body_expr = arena.get_expr(*body).clone();
-            results.extend(spelunk_expression_for_await_module_types(
-                &body_expr, context, arena,
-            ));
+            if context.contains(&module_type_name) {
+                return spelunk_expression_for_await_module_types(&body_expr, context, arena);
+            }
+            context.insert(module_type_name.clone());
+            let rest = spelunk_expression_for_await_module_types(&body_expr, context, arena);
+            // module type __ME__ = module type of ME
+            let module_type_name_idx = arena.intern_string(&module_type_name);
+            let lid_loc = located_lid.loc;
+
+            let typeof_mod_expr_idx = arena.push_mod_expr(current::ModuleExpr {
+                pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(Located {
+                    txt: located_lid.txt,
+                    loc: lid_loc,
+                })),
+                // OCaml: Mty.typeof_ ~loc me - `me` keeps its original
+                // pmod_loc allocation (distinct from the lid location).
+                pmod_loc: mod_expr_val.pmod_loc,
+                // OCaml: Mty.typeof_ ~loc me uses original `me` attrs.
+                pmod_attributes: mod_expr_val.pmod_attributes.clone(),
+            });
+            let module_type_idx = arena.push_mod_type(current::ModuleType {
+                pmty_desc: Box::new(ModuleTypeDesc::Pmty_typeof(typeof_mod_expr_idx)),
+                pmty_loc: lid_loc,
+                pmty_attributes: Attributes::new(),
+            });
+            let module_type_decl = StructureItem {
+                pstr_desc: Box::new(StructureItemDesc::Pstr_modtype(Box::new(
+                    current::ModuleTypeDeclaration {
+                        pmtd_name: Located {
+                            txt: module_type_name_idx,
+                            loc: lid_loc,
+                        },
+                        pmtd_type: Some(module_type_idx),
+                        pmtd_attributes: Attributes::new(),
+                        pmtd_loc: lid_loc,
+                    },
+                ))),
+                pstr_loc: lid_loc,
+            };
+
+            let mut results = vec![module_type_decl];
+            results.extend(rest);
             results
         }
-
-        // Recursively traverse other expression forms (matching OCaml's aux function)
         ExpressionDesc::Pexp_let(inner) => {
             let (_, ref bindings, ref body) = **inner;
+            let binding_results = spelunk_value_bindings_for_await_module_types(bindings, context, arena);
             let body_expr = arena.get_expr(*body).clone();
             let mut results = spelunk_expression_for_await_module_types(&body_expr, context, arena);
-            for vb in bindings {
-                let vb_expr = arena.get_expr(vb.pvb_expr).clone();
-                results.extend(spelunk_expression_for_await_module_types(
-                    &vb_expr, context, arena,
-                ));
-            }
+            results.extend(binding_results);
             results
         }
-
         ExpressionDesc::Pexp_ifthenelse(inner) => {
             let (_, ref then_idx, ref else_idx) = **inner;
+            let Some(else_idx) = else_idx else {
+                return vec![];
+            };
+            let else_expr = arena.get_expr(*else_idx).clone();
+            let else_results = spelunk_expression_for_await_module_types(&else_expr, context, arena);
             let then_expr = arena.get_expr(*then_idx).clone();
             let mut results = spelunk_expression_for_await_module_types(&then_expr, context, arena);
-            if let Some(else_e_idx) = else_idx {
-                let else_expr = arena.get_expr(*else_e_idx).clone();
-                results.extend(spelunk_expression_for_await_module_types(
-                    &else_expr, context, arena,
-                ));
-            }
+            results.extend(else_results);
             results
         }
-
         ExpressionDesc::Pexp_construct(_, Some(e_idx)) => {
             let e_expr = arena.get_expr(*e_idx).clone();
             spelunk_expression_for_await_module_types(&e_expr, context, arena)
         }
-
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun { rhs: ref body, .. } = **inner;
             let body_expr = arena.get_expr(*body).clone();
             spelunk_expression_for_await_module_types(&body_expr, context, arena)
         }
-
+        // OCaml keeps newtypes on `Pexp_fun`; Rust wraps them in `Pexp_newtype`.
         ExpressionDesc::Pexp_newtype(inner) => {
             let (_, ref body) = **inner;
             let body_expr = arena.get_expr(*body).clone();
             spelunk_expression_for_await_module_types(&body_expr, context, arena)
         }
-
         ExpressionDesc::Pexp_constraint(inner) => {
             let (ref e_idx, _) = **inner;
             let e_expr = arena.get_expr(*e_idx).clone();
             spelunk_expression_for_await_module_types(&e_expr, context, arena)
         }
-
         ExpressionDesc::Pexp_match(inner) => {
             let (ref scrut_idx, ref cases) = **inner;
-            let scrut_expr = arena.get_expr(*scrut_idx).clone();
-            let mut results =
-                spelunk_expression_for_await_module_types(&scrut_expr, context, arena);
+            // `List.fold_left (fun acc case -> aux case.pc_rhs @ acc) [] cases`
+            let mut case_results = Vec::new();
             for case in cases {
                 let case_rhs = arena.get_expr(case.pc_rhs).clone();
-                results.extend(spelunk_expression_for_await_module_types(
-                    &case_rhs, context, arena,
-                ));
+                let mut results = spelunk_expression_for_await_module_types(&case_rhs, context, arena);
+                results.extend(case_results);
+                case_results = results;
             }
+            let scrut_expr = arena.get_expr(*scrut_idx).clone();
+            let mut results = spelunk_expression_for_await_module_types(&scrut_expr, context, arena);
+            results.extend(case_results);
             results
         }
-
         _ => vec![],
     }
 }
 
-/// Spelunk through value bindings to collect module type declarations for hoisting.
-///
-/// OCaml: bs_builtin_ppx.ml spelunk_vbs
+/// OCaml `spelunk_vbs` (bs_builtin_ppx.ml:752-795):
+/// `aux pvb_expr @ spelunk_vbs acc tl`, whose tail is evaluated first.
 fn spelunk_value_bindings_for_await_module_types(
     bindings: &[ValueBinding],
     context: &mut std::collections::HashSet<String>,
     arena: &mut ParseArena,
 ) -> Vec<StructureItem> {
-    let mut results = Vec::new();
-    for vb in bindings {
-        let vb_expr = arena.get_expr(vb.pvb_expr).clone();
-        results.extend(spelunk_expression_for_await_module_types(
-            &vb_expr, context, arena,
-        ));
-    }
+    let Some((first, rest)) = bindings.split_first() else {
+        return vec![];
+    };
+    let rest_results = spelunk_value_bindings_for_await_module_types(rest, context, arena);
+    let first_expr = arena.get_expr(first.pvb_expr).clone();
+    let mut results = spelunk_expression_for_await_module_types(&first_expr, context, arena);
+    results.extend(rest_results);
     results
 }
 
@@ -7051,16 +6878,156 @@ fn has_this_attr(attrs: &[Attribute], arena: &ParseArena) -> bool {
         .any(|(attr_name, _)| arena.get_string(attr_name.txt) == "this")
 }
 
-/// Process @get/@set attributes on object fields and generate setter fields.
-/// Mirrors OCaml's Ast_core_type_class_type.typ_mapper for Ptyp_object.
-/// When a field has @set, an additional field `name#=` is generated with type `typ -> unit`.
+/// `Ast_payload.ident_or_record_as_config` entries of a method attribute
+/// payload (compiler/ml/ast_payload.ml:168-209). Payload shape errors are
+/// reported by `validate_object_field_method_attrs`.
+fn method_attribute_config(payload: &Payload, arena: &ParseArena) -> Vec<(String, Option<ExprIdx>)> {
+    let Payload::PStr(items) = payload else {
+        return Vec::new();
+    };
+    let [item] = items.as_slice() else {
+        return Vec::new();
+    };
+    let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
+        return Vec::new();
+    };
+    let expr = arena.get_expr(inner.0);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_ident(lid) => match arena.get_longident(lid.txt) {
+            Longident::Lident(name) => vec![(arena.get_string(*name).to_string(), None)],
+            _ => Vec::new(),
+        },
+        ExpressionDesc::Pexp_record(inner) => {
+            let (fields, with_obj) = &**inner;
+            if with_obj.is_some() {
+                return Vec::new();
+            }
+            fields
+                .iter()
+                .filter_map(|field| {
+                    let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
+                        return None;
+                    };
+                    let name = arena.get_string(*name_idx);
+                    let punned = matches!(
+                        &*arena.get_expr(field.expr).pexp_desc,
+                        ExpressionDesc::Pexp_ident(value)
+                            if matches!(arena.get_longident(value.txt),
+                                Longident::Lident(v) if arena.get_string(*v) == name)
+                    );
+                    Some((name.to_string(), (!punned).then_some(field.expr)))
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// `Ast_payload.assert_bool_lit` on an already validated literal.
+fn method_attribute_bool(opt_expr: Option<ExprIdx>, arena: &ParseArena) -> bool {
+    match opt_expr {
+        None => true,
+        Some(expr_idx) => match &*arena.get_expr(expr_idx).pexp_desc {
+            ExpressionDesc::Pexp_construct(lid, None) => matches!(
+                arena.get_longident(lid.txt),
+                Longident::Lident(name) if arena.get_string(*name) == "true"
+            ),
+            _ => false,
+        },
+    }
+}
+
+enum SetterKind {
+    Get,
+    NoGet,
+}
+
+/// `Ast_attributes.process_method_attributes_rev`
+/// (compiler/frontend/ast_attributes.ml:29-72): the `@get`/`@set` settings and
+/// the other attributes in reverse order.
+fn process_method_attributes_rev(
+    attrs: &[Attribute],
+    arena: &ParseArena,
+) -> (Option<(bool, bool)>, Option<SetterKind>, Vec<Attribute>) {
+    let mut get = None;
+    let mut set = None;
+    let mut acc = Vec::new();
+    for attr in attrs {
+        match arena.get_string(attr.0.txt) {
+            "get" => {
+                let mut result = (false, false);
+                for (name, opt_expr) in method_attribute_config(&attr.1, arena) {
+                    let (null, undefined) = result;
+                    result = match name.as_str() {
+                        "null" => (method_attribute_bool(opt_expr, arena), undefined),
+                        "undefined" => (null, method_attribute_bool(opt_expr, arena)),
+                        "nullable" => {
+                            let v = method_attribute_bool(opt_expr, arena);
+                            (v, v)
+                        }
+                        _ => result,
+                    };
+                }
+                get = Some(result);
+            }
+            "set" => {
+                let mut result = SetterKind::Get;
+                for (name, opt_expr) in method_attribute_config(&attr.1, arena) {
+                    if name == "no_get" {
+                        result = if method_attribute_bool(opt_expr, arena) {
+                            SetterKind::NoGet
+                        } else {
+                            SetterKind::Get
+                        };
+                    }
+                }
+                set = Some(result);
+            }
+            _ => acc.insert(0, attr.clone()),
+        }
+    }
+    (get, set, acc)
+}
+
+/// `Ast_attributes.process_attributes_rev` (ast_attributes.ml:77-81): the last
+/// `@this` attribute and the other attributes in reverse order.
+fn process_attributes_rev(attrs: &[Attribute], arena: &ParseArena) -> (Option<Attribute>, Vec<Attribute>) {
+    let mut this_attr = None;
+    let mut acc = Vec::new();
+    for attr in attrs {
+        if arena.get_string(attr.0.txt) == "this" {
+            this_attr = Some(attr.clone());
+        } else {
+            acc.insert(0, attr.clone());
+        }
+    }
+    (this_attr, acc)
+}
+
+/// The `Otag` case of `Ast_core_type_class_type.typ_mapper`
+/// (compiler/frontend/ast_core_type_class_type.ml:26-54, 94-134).
 fn rewrite_object_fields(
     fields: &[ObjectField],
     obj_loc: LocIdx,
     arena: &mut ParseArena,
 ) -> Vec<ObjectField> {
-    let mut result: Vec<ObjectField> = Vec::new();
+    // `attr +> ty` then `self.typ self ty`.
+    fn map_field_type(
+        this_attr: Option<Attribute>,
+        typ_idx: CoreTypeIdx,
+        arena: &mut ParseArena,
+    ) -> CoreTypeIdx {
+        let mut ty = arena.get_core_type(typ_idx).clone();
+        if let Some(attr) = this_attr {
+            let mut attrs = vec![attr];
+            attrs.extend(ty.ptyp_attributes.iter().cloned());
+            ty.ptyp_attributes = attrs.into();
+        }
+        let rewritten = rewrite_core_type(&ty, arena);
+        arena.push_core_type(rewritten)
+    }
 
+    let mut result: Vec<ObjectField> = Vec::new();
     for field in fields {
         match field {
             ObjectField::Oinherit(typ_idx) => {
@@ -7069,106 +7036,18 @@ fn rewrite_object_fields(
                 result.push(ObjectField::Oinherit(arena.push_core_type(rewritten)));
             }
             ObjectField::Otag(name, attrs, typ_idx) => {
-                let mut has_get: Option<(bool, bool)> = None;
-                let mut has_set = false;
-                let mut no_get = false;
-                let mut remaining_attrs: Vec<Attribute> = Vec::new();
-
-                for attr in attrs.iter() {
-                    let attr_name = arena.get_string(attr.0.txt);
-                    match attr_name {
-                        "get" => {
-                            let mut null = false;
-                            let mut undefined = false;
-                            if let Payload::PStr(items) = &attr.1 {
-                                for item in items.iter() {
-                                    if let StructureItemDesc::Pstr_eval(eval_inner) =
-                                        &*item.pstr_desc
-                                    {
-                                        let (expr_idx, _) = &**eval_inner;
-                                        let expr = arena.get_expr(*expr_idx);
-                                        if let ExpressionDesc::Pexp_record(record_inner) =
-                                            &*expr.pexp_desc
-                                        {
-                                            let (fields, _) = &**record_inner;
-                                            for field in fields.iter() {
-                                                let field_name = match arena
-                                                    .get_longident(field.lid.txt)
-                                                {
-                                                    Longident::Lident(s) => arena.get_string(*s),
-                                                    _ => "",
-                                                };
-                                                match field_name {
-                                                    "null" => null = true,
-                                                    "undefined" => undefined = true,
-                                                    "nullable" => {
-                                                        null = true;
-                                                        undefined = true;
-                                                    }
-                                                    _ => {}
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            has_get = Some((null, undefined));
-                        }
-                        "set" => {
-                            has_set = true;
-                            if let Payload::PStr(items) = &attr.1 {
-                                for item in items.iter() {
-                                    if let StructureItemDesc::Pstr_eval(eval_inner) =
-                                        &*item.pstr_desc
-                                    {
-                                        let (expr_idx, _) = &**eval_inner;
-                                        let expr = arena.get_expr(*expr_idx);
-                                        if let ExpressionDesc::Pexp_record(record_inner) =
-                                            &*expr.pexp_desc
-                                        {
-                                            let (fields, _) = &**record_inner;
-                                            for field in fields.iter() {
-                                                let field_name = match arena
-                                                    .get_longident(field.lid.txt)
-                                                {
-                                                    Longident::Lident(s) => arena.get_string(*s),
-                                                    _ => "",
-                                                };
-                                                if field_name == "no_get" {
-                                                    no_get = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        "this" => {}
-                        _ => remaining_attrs.push(attr.clone()),
-                    }
-                }
-
-                if has_get.is_none() && !has_set {
-                    let typ_ct = arena.get_core_type(*typ_idx).clone();
-                    let rewritten = rewrite_core_type(&typ_ct, arena);
-                    result.push(ObjectField::Otag(
-                        name.clone(),
-                        rewrite_attributes(attrs, arena).into(),
-                        arena.push_core_type(rewritten),
-                    ));
+                let (get, set, pctf_attributes) = process_method_attributes_rev(attrs, arena);
+                if get.is_none() && set.is_none() {
+                    let (this_attr, attrs) = process_attributes_rev(attrs, arena);
+                    let typ = map_field_type(this_attr, *typ_idx, arena);
+                    result.push(ObjectField::Otag(name.clone(), attrs.into(), typ));
                     continue;
                 }
-
-                if has_set {
-                    let setter_name = format!("{}#=", arena.get_string(name.txt));
-                    let setter_name_idx = arena.push_string(setter_name);
-                    let setter_name_loc = Located {
-                        txt: setter_name_idx,
-                        loc: name.loc,
-                    };
-
+                if set.is_some() {
+                    let (this_attr, attrs) = process_attributes_rev(&pctf_attributes, arena);
+                    let arg = map_field_type(this_attr, *typ_idx, arena);
                     let unit_lid = arena.push_lident("unit");
-                    let unit_type = CoreType {
+                    let unit_type = arena.push_core_type(CoreType {
                         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
                             Located {
                                 txt: unit_lid,
@@ -7178,87 +7057,71 @@ fn rewrite_object_fields(
                         )))),
                         ptyp_loc: obj_loc,
                         ptyp_attributes: Attributes::new(),
-                    };
-                    let unit_idx = arena.push_core_type(unit_type);
-
-                    let typ_ct = arena.get_core_type(*typ_idx).clone();
-                    let rewritten_inner = rewrite_core_type(&typ_ct, arena);
-                    let rewritten_inner_idx = arena.push_core_type(rewritten_inner);
-
+                    });
                     let setter_type = CoreType {
                         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
                             Box::new(TypeArg {
                                 attrs: Attributes::new(),
                                 lbl: ArgLabel::Nolabel,
-                                typ: rewritten_inner_idx,
+                                typ: arg,
                             }),
-                            unit_idx,
+                            unit_type,
                             arena.push_arity(Some(1)),
                         )))),
                         ptyp_loc: obj_loc,
                         ptyp_attributes: Attributes::new(),
                     };
+                    let setter_name = format!("{}#=", arena.get_string(name.txt));
+                    let setter_name = Located {
+                        txt: arena.push_string(setter_name),
+                        loc: name.loc,
+                    };
                     result.push(ObjectField::Otag(
-                        setter_name_loc,
-                        remaining_attrs.clone().into(),
+                        setter_name,
+                        attrs.into(),
                         arena.push_core_type(setter_type),
                     ));
                 }
-
-                if !no_get {
-                    let typ_ct = arena.get_core_type(*typ_idx).clone();
-                    let getter_type = if let Some((null, undefined)) = has_get {
-                        match (null, undefined) {
-                            (false, false) => rewrite_core_type(&typ_ct, arena),
-                            (true, false) => {
-                                let inner = rewrite_core_type(&typ_ct, arena);
-                                wrap_in_js_type(&inner, "Js", "null", arena)
-                            }
-                            (false, true) => {
-                                let inner = rewrite_core_type(&typ_ct, arena);
-                                wrap_in_js_type(&inner, "Js", "undefined", arena)
-                            }
-                            (true, true) => {
-                                let inner = rewrite_core_type(&typ_ct, arena);
-                                wrap_in_js_type(&inner, "Js", "null_undefined", arena)
-                            }
-                        }
-                    } else {
-                        rewrite_core_type(&typ_ct, arena)
+                if !matches!(set, Some(SetterKind::NoGet)) {
+                    let (null, undefined) = get.unwrap_or((false, false));
+                    // `lift txt = Typ.constr ~loc {txt; loc} [ty]`.
+                    let lift = match (null, undefined) {
+                        (false, false) => None,
+                        (true, false) => Some(("Stdlib.Null", "t")),
+                        (false, true) => Some(("", "undefined")),
+                        (true, true) => Some(("Stdlib.Nullable", "t")),
                     };
-                    result.push(ObjectField::Otag(
-                        name.clone(),
-                        remaining_attrs.clone().into(),
-                        arena.push_core_type(getter_type),
-                    ));
+                    let typ_idx = match lift {
+                        None => *typ_idx,
+                        Some((prefix, last)) => {
+                            let lid = if prefix.is_empty() {
+                                arena.push_lident(last)
+                            } else {
+                                let stdlib = arena.push_lident("Stdlib");
+                                let module = arena.push_ldot(stdlib, &prefix["Stdlib.".len()..]);
+                                arena.push_ldot(module, last)
+                            };
+                            arena.push_core_type(CoreType {
+                                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+                                    Located {
+                                        txt: lid,
+                                        loc: obj_loc,
+                                    },
+                                    vec![*typ_idx],
+                                )))),
+                                ptyp_loc: obj_loc,
+                                ptyp_attributes: Attributes::new(),
+                            })
+                        }
+                    };
+                    let (this_attr, attrs) = process_attributes_rev(&pctf_attributes, arena);
+                    let typ = map_field_type(this_attr, typ_idx, arena);
+                    result.push(ObjectField::Otag(name.clone(), attrs.into(), typ));
                 }
             }
         }
     }
-
     result
-}
-
-/// Wrap a type in Js.wrapper<typ> (e.g., Js.null<typ>, Js.undefined<typ>)
-fn wrap_in_js_type(
-    typ: &CoreType,
-    module_name: &str,
-    type_name: &str,
-    arena: &mut ParseArena,
-) -> CoreType {
-    let module_lid = arena.push_lident(module_name);
-    let full_lid = arena.push_ldot(module_lid, type_name);
-    CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-            Located {
-                txt: full_lid,
-                loc: typ.ptyp_loc,
-            },
-            vec![arena.push_core_type(typ.clone())],
-        )))),
-        ptyp_loc: typ.ptyp_loc,
-        ptyp_attributes: Attributes::new(),
-    }
 }
 
 /// Rewrite a core type, recursing into nested types and extension payloads.
@@ -7644,9 +7507,7 @@ fn rewrite_value_binding_without_flattening(
             pvc_pattern: None,
             pvc_expression: None,
         };
-        arena
-            .set_value_constraint(pvb_pat, constraint, pvb_expr, vb.pvb_loc)
-            .expect("mapped value constraint remains well formed");
+        arena.set_value_constraint(pvb_pat, constraint, pvb_expr, vb.pvb_loc);
     }
     ValueBinding {
         pvb_pat,
@@ -7710,7 +7571,7 @@ fn flatten_value_binding(vb: &ValueBinding, arena: &mut ParseArena) -> Vec<Value
     if let (PatternDesc::Ppat_record(record_inner), ExpressionDesc::Pexp_pack(mod_expr_idx)) =
         (&*pvb_pat.ppat_desc, &*pvb_expr.pexp_desc)
     {
-        let (ref lid_pats, _) = **record_inner;
+        let (ref lid_pats, _, _) = **record_inner;
         let mod_expr = arena.get_mod_expr(*mod_expr_idx);
         let module_lid = if let ModuleExprDesc::Pmod_ident(lid) = &*mod_expr.pmod_desc {
             *lid
@@ -7846,7 +7707,18 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
 
         // Record pattern: recurse into all field patterns
         PatternDesc::Ppat_record(inner) => {
-            let (ref fields, ref flag) = **inner;
+            let (ref fields, ref flag, ref record_rest) = **inner;
+            let record_rest = record_rest.as_ref().map(|rest| {
+                let rest_type = rest.rest_type.map(|typ| {
+                    let typ = arena.get_core_type(typ).clone();
+                    let typ = rewrite_core_type(&typ, arena);
+                    arena.push_core_type(typ)
+                });
+                crate::parser::ast::RecordPatRest {
+                    rest_type,
+                    ..rest.clone()
+                }
+            });
             PatternDesc::Ppat_record(Box::new((
                 fields
                     .iter()
@@ -7861,6 +7733,7 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
                     })
                     .collect(),
                 *flag,
+                record_rest,
             )))
         }
 
@@ -8146,6 +8019,37 @@ fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
                         // Now desugar based on what f is
                         return desugar_pipe(expr, a, f, arena);
                     }
+                    if op == "##" {
+                        // ast_exp_apply.ml:135-153: `obj##name` becomes
+                        // `Ast_util.js_property loc obj name` (a Pexp_send).
+                        let rest = arena.get_expr(args[1].1);
+                        let name = match &*rest.pexp_desc {
+                            ExpressionDesc::Pexp_ident(lid) => match arena.get_longident(lid.txt) {
+                                Longident::Lident(name_idx) => {
+                                    Some(arena.get_string(*name_idx).to_string())
+                                }
+                                _ => None,
+                            },
+                            ExpressionDesc::Pexp_constant(c) => match &**c {
+                                Constant::String(name, None) => Some(name.to_string()),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some(name) = name {
+                            let obj_expr = arena.get_expr(args[0].1).clone();
+                            let obj = rewrite_expression(&obj_expr, arena);
+                            let obj_idx = arena.push_expr(obj);
+                            return Expression {
+                                pexp_desc: Box::new(ExpressionDesc::Pexp_send(Box::new((
+                                    obj_idx,
+                                    Located::new(Cow::Owned(name), expr.pexp_loc),
+                                )))),
+                                pexp_loc: expr.pexp_loc,
+                                pexp_attributes: expr.pexp_attributes.clone(),
+                            };
+                        }
+                    }
                     if op == "#=" {
                         // This is a setter: obj["prop"] = value
                         // OCaml transforms: Pexp_apply("#=", [Pexp_send(obj, name), value])
@@ -8404,16 +8308,17 @@ fn desugar_pipe(
     arena: &mut ParseArena,
 ) -> Expression {
     match &*f.pexp_desc {
-        // a -> `Variant becomes `Variant(a)
-        ExpressionDesc::Pexp_variant(inner) => {
-            let (ref label, ref _none) = **inner;
+        // a -> `Variant becomes `Variant(a); `{f with pexp_desc; pexp_loc = e.pexp_loc}`
+        // (ast_exp_apply.ml:88-91) keeps `f`'s attributes.
+        ExpressionDesc::Pexp_variant(inner) if inner.1.is_none() => {
+            let label = inner.0.clone();
             Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_variant(Box::new((
-                    label.clone(),
+                    label,
                     Some(arena.push_expr(a)),
                 )))),
                 pexp_loc: original.pexp_loc,
-                pexp_attributes: original.pexp_attributes.clone(),
+                pexp_attributes: f.pexp_attributes.clone(),
             }
         }
 
@@ -8424,7 +8329,7 @@ fn desugar_pipe(
                 Some(arena.push_expr(a)),
             )),
             pexp_loc: original.pexp_loc,
-            pexp_attributes: original.pexp_attributes.clone(),
+            pexp_attributes: f.pexp_attributes.clone(),
         },
 
         // a -> f(b, c) becomes f(a, b, c)
@@ -9027,9 +8932,11 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         }
 
         ExpressionDesc::Pexp_pack(mod_expr_idx) => {
-            // Module expressions - don't recurse for now
+            // The default mapper maps the packed module with `sub.module_expr`
+            // (ast_mapper.ml), so externals inside are processed.
             let me = arena.get_mod_expr(*mod_expr_idx).clone();
-            ExpressionDesc::Pexp_pack(arena.push_mod_expr(me))
+            let rw = rewrite_module_expr(&me, arena);
+            ExpressionDesc::Pexp_pack(arena.push_mod_expr(rw))
         }
 
         ExpressionDesc::Pexp_letmodule(inner) => {
@@ -9367,74 +9274,65 @@ fn expr_lident_name(expr_idx: ExprIdx, arena: &ParseArena) -> Option<String> {
     Some(arena.get_string(*name_idx).to_string())
 }
 
-fn record_field_action_config(
-    field: &ExpressionRecordField,
+/// `Ast_payload.ident_or_record_as_config` for `@deriving`
+/// (compiler/ml/ast_payload.ml:168-209, via
+/// Ast_attributes.process_derive_type). Shapes other than a single
+/// unqualified identifier or a record without `...` produce no actions (their
+/// warnings are reported by `unrecognized_config_record_warning`).
+fn deriving_config_actions(
+    payload: &Payload,
     arena: &ParseArena,
-) -> PpxResult<DeriveActionConfig> {
-    let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
-        return Err(PpxError::at_loc(
-            field.lid.loc,
-            "Qualified label is not allowed",
-        ));
+) -> PpxResult<Vec<DeriveActionConfig>> {
+    let Payload::PStr(items) = payload else {
+        return Ok(Vec::new());
     };
-    let name = arena.get_string(*name_idx).to_string();
-    let config = if expr_lident_name(field.expr, arena).as_deref() == Some(name.as_str()) {
-        None
-    } else {
-        Some(field.expr)
+    let [item] = items.as_slice() else {
+        return Ok(Vec::new());
     };
-    Ok(DeriveActionConfig {
-        name,
-        name_loc: field.lid.loc,
-        config,
-    })
-}
-
-fn collect_deriving_expr_actions(
-    expr_idx: ExprIdx,
-    arena: &ParseArena,
-    actions: &mut Vec<DeriveActionConfig>,
-) -> PpxResult<()> {
-    let expr = arena.get_expr(expr_idx);
+    let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
+        return Ok(Vec::new());
+    };
+    let expr = arena.get_expr(inner.0);
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_ident(lid_loc) => {
-            let Longident::Lident(name_idx) = arena.get_longident(lid_loc.txt) else {
-                return Ok(());
-            };
-            actions.push(DeriveActionConfig {
+        ExpressionDesc::Pexp_record(record) => {
+            let (fields, with_obj) = &**record;
+            if with_obj.is_some() {
+                return Ok(Vec::new());
+            }
+            fields
+                .iter()
+                .map(|field| {
+                    let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
+                        return Err(PpxError::at_loc(
+                            expr.pexp_loc,
+                            "Qualified label is not allowed",
+                        ));
+                    };
+                    let name = arena.get_string(*name_idx).to_string();
+                    let config = if expr_lident_name(field.expr, arena).as_deref()
+                        == Some(name.as_str())
+                    {
+                        None
+                    } else {
+                        Some(field.expr)
+                    };
+                    Ok(DeriveActionConfig {
+                        name,
+                        name_loc: field.lid.loc,
+                        config,
+                    })
+                })
+                .collect()
+        }
+        ExpressionDesc::Pexp_ident(lid_loc) => match arena.get_longident(lid_loc.txt) {
+            Longident::Lident(name_idx) => Ok(vec![DeriveActionConfig {
                 name: arena.get_string(*name_idx).to_string(),
                 name_loc: lid_loc.loc,
                 config: None,
-            });
-            Ok(())
-        }
-        ExpressionDesc::Pexp_tuple(exprs) => {
-            for expr_idx in exprs.iter() {
-                collect_deriving_expr_actions(*expr_idx, arena, actions)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_record(inner) => {
-            let (fields, _base) = &**inner;
-            for field in fields {
-                actions.push(record_field_action_config(field, arena)?);
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply { funct, args, .. } = &**inner;
-            let Some(name) = expr_lident_name(*funct, arena) else {
-                return Ok(());
-            };
-            let name_loc = arena.get_expr(*funct).pexp_loc;
-            actions.push(DeriveActionConfig {
-                name,
-                name_loc,
-                config: args.first().map(|(_, expr_idx)| *expr_idx),
-            });
-            Ok(())
-        }
-        _ => Ok(()),
+            }]),
+            _ => Ok(Vec::new()),
+        },
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -9529,80 +9427,6 @@ fn validate_js_converter_config(expr_idx: ExprIdx, arena: &ParseArena) -> PpxRes
     }
 }
 
-fn validate_deriving_attr_payload(payload: &Payload, arena: &ParseArena) -> PpxResult<()> {
-    let Some(items) = payload_str_items(payload) else {
-        return Ok(());
-    };
-    let mut actions = Vec::new();
-    for item in items {
-        if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc {
-            let (expr_idx, _) = &**eval_inner;
-            collect_deriving_expr_actions(*expr_idx, arena, &mut actions)?;
-        }
-    }
-
-    if actions.iter().any(|action| action.name == "abstract") && actions.len() > 1 {
-        if let Some(action) = actions.iter().find(|action| action.name == "abstract") {
-            return Err(PpxError::at_loc(
-                action.name_loc,
-                "deriving abstract does not work with any other deriving",
-            ));
-        }
-    }
-
-    for action in actions {
-        match action.name.as_str() {
-            "accessors" => {
-                if let Some(config) = action.config {
-                    return Err(PpxError::at_loc(
-                        arena.get_expr(config).pexp_loc,
-                        "such configuration is not supported",
-                    ));
-                }
-            }
-            "jsConverter" => {
-                if let Some(config) = action.config {
-                    validate_js_converter_config(config, arena)?;
-                }
-            }
-            "abstract" => {
-                if let Some(config) = action.config {
-                    if expr_lident_name(config, arena).as_deref() != Some("light") {
-                        return Err(PpxError::at_loc(
-                            action.name_loc,
-                            "invalid config for abstract",
-                        ));
-                    }
-                }
-            }
-            name => {
-                return Err(PpxError::at_loc(
-                    action.name_loc,
-                    format!("{name} is not supported"),
-                ));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum DerivingExpansionContext {
-    StructureItem,
-    SignatureItem,
-}
-
-impl DerivingExpansionContext {
-    fn runs_structure_gen(self) -> bool {
-        matches!(self, DerivingExpansionContext::StructureItem)
-    }
-
-    fn runs_signature_gen(self) -> bool {
-        true
-    }
-}
-
 fn push_deriving_not_applicable_warning(
     loc: LocIdx,
     deriving_name: &str,
@@ -9616,29 +9440,6 @@ fn push_deriving_not_applicable_warning(
     });
 }
 
-fn push_deriving_not_applicable_warnings(
-    loc: LocIdx,
-    deriving_name: &str,
-    warnings: &mut Vec<PpxWarning>,
-    context: DerivingExpansionContext,
-) {
-    // OCaml Ast_derive.gen_structure_signature invokes both structure_gen and
-    // signature_gen. Ast_derive.gen_signature invokes only signature_gen.
-    if context.runs_structure_gen() {
-        push_deriving_not_applicable_warning(loc, deriving_name, warnings);
-    }
-    if context.runs_signature_gen() {
-        push_deriving_not_applicable_warning(loc, deriving_name, warnings);
-    }
-}
-
-fn accessors_not_applicable(tdcl: &TypeDeclaration) -> bool {
-    matches!(
-        tdcl.ptype_kind,
-        TypeKind::Ptype_abstract | TypeKind::Ptype_open
-    )
-}
-
 fn js_converter_not_applicable(tdcl: &TypeDeclaration, arena: &ParseArena) -> bool {
     match tdcl.ptype_kind {
         TypeKind::Ptype_record(_) => false,
@@ -9647,51 +9448,13 @@ fn js_converter_not_applicable(tdcl: &TypeDeclaration, arena: &ParseArena) -> bo
     }
 }
 
-fn collect_deriving_not_applicable_warnings(
-    tdcls: &[TypeDeclaration],
-    arena: &ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-    context: DerivingExpansionContext,
-) {
-    if validate_deriving_accessors_for_tdcls(tdcls, arena).is_err() {
-        return;
-    }
-    let Some(last_tdcl) = tdcls.last() else {
-        return;
-    };
-    let (actions, _remaining_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
-    for action in actions {
-        match action {
-            DeriveAction::Accessors => {
-                for tdcl in tdcls {
-                    if accessors_not_applicable(tdcl) {
-                        push_deriving_not_applicable_warnings(
-                            tdcl.ptype_loc,
-                            "accessors",
-                            warnings,
-                            context,
-                        );
-                    }
-                }
-            }
-            DeriveAction::JsConverter { .. } => {
-                for tdcl in tdcls {
-                    if js_converter_not_applicable(tdcl, arena) {
-                        push_deriving_not_applicable_warnings(
-                            tdcl.ptype_loc,
-                            "jsConverter",
-                            warnings,
-                            context,
-                        );
-                    }
-                }
-            }
-            DeriveAction::Abstract { .. } => {}
-        }
-    }
+/// Parse @deriving attribute to extract derive actions
+fn has_deriving_attribute(attrs: &[Attribute], arena: &ParseArena) -> bool {
+    attrs
+        .iter()
+        .any(|(name, _)| arena.get_string(name.txt) == "deriving")
 }
 
-/// Parse @deriving attribute to extract derive actions
 fn parse_deriving_actions(
     attrs: &[Attribute],
     arena: &ParseArena,
@@ -9704,15 +9467,20 @@ fn parse_deriving_actions(
         let name = arena.get_string(name_loc.txt);
 
         if name == "deriving" {
-            // Parse the payload to extract actions
-            if let Some(items) = payload_str_items(payload) {
-                // @deriving(accessors) or @deriving({jsConverter: newType})
-                for item in items {
-                    if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc {
-                        let (ref expr, _) = **eval_inner;
-                        let expr_desc = arena.get_expr(*expr).pexp_desc.clone();
-                        parse_deriving_expr(&expr_desc, &mut actions, arena);
-                    }
+            for config in deriving_config_actions(payload, arena).unwrap_or_default() {
+                match config.name.as_str() {
+                    "accessors" => actions.push(DeriveAction::Accessors),
+                    "jsConverter" => actions.push(DeriveAction::JsConverter {
+                        new_type: config
+                            .config
+                            .is_some_and(|expr| check_new_type_config(arena.get_expr(expr), arena)),
+                    }),
+                    "abstract" => actions.push(DeriveAction::Abstract {
+                        light: config.config.is_some_and(|expr| {
+                            check_abstract_light_config(arena.get_expr(expr), arena)
+                        }),
+                    }),
+                    _ => {}
                 }
             }
         } else {
@@ -9725,87 +9493,6 @@ fn parse_deriving_actions(
     remaining_attrs.reverse();
 
     (actions, remaining_attrs)
-}
-
-/// Parse a deriving expression to extract actions
-fn parse_deriving_expr(
-    expr_desc: &ExpressionDesc,
-    actions: &mut Vec<DeriveAction>,
-    arena: &ParseArena,
-) {
-    match expr_desc {
-        // Simple identifier: @deriving(accessors)
-        ExpressionDesc::Pexp_ident(lid_loc) => {
-            let lid = arena.get_longident(lid_loc.txt);
-            if let Longident::Lident(s) = lid {
-                let name = arena.get_string(*s);
-                match name {
-                    "accessors" => actions.push(DeriveAction::Accessors),
-                    "jsConverter" => actions.push(DeriveAction::JsConverter { new_type: false }),
-                    "abstract" => actions.push(DeriveAction::Abstract { light: false }),
-                    _ => {}
-                }
-            }
-        }
-        // Tuple of identifiers: @deriving(accessors, jsConverter)
-        ExpressionDesc::Pexp_tuple(exprs) => {
-            for expr in exprs.iter() {
-                let expr_desc = arena.get_expr(*expr).pexp_desc.clone();
-                parse_deriving_expr(&expr_desc, actions, arena);
-            }
-        }
-        // Record: @deriving({jsConverter: newType})
-        ExpressionDesc::Pexp_record(inner) => {
-            let (ref fields, ref _none) = **inner;
-            for field in fields {
-                let lid = arena.get_longident(field.lid.txt);
-                if let Longident::Lident(s) = lid {
-                    let field_name = arena.get_string(*s);
-                    match field_name {
-                        "jsConverter" => {
-                            // Check if value is `newType` or `{newType: true/false}`
-                            let field_expr = arena.get_expr(field.expr).clone();
-                            let new_type = check_new_type_config(&field_expr, arena);
-                            actions.push(DeriveAction::JsConverter { new_type });
-                        }
-                        "abstract" => {
-                            let field_expr = arena.get_expr(field.expr).clone();
-                            let light = check_abstract_light_config(&field_expr, arena);
-                            actions.push(DeriveAction::Abstract { light });
-                        }
-                        "accessors" => {
-                            actions.push(DeriveAction::Accessors);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        // Constructor application for polymorphic variants like @deriving(jsConverter)
-        ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
-            // Check if it's a simple ident being applied
-            let funct_expr = arena.get_expr(*funct);
-            if let ExpressionDesc::Pexp_ident(lid_loc) = &*funct_expr.pexp_desc {
-                let lid = arena.get_longident(lid_loc.txt);
-                if let Longident::Lident(s) = lid {
-                    let name = arena.get_string(*s);
-                    if name == "jsConverter" && !args.is_empty() {
-                        // @deriving(jsConverter({newType: true}))
-                        let (_, arg_expr) = &args[0];
-                        let cfg_expr = arena.get_expr(*arg_expr).clone();
-                        let new_type = check_new_type_config(&cfg_expr, arena);
-                        actions.push(DeriveAction::JsConverter { new_type });
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Check if abstract config is `light` in @deriving({abstract: light})
@@ -9976,7 +9663,8 @@ fn is_enum_polyvar<'a>(tdcl: &'a TypeDeclaration, arena: &'a ParseArena) -> Opti
 
 /// Get @as value from attributes (used for polyvariant tag string mapping)
 fn get_as_string_value(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
-    for (attr_name, payload) in attrs {
+    for attr in attrs {
+        let (attr_name, payload) = attr;
         let name = arena.get_string(attr_name.txt);
         if name == "as" {
             if let Some(items) = payload_str_items(payload) {
@@ -9987,6 +9675,7 @@ fn get_as_string_value(attrs: &[Attribute], arena: &ParseArena) -> Option<String
                         if let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*expr).pexp_desc
                         {
                             if let Constant::String(txt_str, _delim) = &**c {
+                                arena.mark_used_attribute(attr);
                                 return Some(txt_str.to_string());
                             }
                         }
@@ -11620,7 +11309,9 @@ fn handle_deriving_type(
     let last_tdcl = tdcls.last().unwrap();
     let (actions, new_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
 
-    if actions.is_empty() {
+    // `process_derive_type` gives `bs_deriving = Some actions` for any
+    // `@deriving`, even with no actions (ast_tdcls.ml:76-105).
+    if !has_deriving_attribute(&last_tdcl.ptype_attributes, arena) {
         // No @deriving, but still rewrite type declarations for string transformations in attributes
         let rewritten_tdcls: Vec<TypeDeclaration> = tdcls
             .iter()
@@ -11721,220 +11412,176 @@ fn handle_deriving_type(
     }]
 }
 
-fn validate_deriving_accessors_for_tdcls(
+/// `Ast_attributes.process_derive_type` (compiler/frontend/ast_attributes.ml:146-160)
+/// over the last declaration's attributes: the first `@deriving` payload is read
+/// with `ident_or_record_as_config`, a second one raises `Duplicated_bs_deriving`.
+/// Returns the first `@deriving` payload.
+fn deriving_process_derive_type<'t>(
+    tdcls: &'t [TypeDeclaration],
+    arena: &ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) -> PpxResult<Option<&'t Payload>> {
+    let Some(last_tdcl) = tdcls.last() else {
+        return Ok(None);
+    };
+    let mut first_deriving = None;
+    for (attr_name, payload) in &last_tdcl.ptype_attributes {
+        if arena.get_string(attr_name.txt) == "deriving" {
+            if first_deriving.is_some() {
+                return Err(PpxError::at_loc(
+                    attr_name.loc,
+                    "Duplicate @deriving attribute; a type can only have one.",
+                ));
+            }
+            deriving_config_actions(payload, arena)?;
+            // `Ast_payload.ident_or_record_as_config` warns about payloads it
+            // cannot use (ast_payload.ml:194-209).
+            if let Some((loc, message)) = return_wrapper_config_warning(payload, arena, attr_name.loc) {
+                warnings.push(PpxWarning {
+                    loc,
+                    warning: Warning::BsDeriveWarning {
+                        message: message.to_string(),
+                    },
+                });
+            }
+            first_deriving = Some(payload);
+        }
+    }
+    Ok(first_deriving)
+}
+
+/// `Ast_tdcls.handle_tdcls_in_stru`/`handle_tdcls_in_sigi`
+/// (ast_tdcls.ml:38-108) after the declarations are mapped:
+/// `Ast_derive_abstract.is_abstract`, then either the abstract expansion or,
+/// action by action, `Ast_payload.table_dispatch` and the deriver's
+/// `structure_gen` (structures only) and `signature_gen`.
+fn run_derivers(
     tdcls: &[TypeDeclaration],
     arena: &ParseArena,
+    in_structure: bool,
+    payload: &Payload,
+    warnings: &mut Vec<PpxWarning>,
 ) -> PpxResult<()> {
-    let Some(last_tdcl) = tdcls.last() else {
+    if tdcls.is_empty() {
         return Ok(());
+    }
+    let actions = deriving_config_actions(payload, arena)?;
+    // `Ast_derive_abstract.is_abstract` (ast_derive_abstract.ml:32-47).
+    let is_abstract = match actions.as_slice() {
+        [action] if action.name == "abstract" => match action.config {
+            None => true,
+            Some(config) if expr_lident_name(config, arena).as_deref() == Some("light") => true,
+            Some(_) => {
+                return Err(PpxError::at_loc(action.name_loc, "invalid config for abstract"));
+            }
+        },
+        _ => {
+            if let Some(action) = actions.iter().find(|action| action.name == "abstract") {
+                return Err(PpxError::at_loc(
+                    action.name_loc,
+                    "deriving abstract does not work with any other deriving",
+                ));
+            }
+            false
+        }
     };
-    for tdcl in tdcls {
-        let mut seen_deriving = false;
-        for (attr_name, payload) in &tdcl.ptype_attributes {
-            if arena.get_string(attr_name.txt) == "deriving" {
-                if seen_deriving {
-                    return Err(PpxError::at_loc(
-                        attr_name.loc,
-                        "Duplicate @deriving attribute; a type can only have one.",
-                    ));
+    if is_abstract {
+        // `Ast_derive_abstract.handle_tdcls_in_str`/`handle_tdcls_in_sig`
+        // fold right over the declarations and their record labels, reading
+        // each `@as` with `Ast_attributes.iter_process_bs_string_as`.
+        for tdcl in tdcls.iter().rev() {
+            if let TypeKind::Ptype_record(labels) = &tdcl.ptype_kind {
+                for label in labels.iter().rev() {
+                    validate_string_as_attrs(&label.pld_attributes, arena)?;
                 }
-                seen_deriving = true;
-                validate_deriving_attr_payload(payload, arena)?;
             }
         }
-    }
-
-    let (actions, _remaining_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
-    if !actions
-        .iter()
-        .any(|action| matches!(action, DeriveAction::Accessors))
-    {
         return Ok(());
     }
-
-    for tdcl in tdcls {
-        if let TypeKind::Ptype_variant(constructors) = &tdcl.ptype_kind {
-            for constructor in constructors {
-                if matches!(constructor.pcd_args, ConstructorArguments::Pcstr_record(_)) {
+    for action in &actions {
+        match action.name.as_str() {
+            // `Ast_derive_projector` (ast_derive_projector.ml:17-137).
+            "accessors" => {
+                if let Some(config) = action.config {
                     return Err(PpxError::at_loc(
-                        constructor.pcd_loc,
-                        ACCESSORS_VARIANT_RECORD_ARG_ERROR,
+                        arena.get_expr(config).pexp_loc,
+                        "such configuration is not supported",
                     ));
                 }
+                if in_structure {
+                    accessors_gen(tdcls, warnings)?;
+                }
+                accessors_gen(tdcls, warnings)?;
+            }
+            // `Ast_derive_js_mapper` (ast_derive_js_mapper.ml:145-360).
+            "jsConverter" => {
+                if let Some(config) = action.config {
+                    validate_js_converter_config(config, arena)?;
+                }
+                if in_structure {
+                    for tdcl in tdcls {
+                        if let TypeKind::Ptype_abstract = &tdcl.ptype_kind
+                            && let Some(row_fields) = is_enum_polyvar(tdcl, arena)
+                        {
+                            // `build_map` reads each tag's `@as`.
+                            for row_field in row_fields {
+                                if let RowField::Rtag(_, attrs, _, _) = row_field {
+                                    validate_string_as_attrs(attrs, arena)?;
+                                }
+                            }
+                        } else if js_converter_not_applicable(tdcl, arena) {
+                            push_deriving_not_applicable_warning(
+                                tdcl.ptype_loc,
+                                "jsConverter",
+                                warnings,
+                            );
+                        }
+                    }
+                }
+                for tdcl in tdcls {
+                    if js_converter_not_applicable(tdcl, arena) {
+                        push_deriving_not_applicable_warning(tdcl.ptype_loc, "jsConverter", warnings);
+                    }
+                }
+            }
+            name => {
+                return Err(PpxError::at_loc(
+                    action.name_loc,
+                    format!("{name} is not supported"),
+                ));
             }
         }
     }
-
     Ok(())
 }
 
-fn validate_payload_deriving_errors(payload: &Payload, arena: &ParseArena) -> PpxResult<()> {
-    match payload {
-        Payload::PStr(items) => validate_structure_deriving_errors(items, arena),
-        Payload::PSig(items) => validate_signature_deriving_errors(items, arena),
-        Payload::PTyp(_) | Payload::PPat(_) => Ok(()),
-    }
-}
-
-fn validate_structure_deriving_errors(
-    structure: &[StructureItem],
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    for item in structure {
-        match &*item.pstr_desc {
-            StructureItemDesc::Pstr_type(inner) => {
-                let (_rec_flag, tdcls) = &**inner;
-                validate_deriving_accessors_for_tdcls(tdcls, arena)?;
-            }
-            StructureItemDesc::Pstr_module(mb) => {
-                let mod_expr = arena.get_mod_expr(mb.pmb_expr);
-                validate_module_expr_deriving_errors(&mod_expr, arena)?;
-            }
-            StructureItemDesc::Pstr_recmodule(mbs) => {
-                for mb in mbs.iter() {
-                    let mod_expr = arena.get_mod_expr(mb.pmb_expr);
-                    validate_module_expr_deriving_errors(&mod_expr, arena)?;
+/// `structure_gen`/`signature_gen` of `Ast_derive_projector`: both raise on a
+/// variant constructor with an inline record and warn on abstract and open
+/// types.
+fn accessors_gen(tdcls: &[TypeDeclaration], warnings: &mut Vec<PpxWarning>) -> PpxResult<()> {
+    for tdcl in tdcls {
+        match &tdcl.ptype_kind {
+            TypeKind::Ptype_record(_) => {}
+            TypeKind::Ptype_variant(constructors) => {
+                for constructor in constructors {
+                    if matches!(constructor.pcd_args, ConstructorArguments::Pcstr_record(_)) {
+                        return Err(PpxError::at_loc(
+                            constructor.pcd_loc,
+                            ACCESSORS_VARIANT_RECORD_ARG_ERROR,
+                        ));
+                    }
                 }
             }
-            StructureItemDesc::Pstr_modtype(mtd) => {
-                if let Some(mod_type_idx) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type_idx);
-                    validate_module_type_deriving_errors(&mod_type, arena)?;
-                }
+            TypeKind::Ptype_abstract | TypeKind::Ptype_open => {
+                push_deriving_not_applicable_warning(tdcl.ptype_loc, "accessors", warnings);
             }
-            StructureItemDesc::Pstr_include(incl) => {
-                let mod_expr = arena.get_mod_expr(incl.pincl_mod);
-                validate_module_expr_deriving_errors(&mod_expr, arena)?;
-            }
-            StructureItemDesc::Pstr_attribute(attr) => {
-                validate_payload_deriving_errors(&attr.1, arena)?;
-            }
-            StructureItemDesc::Pstr_extension(inner) => {
-                let (extension, _attrs) = &**inner;
-                validate_payload_deriving_errors(&extension.1, arena)?;
-            }
-            StructureItemDesc::Pstr_eval(_)
-            | StructureItemDesc::Pstr_value(_)
-            | StructureItemDesc::Pstr_primitive(_)
-            | StructureItemDesc::Pstr_typext(_)
-            | StructureItemDesc::Pstr_exception(_)
-            | StructureItemDesc::Pstr_open(_) => {}
         }
     }
-
     Ok(())
 }
 
-fn validate_signature_deriving_errors(
-    signature: &[SignatureItem],
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    for item in signature {
-        match &*item.psig_desc {
-            SignatureItemDesc::Psig_type(inner) => {
-                let (_rec_flag, tdcls) = &**inner;
-                validate_deriving_accessors_for_tdcls(tdcls, arena)?;
-            }
-            SignatureItemDesc::Psig_module(md) => {
-                let mod_type = arena.get_mod_type(md.pmd_type);
-                validate_module_type_deriving_errors(&mod_type, arena)?;
-            }
-            SignatureItemDesc::Psig_recmodule(mds) => {
-                for md in mds.iter() {
-                    let mod_type = arena.get_mod_type(md.pmd_type);
-                    validate_module_type_deriving_errors(&mod_type, arena)?;
-                }
-            }
-            SignatureItemDesc::Psig_modtype(mtd) => {
-                if let Some(mod_type_idx) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type_idx);
-                    validate_module_type_deriving_errors(&mod_type, arena)?;
-                }
-            }
-            SignatureItemDesc::Psig_include(incl) => {
-                let mod_type = arena.get_mod_type(incl.pincl_mod);
-                validate_module_type_deriving_errors(&mod_type, arena)?;
-            }
-            SignatureItemDesc::Psig_attribute(attr) => {
-                validate_payload_deriving_errors(&attr.1, arena)?;
-            }
-            SignatureItemDesc::Psig_extension(inner) => {
-                let (extension, _attrs) = &**inner;
-                validate_payload_deriving_errors(&extension.1, arena)?;
-            }
-            SignatureItemDesc::Psig_value(_)
-            | SignatureItemDesc::Psig_typext(_)
-            | SignatureItemDesc::Psig_exception(_)
-            | SignatureItemDesc::Psig_open(_) => {}
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_module_expr_deriving_errors(
-    mod_expr: &current::ModuleExpr,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    match &*mod_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(items) => validate_structure_deriving_errors(items, arena),
-        ModuleExprDesc::Pmod_functor(inner) => {
-            let (_name, param_type, body) = &**inner;
-            if let Some(param_type_idx) = *param_type {
-                let mod_type = arena.get_mod_type(param_type_idx);
-                validate_module_type_deriving_errors(&mod_type, arena)?;
-            }
-            let body_expr = arena.get_mod_expr(*body);
-            validate_module_expr_deriving_errors(&body_expr, arena)
-        }
-        ModuleExprDesc::Pmod_apply(left, right) => {
-            let left_expr = arena.get_mod_expr(*left);
-            validate_module_expr_deriving_errors(&left_expr, arena)?;
-            let right_expr = arena.get_mod_expr(*right);
-            validate_module_expr_deriving_errors(&right_expr, arena)
-        }
-        ModuleExprDesc::Pmod_constraint(inner, mod_type_idx) => {
-            let inner_expr = arena.get_mod_expr(*inner);
-            validate_module_expr_deriving_errors(&inner_expr, arena)?;
-            let mod_type = arena.get_mod_type(*mod_type_idx);
-            validate_module_type_deriving_errors(&mod_type, arena)
-        }
-        ModuleExprDesc::Pmod_extension(extension) => {
-            validate_payload_deriving_errors(&extension.1, arena)
-        }
-        ModuleExprDesc::Pmod_ident(_) | ModuleExprDesc::Pmod_unpack(_) => Ok(()),
-    }
-}
-
-fn validate_module_type_deriving_errors(
-    mod_type: &ModuleType,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    match &*mod_type.pmty_desc {
-        ModuleTypeDesc::Pmty_signature(items) => validate_signature_deriving_errors(items, arena),
-        ModuleTypeDesc::Pmty_functor(inner) => {
-            let (_name, param_type, result_type) = &**inner;
-            if let Some(param_type_idx) = *param_type {
-                let param_type = arena.get_mod_type(param_type_idx);
-                validate_module_type_deriving_errors(&param_type, arena)?;
-            }
-            let result_type = arena.get_mod_type(*result_type);
-            validate_module_type_deriving_errors(&result_type, arena)
-        }
-        ModuleTypeDesc::Pmty_with(inner) => {
-            let (mod_type_idx, _constraints) = &**inner;
-            let inner_type = arena.get_mod_type(*mod_type_idx);
-            validate_module_type_deriving_errors(&inner_type, arena)
-        }
-        ModuleTypeDesc::Pmty_typeof(mod_expr_idx) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx);
-            validate_module_expr_deriving_errors(&mod_expr, arena)
-        }
-        ModuleTypeDesc::Pmty_extension(extension) => {
-            validate_payload_deriving_errors(&extension.1, arena)
-        }
-        ModuleTypeDesc::Pmty_ident(_) | ModuleTypeDesc::Pmty_alias(_) => Ok(()),
-    }
+fn is_config_attribute(attr: &Attribute, arena: &ParseArena) -> bool {
+    arena.get_string(attr.0.txt) == "config"
 }
 
 fn is_builtin_rank0_type_name(name: &str) -> bool {
@@ -11942,20 +11589,6 @@ fn is_builtin_rank0_type_name(name: &str) -> bool {
         name,
         "int" | "char" | "float" | "bool" | "unit" | "exn" | "string"
     )
-}
-
-fn validate_type_declaration_builtin_type_redefinition_error(
-    tdcl: &TypeDeclaration,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    let name = arena.get_string(tdcl.ptype_name.txt);
-    if is_builtin_rank0_type_name(name) {
-        return Err(PpxError::at_loc(
-            tdcl.ptype_loc,
-            format!("built-in type `{name}` can not be redefined "),
-        ));
-    }
-    Ok(())
 }
 
 fn core_type_get_uncurry_arity_aux(typ_idx: CoreTypeIdx, acc: i32, arena: &ParseArena) -> i32 {
@@ -11988,406 +11621,6 @@ fn core_type_get_curry_arity(typ_idx: CoreTypeIdx, arena: &ParseArena) -> i32 {
 
 fn core_type_is_arity_one(typ_idx: CoreTypeIdx, arena: &ParseArena) -> bool {
     core_type_get_curry_arity(typ_idx, arena) == 1
-}
-
-fn validate_value_description_identity_arity_error(
-    vd: &ValueDescription,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    let [byte_name] = vd.pval_prim.as_slice() else {
-        return Ok(());
-    };
-    if arena.get_string(*byte_name) == "%identity" && !core_type_is_arity_one(vd.pval_type, arena) {
-        return Err(PpxError::at_loc(
-            vd.pval_loc,
-            "%identity expects a function type of the form 'a => 'b (arity 1)",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_with_constraint_builtin_type_redefinition_errors(
-    constraint: &WithConstraint,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    match constraint {
-        WithConstraint::Pwith_type(_, tdcl) | WithConstraint::Pwith_typesubst(_, tdcl) => {
-            validate_type_declaration_builtin_type_redefinition_error(tdcl, arena)
-        }
-        WithConstraint::Pwith_module(_, _) | WithConstraint::Pwith_modsubst(_, _) => Ok(()),
-    }
-}
-
-fn validate_payload_builtin_type_redefinition_errors(
-    payload: &Payload,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    match payload {
-        Payload::PStr(items) => validate_structure_builtin_type_redefinition_errors(items, arena),
-        Payload::PSig(items) => validate_signature_builtin_type_redefinition_errors(items, arena),
-        Payload::PTyp(_) | Payload::PPat(_) => Ok(()),
-    }
-}
-
-fn validate_structure_builtin_type_redefinition_errors(
-    structure: &[StructureItem],
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    for item in structure {
-        match &*item.pstr_desc {
-            StructureItemDesc::Pstr_type(inner) => {
-                let (_rec_flag, tdcls) = &**inner;
-                for tdcl in tdcls {
-                    validate_type_declaration_builtin_type_redefinition_error(tdcl, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_module(mb) => {
-                let mod_expr = arena.get_mod_expr(mb.pmb_expr);
-                validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)?;
-            }
-            StructureItemDesc::Pstr_recmodule(mbs) => {
-                for mb in mbs.iter() {
-                    let mod_expr = arena.get_mod_expr(mb.pmb_expr);
-                    validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_modtype(mtd) => {
-                if let Some(mod_type_idx) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type_idx);
-                    validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_include(incl) => {
-                let mod_expr = arena.get_mod_expr(incl.pincl_mod);
-                validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)?;
-            }
-            StructureItemDesc::Pstr_attribute(attr) => {
-                validate_payload_builtin_type_redefinition_errors(&attr.1, arena)?;
-            }
-            StructureItemDesc::Pstr_extension(inner) => {
-                let (extension, _attrs) = &**inner;
-                validate_payload_builtin_type_redefinition_errors(&extension.1, arena)?;
-            }
-            StructureItemDesc::Pstr_primitive(vd) => {
-                validate_value_description_identity_arity_error(vd, arena)?;
-            }
-            StructureItemDesc::Pstr_eval(inner) => {
-                let (expr_idx, _attrs) = &**inner;
-                validate_expression_builtin_type_redefinition_errors(*expr_idx, arena)?;
-            }
-            StructureItemDesc::Pstr_value(inner) => {
-                let (_rec_flag, bindings) = &**inner;
-                for binding in bindings {
-                    validate_expression_builtin_type_redefinition_errors(binding.pvb_expr, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_typext(_)
-            | StructureItemDesc::Pstr_exception(_)
-            | StructureItemDesc::Pstr_open(_) => {}
-        }
-    }
-    Ok(())
-}
-
-fn validate_signature_builtin_type_redefinition_errors(
-    signature: &[SignatureItem],
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    for item in signature {
-        match &*item.psig_desc {
-            SignatureItemDesc::Psig_type(inner) => {
-                let (_rec_flag, tdcls) = &**inner;
-                for tdcl in tdcls {
-                    validate_type_declaration_builtin_type_redefinition_error(tdcl, arena)?;
-                }
-            }
-            SignatureItemDesc::Psig_module(md) => {
-                let mod_type = arena.get_mod_type(md.pmd_type);
-                validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
-            }
-            SignatureItemDesc::Psig_recmodule(mds) => {
-                for md in mds.iter() {
-                    let mod_type = arena.get_mod_type(md.pmd_type);
-                    validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
-                }
-            }
-            SignatureItemDesc::Psig_modtype(mtd) => {
-                if let Some(mod_type_idx) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type_idx);
-                    validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
-                }
-            }
-            SignatureItemDesc::Psig_include(incl) => {
-                let mod_type = arena.get_mod_type(incl.pincl_mod);
-                validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
-            }
-            SignatureItemDesc::Psig_attribute(attr) => {
-                validate_payload_builtin_type_redefinition_errors(&attr.1, arena)?;
-            }
-            SignatureItemDesc::Psig_extension(inner) => {
-                let (extension, _attrs) = &**inner;
-                validate_payload_builtin_type_redefinition_errors(&extension.1, arena)?;
-            }
-            SignatureItemDesc::Psig_value(vd) => {
-                validate_value_description_identity_arity_error(vd, arena)?;
-            }
-            SignatureItemDesc::Psig_typext(_)
-            | SignatureItemDesc::Psig_exception(_)
-            | SignatureItemDesc::Psig_open(_) => {}
-        }
-    }
-    Ok(())
-}
-
-fn validate_module_expr_builtin_type_redefinition_errors(
-    mod_expr: &ModuleExpr,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    match &*mod_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(items) => {
-            validate_structure_builtin_type_redefinition_errors(items, arena)
-        }
-        ModuleExprDesc::Pmod_functor(inner) => {
-            let (_name, param_type, body) = &**inner;
-            if let Some(param_type_idx) = *param_type {
-                let param_type = arena.get_mod_type(param_type_idx);
-                validate_module_type_builtin_type_redefinition_errors(&param_type, arena)?;
-            }
-            let body = arena.get_mod_expr(*body);
-            validate_module_expr_builtin_type_redefinition_errors(&body, arena)
-        }
-        ModuleExprDesc::Pmod_apply(left, right) => {
-            let left = arena.get_mod_expr(*left);
-            validate_module_expr_builtin_type_redefinition_errors(&left, arena)?;
-            let right = arena.get_mod_expr(*right);
-            validate_module_expr_builtin_type_redefinition_errors(&right, arena)
-        }
-        ModuleExprDesc::Pmod_constraint(inner, mod_type_idx) => {
-            let inner = arena.get_mod_expr(*inner);
-            validate_module_expr_builtin_type_redefinition_errors(&inner, arena)?;
-            let mod_type = arena.get_mod_type(*mod_type_idx);
-            validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)
-        }
-        ModuleExprDesc::Pmod_extension(extension) => {
-            validate_payload_builtin_type_redefinition_errors(&extension.1, arena)
-        }
-        ModuleExprDesc::Pmod_unpack(expr_idx) => {
-            validate_expression_builtin_type_redefinition_errors(*expr_idx, arena)
-        }
-        ModuleExprDesc::Pmod_ident(_) => Ok(()),
-    }
-}
-
-fn validate_expression_builtin_type_redefinition_errors(
-    expr_idx: ExprIdx,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    let expr = arena.get_expr(expr_idx);
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_let(inner) => {
-            let (_rec_flag, bindings, body) = &**inner;
-            for binding in bindings {
-                validate_expression_builtin_type_redefinition_errors(binding.pvb_expr, arena)?;
-            }
-            validate_expression_builtin_type_redefinition_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_fun(fun) => {
-            if let Some(default) = fun.default {
-                validate_expression_builtin_type_redefinition_errors(default, arena)?;
-            }
-            validate_expression_builtin_type_redefinition_errors(fun.rhs, arena)
-        }
-        ExpressionDesc::Pexp_apply(apply) => {
-            validate_expression_builtin_type_redefinition_errors(apply.funct, arena)?;
-            for (_label, arg) in &apply.args {
-                validate_expression_builtin_type_redefinition_errors(*arg, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            let (scrutinee, cases) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*scrutinee, arena)?;
-            for case in cases {
-                if let Some(guard) = case.pc_guard {
-                    validate_expression_builtin_type_redefinition_errors(guard, arena)?;
-                }
-                validate_expression_builtin_type_redefinition_errors(case.pc_rhs, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
-            for item in items.iter() {
-                validate_expression_builtin_type_redefinition_errors(*item, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_construct(_, arg) => {
-            if let Some(arg) = arg {
-                validate_expression_builtin_type_redefinition_errors(*arg, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_variant(inner) => {
-            let (_label, arg) = &**inner;
-            if let Some(arg) = arg {
-                validate_expression_builtin_type_redefinition_errors(*arg, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_record(inner) => {
-            let (fields, spread) = &**inner;
-            for field in fields {
-                validate_expression_builtin_type_redefinition_errors(field.expr, arena)?;
-            }
-            if let Some(spread) = spread {
-                validate_expression_builtin_type_redefinition_errors(*spread, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_field(owner, _)
-        | ExpressionDesc::Pexp_assert(owner)
-        | ExpressionDesc::Pexp_await(owner)
-        | ExpressionDesc::Pexp_comptime_compile_error(owner)
-        | ExpressionDesc::Pexp_comptime_build_variant(owner)
-        | ExpressionDesc::Pexp_comptime_variant_case(owner)
-        | ExpressionDesc::Pexp_comptime_build_record(owner)
-        | ExpressionDesc::Pexp_comptime_record_field(owner) => {
-            validate_expression_builtin_type_redefinition_errors(*owner, arena)
-        }
-        ExpressionDesc::Pexp_setfield(inner) => {
-            let (owner, _field, value) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*owner, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*value, arena)
-        }
-        ExpressionDesc::Pexp_ifthenelse(inner) => {
-            let (condition, then_expr, else_expr) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*condition, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*then_expr, arena)?;
-            if let Some(else_expr) = else_expr {
-                validate_expression_builtin_type_redefinition_errors(*else_expr, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_sequence(first, second) => {
-            validate_expression_builtin_type_redefinition_errors(*first, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*second, arena)
-        }
-        ExpressionDesc::Pexp_while(condition, body) => {
-            validate_expression_builtin_type_redefinition_errors(*condition, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_for(inner) => {
-            let (_pat, start, stop, _direction, body) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*start, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*stop, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_for_of(inner)
-        | ExpressionDesc::Pexp_for_await_of(inner)
-        | ExpressionDesc::Pexp_inline_for(inner) => {
-            let (_pat, iterable, body) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*iterable, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_constraint(inner) => {
-            let (inner_expr, _typ) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*inner_expr, arena)
-        }
-        ExpressionDesc::Pexp_coerce(inner) => {
-            let (inner_expr, _from_typ, _to_typ) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*inner_expr, arena)
-        }
-        ExpressionDesc::Pexp_send(inner) => {
-            let (owner, _method) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*owner, arena)
-        }
-        ExpressionDesc::Pexp_letmodule(inner) => {
-            let (_name, mod_expr_idx, body) = &**inner;
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx);
-            validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_letexception(inner) => {
-            let (_extension, body) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_newtype(inner) => {
-            let (_name, body) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_pack(mod_expr_idx) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx);
-            validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)
-        }
-        ExpressionDesc::Pexp_open(inner) => {
-            let (_override_flag, _lid, body) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_extension(extension) => {
-            validate_payload_builtin_type_redefinition_errors(&extension.1, arena)
-        }
-        ExpressionDesc::Pexp_comptime_field(inner) => {
-            let (value, field) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*value, arena)?;
-            validate_expression_builtin_type_redefinition_errors(*field, arena)
-        }
-        ExpressionDesc::Pexp_comptime_record(inner) => {
-            let (_typ, fields) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*fields, arena)
-        }
-        ExpressionDesc::Pexp_comptime_variant(inner) => {
-            let (_typ, constructor, payload) = &**inner;
-            validate_expression_builtin_type_redefinition_errors(*constructor, arena)?;
-            if let Some(payload) = payload {
-                validate_expression_builtin_type_redefinition_errors(*payload, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_ident(_)
-        | ExpressionDesc::Pexp_constant(_)
-        | ExpressionDesc::Pexp_break
-        | ExpressionDesc::Pexp_continue
-        | ExpressionDesc::Pexp_jsx_element(_)
-        | ExpressionDesc::Pexp_comptime_typeinfo(_)
-        | ExpressionDesc::Pexp_comptime_typename(_) => Ok(()),
-    }
-}
-
-fn validate_module_type_builtin_type_redefinition_errors(
-    mod_type: &ModuleType,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    match &*mod_type.pmty_desc {
-        ModuleTypeDesc::Pmty_signature(items) => {
-            validate_signature_builtin_type_redefinition_errors(items, arena)
-        }
-        ModuleTypeDesc::Pmty_functor(inner) => {
-            let (_name, param_type, result_type) = &**inner;
-            if let Some(param_type_idx) = *param_type {
-                let param_type = arena.get_mod_type(param_type_idx);
-                validate_module_type_builtin_type_redefinition_errors(&param_type, arena)?;
-            }
-            let result_type = arena.get_mod_type(*result_type);
-            validate_module_type_builtin_type_redefinition_errors(&result_type, arena)
-        }
-        ModuleTypeDesc::Pmty_with(inner) => {
-            let (mod_type_idx, constraints) = &**inner;
-            let mod_type = arena.get_mod_type(*mod_type_idx);
-            validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
-            for constraint in constraints {
-                validate_with_constraint_builtin_type_redefinition_errors(constraint, arena)?;
-            }
-            Ok(())
-        }
-        ModuleTypeDesc::Pmty_typeof(mod_expr_idx) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx);
-            validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)
-        }
-        ModuleTypeDesc::Pmty_extension(extension) => {
-            validate_payload_builtin_type_redefinition_errors(&extension.1, arena)
-        }
-        ModuleTypeDesc::Pmty_ident(_) | ModuleTypeDesc::Pmty_alias(_) => Ok(()),
-    }
 }
 
 fn validate_method_attribute_config_names<F>(
@@ -12476,8 +11709,25 @@ fn validate_method_attribute_bool_payload(
     }
 }
 
-fn validate_object_field_method_attrs(attrs: &[Attribute], arena: &ParseArena) -> PpxResult<()> {
+/// `Ast_attributes.process_method_attributes_rev` (ast_attributes.ml): each
+/// `@get`/`@set` payload is read with `Ast_payload.ident_or_record_as_config`,
+/// which warns about a payload it cannot use.
+fn validate_object_field_method_attrs(
+    attrs: &[Attribute],
+    arena: &ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) -> PpxResult<()> {
     for (attr_name, payload) in attrs {
+        if matches!(arena.get_string(attr_name.txt), "get" | "set")
+            && let Some((loc, message)) = return_wrapper_config_warning(payload, arena, attr_name.loc)
+        {
+            warnings.push(PpxWarning {
+                loc,
+                warning: Warning::BsDeriveWarning {
+                    message: message.to_string(),
+                },
+            });
+        }
         match arena.get_string(attr_name.txt) {
             "get" => {
                 validate_method_attribute_config_names(payload, arena, |name, loc, opt_expr| {
@@ -12503,284 +11753,28 @@ fn validate_object_field_method_attrs(attrs: &[Attribute], arena: &ParseArena) -
     Ok(())
 }
 
-fn validate_core_type_method_attribute_errors(
-    typ: &CoreType,
-    arena: &ParseArena,
-) -> MethodAttrResult {
-    match &*typ.ptyp_desc {
-        CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (arg, ret, _arity) = &**inner;
-            let arg_type = arena.get_core_type(arg.typ).clone();
-            validate_core_type_method_attribute_errors(&arg_type, arena)?;
-            let ret_type = arena.get_core_type(*ret).clone();
-            validate_core_type_method_attribute_errors(&ret_type, arena)
-        }
-        CoreTypeDesc::Ptyp_tuple(types) => {
-            for typ_idx in types.iter() {
-                let child = arena.get_core_type(*typ_idx).clone();
-                validate_core_type_method_attribute_errors(&child, arena)?;
-            }
-            Ok(())
-        }
-        CoreTypeDesc::Ptyp_constr(inner) => {
-            let (_lid, types) = &**inner;
-            for typ_idx in types.iter() {
-                let child = arena.get_core_type(*typ_idx).clone();
-                validate_core_type_method_attribute_errors(&child, arena)?;
-            }
-            Ok(())
-        }
-        CoreTypeDesc::Ptyp_object(inner) => {
-            let (fields, _closed) = &**inner;
-            for field in fields {
-                match field {
-                    ObjectField::Otag(_name, attrs, typ_idx) => {
-                        validate_object_field_method_attrs(attrs, arena)?;
-                        let child = arena.get_core_type(*typ_idx).clone();
-                        validate_core_type_method_attribute_errors(&child, arena)?;
-                    }
-                    ObjectField::Oinherit(typ_idx) => {
-                        let child = arena.get_core_type(*typ_idx).clone();
-                        validate_core_type_method_attribute_errors(&child, arena)?;
-                    }
-                }
-            }
-            Ok(())
-        }
-        CoreTypeDesc::Ptyp_alias(inner) => {
-            let (typ_idx, _name) = &**inner;
-            let child = arena.get_core_type(*typ_idx).clone();
-            validate_core_type_method_attribute_errors(&child, arena)
-        }
-        CoreTypeDesc::Ptyp_poly(inner) => {
-            let (_vars, typ_idx) = &**inner;
-            let child = arena.get_core_type(*typ_idx).clone();
-            validate_core_type_method_attribute_errors(&child, arena)
-        }
-        CoreTypeDesc::Ptyp_variant(inner) => {
-            let (rows, _closed, _labels) = &**inner;
-            for row in rows {
-                match row {
-                    RowField::Rtag(_label, _attrs, _empty, types) => {
-                        for typ_idx in types {
-                            let child = arena.get_core_type(*typ_idx).clone();
-                            validate_core_type_method_attribute_errors(&child, arena)?;
-                        }
-                    }
-                    RowField::Rinherit(typ_idx) => {
-                        let child = arena.get_core_type(*typ_idx).clone();
-                        validate_core_type_method_attribute_errors(&child, arena)?;
-                    }
-                }
-            }
-            Ok(())
-        }
-        CoreTypeDesc::Ptyp_package(pkg) => {
-            let (_lid, constraints) = &**pkg;
-            for (_lid, typ_idx) in constraints {
-                let child = arena.get_core_type(*typ_idx).clone();
-                validate_core_type_method_attribute_errors(&child, arena)?;
-            }
-            Ok(())
-        }
-        CoreTypeDesc::Ptyp_extension(extension) => {
-            validate_payload_method_attribute_errors(&extension.1, arena)
-        }
-        CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => Ok(()),
-    }
-}
-
-fn validate_constructor_args_method_attribute_errors(
-    args: &ConstructorArguments,
-    arena: &ParseArena,
-) -> MethodAttrResult {
-    match args {
-        ConstructorArguments::Pcstr_tuple(types) => {
-            for typ_idx in types {
-                let typ = arena.get_core_type(*typ_idx).clone();
-                validate_core_type_method_attribute_errors(&typ, arena)?;
-            }
-        }
-        ConstructorArguments::Pcstr_record(labels) => {
-            for label in labels {
-                let typ = arena.get_core_type(label.pld_type).clone();
-                validate_core_type_method_attribute_errors(&typ, arena)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_type_declaration_method_attribute_errors(
-    tdcl: &TypeDeclaration,
-    arena: &ParseArena,
-) -> MethodAttrResult {
-    for (param, _) in &tdcl.ptype_params {
-        let typ = arena.get_core_type(*param).clone();
-        validate_core_type_method_attribute_errors(&typ, arena)?;
-    }
-    for (left, right, _loc) in &tdcl.ptype_cstrs {
-        let left = arena.get_core_type(*left).clone();
-        validate_core_type_method_attribute_errors(&left, arena)?;
-        let right = arena.get_core_type(*right).clone();
-        validate_core_type_method_attribute_errors(&right, arena)?;
-    }
-    if let Some(manifest) = tdcl.ptype_manifest {
-        let typ = arena.get_core_type(manifest).clone();
-        validate_core_type_method_attribute_errors(&typ, arena)?;
-    }
-    match &tdcl.ptype_kind {
-        TypeKind::Ptype_record(labels) => {
-            for label in labels {
-                let typ = arena.get_core_type(label.pld_type).clone();
-                validate_core_type_method_attribute_errors(&typ, arena)?;
-            }
-        }
-        TypeKind::Ptype_variant(constructors) => {
-            for constructor in constructors {
-                validate_constructor_args_method_attribute_errors(&constructor.pcd_args, arena)?;
-                if let Some(res) = constructor.pcd_res {
-                    let typ = arena.get_core_type(res).clone();
-                    validate_core_type_method_attribute_errors(&typ, arena)?;
-                }
-            }
-        }
-        TypeKind::Ptype_abstract | TypeKind::Ptype_open => {}
-    }
-    Ok(())
-}
-
-fn validate_type_extension_method_attribute_errors(
-    ext: &TypeExtension,
-    arena: &ParseArena,
-) -> MethodAttrResult {
-    for (param, _) in &ext.ptyext_params {
-        let typ = arena.get_core_type(*param).clone();
-        validate_core_type_method_attribute_errors(&typ, arena)?;
-    }
-    for constructor in &ext.ptyext_constructors {
-        validate_extension_constructor_method_attribute_errors(constructor, arena)?;
-    }
-    Ok(())
-}
-
-fn validate_extension_constructor_method_attribute_errors(
-    ext: &ExtensionConstructor,
-    arena: &ParseArena,
-) -> MethodAttrResult {
-    match &ext.pext_kind {
-        ExtensionConstructorKind::Pext_decl(args, res) => {
-            validate_constructor_args_method_attribute_errors(args, arena)?;
-            if let Some(res) = res {
-                let typ = arena.get_core_type(*res).clone();
-                validate_core_type_method_attribute_errors(&typ, arena)?;
-            }
-        }
-        ExtensionConstructorKind::Pext_rebind(_) => {}
-    }
-    Ok(())
-}
-
-fn validate_payload_method_attribute_errors(
-    payload: &Payload,
-    arena: &ParseArena,
-) -> MethodAttrResult {
-    match payload {
-        Payload::PStr(items) => validate_structure_method_attribute_errors(items, arena),
-        Payload::PSig(items) => validate_signature_method_attribute_errors(items, arena),
-        Payload::PTyp(typ_idx) => {
-            let typ = arena.get_core_type(*typ_idx).clone();
-            validate_core_type_method_attribute_errors(&typ, arena)
-        }
-        Payload::PPat(inner) => {
-            let (pat_idx, guard) = &**inner;
-            validate_pattern_idx_method_attribute_errors(*pat_idx, arena)?;
-            if let Some(guard) = guard {
-                validate_expression_idx_method_attribute_errors(*guard, arena)?;
-            }
-            Ok(())
-        }
-    }
-}
-
-const FFI_EXTENSION_PAYLOAD_ERROR: &str = "%ffi extension can only be applied to a string containing a JavaScript function such as \"(x) => ...\"";
-
-/// Error from the builtin-PPX method-attribute and extension-payload checks.
-/// The checks only read the arena; the one error that needs to allocate in
-/// it (the `%ffi` parse warning) is completed by `into_ppx` at the top-level
-/// caller, before anything else touches the arena.
-enum MethodAttrError {
-    Ppx(PpxError),
-    FfiNotAFunction {
-        ext_loc: LocIdx,
-        code: String,
-        payload_loc: LocIdx,
-        first_line_offset: i32,
-    },
-}
-
-type MethodAttrResult = Result<(), MethodAttrError>;
-
-impl From<PpxError> for MethodAttrError {
-    fn from(error: PpxError) -> Self {
-        MethodAttrError::Ppx(error)
-    }
-}
-
-impl MethodAttrError {
-    fn at_loc(loc: LocIdx, message: &str) -> Self {
-        MethodAttrError::Ppx(PpxError::at_loc(loc, message))
-    }
-
-    fn into_ppx(self, arena: &mut ParseArena) -> PpxError {
-        match self {
-            MethodAttrError::Ppx(error) => error,
-            MethodAttrError::FfiNotAFunction {
-                ext_loc,
-                code,
-                payload_loc,
-                first_line_offset,
-            } => {
-                let err = PpxError::at_loc(ext_loc, FFI_EXTENSION_PAYLOAD_ERROR);
-                if let Some(warning) =
-                    raw_js_expression_parse_warning(&code, payload_loc, first_line_offset, arena)
-                {
-                    err.with_warning(
-                        warning.loc,
-                        Warning::BsFfiWarning {
-                            message: warning.message,
-                        },
-                    )
-                } else {
-                    err
-                }
-            }
-        }
-    }
-}
-
 fn validate_expression_extension_payload_error(
     extension: &current::Extension,
-    arena: &ParseArena,
-) -> MethodAttrResult {
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
     let (ext_name, payload) = extension;
     let name = arena.get_string(ext_name.txt);
     match name {
-        "debugger" if !payload_is_empty_str(payload) => Err(MethodAttrError::at_loc(
+        "debugger" if !payload_is_empty_str(payload) => Err(PpxError::at_loc(
             ext_name.loc,
             "%debugger extension doesn't accept arguments",
         )),
-        "raw" if payload_single_string_literal(payload, arena).is_none() => Err(MethodAttrError::at_loc(
+        "raw" if payload_single_string_literal(payload, arena).is_none() => Err(PpxError::at_loc(
             ext_name.loc,
             "%raw extension can only be applied to a string",
         )),
         "re" => match payload_single_string_literal_with_loc(payload, arena) {
-            None => Err(MethodAttrError::at_loc(
+            None => Err(PpxError::at_loc(
                 ext_name.loc,
                 "%re extension can only be applied to a string",
             )),
             Some((code, loc)) if !is_js_regex_literal(code) && !is_js_regex_like_literal(code) => {
-                Err(MethodAttrError::at_loc(
+                Err(PpxError::at_loc(
                     loc,
                     "Syntax error: a valid JS regex literal expected",
                 ))
@@ -12789,15 +11783,12 @@ fn validate_expression_extension_payload_error(
         },
         "ffi" => match payload_single_string_literal_info(payload, arena) {
             Some((code, _, _)) if is_js_function(code) => Ok(()),
-            Some((code, payload_loc, first_line_offset)) => Err(MethodAttrError::FfiNotAFunction {
-                ext_loc: ext_name.loc,
-                code: code.to_string(),
-                payload_loc,
-                first_line_offset,
-            }),
-            None => Err(PpxError::at_loc(ext_name.loc, FFI_EXTENSION_PAYLOAD_ERROR).into()),
+            _ => Err(PpxError::at_loc(
+                ext_name.loc,
+                "%ffi extension can only be applied to a string containing a JavaScript function such as \"(x) => ...\"",
+            )),
         },
-        "obj" => Ok(validate_obj_extension_payload_error(payload, ext_name.loc, arena)?),
+        "obj" => validate_obj_extension_payload_error(payload, ext_name.loc, arena),
         _ => Ok(()),
     }
 }
@@ -12810,7 +11801,9 @@ fn validate_obj_extension_payload_error(
     let Some(fields) = payload_single_record_fields_without_spread(payload, arena) else {
         return Err(PpxError::at_loc(ext_loc, "Expect a record expression here"));
     };
-    for field in fields {
+    // `Ast_util.record_as_js_object` folds the labels with
+    // `Ext_list.fold_right` (ast_util.ml:31-39): the last one is checked first.
+    for field in fields.iter().rev() {
         let lid = arena.get_longident(field.lid.txt);
         if !matches!(lid, Longident::Lident(_)) {
             return Err(PpxError::at_loc(field.lid.loc, "invalid js label "));
@@ -12821,561 +11814,17 @@ fn validate_obj_extension_payload_error(
 
 fn validate_structure_extension_payload_error(
     extension: &current::Extension,
-    arena: &ParseArena,
-) -> MethodAttrResult {
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
     let (ext_name, payload) = extension;
     let name = arena.get_string(ext_name.txt);
     if name == "raw" && payload_single_string_literal(payload, arena).is_none() {
-        Err(MethodAttrError::at_loc(
+        Err(PpxError::at_loc(
             ext_name.loc,
             "%%raw extension can only be applied to a string",
         ))
     } else {
         Ok(())
-    }
-}
-
-fn validate_structure_method_attribute_errors(
-    structure: &[StructureItem],
-    arena: &ParseArena,
-) -> MethodAttrResult {
-    for item in structure {
-        match &*item.pstr_desc {
-            StructureItemDesc::Pstr_eval(inner) => {
-                let (expr, attrs) = &**inner;
-                validate_expression_idx_method_attribute_errors(*expr, arena)?;
-                for attr in attrs.iter() {
-                    validate_payload_method_attribute_errors(&attr.1, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_value(inner) => {
-                let (_rec_flag, bindings) = &**inner;
-                for binding in bindings {
-                    validate_pattern_idx_method_attribute_errors(binding.pvb_pat, arena)?;
-                    validate_expression_idx_method_attribute_errors(binding.pvb_expr, arena)?;
-                    for attr in binding.pvb_attributes.iter() {
-                        validate_payload_method_attribute_errors(&attr.1, arena)?;
-                    }
-                }
-            }
-            StructureItemDesc::Pstr_primitive(vd) => {
-                let typ = arena.get_core_type(vd.pval_type).clone();
-                validate_core_type_method_attribute_errors(&typ, arena)?;
-                for attr in vd.pval_attributes.iter() {
-                    validate_payload_method_attribute_errors(&attr.1, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_type(inner) => {
-                let (_rec_flag, tdcls) = &**inner;
-                for tdcl in tdcls {
-                    validate_type_declaration_method_attribute_errors(tdcl, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_typext(ext) => {
-                validate_type_extension_method_attribute_errors(ext, arena)?;
-            }
-            StructureItemDesc::Pstr_exception(ext) => {
-                validate_extension_constructor_method_attribute_errors(ext, arena)?;
-            }
-            StructureItemDesc::Pstr_module(mb) => {
-                let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
-                validate_module_expr_method_attribute_errors(&mod_expr, arena)?;
-            }
-            StructureItemDesc::Pstr_recmodule(mbs) => {
-                for mb in mbs.iter() {
-                    let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
-                    validate_module_expr_method_attribute_errors(&mod_expr, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_modtype(mtd) => {
-                if let Some(mod_type_idx) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type_idx).clone();
-                    validate_module_type_method_attribute_errors(&mod_type, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_include(incl) => {
-                let mod_expr = arena.get_mod_expr(incl.pincl_mod).clone();
-                validate_module_expr_method_attribute_errors(&mod_expr, arena)?;
-            }
-            StructureItemDesc::Pstr_attribute(attr) => {
-                validate_payload_method_attribute_errors(&attr.1, arena)?;
-            }
-            StructureItemDesc::Pstr_extension(inner) => {
-                let (extension, attrs) = &**inner;
-                validate_structure_extension_payload_error(extension, arena)?;
-                validate_payload_method_attribute_errors(&extension.1, arena)?;
-                for attr in attrs.iter() {
-                    validate_payload_method_attribute_errors(&attr.1, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_open(_) => {}
-        }
-    }
-    Ok(())
-}
-
-fn validate_signature_method_attribute_errors(
-    signature: &[SignatureItem],
-    arena: &ParseArena,
-) -> MethodAttrResult {
-    for item in signature {
-        match &*item.psig_desc {
-            SignatureItemDesc::Psig_value(vd) => {
-                let typ = arena.get_core_type(vd.pval_type).clone();
-                validate_core_type_method_attribute_errors(&typ, arena)?;
-            }
-            SignatureItemDesc::Psig_type(inner) => {
-                let (_rec_flag, tdcls) = &**inner;
-                for tdcl in tdcls {
-                    validate_type_declaration_method_attribute_errors(tdcl, arena)?;
-                }
-            }
-            SignatureItemDesc::Psig_typext(ext) => {
-                validate_type_extension_method_attribute_errors(ext, arena)?;
-            }
-            SignatureItemDesc::Psig_exception(ext) => {
-                validate_extension_constructor_method_attribute_errors(ext, arena)?;
-            }
-            SignatureItemDesc::Psig_module(md) => {
-                let mod_type = arena.get_mod_type(md.pmd_type).clone();
-                validate_module_type_method_attribute_errors(&mod_type, arena)?;
-            }
-            SignatureItemDesc::Psig_recmodule(mds) => {
-                for md in mds.iter() {
-                    let mod_type = arena.get_mod_type(md.pmd_type).clone();
-                    validate_module_type_method_attribute_errors(&mod_type, arena)?;
-                }
-            }
-            SignatureItemDesc::Psig_modtype(mtd) => {
-                if let Some(mod_type_idx) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type_idx).clone();
-                    validate_module_type_method_attribute_errors(&mod_type, arena)?;
-                }
-            }
-            SignatureItemDesc::Psig_include(incl) => {
-                let mod_type = arena.get_mod_type(incl.pincl_mod).clone();
-                validate_module_type_method_attribute_errors(&mod_type, arena)?;
-            }
-            SignatureItemDesc::Psig_attribute(attr) => {
-                validate_payload_method_attribute_errors(&attr.1, arena)?;
-            }
-            SignatureItemDesc::Psig_extension(inner) => {
-                let (extension, attrs) = &**inner;
-                validate_payload_method_attribute_errors(&extension.1, arena)?;
-                for attr in attrs.iter() {
-                    validate_payload_method_attribute_errors(&attr.1, arena)?;
-                }
-            }
-            SignatureItemDesc::Psig_open(_) => {}
-        }
-    }
-    Ok(())
-}
-
-fn validate_module_expr_method_attribute_errors(
-    mod_expr: &ModuleExpr,
-    arena: &ParseArena,
-) -> MethodAttrResult {
-    match &*mod_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(items) => {
-            validate_structure_method_attribute_errors(items, arena)
-        }
-        ModuleExprDesc::Pmod_functor(inner) => {
-            let (_name, param_type, body) = &**inner;
-            if let Some(param_type_idx) = *param_type {
-                let mod_type = arena.get_mod_type(param_type_idx).clone();
-                validate_module_type_method_attribute_errors(&mod_type, arena)?;
-            }
-            let body = arena.get_mod_expr(*body).clone();
-            validate_module_expr_method_attribute_errors(&body, arena)
-        }
-        ModuleExprDesc::Pmod_apply(left, right) => {
-            let left = arena.get_mod_expr(*left).clone();
-            validate_module_expr_method_attribute_errors(&left, arena)?;
-            let right = arena.get_mod_expr(*right).clone();
-            validate_module_expr_method_attribute_errors(&right, arena)
-        }
-        ModuleExprDesc::Pmod_constraint(inner, mod_type_idx) => {
-            let inner = arena.get_mod_expr(*inner).clone();
-            validate_module_expr_method_attribute_errors(&inner, arena)?;
-            let mod_type = arena.get_mod_type(*mod_type_idx).clone();
-            validate_module_type_method_attribute_errors(&mod_type, arena)
-        }
-        ModuleExprDesc::Pmod_unpack(expr_idx) => {
-            validate_expression_idx_method_attribute_errors(*expr_idx, arena)
-        }
-        ModuleExprDesc::Pmod_extension(extension) => {
-            validate_payload_method_attribute_errors(&extension.1, arena)
-        }
-        ModuleExprDesc::Pmod_ident(_) => Ok(()),
-    }
-}
-
-fn validate_module_type_method_attribute_errors(
-    mod_type: &ModuleType,
-    arena: &ParseArena,
-) -> MethodAttrResult {
-    match &*mod_type.pmty_desc {
-        ModuleTypeDesc::Pmty_signature(items) => {
-            validate_signature_method_attribute_errors(items, arena)
-        }
-        ModuleTypeDesc::Pmty_functor(inner) => {
-            let (_name, param_type, result_type) = &**inner;
-            if let Some(param_type_idx) = *param_type {
-                let param_type = arena.get_mod_type(param_type_idx).clone();
-                validate_module_type_method_attribute_errors(&param_type, arena)?;
-            }
-            let result_type = arena.get_mod_type(*result_type).clone();
-            validate_module_type_method_attribute_errors(&result_type, arena)
-        }
-        ModuleTypeDesc::Pmty_with(inner) => {
-            let (mod_type_idx, constraints) = &**inner;
-            let inner_type = arena.get_mod_type(*mod_type_idx).clone();
-            validate_module_type_method_attribute_errors(&inner_type, arena)?;
-            for constraint in constraints {
-                match constraint {
-                    WithConstraint::Pwith_type(_, tdcl)
-                    | WithConstraint::Pwith_typesubst(_, tdcl) => {
-                        validate_type_declaration_method_attribute_errors(tdcl, arena)?;
-                    }
-                    WithConstraint::Pwith_module(_, _) | WithConstraint::Pwith_modsubst(_, _) => {}
-                }
-            }
-            Ok(())
-        }
-        ModuleTypeDesc::Pmty_typeof(mod_expr_idx) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
-            validate_module_expr_method_attribute_errors(&mod_expr, arena)
-        }
-        ModuleTypeDesc::Pmty_extension(extension) => {
-            validate_payload_method_attribute_errors(&extension.1, arena)
-        }
-        ModuleTypeDesc::Pmty_ident(_) | ModuleTypeDesc::Pmty_alias(_) => Ok(()),
-    }
-}
-
-fn validate_pattern_idx_method_attribute_errors(
-    pat_idx: PatIdx,
-    arena: &ParseArena,
-) -> MethodAttrResult {
-    validate_pattern_method_attribute_errors(arena.get_pat(pat_idx), arena)
-}
-
-fn validate_pattern_method_attribute_errors(
-    pat: &Pattern,
-    arena: &ParseArena,
-) -> MethodAttrResult {
-    match &*pat.ppat_desc {
-        PatternDesc::Ppat_alias(inner, _)
-        | PatternDesc::Ppat_exception(inner)
-        | PatternDesc::Ppat_open(_, inner) => {
-            validate_pattern_idx_method_attribute_errors(*inner, arena)
-        }
-        PatternDesc::Ppat_tuple(items) | PatternDesc::Ppat_array(items) => {
-            for item in items.iter() {
-                validate_pattern_idx_method_attribute_errors(*item, arena)?;
-            }
-            Ok(())
-        }
-        PatternDesc::Ppat_construct(_, arg) => {
-            if let Some(arg) = arg {
-                validate_pattern_idx_method_attribute_errors(*arg, arena)?;
-            }
-            Ok(())
-        }
-        PatternDesc::Ppat_variant(inner) => {
-            let (_label, arg) = &**inner;
-            if let Some(arg) = arg {
-                validate_pattern_idx_method_attribute_errors(*arg, arena)?;
-            }
-            Ok(())
-        }
-        PatternDesc::Ppat_record(inner) => {
-            let (fields, _closed) = &**inner;
-            for field in fields {
-                validate_pattern_idx_method_attribute_errors(field.pat, arena)?;
-            }
-            Ok(())
-        }
-        PatternDesc::Ppat_or(left, right) => {
-            validate_pattern_idx_method_attribute_errors(*left, arena)?;
-            validate_pattern_idx_method_attribute_errors(*right, arena)
-        }
-        PatternDesc::Ppat_constraint(inner) => {
-            let (inner_pat, typ_idx) = &**inner;
-            validate_pattern_idx_method_attribute_errors(*inner_pat, arena)?;
-            let typ = arena.get_core_type(*typ_idx).clone();
-            validate_core_type_method_attribute_errors(&typ, arena)
-        }
-        PatternDesc::Ppat_extension(extension) => {
-            validate_payload_method_attribute_errors(&extension.1, arena)
-        }
-        PatternDesc::Ppat_any
-        | PatternDesc::Ppat_var(_)
-        | PatternDesc::Ppat_constant(_)
-        | PatternDesc::Ppat_interval(_)
-        | PatternDesc::Ppat_type(_)
-        | PatternDesc::Ppat_unpack(_) => Ok(()),
-    }
-}
-
-fn validate_expression_idx_method_attribute_errors(
-    expr_idx: ExprIdx,
-    arena: &ParseArena,
-) -> MethodAttrResult {
-    validate_expression_method_attribute_errors(arena.get_expr(expr_idx), arena)
-}
-
-fn validate_cases_method_attribute_errors(cases: &[Case], arena: &ParseArena) -> MethodAttrResult {
-    for case in cases {
-        validate_pattern_idx_method_attribute_errors(case.pc_lhs, arena)?;
-        if let Some(guard) = case.pc_guard {
-            validate_expression_idx_method_attribute_errors(guard, arena)?;
-        }
-        validate_expression_idx_method_attribute_errors(case.pc_rhs, arena)?;
-    }
-    Ok(())
-}
-
-fn validate_jsx_element_method_attribute_errors(
-    jsx: &JsxElement,
-    arena: &ParseArena,
-) -> MethodAttrResult {
-    match jsx {
-        JsxElement::Fragment(fragment) => {
-            for child in &fragment.children {
-                validate_expression_idx_method_attribute_errors(*child, arena)?;
-            }
-        }
-        JsxElement::Unary(elem) => {
-            validate_jsx_props_method_attribute_errors(&elem.props, arena)?;
-        }
-        JsxElement::Container(elem) => {
-            validate_jsx_props_method_attribute_errors(&elem.props, arena)?;
-            for child in &elem.children {
-                validate_expression_idx_method_attribute_errors(*child, arena)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_jsx_props_method_attribute_errors(
-    props: &[JsxProp],
-    arena: &ParseArena,
-) -> MethodAttrResult {
-    for prop in props {
-        match prop {
-            JsxProp::Value { value, .. } => {
-                validate_expression_idx_method_attribute_errors(*value, arena)?;
-            }
-            JsxProp::Spreading { expr, .. } => {
-                validate_expression_idx_method_attribute_errors(*expr, arena)?;
-            }
-            JsxProp::Punning { .. } => {}
-        }
-    }
-    Ok(())
-}
-
-fn validate_expression_method_attribute_errors(
-    expr: &Expression,
-    arena: &ParseArena,
-) -> MethodAttrResult {
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_let(inner) => {
-            let (_rec_flag, bindings, body) = &**inner;
-            for binding in bindings {
-                validate_pattern_idx_method_attribute_errors(binding.pvb_pat, arena)?;
-                validate_expression_idx_method_attribute_errors(binding.pvb_expr, arena)?;
-            }
-            validate_expression_idx_method_attribute_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_fun(inner) => {
-            validate_pattern_idx_method_attribute_errors(inner.lhs, arena)?;
-            if let Some(default) = inner.default {
-                validate_expression_idx_method_attribute_errors(default, arena)?;
-            }
-            validate_expression_idx_method_attribute_errors(inner.rhs, arena)
-        }
-        ExpressionDesc::Pexp_apply(inner) => {
-            validate_expression_idx_method_attribute_errors(inner.funct, arena)?;
-            for (_label, arg) in &inner.args {
-                validate_expression_idx_method_attribute_errors(*arg, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            let (scrutinee, cases) = &**inner;
-            validate_expression_idx_method_attribute_errors(*scrutinee, arena)?;
-            validate_cases_method_attribute_errors(cases, arena)
-        }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
-            for item in items.iter() {
-                validate_expression_idx_method_attribute_errors(*item, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_construct(_, Some(arg))
-        | ExpressionDesc::Pexp_field(arg, _)
-        | ExpressionDesc::Pexp_assert(arg)
-        | ExpressionDesc::Pexp_await(arg)
-        | ExpressionDesc::Pexp_comptime_compile_error(arg)
-        | ExpressionDesc::Pexp_comptime_build_variant(arg)
-        | ExpressionDesc::Pexp_comptime_variant_case(arg)
-        | ExpressionDesc::Pexp_comptime_build_record(arg)
-        | ExpressionDesc::Pexp_comptime_record_field(arg) => {
-            validate_expression_idx_method_attribute_errors(*arg, arena)
-        }
-        ExpressionDesc::Pexp_send(inner) => {
-            let (arg, _method) = &**inner;
-            validate_expression_idx_method_attribute_errors(*arg, arena)
-        }
-        ExpressionDesc::Pexp_variant(inner) => {
-            if let Some(arg) = inner.1 {
-                validate_expression_idx_method_attribute_errors(arg, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_record(inner) => {
-            let (fields, spread) = &**inner;
-            if let Some(spread) = spread {
-                validate_expression_idx_method_attribute_errors(*spread, arena)?;
-            }
-            for field in fields {
-                validate_expression_idx_method_attribute_errors(field.expr, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_setfield(inner) => {
-            let (target, _field, value) = &**inner;
-            validate_expression_idx_method_attribute_errors(*target, arena)?;
-            validate_expression_idx_method_attribute_errors(*value, arena)
-        }
-        ExpressionDesc::Pexp_ifthenelse(inner) => {
-            let (cond, then_expr, else_expr) = &**inner;
-            validate_expression_idx_method_attribute_errors(*cond, arena)?;
-            validate_expression_idx_method_attribute_errors(*then_expr, arena)?;
-            if let Some(else_expr) = else_expr {
-                validate_expression_idx_method_attribute_errors(*else_expr, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_sequence(left, right) | ExpressionDesc::Pexp_while(left, right) => {
-            validate_expression_idx_method_attribute_errors(*left, arena)?;
-            validate_expression_idx_method_attribute_errors(*right, arena)
-        }
-        ExpressionDesc::Pexp_for(inner) => {
-            let (pat, start, finish, _dir, body) = &**inner;
-            validate_pattern_idx_method_attribute_errors(*pat, arena)?;
-            validate_expression_idx_method_attribute_errors(*start, arena)?;
-            validate_expression_idx_method_attribute_errors(*finish, arena)?;
-            validate_expression_idx_method_attribute_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_for_of(inner)
-        | ExpressionDesc::Pexp_for_await_of(inner)
-        | ExpressionDesc::Pexp_inline_for(inner) => {
-            let (pat, collection, body) = &**inner;
-            validate_pattern_idx_method_attribute_errors(*pat, arena)?;
-            validate_expression_idx_method_attribute_errors(*collection, arena)?;
-            validate_expression_idx_method_attribute_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_constraint(inner) => {
-            let (inner_expr, typ_idx) = &**inner;
-            validate_expression_idx_method_attribute_errors(*inner_expr, arena)?;
-            let typ = arena.get_core_type(*typ_idx).clone();
-            validate_core_type_method_attribute_errors(&typ, arena)
-        }
-        ExpressionDesc::Pexp_coerce(inner) => {
-            let (inner_expr, from_type, to_type) = &**inner;
-            validate_expression_idx_method_attribute_errors(*inner_expr, arena)?;
-            if let Some(from_type) = from_type {
-                let typ = arena.get_core_type(*from_type).clone();
-                validate_core_type_method_attribute_errors(&typ, arena)?;
-            }
-            let typ = arena.get_core_type(*to_type).clone();
-            validate_core_type_method_attribute_errors(&typ, arena)
-        }
-        ExpressionDesc::Pexp_letmodule(inner) => {
-            let (_name, mod_expr, body) = &**inner;
-            let mod_expr = arena.get_mod_expr(*mod_expr).clone();
-            validate_module_expr_method_attribute_errors(&mod_expr, arena)?;
-            validate_expression_idx_method_attribute_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_letexception(inner) => {
-            let (ext, body) = &**inner;
-            validate_extension_constructor_method_attribute_errors(ext, arena)?;
-            validate_expression_idx_method_attribute_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_newtype(inner) => {
-            let (_name, body) = &**inner;
-            validate_expression_idx_method_attribute_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_pack(mod_expr_idx) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
-            validate_module_expr_method_attribute_errors(&mod_expr, arena)
-        }
-        ExpressionDesc::Pexp_open(inner) => {
-            let (_override, _lid, body) = &**inner;
-            validate_expression_idx_method_attribute_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_extension(extension) => {
-            validate_expression_extension_payload_error(extension, arena)?;
-            validate_payload_method_attribute_errors(&extension.1, arena)
-        }
-        ExpressionDesc::Pexp_jsx_element(jsx) => {
-            validate_jsx_element_method_attribute_errors(jsx, arena)
-        }
-        ExpressionDesc::Pexp_comptime_field(inner) => {
-            let (value, field) = &**inner;
-            validate_expression_idx_method_attribute_errors(*value, arena)?;
-            validate_expression_idx_method_attribute_errors(*field, arena)
-        }
-        ExpressionDesc::Pexp_comptime_record(inner) => {
-            let (typ_idx, fields) = &**inner;
-            let typ = arena.get_core_type(*typ_idx).clone();
-            validate_core_type_method_attribute_errors(&typ, arena)?;
-            validate_expression_idx_method_attribute_errors(*fields, arena)
-        }
-        ExpressionDesc::Pexp_comptime_variant(inner) => {
-            let (typ_idx, name, payload) = &**inner;
-            let typ = arena.get_core_type(*typ_idx).clone();
-            validate_core_type_method_attribute_errors(&typ, arena)?;
-            validate_expression_idx_method_attribute_errors(*name, arena)?;
-            if let Some(payload) = payload {
-                validate_expression_idx_method_attribute_errors(*payload, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_comptime_typeinfo(typ_idx)
-        | ExpressionDesc::Pexp_comptime_typename(typ_idx) => {
-            let typ = arena.get_core_type(*typ_idx).clone();
-            validate_core_type_method_attribute_errors(&typ, arena)
-        }
-        ExpressionDesc::Pexp_ident(_)
-        | ExpressionDesc::Pexp_constant(_)
-        | ExpressionDesc::Pexp_construct(_, None)
-        | ExpressionDesc::Pexp_break
-        | ExpressionDesc::Pexp_continue => Ok(()),
-    }
-}
-
-fn validate_payload_await_errors(
-    payload: &Payload,
-    arena: &ParseArena,
-    async_context: bool,
-) -> PpxResult<()> {
-    match payload {
-        Payload::PStr(items) => validate_structure_await_errors(items, arena, async_context),
-        Payload::PSig(items) => validate_signature_await_errors(items, arena, async_context),
-        Payload::PTyp(_) => Ok(()),
-        Payload::PPat(inner) => {
-            let (_pat, guard) = &**inner;
-            if let Some(guard_idx) = guard {
-                validate_expression_idx_await_context(*guard_idx, arena, async_context, false)?;
-            }
-            Ok(())
-        }
     }
 }
 
@@ -13549,933 +11998,6 @@ fn attributes_have_template_marker(attrs: &[Attribute], arena: &ParseArena) -> b
     })
 }
 
-fn validate_attributes_js_string_errors(
-    attrs: &[Attribute],
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    for attr in attrs {
-        validate_payload_js_string_errors(&attr.1, arena)?;
-    }
-    Ok(())
-}
-
-fn validate_payload_js_string_errors(payload: &Payload, arena: &ParseArena) -> PpxResult<()> {
-    match payload {
-        Payload::PStr(items) => validate_structure_js_string_errors(items, arena),
-        Payload::PSig(items) => validate_signature_js_string_errors(items, arena),
-        Payload::PTyp(typ) => validate_core_type_js_string_errors(*typ, arena),
-        Payload::PPat(inner) => {
-            let (pat, guard) = &**inner;
-            validate_pattern_js_string_errors(*pat, arena)?;
-            if let Some(guard) = guard {
-                validate_expression_idx_js_string_errors(*guard, arena)?;
-            }
-            Ok(())
-        }
-    }
-}
-
-fn validate_core_type_js_string_errors(
-    typ_idx: CoreTypeIdx,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    let typ = arena.get_core_type(typ_idx);
-    validate_attributes_js_string_errors(&typ.ptyp_attributes, arena)?;
-    match &*typ.ptyp_desc {
-        CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (arg, ret, _) = &**inner;
-            validate_attributes_js_string_errors(&arg.attrs, arena)?;
-            validate_core_type_js_string_errors(arg.typ, arena)?;
-            validate_core_type_js_string_errors(*ret, arena)
-        }
-        CoreTypeDesc::Ptyp_tuple(items) => {
-            for item in items.iter() {
-                validate_core_type_js_string_errors(*item, arena)?;
-            }
-            Ok(())
-        }
-        CoreTypeDesc::Ptyp_constr(inner) => {
-            let (_, args) = &**inner;
-            for arg in args {
-                validate_core_type_js_string_errors(*arg, arena)?;
-            }
-            Ok(())
-        }
-        CoreTypeDesc::Ptyp_object(inner) => {
-            let (fields, _) = &**inner;
-            for field in fields {
-                match field {
-                    ObjectField::Otag(_, attrs, typ) => {
-                        validate_attributes_js_string_errors(attrs, arena)?;
-                        validate_core_type_js_string_errors(*typ, arena)?;
-                    }
-                    ObjectField::Oinherit(typ) => {
-                        validate_core_type_js_string_errors(*typ, arena)?;
-                    }
-                }
-            }
-            Ok(())
-        }
-        CoreTypeDesc::Ptyp_alias(inner) => {
-            let (typ, _) = &**inner;
-            validate_core_type_js_string_errors(*typ, arena)
-        }
-        CoreTypeDesc::Ptyp_variant(inner) => {
-            let (fields, _, _) = &**inner;
-            for field in fields {
-                match field {
-                    RowField::Rtag(_, attrs, _, args) => {
-                        validate_attributes_js_string_errors(attrs, arena)?;
-                        for arg in args {
-                            validate_core_type_js_string_errors(*arg, arena)?;
-                        }
-                    }
-                    RowField::Rinherit(typ) => {
-                        validate_core_type_js_string_errors(*typ, arena)?;
-                    }
-                }
-            }
-            Ok(())
-        }
-        CoreTypeDesc::Ptyp_poly(inner) => {
-            let (_, typ) = &**inner;
-            validate_core_type_js_string_errors(*typ, arena)
-        }
-        CoreTypeDesc::Ptyp_package(inner) => {
-            let (_, constraints) = &**inner;
-            for (_, typ) in constraints {
-                validate_core_type_js_string_errors(*typ, arena)?;
-            }
-            Ok(())
-        }
-        CoreTypeDesc::Ptyp_extension(extension) => {
-            validate_payload_js_string_errors(&extension.1, arena)
-        }
-        CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => Ok(()),
-    }
-}
-
-fn validate_pattern_js_string_errors(pat_idx: PatIdx, arena: &ParseArena) -> PpxResult<()> {
-    let pat = arena.get_pat(pat_idx);
-    validate_attributes_js_string_errors(&pat.ppat_attributes, arena)?;
-    match &*pat.ppat_desc {
-        PatternDesc::Ppat_constant(constant) => {
-            if let Constant::String(s, Some(delim)) = &**constant
-                && delim == "js"
-            {
-                validate_js_string_literal(s, pat.ppat_loc)?;
-            }
-            Ok(())
-        }
-        PatternDesc::Ppat_interval(inner) => {
-            let (left, right) = &**inner;
-            for constant in [left, right] {
-                if let Constant::String(s, Some(delim)) = constant
-                    && delim == "js"
-                {
-                    validate_js_string_literal(s, pat.ppat_loc)?;
-                }
-            }
-            Ok(())
-        }
-        PatternDesc::Ppat_alias(inner, _)
-        | PatternDesc::Ppat_exception(inner)
-        | PatternDesc::Ppat_open(_, inner) => validate_pattern_js_string_errors(*inner, arena),
-        PatternDesc::Ppat_tuple(items) | PatternDesc::Ppat_array(items) => {
-            for item in items.iter() {
-                validate_pattern_js_string_errors(*item, arena)?;
-            }
-            Ok(())
-        }
-        PatternDesc::Ppat_construct(_, arg) => {
-            if let Some(arg) = arg {
-                validate_pattern_js_string_errors(*arg, arena)?;
-            }
-            Ok(())
-        }
-        PatternDesc::Ppat_variant(inner) => {
-            let (_, arg) = &**inner;
-            if let Some(arg) = arg {
-                validate_pattern_js_string_errors(*arg, arena)?;
-            }
-            Ok(())
-        }
-        PatternDesc::Ppat_record(inner) => {
-            let (fields, _) = &**inner;
-            for field in fields {
-                validate_pattern_js_string_errors(field.pat, arena)?;
-            }
-            Ok(())
-        }
-        PatternDesc::Ppat_or(left, right) => {
-            validate_pattern_js_string_errors(*left, arena)?;
-            validate_pattern_js_string_errors(*right, arena)
-        }
-        PatternDesc::Ppat_constraint(inner) => {
-            let (pat, typ) = &**inner;
-            validate_pattern_js_string_errors(*pat, arena)?;
-            validate_core_type_js_string_errors(*typ, arena)
-        }
-        PatternDesc::Ppat_extension(extension) => {
-            validate_payload_js_string_errors(&extension.1, arena)
-        }
-        PatternDesc::Ppat_any
-        | PatternDesc::Ppat_var(_)
-        | PatternDesc::Ppat_type(_)
-        | PatternDesc::Ppat_unpack(_) => Ok(()),
-    }
-}
-
-fn validate_value_bindings_js_string_errors(
-    bindings: &[ValueBinding],
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    for vb in bindings {
-        validate_pattern_js_string_errors(vb.pvb_pat, arena)?;
-        validate_expression_idx_js_string_errors(vb.pvb_expr, arena)?;
-        validate_attributes_js_string_errors(&vb.pvb_attributes, arena)?;
-    }
-    Ok(())
-}
-
-fn validate_cases_js_string_errors(cases: &[Case], arena: &ParseArena) -> PpxResult<()> {
-    for case in cases {
-        validate_pattern_js_string_errors(case.pc_lhs, arena)?;
-        if let Some(guard) = case.pc_guard {
-            validate_expression_idx_js_string_errors(guard, arena)?;
-        }
-        validate_expression_idx_js_string_errors(case.pc_rhs, arena)?;
-    }
-    Ok(())
-}
-
-fn validate_expression_idx_js_string_errors(
-    expr_idx: ExprIdx,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    let expr = arena.get_expr(expr_idx);
-    validate_expression_js_string_errors(&expr, arena)
-}
-
-fn validate_jsx_element_js_string_errors(
-    jsx: &JsxElement,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    match jsx {
-        JsxElement::Fragment(fragment) => {
-            for child in &fragment.children {
-                validate_expression_idx_js_string_errors(*child, arena)?;
-            }
-        }
-        JsxElement::Unary(elem) => validate_jsx_props_js_string_errors(&elem.props, arena)?,
-        JsxElement::Container(elem) => {
-            validate_jsx_props_js_string_errors(&elem.props, arena)?;
-            for child in &elem.children {
-                validate_expression_idx_js_string_errors(*child, arena)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_jsx_props_js_string_errors(props: &[JsxProp], arena: &ParseArena) -> PpxResult<()> {
-    for prop in props {
-        match prop {
-            JsxProp::Value { value, .. } => {
-                validate_expression_idx_js_string_errors(*value, arena)?;
-            }
-            JsxProp::Spreading { expr, .. } => {
-                validate_expression_idx_js_string_errors(*expr, arena)?;
-            }
-            JsxProp::Punning { .. } => {}
-        }
-    }
-    Ok(())
-}
-
-fn validate_expression_js_string_errors(
-    expr: &Expression,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    validate_attributes_js_string_errors(&expr.pexp_attributes, arena)?;
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => {
-            if let Constant::String(s, Some(delim)) = &**constant
-                && delim == "js"
-                && !attributes_have_template_marker(&expr.pexp_attributes, arena)
-                && !is_js_regex_like_literal(s)
-            {
-                validate_js_string_literal(s, expr.pexp_loc)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_let(inner) => {
-            let (_, bindings, body) = &**inner;
-            validate_value_bindings_js_string_errors(bindings, arena)?;
-            validate_expression_idx_js_string_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_fun(inner) => {
-            if let Some(default) = inner.default {
-                validate_expression_idx_js_string_errors(default, arena)?;
-            }
-            validate_pattern_js_string_errors(inner.lhs, arena)?;
-            validate_expression_idx_js_string_errors(inner.rhs, arena)
-        }
-        ExpressionDesc::Pexp_apply(inner) => {
-            validate_expression_idx_js_string_errors(inner.funct, arena)?;
-            for (_, arg) in &inner.args {
-                validate_expression_idx_js_string_errors(*arg, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            let (scrutinee, cases) = &**inner;
-            validate_expression_idx_js_string_errors(*scrutinee, arena)?;
-            validate_cases_js_string_errors(cases, arena)
-        }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
-            for item in items.iter() {
-                validate_expression_idx_js_string_errors(*item, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_construct(_, arg) => {
-            if let Some(arg) = arg {
-                validate_expression_idx_js_string_errors(*arg, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_variant(inner) => {
-            let (_, arg) = &**inner;
-            if let Some(arg) = arg {
-                validate_expression_idx_js_string_errors(*arg, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_record(inner) => {
-            let (fields, spread) = &**inner;
-            if let Some(spread) = spread {
-                validate_expression_idx_js_string_errors(*spread, arena)?;
-            }
-            for field in fields {
-                validate_expression_idx_js_string_errors(field.expr, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_field(target, _)
-        | ExpressionDesc::Pexp_assert(target)
-        | ExpressionDesc::Pexp_await(target)
-        | ExpressionDesc::Pexp_comptime_compile_error(target)
-        | ExpressionDesc::Pexp_comptime_build_variant(target)
-        | ExpressionDesc::Pexp_comptime_variant_case(target)
-        | ExpressionDesc::Pexp_comptime_build_record(target)
-        | ExpressionDesc::Pexp_comptime_record_field(target) => {
-            validate_expression_idx_js_string_errors(*target, arena)
-        }
-        ExpressionDesc::Pexp_send(inner) => {
-            let (target, _) = &**inner;
-            validate_expression_idx_js_string_errors(*target, arena)
-        }
-        ExpressionDesc::Pexp_setfield(inner) => {
-            let (target, _, value) = &**inner;
-            validate_expression_idx_js_string_errors(*target, arena)?;
-            validate_expression_idx_js_string_errors(*value, arena)
-        }
-        ExpressionDesc::Pexp_ifthenelse(inner) => {
-            let (cond, then_expr, else_expr) = &**inner;
-            validate_expression_idx_js_string_errors(*cond, arena)?;
-            validate_expression_idx_js_string_errors(*then_expr, arena)?;
-            if let Some(else_expr) = else_expr {
-                validate_expression_idx_js_string_errors(*else_expr, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_sequence(left, right) | ExpressionDesc::Pexp_while(left, right) => {
-            validate_expression_idx_js_string_errors(*left, arena)?;
-            validate_expression_idx_js_string_errors(*right, arena)
-        }
-        ExpressionDesc::Pexp_for(inner) => {
-            let (pat, start, finish, _, body) = &**inner;
-            validate_pattern_js_string_errors(*pat, arena)?;
-            validate_expression_idx_js_string_errors(*start, arena)?;
-            validate_expression_idx_js_string_errors(*finish, arena)?;
-            validate_expression_idx_js_string_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_for_of(inner) | ExpressionDesc::Pexp_for_await_of(inner) => {
-            let (pat, iterable, body) = &**inner;
-            validate_pattern_js_string_errors(*pat, arena)?;
-            validate_expression_idx_js_string_errors(*iterable, arena)?;
-            validate_expression_idx_js_string_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_constraint(inner) => {
-            let (inner_expr, typ) = &**inner;
-            validate_expression_idx_js_string_errors(*inner_expr, arena)?;
-            validate_core_type_js_string_errors(*typ, arena)
-        }
-        ExpressionDesc::Pexp_coerce(inner) => {
-            let (inner_expr, typ1, typ2) = &**inner;
-            validate_expression_idx_js_string_errors(*inner_expr, arena)?;
-            if let Some(typ1) = typ1 {
-                validate_core_type_js_string_errors(*typ1, arena)?;
-            }
-            validate_core_type_js_string_errors(*typ2, arena)
-        }
-        ExpressionDesc::Pexp_letmodule(inner) => {
-            let (_, mod_expr, body) = &**inner;
-            let mod_expr = arena.get_mod_expr(*mod_expr);
-            validate_module_expr_js_string_errors(&mod_expr, arena)?;
-            validate_expression_idx_js_string_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_letexception(inner) => {
-            let (ext, body) = &**inner;
-            validate_attributes_js_string_errors(&ext.pext_attributes, arena)?;
-            validate_expression_idx_js_string_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_newtype(inner) => {
-            let (_, body) = &**inner;
-            validate_expression_idx_js_string_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_pack(mod_expr) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr);
-            validate_module_expr_js_string_errors(&mod_expr, arena)
-        }
-        ExpressionDesc::Pexp_open(inner) => {
-            let (_, _, body) = &**inner;
-            validate_expression_idx_js_string_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_extension(extension) => {
-            validate_payload_js_string_errors(&extension.1, arena)
-        }
-        ExpressionDesc::Pexp_jsx_element(jsx) => validate_jsx_element_js_string_errors(jsx, arena),
-        ExpressionDesc::Pexp_inline_for(inner) => {
-            let (pat, collection, body) = &**inner;
-            validate_pattern_js_string_errors(*pat, arena)?;
-            validate_expression_idx_js_string_errors(*collection, arena)?;
-            validate_expression_idx_js_string_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_comptime_typeinfo(typ)
-        | ExpressionDesc::Pexp_comptime_typename(typ) => {
-            validate_core_type_js_string_errors(*typ, arena)
-        }
-        ExpressionDesc::Pexp_comptime_field(inner) => {
-            let (value, field) = &**inner;
-            validate_expression_idx_js_string_errors(*value, arena)?;
-            validate_expression_idx_js_string_errors(*field, arena)
-        }
-        ExpressionDesc::Pexp_comptime_record(inner) => {
-            let (typ, fields) = &**inner;
-            validate_core_type_js_string_errors(*typ, arena)?;
-            validate_expression_idx_js_string_errors(*fields, arena)
-        }
-        ExpressionDesc::Pexp_comptime_variant(inner) => {
-            let (typ, name, payload) = &**inner;
-            validate_core_type_js_string_errors(*typ, arena)?;
-            validate_expression_idx_js_string_errors(*name, arena)?;
-            if let Some(payload) = payload {
-                validate_expression_idx_js_string_errors(*payload, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_ident(_)
-        | ExpressionDesc::Pexp_break
-        | ExpressionDesc::Pexp_continue => Ok(()),
-    }
-}
-
-fn validate_module_expr_js_string_errors(
-    mod_expr: &ModuleExpr,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    validate_attributes_js_string_errors(&mod_expr.pmod_attributes, arena)?;
-    match &*mod_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(items) => validate_structure_js_string_errors(items, arena),
-        ModuleExprDesc::Pmod_functor(inner) => {
-            let (_, param_type, body) = &**inner;
-            if let Some(param_type) = param_type {
-                let param_type = arena.get_mod_type(*param_type);
-                validate_module_type_js_string_errors(&param_type, arena)?;
-            }
-            let body = arena.get_mod_expr(*body);
-            validate_module_expr_js_string_errors(&body, arena)
-        }
-        ModuleExprDesc::Pmod_apply(left, right) => {
-            let left = arena.get_mod_expr(*left);
-            validate_module_expr_js_string_errors(&left, arena)?;
-            let right = arena.get_mod_expr(*right);
-            validate_module_expr_js_string_errors(&right, arena)
-        }
-        ModuleExprDesc::Pmod_constraint(inner, mod_type) => {
-            let inner = arena.get_mod_expr(*inner);
-            validate_module_expr_js_string_errors(&inner, arena)?;
-            let mod_type = arena.get_mod_type(*mod_type);
-            validate_module_type_js_string_errors(&mod_type, arena)
-        }
-        ModuleExprDesc::Pmod_unpack(expr) => validate_expression_idx_js_string_errors(*expr, arena),
-        ModuleExprDesc::Pmod_extension(extension) => {
-            validate_payload_js_string_errors(&extension.1, arena)
-        }
-        ModuleExprDesc::Pmod_ident(_) => Ok(()),
-    }
-}
-
-fn validate_module_type_js_string_errors(
-    mod_type: &ModuleType,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    validate_attributes_js_string_errors(&mod_type.pmty_attributes, arena)?;
-    match &*mod_type.pmty_desc {
-        ModuleTypeDesc::Pmty_signature(items) => validate_signature_js_string_errors(items, arena),
-        ModuleTypeDesc::Pmty_functor(inner) => {
-            let (_, param_type, result_type) = &**inner;
-            if let Some(param_type) = param_type {
-                let param_type = arena.get_mod_type(*param_type);
-                validate_module_type_js_string_errors(&param_type, arena)?;
-            }
-            let result_type = arena.get_mod_type(*result_type);
-            validate_module_type_js_string_errors(&result_type, arena)
-        }
-        ModuleTypeDesc::Pmty_with(inner) => {
-            let (mod_type, constraints) = &**inner;
-            let mod_type = arena.get_mod_type(*mod_type);
-            validate_module_type_js_string_errors(&mod_type, arena)?;
-            for constraint in constraints {
-                match constraint {
-                    WithConstraint::Pwith_type(_, tdcl) => {
-                        validate_type_declaration_js_string_errors(tdcl, arena)?;
-                    }
-                    WithConstraint::Pwith_typesubst(_, tdcl) => {
-                        validate_type_declaration_js_string_errors(tdcl, arena)?;
-                    }
-                    WithConstraint::Pwith_module(_, _) | WithConstraint::Pwith_modsubst(_, _) => {}
-                }
-            }
-            Ok(())
-        }
-        ModuleTypeDesc::Pmty_typeof(mod_expr) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr);
-            validate_module_expr_js_string_errors(&mod_expr, arena)
-        }
-        ModuleTypeDesc::Pmty_extension(extension) => {
-            validate_payload_js_string_errors(&extension.1, arena)
-        }
-        ModuleTypeDesc::Pmty_ident(_) | ModuleTypeDesc::Pmty_alias(_) => Ok(()),
-    }
-}
-
-fn validate_type_declaration_js_string_errors(
-    tdcl: &TypeDeclaration,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    validate_attributes_js_string_errors(&tdcl.ptype_attributes, arena)?;
-    for (param, _) in &tdcl.ptype_params {
-        validate_core_type_js_string_errors(*param, arena)?;
-    }
-    match &tdcl.ptype_kind {
-        TypeKind::Ptype_record(fields) => {
-            for field in fields {
-                validate_attributes_js_string_errors(&field.pld_attributes, arena)?;
-                validate_core_type_js_string_errors(field.pld_type, arena)?;
-            }
-        }
-        TypeKind::Ptype_variant(ctors) => {
-            for ctor in ctors {
-                validate_attributes_js_string_errors(&ctor.pcd_attributes, arena)?;
-                match &ctor.pcd_args {
-                    ConstructorArguments::Pcstr_tuple(args) => {
-                        for arg in args {
-                            validate_core_type_js_string_errors(*arg, arena)?;
-                        }
-                    }
-                    ConstructorArguments::Pcstr_record(fields) => {
-                        for field in fields {
-                            validate_attributes_js_string_errors(&field.pld_attributes, arena)?;
-                            validate_core_type_js_string_errors(field.pld_type, arena)?;
-                        }
-                    }
-                }
-                if let Some(result) = ctor.pcd_res {
-                    validate_core_type_js_string_errors(result, arena)?;
-                }
-            }
-        }
-        TypeKind::Ptype_abstract | TypeKind::Ptype_open => {}
-    }
-    if let Some(manifest) = tdcl.ptype_manifest {
-        validate_core_type_js_string_errors(manifest, arena)?;
-    }
-    Ok(())
-}
-
-fn validate_structure_js_string_errors(
-    structure: &[StructureItem],
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    for item in structure {
-        match &*item.pstr_desc {
-            StructureItemDesc::Pstr_eval(inner) => {
-                let (expr, attrs) = &**inner;
-                validate_expression_idx_js_string_errors(*expr, arena)?;
-                validate_attributes_js_string_errors(attrs, arena)?;
-            }
-            StructureItemDesc::Pstr_value(inner) => {
-                let (_, bindings) = &**inner;
-                validate_value_bindings_js_string_errors(bindings, arena)?;
-            }
-            StructureItemDesc::Pstr_primitive(vd) => {
-                validate_attributes_js_string_errors(&vd.pval_attributes, arena)?;
-                validate_core_type_js_string_errors(vd.pval_type, arena)?;
-            }
-            StructureItemDesc::Pstr_type(inner) => {
-                let (_, tdcls) = &**inner;
-                for tdcl in tdcls {
-                    validate_type_declaration_js_string_errors(tdcl, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_typext(te) => {
-                validate_attributes_js_string_errors(&te.ptyext_attributes, arena)?;
-                for ctor in &te.ptyext_constructors {
-                    validate_attributes_js_string_errors(&ctor.pext_attributes, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_exception(ext) => {
-                validate_attributes_js_string_errors(&ext.pext_attributes, arena)?;
-            }
-            StructureItemDesc::Pstr_module(mb) => {
-                validate_attributes_js_string_errors(&mb.pmb_attributes, arena)?;
-                let mod_expr = arena.get_mod_expr(mb.pmb_expr);
-                validate_module_expr_js_string_errors(&mod_expr, arena)?;
-            }
-            StructureItemDesc::Pstr_recmodule(mbs) => {
-                for mb in mbs.iter() {
-                    validate_attributes_js_string_errors(&mb.pmb_attributes, arena)?;
-                    let mod_expr = arena.get_mod_expr(mb.pmb_expr);
-                    validate_module_expr_js_string_errors(&mod_expr, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_modtype(mtd) => {
-                validate_attributes_js_string_errors(&mtd.pmtd_attributes, arena)?;
-                if let Some(mod_type) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type);
-                    validate_module_type_js_string_errors(&mod_type, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_include(incl) => {
-                validate_attributes_js_string_errors(&incl.pincl_attributes, arena)?;
-                let mod_expr = arena.get_mod_expr(incl.pincl_mod);
-                validate_module_expr_js_string_errors(&mod_expr, arena)?;
-            }
-            StructureItemDesc::Pstr_open(od) => {
-                validate_attributes_js_string_errors(&od.popen_attributes, arena)?;
-            }
-            StructureItemDesc::Pstr_attribute(attr) => {
-                validate_payload_js_string_errors(&attr.1, arena)?;
-            }
-            StructureItemDesc::Pstr_extension(inner) => {
-                let (extension, attrs) = &**inner;
-                validate_payload_js_string_errors(&extension.1, arena)?;
-                validate_attributes_js_string_errors(attrs, arena)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_signature_js_string_errors(
-    signature: &[SignatureItem],
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    for item in signature {
-        match &*item.psig_desc {
-            SignatureItemDesc::Psig_value(vd) => {
-                validate_attributes_js_string_errors(&vd.pval_attributes, arena)?;
-                validate_core_type_js_string_errors(vd.pval_type, arena)?;
-            }
-            SignatureItemDesc::Psig_type(inner) => {
-                let (_, tdcls) = &**inner;
-                for tdcl in tdcls {
-                    validate_type_declaration_js_string_errors(tdcl, arena)?;
-                }
-            }
-            SignatureItemDesc::Psig_typext(te) => {
-                validate_attributes_js_string_errors(&te.ptyext_attributes, arena)?;
-                for ctor in &te.ptyext_constructors {
-                    validate_attributes_js_string_errors(&ctor.pext_attributes, arena)?;
-                }
-            }
-            SignatureItemDesc::Psig_exception(ext) => {
-                validate_attributes_js_string_errors(&ext.pext_attributes, arena)?;
-            }
-            SignatureItemDesc::Psig_module(md) => {
-                validate_attributes_js_string_errors(&md.pmd_attributes, arena)?;
-                let mod_type = arena.get_mod_type(md.pmd_type);
-                validate_module_type_js_string_errors(&mod_type, arena)?;
-            }
-            SignatureItemDesc::Psig_recmodule(mds) => {
-                for md in mds.iter() {
-                    validate_attributes_js_string_errors(&md.pmd_attributes, arena)?;
-                    let mod_type = arena.get_mod_type(md.pmd_type);
-                    validate_module_type_js_string_errors(&mod_type, arena)?;
-                }
-            }
-            SignatureItemDesc::Psig_modtype(mtd) => {
-                validate_attributes_js_string_errors(&mtd.pmtd_attributes, arena)?;
-                if let Some(mod_type) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type);
-                    validate_module_type_js_string_errors(&mod_type, arena)?;
-                }
-            }
-            SignatureItemDesc::Psig_include(incl) => {
-                validate_attributes_js_string_errors(&incl.pincl_attributes, arena)?;
-                let mod_type = arena.get_mod_type(incl.pincl_mod);
-                validate_module_type_js_string_errors(&mod_type, arena)?;
-            }
-            SignatureItemDesc::Psig_open(od) => {
-                validate_attributes_js_string_errors(&od.popen_attributes, arena)?;
-            }
-            SignatureItemDesc::Psig_attribute(attr) => {
-                validate_payload_js_string_errors(&attr.1, arena)?;
-            }
-            SignatureItemDesc::Psig_extension(inner) => {
-                let (extension, attrs) = &**inner;
-                validate_payload_js_string_errors(&extension.1, arena)?;
-                validate_attributes_js_string_errors(attrs, arena)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_structure_await_errors(
-    structure: &[StructureItem],
-    arena: &ParseArena,
-    async_context: bool,
-) -> PpxResult<()> {
-    for item in structure {
-        match &*item.pstr_desc {
-            StructureItemDesc::Pstr_eval(inner) => {
-                let (expr, attrs) = &**inner;
-                validate_expression_idx_await_context(*expr, arena, async_context, false)?;
-                for attr in attrs.iter() {
-                    validate_payload_await_errors(&attr.1, arena, async_context)?;
-                }
-            }
-            StructureItemDesc::Pstr_value(inner) => {
-                let (_rec_flag, bindings) = &**inner;
-                validate_value_bindings_await_context(bindings, arena, async_context)?;
-            }
-            StructureItemDesc::Pstr_primitive(vd) => {
-                for attr in vd.pval_attributes.iter() {
-                    validate_payload_await_errors(&attr.1, arena, async_context)?;
-                }
-            }
-            StructureItemDesc::Pstr_type(inner) => {
-                let (_rec_flag, tdcls) = &**inner;
-                for tdcl in tdcls {
-                    for attr in tdcl.ptype_attributes.iter() {
-                        validate_payload_await_errors(&attr.1, arena, async_context)?;
-                    }
-                }
-            }
-            StructureItemDesc::Pstr_typext(te) => {
-                for attr in te.ptyext_attributes.iter() {
-                    validate_payload_await_errors(&attr.1, arena, async_context)?;
-                }
-            }
-            StructureItemDesc::Pstr_exception(ext) => {
-                for attr in ext.pext_attributes.iter() {
-                    validate_payload_await_errors(&attr.1, arena, async_context)?;
-                }
-            }
-            StructureItemDesc::Pstr_module(mb) => {
-                let mod_expr = arena.get_mod_expr(mb.pmb_expr);
-                validate_module_expr_await_context(&mod_expr, arena, async_context)?;
-                for attr in mb.pmb_attributes.iter() {
-                    validate_payload_await_errors(&attr.1, arena, async_context)?;
-                }
-            }
-            StructureItemDesc::Pstr_recmodule(mbs) => {
-                for mb in mbs.iter() {
-                    let mod_expr = arena.get_mod_expr(mb.pmb_expr);
-                    validate_module_expr_await_context(&mod_expr, arena, async_context)?;
-                    for attr in mb.pmb_attributes.iter() {
-                        validate_payload_await_errors(&attr.1, arena, async_context)?;
-                    }
-                }
-            }
-            StructureItemDesc::Pstr_modtype(mtd) => {
-                if let Some(mod_type_idx) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type_idx);
-                    validate_module_type_await_context(&mod_type, arena, async_context)?;
-                }
-                for attr in mtd.pmtd_attributes.iter() {
-                    validate_payload_await_errors(&attr.1, arena, async_context)?;
-                }
-            }
-            StructureItemDesc::Pstr_include(incl) => {
-                let mod_expr = arena.get_mod_expr(incl.pincl_mod);
-                validate_module_expr_await_context(&mod_expr, arena, async_context)?;
-                for attr in incl.pincl_attributes.iter() {
-                    validate_payload_await_errors(&attr.1, arena, async_context)?;
-                }
-            }
-            StructureItemDesc::Pstr_open(od) => {
-                for attr in od.popen_attributes.iter() {
-                    validate_payload_await_errors(&attr.1, arena, async_context)?;
-                }
-            }
-            StructureItemDesc::Pstr_attribute(attr) => {
-                validate_payload_await_errors(&attr.1, arena, async_context)?;
-            }
-            StructureItemDesc::Pstr_extension(inner) => {
-                let (extension, attrs) = &**inner;
-                validate_payload_await_errors(&extension.1, arena, async_context)?;
-                for attr in attrs.iter() {
-                    validate_payload_await_errors(&attr.1, arena, async_context)?;
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_signature_await_errors(
-    signature: &[SignatureItem],
-    arena: &ParseArena,
-    async_context: bool,
-) -> PpxResult<()> {
-    for item in signature {
-        match &*item.psig_desc {
-            SignatureItemDesc::Psig_module(md) => {
-                let mod_type = arena.get_mod_type(md.pmd_type);
-                validate_module_type_await_context(&mod_type, arena, async_context)?;
-            }
-            SignatureItemDesc::Psig_recmodule(mds) => {
-                for md in mds.iter() {
-                    let mod_type = arena.get_mod_type(md.pmd_type);
-                    validate_module_type_await_context(&mod_type, arena, async_context)?;
-                }
-            }
-            SignatureItemDesc::Psig_modtype(mtd) => {
-                if let Some(mod_type_idx) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type_idx);
-                    validate_module_type_await_context(&mod_type, arena, async_context)?;
-                }
-            }
-            SignatureItemDesc::Psig_include(incl) => {
-                let mod_type = arena.get_mod_type(incl.pincl_mod);
-                validate_module_type_await_context(&mod_type, arena, async_context)?;
-            }
-            SignatureItemDesc::Psig_attribute(attr) => {
-                validate_payload_await_errors(&attr.1, arena, async_context)?;
-            }
-            SignatureItemDesc::Psig_extension(inner) => {
-                let (extension, attrs) = &**inner;
-                validate_payload_await_errors(&extension.1, arena, async_context)?;
-                for attr in attrs.iter() {
-                    validate_payload_await_errors(&attr.1, arena, async_context)?;
-                }
-            }
-            SignatureItemDesc::Psig_value(_)
-            | SignatureItemDesc::Psig_type(_)
-            | SignatureItemDesc::Psig_typext(_)
-            | SignatureItemDesc::Psig_exception(_)
-            | SignatureItemDesc::Psig_open(_) => {}
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_module_expr_await_context(
-    mod_expr: &current::ModuleExpr,
-    arena: &ParseArena,
-    async_context: bool,
-) -> PpxResult<()> {
-    match &*mod_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(items) => {
-            validate_structure_await_errors(items, arena, async_context)
-        }
-        ModuleExprDesc::Pmod_functor(inner) => {
-            let (_name, param_type, body) = &**inner;
-            if let Some(param_type_idx) = *param_type {
-                let mod_type = arena.get_mod_type(param_type_idx);
-                validate_module_type_await_context(&mod_type, arena, async_context)?;
-            }
-            let body_expr = arena.get_mod_expr(*body);
-            validate_module_expr_await_context(&body_expr, arena, async_context)
-        }
-        ModuleExprDesc::Pmod_apply(left, right) => {
-            let left_expr = arena.get_mod_expr(*left);
-            validate_module_expr_await_context(&left_expr, arena, async_context)?;
-            let right_expr = arena.get_mod_expr(*right);
-            validate_module_expr_await_context(&right_expr, arena, async_context)
-        }
-        ModuleExprDesc::Pmod_constraint(inner, mod_type_idx) => {
-            let inner_expr = arena.get_mod_expr(*inner);
-            validate_module_expr_await_context(&inner_expr, arena, async_context)?;
-            let mod_type = arena.get_mod_type(*mod_type_idx);
-            validate_module_type_await_context(&mod_type, arena, async_context)
-        }
-        ModuleExprDesc::Pmod_unpack(expr_idx) => {
-            validate_expression_idx_await_context(*expr_idx, arena, async_context, false)
-        }
-        ModuleExprDesc::Pmod_extension(extension) => {
-            validate_payload_await_errors(&extension.1, arena, async_context)
-        }
-        ModuleExprDesc::Pmod_ident(_) => Ok(()),
-    }
-}
-
-fn validate_module_type_await_context(
-    mod_type: &ModuleType,
-    arena: &ParseArena,
-    async_context: bool,
-) -> PpxResult<()> {
-    match &*mod_type.pmty_desc {
-        ModuleTypeDesc::Pmty_signature(items) => {
-            validate_signature_await_errors(items, arena, async_context)
-        }
-        ModuleTypeDesc::Pmty_functor(inner) => {
-            let (_name, param_type, result_type) = &**inner;
-            if let Some(param_type_idx) = *param_type {
-                let param_type = arena.get_mod_type(param_type_idx);
-                validate_module_type_await_context(&param_type, arena, async_context)?;
-            }
-            let result_type = arena.get_mod_type(*result_type);
-            validate_module_type_await_context(&result_type, arena, async_context)
-        }
-        ModuleTypeDesc::Pmty_with(inner) => {
-            let (mod_type_idx, _constraints) = &**inner;
-            let inner_type = arena.get_mod_type(*mod_type_idx);
-            validate_module_type_await_context(&inner_type, arena, async_context)
-        }
-        ModuleTypeDesc::Pmty_typeof(mod_expr_idx) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx);
-            validate_module_expr_await_context(&mod_expr, arena, async_context)
-        }
-        ModuleTypeDesc::Pmty_extension(extension) => {
-            validate_payload_await_errors(&extension.1, arena, async_context)
-        }
-        ModuleTypeDesc::Pmty_ident(_) | ModuleTypeDesc::Pmty_alias(_) => Ok(()),
-    }
-}
-
-fn validate_value_bindings_await_context(
-    bindings: &[ValueBinding],
-    arena: &ParseArena,
-    async_context: bool,
-) -> PpxResult<()> {
-    for vb in bindings {
-        validate_module_record_pattern_binding_error(vb, arena)?;
-        validate_expression_idx_await_context(vb.pvb_expr, arena, async_context, false)?;
-        for attr in vb.pvb_attributes.iter() {
-            validate_payload_await_errors(&attr.1, arena, async_context)?;
-        }
-    }
-    Ok(())
-}
-
 fn validate_module_record_pattern_binding_error(
     vb: &ValueBinding,
     arena: &ParseArena,
@@ -14496,14 +12018,14 @@ fn validate_module_record_pattern_binding_error(
 
     // compiler/frontend/ast_tuple_pattern_flatten.ml rejects record-rest
     // module destructuring before attempting to project any module fields.
-    if let Some(rest) = arena.record_pat_rest(pat.ppat_loc) {
+    if let Some(rest) = &record_inner.2 {
         return Err(PpxError::at_loc(
             rest.rest_loc,
             "Record rest patterns are not supported when destructuring modules. Bind the module fields explicitly.",
         ));
     }
 
-    let (lid_pats, _) = &**record_inner;
+    let (lid_pats, _, _) = &**record_inner;
     for field in lid_pats {
         if !matches!(arena.get_longident(field.lid.txt), Longident::Lident(_)) {
             return Err(PpxError::at_loc(
@@ -14513,30 +12035,6 @@ fn validate_module_record_pattern_binding_error(
         }
     }
 
-    Ok(())
-}
-
-fn validate_expression_idx_await_context(
-    expr_idx: ExprIdx,
-    arena: &ParseArena,
-    async_context: bool,
-    in_function_def: bool,
-) -> PpxResult<()> {
-    let expr = arena.get_expr(expr_idx);
-    validate_expression_await_context(&expr, arena, async_context, in_function_def)
-}
-
-fn validate_cases_await_context(
-    cases: &[Case],
-    arena: &ParseArena,
-    async_context: bool,
-) -> PpxResult<()> {
-    for case in cases {
-        if let Some(guard) = case.pc_guard {
-            validate_expression_idx_await_context(guard, arena, async_context, false)?;
-        }
-        validate_expression_idx_await_context(case.pc_rhs, arena, async_context, false)?;
-    }
     Ok(())
 }
 
@@ -14551,49 +12049,6 @@ fn letmodule_expr_has_await_payload(mod_expr: &current::ModuleExpr, arena: &Pars
         }
         _ => false,
     }
-}
-
-fn validate_jsx_element_await_context(
-    jsx: &JsxElement,
-    arena: &ParseArena,
-    async_context: bool,
-) -> PpxResult<()> {
-    match jsx {
-        JsxElement::Fragment(fragment) => {
-            for child in &fragment.children {
-                validate_expression_idx_await_context(*child, arena, async_context, false)?;
-            }
-        }
-        JsxElement::Unary(elem) => {
-            validate_jsx_props_await_context(&elem.props, arena, async_context)?;
-        }
-        JsxElement::Container(elem) => {
-            validate_jsx_props_await_context(&elem.props, arena, async_context)?;
-            for child in &elem.children {
-                validate_expression_idx_await_context(*child, arena, async_context, false)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_jsx_props_await_context(
-    props: &[JsxProp],
-    arena: &ParseArena,
-    async_context: bool,
-) -> PpxResult<()> {
-    for prop in props {
-        match prop {
-            JsxProp::Value { value, .. } => {
-                validate_expression_idx_await_context(*value, arena, async_context, false)?;
-            }
-            JsxProp::Spreading { expr, .. } => {
-                validate_expression_idx_await_context(*expr, arena, async_context, false)?;
-            }
-            JsxProp::Punning { .. } => {}
-        }
-    }
-    Ok(())
 }
 
 fn expression_is_lident(expr_idx: ExprIdx, expected: &str, arena: &ParseArena) -> bool {
@@ -14669,6 +12124,67 @@ fn invalid_property_name_error(name: &str, loc: LocIdx) -> Option<PpxError> {
     }
 }
 
+/// The errors `Ast_exp_apply.app_exp_mapper` (ast_exp_apply.ml:75-208) raises
+/// for an infix application (`->`, `#=`, `##`) before mapping its arguments.
+fn app_exp_mapper_error(expr: &Expression, arena: &ParseArena) -> Option<PpxError> {
+    // `view_as_app e infix_ops` (ast_exp_apply.ml:66-71).
+    let ExpressionDesc::Pexp_apply(inner) = &*expr.pexp_desc else {
+        return None;
+    };
+    let PexpApply { funct, args, .. } = &**inner;
+    let op = ["->", "#=", "##"]
+        .into_iter()
+        .find(|op| expression_is_lident(*funct, op, arena))?;
+    let loc = expr.pexp_loc;
+    // `check_and_discard` (ast_exp_apply.ml:47-51): `Bs_syntaxerr.err_if_label`.
+    for (label, arg) in args {
+        if !matches!(label, ArgLabel::Nolabel) {
+            return Some(PpxError::at_loc(
+                arena.get_expr(*arg).pexp_loc,
+                "Label syntax is not supported in this position",
+            ));
+        }
+    }
+    match (op, args.len()) {
+        ("->", 2) => None,
+        ("##", 2) => {
+            let rest = arena.get_expr(args[1].1);
+            let name = match &*rest.pexp_desc {
+                ExpressionDesc::Pexp_ident(lid) => match arena.get_longident(lid.txt) {
+                    Longident::Lident(name_idx) => Some(arena.get_string(*name_idx).to_string()),
+                    _ => None,
+                },
+                ExpressionDesc::Pexp_constant(c) => match &**c {
+                    Constant::String(name, None) => Some(name.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            match name {
+                Some(name) => invalid_property_name_error(&name, rest.pexp_loc),
+                None => Some(PpxError::at_loc(loc, "invalid ## syntax")),
+            }
+        }
+        ("#=", 2) => {
+            if let Some(error) = hash_set_property_name_error(expr, arena) {
+                return Some(error);
+            }
+            invalid_hash_set_assignment(expr, arena)
+                .then(|| PpxError::at_loc(loc, "invalid #= assignment"))
+        }
+        ("->", _) => Some(PpxError::at_loc(
+            loc,
+            "Invalid pipe syntax. The pipe symbol (->) can only be used as a binary operator.",
+        )),
+        ("##", _) => Some(PpxError::at_loc(
+            loc,
+            "Js object ## expect syntax like obj##(paint (a,b)) ",
+        )),
+        // `Location.raise_errorf "invalid %s syntax" op` has no location.
+        (op, _) => Some(PpxError::message(format!("invalid {op} syntax"))),
+    }
+}
+
 fn hash_set_property_name_error(expr: &Expression, arena: &ParseArena) -> Option<PpxError> {
     let args = hash_set_apply_args(expr, arena)?;
     let lhs = arena.get_expr(args[0].1);
@@ -14691,437 +12207,6 @@ fn invalid_hash_set_assignment(expr: &Expression, arena: &ParseArena) -> bool {
     let lhs = arena.get_expr(args[0].1);
     !matches!(&*lhs.pexp_desc, ExpressionDesc::Pexp_send(_))
         && !hash_hash_property_access(lhs, arena)
-}
-
-fn validate_expression_await_context(
-    expr: &Expression,
-    arena: &ParseArena,
-    async_context: bool,
-    in_function_def: bool,
-) -> PpxResult<()> {
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_let(inner) => {
-            let (_rec_flag, bindings, body) = &**inner;
-            validate_value_bindings_await_context(bindings, arena, async_context)?;
-            validate_expression_idx_await_context(*body, arena, async_context, false)?;
-        }
-        ExpressionDesc::Pexp_fun(inner) => {
-            let child_async_context = if has_this_attr(&expr.pexp_attributes, arena) {
-                false
-            } else {
-                (in_function_def && async_context) || inner.is_async
-            };
-            if let Some(default) = inner.default {
-                validate_expression_idx_await_context(default, arena, child_async_context, false)?;
-            }
-            validate_expression_idx_await_context(inner.rhs, arena, child_async_context, true)?;
-        }
-        ExpressionDesc::Pexp_apply(inner) => {
-            // Match ast_exp_apply.ml: #= only assigns to send expressions or ## property reads.
-            if let Some(error) = hash_set_property_name_error(expr, arena) {
-                return Err(error);
-            }
-            if invalid_hash_set_assignment(expr, arena) {
-                return Err(PpxError::at_loc(expr.pexp_loc, "invalid #= assignment"));
-            }
-            validate_expression_idx_await_context(inner.funct, arena, async_context, false)?;
-            for (_label, arg) in &inner.args {
-                validate_expression_idx_await_context(*arg, arena, async_context, false)?;
-            }
-        }
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            let (scrutinee, cases) = &**inner;
-            validate_expression_idx_await_context(*scrutinee, arena, async_context, false)?;
-            validate_cases_await_context(cases, arena, async_context)?;
-        }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
-            for item in items.iter() {
-                validate_expression_idx_await_context(*item, arena, async_context, false)?;
-            }
-        }
-        ExpressionDesc::Pexp_construct(_, Some(arg))
-        | ExpressionDesc::Pexp_assert(arg)
-        | ExpressionDesc::Pexp_comptime_compile_error(arg)
-        | ExpressionDesc::Pexp_comptime_build_variant(arg)
-        | ExpressionDesc::Pexp_comptime_variant_case(arg)
-        | ExpressionDesc::Pexp_comptime_build_record(arg)
-        | ExpressionDesc::Pexp_comptime_record_field(arg) => {
-            validate_expression_idx_await_context(*arg, arena, async_context, false)?;
-        }
-        ExpressionDesc::Pexp_record(inner) => {
-            let (fields, spread) = &**inner;
-            if let Some(spread) = spread {
-                validate_expression_idx_await_context(*spread, arena, async_context, false)?;
-            }
-            for field in fields {
-                validate_expression_idx_await_context(field.expr, arena, async_context, false)?;
-            }
-        }
-        ExpressionDesc::Pexp_variant(inner) => {
-            let (_label, arg) = &**inner;
-            if let Some(arg) = arg {
-                validate_expression_idx_await_context(*arg, arena, async_context, false)?;
-            }
-        }
-        ExpressionDesc::Pexp_field(target, _) => {
-            validate_expression_idx_await_context(*target, arena, async_context, false)?;
-        }
-        ExpressionDesc::Pexp_send(inner) => {
-            let (target, _method) = &**inner;
-            validate_expression_idx_await_context(*target, arena, async_context, false)?;
-        }
-        ExpressionDesc::Pexp_setfield(inner) => {
-            let (target, _field, value) = &**inner;
-            validate_expression_idx_await_context(*target, arena, async_context, false)?;
-            validate_expression_idx_await_context(*value, arena, async_context, false)?;
-        }
-        ExpressionDesc::Pexp_ifthenelse(inner) => {
-            let (cond, then_expr, else_expr) = &**inner;
-            validate_expression_idx_await_context(*cond, arena, async_context, false)?;
-            validate_expression_idx_await_context(*then_expr, arena, async_context, false)?;
-            if let Some(else_expr) = else_expr {
-                validate_expression_idx_await_context(*else_expr, arena, async_context, false)?;
-            }
-        }
-        ExpressionDesc::Pexp_sequence(left, right) | ExpressionDesc::Pexp_while(left, right) => {
-            validate_expression_idx_await_context(*left, arena, async_context, false)?;
-            validate_expression_idx_await_context(*right, arena, async_context, false)?;
-        }
-        ExpressionDesc::Pexp_for(inner) => {
-            let (_pat, start, finish, _dir, body) = &**inner;
-            validate_expression_idx_await_context(*start, arena, async_context, false)?;
-            validate_expression_idx_await_context(*finish, arena, async_context, false)?;
-            validate_expression_idx_await_context(*body, arena, async_context, false)?;
-        }
-        ExpressionDesc::Pexp_for_of(inner) => {
-            let (_pat, iterable, body) = &**inner;
-            validate_expression_idx_await_context(*iterable, arena, async_context, false)?;
-            validate_expression_idx_await_context(*body, arena, async_context, false)?;
-        }
-        ExpressionDesc::Pexp_for_await_of(inner) => {
-            let (_pat, iterable, body) = &**inner;
-            validate_expression_idx_await_context(*iterable, arena, async_context, false)?;
-            validate_expression_idx_await_context(*body, arena, async_context, false)?;
-            if !async_context {
-                return Err(PpxError::at_loc(
-                    expr.pexp_loc,
-                    AWAIT_NOT_ASYNC_CONTEXT_ERROR,
-                ));
-            }
-        }
-        ExpressionDesc::Pexp_constraint(inner) => {
-            let (inner_expr, _typ) = &**inner;
-            validate_expression_idx_await_context(*inner_expr, arena, async_context, false)?;
-        }
-        ExpressionDesc::Pexp_coerce(inner) => {
-            let (inner_expr, _typ1, _typ2) = &**inner;
-            validate_expression_idx_await_context(*inner_expr, arena, async_context, false)?;
-        }
-        ExpressionDesc::Pexp_letmodule(inner) => {
-            let (_name, mod_expr_idx, body) = &**inner;
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx);
-            validate_module_expr_await_context(&mod_expr, arena, async_context)?;
-            validate_expression_idx_await_context(*body, arena, async_context, false)?;
-            if letmodule_expr_has_await_payload(&mod_expr, arena) && !async_context {
-                return Err(PpxError::at_loc(
-                    expr.pexp_loc,
-                    AWAIT_NOT_ASYNC_CONTEXT_ERROR,
-                ));
-            }
-        }
-        ExpressionDesc::Pexp_letexception(inner) => {
-            let (_ext, body) = &**inner;
-            validate_expression_idx_await_context(*body, arena, async_context, false)?;
-        }
-        ExpressionDesc::Pexp_newtype(inner) => {
-            let (_name, body) = &**inner;
-            validate_expression_idx_await_context(*body, arena, async_context, false)?;
-        }
-        ExpressionDesc::Pexp_pack(mod_expr_idx) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx);
-            validate_module_expr_await_context(&mod_expr, arena, async_context)?;
-        }
-        ExpressionDesc::Pexp_open(inner) => {
-            let (_override, _mod_name, body) = &**inner;
-            validate_expression_idx_await_context(*body, arena, async_context, false)?;
-        }
-        ExpressionDesc::Pexp_extension(extension) => {
-            validate_payload_await_errors(&extension.1, arena, async_context)?;
-        }
-        ExpressionDesc::Pexp_await(inner) => {
-            validate_expression_idx_await_context(*inner, arena, async_context, false)?;
-            if !async_context {
-                return Err(PpxError::at_loc(
-                    expr.pexp_loc,
-                    AWAIT_NOT_ASYNC_CONTEXT_ERROR,
-                ));
-            }
-        }
-        ExpressionDesc::Pexp_jsx_element(jsx) => {
-            validate_jsx_element_await_context(jsx, arena, async_context)?;
-        }
-        ExpressionDesc::Pexp_inline_for(inner) => {
-            let (_pat, collection, body) = &**inner;
-            validate_expression_idx_await_context(*collection, arena, async_context, false)?;
-            validate_expression_idx_await_context(*body, arena, async_context, false)?;
-        }
-        ExpressionDesc::Pexp_comptime_field(inner) => {
-            let (value, field) = &**inner;
-            validate_expression_idx_await_context(*value, arena, async_context, false)?;
-            validate_expression_idx_await_context(*field, arena, async_context, false)?;
-        }
-        ExpressionDesc::Pexp_comptime_record(inner) => {
-            let (_typ, fields) = &**inner;
-            validate_expression_idx_await_context(*fields, arena, async_context, false)?;
-        }
-        ExpressionDesc::Pexp_comptime_variant(inner) => {
-            let (_typ, name, payload) = &**inner;
-            validate_expression_idx_await_context(*name, arena, async_context, false)?;
-            if let Some(payload) = payload {
-                validate_expression_idx_await_context(*payload, arena, async_context, false)?;
-            }
-        }
-        ExpressionDesc::Pexp_ident(_)
-        | ExpressionDesc::Pexp_constant(_)
-        | ExpressionDesc::Pexp_construct(_, None)
-        | ExpressionDesc::Pexp_break
-        | ExpressionDesc::Pexp_continue
-        | ExpressionDesc::Pexp_comptime_typeinfo(_)
-        | ExpressionDesc::Pexp_comptime_typename(_) => {}
-    }
-
-    Ok(())
-}
-
-fn validate_structure_this_errors(
-    structure: &[StructureItem],
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    for item in structure {
-        match &*item.pstr_desc {
-            StructureItemDesc::Pstr_value(inner) => {
-                let (_rec_flag, bindings) = &**inner;
-                for binding in bindings {
-                    validate_expression_idx_this_errors(binding.pvb_expr, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_eval(inner) => {
-                let (expr, _) = &**inner;
-                validate_expression_idx_this_errors(*expr, arena)?;
-            }
-            StructureItemDesc::Pstr_module(mb) => {
-                let mod_expr = arena.get_mod_expr(mb.pmb_expr);
-                validate_module_expr_this_errors(&mod_expr, arena)?;
-            }
-            StructureItemDesc::Pstr_recmodule(mbs) => {
-                for mb in mbs.iter() {
-                    let mod_expr = arena.get_mod_expr(mb.pmb_expr);
-                    validate_module_expr_this_errors(&mod_expr, arena)?;
-                }
-            }
-            StructureItemDesc::Pstr_include(include_decl) => {
-                let mod_expr = arena.get_mod_expr(include_decl.pincl_mod);
-                validate_module_expr_this_errors(&mod_expr, arena)?;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn validate_module_expr_this_errors(
-    mod_expr: &ModuleExpr,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    match &*mod_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(items) => validate_structure_this_errors(items, arena),
-        ModuleExprDesc::Pmod_functor(inner) => {
-            let (_name, _param, body) = &**inner;
-            let body = arena.get_mod_expr(*body);
-            validate_module_expr_this_errors(&body, arena)
-        }
-        ModuleExprDesc::Pmod_apply(left, right) => {
-            let left = arena.get_mod_expr(*left);
-            validate_module_expr_this_errors(&left, arena)?;
-            let right = arena.get_mod_expr(*right);
-            validate_module_expr_this_errors(&right, arena)
-        }
-        ModuleExprDesc::Pmod_constraint(inner, _mty) => {
-            let inner = arena.get_mod_expr(*inner);
-            validate_module_expr_this_errors(&inner, arena)
-        }
-        ModuleExprDesc::Pmod_extension(extension) => match &extension.1 {
-            Payload::PStr(items) => validate_structure_this_errors(items, arena),
-            _ => Ok(()),
-        },
-        _ => Ok(()),
-    }
-}
-
-fn validate_expression_idx_this_errors(expr_idx: ExprIdx, arena: &ParseArena) -> PpxResult<()> {
-    let expr = arena.get_expr(expr_idx);
-    validate_expression_this_errors(&expr, arena)
-}
-
-fn validate_method_callback_this_errors(
-    expr: &Expression,
-    fun: &PexpFun,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    // Parser-created functions keep the current Parsetree's n-ary params and
-    // newtypes in side tables; the inline Pexp_fun fields only describe the
-    // compact first-parameter representation.
-    let params = arena.nary_fun_params(fun).into_owned();
-    let _newtypes = arena.nary_fun_newtypes(fun);
-    let body = arena.nary_fun_body(fun);
-
-    let self_pat = arena.get_pat(params[0].p_pat);
-    if single_var_pattern_name_conservative(&self_pat, arena).is_none() {
-        return Err(PpxError::at_loc(
-            self_pat.ppat_loc,
-            "@this expects its first parameter to be a simple variable (or `_`).",
-        ));
-    }
-
-    if params
-        .iter()
-        .any(|param| matches!(param.p_lbl, ArgLabel::Optional(_)))
-    {
-        return Err(PpxError::at_loc(
-            expr.pexp_loc,
-            "Uncurried function doesn't support optional arguments yet",
-        ));
-    }
-
-    validate_expression_idx_this_errors(body, arena)
-}
-
-fn validate_expression_this_errors(expr: &Expression, arena: &ParseArena) -> PpxResult<()> {
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_fun(inner) if has_this_attr(&expr.pexp_attributes, arena) => {
-            validate_method_callback_this_errors(expr, inner, arena)
-        }
-        ExpressionDesc::Pexp_fun(inner) => {
-            let params = arena.nary_fun_params(inner).into_owned();
-            let _newtypes = arena.nary_fun_newtypes(inner);
-            let body = arena.nary_fun_body(inner);
-            for param in params {
-                if let Some(default) = param.p_default {
-                    validate_expression_idx_this_errors(default, arena)?;
-                }
-            }
-            validate_expression_idx_this_errors(body, arena)
-        }
-        ExpressionDesc::Pexp_let(inner) => {
-            let (_rec_flag, bindings, body) = &**inner;
-            for binding in bindings {
-                validate_expression_idx_this_errors(binding.pvb_expr, arena)?;
-            }
-            validate_expression_idx_this_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_apply(inner) => {
-            validate_expression_idx_this_errors(inner.funct, arena)?;
-            for (_label, arg) in &inner.args {
-                validate_expression_idx_this_errors(*arg, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            let (scrutinee, cases) = &**inner;
-            validate_expression_idx_this_errors(*scrutinee, arena)?;
-            for case in cases {
-                if let Some(guard) = case.pc_guard {
-                    validate_expression_idx_this_errors(guard, arena)?;
-                }
-                validate_expression_idx_this_errors(case.pc_rhs, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
-            for item in items.iter() {
-                validate_expression_idx_this_errors(*item, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_construct(_, Some(arg))
-        | ExpressionDesc::Pexp_field(arg, _)
-        | ExpressionDesc::Pexp_assert(arg)
-        | ExpressionDesc::Pexp_await(arg) => validate_expression_idx_this_errors(*arg, arena),
-        ExpressionDesc::Pexp_variant(inner) => {
-            if let Some(arg) = inner.1 {
-                validate_expression_idx_this_errors(arg, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_record(inner) => {
-            let (fields, spread) = &**inner;
-            if let Some(spread) = spread {
-                validate_expression_idx_this_errors(*spread, arena)?;
-            }
-            for field in fields {
-                validate_expression_idx_this_errors(field.expr, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_setfield(inner) => {
-            let (target, _field, value) = &**inner;
-            validate_expression_idx_this_errors(*target, arena)?;
-            validate_expression_idx_this_errors(*value, arena)
-        }
-        ExpressionDesc::Pexp_ifthenelse(inner) => {
-            let (cond, then_expr, else_expr) = &**inner;
-            validate_expression_idx_this_errors(*cond, arena)?;
-            validate_expression_idx_this_errors(*then_expr, arena)?;
-            if let Some(else_expr) = else_expr {
-                validate_expression_idx_this_errors(*else_expr, arena)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_sequence(left, right) | ExpressionDesc::Pexp_while(left, right) => {
-            validate_expression_idx_this_errors(*left, arena)?;
-            validate_expression_idx_this_errors(*right, arena)
-        }
-        ExpressionDesc::Pexp_for(inner) => {
-            let (_pat, start, finish, _dir, body) = &**inner;
-            validate_expression_idx_this_errors(*start, arena)?;
-            validate_expression_idx_this_errors(*finish, arena)?;
-            validate_expression_idx_this_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_for_of(inner)
-        | ExpressionDesc::Pexp_for_await_of(inner)
-        | ExpressionDesc::Pexp_inline_for(inner) => {
-            let (_pat, collection, body) = &**inner;
-            validate_expression_idx_this_errors(*collection, arena)?;
-            validate_expression_idx_this_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_constraint(inner) => {
-            let (inner_expr, _typ) = &**inner;
-            validate_expression_idx_this_errors(*inner_expr, arena)
-        }
-        ExpressionDesc::Pexp_coerce(inner) => {
-            let (inner_expr, _from, _to) = &**inner;
-            validate_expression_idx_this_errors(*inner_expr, arena)
-        }
-        ExpressionDesc::Pexp_letmodule(inner) => {
-            let (_name, mod_expr, body) = &**inner;
-            let mod_expr = arena.get_mod_expr(*mod_expr);
-            validate_module_expr_this_errors(&mod_expr, arena)?;
-            validate_expression_idx_this_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_letexception(inner) => {
-            let (_ext, body) = &**inner;
-            validate_expression_idx_this_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_open(inner) => {
-            let (_override, _lid, body) = &**inner;
-            validate_expression_idx_this_errors(*body, arena)
-        }
-        ExpressionDesc::Pexp_extension(extension) => match &extension.1 {
-            Payload::PStr(items) => validate_structure_this_errors(items, arena),
-            _ => Ok(()),
-        },
-        _ => Ok(()),
-    }
 }
 
 /// Handle @deriving(abstract) which transforms record types into abstract types with accessors
@@ -15306,9 +12391,13 @@ fn handle_abstract_tdcl(
                     label.pld_name.clone()
                 };
 
-                let is_optional = label.pld_attributes.iter().any(|(attr_name, _)| {
-                    let name = arena.get_string(attr_name.txt);
-                    name == "optional"
+                // OCaml `Ast_attributes.has_bs_optional` marks the attribute used.
+                let is_optional = label.pld_attributes.iter().any(|attr| {
+                    let is_opt = arena.get_string(attr.0.txt) == "optional";
+                    if is_opt {
+                        arena.mark_used_attribute(attr);
+                    }
+                    is_opt
                 });
 
                 // Build the argument for maker function
@@ -15669,7 +12758,8 @@ fn make_set_attr(loc: LocIdx, arena: &mut ParseArena) -> Attribute {
 
 /// Get the @as("...") attribute value
 fn get_bs_as_string(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
-    for (attr_name, payload) in attrs {
+    for attr in attrs {
+        let (attr_name, payload) = attr;
         let name = arena.get_string(attr_name.txt);
         if name == "as" {
             if let Some(items) = payload_str_items(payload) {
@@ -15679,6 +12769,7 @@ fn get_bs_as_string(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
                         if let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*expr).pexp_desc
                         {
                             if let Constant::String(txt, _) = &**c {
+                                arena.mark_used_attribute(attr);
                                 return Some(txt.to_string());
                             }
                         }
@@ -16291,15 +13382,27 @@ pub fn rewrite_structure(
     structure: &[StructureItem],
     arena: &mut ParseArena,
 ) -> PpxResult<Vec<StructureItem>> {
-    rewrite_structure_impl(structure, arena, false, true)
+    rewrite_structure_with_warnings(structure, arena).0
 }
 
-/// Apply the built-in mapper with configured Spice support.
-pub fn rewrite_structure_with_spice(
+/// [`rewrite_structure`] together with the warnings the builtin mapper
+/// prints while mapping, which precede its error when it fails.
+pub fn rewrite_structure_with_warnings(
     structure: &[StructureItem],
     arena: &mut ParseArena,
-) -> PpxResult<Vec<StructureItem>> {
-    rewrite_structure_impl(structure, arena, true, true)
+) -> (PpxResult<Vec<StructureItem>>, Vec<PpxWarning>) {
+    let mut warnings = Vec::new();
+    let result = rewrite_structure_impl(structure, arena, true, true, Some(&mut warnings));
+    (with_deferred_ppx_error(result, arena), warnings)
+}
+
+/// A nested rewrite error was raised before any error returned directly, so
+/// it takes precedence (OCaml's mapper raises at the first failure).
+fn with_deferred_ppx_error<T>(result: PpxResult<T>, arena: &mut ParseArena) -> PpxResult<T> {
+    match arena.take_ppx_deferred_error() {
+        Some(error) => Err(error),
+        None => result,
+    }
 }
 
 /// Apply the built-in mapper for parser-debug output. OCaml's `res_parser`
@@ -16308,96 +13411,280 @@ pub fn rewrite_structure_for_parser_debug(
     structure: &[StructureItem],
     arena: &mut ParseArena,
 ) -> PpxResult<Vec<StructureItem>> {
-    rewrite_structure_impl(structure, arena, false, false)
+    let result = rewrite_structure_impl(structure, arena, true, false, None);
+    with_deferred_ppx_error(result, arena)
 }
 
+/// The order in which OCaml `Bs_builtin_ppx.structure_mapper`
+/// (bs_builtin_ppx.ml:676-802) maps the items of `structure`: it recurses as
+/// `head :: structure_mapper rest`, evaluated right to left, so most items
+/// are mapped after the rest of the structure; `let` items and `@res.await`
+/// module aliases bind their mapped item first, and a run of `%%private`
+/// items maps its payload before the rest.
+fn structure_mapper_order(structure: &[StructureItem], arena: &ParseArena) -> Vec<usize> {
+    let mut order = std::collections::VecDeque::with_capacity(structure.len());
+    let mut units = Vec::new();
+    let mut i = 0;
+    while i < structure.len() {
+        if is_private_extension(&structure[i], arena) {
+            let start = i;
+            while i < structure.len() && is_private_extension(&structure[i], arena) {
+                i += 1;
+            }
+            units.push((start, i, true));
+        } else {
+            units.push((i, i + 1, false));
+            i += 1;
+        }
+    }
+    for &(start, end, private) in units.iter().rev() {
+        let head_first = !private
+            && match &*structure[start].pstr_desc {
+                StructureItemDesc::Pstr_value(_) => true,
+                StructureItemDesc::Pstr_module(mb) => is_await_module_alias(mb, arena),
+                _ => false,
+            };
+        if private || head_first {
+            for index in (start..end).rev() {
+                order.push_front(index);
+            }
+        } else {
+            order.push_back(start);
+        }
+    }
+    order.into_iter().collect()
+}
+
+/// `warnings` receives the mapper's warnings; it is `None` for the nested
+/// structures, which the top-level check has already walked.
 fn rewrite_structure_impl(
     structure: &[StructureItem],
     arena: &mut ParseArena,
     apply_spice: bool,
     validate_invariants: bool,
+    mut warnings: Option<&mut Vec<PpxWarning>>,
 ) -> PpxResult<Vec<StructureItem>> {
-    if validate_invariants {
-        validate_structure_deriving_errors(structure, arena)?;
-        validate_structure_method_attribute_errors(structure, arena)
-            .map_err(|error| error.into_ppx(arena))?;
-        validate_structure_js_string_errors(structure, arena)?;
-        validate_structure_await_errors(structure, arena, true)?;
-        validate_structure_this_errors(structure, arena)?;
+
+    // Context for tracking already-created module type names (per-structure scope)
+    let mut await_context = std::collections::HashSet::new();
+    let spice_mapper_active =
+        apply_spice && spice_ppx::structure_uses_spice_mapper(structure, arena);
+
+    // OCaml `Bs_builtin_ppx.structure_mapper` (bs_builtin_ppx.ml:676-802)
+    // recurses as `head :: structure_mapper rest`. Constructor arguments are
+    // evaluated right to left, so most items are mapped after the rest of the
+    // structure; `let` items and `@res.await` module aliases bind their mapped
+    // item first. A run of `%%private` items maps its payload items first and is
+    // wrapped by `expand_reverse` after the rest, which fixes the `local_N`
+    // numbering. Plan that order, run it, then assemble results by position.
+    enum Unit {
+        Item(usize),
+        Private(usize, usize),
     }
-
-    // Nested signature mapping follows the same configured PPX scope.
-    let previous_spice = std::mem::replace(&mut arena.spice_mapper_enabled, apply_spice);
-    let result = (|| {
-        // Context for tracking already-created module type names (per-structure scope)
-        let mut await_context = std::collections::HashSet::new();
-        let mut result = Vec::new();
-        let spice_mapper_active =
-            apply_spice && spice_ppx::structure_uses_spice_mapper(structure, arena);
-
-        for item in structure {
-            match &*item.pstr_desc {
-                StructureItemDesc::Pstr_module(mb) => {
-                    // OCaml structure_mapper handles module-level await here (not in structure_item mapper)
-                    // and deduplicates generated module type declarations per structure.
-                    if let Some((module_type_decl, transformed_mb)) =
-                        transform_module_await(mb, item.pstr_loc, arena)
-                    {
-                        let mb_expr = arena.get_mod_expr(mb.pmb_expr);
-                        if let ModuleExprDesc::Pmod_ident(located_lid) = &*mb_expr.pmod_desc {
-                            let module_type_name = local_module_type_name(located_lid.txt, arena);
-                            if await_context.insert(module_type_name) {
-                                result.push(module_type_decl);
-                            }
-                        }
-                        result.push(transformed_mb);
-                    } else {
-                        result.extend(try_rewrite_structure_item(
-                            item,
-                            arena,
-                            spice_mapper_active,
-                        )?);
-                    }
-                }
-                StructureItemDesc::Pstr_value(inner) => {
-                    let (ref _rec_flag, ref bindings) = **inner;
-                    // Spelunk through the ORIGINAL bindings to find await module types
-                    // (before expression rewriting transforms them)
-                    let module_type_decls = spelunk_value_bindings_for_await_module_types(
-                        bindings,
-                        &mut await_context,
-                        arena,
-                    );
-
-                    // Add hoisted module type declarations first
-                    result.extend(module_type_decls);
-
-                    // Then process the structure item normally
-                    result.extend(try_rewrite_structure_item(
-                        item,
-                        arena,
-                        spice_mapper_active,
-                    )?);
-                }
-                _ => {
-                    // Non-Pstr_value items: just process normally
-                    result.extend(try_rewrite_structure_item(
-                        item,
-                        arena,
-                        spice_mapper_active,
-                    )?);
+    enum Event {
+        Map(usize),
+        MapPrivate(usize),
+        WrapPrivate(usize),
+    }
+    let mut units = Vec::new();
+    let mut i = 0;
+    while i < structure.len() {
+        if is_private_extension(&structure[i], arena) {
+            let start = i;
+            while i < structure.len() && is_private_extension(&structure[i], arena) {
+                i += 1;
+            }
+            units.push(Unit::Private(start, i));
+        } else {
+            units.push(Unit::Item(i));
+            i += 1;
+        }
+    }
+    let mut order = std::collections::VecDeque::with_capacity(units.len());
+    for (unit_index, unit) in units.iter().enumerate().rev() {
+        match *unit {
+            Unit::Private(..) => {
+                order.push_front(Event::MapPrivate(unit_index));
+                order.push_back(Event::WrapPrivate(unit_index));
+            }
+            Unit::Item(index) => {
+                let head_first = match &*structure[index].pstr_desc {
+                    StructureItemDesc::Pstr_value(_) => true,
+                    StructureItemDesc::Pstr_module(mb) => is_await_module_alias(mb, arena),
+                    _ => false,
+                };
+                if head_first {
+                    order.push_front(Event::Map(unit_index));
+                } else {
+                    order.push_back(Event::Map(unit_index));
                 }
             }
         }
+    }
 
-        if validate_invariants {
-            validate_structure_builtin_type_redefinition_errors(&result, arena)?;
+    let mut slots: Vec<Vec<StructureItem>> = (0..units.len()).map(|_| Vec::new()).collect();
+    for event in order {
+        match event {
+            Event::Map(unit_index) => {
+                let Unit::Item(index) = units[unit_index] else {
+                    unreachable!("item event for a %%private run")
+                };
+                if validate_invariants {
+                    let mut checker = check::Checker::new(arena);
+                    let result = checker.structure_mapper_item(&structure[index]);
+                    if let Some(warnings) = warnings.as_deref_mut() {
+                        warnings.append(&mut checker.warnings);
+                    }
+                    result?;
+                }
+                slots[unit_index] = rewrite_structure_unit(
+                    &structure[index],
+                    arena,
+                    apply_spice,
+                    spice_mapper_active,
+                    &mut await_context,
+                )?;
+            }
+            Event::MapPrivate(unit_index) => {
+                let Unit::Private(start, end) = units[unit_index] else {
+                    unreachable!("%%private event for an item")
+                };
+                if validate_invariants {
+                    for item in &structure[start..end] {
+                        let mut checker = check::Checker::new(arena);
+                        let result = checker.structure_mapper_item(item);
+                        if let Some(warnings) = warnings.as_deref_mut() {
+                            warnings.append(&mut checker.warnings);
+                        }
+                        result?;
+                    }
+                }
+                let mut mapped = Vec::new();
+                for item in &structure[start..end] {
+                    let StructureItemDesc::Pstr_extension(inner) = &*item.pstr_desc else {
+                        unreachable!("%%private run holds extensions")
+                    };
+                    let ((ext_name, payload), _attrs) = &**inner;
+                    // `self.structure_item` on each payload item. `%%raw` and
+                    // `%%private` are only expanded by `structure_mapper`, so
+                    // here they stay extensions (and `Typemod_hide.check`
+                    // rejects them).
+                    for work in private_extension_structure_items(payload, ext_name.loc)? {
+                        if is_structure_mapper_extension(work, arena) {
+                            mapped.push(work.clone());
+                        } else if apply_spice {
+                            mapped.extend(try_rewrite_structure_item(
+                                work,
+                                arena,
+                                spice_mapper_active,
+                            )?);
+                        } else {
+                            mapped.extend(rewrite_structure_item_no_spice(work, arena));
+                        }
+                    }
+                }
+                slots[unit_index] = mapped;
+            }
+            Event::WrapPrivate(unit_index) => {
+                let Unit::Private(start, _) = units[unit_index] else {
+                    unreachable!("%%private event for an item")
+                };
+                let mapped = std::mem::take(&mut slots[unit_index]);
+                // `expand_reverse`: `Typemod_hide.check`, then a fresh `local_N`.
+                check_private_extension_items(&mapped, arena)?;
+                slots[unit_index] = wrap_in_local_module(mapped, structure[start].pstr_loc, arena);
+            }
         }
+    }
+    let result: Vec<StructureItem> = slots.into_iter().flatten().collect();
 
-        Ok(result)
-    })();
-    arena.spice_mapper_enabled = previous_spice;
-    result
+    if validate_invariants {}
+
+    Ok(result)
+}
+
+/// Map one structure item as `Bs_builtin_ppx.structure_mapper` does outside
+/// `%%private` runs: `@res.await` module aliases and `let` items may emit module
+/// type declarations (deduplicated per structure) ahead of the item.
+fn rewrite_structure_unit(
+    item: &StructureItem,
+    arena: &mut ParseArena,
+    apply_spice: bool,
+    spice_mapper_active: bool,
+    await_context: &mut std::collections::HashSet<String>,
+) -> PpxResult<Vec<StructureItem>> {
+    let mut result = Vec::new();
+    match &*item.pstr_desc {
+        StructureItemDesc::Pstr_module(mb) => {
+            // OCaml structure_mapper handles module-level await here (not in structure_item mapper)
+            // and deduplicates generated module type declarations per structure.
+            if let Some((module_type_decl, transformed_mb)) =
+                transform_module_await(mb, item.pstr_loc, arena)
+            {
+                let mb_expr = arena.get_mod_expr(mb.pmb_expr);
+                if let ModuleExprDesc::Pmod_ident(located_lid) = &*mb_expr.pmod_desc {
+                    let module_type_name = local_module_type_name(located_lid.txt, arena);
+                    if await_context.insert(module_type_name) {
+                        result.push(module_type_decl);
+                    }
+                }
+                result.push(transformed_mb);
+            } else if apply_spice {
+                result.extend(try_rewrite_structure_item(
+                    item,
+                    arena,
+                    spice_mapper_active,
+                )?);
+            } else {
+                result.extend(rewrite_structure_item_no_spice(item, arena));
+            }
+        }
+        StructureItemDesc::Pstr_value(inner) => {
+            let (ref _rec_flag, ref bindings) = **inner;
+            // Spelunk through the ORIGINAL bindings to find await module types
+            // (before expression rewriting transforms them)
+            let module_type_decls = spelunk_value_bindings_for_await_module_types(
+                bindings,
+                await_context,
+                arena,
+            );
+
+            // Add hoisted module type declarations first
+            result.extend(module_type_decls);
+
+            // Then process the structure item normally
+            if apply_spice {
+                result.extend(try_rewrite_structure_item(
+                    item,
+                    arena,
+                    spice_mapper_active,
+                )?);
+            } else {
+                result.extend(rewrite_structure_item_no_spice(item, arena));
+            }
+        }
+        _ => {
+            // Non-Pstr_value items: just process normally
+            if apply_spice {
+                result.extend(try_rewrite_structure_item(
+                    item,
+                    arena,
+                    spice_mapper_active,
+                )?);
+            } else {
+                result.extend(rewrite_structure_item_no_spice(item, arena));
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// `module M = @res.await Path`, the structure_mapper case that maps its item
+/// before the rest of the structure (bs_builtin_ppx.ml:708-747).
+fn is_await_module_alias(mb: &current::ModuleBinding, arena: &ParseArena) -> bool {
+    let mod_expr = arena.get_mod_expr(mb.pmb_expr);
+    matches!(&*mod_expr.pmod_desc, ModuleExprDesc::Pmod_ident(_))
+        && has_await_attribute(&mod_expr.pmod_attributes, arena)
 }
 
 /// Lightweight extension expansion: only expands %%raw, %raw, %re, %%private.
@@ -16674,33 +13961,66 @@ pub fn rewrite_signature(
     signature: &[SignatureItem],
     arena: &mut ParseArena,
 ) -> PpxResult<Vec<SignatureItem>> {
-    rewrite_signature_impl(signature, arena, false)
+    rewrite_signature_with_warnings(signature, arena).0
 }
 
-/// Apply the built-in signature mapper with configured Spice support.
-pub fn rewrite_signature_with_spice(
+/// [`rewrite_signature`] together with the warnings the builtin mapper
+/// prints while mapping, which precede its error when it fails.
+pub fn rewrite_signature_with_warnings(
     signature: &[SignatureItem],
     arena: &mut ParseArena,
-) -> PpxResult<Vec<SignatureItem>> {
-    rewrite_signature_impl(signature, arena, true)
+) -> (PpxResult<Vec<SignatureItem>>, Vec<PpxWarning>) {
+    let mut checker = check::Checker::new(arena);
+    let checked = checker.signature(signature);
+    let warnings = std::mem::take(&mut checker.warnings);
+    if let Err(error) = checked {
+        return (Err(error), warnings);
+    }
+    let rewritten = with_deferred_ppx_error(try_rewrite_signature_items(signature, arena), arena);
+    (rewritten, warnings)
 }
 
-fn rewrite_signature_impl(
-    signature: &[SignatureItem],
-    arena: &mut ParseArena,
-    apply_spice: bool,
-) -> PpxResult<Vec<SignatureItem>> {
-    validate_signature_deriving_errors(signature, arena)?;
-    validate_signature_method_attribute_errors(signature, arena)
-        .map_err(|error| error.into_ppx(arena))?;
-    validate_signature_js_string_errors(signature, arena)?;
-    validate_signature_await_errors(signature, arena, true)?;
-    let previous_spice = std::mem::replace(&mut arena.spice_mapper_enabled, apply_spice);
-    let result = try_rewrite_signature_items(signature, arena);
-    arena.spice_mapper_enabled = previous_spice;
-    let rewritten = result?;
-    validate_signature_builtin_type_redefinition_errors(&rewritten, arena)?;
-    Ok(rewritten)
+/// Externals nested below a top-level item (in submodules, module types, local
+/// modules, or functor bodies). OCaml's builtin mapper validates every external
+/// it reaches (compiler/frontend/bs_builtin_ppx.ml structure_item /
+/// signature_item mappers), not just top-level ones.
+#[derive(Default)]
+struct NestedExternals {
+    externals: Vec<ValueDescription>,
+}
+
+impl super::ast_iter::AstIter for NestedExternals {
+    fn structure_item(&mut self, arena: &ParseArena, item: &StructureItem) {
+        if let StructureItemDesc::Pstr_primitive(vd) = &*item.pstr_desc {
+            self.externals.push((**vd).clone());
+        }
+        super::ast_iter::walk_structure_item(self, arena, item);
+    }
+
+    fn signature_item(&mut self, arena: &ParseArena, item: &SignatureItem) {
+        if let SignatureItemDesc::Psig_value(vd) = &*item.psig_desc {
+            self.externals.push((**vd).clone());
+        }
+        super::ast_iter::walk_signature_item(self, arena, item);
+    }
+}
+
+fn validate_nested_structure_externals(item: &StructureItem, arena: &mut ParseArena) -> PpxResult<()> {
+    let mut nested = NestedExternals::default();
+    super::ast_iter::walk_structure_item(&mut nested, arena, item);
+    for vd in &nested.externals {
+        validate_external_attribute_errors(vd, arena, &mut Vec::new())?;
+    }
+    Ok(())
+}
+
+fn validate_nested_signature_externals(item: &SignatureItem, arena: &mut ParseArena) -> PpxResult<()> {
+    let mut nested = NestedExternals::default();
+    super::ast_iter::walk_signature_item(&mut nested, arena, item);
+    for vd in &nested.externals {
+        validate_external_attribute_errors(vd, arena, &mut Vec::new())?;
+    }
+    Ok(())
 }
 
 fn try_rewrite_signature_items(
@@ -16708,19 +14028,16 @@ fn try_rewrite_signature_items(
     arena: &mut ParseArena,
 ) -> PpxResult<Vec<SignatureItem>> {
     let mut rewritten = Vec::new();
-    let spice_mapper_active =
-        arena.spice_mapper_enabled && spice_ppx::signature_uses_spice_mapper(items, arena);
+    let spice_mapper_active = spice_ppx::signature_uses_spice_mapper(items, arena);
     for item in items {
-        let expanded_items = if arena.spice_mapper_enabled {
+        let expanded_items =
             spice_ppx::expand_signature_item_with_mapper(item, arena, spice_mapper_active)
-                .map_err(PpxError::message)?
-        } else {
-            vec![item.clone()]
-        };
+                .map_err(PpxError::message)?;
         for expanded in expanded_items {
             if let SignatureItemDesc::Psig_value(vd) = &*expanded.psig_desc {
-                validate_external_attribute_errors(vd, arena)?;
+                validate_external_attribute_errors(vd, arena, &mut Vec::new())?;
             }
+            validate_nested_signature_externals(&expanded, arena)?;
             let rewritten_item = rewrite_signature_item_no_spice(&expanded, arena);
             rewritten.extend(expand_signature_deriving_items(
                 &expanded,
@@ -16733,7 +14050,8 @@ fn try_rewrite_signature_items(
 }
 
 fn rewrite_signature_items(items: &[SignatureItem], arena: &mut ParseArena) -> Vec<SignatureItem> {
-    try_rewrite_signature_items(items, arena).unwrap_or_else(|_| {
+    try_rewrite_signature_items(items, arena).unwrap_or_else(|error| {
+        arena.defer_ppx_error(error);
         items
             .iter()
             .flat_map(|item| {
@@ -16744,6 +14062,7 @@ fn rewrite_signature_items(items: &[SignatureItem], arena: &mut ParseArena) -> V
     })
 }
 
+/// `Ast_tdcls.handle_tdcls_in_sigi` (compiler/frontend/ast_tdcls.ml:38-72).
 fn expand_signature_deriving_items(
     original: &SignatureItem,
     rewritten: SignatureItem,
@@ -16752,27 +14071,174 @@ fn expand_signature_deriving_items(
     let SignatureItemDesc::Psig_type(inner) = &*original.psig_desc else {
         return vec![rewritten];
     };
-    let (_rec_flag, tdcls) = &**inner;
+    let (rec_flag, tdcls) = &**inner;
     let Some(last_tdcl) = tdcls.last() else {
         return vec![rewritten];
     };
-    let (actions, _remaining_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
-    if !actions
-        .iter()
-        .any(|action| matches!(action, DeriveAction::Accessors))
-    {
+    let (actions, new_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
+    if actions.is_empty() {
         return vec![rewritten];
     }
+    let loc = original.psig_loc;
+    let none_loc = arena.none_loc();
 
-    let mut items = vec![rewritten];
-    for tdcl in tdcls.iter() {
-        if let Some((_structure_items, signature_items)) =
-            generate_accessor_items_for_tdcl(tdcl, tdcl.ptype_loc, arena)
-        {
-            items.extend(signature_items);
-        }
+    // `new_tdcls tdcls new_attrs`: the processed `@deriving` is removed from
+    // the last declaration; `new_tdcls_new_attrs` is that list mapped.
+    let SignatureItemDesc::Psig_type(rewritten_inner) = &*rewritten.psig_desc else {
+        return vec![rewritten];
+    };
+    let mut new_tdcls: Vec<TypeDeclaration> = rewritten_inner.1.clone();
+    if let Some(last) = new_tdcls.last_mut() {
+        last.ptype_attributes = rewrite_attributes(&new_attrs, arena).into();
     }
-    items
+    let mut original_tdcls_new_attrs: Vec<TypeDeclaration> = tdcls.clone();
+    if let Some(last) = original_tdcls_new_attrs.last_mut() {
+        last.ptype_attributes = new_attrs.clone().into();
+    }
+
+    let abstract_light = match actions.as_slice() {
+        [DeriveAction::Abstract { light }] => Some(*light),
+        _ => None,
+    };
+
+    let items = if let Some(light) = abstract_light {
+        // `include module type of (struct type ... end : sig end)` followed by
+        // `Ast_derive_abstract.handle_tdcls_in_sig` (ast_derive_abstract.ml:
+        // 215-223): the abstract declarations, then one `val` per generated
+        // external.
+        let type_str_item = StructureItem {
+            pstr_desc: Box::new(StructureItemDesc::Pstr_type(Box::new((
+                *rec_flag,
+                new_tdcls.clone(),
+            )))),
+            pstr_loc: loc,
+        };
+        let inner_mod = arena.push_mod_expr(ModuleExpr {
+            pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(vec![type_str_item]))),
+            pmod_loc: loc,
+            pmod_attributes: Attributes::new(),
+        });
+        let empty_sig = arena.push_mod_type(current::ModuleType {
+            pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_signature(Box::new(vec![]))),
+            pmty_loc: loc,
+            pmty_attributes: Attributes::new(),
+        });
+        let constrained = arena.push_mod_expr(ModuleExpr {
+            pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(inner_mod, empty_sig)),
+            pmod_loc: loc,
+            pmod_attributes: Attributes::new(),
+        });
+        let typeof_mty = arena.push_mod_type(current::ModuleType {
+            pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_typeof(constrained)),
+            pmty_loc: loc,
+            pmty_attributes: Attributes::new(),
+        });
+        let mut items = vec![SignatureItem {
+            psig_desc: Box::new(SignatureItemDesc::Psig_include(Box::new(
+                current::IncludeDescription {
+                    pincl_mod: typeof_mty,
+                    pincl_loc: loc,
+                    pincl_attributes: Attributes::new(),
+                },
+            ))),
+            psig_loc: loc,
+        }];
+        let mut abstract_tdcls = Vec::with_capacity(original_tdcls_new_attrs.len());
+        let mut values = Vec::new();
+        for tdcl in &original_tdcls_new_attrs {
+            let (abstract_tdcl, value_descriptions) = handle_abstract_tdcl(tdcl, light, arena);
+            abstract_tdcls.push(abstract_tdcl);
+            values.extend(value_descriptions);
+        }
+        items.push(SignatureItem {
+            psig_desc: Box::new(SignatureItemDesc::Psig_type(Box::new((
+                *rec_flag,
+                abstract_tdcls,
+            )))),
+            psig_loc: none_loc,
+        });
+        for vd in values {
+            items.push(SignatureItem {
+                psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(vd))),
+                psig_loc: none_loc,
+            });
+        }
+        items
+    } else {
+        // `Sig.type_ ~loc rf new_tdcls_new_attrs ::
+        //  Ast_derive.gen_signature tdcls actions rf` (ast_derive.ml:54-58).
+        let mut items = vec![SignatureItem {
+            psig_desc: Box::new(SignatureItemDesc::Psig_type(Box::new((
+                *rec_flag,
+                new_tdcls,
+            )))),
+            psig_loc: loc,
+        }];
+        for action in &actions {
+            match action {
+                DeriveAction::Accessors => {
+                    for tdcl in tdcls.iter() {
+                        if let Some((_structure_items, signature_items)) =
+                            generate_accessor_items_for_tdcl(tdcl, tdcl.ptype_loc, arena)
+                        {
+                            items.extend(signature_items);
+                        }
+                    }
+                }
+                DeriveAction::JsConverter { new_type } => {
+                    for tdcl in tdcls.iter() {
+                        let inner_loc = tdcl.ptype_loc;
+                        let (_structure_items, signature_items) = match &tdcl.ptype_kind {
+                            TypeKind::Ptype_record(label_declarations) => {
+                                generate_js_converter_record(
+                                    tdcl,
+                                    label_declarations,
+                                    *new_type,
+                                    inner_loc,
+                                    arena,
+                                )
+                            }
+                            TypeKind::Ptype_abstract => {
+                                match is_enum_polyvar(tdcl, arena).map(|rf| rf.to_vec()) {
+                                    Some(row_fields) => generate_js_converter_polyvar(
+                                        tdcl,
+                                        &row_fields,
+                                        *new_type,
+                                        inner_loc,
+                                        arena,
+                                    ),
+                                    None => (vec![], vec![]),
+                                }
+                            }
+                            TypeKind::Ptype_variant(_) | TypeKind::Ptype_open => (vec![], vec![]),
+                        };
+                        items.extend(signature_items);
+                    }
+                }
+                // `abstract` combined with other actions is rejected by
+                // `run_derivers`; nothing is generated for it here.
+                DeriveAction::Abstract { .. } => {}
+            }
+        }
+        items
+    };
+
+    // `Ast_signature.fuse_all ~loc`: `include sig ... end`.
+    let fused = arena.push_mod_type(current::ModuleType {
+        pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_signature(Box::new(items))),
+        pmty_loc: loc,
+        pmty_attributes: Attributes::new(),
+    });
+    vec![SignatureItem {
+        psig_desc: Box::new(SignatureItemDesc::Psig_include(Box::new(
+            current::IncludeDescription {
+                pincl_mod: fused,
+                pincl_loc: loc,
+                pincl_attributes: Attributes::new(),
+            },
+        ))),
+        psig_loc: loc,
+    }]
 }
 
 fn try_rewrite_structure_item(
@@ -16781,16 +14247,13 @@ fn try_rewrite_structure_item(
     spice_mapper_active: bool,
 ) -> PpxResult<Vec<StructureItem>> {
     let mut result = Vec::new();
-    let expanded_items = if arena.spice_mapper_enabled {
-        spice_ppx::expand_structure_item_with_mapper(item, arena, spice_mapper_active)
-            .map_err(PpxError::message)?
-    } else {
-        vec![item.clone()]
-    };
-    for expanded in expanded_items {
+    for expanded in spice_ppx::expand_structure_item_with_mapper(item, arena, spice_mapper_active)
+        .map_err(PpxError::message)?
+    {
         if let StructureItemDesc::Pstr_primitive(vd) = &*expanded.pstr_desc {
-            validate_external_attribute_errors(vd, arena)?;
+            validate_external_attribute_errors(vd, arena, &mut Vec::new())?;
         }
+        validate_nested_structure_externals(&expanded, arena)?;
         result.extend(rewrite_structure_item_no_spice(&expanded, arena));
     }
     Ok(result)
@@ -16798,10 +14261,12 @@ fn try_rewrite_structure_item(
 
 /// Rewrite a structure item, potentially returning multiple items for @deriving.
 fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
-    let spice_mapper_active = arena.spice_mapper_enabled
-        && spice_ppx::structure_uses_spice_mapper(std::slice::from_ref(item), arena);
-    try_rewrite_structure_item(item, arena, spice_mapper_active)
-        .unwrap_or_else(|_| rewrite_structure_item_no_spice(item, arena))
+    let spice_mapper_active =
+        spice_ppx::structure_uses_spice_mapper(std::slice::from_ref(item), arena);
+    try_rewrite_structure_item(item, arena, spice_mapper_active).unwrap_or_else(|error| {
+        arena.defer_ppx_error(error);
+        rewrite_structure_item_no_spice(item, arena)
+    })
 }
 
 fn rewrite_structure_item_no_spice(
@@ -17065,7 +14530,10 @@ fn rewrite_structure_item_no_spice(
                 vec![handle_raw_structure(item, payload, arena, ext_name.loc)]
             } else if name == "private" {
                 // %%private(let x = ...) -> module local_N = { let x = ... } ; open! local_N
-                handle_private_extension(payload, ext_name.loc, arena).unwrap_or_default()
+                handle_private_extension(payload, ext_name.loc, arena).unwrap_or_else(|error| {
+                    arena.defer_ppx_error(error);
+                    Vec::new()
+                })
             } else {
                 // Rewrite payload for string transformation
                 vec![StructureItem {
@@ -17079,6 +14547,11 @@ fn rewrite_structure_item_no_spice(
             }
         }
         // Handle floating attributes (@@attr) - need to transform strings in payload
+        // Bs_builtin_ppx.structure_item_mapper leaves `@@config` untouched
+        // (bs_builtin_ppx.ml:633).
+        StructureItemDesc::Pstr_attribute(attr) if is_config_attribute(attr, arena) => {
+            vec![item.clone()]
+        }
         StructureItemDesc::Pstr_attribute(attr) => {
             vec![StructureItem {
                 pstr_desc: Box::new(StructureItemDesc::Pstr_attribute(Box::new(
@@ -17168,7 +14641,8 @@ fn rewrite_module_expr(
     let new_desc = match &*mod_expr.pmod_desc {
         current::ModuleExprDesc::Pmod_structure(items) => {
             let rewritten_items =
-                rewrite_structure_impl(items, arena, false, true).unwrap_or_else(|_| {
+                rewrite_structure_impl(items, arena, false, true, None).unwrap_or_else(|error| {
+                    arena.defer_ppx_error(error);
                     items
                         .iter()
                         .flat_map(|item| rewrite_structure_item_no_spice(item, arena))
@@ -17216,7 +14690,14 @@ fn rewrite_module_expr(
                 rewrite_payload(payload, arena),
             )))
         }
-        // Ident, unpack - just clone
+        // The default mapper (ast_mapper.ml `M.map`) maps the unpacked
+        // expression with `sub.expr`, so `%raw` etc. inside are expanded.
+        current::ModuleExprDesc::Pmod_unpack(e) => {
+            let e = arena.get_expr(*e).clone();
+            let rw = rewrite_expression(&e, arena);
+            current::ModuleExprDesc::Pmod_unpack(arena.push_expr(rw))
+        }
+        // Ident - just clone
         _ => return mod_expr.clone(),
     };
 
@@ -17332,11 +14813,16 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
                     psig_loc: item.psig_loc,
                 }
             } else {
+                // Ast_mapper.default_mapper.value_description maps `pval_type`
+                // through `typ_mapper` (Ast_core_type_class_type.typ_mapper),
+                // which expands `@get`/`@set` object fields.
+                let vd_type = arena.get_core_type(vd.pval_type).clone();
+                let rewritten_type = rewrite_core_type(&vd_type, arena);
                 SignatureItem {
                     psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(
                         ValueDescription {
                             pval_name: vd.pval_name.clone(),
-                            pval_type: vd.pval_type.clone(),
+                            pval_type: arena.push_core_type(rewritten_type),
                             pval_prim: vd.pval_prim.clone(),
                             pval_attributes: rewritten_attrs.into(),
                             pval_loc: vd.pval_loc,
@@ -17630,53 +15116,6 @@ let f = value => {
     }
 
     #[test]
-    fn unconfigured_spice_still_validates_external_attributes() {
-        let source = "@val external f: (@as(\"a\") @as(\"b\") _) => unit = \"f\"";
-        let (mut arena, structure) = parse_structure(source);
-        assert!(rewrite_structure(&structure, &mut arena).is_err());
-    }
-
-    #[test]
-    fn signature_spice_requires_explicit_mapper_activation() {
-        let source = "@spice type person = {name: string}";
-        let mut parser = Parser::new("test.resi", source);
-        let signature = module::parse_signature(&mut parser);
-        assert!(
-            !parser.has_errors(),
-            "parser errors: {:?}",
-            parser.diagnostics()
-        );
-        let ordinary = rewrite_signature(&signature, parser.arena_mut()).expect("ordinary rewrite");
-        assert_eq!(ordinary.len(), 1);
-
-        let mut parser = Parser::new("test.resi", source);
-        let signature = module::parse_signature(&mut parser);
-        let configured = rewrite_signature_with_spice(&signature, parser.arena_mut())
-            .expect("configured rewrite");
-        assert!(configured.len() > ordinary.len());
-    }
-
-    #[test]
-    fn spice_requires_explicit_mapper_activation() {
-        let source = "@spice type person = {name: string}";
-        let (mut arena, structure) = parse_structure(source);
-        let ordinary = rewrite_structure(&structure, &mut arena).expect("ordinary rewrite");
-        assert_eq!(
-            ordinary.len(),
-            1,
-            "unconfigured @spice must remain an attribute"
-        );
-
-        let (mut arena, structure) = parse_structure(source);
-        let configured =
-            rewrite_structure_with_spice(&structure, &mut arena).expect("configured Spice rewrite");
-        assert!(
-            configured.len() > ordinary.len(),
-            "configured Spice emits codecs"
-        );
-    }
-
-    #[test]
     fn spice_expands_nested_inline_record_variants_once() {
         let source = r#"
 module Story = {
@@ -17690,8 +15129,7 @@ module Story = {
 type envelope = Story(Story.event)
 "#;
         let (mut arena, structure) = parse_structure(source);
-        let rewritten =
-            rewrite_structure_with_spice(&structure, &mut arena).expect("rewrite should work");
+        let rewritten = rewrite_structure(&structure, &mut arena).expect("rewrite should work");
         let StructureItemDesc::Pstr_module(module) = &*rewritten[0].pstr_desc else {
             panic!("expected nested module");
         };

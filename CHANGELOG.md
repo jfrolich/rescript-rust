@@ -32,6 +32,7 @@
 - Fix Rust compiler parity for nullable component refs, record spreads, optional values through local aliases, constructor string escapes, control-flow output, configured PPX activation, JSX type printing, and long type diagnostics. https://github.com/jfrolich/rescript-rust/pull/21
 
 - Preserve unification links and type-level changes when the Rust in-process compiler reuses dependency signatures, while isolating those mutations between compilation units. https://github.com/jfrolich/rescript-rust/pull/21
+- Preserve source filename casing in Rust CLI package outputs on case-sensitive filesystems. https://github.com/jfrolich/rescript-rust/pull/10
 
 - Fix formatter breaking the opening brace of a functor module type's result signature onto a new line (e.g. `module Make: Pattern => {`). https://github.com/rescript-lang/rescript/pull/8519
 - Fix argument evaluation order when a function call is inlined: the beta reducer stacked argument bindings in reverse parameter order, so the last argument was evaluated first when arguments could not be substituted directly. https://github.com/rescript-lang/rescript/pull/8572
@@ -54,6 +55,8 @@
 - Allow inferred labeled functions to be called with labels in any order by removing legacy curried-arrow commutation locks. https://github.com/rescript-lang/rescript/pull/8547
 
 #### :house: Internal
+
+- Cache binary-AST debug options per serialization instead of querying the environment for each source location. https://github.com/jfrolich/rescript-rust/pull/10
 
 - Give nominal variants one canonical runtime layout: compute their JavaScript representation once after typing each declaration, replace positional constructor tags with semantic runtime descriptors, and make construction, matching, coercion, printing, diagnostics, and GenType consume the stored representation instead of reinterpreting annotations. Pattern matching keeps occurrence-specific plans local without adding another Lambda or Lam expression form. https://github.com/rescript-lang/rescript/pull/8579
 - Sync the platform npm package's compiler binaries (`packages/@rescript/<platform>/bin`) via dune promotion on every `dune build`, instead of Makefile/CI copy steps that only ran when make did: a plain `dune build` can no longer leave `cli/*.js` and the test harnesses running a stale compiler. https://github.com/rescript-lang/rescript/pull/8560

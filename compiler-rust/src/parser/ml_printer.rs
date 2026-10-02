@@ -448,7 +448,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
                 print_value_binding(
                     f,
                     arena,
-                    arena.get_pat(binding.pvb_pat),
+                    binding.pvb_pat,
                     arena.get_expr(binding.pvb_expr),
                 );
                 f.close_box();
@@ -727,9 +727,31 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
 fn print_value_binding<W: Write>(
     f: &mut Formatter<W>,
     arena: &ParseArena,
-    pat: &Pattern,
+    pat_idx: crate::parse_arena::PatIdx,
     expr: &Expression,
 ) {
+    let pat = arena.get_pat(pat_idx);
+    // pprintast.ml:1119-1123: `pvb_constraint = Some {pvc_newtypes; pvc_type}`.
+    if let Some(constraint) = arena.value_constraint(pat_idx) {
+        print_simple_pattern(f, arena, pat);
+        f.space();
+        f.string(": type");
+        f.space();
+        for (i, name) in constraint.pvc_newtypes.iter().enumerate() {
+            if i > 0 {
+                f.space();
+            }
+            f.string(arena.get_string(name.txt));
+        }
+        f.string(".");
+        f.space();
+        print_core_type(f, arena, arena.get_core_type(constraint.pvc_type));
+        f.space();
+        f.string("=");
+        f.space();
+        print_expression(f, arena, expr);
+        return;
+    }
     if !expr.pexp_attributes.is_empty() {
         // OCaml: pp f "%a@;=@;%a" (pattern ctxt) p (expression ctxt) x
         print_pattern(f, arena, pat);
@@ -853,36 +875,12 @@ fn print_value_binding<W: Write>(
                 ref arity,
                 ref is_async,
             } = **inner;
-            // OCaml: pp f "%a@ %a" (simple_pattern ctxt) p pp_print_pexp_function x
-            // where pp_print_pexp_function does: pp f "%s%s%a@ %a" async_str arity_str param recurse
+            // OCaml `binding`: pp f "%a@ %a" (simple_pattern ctxt) p pp_print_pexp_function x
+            // (pprintast.ml:1063-1089).
             print_pattern(f, arena, pat);
-            f.space(); // @ between pattern and pp_print_pexp_function
-
-            if *is_async {
-                f.string("async ");
-            }
-
-            if let Some(n) = arena.get_arity(*arity) {
-                f.string(&format!("[arity:{}]", n));
-            }
-
-            let body = if let Some(params) = arena.stored_nary_fun_params(inner) {
-                for param in params {
-                    print_inline_param(
-                        f,
-                        arena,
-                        &param.p_lbl,
-                        &param.p_default,
-                        arena.get_pat(param.p_pat),
-                    );
-                    f.space();
-                }
-                arena.get_expr(*rhs)
-            } else {
-                print_inline_param(f, arena, arg_label, default, arena.get_pat(*lhs));
-                f.space(); // @ between param and next
-                print_remaining_inline_params(f, arena, arena.get_expr(*rhs))
-            };
+            f.space();
+            print_pexp_function_head(f, arena, inner);
+            let body = print_remaining_inline_params(f, arena, arena.get_expr(inner.rhs));
 
             // OCaml: pp f "=@;%a" (expression ctxt) x
             f.string("=");
@@ -1092,6 +1090,34 @@ fn print_remaining_inline_params<'a, W: Write>(
     print_remaining_inline_params_with_arity(f, arena, expr, false)
 }
 
+/// One `Pexp_fun` step of OCaml `pp_print_pexp_function` (pprintast.ml:1069-1086):
+/// "%s%a%s%a" async_str pp_newtypes newtypes arity_str pp_params params.
+fn print_pexp_function_head<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, inner: &PexpFun) {
+    if inner.is_async {
+        f.string("async ");
+    }
+    for (name, nt_attrs) in arena.nary_fun_newtypes(inner) {
+        print_attributes(f, arena, nt_attrs);
+        f.string("(type");
+        f.space();
+        f.string(arena.get_string(name.txt));
+        f.string(")");
+        f.space();
+    }
+    if let Some(n) = arena.get_arity(inner.arity) {
+        f.string(&format!("[arity:{}]", n));
+    }
+    if let Some(params) = arena.stored_nary_fun_params(inner) {
+        for param in params {
+            print_inline_param(f, arena, &param.p_lbl, &param.p_default, arena.get_pat(param.p_pat));
+            f.space();
+        }
+    } else {
+        print_inline_param(f, arena, &inner.arg_label, &inner.default, arena.get_pat(inner.lhs));
+        f.space();
+    }
+}
+
 /// Helper to print remaining inline params, optionally printing arity on first Pexp_fun
 fn print_remaining_inline_params_with_arity<'a, W: Write>(
     f: &mut Formatter<W>,
@@ -1105,22 +1131,8 @@ fn print_remaining_inline_params_with_arity<'a, W: Write>(
 
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
-            let PexpFun {
-                ref arg_label,
-                ref default,
-                ref lhs,
-                ref rhs,
-                ref arity,
-                ..
-            } = **inner;
-            // Print arity for each Pexp_fun that has an arity annotation
-            // (matching OCaml's pprintast: only print when explicitly set)
-            if let Some(n) = arena.get_arity(*arity) {
-                f.string(&format!("[arity:{}]", n));
-            }
-            print_inline_param(f, arena, arg_label, default, arena.get_pat(*lhs));
-            f.space(); // @ between param and next recursive call
-            print_remaining_inline_params_with_arity(f, arena, arena.get_expr(*rhs), false)
+            print_pexp_function_head(f, arena, inner);
+            print_remaining_inline_params_with_arity(f, arena, arena.get_expr(inner.rhs), false)
         }
         ExpressionDesc::Pexp_newtype(inner) => {
             let (ref name, ref inner_idx) = **inner;
@@ -1484,7 +1496,7 @@ fn print_expression_inner<W: Write>(
                 print_value_binding(
                     f,
                     arena,
-                    arena.get_pat(binding.pvb_pat),
+                    binding.pvb_pat,
                     arena.get_expr(binding.pvb_expr),
                 );
                 f.close_box();
@@ -1521,6 +1533,14 @@ fn print_expression_inner<W: Write>(
             }
             f.string("fun");
             f.space();
+            // OCaml `pp_newtypes`: "%a(type %s)@;" (pprintast.ml:633-638).
+            for (name, nt_attrs) in arena.nary_fun_newtypes(inner) {
+                print_attributes(f, arena, nt_attrs);
+                f.string("(type ");
+                f.string(arena.get_string(name.txt));
+                f.string(")");
+                f.space();
+            }
             if let Some(n) = arity_value {
                 f.string(&format!("[arity:{}]", n));
             }
@@ -2601,7 +2621,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             }
         }
         PatternDesc::Ppat_record(inner) => {
-            let (ref fields, ref closed) = **inner;
+            let (ref fields, ref closed, ref record_rest) = **inner;
             // OCaml closed: @[<2>{@;%a@;}@]  with sep ";@;"
             // OCaml open:   @[<2>{@;%a;_}@]  with sep ";@;"
             f.open_box(BoxKind::Box, 2);
@@ -2657,7 +2677,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                     f.close_box();
                 }
             }
-            if let Some(rest) = arena.record_pat_rest(pat.ppat_loc) {
+            if let Some(rest) = record_rest.as_ref() {
                 if !fields.is_empty() {
                     f.string(";");
                     f.space();
@@ -2773,19 +2793,21 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
 // Types
 // ============================================================================
 
-/// Print core_type at level 1 (wraps arrow and alias types in parens).
-/// Matches OCaml's core_type1 which falls through to paren true (core_type ctxt) for those.
+/// `core_type1` (pprintast.ml:328-400): no box of its own; types with
+/// attributes go through `core_type`, and arrow, alias and poly types fall
+/// through to `paren true (core_type ctxt)`.
 fn print_core_type1<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ: &CoreType) {
-    let needs_parens = matches!(
-        *typ.ptyp_desc,
-        CoreTypeDesc::Ptyp_arrow(_) | CoreTypeDesc::Ptyp_alias(..)
-    );
-    if needs_parens {
-        f.string("(");
+    if !typ.ptyp_attributes.is_empty() {
         print_core_type(f, arena, typ);
-        f.string(")");
-    } else {
-        print_core_type(f, arena, typ);
+        return;
+    }
+    match &*typ.ptyp_desc {
+        CoreTypeDesc::Ptyp_arrow(_) | CoreTypeDesc::Ptyp_alias(..) | CoreTypeDesc::Ptyp_poly(_) => {
+            f.string("(");
+            print_core_type(f, arena, typ);
+            f.string(")");
+        }
+        _ => print_core_type_inner(f, arena, typ),
     }
 }
 
@@ -2835,21 +2857,10 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             f.open_box(BoxKind::Box, 2);
             let args = arena.nary_arrow_args(arg, *arity);
             for arg in args.iter() {
+                // `type_with_label` (pprintast.ml:287-295) prints the
+                // argument with `core_type1`.
                 print_arg_label(f, arena, &arg.lbl);
-                // Arrow and alias types as args need parentheses (OCaml's core_type1
-                // wraps them via the `| _ -> paren true (core_type ctxt) f x` fallthrough)
-                let arg_typ = arena.get_core_type(arg.typ);
-                let arg_needs_parens = matches!(
-                    *arg_typ.ptyp_desc,
-                    CoreTypeDesc::Ptyp_arrow(_) | CoreTypeDesc::Ptyp_alias(..)
-                );
-                if arg_needs_parens {
-                    f.string("(");
-                }
-                print_core_type(f, arena, arg_typ);
-                if arg_needs_parens {
-                    f.string(")");
-                }
+                print_core_type1(f, arena, arena.get_core_type(arg.typ));
                 // Print attributes on the argument (after the type)
                 print_attributes(f, arena, &arg.attrs);
                 f.space(); // Break hint before ->

@@ -6,6 +6,13 @@ Goal: Make the ReScript Rust parser the fastest possible implementation. The par
 
 ---
 
+## September 2026: CI timing follow-up
+
+- [x] Profile the full `bsc -bs-ast` path used by the three failing CI benchmarks.
+- [x] Capture debug flags per `MarshalWriter`, removing per-node environment queries without changing serialization or benchmark assertions.
+- [x] Verify release tests, core AST byte parity, JavaScript output, diagnostic output, and before/after debug-trace behavior. See [PROGRESS.md](./PROGRESS.md#september-2026-ci-timing-follow-up) for measurements and limitations.
+- [ ] Confirm the unchanged 1.20× limit on Linux CI. Local measurements are not Linux acceptance; external Tella validation was not repeated.
+
 ## Motivation
 
 The Rust parser is a fully functional drop-in replacement for the OCaml parser, producing byte-for-byte identical binary AST output for all 1,312 test files. With correctness established, the focus shifts to performance:

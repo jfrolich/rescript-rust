@@ -12,15 +12,14 @@ use anyhow::{Context, anyhow};
 use log::debug;
 use rayon::prelude::*;
 use rescript_compiler::binary_ast::{
-    Dependencies, extract_signature_deps, extract_structure_deps, ppx,
+    Dependencies, extract_signature_deps, extract_structure_deps,
     write_signature_ast_current_with_extra_deps_and_builtin_ppx,
     write_structure_ast_current_with_extra_deps_and_builtin_ppx,
 };
-use rescript_compiler::parser::{Parser, code_frame, jsx_ppx, let_unwrap_ppx, module};
+use rescript_compiler::parser::{Parser, module};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::{env, io::IsTerminal};
 use tracing::info_span;
 
 struct GeneratedAst {
@@ -38,6 +37,13 @@ pub fn generate_asts(
     let mut stderr = "".to_string();
     let use_rust_parser = build_state.use_rust_parser();
     let in_process = build_state.build_mode().is_in_process();
+    if use_rust_parser {
+        // `bsc` defaults to `-color always` (compiler/bsc/rescript_compiler_main.ml:494),
+        // and the in-process frontend stands in for `bsc -bs-ast`.
+        rescript_compiler::parser::code_frame::set_color_mode(
+            rescript_compiler::parser::code_frame::ColorMode::Always,
+        );
+    }
     let store_ast = use_rust_parser && (in_process || build_state.dump_typed_sexp());
 
     // Count dirty modules for the span attribute only when a subscriber is
@@ -574,13 +580,74 @@ fn generate_ast(
     let build_path_abs = package.get_build_path();
     let ast_path = helpers::get_ast_path(filename);
     let ast_output_path = build_path_abs.join(&ast_path);
-    let source_path_str = file_path.to_string_lossy().to_string();
+    // `bsc -absname` names the source by its normalized absolute path.
+    let source_path_str = helpers::ocaml_absname(&file_path).to_string_lossy().to_string();
     let bsc_flags = config::flatten_flags(&package.config.compiler_flags);
     let open_deps = open_dependencies_from_bsc_flags(&bsc_flags);
-    let no_builtin_ppx = bsc_flags.iter().any(|flag| flag == "-bs-no-builtin-ppx");
-    let jsx_version = rust_parser_effective_jsx_version(build_state.project_context.get_root_config());
-    let let_unwrap_enabled =
-        rust_parser_let_unwrap_enabled(build_state.project_context.get_root_config(), &package.config);
+    // The Rust parser reads the source once, for both the ppx filter and
+    // parsing.
+    let source_bytes = if use_rust_parser {
+        Some(std::fs::read(&file_path).with_context(|| format!("Failed to read {}", file_path.display()))?)
+    } else {
+        None
+    };
+
+    // The Rust parser runs the same frontend as `bsc -bs-ast` in process, so it
+    // reads the flags OCaml's `-bs-ast` would receive (see `parser_args`).
+    // `-ppx` rewriters from `ppx-flags`, as `parser_args` passes them to
+    // `bsc -bs-ast`.
+    let mut external_ppxs: Vec<String> = match &package.config.ppx_flags {
+        Some(flags) if use_rust_parser && !flags.is_empty() => {
+            let contents =
+                std::str::from_utf8(source_bytes.as_deref().unwrap_or_default()).unwrap_or_default();
+            let ppx_args = config::flatten_ppx_flags(
+                &build_state.project_context,
+                &package.config,
+                &filter_ppx_flags(&package.config.ppx_flags, contents),
+            )?;
+            ppx_args
+                .chunks(2)
+                .filter(|pair| pair[0] == "-ppx")
+                .map(|pair| pair[1].clone())
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    // The builtin spice mapper implements `ppx-spice`, so run it in process
+    // instead of spawning the configured executable for every module.
+    let spice_ppx = !external_ppxs.is_empty() && {
+        let before = external_ppxs.len();
+        external_ppxs.retain(|command| !command.contains("spice"));
+        external_ppxs.len() != before
+    };
+    let frontend_options = use_rust_parser.then(|| {
+        let root_config = build_state.project_context.get_root_config();
+        let flags = [
+            root_config.get_jsx_args(),
+            root_config.get_jsx_module_args(),
+            root_config.get_jsx_mode_args(),
+            root_config.get_jsx_preserve_args(),
+            root_config.get_experimental_features_args(),
+            package
+                .config
+                .get_warning_args(package.is_local_dep, warn_error_override.clone()),
+            bsc_flags.clone(),
+        ]
+        .concat();
+        let parsed = super::compile::parse_in_process_compiler_flags(&flags);
+        rescript_compiler::driver::CompilerOptions {
+            warning_specs: parsed.warning_specs,
+            warning_error_specs: parsed.warning_error_specs,
+            jsx_version: parsed.jsx_version,
+            jsx_preserve: parsed.jsx_preserve,
+            experimental_let_unwrap: parsed.experimental_let_unwrap
+                || rust_parser_let_unwrap_enabled(root_config, &package.config),
+            no_builtin_ppx: parsed.no_builtin_ppx,
+            spice_ppx,
+            external_ppxs,
+            ..Default::default()
+        }
+    });
 
     let parser_args = if use_rust_parser {
         Vec::new()
@@ -613,16 +680,15 @@ fn generate_ast(
     let result = if use_rust_parser {
         generate_ast_with_rust_parser(
             &file_path,
+            source_bytes.expect("Rust parser source"),
             &ast_output_path,
             &source_path_str,
             &open_deps,
-            jsx_version,
-            let_unwrap_enabled,
-            no_builtin_ppx,
-            &package.config.ppx_flags,
+            frontend_options.as_ref().expect("Rust parser options"),
             store_ast,
             in_process,
         )
+        .map_err(|err| anyhow!("Error in {}:\n{}", package.name, err))
         .map(|(stderr, stored_ast, deps)| GeneratedAst {
             path: ast_path.clone(),
             stderr,
@@ -720,82 +786,9 @@ fn open_dependencies_from_bsc_flags(flags: &[String]) -> Vec<String> {
     deps
 }
 
-fn rust_parser_effective_jsx_version(root_config: &Config) -> i32 {
-    let version = root_config.jsx.as_ref().and_then(|jsx| jsx.version).unwrap_or(-1);
-    let preserve = root_config
-        .jsx
-        .as_ref()
-        .and_then(|jsx| jsx.preserve)
-        .unwrap_or(false);
-
-    if preserve { -1 } else { version }
-}
-
 fn rust_parser_let_unwrap_enabled(root_config: &Config, package_config: &Config) -> bool {
     package_config.has_experimental_feature(ExperimentalFeature::LetUnwrap)
         || root_config.has_experimental_feature(ExperimentalFeature::LetUnwrap)
-}
-
-fn diagnostics_to_stderr(parser: &Parser<'_>, source: &str, filename: &str) -> String {
-    parser
-        .diagnostics()
-        .iter()
-        .map(|diag| {
-            code_frame::format_error(
-                filename,
-                source,
-                &diag.start_pos,
-                &diag.end_pos,
-                &diag.explain_with_source(Some(source)),
-            )
-        })
-        .collect::<Vec<String>>()
-        .join("")
-}
-
-fn append_jsx_preprocessor_warnings(
-    output: &mut String,
-    source: &str,
-    filename: &str,
-    warnings: &[jsx_ppx::JsxPreprocessorWarning],
-) {
-    let use_color = should_enable_color();
-    for warning in warnings {
-        if use_color {
-            output.push_str("\x1b[1;33mWarning number 22\x1b[0m\n  ");
-        } else {
-            output.push_str("Warning number 22\n  ");
-        }
-
-        let location = code_frame::format_location(filename, &warning.start_pos, &warning.end_pos);
-        if use_color {
-            output.push_str(&colorize_location(&location));
-        } else {
-            output.push_str(&location);
-        }
-        output.push_str("\n\n");
-        output.push_str(&code_frame::print_warning(
-            source,
-            &warning.start_pos,
-            &warning.end_pos,
-        ));
-        output.push_str("\n  ");
-        output.push_str(&warning.message);
-        output.push_str("\n\n");
-    }
-}
-
-fn should_enable_color() -> bool {
-    let term = env::var("TERM").unwrap_or_default();
-    term != "dumb" && !term.is_empty() && std::io::stderr().is_terminal()
-}
-
-fn colorize_location(location: &str) -> String {
-    if let Some((file, rest)) = location.split_once(':') {
-        format!("\x1b[36m{}\x1b[0m:\x1b[2m{}\x1b[0m", file, rest)
-    } else {
-        location.to_string()
-    }
 }
 
 fn source_bytes_to_latin1(bytes: Vec<u8>) -> String {
@@ -808,13 +801,11 @@ fn source_bytes_to_latin1(bytes: Vec<u8>) -> String {
 
 fn generate_ast_with_rust_parser(
     source_file: &Path,
+    bytes: Vec<u8>,
     ast_output_path: &Path,
     source_path_for_ast: &str,
     extra_deps: &[String],
-    jsx_version: i32,
-    let_unwrap_enabled: bool,
-    no_builtin_ppx: bool,
-    ppx_flags: &Option<Vec<OneOrMore<String>>>,
+    options: &rescript_compiler::driver::CompilerOptions,
     store_ast: bool,
     in_process: bool,
 ) -> anyhow::Result<(
@@ -823,11 +814,9 @@ fn generate_ast_with_rust_parser(
     Option<Dependencies>,
 )> {
     rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
-        let bytes = std::fs::read(source_file)
-            .with_context(|| format!("Failed to read {}", source_file.display()))?;
         let source = source_bytes_to_latin1(bytes);
-        let spice_ppx = in_process && !no_builtin_ppx && configured_spice_ppx(ppx_flags, &source);
         let mut parser = Parser::new(source_path_for_ast.to_string(), &source);
+        // Frontend warning reports, in the order `bsc -bs-ast` prints them.
         let mut warnings = String::new();
 
         let is_interface = source_file
@@ -837,46 +826,28 @@ fn generate_ast_with_rust_parser(
 
         if is_interface {
             let signature = module::parse_signature(&mut parser);
-            if parser.has_errors() {
-                let stderr = diagnostics_to_stderr(&parser, &source, source_path_for_ast);
-                return if stderr.is_empty() {
-                    Err(anyhow!(
-                        "Parse failed with {} error(s) in {}",
-                        parser.diagnostics().len(),
-                        source_file.display()
-                    ))
-                } else {
-                    Err(anyhow!(stderr))
-                };
+            let frontend = rescript_compiler::driver::run_interface_frontend(
+                &mut parser,
+                signature,
+                &source,
+                source_path_for_ast,
+                options,
+                &mut warnings,
+            );
+            let frontend = match frontend {
+                Ok(frontend) => frontend,
+                Err(err) => return Err(anyhow!("{warnings}{err}")),
+            };
+            // `bsc -bs-ast` exits 2 when a frontend warning is an error.
+            if frontend.warnings_fatal {
+                return Err(anyhow!(warnings));
             }
+            let signature = frontend.signature;
 
-            // Apply per-file @@config({flags: [...]}) overrides
-            let file_config =
-                rescript_compiler::driver::extract_file_config_from_signature(&signature, parser.arena());
-            let let_unwrap_enabled = let_unwrap_enabled || file_config.let_unwrap;
-            let jsx_version = file_config.jsx_version.unwrap_or(jsx_version);
-
-            let (signature, jsx_warnings) =
-                jsx_ppx::transform_signature_with_warnings(signature, jsx_version, parser.arena_mut());
-            append_jsx_preprocessor_warnings(&mut warnings, &source, source_path_for_ast, &jsx_warnings);
-            let signature =
-                let_unwrap_ppx::rewrite_signature(&signature, parser.arena_mut(), let_unwrap_enabled)
-                    .map_err(|e| anyhow!(e))?;
-
-            let (signature, deps) = if in_process {
-                let signature = if no_builtin_ppx {
-                    signature
-                } else {
-                    let rewrite = if spice_ppx {
-                        ppx::rewrite_signature_with_spice
-                    } else {
-                        ppx::rewrite_signature
-                    };
-                    rewrite(&signature, parser.arena_mut()).map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
-                };
+            let deps = if in_process {
                 let mut deps = extract_signature_deps(parser.arena(), &signature);
                 deps.extend(extra_deps.iter().cloned());
-                (signature, Some(deps))
+                Some(deps)
             } else {
                 write_signature_ast_current_with_extra_deps_and_builtin_ppx(
                     ast_output_path,
@@ -884,10 +855,10 @@ fn generate_ast_with_rust_parser(
                     parser.arena_mut(),
                     &signature,
                     extra_deps,
-                    !no_builtin_ppx,
+                    false,
                 )
                 .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
-                (signature, None)
+                None
             };
 
             let stored = if store_ast {
@@ -906,47 +877,25 @@ fn generate_ast_with_rust_parser(
             Ok(((!warnings.is_empty()).then_some(warnings), stored, deps))
         } else {
             let structure = module::parse_structure(&mut parser);
-            if parser.has_errors() {
-                let stderr = diagnostics_to_stderr(&parser, &source, source_path_for_ast);
-                return if stderr.is_empty() {
-                    Err(anyhow!(
-                        "Parse failed with {} error(s) in {}",
-                        parser.diagnostics().len(),
-                        source_file.display()
-                    ))
-                } else {
-                    Err(anyhow!(stderr))
-                };
+            let frontend = rescript_compiler::driver::run_implementation_frontend(
+                &mut parser,
+                structure,
+                &source,
+                source_path_for_ast,
+                options,
+                &mut warnings,
+            );
+            let frontend = match frontend {
+                Ok(frontend) => frontend,
+                Err(err) => return Err(anyhow!("{warnings}{err}")),
+            };
+            if frontend.warnings_fatal {
+                return Err(anyhow!(warnings));
             }
-
-            // Apply per-file @@config({flags: [...]}) overrides
-            let file_config =
-                rescript_compiler::driver::extract_file_config_from_structure(&structure, parser.arena());
-            let let_unwrap_enabled = let_unwrap_enabled || file_config.let_unwrap;
-            let jsx_version = file_config.jsx_version.unwrap_or(jsx_version);
-
-            let (structure, jsx_warnings) =
-                jsx_ppx::transform_structure_with_warnings(structure, jsx_version, parser.arena_mut());
-            append_jsx_preprocessor_warnings(&mut warnings, &source, source_path_for_ast, &jsx_warnings);
-            let structure =
-                let_unwrap_ppx::rewrite_structure(&structure, parser.arena_mut(), let_unwrap_enabled)
-                    .map_err(|e| anyhow!(e))?;
+            let structure = frontend.structure;
 
             let (structure, deps) = if in_process {
-                let structure = if no_builtin_ppx {
-                    structure
-                } else {
-                    let rewrite = if spice_ppx {
-                        ppx::rewrite_structure_with_spice
-                    } else {
-                        ppx::rewrite_structure
-                    };
-                    rewrite(&structure, parser.arena_mut()).map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
-                };
-                let structure = rescript_compiler::binary_ast::writer::apply_no_export_config(
-                    parser.arena_mut(),
-                    structure,
-                );
+                // The frontend already applied `no_export` (js_implementation.ml:130).
                 let mut deps = extract_structure_deps(parser.arena(), &structure);
                 deps.extend(extra_deps.iter().cloned());
                 (structure, Some(deps))
@@ -957,7 +906,7 @@ fn generate_ast_with_rust_parser(
                     parser.arena_mut(),
                     &structure,
                     extra_deps,
-                    !no_builtin_ppx,
+                    false,
                 )
                 .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
                 (structure, None)
@@ -981,21 +930,6 @@ fn generate_ast_with_rust_parser(
     })
 }
 
-fn configured_spice_ppx(ppx_flags: &Option<Vec<OneOrMore<String>>>, contents: &str) -> bool {
-    filter_ppx_flags(ppx_flags, contents).is_some_and(|flags| {
-        flags.iter().any(|flag| {
-            let command = match flag {
-                OneOrMore::Single(command) => command,
-                OneOrMore::Multiple(commands) => match commands.first() {
-                    Some(command) => command,
-                    None => return false,
-                },
-            };
-            command.contains("spice")
-        })
-    })
-}
-
 fn filter_ppx_flags(
     ppx_flags: &Option<Vec<OneOrMore<String>>>,
     contents: &str,
@@ -1015,22 +949,8 @@ fn filter_ppx_flags(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        configured_spice_ppx, open_dependencies_from_bsc_flags, rust_parser_effective_jsx_version,
-        rust_parser_let_unwrap_enabled,
-    };
-    use crate::config::{Config, OneOrMore};
-
-    #[test]
-    fn spice_only_runs_when_ppx_is_configured_and_selected_for_source() {
-        let source = "@spice type person = {name: string}";
-        let spice = Some(vec![OneOrMore::Single("./node_modules/ppx_spice/ppx.exe".into())]);
-        assert!(!configured_spice_ppx(&None, source));
-        assert!(configured_spice_ppx(&spice, source));
-        assert!(!configured_spice_ppx(&spice, "type person = {name: string}"));
-        let unrelated = Some(vec![OneOrMore::Single("./ppx_other.exe".into())]);
-        assert!(!configured_spice_ppx(&unrelated, source));
-    }
+    use super::{open_dependencies_from_bsc_flags, rust_parser_let_unwrap_enabled};
+    use crate::config::Config;
 
     #[test]
     fn open_dependencies_extracts_and_dedups() {
@@ -1054,38 +974,6 @@ mod tests {
         let flags = vec!["-open".to_string()];
         let deps = open_dependencies_from_bsc_flags(&flags);
         assert!(deps.is_empty());
-    }
-
-    #[test]
-    fn rust_parser_effective_jsx_version_uses_rescript_json_version() {
-        let config = Config::new_from_json_string(
-            r#"
-            {
-                "name": "demo",
-                "sources": ["src"],
-                "jsx": { "version": 4, "mode": "automatic" }
-            }
-            "#,
-        )
-        .unwrap();
-
-        assert_eq!(rust_parser_effective_jsx_version(&config), 4);
-    }
-
-    #[test]
-    fn rust_parser_effective_jsx_version_respects_preserve_flag() {
-        let config = Config::new_from_json_string(
-            r#"
-            {
-                "name": "demo",
-                "sources": ["src"],
-                "jsx": { "version": 4, "mode": "automatic", "preserve": true }
-            }
-            "#,
-        )
-        .unwrap();
-
-        assert_eq!(rust_parser_effective_jsx_version(&config), -1);
     }
 
     #[test]

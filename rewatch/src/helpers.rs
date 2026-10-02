@@ -284,6 +284,24 @@ fn find_dep_in_upward_node_modules(
     ))
 }
 
+/// `Ext_path.absolute_path` (compiler/ext/ext_path.ml:91-104): `bsc -absname`
+/// names a source by its path with `.` and `..` components resolved
+/// lexically. In-process builds name sources the same way.
+pub fn ocaml_absname(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 pub fn get_abs_path(path: &Path) -> PathBuf {
     let abs_path_buf = PathBuf::from(path);
 

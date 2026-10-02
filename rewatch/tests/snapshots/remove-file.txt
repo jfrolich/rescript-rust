@@ -1,6 +1,6 @@
-Cleaned 1/510
-Parsed 1 source files
-Compiled 2 modules
+Cleaned 1/512
+Parsed 4 source files
+Compiled incremental modules
 
   [1;33mWarning number 32[0m
   [36m/packages/watch-warnings/src/ModuleA.res[0m:[2m1:5-15[0m
@@ -38,4 +38,5 @@ Unknown field 'some-new-field' found in the package config of '@testrepo/depreca
   
 
 
-Incremental build failed. Error: [2K  Failed to Compile. See Errors Above
+Incremental build failed. Error: [2K
+  Failed to Compile. See Errors Above

@@ -11,6 +11,7 @@ rewatch build &> /dev/null
 mv ./packages/main/src/InternalDep.res ./packages/main/src/InternalDep2.res
 rewatch build &> ../tests/snapshots/rename-file-internal-dep.txt
 normalize_paths ../tests/snapshots/rename-file-internal-dep.txt
+normalize_incremental_count ../tests/snapshots/rename-file-internal-dep.txt
 mv ./packages/main/src/InternalDep2.res ./packages/main/src/InternalDep.res
 
 rewatch build &> /dev/null
