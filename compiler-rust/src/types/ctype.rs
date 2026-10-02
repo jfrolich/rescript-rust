@@ -3220,6 +3220,16 @@ fn try_expand_head_with_mode<'a>(
                 }
             }
 
+            // Predefined types have no manifest (compiler/ml/predef.ml:239-424):
+            // the general route below finds the abstract declaration with
+            // `IdTbl.find_same` and stops without expanding.
+            if let Path::Pident(id) = &path
+                && super::predef::is_predef_type_ident(id)
+                && env.find_type_by_ident(id).is_ok_and(|decl| decl.type_manifest.is_none())
+            {
+                return None;
+            }
+
             // Qualified heads: the outcome depends only on the module scope,
             // the path, the mode and the arity (each lookup on this route is
             // memoized per `Env::scope_id`), so it is computed once per key.

@@ -398,9 +398,9 @@ impl<T: Clone> IdTbl<T> {
                 .rev()
                 .find(|(entry_id, _)| {
                     if stamp == 0 {
-                        entry_id.is_persistent() && entry_id.name() == id.name()
+                        entry_id.is_persistent() && entry_id.name_atom() == id.name_atom()
                     } else {
-                        entry_id.same(id) && entry_id.name() == id.name()
+                        entry_id.same(id) && entry_id.name_atom() == id.name_atom()
                     }
                 })
                 .map(|(_, value)| value)
@@ -724,9 +724,9 @@ impl<T: Clone> TycompTbl<T> {
                 .rev()
                 .find(|(entry_id, _)| {
                     if stamp == 0 {
-                        entry_id.is_persistent() && entry_id.name() == id.name()
+                        entry_id.is_persistent() && entry_id.name_atom() == id.name_atom()
                     } else {
-                        entry_id.same(id) && entry_id.name() == id.name()
+                        entry_id.same(id) && entry_id.name_atom() == id.name_atom()
                     }
                 })
                 .map(|(_, value)| value)
