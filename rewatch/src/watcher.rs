@@ -1,5 +1,5 @@
 use crate::build;
-use crate::build::build_types::{BuildCommandState, BuildMode, SourceType};
+use crate::build::build_types::{BuildCommandState, BuildMode, SourceType, TypedArtifactStore};
 use crate::build::clean;
 use crate::cmd;
 use crate::config::{self, SourceMapCommand};
@@ -515,6 +515,11 @@ async fn async_watch(
                         // Preserve warning state for unchanged modules so their warnings are re-emitted after the
                         // fresh build state replaces the previous one.
                         carry_forward_compile_warnings(&build_state, &mut next_build_state);
+                        // The fresh build compiles every module again.
+                        if let Some(store) = &build_state.typed_artifacts {
+                            store.clear();
+                        }
+                        next_build_state.typed_artifacts = build_state.typed_artifacts.clone();
                         build_state = next_build_state;
 
                         // Re-register watches based on the new build state
@@ -596,6 +601,15 @@ pub fn start(
         })
         .expect("Error setting Ctrl-C handler");
 
+        // In-process builds write no typed artifacts: keep them in memory and
+        // serve them to editor tooling while watching.
+        let typed_artifacts = build_mode.is_in_process().then(TypedArtifactStore::default);
+        let _tooling_server = typed_artifacts.as_ref().and_then(|store| {
+            crate::tooling_server::start(path, store.clone())
+                .map_err(|err| log::warn!("Could not start the editor tooling server: {err}"))
+                .ok()
+        });
+
         // Initialization can clean previous build artifacts, so it has to be serialized
         // with the initial compile too.
         let (build_state, current_watch_paths, initial_compile_result): StartupBuildResult =
@@ -614,6 +628,7 @@ pub fn start(
                     SourceMapCommand::Watch,
                 )
                 .with_context(|| "Could not initialize build")?;
+                build_state.typed_artifacts = typed_artifacts.clone();
 
                 // Compute and register targeted watches based on source folders.
                 let current_watch_paths = compute_watch_paths(&build_state, path);

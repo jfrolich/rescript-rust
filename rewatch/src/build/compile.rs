@@ -2112,9 +2112,12 @@ fn build_compiler_options(
         make_runtime: parsed_flags.make_runtime,
         gentype_config,
         gentype_resolver,
-        // In-process builds keep typed results in memory; they write no
-        // `.cmi`/`.cmt`/`.cmti` files.
-        typed_artifacts: None,
+        // In-process builds write no `.cmi`/`.cmt`/`.cmti` files. A watcher
+        // keeps them in memory for editor tooling.
+        typed_artifacts: build_command_state
+            .typed_artifacts
+            .as_ref()
+            .map(|store| std::sync::Arc::new(typed_artifact_output(package, source_file_path, store.sink()))),
         keep_locs: parsed_flags.keep_locs,
         binary_annotations: parsed_flags.binary_annotations,
         visible_package_roots: Some(visible_package_roots),
@@ -2127,6 +2130,25 @@ fn build_compiler_options(
             .map(|ns| ns.to_string()),
         ..Default::default()
     })
+}
+
+/// Where the typed artifacts of `source_file_path` would be written
+/// (`lib/bs/<dir>/<module>`, copied to `lib/ocaml`).
+fn typed_artifact_output(
+    package: &packages::Package,
+    source_file_path: &Path,
+    sink: rescript_compiler::driver::TypedArtifactSink,
+) -> rescript_compiler::driver::TypedArtifactOutput {
+    let build_path = package.get_build_path();
+    let dir = source_file_path.parent().unwrap_or_else(|| Path::new(""));
+    let basename = helpers::file_path_to_compiler_asset_basename(source_file_path, &package.namespace);
+    rescript_compiler::driver::TypedArtifactOutput {
+        output_prefix: build_path.join(dir).join(basename),
+        copy_dirs: vec![package.get_ocaml_build_path()],
+        builddir: build_path.to_string_lossy().into_owned(),
+        args: std::env::args().collect(),
+        sink,
+    }
 }
 
 fn package_spec_to_module_format(spec: &config::PackageSpec) -> rescript_compiler::js_ir::ModuleFormat {
@@ -2522,13 +2544,40 @@ fn register_namespace_signatures(build_state: &BuildCommandState) {
             // bsc-compiled `.mlmap` (js_implementation.ml:207-226).
             let mut sorted_aliases = module_aliases.clone();
             sorted_aliases.sort();
-            // In-process builds write no namespace `.cmi`/`.cmt`, so there
-            // is no saved CRC list for importers to record.
+            // In-process builds write no namespace `.cmi`/`.cmt`. A watcher
+            // keeps them for editor tooling, and importers then record the
+            // saved unit's CRC list (env.ml:627-638).
+            let crcs = match &build_state.typed_artifacts {
+                Some(store) => {
+                    let build_path = package.get_build_path();
+                    let output = rescript_compiler::driver::TypedArtifactOutput {
+                        output_prefix: build_path.join(&namespace_suffix),
+                        copy_dirs: vec![package.get_ocaml_build_path()],
+                        builddir: build_path.to_string_lossy().into_owned(),
+                        args: std::env::args().collect(),
+                        sink: store.sink(),
+                    };
+                    let runtime_path = get_runtime_path(&package.config, &build_state.project_context).ok();
+                    match rescript_compiler::driver::save_namespace_typed_artifacts(
+                        &namespace_suffix,
+                        &sorted_aliases,
+                        &output,
+                        runtime_path.as_deref(),
+                    ) {
+                        Ok(crcs) => crcs,
+                        Err(err) => {
+                            log::warn!("Could not save namespace artifacts for {namespace_suffix}: {err}");
+                            Vec::new()
+                        }
+                    }
+                }
+                None => Vec::new(),
+            };
             build_state.register_namespace_in_registry(
                 &namespace_suffix,
                 &module_aliases,
                 package.path.clone(),
-                Vec::new(),
+                crcs,
             );
         }
     }

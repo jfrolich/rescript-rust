@@ -222,7 +222,7 @@ pub struct BuildCommandState {
     pub build_state: BuildState,
     // Command-line --warn-error flag override (takes precedence over rescript.json config)
     pub warn_error_override: Option<String>,
-    // The explicit build mode (Default, Rust, or InProcess)
+    // The build mode (in-process, or the test-only external compiler)
     pub build_mode: BuildMode,
     // Command-line --dump-typed-sexp flag: add -dtyped-sexp to bsc invocations.
     pub dump_typed_sexp: bool,
@@ -246,6 +246,44 @@ pub struct BuildCommandState {
     // Command-line --features override. `None` means all features are active; `Some(list)`
     // restricts the root package to those features (and whatever they transitively imply).
     pub features: Option<Vec<String>>,
+    // Typed artifacts kept in memory for editor tooling by a watcher. `None`
+    // for one-shot builds, which produce none.
+    pub typed_artifacts: Option<TypedArtifactStore>,
+}
+
+/// The `.cmi`/`.cmt`/`.cmti` files of in-process compilation, keyed by the
+/// path each would have on disk (`lib/bs/...`). In-process builds write no
+/// such files; a watcher keeps them here and serves them to editor tooling.
+#[derive(Clone, Default)]
+pub struct TypedArtifactStore(Arc<Mutex<AHashMap<PathBuf, Arc<Vec<u8>>>>>);
+
+impl TypedArtifactStore {
+    pub fn insert(&self, path: PathBuf, bytes: Vec<u8>) {
+        self.0.lock().unwrap().insert(path, Arc::new(bytes));
+    }
+
+    pub fn get(&self, path: &std::path::Path) -> Option<Arc<Vec<u8>>> {
+        self.0.lock().unwrap().get(path).cloned()
+    }
+
+    /// Forget everything, before a build that compiles every module again.
+    pub fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
+
+    pub fn paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self.0.lock().unwrap().keys().cloned().collect();
+        paths.sort();
+        paths
+    }
+
+    /// The compiler-side destination that fills this store.
+    pub fn sink(&self) -> rescript_compiler::driver::TypedArtifactSink {
+        let store = self.clone();
+        rescript_compiler::driver::TypedArtifactSink::Memory(Arc::new(move |path, bytes| {
+            store.insert(path, bytes)
+        }))
+    }
 }
 
 impl std::fmt::Debug for BuildCommandState {
@@ -339,6 +377,7 @@ impl BuildCommandState {
             in_memory_deps: Mutex::new(AHashMap::new()),
             gentype_contexts: Mutex::new(AHashMap::new()),
             features,
+            typed_artifacts: None,
         }
     }
 

@@ -1255,6 +1255,29 @@ pub struct TypedArtifactOutput {
     pub builddir: String,
     /// `cmt_args`.
     pub args: Vec<String>,
+    /// Where the `.cmi`/`.cmt`/`.cmti` files go.
+    pub sink: TypedArtifactSink,
+}
+
+/// Destination of the typed artifacts of a compilation unit.
+#[derive(Clone, Default)]
+pub enum TypedArtifactSink {
+    /// Write them to disk.
+    #[default]
+    Disk,
+    /// Hand them to the build system, keyed by the path each file would have
+    /// on disk: a watcher keeps them in memory and serves them to editor
+    /// tooling instead of writing files.
+    Memory(std::sync::Arc<dyn Fn(PathBuf, Vec<u8>) + Send + Sync>),
+}
+
+impl std::fmt::Debug for TypedArtifactSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            TypedArtifactSink::Disk => "Disk",
+            TypedArtifactSink::Memory(_) => "Memory",
+        })
+    }
 }
 
 /// Which typed annotations are being saved.
@@ -1415,18 +1438,24 @@ fn save_typed_artifacts(
     if !(binary_annotations && options.binary_annotations) {
         files.retain(|(ext, _)| *ext == "cmi");
     }
-    for (ext, bytes) in &files {
+    for (ext, bytes) in files {
         let with_ext = |path: &std::path::Path| {
             let mut path = path.as_os_str().to_owned();
             path.push(".");
             path.push(ext);
             PathBuf::from(path)
         };
-        write_artifact_if_changed(&with_ext(&out.output_prefix), bytes)?;
-        if let Some(file_name) = out.output_prefix.file_name() {
-            for dir in &out.copy_dirs {
-                write_artifact_if_changed(&with_ext(&dir.join(file_name)), bytes)?;
+        let primary = with_ext(&out.output_prefix);
+        match &out.sink {
+            TypedArtifactSink::Disk => {
+                write_artifact_if_changed(&primary, &bytes)?;
+                if let Some(file_name) = out.output_prefix.file_name() {
+                    for dir in &out.copy_dirs {
+                        write_artifact_if_changed(&with_ext(&dir.join(file_name)), &bytes)?;
+                    }
+                }
             }
+            TypedArtifactSink::Memory(sink) => sink(primary, bytes),
         }
     }
     Ok(cmi_crc)
