@@ -9,9 +9,9 @@
 use crate::lambda::lam_compile_context::LamStats;
 use crate::lambda::lam_eta_conversion::transform_under_supply;
 use crate::lambda::lam_pass_collect::ExternalArityResolver;
-use crate::lambda::lam_primitive::Primitive;
+use crate::lambda::map_box;
 use crate::lambda::{ApInfo, Apply, ApplyStatus, Lambda, LambdaSwitch, PrimInfo};
-use crate::lambda::{LFunction, map_box};
+use crate::lambda::{map_function_body, map_prim_args};
 
 /// Direct port of `Lam_pass_alpha_conversion.alpha_conversion`
 /// (lam_pass_alpha_conversion.ml:25-129).
@@ -365,24 +365,8 @@ impl<'a, 'r> Alpha<'a, 'r> {
                     .collect();
                 Lambda::Lletrec(bindings, map_box(body, |inner| self.simpl_owned(inner)))
             }
-            Lambda::Lprim(__prim0) => {
-                let PrimInfo {
-                    primitive,
-                    args,
-                    loc,
-                } = *__prim0;
-                Lambda::prim(
-                    primitive,
-                    args.into_iter().map(|a| self.simpl_owned(a)).collect(),
-                    loc,
-                )
-            }
-            Lambda::Lfunction(f) => Lambda::Lfunction(Box::new(LFunction {
-                arity: f.arity,
-                params: f.params,
-                body: map_box(f.body, |inner| self.simpl_owned(inner)),
-                attr: f.attr,
-            })),
+            Lambda::Lprim(info) => map_prim_args(info, |a| self.simpl_owned(a)),
+            Lambda::Lfunction(f) => map_function_body(f, |inner| self.simpl_owned(inner)),
             Lambda::Lswitch(scrut, switch) => Lambda::switch(
                 self.simpl_owned(*scrut),
                 LambdaSwitch {

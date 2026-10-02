@@ -4,7 +4,8 @@
 //! of named module-block bindings so downstream passes see a flat sequence of
 //! single bindings. Mirrors `Lam_pass_deep_flatten.deep_flatten`.
 
-use crate::lambda::{LFunction, map_box};
+use crate::lambda::map_box;
+use crate::lambda::{map_function_body, map_prim_args};
 use ahash::AHashMap as HashMap;
 
 use crate::context::IdGenerator;
@@ -380,17 +381,8 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
                 ap_info: apply.ap_info,
                 ap_transformed_jsx: apply.ap_transformed_jsx,
             })),
-            Lambda::Lfunction(func) => Lambda::Lfunction(Box::new(LFunction {
-                arity: func.arity,
-                params: func.params,
-                body: map_box(func.body, |inner| aux(inner, id_gen)),
-                attr: func.attr,
-            })),
-            Lambda::Lprim(info) => Lambda::prim(
-                info.primitive,
-                info.args.into_iter().map(|arg| aux(arg, id_gen)).collect(),
-                info.loc,
-            ),
+            Lambda::Lfunction(func) => map_function_body(func, |inner| aux(inner, id_gen)),
+            Lambda::Lprim(info) => map_prim_args(info, |arg| aux(arg, id_gen)),
             Lambda::Lswitch(scrutinee, switch) => Lambda::Lswitch(
                 map_box(scrutinee, |inner| aux(inner, id_gen)),
                 Box::new(LambdaSwitch {

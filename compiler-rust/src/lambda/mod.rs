@@ -263,6 +263,24 @@ pub(crate) fn map_box(mut boxed: Box<Lambda>, f: impl FnOnce(Lambda) -> Lambda) 
     boxed
 }
 
+/// Rebuild an `Lprim` with mapped arguments, reusing its boxed payload.
+/// Applies the same constant folding as [`Lambda::prim`].
+pub(crate) fn map_prim_args(mut info: Box<PrimInfo>, f: impl FnMut(Lambda) -> Lambda) -> Lambda {
+    let args = std::mem::take(&mut info.args);
+    info.args = args.into_iter().map(f).collect();
+    Lambda::prim_boxed(info)
+}
+
+/// Rebuild an `Lfunction` with a mapped body, reusing its boxed payload.
+pub(crate) fn map_function_body(
+    mut func: Box<LFunction>,
+    f: impl FnOnce(Lambda) -> Lambda,
+) -> Lambda {
+    let body = std::mem::replace(&mut *func.body, Lambda::Lbreak);
+    *func.body = f(body);
+    Lambda::Lfunction(func)
+}
+
 /// Lambda IR expression
 ///
 /// This is the core representation used for code generation and optimization.
@@ -391,6 +409,26 @@ impl Lambda {
     /// folds constants on unary/binary numeric and string ops, and
     /// collapses module aliasing makeblocks. Every fold below cites the
     /// exact OCaml line that justifies it.
+    /// [`Lambda::prim`] for an already boxed payload: keeps the box unless one
+    /// of `prim`'s constant folds can apply (one or two constant arguments,
+    /// or a module-alias `Pmakeblock`).
+    pub fn prim_boxed(info: Box<PrimInfo>) -> Self {
+        let may_fold = matches!(
+            info.args.as_slice(),
+            [Lambda::Lconst(_)] | [Lambda::Lconst(_), Lambda::Lconst(_)]
+        ) || matches!(info.primitive, Primitive::Pmakeblock(TagInfo::Module(_), _));
+        if may_fold {
+            let PrimInfo {
+                primitive,
+                args,
+                loc,
+            } = *info;
+            Lambda::prim(primitive, args, loc)
+        } else {
+            Lambda::Lprim(info)
+        }
+    }
+
     pub fn prim(primitive: Primitive, args: Vec<Lambda>, loc: Location) -> Self {
         let default = |primitive: Primitive, args: Vec<Lambda>, loc: Location| -> Lambda {
             Lambda::Lprim(Box::new(PrimInfo {

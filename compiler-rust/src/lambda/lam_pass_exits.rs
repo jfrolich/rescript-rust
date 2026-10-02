@@ -6,6 +6,7 @@
 //! OCaml file and line number that justifies it.
 
 use crate::lambda::map_box;
+use crate::lambda::map_prim_args;
 use ahash::AHashMap as HashMap;
 
 use crate::context::IdGenerator;
@@ -375,14 +376,9 @@ fn subst_helper_owned(
         // lam_pass_exits.ml:211
         Lambda::LglobalModule(_, _) => lam,
         // lam_pass_exits.ml:212-214
-        Lambda::Lprim(info) => Lambda::prim(
-            info.primitive,
-            info.args
-                .into_iter()
-                .map(|arg| subst_helper_owned(subst, counts, id_gen, arg))
-                .collect(),
-            info.loc,
-        ),
+        Lambda::Lprim(info) => {
+            map_prim_args(info, |arg| subst_helper_owned(subst, counts, id_gen, arg))
+        }
         // lam_pass_exits.ml:215-226
         Lambda::Lswitch(l, sw) => Lambda::switch(
             subst_helper_owned(subst, counts, id_gen, *l),

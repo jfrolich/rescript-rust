@@ -8,6 +8,7 @@
 //! justifies it. Do not introduce Rust-only logic.
 
 use crate::lambda::map_box;
+use crate::lambda::map_prim_args;
 use ahash::AHashMap as HashMap;
 
 use crate::ident::Ident;
@@ -739,14 +740,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
             }
         }
 
-        Lambda::Lprim(prim) => Lambda::prim(
-            prim.primitive,
-            prim.args
-                .into_iter()
-                .map(|a| lets_helper_owned(state, a))
-                .collect(),
-            prim.loc,
-        ),
+        Lambda::Lprim(prim) => map_prim_args(prim, |a| lets_helper_owned(state, a)),
 
         Lambda::Lswitch(scrut, sw) => {
             let new_scrut = lets_helper_owned(state, *scrut);

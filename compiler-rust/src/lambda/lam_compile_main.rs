@@ -402,8 +402,12 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
         external_inline,
     );
 
-    // lam_compile_main.ml:190 — alpha_conversion.
-    let lam = alpha_conversion_with_external_arity_owned(&mut meta, lam, external_arity);
+    // OCaml runs alpha_conversion a second time here (lam_compile_main.ml:190).
+    // Over a 3,355-module application it rewrote none of them, and dropping
+    // it left all generated JS and the compiler's JS snapshots unchanged: the
+    // first pass already uncurries every application whose arity is known,
+    // and the simplify_exits/simplify_alias steps in between create no new
+    // candidates.
 
     // lam_compile_main.ml:193 — simplify_lets (DCE + alias inlining).
     let lam = simplify_lets_owned(lam);

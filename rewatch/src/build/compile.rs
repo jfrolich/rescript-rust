@@ -943,6 +943,7 @@ pub fn compile(
     let build_command_state_ref: &BuildCommandState = build_state;
 
     let (tx, rx) = mpsc::channel::<WorkerMsg>();
+    let js_writer = JsWriter::spawn();
     // Bound the jobs handed to rayon so the priority heap still orders work —
     // dumping everything into rayon's queue would defeat #2. Allow one queued
     // job per thread beyond the running ones: a worker that finishes then
@@ -1000,6 +1001,7 @@ pub fn compile(
                     }
                     let module_name = pre_js_msg.module_name.clone();
                     let tx = tx.clone();
+                    let write_tx = js_writer.sender();
                     let inc_ref = &inc;
                     let parent_span = compile_parent_span.clone();
                     let registry_snapshot = worker_registry_template.clone();
@@ -1020,6 +1022,7 @@ pub fn compile(
                             parent_span,
                             registry_snapshot,
                             &tx,
+                            &write_tx,
                         );
                         if show_progress {
                             inc_ref();
@@ -1279,6 +1282,7 @@ pub fn compile(
     // Close our sender handle so any lingering clones in already-spawned
     // workers don't keep the channel open past the scope.
     drop(tx);
+    let js_write_failures = js_writer.finish();
 
     trace!(
         "Compiled {} out of {} in the universe",
@@ -1467,6 +1471,15 @@ pub fn compile(
         }
 
         compile_errors.push_str(&message);
+    }
+
+    // A module whose JS output could not be written must be recompiled next
+    // time, exactly as when the write still happened on the worker.
+    for (module_name, err) in js_write_failures {
+        if let Some(module) = build_state.build_state.modules.get_mut(&module_name) {
+            module.compile_dirty = true;
+        }
+        compile_errors.push_str(&format!("Failed to write JS output for {module_name}: {err:#}\n"));
     }
 
     // Collect replayed warnings into the same list as fresh warnings so mixed
@@ -2244,17 +2257,54 @@ fn write_js_output(
     Ok(())
 }
 
-fn write_compiled_js_outputs(
-    js_outputs: &[rescript_compiler::driver::JsOutput],
-    fallback_js_output: &str,
-    package: &packages::Package,
-    source_file_path: &Path,
-    root_config: &config::Config,
-) -> Result<()> {
-    if js_outputs.is_empty() {
-        return write_js_output(fallback_js_output, package, source_file_path, root_config);
+/// JS outputs of one module, queued for the writer thread.
+struct JsWriteJob {
+    module_name: String,
+    outputs: Vec<rescript_compiler::driver::JsOutput>,
+}
+
+/// Writes compiled JS on one dedicated thread. The kernel serializes file
+/// creation in a directory tree, so creating thousands of files from every
+/// worker at once spends most of the time contending inside `open`; a single
+/// writer does the same work in less total time and keeps the workers on
+/// compilation.
+struct JsWriter {
+    tx: mpsc::Sender<JsWriteJob>,
+    handle: std::thread::JoinHandle<Vec<(String, anyhow::Error)>>,
+}
+
+impl JsWriter {
+    fn spawn() -> Self {
+        let (tx, rx) = mpsc::channel::<JsWriteJob>();
+        let handle = std::thread::Builder::new()
+            .name("js-writer".to_string())
+            .spawn(move || {
+                let mut failures = Vec::new();
+                for job in rx {
+                    if let Err(err) = write_js_write_job(&job.outputs) {
+                        failures.push((job.module_name, err));
+                    }
+                }
+                failures
+            })
+            .expect("failed to spawn the JS writer thread");
+        JsWriter { tx, handle }
     }
 
+    fn sender(&self) -> mpsc::Sender<JsWriteJob> {
+        self.tx.clone()
+    }
+
+    /// Wait for every queued write and return the modules whose write failed.
+    fn finish(self) -> Vec<(String, anyhow::Error)> {
+        drop(self.tx);
+        self.handle
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+}
+
+fn write_js_write_job(js_outputs: &[rescript_compiler::driver::JsOutput]) -> Result<()> {
     for output in js_outputs {
         write_file_creating_parent_on_missing(&output.path, &output.code)?;
         let map_path = PathBuf::from(format!("{}.map", output.path.display()));
@@ -2265,6 +2315,19 @@ fn write_compiled_js_outputs(
         }
     }
     Ok(())
+}
+
+fn write_compiled_js_outputs(
+    js_outputs: &[rescript_compiler::driver::JsOutput],
+    fallback_js_output: &str,
+    package: &packages::Package,
+    source_file_path: &Path,
+    root_config: &config::Config,
+) -> Result<()> {
+    if js_outputs.is_empty() {
+        return write_js_output(fallback_js_output, package, source_file_path, root_config);
+    }
+    write_js_write_job(js_outputs)
 }
 
 /// Register namespace module signatures in the PersistentEnv for --in-process mode.
@@ -2464,7 +2527,10 @@ struct RuntimeCompletionMsg {
 ///
 /// Runs on a dedicated thread with a large stack to handle any remaining
 /// source-fallback chains during the pre-compilation itself.
-pub(crate) fn pre_compile_runtime_modules(registry: &Mutex<ModuleRegistry>, runtime_root: &Path) -> Result<()> {
+pub(crate) fn pre_compile_runtime_modules(
+    registry: &Mutex<ModuleRegistry>,
+    runtime_root: &Path,
+) -> Result<()> {
     let _span = info_span!("build.runtime_precompile").entered();
     let runtime_timing_enabled = std::env::var_os("RESCRIPT_RUNTIME_TIMINGS").is_some()
         || std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
@@ -3482,6 +3548,7 @@ fn finish_in_process_js(
     parent_span: Span,
     registry_snapshot: ModuleRegistry,
     metadata_tx: &mpsc::Sender<WorkerMsg>,
+    write_tx: &mpsc::Sender<JsWriteJob>,
 ) -> CompletionMsg {
     let _placement = qos::UnitPlacementGuard::enter(qos::UnitClass::Background);
     let module_name = pre_js_msg.module_name.clone();
@@ -3493,6 +3560,7 @@ fn finish_in_process_js(
         parent_span,
         registry_snapshot,
         metadata_tx,
+        write_tx,
     );
     let (result, registry_updates) = match result {
         Ok(outcome) => (Ok(outcome.warning), outcome.registry_updates),
@@ -3515,6 +3583,7 @@ fn finish_in_process_js_inner(
     parent_span: Span,
     registry_snapshot: ModuleRegistry,
     metadata_tx: &mpsc::Sender<WorkerMsg>,
+    write_tx: &mpsc::Sender<JsWriteJob>,
 ) -> Result<InProcessModuleResult> {
     let PreJsMsg {
         module_name,
@@ -3582,7 +3651,7 @@ fn finish_in_process_js_inner(
         )
     }));
     drop(metadata_hook);
-    let compile_result = match compile_result {
+    let mut compile_result = match compile_result {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             return Err(anyhow!("JS compilation failed for {}: {}", module_name, e));
@@ -3628,13 +3697,25 @@ fn finish_in_process_js_inner(
         )
         .entered();
         let write_start = module_timing_enabled.then(Instant::now);
-        write_compiled_js_outputs(
-            &compile_result.js_outputs,
-            &compile_result.js_output,
-            package,
-            &implementation_path,
-            root_config,
-        )?;
+        // A post-build command reads the file, so it must exist before the
+        // command runs. Otherwise hand the outputs to the writer thread.
+        if package.config.js_post_build.is_some() || compile_result.js_outputs.is_empty() {
+            write_compiled_js_outputs(
+                &compile_result.js_outputs,
+                &compile_result.js_output,
+                package,
+                &implementation_path,
+                root_config,
+            )?;
+        } else {
+            let job = JsWriteJob {
+                module_name: module_name.clone(),
+                outputs: std::mem::take(&mut compile_result.js_outputs),
+            };
+            if let Err(mpsc::SendError(job)) = write_tx.send(job) {
+                write_js_write_job(&job.outputs)?;
+            }
+        }
         if let Some(write_start) = write_start {
             write_duration = write_start.elapsed();
         }
