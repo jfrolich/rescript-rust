@@ -3643,7 +3643,11 @@ fn make_typed_spread_label(
     // `mk_lbl` (compiler/ml/record_type_spread.ml:110-121): `ld_loc = l.ld_loc`,
     // which for a label read from a `.cmi` may lie outside this file.
     let source_loc = find_loc_idx_by_location(arena, &field.ld_loc)
-        .unwrap_or_else(|| arena.push_typecheck_location(&field.ld_loc));
+        .unwrap_or_else(|| {
+            arena.push_typecheck_location(&field.ld_loc, &|idx| {
+                ctx.resolve_cmi_longident_component(idx)
+            })
+        });
     TypedLabelDeclaration {
         ld_id: field.ld_id.clone(),
         ld_name: Located {

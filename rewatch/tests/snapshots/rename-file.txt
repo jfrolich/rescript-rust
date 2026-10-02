@@ -1,6 +1,6 @@
-Cleaned 1/512
-Parsed 5 source files
-Compiled incremental modules
+Cleaned 1/510
+Parsed 2 source files
+Compiled 2 modules
 
   [1;33mWarning number 32[0m
   [36m/packages/watch-warnings/src/ModuleA.res[0m:[2m1:5-15[0m

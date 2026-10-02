@@ -1485,15 +1485,26 @@ impl ParseArena {
 
     /// Intern a `Location` that comes from outside this arena (e.g. a label
     /// declaration read from a `.cmi`) while the arena is shared.
-    pub fn push_typecheck_location(&self, loc: &crate::location::Location) -> LocIdx {
+    /// `foreign_file_name` resolves file names that are not strings of this
+    /// arena (the type context's `.cmi` name table); they are copied into the
+    /// arena's typechecker string storage.
+    pub fn push_typecheck_location(
+        &self,
+        loc: &crate::location::Location,
+        foreign_file_name: &dyn Fn(StrIdx) -> Option<String>,
+    ) -> LocIdx {
         let push_pos = |pos: &Position| {
             // `Location::none()` is Rust's spelling of OCaml `Location.none`
             // (`in_file "_none_"`: line 1, bol 0, cnum -1).
             if pos.file_name == StrIdx::default() && pos.line == 0 {
                 return self.none_pos();
             }
+            let mut pos = pos.clone();
+            if let Some(name) = foreign_file_name(pos.file_name) {
+                pos.file_name = self.push_typecheck_string(name);
+            }
             let slot = self.synthetic_positions.len();
-            self.synthetic_positions.push(Box::new(pos.clone()));
+            self.synthetic_positions.push(Box::new(pos));
             PosIdx::from_u32(SYNTHETIC_POSITION_BASE + slot as u32)
         };
         let start = push_pos(&loc.loc_start);

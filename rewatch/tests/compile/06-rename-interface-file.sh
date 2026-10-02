@@ -11,7 +11,6 @@ rewatch build &> /dev/null
 mv ./packages/main/src/ModuleWithInterface.resi ./packages/main/src/ModuleWithInterface2.resi
 rewatch build &> ../tests/snapshots/rename-interface-file.txt
 normalize_paths ../tests/snapshots/rename-interface-file.txt
-normalize_incremental_count ../tests/snapshots/rename-interface-file.txt
 mv ./packages/main/src/ModuleWithInterface2.resi ./packages/main/src/ModuleWithInterface.resi
 
 rewatch build &> /dev/null

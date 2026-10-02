@@ -13,7 +13,6 @@ rewatch build &> /dev/null
 echo 'open WebAPI' >> packages/with-dev-deps/src/FileToTest.res
 rewatch build &> ../tests/snapshots/dev-dependency-used-by-non-dev-source.txt
 normalize_paths ../tests/snapshots/dev-dependency-used-by-non-dev-source.txt
-normalize_incremental_count ../tests/snapshots/dev-dependency-used-by-non-dev-source.txt
 git checkout -- packages/with-dev-deps/src/FileToTest.res
 
 rewatch build &> /dev/null
