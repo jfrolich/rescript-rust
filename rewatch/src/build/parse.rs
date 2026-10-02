@@ -446,9 +446,25 @@ pub fn generate_asts(
                     if dirty_packages.contains(&package_name) {
                         if in_process {
                             // In-process builds synthesize namespace signatures directly into
-                            // the module registry during compilation. The file-backed mlmap
-                            // compiler only creates .cmi/.cmj/.cmt assets for subprocess mode.
-                            true
+                            // the module registry during compilation. The namespace changes
+                            // exactly when its member list does, which a file-backed build
+                            // detects through the digest of the compiled mlmap; compare the
+                            // member list with the copy kept from the previous build.
+                            let package = build_state
+                                .build_state
+                                .packages
+                                .get(&package_name)
+                                .expect("Package not found");
+                            let mlmap = package.get_mlmap_path();
+                            let previous = package
+                                .get_ocaml_build_path()
+                                .join(mlmap.file_name().expect("mlmap path has a file name"));
+                            let current = std::fs::read(&mlmap).ok();
+                            let changed = current.is_none() || std::fs::read(&previous).ok() != current;
+                            if changed {
+                                let _ = std::fs::copy(&mlmap, &previous);
+                            }
+                            changed
                         } else {
                             let package = build_state
                                 .build_state

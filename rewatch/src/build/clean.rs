@@ -328,11 +328,20 @@ fn in_process_source_paths(build_state: &BuildCommandState) -> AHashMap<String, 
 }
 
 /// Record the compiled sources of an in-process build (see [`IN_PROCESS_MANIFEST`]).
+/// Like the `.ast` files it stands in for, a module with warnings is left out:
+/// [`cleanup_after_build`] drops its parse result so the next build shows the
+/// warnings again.
 pub fn write_in_process_manifest(build_state: &BuildCommandState) {
     for (package_name, mut entries) in in_process_source_paths(build_state) {
         let Some(package) = build_state.packages.get(&package_name) else {
             continue;
         };
+        entries.retain(|(module_name, _)| {
+            build_state
+                .modules
+                .get(module_name)
+                .is_none_or(|module| !has_parse_warnings(module) && !has_compile_warnings(module))
+        });
         entries.sort();
         let content: String = entries
             .iter()
@@ -400,6 +409,12 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
     (removed, total)
 }
 
+/// The in-process counterpart of [`remove_ast`]/[`remove_iast`]: without its
+/// dependency cache the next build parses and compiles the module again.
+fn remove_in_process_dependencies(package: &packages::Package, source_file: &Path) {
+    let _ = std::fs::remove_file(super::parse::dependencies_path(package, source_file));
+}
+
 pub fn cleanup_after_build(build_state: &BuildCommandState) {
     if build_state.build_mode().is_in_process() {
         write_in_process_manifest(build_state);
@@ -411,6 +426,7 @@ pub fn cleanup_after_build(build_state: &BuildCommandState) {
         {
             remove_iast(package, &source_file.implementation.path);
             remove_ast(package, &source_file.implementation.path);
+            remove_in_process_dependencies(package, &source_file.implementation.path);
         }
         if has_compile_warnings(module) {
             // only retain AST file if the compilation doesn't have warnings, we remove the AST in favor
@@ -428,6 +444,7 @@ pub fn cleanup_after_build(build_state: &BuildCommandState) {
                     // unecessary mark all the dependents as dirty, when there is no change in the interface
                     remove_ast(package, &source_file.implementation.path);
                     remove_iast(package, &source_file.implementation.path);
+                    remove_in_process_dependencies(package, &source_file.implementation.path);
                 }
                 SourceType::MlMap(_) => (),
             }

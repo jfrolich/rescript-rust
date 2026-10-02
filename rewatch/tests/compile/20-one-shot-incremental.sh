@@ -33,7 +33,8 @@ if [[ "$(shasum lib/es6/src/*.mjs)" != "$full_js" ]]; then
   error "Incremental JS differs from a clean full build"
   exit 1
 fi
-# A missing sidecar must fall back to parsing, without using stale dependency data.
+# The dependency sidecar stands in for the `.ast` file: without it the module is
+# parsed and compiled again, without using stale dependency data.
 deps_file=lib/ocaml/Consumer-InProcessNamespace.in-process-deps.json
 if [[ ! -f "$deps_file" ]]; then
   error "Missing dependency sidecar after successful build"
@@ -41,8 +42,8 @@ if [[ ! -f "$deps_file" ]]; then
 fi
 rm "$deps_file"
 output=$(rewatch build --in-process 2>&1)
-if [[ "$output" != *"Parsed 1 source files"* || "$output" != *"Compiled 0 modules"* ]]; then
-  error "Missing dependency cache did not reparse its module"
+if [[ "$output" != *"Parsed 1 source files"* || "$output" != *"Compiled 1 modules"* ]]; then
+  error "Missing dependency cache did not rebuild only its module"
   printf '%s\n' "$output" >&2
   exit 1
 fi

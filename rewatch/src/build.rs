@@ -19,6 +19,7 @@ use crate::lock::{LockKind, drop_lock, get_lock_or_exit};
 use crate::project_context::ProjectContext;
 use crate::sourcedirs;
 use anyhow::{Context, Result, anyhow};
+use ahash::AHashSet;
 use build_types::*;
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -401,8 +402,20 @@ pub fn incremental_build_without_lock(
     if needs_in_process_seed {
         compile::seed_clean_in_process_dependencies(build_state);
     }
+    // Sources parsed below are compiled, as a file-backed build compiles every
+    // module whose `.ast` it regenerates.
+    let reparsed: AHashSet<String> = if needs_in_process_seed {
+        build_state
+            .modules
+            .iter()
+            .filter(|(_, module)| is_dirty(module))
+            .map(|(name, _)| name.clone())
+            .collect()
+    } else {
+        AHashSet::new()
+    };
 
-    let mut num_dirty_modules = build_state.modules.values().filter(|m| is_dirty(m)).count() as u64;
+    let num_dirty_modules = build_state.modules.values().filter(|m| is_dirty(m)).count() as u64;
     let pb = if !plain_output && show_progress {
         ProgressBar::new(num_dirty_modules)
     } else {
@@ -454,17 +467,17 @@ pub fn incremental_build_without_lock(
         }
     };
     let deleted_modules = build_state.deleted_modules.clone();
-    if needs_in_process_seed && initial_build {
-        compile::seed_clean_in_process_modules(build_state);
+    if needs_in_process_seed {
+        compile::seed_clean_in_process_modules(build_state, &reparsed);
     }
     deps::get_deps(build_state, &deleted_modules);
-    if needs_in_process_seed && initial_build {
+    if needs_in_process_seed {
         compile::mark_clean_with_expired_interfaces_dirty(build_state);
     }
     // An unchanged source may need recompilation when a dependency's interface
     // changes. Parse those potential dependents now, before the scheduler takes
     // its immutable snapshot of stored ASTs.
-    if needs_in_process_seed && initial_build {
+    if needs_in_process_seed {
         mark_modules_with_deleted_deps_dirty(&mut build_state.build_state);
         let before = build_state
             .modules
@@ -479,7 +492,9 @@ pub fn incremental_build_without_lock(
             .count()
             - before) as u64;
         if additional > 0 {
-            num_dirty_modules += additional;
+            // These sources are unchanged: a file-backed build would read their
+            // `.ast` from disk, so they are not reported as parsed.
+            pb.inc_length(additional);
             match parse::generate_asts(build_state, || pb.inc(1)) {
                 Ok(warnings) => parse_warnings.push_str(&warnings),
                 Err(err) => {

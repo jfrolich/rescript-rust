@@ -283,10 +283,13 @@ pub fn seed_clean_in_process_dependencies(build_state: &mut BuildCommandState) {
 
 /// Recover one-shot outputs after the parse phase has reconstructed the dependency
 /// graph. Only a complete set of artifacts from this compiler is eligible.
-pub fn seed_clean_in_process_modules(build_state: &mut BuildCommandState) {
+pub fn seed_clean_in_process_modules(build_state: &mut BuildCommandState, reparsed: &AHashSet<String>) {
     let root_config = build_state.get_root_config();
     let mut clean = Vec::new();
     for (name, module) in &build_state.modules {
+        if reparsed.contains(name) {
+            continue;
+        }
         let SourceType::SourceFile(source) = &module.source_type else {
             continue;
         };
@@ -305,10 +308,15 @@ pub fn seed_clean_in_process_modules(build_state: &mut BuildCommandState) {
         // Typed artifacts and JS may deliberately retain their mtime when their
         // contents are unchanged. The metadata file is rewritten after each
         // successful compilation, so its mtime is the build generation marker.
-        if std::fs::metadata(&metadata)
-            .and_then(|m| m.modified())
-            .map_or(true, |t| t < source_time)
-        {
+        // The dependency cache plays the role of the `.ast` file: a module
+        // without one (e.g. dropped because it had warnings) stays dirty, as in
+        // `cleanup_previous_build`.
+        let deps_path = super::parse::dependencies_path(package, path);
+        if [&metadata, &deps_path].iter().any(|file| {
+            std::fs::metadata(file)
+                .and_then(|m| m.modified())
+                .map_or(true, |t| t < source_time)
+        }) {
             continue;
         }
         let Some((info, has_cmt, has_cmti, warning)) = load_js_metadata(package, path) else {
@@ -2756,6 +2764,46 @@ fn write_compiled_js_outputs(
     Ok(())
 }
 
+/// Mirror in-source JS (and its source map) into `lib/bs`, as a file-backed
+/// build does after each compile.
+fn copy_in_source_js_to_build_dir(
+    package: &packages::Package,
+    source_file_path: &Path,
+    root_config: &config::Config,
+) {
+    for spec in root_config.get_package_specs() {
+        if !spec.in_source {
+            continue;
+        }
+        let suffix = root_config.get_suffix(&spec);
+        let source = helpers::get_source_file_from_rescript_file(
+            &Path::new(&package.path).join(source_file_path),
+            &suffix,
+        );
+        let destination = helpers::get_source_file_from_rescript_file(
+            &package.get_build_path().join(source_file_path),
+            &suffix,
+        );
+        if source.exists() {
+            if let Some(parent) = destination.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::copy(&source, &destination);
+        }
+        let mut source_map = source.into_os_string();
+        source_map.push(".map");
+        let source_map = PathBuf::from(source_map);
+        let mut destination_map = destination.into_os_string();
+        destination_map.push(".map");
+        let destination_map = PathBuf::from(destination_map);
+        if source_map.exists() {
+            let _ = std::fs::copy(&source_map, &destination_map);
+        } else {
+            let _ = std::fs::remove_file(&destination_map);
+        }
+    }
+}
+
 /// Register namespace module signatures in the PersistentEnv for --in-process mode.
 ///
 /// For each package with a namespace, synthesizes the namespace module's
@@ -4158,6 +4206,7 @@ fn finish_in_process_js_inner(
             &implementation_path,
             root_config,
         )?;
+        copy_in_source_js_to_build_dir(package, &implementation_path, root_config);
         if let Some(write_start) = write_start {
             write_duration = write_start.elapsed();
         }
