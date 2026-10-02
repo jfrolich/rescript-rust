@@ -1,4 +1,7 @@
 let try_read_cmt cmt =
+  match Reanalyze.Watch_client.read_cmt cmt with
+  | Some _ as served -> served
+  | None ->
   if not (Files.exists cmt) then (
     Log.log ("Cmt file does not exist " ^ cmt);
     None)
@@ -17,6 +20,9 @@ let try_read_cmt cmt =
     | x -> Some x
 
 let try_read_cmi cmi =
+  match Reanalyze.Watch_client.read_cmi cmi with
+  | Some _ as served -> served
+  | None ->
   if not (Files.exists cmi) then None
   else
     match Cmt_format.read_cmi cmi with

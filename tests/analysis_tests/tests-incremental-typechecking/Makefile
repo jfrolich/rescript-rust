@@ -3,8 +3,9 @@ SHELL = /bin/bash
 build:
 	yarn build > /dev/null 2>&1 || true
 
+# In-process builds write no .cmt files: analysis reads them from a watcher.
 test: build
-	./test.sh
+	../with-watcher.sh ./test.sh
 
 clean:
 	yarn clean

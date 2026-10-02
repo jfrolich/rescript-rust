@@ -71,7 +71,7 @@ let process_cmt_file ~config ~(file : file_context) ~cmt_file_path
       signature.sig_type
   | Implementation structure ->
     let cmti_exists =
-      Sys.file_exists ((cmt_file_path |> Filename.remove_extension) ^ ".cmti")
+      Watch_client.exists ((cmt_file_path |> Filename.remove_extension) ^ ".cmti")
     in
     Collect_annotations.structure ~state:annotations ~config
       ~do_gentype:(not cmti_exists) structure;

@@ -3,13 +3,14 @@ SHELL = /bin/bash
 build:
 	yarn build
 
+# In-process builds write no .cmt files: reanalyze reads them from a watcher.
 test: build node_modules/.bin/rescript
-	./test.sh
+	../../with-watcher.sh ./test.sh
 
 # Order-independence test for reanalyze - not run by default (takes longer)
 # Verifies that processing files in different orders produces identical results
 test-reanalyze-order-independence: build node_modules/.bin/rescript
-	./test-order-independence.sh
+	../../with-watcher.sh ./test-order-independence.sh
 
 # Reactive server test - tests incremental analysis correctness
 # Starts server, makes source changes, verifies delta matches expectation
