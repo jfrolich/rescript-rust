@@ -98,6 +98,39 @@ pub const PREDEF_STAMP_BARRIER: i32 = 999;
 // Type idents
 // ============================================================================
 
+/// Whether `id` is exactly one of the predefined type identifiers installed
+/// by `env::initial_env` (OCaml `Predef.build_initial_env`,
+/// compiler/ml/predef.ml:239-424). None of them has a manifest.
+#[inline]
+pub fn is_predef_type_ident(id: &Ident) -> bool {
+    let expected = match id.stamp() {
+        STAMP_INT => "int",
+        STAMP_CHAR => "char",
+        STAMP_FLOAT => "float",
+        STAMP_BOOL => "bool",
+        STAMP_UNIT => "unit",
+        STAMP_EXN => "exn",
+        STAMP_ARRAY => "array",
+        STAMP_ITERABLE => "iterable",
+        STAMP_ASYNC_ITERABLE => "asyncIterable",
+        STAMP_LIST => "list",
+        STAMP_OPTION => "option",
+        STAMP_RESULT => "result",
+        STAMP_DICT => "dict",
+        STAMP_BIGINT => "bigint",
+        STAMP_STRING => "string",
+        STAMP_EXTENSION_CONSTRUCTOR => "extension_constructor",
+        STAMP_UNKNOWN => "unknown",
+        STAMP_PROMISE => "promise",
+        STAMP_TAGGED_TEMPLATE => "taggedTemplate",
+        STAMP_TYPE_INFO => "typeInfo",
+        STAMP_FIELD_INFO => "fieldInfo",
+        STAMP_CONSTRUCTOR_INFO => "constructorInfo",
+        _ => return false,
+    };
+    !id.is_persistent() && id.name() == expected
+}
+
 fn make_ident(name: &str, stamp: i32) -> Ident {
     Ident::new(name, stamp, IdentFlags::NONE)
 }

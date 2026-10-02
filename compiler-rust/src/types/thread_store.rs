@@ -27,7 +27,7 @@ use crate::cmi::persistent_env::PersStruct;
 use crate::cmi::portable_types::PortablePersStruct;
 use crate::intern::StrIdx;
 use std::cell::{Cell, RefCell};
-use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
@@ -97,7 +97,7 @@ pub(crate) struct SigTypeRegistration {
 #[derive(Debug)]
 pub(crate) struct SigTypeBatch {
     entries: Box<[SigTypeRegistration]>,
-    exact_index: std::sync::OnceLock<ahash::AHashMap<Path, u32>>,
+    exact_index: std::sync::OnceLock<crate::fast_hash::AHashMap<Path, u32>>,
 }
 
 impl SigTypeBatch {
@@ -105,7 +105,7 @@ impl SigTypeBatch {
     /// its entries into a map keyed by `qualified_path` would leave it.
     pub(crate) fn find_exact(&self, path: &Path) -> Option<&Arc<TypeDeclaration>> {
         let index = self.exact_index.get_or_init(|| {
-            let mut index = ahash::AHashMap::with_capacity(self.entries.len());
+            let mut index = crate::fast_hash::AHashMap::with_capacity(self.entries.len());
             for (position, entry) in self.entries.iter().enumerate() {
                 index.insert(entry.qualified_path.clone(), position as u32);
             }
@@ -126,6 +126,14 @@ impl std::ops::Deref for SigTypeBatch {
 }
 
 /// Shared dependency state for one worker thread.
+/// Store-built label descriptions of one record type, their summary, and the
+/// replay record of building them.
+pub(crate) type SharedRecordLabels = (
+    Arc<Vec<crate::types::decl::LabelDescription>>,
+    Arc<crate::types::context::RecordLabelDescriptionSummary>,
+    Arc<crate::types::context::StorePiece>,
+);
+
 pub(crate) struct ThreadTypeStore {
     types: TypeArena,
     /// Initial memo values of store `Tconstr` nodes (always `Mnil` after
@@ -168,11 +176,26 @@ pub(crate) struct ThreadTypeStore {
     /// Synthetic longident component names used by store `Tpackage` nodes.
     longident_names: RefCell<HashMap<u32, String>>,
     next_longident_idx: Cell<u32>,
+    /// Label descriptions of large regular records of dependency types,
+    /// built as store builds (see `typecore::build_record_label_descriptions_info`).
+    record_labels: RefCell<HashMap<Path, SharedRecordLabels>>,
+    /// The predefined environment built as a store build, with its replay
+    /// record (see `env::initial_env`).
+    initial_env: RefCell<
+        Option<(
+            crate::types::env::Env,
+            Arc<crate::types::context::StorePiece>,
+        )>,
+    >,
     generation: u64,
+    /// The build's process-wide pool of immutable dependency graphs; holding
+    /// it keeps every shared node this store's signatures refer to alive.
+    shared: Arc<super::shared_store::SharedTypePool>,
 }
 
 impl ThreadTypeStore {
     fn new() -> Self {
+        let generation = BUILD_GENERATION.load(Ordering::SeqCst);
         ThreadTypeStore {
             types: TypeArena::new(),
             abbrevs: RefCell::new(Vec::new()),
@@ -188,8 +211,17 @@ impl ThreadTypeStore {
             shared_components: RefCell::new(HashMap::new()),
             longident_names: RefCell::new(HashMap::new()),
             next_longident_idx: Cell::new(STORE_LONGIDENT_IDX_BASE),
-            generation: BUILD_GENERATION.load(Ordering::SeqCst),
+            record_labels: RefCell::new(HashMap::new()),
+            initial_env: RefCell::new(None),
+            generation,
+            shared: super::shared_store::pool_for(generation),
         }
+    }
+
+    /// The process-wide pool of this store's build.
+    #[inline]
+    pub(crate) fn shared_pool(&self) -> &super::shared_store::SharedTypePool {
+        &self.shared
     }
 
     /// The shared internalization of `pps`, if this thread already built one.
@@ -287,6 +319,34 @@ impl ThreadTypeStore {
             .borrow_mut()
             .entry(key)
             .or_insert((components, piece));
+    }
+
+    pub(crate) fn cached_record_labels(&self, record_path: &Path) -> Option<SharedRecordLabels> {
+        self.record_labels.borrow().get(record_path).cloned()
+    }
+
+    pub(crate) fn publish_record_labels(&self, record_path: Path, labels: SharedRecordLabels) {
+        self.record_labels
+            .borrow_mut()
+            .entry(record_path)
+            .or_insert(labels);
+    }
+
+    pub(crate) fn cached_initial_env(
+        &self,
+    ) -> Option<(
+        crate::types::env::Env,
+        Arc<crate::types::context::StorePiece>,
+    )> {
+        self.initial_env.borrow().clone()
+    }
+
+    pub(crate) fn publish_initial_env(
+        &self,
+        env: crate::types::env::Env,
+        piece: Arc<crate::types::context::StorePiece>,
+    ) {
+        self.initial_env.borrow_mut().get_or_insert((env, piece));
     }
 
     pub(crate) fn pers_struct_count(&self) -> usize {

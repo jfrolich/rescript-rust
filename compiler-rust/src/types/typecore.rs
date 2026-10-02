@@ -46,7 +46,7 @@ use crate::types::{
     Env, Path, RowField, TypeArg, TypeContext, TypeDesc, TypeError, TypeExprRef, TypeExprRefMap,
     UnifyState, ValueDescription,
 };
-use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -6935,7 +6935,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             rue_unify(tctx, loc, ty, expected_ty, context)?;
 
             Ok(Expression::new(
-                ExpressionDesc::Texp_ident(path, lid.clone(), Box::new(desc)),
+                ExpressionDesc::Texp_ident(path, lid.clone(), desc),
                 loc,
                 ty,
                 tctx.type_ctx.store_typed_env(env),
@@ -9291,7 +9291,7 @@ fn lookup_qualified_value_for_arity_suggestion(
     arena: &ParseArena,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &TypeContext,
-) -> Option<(Path, ValueDescription)> {
+) -> Option<(Path, Arc<ValueDescription>)> {
     if let Some(Some(result)) =
         with_resolved_module_components_for_lid(prefix, arena, env, pers_env, ctx, |components| {
             let module_path = components.access_path().clone();
@@ -9302,7 +9302,7 @@ fn lookup_qualified_value_for_arity_suggestion(
                 .lookup_value_for_access(value_name, ctx)
                 .map(|(pos, _, vd)| {
                     let path = Path::pdot_pos(module_path.clone(), value_name, pos as i32);
-                    let result = (path, vd);
+                    let result = (path, Arc::new(vd));
                     ctx.register_resolved_module_value(
                         &module_path,
                         value_name,
@@ -9333,7 +9333,7 @@ fn lookup_qualified_value_for_arity_suggestion(
             value_name.to_string().into(),
             pos as i32,
         );
-        let result = (path, vd);
+        let result = (path, Arc::new(vd));
         ctx.register_resolved_module_value(
             &module_path,
             value_name,
@@ -9355,7 +9355,7 @@ fn lookup_qualified_value_for_arity_suggestion(
                     &mod_path,
                     ctx,
                 );
-                let result = (Path::pdot_pos(mod_path.clone(), value_name, 0), vd);
+                let result = (Path::pdot_pos(mod_path.clone(), value_name, 0), Arc::new(vd));
                 ctx.register_resolved_module_value(
                     &module_path,
                     value_name,
@@ -9376,7 +9376,7 @@ fn lookup_module_value_by_name(
     value_name: &str,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &TypeContext,
-) -> Option<(Path, ValueDescription)> {
+) -> Option<(Path, Arc<ValueDescription>)> {
     let (module_path, _) = env.find_module_with_path(module_name).ok()?;
 
     if let Some(cached) = ctx.find_resolved_module_value(&module_path, value_name) {
@@ -9392,7 +9392,7 @@ fn lookup_module_value_by_name(
     {
         let result = (
             Path::pdot_pos(access_path, value_name.to_string(), pos as i32),
-            vd,
+            Arc::new(vd),
         );
         ctx.register_resolved_module_value(
             &module_path,
@@ -9411,7 +9411,7 @@ fn lookup_value_for_arity_suggestion(
     env: &Env,
     original_lid: &Longident,
     candidate: &str,
-) -> Option<(Path, ValueDescription)> {
+) -> Option<(Path, Arc<ValueDescription>)> {
     match original_lid {
         Longident::Lident(_) => {
             let value_name = candidate
@@ -9422,7 +9422,7 @@ fn lookup_value_for_arity_suggestion(
                     .val_path
                     .clone()
                     .unwrap_or_else(|| Path::pident(id.clone()));
-                (path, desc.clone())
+                (path, Arc::new(desc.clone()))
             })
         }
         Longident::Ldot(prefix, _) => {
@@ -21178,7 +21178,7 @@ fn type_extension_expr(
             loc: extension.0.loc,
         };
         let throw_expr = Expression::new(
-            ExpressionDesc::Texp_ident(throw_path, throw_lid, Box::new(throw_desc)),
+            ExpressionDesc::Texp_ident(throw_path, throw_lid, throw_desc),
             extension.0.loc,
             throw_ty,
             ctx.store_typed_env(env),
@@ -22811,7 +22811,7 @@ fn type_expect_with_module_unpacks(
     // which calls instance() on the looked-up type. Match that by instancing here.
     let unpack_inst_ty = crate::types::instance(tctx.type_ctx, unpack.ty);
     let unpack_expr = Expression::new(
-        ExpressionDesc::Texp_ident(Path::pident(unpack.id.clone()), located_lid, Box::new(value_desc)),
+        ExpressionDesc::Texp_ident(Path::pident(unpack.id.clone()), located_lid, Arc::new(value_desc)),
         unpack.loc_idx,
         unpack_inst_ty,
         tctx.type_ctx.store_typed_env(env),
@@ -26481,11 +26481,11 @@ impl Env {
         arena: &crate::parse_arena::ParseArena,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext,
-    ) -> TypeCoreResult<(Path, ValueDescription)> {
+    ) -> TypeCoreResult<(Path, Arc<ValueDescription>)> {
         match lid {
             Longident::Lident(idx) => {
                 let name = arena.get_string(*idx);
-                match self.find_value_with_path(name) {
+                match self.find_value_arc_with_path(name) {
                     Ok((access_path, desc)) => Ok((access_path, desc.clone())),
                     Err(_) => Err(TypeCoreError::UndefinedMethod {
                         loc: None,
@@ -26519,7 +26519,7 @@ impl Env {
                             .map(|(pos, _, vd)| {
                                 let path =
                                     Path::pdot_pos(module_path.clone(), value_name, pos as i32);
-                                let result = (path, vd);
+                                let result = (path, Arc::new(vd));
                                 ctx.register_resolved_module_value(
                                     &module_path,
                                     value_name,
@@ -26556,7 +26556,7 @@ impl Env {
                             value_name.to_string().into(),
                             pos as i32,
                         );
-                        let result = (path, vd);
+                        let result = (path, Arc::new(vd));
                         ctx.register_resolved_module_value(
                             &module_path,
                             value_name,
@@ -29451,6 +29451,67 @@ fn build_record_label_descriptions_info<'a>(
             });
         return Some(RecordLabelDescriptionsInfo {
             labels: cached,
+            summary,
+        });
+    }
+
+    // Large regular records of dependency types (JSX DOM props and the like)
+    // are reconstructed identically by every module, and their labels are
+    // not qualified here (see below), so build them once per worker store.
+    let large_regular = labels.len() >= 20
+        && matches!(repr, crate::types::RecordRepresentation::RecordRegular);
+    if large_regular && crate::types::ctype::path_root_is_persistent(&record_path) {
+        let store = ctx.thread_store();
+        if let Some((labels, summary, piece)) = store.cached_record_labels(&record_path) {
+            ctx.touch_store_piece(&piece);
+            ctx.register_record_label_descriptions_with_summary(
+                &record_path,
+                labels.clone(),
+                summary.clone(),
+            );
+            return Some(RecordLabelDescriptionsInfo { labels, summary });
+        }
+        let (descriptions, piece) = ctx.build_in_store(|| {
+            let shared_res = ctx.new_generic_constr(record_path.clone(), decl.type_params.clone());
+            labels
+                .iter()
+                .enumerate()
+                .map(|(pos, ld)| crate::types::LabelDescription {
+                    lbl_name: ld.ld_id.name().to_string(),
+                    lbl_res: shared_res,
+                    lbl_arg: crate::types::ctype::remap_label_type_to_params(
+                        ctx,
+                        ld.ld_type,
+                        &decl.type_params,
+                    ),
+                    lbl_mut: ld.ld_mutable,
+                    lbl_optional: ld.ld_optional,
+                    lbl_pos: pos as i32,
+                    lbl_all: crate::types::LabelArrayRef(0),
+                    lbl_repres: repr.clone(),
+                    lbl_private: decl.type_private,
+                    lbl_loc: ld.ld_loc.clone(),
+                    lbl_attributes: ld.ld_attributes.clone(),
+                })
+                .collect::<Vec<_>>()
+        });
+        let descriptions = Arc::new(descriptions);
+        let summary = Arc::new(crate::types::context::RecordLabelDescriptionSummary::from_labels(
+            &descriptions,
+        ));
+        if let Some(piece) = piece {
+            store.publish_record_labels(
+                record_path.clone(),
+                (descriptions.clone(), summary.clone(), piece),
+            );
+        }
+        ctx.register_record_label_descriptions_with_summary(
+            &record_path,
+            descriptions.clone(),
+            summary.clone(),
+        );
+        return Some(RecordLabelDescriptionsInfo {
+            labels: descriptions,
             summary,
         });
     }
@@ -34251,7 +34312,7 @@ pub fn contains_build_variant(
 pub fn contains_build_variant_with_registry(
     expr: &ParsedExpression,
     arena: &crate::parse_arena::ParseArena,
-    registry: Option<&ahash::AHashMap<String, crate::types::comptime::ComptimeFunction>>,
+    registry: Option<&crate::fast_hash::AHashMap<String, crate::types::comptime::ComptimeFunction>>,
 ) -> bool {
     use crate::parser::ast::ExpressionDesc as ED;
     // Top-level: if this is a function (has parameters), it's a TEMPLATE,
@@ -34266,7 +34327,7 @@ pub fn contains_build_variant_with_registry(
 fn contains_build_variant_inside(
     expr: &ParsedExpression,
     arena: &crate::parse_arena::ParseArena,
-    registry: Option<&ahash::AHashMap<String, crate::types::comptime::ComptimeFunction>>,
+    registry: Option<&crate::fast_hash::AHashMap<String, crate::types::comptime::ComptimeFunction>>,
 ) -> bool {
     use crate::parser::ast::ExpressionDesc as ED;
     match &*expr.pexp_desc {
@@ -35068,7 +35129,7 @@ fn make_comptime_call(
     };
 
     let func_expr = Expression::new(
-        ExpressionDesc::Texp_ident(func_path, lid_loc, Box::new(func_vd)),
+        ExpressionDesc::Texp_ident(func_path, lid_loc, Arc::new(func_vd)),
         LocIdx(0),
         func_type,
         EnvRef(0),

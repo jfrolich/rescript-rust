@@ -373,3 +373,35 @@ Raw results: [12 workers](thread-store-mutation-isolation/clean-w12.json),
 **Remaining:** stage 3's template/forced-view ownership refactor, prelude
 sharing, and stage 4's registry removal/reuse. These are not implemented by
 this correction; the sub-second target remains unmet.
+
+## Process-wide shared graphs (`types/shared_store.rs`)
+
+Worker stores still built every dependency graph once *per worker*. The
+shared pool removes that duplication, after Zig's `InternPool`:
+
+- One pool per build generation (`pool_for`), held by every worker store.
+- A graph is internalized completely (descriptors, levels, variant layouts)
+  and then published into a page-aligned index range. The page table is a
+  `Arc<[OnceLock<Arc<SharedGraph>>]>`: any worker resolves a shared index
+  with lock-free reads, and nothing is written after publication.
+- `PortablePersStruct` identity -> `OnceLock<Arc<PersStruct>>` slot, so two
+  workers that need the same dependency at once wait for one builder.
+- References carry `STORE_REF_TAG | SHARED_REF_TAG` (types, abbreviation
+  memo cells keyed by their `Tconstr` node, variant layouts). Shared
+  references are also `is_store()`, so store-build poisoning treats them as
+  non-local.
+- Writes never touch a shared node: descriptor, level and memo writes go to
+  `TypeContext::shared_*_overlay` (included in type-state snapshots), like
+  writes to worker-store nodes.
+- Shared descriptor borrows are `Ref::map` borrows of a never-mutably
+  borrowed page-table handle, so `TypeDescRef` stays a plain `Ref`. An enum
+  borrow type (`Local`/`Shared`) cost ~2.5G instructions per build because
+  it stopped `repr`/`get_desc` from inlining; materializing shared nodes into
+  the compilation on first read cost ~1G.
+
+Measured on a 3248-module app, 10 workers, three interleaved pairs:
+instructions 86.03G -> 85.96G, cycles 46.30G -> 46.09G, peak RSS
+2.27 GB -> 1.92 GB, JS/gen.ts output byte-identical. Serial builds pay
+~0.8G instructions for the extra indirection. The remaining per-worker
+dependency work (component views, signature registrations, `StorePiece`
+replay) is per-unit rather than duplicated.

@@ -16043,7 +16043,7 @@ mod tests {
             exp_desc: ExpressionDesc::Texp_ident(
                 TypePath::pident(expr_path_id),
                 Located::mknoloc(LidentIdx(0)),
-                Box::new(ValueDescription {
+                std::sync::Arc::new(ValueDescription {
                     val_type: TypeExprRef::null(),
                     val_kind: ValueKind::ValReg,
                     val_loc: Location::none(),

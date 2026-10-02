@@ -1138,7 +1138,9 @@ impl PersistentEnv {
             if !effective_module_path.same(&module_path) {
                 register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, shared);
             }
-            register_types_by_stamp_in_signature_recursive(&ps.ps_sig, ctx, shared);
+            // `register_sig_types_recursive` already registers every
+            // declaration with a non-zero stamp under that stamp, in this
+            // order, so no separate by-stamp pass is needed.
             if should_register_lazy_raw_sig(&portable_key, &self.view.alias_prefix_rewrites)
                 && !ctx.has_raw_module_sig(&portable_key)
             {
@@ -1223,7 +1225,9 @@ impl PersistentEnv {
             if !effective_module_path.same(&module_path) {
                 register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, shared);
             }
-            register_types_by_stamp_in_signature_recursive(&ps.ps_sig, ctx, shared);
+            // `register_sig_types_recursive` already registers every
+            // declaration with a non-zero stamp under that stamp, in this
+            // order, so no separate by-stamp pass is needed.
         }
 
         if should_register_lazy_raw_sig(cache_key, &self.view.alias_prefix_rewrites)
@@ -2012,7 +2016,7 @@ impl PersistentEnv {
                     crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
                         module_path.clone(),
                         ps.ps_sig.clone(),
-                        ahash::AHashMap::new(),
+                        crate::fast_hash::AHashMap::new(),
                         alias_source.clone(),
                         ctx,
                     )

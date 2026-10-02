@@ -96,7 +96,8 @@ impl TypeArena {
     }
 }
 
-/// Type alias for the desc borrow returned by get_desc().
+/// Borrow of a type descriptor. Shared dependency nodes are borrowed through
+/// `TypeContext::shared_pages` (`Ref::map`), so every borrow is a `Ref`.
 pub type TypeDescRef<'a> = std::cell::Ref<'a, TypeDesc>;
 
 /// Cloned snapshot of a type descriptor, for cases where the caller
@@ -121,6 +122,9 @@ pub(crate) struct TypeMutationSnapshot {
     abbrev_states: Vec<AbbrevMemo>,
     store_abbrev_overlay: super::thread_store::PagedOverlay<AbbrevMemo>,
     store_row_field_overlay: super::thread_store::PagedOverlay<Option<RowField>>,
+    shared_desc_overlay: super::thread_store::PagedOverlay<usize>,
+    shared_level_overlay: super::thread_store::PagedOverlay<i32>,
+    shared_abbrev_overlay: super::thread_store::PagedOverlay<AbbrevMemo>,
     memoized_abbrev_refs: Vec<AbbrevMemoRef>,
     current_abbreviations: AbbrevMemoRef,
     current_level: i32,
@@ -180,7 +184,7 @@ impl QualifiedRecordLabelCacheKey {
 
 #[derive(Clone, Debug)]
 pub(crate) struct RecordLabelDescriptionSummary {
-    label_positions: Arc<ahash::AHashMap<String, usize>>,
+    label_positions: Arc<crate::fast_hash::AHashMap<String, usize>>,
     pub(crate) mandatory_count: usize,
     pub(crate) has_optional: bool,
     pub(crate) has_dotdotdot: bool,
@@ -189,7 +193,7 @@ pub(crate) struct RecordLabelDescriptionSummary {
 
 impl RecordLabelDescriptionSummary {
     pub(crate) fn from_labels(labels: &[super::decl::LabelDescription]) -> Self {
-        let mut label_positions = ahash::AHashMap::with_capacity(labels.len());
+        let mut label_positions = crate::fast_hash::AHashMap::with_capacity(labels.len());
         let mut mandatory_count = 0;
         let mut has_optional = false;
         let mut has_dotdotdot = false;
@@ -282,7 +286,7 @@ pub struct TypeContext {
     simple_abbrevs: Cell<AbbrevMemoRef>,
     /// Counters for OCaml `Ctype.get_new_abstract_name` when reifying local
     /// GADT constraint variables.
-    reified_var_counters: RefCell<ahash::AHashMap<String, usize>>,
+    reified_var_counters: RefCell<crate::fast_hash::AHashMap<String, usize>>,
     /// Previous env ID for check_abbrev_env (OCaml ctype.ml:1272)
     previous_env_id: Cell<u64>,
 
@@ -311,6 +315,15 @@ pub struct TypeContext {
     store_abbrev_overlay: RefCell<super::thread_store::PagedOverlay<AbbrevMemo>>,
     /// This compilation's writes to row field cells of store rows.
     store_row_field_overlay: RefCell<super::thread_store::PagedOverlay<Option<RowField>>>,
+    /// The same overlays for nodes of the process-wide shared pool, keyed by
+    /// shared index (descriptor overlays point into `store_descs`).
+    shared_desc_overlay: RefCell<super::thread_store::PagedOverlay<usize>>,
+    shared_level_overlay: RefCell<super::thread_store::PagedOverlay<i32>>,
+    shared_abbrev_overlay: RefCell<super::thread_store::PagedOverlay<AbbrevMemo>>,
+    /// Direct handle to the shared pool's page table for node reads. Never
+    /// borrowed mutably: the `RefCell` only lets shared descriptor borrows be
+    /// `Ref`s like local ones (`Ref::map`), so callers see one borrow type.
+    shared_pages: RefCell<super::shared_store::SharedPages>,
 
     /// Nesting depth of `build_in_store`; allocations go to the worker store
     /// while it is non-zero.
@@ -326,7 +339,7 @@ pub struct TypeContext {
     /// Effects of the current store build on this compilation.
     store_build_effects: RefCell<Vec<StoreEffect>>,
     /// Shared pieces whose effects this compilation has already applied.
-    touched_store_pieces: RefCell<ahash::AHashSet<u64>>,
+    touched_store_pieces: RefCell<crate::fast_hash::AHashSet<u64>>,
 
     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
     compiler_counters_enabled: bool,
@@ -351,27 +364,27 @@ pub struct TypeContext {
     /// Global type declaration store, indexed by type name.
     /// Populated when loading CMI module signatures so that type alias
     /// expansion can find declarations for types not directly in the env.
-    type_decl_store: RefCell<ahash::AHashMap<smol_str::SmolStr, Arc<super::decl::TypeDeclaration>>>,
+    type_decl_store: RefCell<crate::fast_hash::AHashMap<smol_str::SmolStr, Arc<super::decl::TypeDeclaration>>>,
 
     /// Global type declaration store, indexed by ident stamp.
     /// Used for looking up CMI-loaded type declarations by their stamp
     /// when the type name is too generic (e.g., "t").
-    type_decl_by_stamp: RefCell<ahash::AHashMap<i32, Arc<super::decl::TypeDeclaration>>>,
+    type_decl_by_stamp: RefCell<crate::fast_hash::AHashMap<i32, Arc<super::decl::TypeDeclaration>>>,
 
     /// Global type declaration store, indexed by full qualified path string.
     /// Used for looking up types via Pdot paths (e.g., "Js.Promise.t").
-    type_decl_by_path: RefCell<ahash::AHashMap<smol_str::SmolStr, Arc<super::decl::TypeDeclaration>>>,
+    type_decl_by_path: RefCell<crate::fast_hash::AHashMap<smol_str::SmolStr, Arc<super::decl::TypeDeclaration>>>,
     /// Qualified declarations keyed by Path identity, preserving local stamps.
     /// Only single `Exact` registrations, with their log position; batches
     /// are kept whole in `exact_path_batches` and probed through their shared
     /// index, so a unit never copies every dependency type into this map.
     type_decl_by_exact_path:
-        RefCell<ahash::AHashMap<Path, (usize, Arc<super::decl::TypeDeclaration>)>>,
+        RefCell<crate::fast_hash::AHashMap<Path, (usize, Arc<super::decl::TypeDeclaration>)>>,
     exact_path_batches: RefCell<Vec<(usize, Arc<super::thread_store::SigTypeBatch>)>>,
     /// Exact-path answers, valid while the log length equals the first field.
     exact_path_memo: RefCell<(
         usize,
-        ahash::AHashMap<Path, Option<Arc<super::decl::TypeDeclaration>>>,
+        crate::fast_hash::AHashMap<Path, Option<Arc<super::decl::TypeDeclaration>>>,
     )>,
     /// Registrations for the four maps above, in registration order. Each map
     /// replays the log up to the present only when it is read: modules
@@ -380,26 +393,26 @@ pub struct TypeContext {
     type_decl_log: RefCell<Vec<TypeDeclRegistration>>,
     /// Log position each map has been replayed to: name, stamp, path, exact.
     type_decl_log_replayed: [Cell<usize>; 4],
-    type_item_by_path: RefCell<ahash::AHashMap<String, (Ident, super::decl::TypeDeclaration)>>,
-    missing_type_item_by_path: RefCell<ahash::AHashSet<String>>,
+    type_item_by_path: RefCell<crate::fast_hash::AHashMap<String, (Ident, super::decl::TypeDeclaration)>>,
+    missing_type_item_by_path: RefCell<crate::fast_hash::AHashSet<String>>,
 
     /// Cache for type declarations resolved through module signatures (Pdot paths).
     /// Separate from type_decl_by_path to avoid conflicts with expand_head_once
     /// entries which have unqualified paths. This approximates OCaml's
     /// components_of_module_maker lazy caching.
-    resolved_pdot_type_cache: RefCell<ahash::AHashMap<SamePathKey, Arc<super::decl::TypeDeclaration>>>,
+    resolved_pdot_type_cache: RefCell<crate::fast_hash::AHashMap<SamePathKey, Arc<super::decl::TypeDeclaration>>>,
 
     /// Cache for resolved module signatures. Keyed by module path name.
     /// OCaml `compiler/ml/env.ml:1513-1514,1516-1588` stores forced module
     /// components behind lazy cells; cache hits share the already-substituted
     /// signature snapshot instead of cloning every `SignatureItem`.
     resolved_module_sig_cache:
-        RefCell<ahash::AHashMap<String, (Path, Arc<super::decl::Signature>)>>,
+        RefCell<crate::fast_hash::AHashMap<String, (Path, Arc<super::decl::Signature>)>>,
 
     /// Cached qualified module-component views keyed by access-path semantics.
     /// This is the Rust analogue of OCaml's lazy `components_of_module_maker`.
     qualified_module_components_cache: RefCell<
-        ahash::AHashMap<
+        crate::fast_hash::AHashMap<
             QualifiedModuleComponentsCacheKey,
             Arc<super::env_lazy::QualifiedModuleComponents>,
         >,
@@ -413,17 +426,17 @@ pub struct TypeContext {
     /// declaration-derived source path available when Rust later reaches a
     /// cached component view without `PersistentEnv`; it must not be inferred
     /// from flattened module-name spelling.
-    component_alias_sources: RefCell<ahash::AHashMap<SamePathKey, Vec<Path>>>,
+    component_alias_sources: RefCell<crate::fast_hash::AHashMap<SamePathKey, Vec<Path>>>,
     /// Component-table name indexes of compilation-local signatures, keyed by
     /// address; the entry keeps the signature alive so the key stays unique.
     signature_indexes: RefCell<
-        ahash::AHashMap<usize, (Arc<super::decl::Signature>, Arc<super::env_lazy::SignatureIndex>)>,
+        crate::fast_hash::AHashMap<usize, (Arc<super::decl::Signature>, Arc<super::env_lazy::SignatureIndex>)>,
     >,
-    component_paths_by_alias_source: RefCell<ahash::AHashMap<SamePathKey, Vec<Path>>>,
+    component_paths_by_alias_source: RefCell<crate::fast_hash::AHashMap<SamePathKey, Vec<Path>>>,
 
     /// Cached dotted value lookups keyed by resolved module access path.
     resolved_module_value_cache: RefCell<
-        ahash::AHashMap<Path, ahash::AHashMap<String, (Path, super::decl::ValueDescription)>>,
+        crate::fast_hash::AHashMap<Path, crate::fast_hash::AHashMap<String, (Path, Arc<super::decl::ValueDescription>)>>,
     >,
 
     /// Cached dotted type lookups keyed by resolved module access path.
@@ -431,51 +444,57 @@ pub struct TypeContext {
     /// never change under an existing path, but Rust's Env is mutated in
     /// place (`add_module`) and must invalidate these derived entries.
     resolved_module_type_cache: RefCell<
-        ahash::AHashMap<
+        crate::fast_hash::AHashMap<
             (u64, Path),
-            ahash::AHashMap<String, (Path, Ident, Arc<super::decl::TypeDeclaration>)>,
+            crate::fast_hash::AHashMap<String, (Path, Ident, Arc<super::decl::TypeDeclaration>)>,
         >,
     >,
 
     /// Cached child-module access paths keyed by resolved parent access path.
-    resolved_child_module_path_cache: RefCell<ahash::AHashMap<Path, ahash::AHashMap<String, Path>>>,
+    resolved_child_module_path_cache: RefCell<crate::fast_hash::AHashMap<Path, crate::fast_hash::AHashMap<String, Path>>>,
 
     /// Forced declarations shared by persistent/global alias component views.
     /// Local component views keep their own thunk state in StructureComponentTables.
     qualified_module_decl_cache: RefCell<
-        ahash::AHashMap<
+        crate::fast_hash::AHashMap<
             Path,
-            ahash::AHashMap<String, (Ident, Arc<super::decl::ModuleDeclaration>)>,
+            crate::fast_hash::AHashMap<String, (Ident, Arc<super::decl::ModuleDeclaration>)>,
         >,
     >,
 
     /// Resolved dotted type paths keyed by `Env::scope_id`, path, and whether
     /// alias targets were strengthened (see `ctype::resolve_type_item_through_env`).
     resolved_type_item_cache: RefCell<
-        ahash::AHashMap<(u64, Path, bool), (Ident, Arc<super::decl::TypeDeclaration>)>,
+        crate::fast_hash::AHashMap<(u64, Path, bool), (Ident, Arc<super::decl::TypeDeclaration>)>,
     >,
 
     /// Cached full normalize_path results keyed by environment identity.
-    normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
+    normalized_path_full_cache: RefCell<crate::fast_hash::AHashMap<(u64, Path), Path>>,
+    /// Answers of `raw_lambda::typeopt` queries while the finished typed tree
+    /// is lowered (`None` outside that phase): the types no longer change.
+    typeopt_answers: RefCell<Option<crate::fast_hash::AHashMap<(u64, TypeExprRef, u8), bool>>>,
+    /// Outcome of expanding a `Pdot`-headed constructor, per module scope
+    /// (see `ctype::PdotExpansion`).
+    pdot_expansions: RefCell<hashbrown::HashMap<PdotExpansionKey, super::ctype::PdotExpansion, ahash::RandomState>>,
 
     /// Cached forward-only (unification) normalize_path results, keyed like
     /// `normalized_path_full_cache`.
-    normalized_path_forward_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
+    normalized_path_forward_cache: RefCell<crate::fast_hash::AHashMap<(u64, Path), Path>>,
 
     /// `occur_univar` argument masks per (scope, constructor path): bit `i`
     /// is set when argument `i` has a may-positive or may-negative variance;
     /// `None` when the declaration is not found (every argument is visited).
-    occur_variance_masks: RefCell<ahash::AHashMap<(u64, Path), Option<u64>>>,
+    occur_variance_masks: RefCell<crate::fast_hash::AHashMap<(u64, Path), Option<u64>>>,
 
     /// `Ctype.get_level` declaration levels per (scope, type path): the
     /// `type_newtype_level` of the declaration `Env.find_type` returns.
-    type_newtype_levels: RefCell<ahash::AHashMap<(u64, Path), Option<i32>>>,
+    type_newtype_levels: RefCell<crate::fast_hash::AHashMap<(u64, Path), Option<i32>>>,
 
     /// Cached side-effectful normalize_path results keyed by environment identity.
-    forced_normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
+    forced_normalized_path_full_cache: RefCell<crate::fast_hash::AHashMap<(u64, Path), Path>>,
 
     /// Cached side-effectful type-path comparisons keyed by environment identity.
-    forced_type_path_compare_cache: RefCell<ahash::AHashMap<(u64, Path, Path), bool>>,
+    forced_type_path_compare_cache: RefCell<crate::fast_hash::AHashMap<(u64, Path, Path), bool>>,
 
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Arc<Vec<std::path::PathBuf>>>,
@@ -491,7 +510,7 @@ pub struct TypeContext {
     /// Cache of renamed module signatures.
     /// Matches OCaml's lazy ps_sig = Subst.signature Subst.identity sign.
     /// Populated by PersistentEnv::get_renamed_sig, consumed by normalize_path.
-    pub(crate) renamed_module_sigs: RefCell<ahash::AHashMap<String, Arc<DeferredRenamedSig>>>,
+    pub(crate) renamed_module_sigs: RefCell<crate::fast_hash::AHashMap<String, Arc<DeferredRenamedSig>>>,
 
     /// Reserved stamp cursor `(next, last)` used while materializing a
     /// [`DeferredRenamedSig`], so its binders get the stamps reserved when the
@@ -501,7 +520,7 @@ pub struct TypeContext {
     /// Raw (un-renamed) module signatures for persistent modules.
     /// Used by trigger_module_sig_rename to lazily rename on first access
     /// from normalize_path, matching OCaml's lazy ps_sig forcing.
-    raw_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
+    raw_module_sigs: RefCell<crate::fast_hash::AHashMap<String, Arc<super::decl::Signature>>>,
 
     /// Raw signature copies used only by GenType's CMT-shaped alias scraping.
     ///
@@ -510,9 +529,9 @@ pub struct TypeContext {
     /// TypeContext boundaries through PortablePersStruct, so keep those raw
     /// copied signatures separate from `raw_module_sigs`; typechecking lookup
     /// paths expect the normal component/rename caches, not this CMT view.
-    gentype_raw_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
+    gentype_raw_module_sigs: RefCell<crate::fast_hash::AHashMap<String, Arc<super::decl::Signature>>>,
     gentype_portable_raw_module_sigs:
-        RefCell<ahash::AHashMap<String, Arc<crate::cmi::portable_types::PortablePersStruct>>>,
+        RefCell<crate::fast_hash::AHashMap<String, Arc<crate::cmi::portable_types::PortablePersStruct>>>,
 
     /// Raw signatures loaded only for persistent component lookup.
     ///
@@ -520,12 +539,12 @@ pub struct TypeContext {
     /// same one-shot component backing store without making
     /// `trigger_all_module_sig_renames` see modules that were only touched by
     /// descriptor lookup.
-    raw_component_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
+    raw_component_module_sigs: RefCell<crate::fast_hash::AHashMap<String, Arc<super::decl::Signature>>>,
 
     /// String table for CMI-decoded Longident components.
     /// CMI decoding happens without a ParseArena, so we allocate synthetic
     /// StrIdx values here and resolve them later when needed.
-    cmi_longident_names: RefCell<ahash::AHashMap<u32, String>>,
+    cmi_longident_names: RefCell<crate::fast_hash::AHashMap<u32, String>>,
 
     /// String table for ParseArena Longident components whose StrIdx values are
     /// intentionally unique per source occurrence for marshal identity.
@@ -556,14 +575,14 @@ pub struct TypeContext {
     /// sharing `t.id`, so the sexp serializer deduplicates them. In Rust, we create
     /// separate TypeExprRef nodes but record the alias here so the sexp serializer
     /// can use the original's dedup key.
-    arity_aliases: RefCell<ahash::AHashMap<TypeExprRef, TypeExprRef>>,
+    arity_aliases: RefCell<crate::fast_hash::AHashMap<TypeExprRef, TypeExprRef>>,
 
     /// Record type labels cache.
     /// Maps type path (with stamp for uniqueness) → Vec<(field_name, position, mutable, repr, attributes)>.
     /// Populated during type checking when record patterns are processed.
     /// Used by raw lambda conversion to bind ALL record fields (matching OCaml's make_record_matching).
     record_labels_cache: RefCell<
-        ahash::AHashMap<
+        crate::fast_hash::AHashMap<
             Path,
             Vec<(
                 String,
@@ -583,9 +602,9 @@ pub struct TypeContext {
     /// literals instead of rebuilding or cloning large records such as
     /// `JsxDOM.domProps` for every JSX literal.
     record_label_descriptions_cache:
-        RefCell<ahash::AHashMap<super::path::Path, Arc<Vec<super::decl::LabelDescription>>>>,
+        RefCell<crate::fast_hash::AHashMap<super::path::Path, Arc<Vec<super::decl::LabelDescription>>>>,
     record_label_description_summaries_cache:
-        RefCell<ahash::AHashMap<super::path::Path, Arc<RecordLabelDescriptionSummary>>>,
+        RefCell<crate::fast_hash::AHashMap<super::path::Path, Arc<RecordLabelDescriptionSummary>>>,
 
     /// Qualified persistent record labels keyed by environment and label slot.
     /// OCaml caches module components with already-substituted `lbl_all`
@@ -593,7 +612,7 @@ pub struct TypeContext {
     /// repeatedly copying the same persistent JSX prop label skeleton before
     /// each `instance_label` call.
     qualified_record_label_cache:
-        RefCell<ahash::AHashMap<QualifiedRecordLabelCacheKey, super::decl::LabelDescription>>,
+        RefCell<crate::fast_hash::AHashMap<QualifiedRecordLabelCacheKey, super::decl::LabelDescription>>,
 
     /// Synthetic dict-pattern labels created by type-directed label lookup.
     /// OCaml mutates `lbl_all` on the predefined dict magic field as each dict
@@ -611,13 +630,16 @@ pub struct TypeContext {
     /// Lident indices synthesized while filling omitted optional record fields.
     /// This avoids repeated reverse scans through the parse arena for large JSX
     /// DOM prop records while preserving the same index that the scan found.
-    synthesized_record_lidents: RefCell<ahash::AHashMap<String, LidentIdx>>,
+    synthesized_record_lidents: RefCell<crate::fast_hash::AHashMap<String, LidentIdx>>,
 
     /// Stored typedtree environment snapshots, keyed by EnvRef.
     typed_envs: RefCell<Vec<Arc<Env>>>,
 
     /// Reuse EnvRefs for identical logical environments.
-    typed_envs_by_id: RefCell<ahash::AHashMap<u64, EnvRef>>,
+    typed_envs_by_id: RefCell<crate::fast_hash::AHashMap<u64, EnvRef>>,
+    /// The most recently stored (env id, EnvRef): consecutive typed nodes
+    /// usually share their environment.
+    last_typed_env: Cell<(u64, EnvRef)>,
 }
 
 /// Effect of building shared store data on the state of the compilation that
@@ -722,6 +744,34 @@ impl std::hash::Hash for SamePathKey {
     }
 }
 
+/// Key of `TypeContext::pdot_expansions`.
+#[derive(PartialEq, Eq, Hash)]
+struct PdotExpansionKey {
+    scope_id: u64,
+    mode: u8,
+    arity: usize,
+    path: Path,
+}
+
+/// Borrowed form of [`PdotExpansionKey`], so lookups do not clone the path.
+/// Field order and hashing match the owned key.
+#[derive(Hash)]
+struct PdotExpansionKeyRef<'a> {
+    scope_id: u64,
+    mode: u8,
+    arity: usize,
+    path: &'a Path,
+}
+
+impl hashbrown::Equivalent<PdotExpansionKey> for PdotExpansionKeyRef<'_> {
+    fn equivalent(&self, key: &PdotExpansionKey) -> bool {
+        self.scope_id == key.scope_id
+            && self.mode == key.mode
+            && self.arity == key.arity
+            && *self.path == key.path
+    }
+}
+
 fn push_unique_path(paths: &mut Vec<Path>, path: Path) {
     if !paths.iter().any(|existing| existing.same(&path)) {
         paths.push(path);
@@ -742,6 +792,8 @@ pub(crate) struct DeferredRenamedSig {
 impl TypeContext {
     /// Create a new type context.
     pub fn new(id_gen: Arc<IdGenerator>) -> Self {
+        let store = super::thread_store::current();
+        let shared_pages = store.shared_pool().pages();
         TypeContext {
             id_gen,
             current_level: Cell::new(0),
@@ -750,22 +802,26 @@ impl TypeContext {
             saved_levels: RefCell::new(Vec::new()),
             trace_gadt_instances: Cell::new(false),
             simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
-            reified_var_counters: RefCell::new(ahash::AHashMap::new()),
+            reified_var_counters: RefCell::new(crate::fast_hash::AHashMap::new()),
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: TypeArena::new(),
-            store: super::thread_store::current(),
+            store,
             store_descs: TypeArena::new(),
             store_desc_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             store_level_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             store_abbrev_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             store_row_field_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            shared_desc_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            shared_level_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            shared_abbrev_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            shared_pages: RefCell::new(shared_pages),
             store_build_depth: Cell::new(0),
             store_build_type_start: Cell::new(0),
             store_build_row_start: Cell::new(0),
             store_build_poisoned: Cell::new(false),
             store_build_effects: RefCell::new(Vec::new()),
-            touched_store_pieces: RefCell::new(ahash::AHashSet::new()),
+            touched_store_pieces: RefCell::new(crate::fast_hash::AHashSet::new()),
             compiler_counters_enabled: crate::perf_counters::enabled(),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
@@ -777,42 +833,44 @@ impl TypeContext {
             variant_layouts: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
-            type_decl_store: RefCell::new(ahash::AHashMap::new()),
-            type_decl_by_stamp: RefCell::new(ahash::AHashMap::new()),
-            type_decl_by_path: RefCell::new(ahash::AHashMap::new()),
-            type_decl_by_exact_path: RefCell::new(ahash::AHashMap::new()),
+            type_decl_store: RefCell::new(crate::fast_hash::AHashMap::new()),
+            type_decl_by_stamp: RefCell::new(crate::fast_hash::AHashMap::new()),
+            type_decl_by_path: RefCell::new(crate::fast_hash::AHashMap::new()),
+            type_decl_by_exact_path: RefCell::new(crate::fast_hash::AHashMap::new()),
             exact_path_batches: RefCell::new(Vec::new()),
-            exact_path_memo: RefCell::new((0, ahash::AHashMap::new())),
+            exact_path_memo: RefCell::new((0, crate::fast_hash::AHashMap::new())),
             type_decl_log: RefCell::new(Vec::new()),
             type_decl_log_replayed: Default::default(),
-            type_item_by_path: RefCell::new(ahash::AHashMap::new()),
-            missing_type_item_by_path: RefCell::new(ahash::AHashSet::new()),
-            resolved_pdot_type_cache: RefCell::new(ahash::AHashMap::new()),
-            resolved_module_sig_cache: RefCell::new(ahash::AHashMap::new()),
-            qualified_module_components_cache: RefCell::new(ahash::AHashMap::new()),
-            component_alias_sources: RefCell::new(ahash::AHashMap::new()),
-            signature_indexes: RefCell::new(ahash::AHashMap::new()),
-            component_paths_by_alias_source: RefCell::new(ahash::AHashMap::new()),
-            resolved_module_value_cache: RefCell::new(ahash::AHashMap::new()),
-            resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
-            resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
-            qualified_module_decl_cache: RefCell::new(ahash::AHashMap::new()),
-            resolved_type_item_cache: RefCell::new(ahash::AHashMap::new()),
-            normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
-            normalized_path_forward_cache: RefCell::new(ahash::AHashMap::new()),
-            occur_variance_masks: RefCell::new(ahash::AHashMap::new()),
-            type_newtype_levels: RefCell::new(ahash::AHashMap::new()),
-            forced_normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
-            forced_type_path_compare_cache: RefCell::new(ahash::AHashMap::new()),
+            type_item_by_path: RefCell::new(crate::fast_hash::AHashMap::new()),
+            missing_type_item_by_path: RefCell::new(crate::fast_hash::AHashSet::new()),
+            resolved_pdot_type_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_module_sig_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            qualified_module_components_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            component_alias_sources: RefCell::new(crate::fast_hash::AHashMap::new()),
+            signature_indexes: RefCell::new(crate::fast_hash::AHashMap::new()),
+            component_paths_by_alias_source: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_module_value_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_module_type_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_child_module_path_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            qualified_module_decl_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_type_item_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            normalized_path_full_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            pdot_expansions: RefCell::new(hashbrown::HashMap::default()),
+            typeopt_answers: RefCell::new(None),
+            normalized_path_forward_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            occur_variance_masks: RefCell::new(crate::fast_hash::AHashMap::new()),
+            type_newtype_levels: RefCell::new(crate::fast_hash::AHashMap::new()),
+            forced_normalized_path_full_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            forced_type_path_compare_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             load_paths: RefCell::new(Arc::new(Vec::new())),
             persistent_env: RefCell::new(None),
-            renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
+            renamed_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
             reserved_rename_stamps: Cell::new(None),
-            raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
-            gentype_raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
-            gentype_portable_raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
-            raw_component_module_sigs: RefCell::new(ahash::AHashMap::new()),
-            cmi_longident_names: RefCell::new(ahash::AHashMap::new()),
+            raw_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
+            gentype_raw_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
+            gentype_portable_raw_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
+            raw_component_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
+            cmi_longident_names: RefCell::new(crate::fast_hash::AHashMap::new()),
             arena_longident_names: RefCell::new(Vec::new()),
             next_cmi_longident_idx: Cell::new(0xF000_0000),
             predef_int: Cell::new(None),
@@ -826,15 +884,16 @@ impl TypeContext {
             predef_option_inner: Cell::new(None),
             predef_option_type: Cell::new(None),
             predef_option_layout: Cell::new(None),
-            arity_aliases: RefCell::new(ahash::AHashMap::new()),
-            record_labels_cache: RefCell::new(ahash::AHashMap::new()),
-            record_label_descriptions_cache: RefCell::new(ahash::AHashMap::new()),
-            record_label_description_summaries_cache: RefCell::new(ahash::AHashMap::new()),
-            qualified_record_label_cache: RefCell::new(ahash::AHashMap::new()),
+            arity_aliases: RefCell::new(crate::fast_hash::AHashMap::new()),
+            record_labels_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            record_label_descriptions_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            record_label_description_summaries_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            qualified_record_label_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             dict_pattern_labels_cache: RefCell::new(Vec::new()),
-            synthesized_record_lidents: RefCell::new(ahash::AHashMap::new()),
+            synthesized_record_lidents: RefCell::new(crate::fast_hash::AHashMap::new()),
             typed_envs: RefCell::new(Vec::new()),
-            typed_envs_by_id: RefCell::new(ahash::AHashMap::new()),
+            typed_envs_by_id: RefCell::new(crate::fast_hash::AHashMap::new()),
+            last_typed_env: Cell::new((u64::MAX, EnvRef(0))),
         }
     }
 
@@ -851,6 +910,11 @@ impl TypeContext {
         &self,
         layout: super::variant_runtime::Layout,
     ) -> super::variant_runtime::LayoutRef {
+        // Like `alloc_type`: a store build allocates in the worker store, where
+        // layouts are complete on allocation.
+        if self.in_store_build() {
+            return self.store.alloc_complete_variant_layout(layout);
+        }
         let layout_ref = self.pending_variant_layout();
         self.complete_variant_layout(layout_ref, layout);
         layout_ref
@@ -886,6 +950,9 @@ impl TypeContext {
         layout_ref: super::variant_runtime::LayoutRef,
         read: impl FnOnce(&super::variant_runtime::Layout) -> R,
     ) -> R {
+        if layout_ref.is_shared() {
+            return read(self.store.shared_pool().layout(layout_ref));
+        }
         if layout_ref.is_store() {
             return self.store.with_variant_layout(layout_ref, read);
         }
@@ -911,7 +978,12 @@ impl TypeContext {
     /// Store a typedtree environment snapshot and return a stable reference.
     pub fn store_typed_env(&self, env: &Env) -> EnvRef {
         self.poison_store_build_for("store_typed_env");
+        let (last_id, last_ref) = self.last_typed_env.get();
+        if last_id == env.id() {
+            return last_ref;
+        }
         if let Some(existing) = self.typed_envs_by_id.borrow().get(&env.id()).copied() {
+            self.last_typed_env.set((env.id(), existing));
             return existing;
         }
 
@@ -922,6 +994,7 @@ impl TypeContext {
             env_ref
         };
         self.typed_envs_by_id.borrow_mut().insert(env.id(), env_ref);
+        self.last_typed_env.set((env.id(), env_ref));
         env_ref
     }
 
@@ -952,6 +1025,7 @@ impl TypeContext {
             .get(&idx.raw())
             .cloned()
             .or_else(|| self.store.longident_name(idx))
+            .or_else(|| self.store.shared_pool().longident_name(idx))
     }
 
     /// The worker's persistent store leased by this compilation.
@@ -962,7 +1036,9 @@ impl TypeContext {
     /// Whether `r` names an allocated node of this compilation's arena or of
     /// the worker store.
     pub fn contains_type_ref(&self, r: TypeExprRef) -> bool {
-        if r.is_store() {
+        if r.is_shared() {
+            self.store.shared_pool().contains(r.shared_index())
+        } else if r.is_store() {
             r.store_index() < self.store.type_count()
         } else {
             r.index() < self.types.len()
@@ -1013,6 +1089,7 @@ impl TypeContext {
             .map(|(raw, name)| (*raw, name.clone()))
             .collect();
         names.extend(self.store.snapshot_longident_names());
+        names.extend(self.store.shared_pool().snapshot_longident_names());
         names
     }
 
@@ -1574,7 +1651,7 @@ impl TypeContext {
         module_path: &Path,
         value_name: &str,
         path: Path,
-        desc: super::decl::ValueDescription,
+        desc: Arc<super::decl::ValueDescription>,
     ) {
         self.resolved_module_value_cache
             .borrow_mut()
@@ -1588,7 +1665,7 @@ impl TypeContext {
         &self,
         module_path: &Path,
         value_name: &str,
-    ) -> Option<(Path, super::decl::ValueDescription)> {
+    ) -> Option<(Path, Arc<super::decl::ValueDescription>)> {
         self.resolved_module_value_cache
             .borrow()
             .get(module_path)
@@ -1611,6 +1688,68 @@ impl TypeContext {
             .entry((env_id, module_path.clone()))
             .or_default()
             .insert(type_name.to_string(), (access_path, id, decl));
+    }
+
+    /// Start or stop answering repeated `typeopt` queries from a cache. Only
+    /// enabled while a finished typed tree is lowered to lambda.
+    pub(crate) fn set_typeopt_cache(&self, enabled: bool) {
+        *self.typeopt_answers.borrow_mut() = enabled.then(crate::fast_hash::AHashMap::new);
+    }
+
+    /// Answer a `typeopt` query `query` about `ty` in the env `env_id`,
+    /// reusing an earlier answer while the cache is enabled.
+    pub(crate) fn typeopt_answer(
+        &self,
+        env_id: u64,
+        ty: TypeExprRef,
+        query: u8,
+        compute: impl FnOnce() -> bool,
+    ) -> bool {
+        if self.typeopt_answers.borrow().is_none() {
+            return compute();
+        }
+        let ty = self.repr(ty);
+        if let Some(answer) = self
+            .typeopt_answers
+            .borrow()
+            .as_ref()
+            .and_then(|answers| answers.get(&(env_id, ty, query)))
+        {
+            return *answer;
+        }
+        let answer = compute();
+        if let Some(answers) = self.typeopt_answers.borrow_mut().as_mut() {
+            answers.insert((env_id, ty, query), answer);
+        }
+        answer
+    }
+
+    /// The cached expansion outcome of a `Pdot` head (`ctype::PdotExpansion`).
+    pub(crate) fn find_pdot_expansion(
+        &self,
+        scope_id: u64,
+        mode: u8,
+        arity: usize,
+        path: &Path,
+    ) -> Option<super::ctype::PdotExpansion> {
+        self.pdot_expansions
+            .borrow()
+            .get(&PdotExpansionKeyRef { scope_id, mode, arity, path })
+            .cloned()
+    }
+
+    pub(crate) fn register_pdot_expansion(
+        &self,
+        scope_id: u64,
+        mode: u8,
+        arity: usize,
+        path: &Path,
+        expansion: super::ctype::PdotExpansion,
+    ) {
+        self.pdot_expansions.borrow_mut().insert(
+            PdotExpansionKey { scope_id, mode, arity, path: path.clone() },
+            expansion,
+        );
     }
 
     /// Look up a cached dotted type lookup for a resolved module access path.
@@ -2166,42 +2305,57 @@ impl TypeContext {
     // Type Access
     // ========================================================================
 
-    /// The node behind `r`, in this compilation's arena or the thread store.
-    #[inline]
-    /// The node behind `r`. Local nodes are by far the most common (hundreds
-    /// of millions of reads per build), so their path is inlined into callers;
-    /// store nodes take the out-of-line path.
-    #[inline]
-    fn node(&self, r: TypeExprRef) -> &TypeExpr {
-        if r.is_store() {
-            self.store_node(r)
-        } else {
-            self.poison_store_build();
-            self.types.get(r)
-        }
-    }
-
+    /// Borrow the descriptor of a stored (worker-store or shared) node:
+    /// this compilation's overlay copy if it wrote one, else the immutable
+    /// published descriptor.
     #[inline(never)]
-    fn store_node(&self, r: TypeExprRef) -> &TypeExpr {
-        if let Some(index) = self.store_desc_overlay.borrow().get(r.store_index()) {
-            return self.store_descs.get_at(*index);
+    fn store_desc_ref(&self, r: TypeExprRef) -> TypeDescRef<'_> {
+        if r.is_shared() {
+            let idx = r.shared_index();
+            if let Some(index) = self.shared_desc_overlay.borrow().get(idx as usize) {
+                return self.store_descs.get_at(*index).desc();
+            }
+            return std::cell::Ref::map(self.shared_pages.borrow(), |pages| {
+                &super::shared_store::page_node(pages, idx).desc
+            });
         }
-        self.store.node(r)
+        if let Some(index) = self.store_desc_overlay.borrow().get(r.store_index()) {
+            return self.store_descs.get_at(*index).desc();
+        }
+        self.store.node(r).desc()
     }
 
     /// Clone the descriptor so callers can hold it across node mutations.
     #[inline]
     pub fn get_desc(&self, r: TypeExprRef) -> TypeDescSnapshot {
-        TypeDescSnapshot(self.node(r).desc().clone())
+        TypeDescSnapshot(self.with_desc(r, TypeDesc::clone))
+    }
+
+    /// Apply `f` to the descriptor of `r`. The local path is a plain
+    /// `RefCell` borrow, so hot readers (`repr`, `get_desc`) inline exactly as
+    /// they did before stored nodes had two representations.
+    #[inline(always)]
+    pub(crate) fn with_desc<R>(&self, r: TypeExprRef, f: impl FnOnce(&TypeDesc) -> R) -> R {
+        if r.is_store() {
+            return f(&self.store_desc_ref(r));
+        }
+        self.poison_store_build();
+        f(&self.types.get(r).desc())
     }
 
     /// Borrow the descriptor of a type without cloning it.
     ///
     /// Prefer this in short read-only hot paths. Use `get_desc()` when the
     /// descriptor must be held across code that may mutate the same type node.
+    /// Local nodes are by far the most common (hundreds of millions of reads
+    /// per build), so their path is inlined into callers.
     #[inline]
     pub fn borrow_desc(&self, r: TypeExprRef) -> TypeDescRef<'_> {
-        self.node(r).desc()
+        if r.is_store() {
+            return self.store_desc_ref(r);
+        }
+        self.poison_store_build();
+        self.types.get(r).desc()
     }
 
     /// Get the level of a type.
@@ -2216,6 +2370,15 @@ impl TypeContext {
 
     #[inline(never)]
     fn store_level(&self, r: TypeExprRef) -> i32 {
+        if r.is_shared() {
+            let idx = r.shared_index();
+            return self
+                .shared_level_overlay
+                .borrow()
+                .get(idx as usize)
+                .copied()
+                .unwrap_or_else(|| super::shared_store::page_node(&self.shared_pages.borrow(), idx).level);
+        }
         self.store_level_overlay
             .borrow()
             .get(r.store_index())
@@ -2228,10 +2391,18 @@ impl TypeContext {
         self.types.len()
     }
 
-    /// Set the level of a type.
+    /// Set the level of a type. Stored nodes are never written in place
+    /// unless the current store build is still creating them: the write goes
+    /// to this compilation's overlay.
     #[inline]
     pub fn set_level(&self, r: TypeExprRef, level: i32) {
         if r.is_store() {
+            if r.is_shared() {
+                self.shared_level_overlay
+                    .borrow_mut()
+                    .set(r.shared_index() as usize, level);
+                return;
+            }
             if self.store_build_owns(r) {
                 self.store.set_level_backing(r, level);
                 return;
@@ -2249,6 +2420,10 @@ impl TypeContext {
     #[inline]
     pub fn set_desc(&self, r: TypeExprRef, desc: TypeDesc) {
         if r.is_store() {
+            if r.is_shared() {
+                self.set_shared_desc(r, desc);
+                return;
+            }
             if self.store_build_owns(r) {
                 self.check_store_desc(&desc);
                 self.store.set_desc_backing(r, desc);
@@ -2273,6 +2448,27 @@ impl TypeContext {
         } else {
             self.poison_store_build();
             self.types.get(r).set_desc(desc);
+        }
+    }
+
+    /// Descriptor write to a shared dependency node: copy-on-write into this
+    /// compilation's overlay; the published node is never mutated.
+    #[inline(never)]
+    fn set_shared_desc(&self, r: TypeExprRef, desc: TypeDesc) {
+        let idx = r.shared_index();
+        let index = self.shared_desc_overlay.borrow().get(idx as usize).copied();
+        if let Some(index) = index {
+            self.store_descs.get_at(index).set_desc(desc);
+        } else {
+            let (level, id) = {
+                let pages = self.shared_pages.borrow();
+                let original = super::shared_store::page_node(&pages, idx);
+                (original.level, original.id)
+            };
+            let index = self.store_descs.push_raw(TypeExpr::new(desc, level, id));
+            self.shared_desc_overlay
+                .borrow_mut()
+                .set(idx as usize, index);
         }
     }
 
@@ -2316,6 +2512,9 @@ impl TypeContext {
             abbrev_states,
             store_abbrev_overlay: self.store_abbrev_overlay.borrow().clone(),
             store_row_field_overlay: self.store_row_field_overlay.borrow().clone(),
+            shared_desc_overlay: self.shared_desc_overlay.borrow().clone(),
+            shared_level_overlay: self.shared_level_overlay.borrow().clone(),
+            shared_abbrev_overlay: self.shared_abbrev_overlay.borrow().clone(),
             memoized_abbrev_refs: self.memoized_abbrev_refs.borrow().clone(),
             current_abbreviations: self.current_abbreviations.get(),
             current_level: self.current_level.get(),
@@ -2358,6 +2557,9 @@ impl TypeContext {
         *self.store_level_overlay.borrow_mut() = snapshot.store_level_overlay;
         *self.store_abbrev_overlay.borrow_mut() = snapshot.store_abbrev_overlay;
         *self.store_row_field_overlay.borrow_mut() = snapshot.store_row_field_overlay;
+        *self.shared_desc_overlay.borrow_mut() = snapshot.shared_desc_overlay;
+        *self.shared_level_overlay.borrow_mut() = snapshot.shared_level_overlay;
+        *self.shared_abbrev_overlay.borrow_mut() = snapshot.shared_abbrev_overlay;
         *self.memoized_abbrev_refs.borrow_mut() = snapshot.memoized_abbrev_refs;
         self.current_abbreviations
             .set(snapshot.current_abbreviations);
@@ -2428,6 +2630,21 @@ impl TypeContext {
     ) {
         self.poison_store_build_for("register_record_label_descriptions");
         let summary = Arc::new(RecordLabelDescriptionSummary::from_labels(&labels));
+        self.record_label_descriptions_cache
+            .borrow_mut()
+            .insert(type_path.clone(), labels);
+        self.record_label_description_summaries_cache
+            .borrow_mut()
+            .insert(type_path.clone(), summary);
+    }
+
+    /// Register label descriptions and their already-built summary.
+    pub(crate) fn register_record_label_descriptions_with_summary(
+        &self,
+        type_path: &Path,
+        labels: Arc<Vec<super::decl::LabelDescription>>,
+        summary: Arc<RecordLabelDescriptionSummary>,
+    ) {
         self.record_label_descriptions_cache
             .borrow_mut()
             .insert(type_path.clone(), labels);
@@ -2574,6 +2791,14 @@ impl TypeContext {
     /// Current value of a memo cell: this compilation's overlay for store
     /// cells, the local table otherwise. Missing cells read as `Mnil`.
     fn read_abbrev(&self, memo: AbbrevMemoRef) -> AbbrevMemo {
+        if memo.is_shared() {
+            return self
+                .shared_abbrev_overlay
+                .borrow()
+                .get(memo.shared_index())
+                .cloned()
+                .unwrap_or(AbbrevMemo::Mnil);
+        }
         if memo.is_store() {
             if let Some(value) = self.store_abbrev_overlay.borrow().get(memo.store_index()) {
                 return value.clone();
@@ -2590,6 +2815,12 @@ impl TypeContext {
     /// Apply `f` to a memo cell without copying it (the chain scans below
     /// only compare paths and follow `next`).
     fn with_abbrev<R>(&self, memo: AbbrevMemoRef, f: impl FnOnce(&AbbrevMemo) -> R) -> R {
+        if memo.is_shared() {
+            return match self.shared_abbrev_overlay.borrow().get(memo.shared_index()) {
+                Some(value) => f(value),
+                None => f(&AbbrevMemo::Mnil),
+            };
+        }
         if memo.is_store() {
             if let Some(value) = self.store_abbrev_overlay.borrow().get(memo.store_index()) {
                 return f(value);
@@ -2606,6 +2837,12 @@ impl TypeContext {
     /// Write a memo cell; store cells are written to this compilation's
     /// overlay only. Missing local cells are ignored.
     fn write_abbrev(&self, memo: AbbrevMemoRef, value: AbbrevMemo) {
+        if memo.is_shared() {
+            self.shared_abbrev_overlay
+                .borrow_mut()
+                .set(memo.shared_index(), value);
+            return;
+        }
         if memo.is_store() {
             self.store_abbrev_overlay
                 .borrow_mut()
@@ -3343,7 +3580,9 @@ impl TypeContext {
     /// Whether `r` is a store node created by the current store build.
     #[inline]
     fn store_build_owns(&self, r: TypeExprRef) -> bool {
-        self.in_store_build() && r.store_index() >= self.store_build_type_start.get()
+        self.in_store_build()
+            && !r.is_shared()
+            && r.store_index() >= self.store_build_type_start.get()
     }
 
     #[inline]
@@ -3737,17 +3976,17 @@ impl TypeContext {
     #[inline]
     pub fn repr(&self, t: TypeExprRef) -> TypeExprRef {
         // Fast path, inlined into callers: `t` is already a representative.
-        let first_next = {
-            let desc = self.borrow_desc(t);
-            match &*desc {
-                TypeDesc::Tlink(next) => *next,
-                TypeDesc::Tfield {
-                    kind: FieldKind::Fabsent,
-                    rest,
-                    ..
-                } => *rest,
-                _ => return t,
-            }
+        let next = self.with_desc(t, |desc| match desc {
+            TypeDesc::Tlink(next) => Some(*next),
+            TypeDesc::Tfield {
+                kind: FieldKind::Fabsent,
+                rest,
+                ..
+            } => Some(*rest),
+            _ => None,
+        });
+        let Some(first_next) = next else {
+            return t;
         };
         self.repr_chain(t, first_next)
     }
@@ -3766,18 +4005,15 @@ impl TypeContext {
 
         let mut current = first_next;
         for _ in 0..10_000 {
-            let next = {
-                let desc = self.borrow_desc(current);
-                match &*desc {
-                    TypeDesc::Tlink(next) => Some(*next),
-                    TypeDesc::Tfield {
-                        kind: FieldKind::Fabsent,
-                        rest,
-                        ..
-                    } => Some(*rest),
-                    _ => None,
-                }
-            };
+            let next = self.with_desc(current, |desc| match desc {
+                TypeDesc::Tlink(next) => Some(*next),
+                TypeDesc::Tfield {
+                    kind: FieldKind::Fabsent,
+                    rest,
+                    ..
+                } => Some(*rest),
+                _ => None,
+            });
             match next {
                 Some(next_ref) => {
                     if chain_len < 32 {
@@ -3813,6 +4049,47 @@ impl TypeContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_node_writes_stay_in_the_writing_compilation() {
+        let a = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
+        let pool = a.store.shared_pool();
+        let base = pool
+            .publish(2, 0, |_| {
+                (
+                    vec![(TypeDesc::Tvar(None), GENERIC_LEVEL), (TypeDesc::Tnil, GENERIC_LEVEL)],
+                    Vec::new(),
+                )
+            })
+            .expect("pool has room");
+        let var = super::super::shared_store::shared_ref(base, 0);
+        let nil = super::super::shared_store::shared_ref(base, 1);
+        assert!(var.is_shared() && a.contains_type_ref(var));
+
+        // OCaml `link_type`/level updates on a dependency node: visible in this
+        // compilation only.
+        a.set_desc(var, TypeDesc::Tlink(nil));
+        a.set_level(var, 3);
+        assert_eq!(a.repr(var), nil);
+        assert_eq!(a.get_level(var), 3);
+
+        let b = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
+        assert!(matches!(*b.borrow_desc(var), TypeDesc::Tvar(None)));
+        assert_eq!(b.get_level(var), GENERIC_LEVEL);
+        std::thread::spawn(move || {
+            let c = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
+            assert!(matches!(*c.borrow_desc(var), TypeDesc::Tvar(None)));
+            assert!(matches!(*c.borrow_desc(nil), TypeDesc::Tnil));
+        })
+        .join()
+        .unwrap();
+
+        // Backtracking restores the published view.
+        let snapshot = b.snapshot_type_state();
+        b.set_desc(var, TypeDesc::Tnil);
+        b.restore_type_state(snapshot);
+        assert!(matches!(*b.borrow_desc(var), TypeDesc::Tvar(None)));
+    }
 
     #[test]
     fn store_build_allocates_shared_nodes_and_replays_stamps() {

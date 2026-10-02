@@ -3,10 +3,10 @@
 //! This stage ports the OCaml raw-lambda structure shape first and then
 //! incrementally ports expression lowering from `translcore.ml`.
 
-use ahash::AHashSet;
+use crate::fast_hash::AHashSet;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
-use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::path::Path as StdPath;
 use std::sync::{Mutex, OnceLock};
 
@@ -866,7 +866,7 @@ pub struct RawLambdaConverter<'a> {
     type_ctx: &'a TypeContext,
     env: &'a crate::types::env::Env,
     persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
-    possible_required_modules: AHashSet<ModuleId>,
+    possible_required_modules: ahash::AHashSet<ModuleId>,
     id_gen: RawLambdaIdGenerator,
     next_static_raise: i32,
     next_negative_raise: i32,
@@ -894,7 +894,7 @@ impl<'a> RawLambdaConverter<'a> {
             type_ctx,
             env,
             persistent_env: None,
-            possible_required_modules: AHashSet::new(),
+            possible_required_modules: ahash::AHashSet::new(),
             id_gen: RawLambdaIdGenerator::Owned(IdGenerator::new()),
             next_static_raise: 0,
             next_negative_raise: 0,
@@ -923,7 +923,7 @@ impl<'a> RawLambdaConverter<'a> {
             type_ctx,
             env,
             persistent_env: None,
-            possible_required_modules: AHashSet::new(),
+            possible_required_modules: ahash::AHashSet::new(),
             id_gen: RawLambdaIdGenerator::Owned(IdGenerator::with_start_stamp(start_stamp)),
             next_static_raise: 0,
             next_negative_raise: 0,
@@ -953,7 +953,7 @@ impl<'a> RawLambdaConverter<'a> {
             type_ctx,
             env,
             persistent_env: None,
-            possible_required_modules: AHashSet::new(),
+            possible_required_modules: ahash::AHashSet::new(),
             id_gen: RawLambdaIdGenerator::Owned(IdGenerator::with_start_stamp(start_stamp)),
             next_static_raise: 0,
             next_negative_raise: 0,
@@ -984,7 +984,7 @@ impl<'a> RawLambdaConverter<'a> {
             type_ctx,
             env,
             persistent_env: None,
-            possible_required_modules: AHashSet::new(),
+            possible_required_modules: ahash::AHashSet::new(),
             id_gen: RawLambdaIdGenerator::Shared(id_gen),
             next_static_raise: 0,
             next_negative_raise: 0,
@@ -1040,7 +1040,7 @@ impl<'a> RawLambdaConverter<'a> {
         self.id_gen.current_stamp()
     }
 
-    pub fn take_possible_required_modules(&mut self) -> AHashSet<ModuleId> {
+    pub fn take_possible_required_modules(&mut self) -> ahash::AHashSet<ModuleId> {
         std::mem::take(&mut self.possible_required_modules)
     }
 
@@ -1278,7 +1278,7 @@ impl<'a> RawLambdaConverter<'a> {
         &mut self,
         handler_fun: impl FnOnce() -> RawLambda,
         arg: RawLambda,
-        pat_act_list: Vec<(Pattern, RawLambda)>,
+        pat_act_list: Vec<(&Pattern, RawLambda)>,
         partial: Partial,
     ) -> RawLambda {
         self.sync_matching_stamps();
@@ -1325,7 +1325,7 @@ impl<'a> RawLambdaConverter<'a> {
         &mut self,
         loc: Location,
         param: RawLambda,
-        pat_act_list: Vec<(Pattern, RawLambda)>,
+        pat_act_list: Vec<(&Pattern, RawLambda)>,
         partial: Partial,
     ) -> RawLambda {
         self.sync_matching_stamps();
@@ -1345,7 +1345,7 @@ impl<'a> RawLambdaConverter<'a> {
     fn for_trywith_with_synced_stamps(
         &mut self,
         param: RawLambda,
-        pat_act_list: Vec<(Pattern, RawLambda)>,
+        pat_act_list: Vec<(&Pattern, RawLambda)>,
     ) -> RawLambda {
         self.sync_matching_stamps();
         let lambda = full_matching::for_trywith(
@@ -1363,7 +1363,7 @@ impl<'a> RawLambdaConverter<'a> {
         &mut self,
         loc: Location,
         paraml: Vec<RawLambda>,
-        pat_act_list: Vec<(Pattern, RawLambda)>,
+        pat_act_list: Vec<(&Pattern, RawLambda)>,
         partial: Partial,
     ) -> RawLambda {
         self.sync_matching_stamps();
@@ -1400,7 +1400,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// Convert typed tree cases to `(Pattern, RawLambda)` pairs for the full
     /// matching compiler. Guards are encoded as
     /// `if guard then body else staticraise(0, [])` per OCaml convention.
-    fn cases_to_pat_act_list(&mut self, cases: &[Case]) -> Vec<(Pattern, RawLambda)> {
+    fn cases_to_pat_act_list<'c>(&mut self, cases: &'c [Case]) -> Vec<(&'c Pattern, RawLambda)> {
         cases
             .iter()
             .map(|case| {
@@ -1416,7 +1416,7 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                     None => body,
                 };
-                (case.c_lhs.clone(), act)
+                (&case.c_lhs, act)
             })
             .collect()
     }
@@ -4342,6 +4342,9 @@ impl<'a> RawLambdaConverter<'a> {
             self.no_assert_false = true;
         }
         self.register_signature_type_paths(None, &structure.str_type);
+        // The typed tree is complete: repeated type queries on it have one
+        // answer per (env, type).
+        self.type_ctx.set_typeopt_cache(true);
         let mut fields = Vec::new();
         let result = self.convert_structure_items_raw(
             &mut fields,
@@ -4351,6 +4354,7 @@ impl<'a> RawLambdaConverter<'a> {
             cc,
             Location::none(),
         );
+        self.type_ctx.set_typeopt_cache(false);
         self.materialize_hoisted_exports(result)
     }
 
@@ -10896,7 +10900,7 @@ impl<'a> RawLambdaConverter<'a> {
                             acc = RawLambda::let_(kind, id, value, acc);
                         } else {
                             // Use matching compiler's for_let (OCaml: Matching.for_let)
-                            let pat_act_list = vec![(binding.vb_pat.clone(), acc)];
+                            let pat_act_list = vec![(&binding.vb_pat, acc)];
                             let loc = self.loc(binding.vb_pat.pat_loc);
                             let fname = self.basename_for_loc(loc.clone());
                             let loc_for_handler = loc.clone();
@@ -11086,7 +11090,7 @@ impl<'a> RawLambdaConverter<'a> {
         let return_unit = self.is_base_type(body.exp_type, "unit");
         let mut lambda_body = self.convert_expr_raw(body);
         for param in params.iter().rev() {
-            let pat = param.fp_pat.clone();
+            let pat = &param.fp_pat;
             let id = &param.fp_param;
             lambda_body = match &pat.pat_desc {
                 PatternDesc::Tpat_any => lambda_body,
@@ -11870,8 +11874,8 @@ fn decode_marshaled_ffi_type(encoded: &str) -> Option<std::rc::Rc<OcamlValue>> {
         return None;
     }
     thread_local! {
-        static DECODED: std::cell::RefCell<ahash::AHashMap<String, Option<std::rc::Rc<OcamlValue>>>> =
-            std::cell::RefCell::new(ahash::AHashMap::new());
+        static DECODED: std::cell::RefCell<crate::fast_hash::AHashMap<String, Option<std::rc::Rc<OcamlValue>>>> =
+            std::cell::RefCell::new(crate::fast_hash::AHashMap::new());
     }
     if let Some(cached) = DECODED.with(|cache| cache.borrow().get(encoded).cloned()) {
         return cached;
@@ -12640,6 +12644,7 @@ mod tests {
         let id_gen = IdGenerator::new();
         let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
+        let any_ty = ctx.new_var(None);
 
         let directive_expr = crate::parser::ast::Expression {
             pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_constant(Box::new(
@@ -12663,7 +12668,7 @@ mod tests {
         let param_pat = Pattern::new(
             PatternDesc::Tpat_var(param_id.clone(), Located::mknoloc("name".to_string())),
             LocIdx::none(),
-            crate::types::TypeExprRef(0),
+            any_ty,
             EnvRef(0),
             Attributes::new(),
         );
@@ -12678,14 +12683,14 @@ mod tests {
                 body: Box::new(Expression::new(
                     ExpressionDesc::Texp_constant(TConstant::Int(1)),
                     LocIdx::none(),
-                    crate::types::TypeExprRef(0),
+                    any_ty,
                     EnvRef(0),
                     Attributes::new(),
                 )),
                 async_: false,
             },
             LocIdx::none(),
-            crate::types::TypeExprRef(0),
+            any_ty,
             EnvRef(0),
             directive_attrs,
         );
@@ -12809,7 +12814,7 @@ mod tests {
                 indexed_raw,
                 vec![export],
                 &[],
-                &AHashSet::new(),
+                &ahash::AHashSet::new(),
                 false,
                 &mut inline,
                 &mut arity,
@@ -12873,7 +12878,7 @@ mod tests {
                 indexed_raw,
                 vec![export],
                 &[hoisted],
-                &AHashSet::new(),
+                &ahash::AHashSet::new(),
                 false,
                 &mut inline,
                 &mut arity,

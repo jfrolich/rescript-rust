@@ -43,6 +43,7 @@ pub mod cache;
 /// CMI file loading infrastructure.
 pub mod cmi;
 pub mod config;
+pub mod fast_hash;
 pub mod context;
 /// Cached debug environment flags.
 pub mod debug_flags;

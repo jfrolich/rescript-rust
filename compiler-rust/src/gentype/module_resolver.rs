@@ -192,13 +192,13 @@ fn source_file_exists(path: &str) -> bool {
         return Path::new(path).exists();
     }
     thread_local! {
-        static CACHE: std::cell::RefCell<(u64, ahash::AHashMap<String, bool>)> =
-            std::cell::RefCell::new((0, ahash::AHashMap::new()));
+        static CACHE: std::cell::RefCell<(u64, crate::fast_hash::AHashMap<String, bool>)> =
+            std::cell::RefCell::new((0, crate::fast_hash::AHashMap::new()));
     }
     CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if cache.0 != generation {
-            *cache = (generation, ahash::AHashMap::new());
+            *cache = (generation, crate::fast_hash::AHashMap::new());
         }
         if let Some(&exists) = cache.1.get(path) {
             return exists;

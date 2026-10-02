@@ -27,7 +27,7 @@ use super::path::Path;
 use super::type_expr::{TypeDesc, TypeExprRef};
 use crate::ident::{Ident, IdentFlags};
 use crate::location::Location;
-use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ type PersistentHashSet<T> = im_rc::HashSet<T, ahash::RandomState>;
 /// and only read afterwards (a rare in-place update copies the layer), so a
 /// flat hash table replaces the persistent map: one allocation to build and
 /// to drop instead of a tree of reference-counted nodes.
-type OpenedMap<V> = ahash::AHashMap<Name, V>;
+type OpenedMap<V> = crate::fast_hash::AHashMap<Name, V>;
 
 /// Collect free type variables (Tvar nodes) from a type expression.
 /// Matches OCaml's Datarepr.free_vars.
@@ -398,9 +398,9 @@ impl<T: Clone> IdTbl<T> {
                 .rev()
                 .find(|(entry_id, _)| {
                     if stamp == 0 {
-                        entry_id.is_persistent() && entry_id.name() == id.name()
+                        entry_id.is_persistent() && entry_id.name_atom() == id.name_atom()
                     } else {
-                        entry_id.same(id) && entry_id.name() == id.name()
+                        entry_id.same(id) && entry_id.name_atom() == id.name_atom()
                     }
                 })
                 .map(|(_, value)| value)
@@ -724,9 +724,9 @@ impl<T: Clone> TycompTbl<T> {
                 .rev()
                 .find(|(entry_id, _)| {
                     if stamp == 0 {
-                        entry_id.is_persistent() && entry_id.name() == id.name()
+                        entry_id.is_persistent() && entry_id.name_atom() == id.name_atom()
                     } else {
-                        entry_id.same(id) && entry_id.name() == id.name()
+                        entry_id.same(id) && entry_id.name_atom() == id.name_atom()
                     }
                 })
                 .map(|(_, value)| value)
@@ -1164,6 +1164,13 @@ impl Env {
         self.data.values
             .find_by_name_with_path(name)
             .map(|(path, desc)| (path, desc.as_ref()))
+            .ok_or_else(|| EnvError::ValueNotFound(name.into()))
+    }
+
+    /// Like `find_value_with_path`, sharing the stored description.
+    pub fn find_value_arc_with_path(&self, name: &str) -> EnvResult<(Path, &Arc<ValueDescription>)> {
+        self.data.values
+            .find_by_name_with_path(name)
             .ok_or_else(|| EnvError::ValueNotFound(name.into()))
     }
 
@@ -1955,7 +1962,26 @@ impl Default for Env {
 /// - Defines abstract types (int, float, string, char, bigint, etc.)
 /// - Defines variant types with constructors (bool, unit, option, list, result)
 /// - Registers constructors in the environment so they can be looked up
+/// The initial environment (OCaml `Predef.build_initial_env`,
+/// compiler/ml/predef.ml:239-424, as installed by `Env.initial_safe_string`).
+///
+/// OCaml builds the predefined declarations once per process. The worker
+/// store keeps one copy per worker: the first compilation builds it as a
+/// store build, and later compilations clone the environment and replay
+/// the build's effects instead of rebuilding every predefined type.
 pub fn initial_env(ctx: &TypeContext) -> Env {
+    if let Some((env, piece)) = ctx.thread_store().cached_initial_env() {
+        ctx.touch_store_piece(&piece);
+        return env;
+    }
+    let (env, piece) = ctx.build_in_store(|| build_initial_env(ctx));
+    if let Some(piece) = piece {
+        ctx.thread_store().publish_initial_env(env.clone(), piece);
+    }
+    env
+}
+
+fn build_initial_env(ctx: &TypeContext) -> Env {
     let mut env = Env::empty();
 
     // Helper: create an abstract type declaration
@@ -2739,6 +2765,28 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initial_env_is_built_once_per_worker_store() {
+        use crate::context::IdGenerator;
+        use crate::types::predef;
+        let first_ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let first = initial_env(&first_ctx);
+        assert!(
+            first_ctx.thread_store().cached_initial_env().is_some(),
+            "building the predefined environment must not touch compilation-local state"
+        );
+        let second_ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let second = initial_env(&second_ctx);
+        assert_ne!(first.id(), second.id());
+        let int_path = Path::Pident(predef::ident_int());
+        assert!(first.lookup_type(&int_path).is_ok());
+        assert!(second.lookup_type(&int_path).is_ok());
+        let option = second.lookup_type(&Path::Pident(predef::ident_option())).expect("option");
+        for param in &option.type_params {
+            assert!(param.is_store(), "predef declarations live in the worker store");
+        }
+    }
 
     #[test]
     fn test_empty_env() {

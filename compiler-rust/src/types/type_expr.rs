@@ -449,6 +449,13 @@ pub enum TypeDesc {
 /// Top bit distinguishes worker-store indices from compilation-local indices.
 pub(crate) const STORE_REF_TAG: u32 = 1 << 31;
 
+/// Second bit (only with `STORE_REF_TAG`) selects the process-wide shared
+/// pool of immutable dependency graphs (`types::shared_store`) instead of the
+/// worker store. Shared references are also `is_store()`: every non-local
+/// cell is read-only outside a store build and written through overlays.
+pub(crate) const SHARED_REF_TAG: u32 = 1 << 30;
+const SHARED_REF_BITS: u32 = STORE_REF_TAG | SHARED_REF_TAG;
+
 /// Compact physical identity for a type node, matching OCaml `type_expr`
 /// identity (`compiler/ml/types.ml:22`, `compiler/ml/btype.ml:46-48`).
 /// The top bit selects the worker store; remaining bits index its arena or
@@ -477,16 +484,40 @@ impl TypeExprRef {
     pub(crate) fn from_store_index(idx: usize) -> Self {
         let raw = u32::try_from(idx).expect("type store index exceeds u32::MAX");
         assert!(
-            raw & STORE_REF_TAG == 0,
+            raw & SHARED_REF_BITS == 0,
             "type store index exceeds the tag range"
         );
         Self(raw | STORE_REF_TAG)
     }
 
-    /// Whether this node lives in the per-thread store.
+    /// Reference to the `idx`-th node of the process-wide shared pool.
+    #[inline]
+    pub(crate) fn from_shared_index(idx: u32) -> Self {
+        assert!(
+            idx & SHARED_REF_BITS == 0,
+            "shared type index exceeds the tag range"
+        );
+        Self(idx | SHARED_REF_BITS)
+    }
+
+    /// Whether this node lives outside the compilation (worker store or
+    /// shared pool).
     #[inline]
     pub(crate) fn is_store(self) -> bool {
         self.0 & STORE_REF_TAG != 0
+    }
+
+    /// Whether this node lives in the process-wide shared pool.
+    #[inline]
+    pub(crate) fn is_shared(self) -> bool {
+        self.0 & SHARED_REF_BITS == SHARED_REF_BITS
+    }
+
+    /// Index into the shared pool.
+    #[inline]
+    pub(crate) fn shared_index(self) -> u32 {
+        debug_assert!(self.is_shared(), "non-shared type reference used as a shared index");
+        self.0 & !SHARED_REF_BITS
     }
 
     /// Index into the compilation-local arena.
@@ -503,8 +534,8 @@ impl TypeExprRef {
     #[inline]
     pub(crate) fn store_index(self) -> usize {
         debug_assert!(
-            self.is_store(),
-            "local type reference used as a store index"
+            self.is_store() && !self.is_shared(),
+            "local or shared type reference used as a store index"
         );
         (self.0 & !STORE_REF_TAG) as usize
     }
@@ -538,7 +569,7 @@ enum TypeExprRefMapStorage<T> {
         offset: u32,
         values: Vec<Option<T>>,
     },
-    Sparse(ahash::AHashMap<TypeExprRef, T>),
+    Sparse(crate::fast_hash::AHashMap<TypeExprRef, T>),
 }
 
 /// Identity-exact hybrid storage for short-lived type-copy maps.
@@ -644,7 +675,7 @@ impl<T> TypeExprRefMap<T> {
         key: TypeExprRef,
         value: T,
     ) -> TypeExprRefMapStorage<T> {
-        let mut values = ahash::AHashMap::with_capacity(len + 1);
+        let mut values = crate::fast_hash::AHashMap::with_capacity(len + 1);
         for entry in entries.iter_mut().take(len) {
             let (stored, stored_value) = entry.take().expect("occupied inline type-map slot");
             values.insert(stored, stored_value);
@@ -707,7 +738,7 @@ impl<T> TypeExprRefMap<T> {
                 if span > TYPE_EXPR_MAP_MIN_SPARSE_SPAN
                     && span > entry_count.saturating_mul(TYPE_EXPR_MAP_DENSE_RATIO)
                 {
-                    let mut sparse = ahash::AHashMap::with_capacity(entry_count);
+                    let mut sparse = crate::fast_hash::AHashMap::with_capacity(entry_count);
                     for (idx, slot) in values.iter_mut().enumerate() {
                         if let Some(stored_value) = slot.take() {
                             sparse.insert(TypeExprRef(*offset + idx as u32), stored_value);
@@ -949,10 +980,32 @@ impl AbbrevMemoRef {
     pub(crate) fn from_store_index(idx: usize) -> Self {
         let raw = u32::try_from(idx).expect("abbrev memo store index exceeds u32::MAX");
         assert!(
-            raw & STORE_REF_TAG == 0,
+            raw & SHARED_REF_BITS == 0,
             "abbrev memo store index exceeds the tag range"
         );
         Self(raw | STORE_REF_TAG)
+    }
+
+    /// Memo cell of the shared-pool `Tconstr` node with index `idx`; one cell
+    /// per node, initially `Mnil` (`compiler/ml/subst.ml:173-177`).
+    #[inline]
+    pub(crate) fn from_shared_index(idx: u32) -> Self {
+        assert!(
+            idx & SHARED_REF_BITS == 0,
+            "shared abbrev memo index exceeds the tag range"
+        );
+        Self(idx | SHARED_REF_BITS)
+    }
+
+    #[inline]
+    pub(crate) fn is_shared(self) -> bool {
+        self.0 & SHARED_REF_BITS == SHARED_REF_BITS
+    }
+
+    #[inline]
+    pub(crate) fn shared_index(self) -> usize {
+        debug_assert!(self.is_shared());
+        (self.0 & !SHARED_REF_BITS) as usize
     }
 
     /// Whether this memo cell belongs to a per-thread store node.
@@ -969,7 +1022,10 @@ impl AbbrevMemoRef {
 
     #[inline]
     pub(crate) fn store_index(self) -> usize {
-        debug_assert!(self.is_store(), "local abbrev memo used as a store index");
+        debug_assert!(
+            self.is_store() && !self.is_shared(),
+            "local or shared abbrev memo used as a store index"
+        );
         (self.0 & !STORE_REF_TAG) as usize
     }
 }
