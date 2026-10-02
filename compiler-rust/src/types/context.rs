@@ -2628,6 +2628,21 @@ impl TypeContext {
             .insert(type_path.clone(), summary);
     }
 
+    /// Register label descriptions and their already-built summary.
+    pub(crate) fn register_record_label_descriptions_with_summary(
+        &self,
+        type_path: &Path,
+        labels: Arc<Vec<super::decl::LabelDescription>>,
+        summary: Arc<RecordLabelDescriptionSummary>,
+    ) {
+        self.record_label_descriptions_cache
+            .borrow_mut()
+            .insert(type_path.clone(), labels);
+        self.record_label_description_summaries_cache
+            .borrow_mut()
+            .insert(type_path.clone(), summary);
+    }
+
     /// Look up reconstructed record label descriptions for a type path.
     pub fn get_record_label_descriptions(
         &self,

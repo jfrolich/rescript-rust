@@ -616,7 +616,7 @@ fn get_level_with_lookup_capture(
     found_level.unwrap_or_else(|| path_binding_time(path))
 }
 
-fn path_root_is_persistent(path: &Path) -> bool {
+pub(crate) fn path_root_is_persistent(path: &Path) -> bool {
     match path {
         Path::Pident(id) => id.is_persistent(),
         Path::Pdot(parent, _, _) => path_root_is_persistent(parent),

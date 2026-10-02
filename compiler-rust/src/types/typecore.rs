@@ -29455,6 +29455,67 @@ fn build_record_label_descriptions_info<'a>(
         });
     }
 
+    // Large regular records of dependency types (JSX DOM props and the like)
+    // are reconstructed identically by every module, and their labels are
+    // not qualified here (see below), so build them once per worker store.
+    let large_regular = labels.len() >= 20
+        && matches!(repr, crate::types::RecordRepresentation::RecordRegular);
+    if large_regular && crate::types::ctype::path_root_is_persistent(&record_path) {
+        let store = ctx.thread_store();
+        if let Some((labels, summary, piece)) = store.cached_record_labels(&record_path) {
+            ctx.touch_store_piece(&piece);
+            ctx.register_record_label_descriptions_with_summary(
+                &record_path,
+                labels.clone(),
+                summary.clone(),
+            );
+            return Some(RecordLabelDescriptionsInfo { labels, summary });
+        }
+        let (descriptions, piece) = ctx.build_in_store(|| {
+            let shared_res = ctx.new_generic_constr(record_path.clone(), decl.type_params.clone());
+            labels
+                .iter()
+                .enumerate()
+                .map(|(pos, ld)| crate::types::LabelDescription {
+                    lbl_name: ld.ld_id.name().to_string(),
+                    lbl_res: shared_res,
+                    lbl_arg: crate::types::ctype::remap_label_type_to_params(
+                        ctx,
+                        ld.ld_type,
+                        &decl.type_params,
+                    ),
+                    lbl_mut: ld.ld_mutable,
+                    lbl_optional: ld.ld_optional,
+                    lbl_pos: pos as i32,
+                    lbl_all: crate::types::LabelArrayRef(0),
+                    lbl_repres: repr.clone(),
+                    lbl_private: decl.type_private,
+                    lbl_loc: ld.ld_loc.clone(),
+                    lbl_attributes: ld.ld_attributes.clone(),
+                })
+                .collect::<Vec<_>>()
+        });
+        let descriptions = Arc::new(descriptions);
+        let summary = Arc::new(crate::types::context::RecordLabelDescriptionSummary::from_labels(
+            &descriptions,
+        ));
+        if let Some(piece) = piece {
+            store.publish_record_labels(
+                record_path.clone(),
+                (descriptions.clone(), summary.clone(), piece),
+            );
+        }
+        ctx.register_record_label_descriptions_with_summary(
+            &record_path,
+            descriptions.clone(),
+            summary.clone(),
+        );
+        return Some(RecordLabelDescriptionsInfo {
+            labels: descriptions,
+            summary,
+        });
+    }
+
     let shared_res = ctx.new_generic_constr(record_path.clone(), decl.type_params.clone());
     // OCaml assigns `lbl_all` when label descriptions are installed in the
     // environment, then reuses that array in `type_record`
