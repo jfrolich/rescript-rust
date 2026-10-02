@@ -2016,7 +2016,7 @@ impl PersistentEnv {
                     crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
                         module_path.clone(),
                         ps.ps_sig.clone(),
-                        ahash::AHashMap::new(),
+                        crate::fast_hash::AHashMap::new(),
                         alias_source.clone(),
                         ctx,
                     )

@@ -3,10 +3,10 @@
 //! This stage ports the OCaml raw-lambda structure shape first and then
 //! incrementally ports expression lowering from `translcore.ml`.
 
-use ahash::AHashSet;
+use crate::fast_hash::AHashSet;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
-use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::path::Path as StdPath;
 use std::sync::{Mutex, OnceLock};
 
@@ -866,7 +866,7 @@ pub struct RawLambdaConverter<'a> {
     type_ctx: &'a TypeContext,
     env: &'a crate::types::env::Env,
     persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
-    possible_required_modules: AHashSet<ModuleId>,
+    possible_required_modules: ahash::AHashSet<ModuleId>,
     id_gen: RawLambdaIdGenerator,
     next_static_raise: i32,
     next_negative_raise: i32,
@@ -894,7 +894,7 @@ impl<'a> RawLambdaConverter<'a> {
             type_ctx,
             env,
             persistent_env: None,
-            possible_required_modules: AHashSet::new(),
+            possible_required_modules: ahash::AHashSet::new(),
             id_gen: RawLambdaIdGenerator::Owned(IdGenerator::new()),
             next_static_raise: 0,
             next_negative_raise: 0,
@@ -923,7 +923,7 @@ impl<'a> RawLambdaConverter<'a> {
             type_ctx,
             env,
             persistent_env: None,
-            possible_required_modules: AHashSet::new(),
+            possible_required_modules: ahash::AHashSet::new(),
             id_gen: RawLambdaIdGenerator::Owned(IdGenerator::with_start_stamp(start_stamp)),
             next_static_raise: 0,
             next_negative_raise: 0,
@@ -953,7 +953,7 @@ impl<'a> RawLambdaConverter<'a> {
             type_ctx,
             env,
             persistent_env: None,
-            possible_required_modules: AHashSet::new(),
+            possible_required_modules: ahash::AHashSet::new(),
             id_gen: RawLambdaIdGenerator::Owned(IdGenerator::with_start_stamp(start_stamp)),
             next_static_raise: 0,
             next_negative_raise: 0,
@@ -984,7 +984,7 @@ impl<'a> RawLambdaConverter<'a> {
             type_ctx,
             env,
             persistent_env: None,
-            possible_required_modules: AHashSet::new(),
+            possible_required_modules: ahash::AHashSet::new(),
             id_gen: RawLambdaIdGenerator::Shared(id_gen),
             next_static_raise: 0,
             next_negative_raise: 0,
@@ -1040,7 +1040,7 @@ impl<'a> RawLambdaConverter<'a> {
         self.id_gen.current_stamp()
     }
 
-    pub fn take_possible_required_modules(&mut self) -> AHashSet<ModuleId> {
+    pub fn take_possible_required_modules(&mut self) -> ahash::AHashSet<ModuleId> {
         std::mem::take(&mut self.possible_required_modules)
     }
 
@@ -11874,8 +11874,8 @@ fn decode_marshaled_ffi_type(encoded: &str) -> Option<std::rc::Rc<OcamlValue>> {
         return None;
     }
     thread_local! {
-        static DECODED: std::cell::RefCell<ahash::AHashMap<String, Option<std::rc::Rc<OcamlValue>>>> =
-            std::cell::RefCell::new(ahash::AHashMap::new());
+        static DECODED: std::cell::RefCell<crate::fast_hash::AHashMap<String, Option<std::rc::Rc<OcamlValue>>>> =
+            std::cell::RefCell::new(crate::fast_hash::AHashMap::new());
     }
     if let Some(cached) = DECODED.with(|cache| cache.borrow().get(encoded).cloned()) {
         return cached;
@@ -12814,7 +12814,7 @@ mod tests {
                 indexed_raw,
                 vec![export],
                 &[],
-                &AHashSet::new(),
+                &ahash::AHashSet::new(),
                 false,
                 &mut inline,
                 &mut arity,
@@ -12878,7 +12878,7 @@ mod tests {
                 indexed_raw,
                 vec![export],
                 &[hoisted],
-                &AHashSet::new(),
+                &ahash::AHashSet::new(),
                 false,
                 &mut inline,
                 &mut arity,

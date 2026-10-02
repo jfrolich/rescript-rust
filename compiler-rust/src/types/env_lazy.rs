@@ -6,7 +6,7 @@
 //! each lookup. This module provides the cached qualified view that the hot
 //! module-resolution paths use as their source of truth.
 
-use ahash::AHashMap as HashMap;
+use crate::fast_hash::AHashMap as HashMap;
 use std::cell::{OnceCell, RefCell};
 use std::sync::Arc;
 
@@ -121,7 +121,7 @@ fn check_signature_store_resident(signature: &[SignatureItem], ctx: &super::cont
     }
     let mut stack = Vec::new();
     signature_roots(signature, &mut stack);
-    let mut seen = ahash::AHashSet::new();
+    let mut seen = crate::fast_hash::AHashSet::new();
     while let Some(ty) = stack.pop() {
         if !ty.is_store() {
             ctx.poison_store_build_for("unit-signature");

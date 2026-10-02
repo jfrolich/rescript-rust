@@ -38,7 +38,7 @@ use crate::types::typedtree::{
     TypedTypeDeclaration, TypedTypeKind, ValueBinding,
 };
 use crate::types::{Path, TypeDesc};
-use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 
 fn core_type_has_row_var(arena: &ParseArena, core_type: &crate::parser::ast::CoreType) -> bool {
     match &*core_type.ptyp_desc {

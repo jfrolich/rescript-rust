@@ -27,7 +27,7 @@ use super::path::Path;
 use super::type_expr::{TypeDesc, TypeExprRef};
 use crate::ident::{Ident, IdentFlags};
 use crate::location::Location;
-use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ type PersistentHashSet<T> = im_rc::HashSet<T, ahash::RandomState>;
 /// and only read afterwards (a rare in-place update copies the layer), so a
 /// flat hash table replaces the persistent map: one allocation to build and
 /// to drop instead of a tree of reference-counted nodes.
-type OpenedMap<V> = ahash::AHashMap<Name, V>;
+type OpenedMap<V> = crate::fast_hash::AHashMap<Name, V>;
 
 /// Collect free type variables (Tvar nodes) from a type expression.
 /// Matches OCaml's Datarepr.free_vars.

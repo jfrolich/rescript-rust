@@ -7,7 +7,7 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
-use ahash::AHashMap as HashMap;
+use crate::fast_hash::AHashMap as HashMap;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::ops::Deref;

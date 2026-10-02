@@ -4,7 +4,7 @@
 //! by optimized-lambda parity dumps and now also feeds the JS backend entry
 //! point in `driver.rs`.
 
-use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::sync::Arc;
 
 use crate::context::IdGenerator;

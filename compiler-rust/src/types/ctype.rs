@@ -35,7 +35,7 @@ use super::type_expr::{
 use super::variance::{Variance, VarianceFlag};
 use crate::ident::Ident;
 use crate::location::Location;
-use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::sync::Arc;
 
 fn in_process_module_resolution_env(
@@ -8274,7 +8274,7 @@ pub(crate) fn compute_variance_map_for_fields(
     ctx: &TypeContext,
     env: &Env,
     fields: &[(bool, TypeExprRef)],
-) -> ahash::AHashMap<TypeExprRef, Variance> {
+) -> crate::fast_hash::AHashMap<TypeExprRef, Variance> {
     let roots: Vec<_> = fields
         .iter()
         .map(|(is_mutable, ty)| {
@@ -8293,7 +8293,7 @@ pub(crate) fn compute_variance_map_with_initial(
     ctx: &TypeContext,
     env: &Env,
     roots: &[(Variance, TypeExprRef)],
-) -> ahash::AHashMap<TypeExprRef, Variance> {
+) -> crate::fast_hash::AHashMap<TypeExprRef, Variance> {
     let mut visited: HashMap<TypeExprRef, Variance> = HashMap::new();
     for (initial_variance, ty) in roots {
         compute_variance_rec(ctx, env, &mut visited, *initial_variance, *ty, 0);
@@ -10004,10 +10004,41 @@ pub(crate) struct CopyCache {
     /// Scoped marker table for OCaml Ctype.copy variant recursion handling.
     /// Mirrors `more.desc <- Tsubst(Ttuple [more'; t])` without mutating
     /// shared type descriptors in-place.
-    row_more_markers: HashMap<TypeExprRef, CopyRowMoreMarker>,
+    row_more_markers: RowMoreMarkers,
 
     /// Optional OCaml `Ctype.copy ~partial` mode.
     partial: Option<CopyPartial>,
+}
+
+/// The variant rows currently being copied (at most a few at once), with
+/// their `Tsubst` markers. A small vector: creating a `CopyCache` for every
+/// `instance` must not build a hash table.
+#[derive(Default)]
+struct RowMoreMarkers(Vec<(TypeExprRef, CopyRowMoreMarker)>);
+
+impl RowMoreMarkers {
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[inline]
+    fn get(&self, key: &TypeExprRef) -> Option<&CopyRowMoreMarker> {
+        self.0.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    fn insert(&mut self, key: TypeExprRef, value: CopyRowMoreMarker) -> Option<CopyRowMoreMarker> {
+        if let Some(slot) = self.0.iter_mut().find(|(k, _)| *k == key) {
+            return Some(std::mem::replace(&mut slot.1, value));
+        }
+        self.0.push((key, value));
+        None
+    }
+
+    fn remove(&mut self, key: &TypeExprRef) -> Option<CopyRowMoreMarker> {
+        let index = self.0.iter().position(|(k, _)| k == key)?;
+        Some(self.0.remove(index).1)
+    }
 }
 
 struct CopyPartial {
@@ -10019,7 +10050,7 @@ impl CopyCache {
     pub(crate) fn new() -> Self {
         CopyCache {
             nodes: super::type_expr::TypeExprRefMap::new(),
-            row_more_markers: HashMap::new(),
+            row_more_markers: RowMoreMarkers::default(),
             partial: None,
         }
     }
@@ -10027,7 +10058,7 @@ impl CopyCache {
     fn new_partial(ctx: &TypeContext, ty: TypeExprRef, keep: bool) -> Self {
         CopyCache {
             nodes: super::type_expr::TypeExprRefMap::new(),
-            row_more_markers: HashMap::new(),
+            row_more_markers: RowMoreMarkers::default(),
             partial: Some(CopyPartial {
                 keep,
                 free_univars: compute_univars_per_node(ctx, ty),

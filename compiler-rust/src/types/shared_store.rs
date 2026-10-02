@@ -24,7 +24,7 @@ use super::variant_runtime::{Layout, LayoutRef};
 use crate::cmi::persistent_env::PersStruct;
 use crate::cmi::portable_types::PortablePersStruct;
 use crate::intern::StrIdx;
-use ahash::AHashMap as HashMap;
+use crate::fast_hash::AHashMap as HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 

@@ -569,7 +569,7 @@ enum TypeExprRefMapStorage<T> {
         offset: u32,
         values: Vec<Option<T>>,
     },
-    Sparse(ahash::AHashMap<TypeExprRef, T>),
+    Sparse(crate::fast_hash::AHashMap<TypeExprRef, T>),
 }
 
 /// Identity-exact hybrid storage for short-lived type-copy maps.
@@ -675,7 +675,7 @@ impl<T> TypeExprRefMap<T> {
         key: TypeExprRef,
         value: T,
     ) -> TypeExprRefMapStorage<T> {
-        let mut values = ahash::AHashMap::with_capacity(len + 1);
+        let mut values = crate::fast_hash::AHashMap::with_capacity(len + 1);
         for entry in entries.iter_mut().take(len) {
             let (stored, stored_value) = entry.take().expect("occupied inline type-map slot");
             values.insert(stored, stored_value);
@@ -738,7 +738,7 @@ impl<T> TypeExprRefMap<T> {
                 if span > TYPE_EXPR_MAP_MIN_SPARSE_SPAN
                     && span > entry_count.saturating_mul(TYPE_EXPR_MAP_DENSE_RATIO)
                 {
-                    let mut sparse = ahash::AHashMap::with_capacity(entry_count);
+                    let mut sparse = crate::fast_hash::AHashMap::with_capacity(entry_count);
                     for (idx, slot) in values.iter_mut().enumerate() {
                         if let Some(stored_value) = slot.take() {
                             sparse.insert(TypeExprRef(*offset + idx as u32), stored_value);

@@ -46,7 +46,7 @@ use crate::types::{
     Env, Path, RowField, TypeArg, TypeContext, TypeDesc, TypeError, TypeExprRef, TypeExprRefMap,
     UnifyState, ValueDescription,
 };
-use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -34312,7 +34312,7 @@ pub fn contains_build_variant(
 pub fn contains_build_variant_with_registry(
     expr: &ParsedExpression,
     arena: &crate::parse_arena::ParseArena,
-    registry: Option<&ahash::AHashMap<String, crate::types::comptime::ComptimeFunction>>,
+    registry: Option<&crate::fast_hash::AHashMap<String, crate::types::comptime::ComptimeFunction>>,
 ) -> bool {
     use crate::parser::ast::ExpressionDesc as ED;
     // Top-level: if this is a function (has parameters), it's a TEMPLATE,
@@ -34327,7 +34327,7 @@ pub fn contains_build_variant_with_registry(
 fn contains_build_variant_inside(
     expr: &ParsedExpression,
     arena: &crate::parse_arena::ParseArena,
-    registry: Option<&ahash::AHashMap<String, crate::types::comptime::ComptimeFunction>>,
+    registry: Option<&crate::fast_hash::AHashMap<String, crate::types::comptime::ComptimeFunction>>,
 ) -> bool {
     use crate::parser::ast::ExpressionDesc as ED;
     match &*expr.pexp_desc {

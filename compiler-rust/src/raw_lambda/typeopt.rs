@@ -3,7 +3,7 @@
 //! This follows the same split as OCaml's `typeopt.ml`, which `translcore.ml`
 //! consults when deciding raw-lambda shapes such as `Blk_some_not_nested`.
 
-use std::collections::HashSet;
+use crate::fast_hash::AHashSet as HashSet;
 
 use crate::types::context::TypeContext;
 use crate::types::decl::{

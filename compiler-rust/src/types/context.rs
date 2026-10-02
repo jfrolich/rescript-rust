@@ -184,7 +184,7 @@ impl QualifiedRecordLabelCacheKey {
 
 #[derive(Clone, Debug)]
 pub(crate) struct RecordLabelDescriptionSummary {
-    label_positions: Arc<ahash::AHashMap<String, usize>>,
+    label_positions: Arc<crate::fast_hash::AHashMap<String, usize>>,
     pub(crate) mandatory_count: usize,
     pub(crate) has_optional: bool,
     pub(crate) has_dotdotdot: bool,
@@ -193,7 +193,7 @@ pub(crate) struct RecordLabelDescriptionSummary {
 
 impl RecordLabelDescriptionSummary {
     pub(crate) fn from_labels(labels: &[super::decl::LabelDescription]) -> Self {
-        let mut label_positions = ahash::AHashMap::with_capacity(labels.len());
+        let mut label_positions = crate::fast_hash::AHashMap::with_capacity(labels.len());
         let mut mandatory_count = 0;
         let mut has_optional = false;
         let mut has_dotdotdot = false;
@@ -286,7 +286,7 @@ pub struct TypeContext {
     simple_abbrevs: Cell<AbbrevMemoRef>,
     /// Counters for OCaml `Ctype.get_new_abstract_name` when reifying local
     /// GADT constraint variables.
-    reified_var_counters: RefCell<ahash::AHashMap<String, usize>>,
+    reified_var_counters: RefCell<crate::fast_hash::AHashMap<String, usize>>,
     /// Previous env ID for check_abbrev_env (OCaml ctype.ml:1272)
     previous_env_id: Cell<u64>,
 
@@ -339,7 +339,7 @@ pub struct TypeContext {
     /// Effects of the current store build on this compilation.
     store_build_effects: RefCell<Vec<StoreEffect>>,
     /// Shared pieces whose effects this compilation has already applied.
-    touched_store_pieces: RefCell<ahash::AHashSet<u64>>,
+    touched_store_pieces: RefCell<crate::fast_hash::AHashSet<u64>>,
 
     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
     compiler_counters_enabled: bool,
@@ -364,27 +364,27 @@ pub struct TypeContext {
     /// Global type declaration store, indexed by type name.
     /// Populated when loading CMI module signatures so that type alias
     /// expansion can find declarations for types not directly in the env.
-    type_decl_store: RefCell<ahash::AHashMap<smol_str::SmolStr, Arc<super::decl::TypeDeclaration>>>,
+    type_decl_store: RefCell<crate::fast_hash::AHashMap<smol_str::SmolStr, Arc<super::decl::TypeDeclaration>>>,
 
     /// Global type declaration store, indexed by ident stamp.
     /// Used for looking up CMI-loaded type declarations by their stamp
     /// when the type name is too generic (e.g., "t").
-    type_decl_by_stamp: RefCell<ahash::AHashMap<i32, Arc<super::decl::TypeDeclaration>>>,
+    type_decl_by_stamp: RefCell<crate::fast_hash::AHashMap<i32, Arc<super::decl::TypeDeclaration>>>,
 
     /// Global type declaration store, indexed by full qualified path string.
     /// Used for looking up types via Pdot paths (e.g., "Js.Promise.t").
-    type_decl_by_path: RefCell<ahash::AHashMap<smol_str::SmolStr, Arc<super::decl::TypeDeclaration>>>,
+    type_decl_by_path: RefCell<crate::fast_hash::AHashMap<smol_str::SmolStr, Arc<super::decl::TypeDeclaration>>>,
     /// Qualified declarations keyed by Path identity, preserving local stamps.
     /// Only single `Exact` registrations, with their log position; batches
     /// are kept whole in `exact_path_batches` and probed through their shared
     /// index, so a unit never copies every dependency type into this map.
     type_decl_by_exact_path:
-        RefCell<ahash::AHashMap<Path, (usize, Arc<super::decl::TypeDeclaration>)>>,
+        RefCell<crate::fast_hash::AHashMap<Path, (usize, Arc<super::decl::TypeDeclaration>)>>,
     exact_path_batches: RefCell<Vec<(usize, Arc<super::thread_store::SigTypeBatch>)>>,
     /// Exact-path answers, valid while the log length equals the first field.
     exact_path_memo: RefCell<(
         usize,
-        ahash::AHashMap<Path, Option<Arc<super::decl::TypeDeclaration>>>,
+        crate::fast_hash::AHashMap<Path, Option<Arc<super::decl::TypeDeclaration>>>,
     )>,
     /// Registrations for the four maps above, in registration order. Each map
     /// replays the log up to the present only when it is read: modules
@@ -393,26 +393,26 @@ pub struct TypeContext {
     type_decl_log: RefCell<Vec<TypeDeclRegistration>>,
     /// Log position each map has been replayed to: name, stamp, path, exact.
     type_decl_log_replayed: [Cell<usize>; 4],
-    type_item_by_path: RefCell<ahash::AHashMap<String, (Ident, super::decl::TypeDeclaration)>>,
-    missing_type_item_by_path: RefCell<ahash::AHashSet<String>>,
+    type_item_by_path: RefCell<crate::fast_hash::AHashMap<String, (Ident, super::decl::TypeDeclaration)>>,
+    missing_type_item_by_path: RefCell<crate::fast_hash::AHashSet<String>>,
 
     /// Cache for type declarations resolved through module signatures (Pdot paths).
     /// Separate from type_decl_by_path to avoid conflicts with expand_head_once
     /// entries which have unqualified paths. This approximates OCaml's
     /// components_of_module_maker lazy caching.
-    resolved_pdot_type_cache: RefCell<ahash::AHashMap<SamePathKey, Arc<super::decl::TypeDeclaration>>>,
+    resolved_pdot_type_cache: RefCell<crate::fast_hash::AHashMap<SamePathKey, Arc<super::decl::TypeDeclaration>>>,
 
     /// Cache for resolved module signatures. Keyed by module path name.
     /// OCaml `compiler/ml/env.ml:1513-1514,1516-1588` stores forced module
     /// components behind lazy cells; cache hits share the already-substituted
     /// signature snapshot instead of cloning every `SignatureItem`.
     resolved_module_sig_cache:
-        RefCell<ahash::AHashMap<String, (Path, Arc<super::decl::Signature>)>>,
+        RefCell<crate::fast_hash::AHashMap<String, (Path, Arc<super::decl::Signature>)>>,
 
     /// Cached qualified module-component views keyed by access-path semantics.
     /// This is the Rust analogue of OCaml's lazy `components_of_module_maker`.
     qualified_module_components_cache: RefCell<
-        ahash::AHashMap<
+        crate::fast_hash::AHashMap<
             QualifiedModuleComponentsCacheKey,
             Arc<super::env_lazy::QualifiedModuleComponents>,
         >,
@@ -426,17 +426,17 @@ pub struct TypeContext {
     /// declaration-derived source path available when Rust later reaches a
     /// cached component view without `PersistentEnv`; it must not be inferred
     /// from flattened module-name spelling.
-    component_alias_sources: RefCell<ahash::AHashMap<SamePathKey, Vec<Path>>>,
+    component_alias_sources: RefCell<crate::fast_hash::AHashMap<SamePathKey, Vec<Path>>>,
     /// Component-table name indexes of compilation-local signatures, keyed by
     /// address; the entry keeps the signature alive so the key stays unique.
     signature_indexes: RefCell<
-        ahash::AHashMap<usize, (Arc<super::decl::Signature>, Arc<super::env_lazy::SignatureIndex>)>,
+        crate::fast_hash::AHashMap<usize, (Arc<super::decl::Signature>, Arc<super::env_lazy::SignatureIndex>)>,
     >,
-    component_paths_by_alias_source: RefCell<ahash::AHashMap<SamePathKey, Vec<Path>>>,
+    component_paths_by_alias_source: RefCell<crate::fast_hash::AHashMap<SamePathKey, Vec<Path>>>,
 
     /// Cached dotted value lookups keyed by resolved module access path.
     resolved_module_value_cache: RefCell<
-        ahash::AHashMap<Path, ahash::AHashMap<String, (Path, Arc<super::decl::ValueDescription>)>>,
+        crate::fast_hash::AHashMap<Path, crate::fast_hash::AHashMap<String, (Path, Arc<super::decl::ValueDescription>)>>,
     >,
 
     /// Cached dotted type lookups keyed by resolved module access path.
@@ -444,57 +444,57 @@ pub struct TypeContext {
     /// never change under an existing path, but Rust's Env is mutated in
     /// place (`add_module`) and must invalidate these derived entries.
     resolved_module_type_cache: RefCell<
-        ahash::AHashMap<
+        crate::fast_hash::AHashMap<
             (u64, Path),
-            ahash::AHashMap<String, (Path, Ident, Arc<super::decl::TypeDeclaration>)>,
+            crate::fast_hash::AHashMap<String, (Path, Ident, Arc<super::decl::TypeDeclaration>)>,
         >,
     >,
 
     /// Cached child-module access paths keyed by resolved parent access path.
-    resolved_child_module_path_cache: RefCell<ahash::AHashMap<Path, ahash::AHashMap<String, Path>>>,
+    resolved_child_module_path_cache: RefCell<crate::fast_hash::AHashMap<Path, crate::fast_hash::AHashMap<String, Path>>>,
 
     /// Forced declarations shared by persistent/global alias component views.
     /// Local component views keep their own thunk state in StructureComponentTables.
     qualified_module_decl_cache: RefCell<
-        ahash::AHashMap<
+        crate::fast_hash::AHashMap<
             Path,
-            ahash::AHashMap<String, (Ident, Arc<super::decl::ModuleDeclaration>)>,
+            crate::fast_hash::AHashMap<String, (Ident, Arc<super::decl::ModuleDeclaration>)>,
         >,
     >,
 
     /// Resolved dotted type paths keyed by `Env::scope_id`, path, and whether
     /// alias targets were strengthened (see `ctype::resolve_type_item_through_env`).
     resolved_type_item_cache: RefCell<
-        ahash::AHashMap<(u64, Path, bool), (Ident, Arc<super::decl::TypeDeclaration>)>,
+        crate::fast_hash::AHashMap<(u64, Path, bool), (Ident, Arc<super::decl::TypeDeclaration>)>,
     >,
 
     /// Cached full normalize_path results keyed by environment identity.
-    normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
+    normalized_path_full_cache: RefCell<crate::fast_hash::AHashMap<(u64, Path), Path>>,
     /// Answers of `raw_lambda::typeopt` queries while the finished typed tree
     /// is lowered (`None` outside that phase): the types no longer change.
-    typeopt_answers: RefCell<Option<ahash::AHashMap<(u64, TypeExprRef, u8), bool>>>,
+    typeopt_answers: RefCell<Option<crate::fast_hash::AHashMap<(u64, TypeExprRef, u8), bool>>>,
     /// Outcome of expanding a `Pdot`-headed constructor, per module scope
     /// (see `ctype::PdotExpansion`).
     pdot_expansions: RefCell<hashbrown::HashMap<PdotExpansionKey, super::ctype::PdotExpansion, ahash::RandomState>>,
 
     /// Cached forward-only (unification) normalize_path results, keyed like
     /// `normalized_path_full_cache`.
-    normalized_path_forward_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
+    normalized_path_forward_cache: RefCell<crate::fast_hash::AHashMap<(u64, Path), Path>>,
 
     /// `occur_univar` argument masks per (scope, constructor path): bit `i`
     /// is set when argument `i` has a may-positive or may-negative variance;
     /// `None` when the declaration is not found (every argument is visited).
-    occur_variance_masks: RefCell<ahash::AHashMap<(u64, Path), Option<u64>>>,
+    occur_variance_masks: RefCell<crate::fast_hash::AHashMap<(u64, Path), Option<u64>>>,
 
     /// `Ctype.get_level` declaration levels per (scope, type path): the
     /// `type_newtype_level` of the declaration `Env.find_type` returns.
-    type_newtype_levels: RefCell<ahash::AHashMap<(u64, Path), Option<i32>>>,
+    type_newtype_levels: RefCell<crate::fast_hash::AHashMap<(u64, Path), Option<i32>>>,
 
     /// Cached side-effectful normalize_path results keyed by environment identity.
-    forced_normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
+    forced_normalized_path_full_cache: RefCell<crate::fast_hash::AHashMap<(u64, Path), Path>>,
 
     /// Cached side-effectful type-path comparisons keyed by environment identity.
-    forced_type_path_compare_cache: RefCell<ahash::AHashMap<(u64, Path, Path), bool>>,
+    forced_type_path_compare_cache: RefCell<crate::fast_hash::AHashMap<(u64, Path, Path), bool>>,
 
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Arc<Vec<std::path::PathBuf>>>,
@@ -510,7 +510,7 @@ pub struct TypeContext {
     /// Cache of renamed module signatures.
     /// Matches OCaml's lazy ps_sig = Subst.signature Subst.identity sign.
     /// Populated by PersistentEnv::get_renamed_sig, consumed by normalize_path.
-    pub(crate) renamed_module_sigs: RefCell<ahash::AHashMap<String, Arc<DeferredRenamedSig>>>,
+    pub(crate) renamed_module_sigs: RefCell<crate::fast_hash::AHashMap<String, Arc<DeferredRenamedSig>>>,
 
     /// Reserved stamp cursor `(next, last)` used while materializing a
     /// [`DeferredRenamedSig`], so its binders get the stamps reserved when the
@@ -520,7 +520,7 @@ pub struct TypeContext {
     /// Raw (un-renamed) module signatures for persistent modules.
     /// Used by trigger_module_sig_rename to lazily rename on first access
     /// from normalize_path, matching OCaml's lazy ps_sig forcing.
-    raw_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
+    raw_module_sigs: RefCell<crate::fast_hash::AHashMap<String, Arc<super::decl::Signature>>>,
 
     /// Raw signature copies used only by GenType's CMT-shaped alias scraping.
     ///
@@ -529,9 +529,9 @@ pub struct TypeContext {
     /// TypeContext boundaries through PortablePersStruct, so keep those raw
     /// copied signatures separate from `raw_module_sigs`; typechecking lookup
     /// paths expect the normal component/rename caches, not this CMT view.
-    gentype_raw_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
+    gentype_raw_module_sigs: RefCell<crate::fast_hash::AHashMap<String, Arc<super::decl::Signature>>>,
     gentype_portable_raw_module_sigs:
-        RefCell<ahash::AHashMap<String, Arc<crate::cmi::portable_types::PortablePersStruct>>>,
+        RefCell<crate::fast_hash::AHashMap<String, Arc<crate::cmi::portable_types::PortablePersStruct>>>,
 
     /// Raw signatures loaded only for persistent component lookup.
     ///
@@ -539,12 +539,12 @@ pub struct TypeContext {
     /// same one-shot component backing store without making
     /// `trigger_all_module_sig_renames` see modules that were only touched by
     /// descriptor lookup.
-    raw_component_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
+    raw_component_module_sigs: RefCell<crate::fast_hash::AHashMap<String, Arc<super::decl::Signature>>>,
 
     /// String table for CMI-decoded Longident components.
     /// CMI decoding happens without a ParseArena, so we allocate synthetic
     /// StrIdx values here and resolve them later when needed.
-    cmi_longident_names: RefCell<ahash::AHashMap<u32, String>>,
+    cmi_longident_names: RefCell<crate::fast_hash::AHashMap<u32, String>>,
 
     /// String table for ParseArena Longident components whose StrIdx values are
     /// intentionally unique per source occurrence for marshal identity.
@@ -575,14 +575,14 @@ pub struct TypeContext {
     /// sharing `t.id`, so the sexp serializer deduplicates them. In Rust, we create
     /// separate TypeExprRef nodes but record the alias here so the sexp serializer
     /// can use the original's dedup key.
-    arity_aliases: RefCell<ahash::AHashMap<TypeExprRef, TypeExprRef>>,
+    arity_aliases: RefCell<crate::fast_hash::AHashMap<TypeExprRef, TypeExprRef>>,
 
     /// Record type labels cache.
     /// Maps type path (with stamp for uniqueness) → Vec<(field_name, position, mutable, repr, attributes)>.
     /// Populated during type checking when record patterns are processed.
     /// Used by raw lambda conversion to bind ALL record fields (matching OCaml's make_record_matching).
     record_labels_cache: RefCell<
-        ahash::AHashMap<
+        crate::fast_hash::AHashMap<
             Path,
             Vec<(
                 String,
@@ -602,9 +602,9 @@ pub struct TypeContext {
     /// literals instead of rebuilding or cloning large records such as
     /// `JsxDOM.domProps` for every JSX literal.
     record_label_descriptions_cache:
-        RefCell<ahash::AHashMap<super::path::Path, Arc<Vec<super::decl::LabelDescription>>>>,
+        RefCell<crate::fast_hash::AHashMap<super::path::Path, Arc<Vec<super::decl::LabelDescription>>>>,
     record_label_description_summaries_cache:
-        RefCell<ahash::AHashMap<super::path::Path, Arc<RecordLabelDescriptionSummary>>>,
+        RefCell<crate::fast_hash::AHashMap<super::path::Path, Arc<RecordLabelDescriptionSummary>>>,
 
     /// Qualified persistent record labels keyed by environment and label slot.
     /// OCaml caches module components with already-substituted `lbl_all`
@@ -612,7 +612,7 @@ pub struct TypeContext {
     /// repeatedly copying the same persistent JSX prop label skeleton before
     /// each `instance_label` call.
     qualified_record_label_cache:
-        RefCell<ahash::AHashMap<QualifiedRecordLabelCacheKey, super::decl::LabelDescription>>,
+        RefCell<crate::fast_hash::AHashMap<QualifiedRecordLabelCacheKey, super::decl::LabelDescription>>,
 
     /// Synthetic dict-pattern labels created by type-directed label lookup.
     /// OCaml mutates `lbl_all` on the predefined dict magic field as each dict
@@ -630,13 +630,16 @@ pub struct TypeContext {
     /// Lident indices synthesized while filling omitted optional record fields.
     /// This avoids repeated reverse scans through the parse arena for large JSX
     /// DOM prop records while preserving the same index that the scan found.
-    synthesized_record_lidents: RefCell<ahash::AHashMap<String, LidentIdx>>,
+    synthesized_record_lidents: RefCell<crate::fast_hash::AHashMap<String, LidentIdx>>,
 
     /// Stored typedtree environment snapshots, keyed by EnvRef.
     typed_envs: RefCell<Vec<Arc<Env>>>,
 
     /// Reuse EnvRefs for identical logical environments.
-    typed_envs_by_id: RefCell<ahash::AHashMap<u64, EnvRef>>,
+    typed_envs_by_id: RefCell<crate::fast_hash::AHashMap<u64, EnvRef>>,
+    /// The most recently stored (env id, EnvRef): consecutive typed nodes
+    /// usually share their environment.
+    last_typed_env: Cell<(u64, EnvRef)>,
 }
 
 /// Effect of building shared store data on the state of the compilation that
@@ -799,7 +802,7 @@ impl TypeContext {
             saved_levels: RefCell::new(Vec::new()),
             trace_gadt_instances: Cell::new(false),
             simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
-            reified_var_counters: RefCell::new(ahash::AHashMap::new()),
+            reified_var_counters: RefCell::new(crate::fast_hash::AHashMap::new()),
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: TypeArena::new(),
@@ -818,7 +821,7 @@ impl TypeContext {
             store_build_row_start: Cell::new(0),
             store_build_poisoned: Cell::new(false),
             store_build_effects: RefCell::new(Vec::new()),
-            touched_store_pieces: RefCell::new(ahash::AHashSet::new()),
+            touched_store_pieces: RefCell::new(crate::fast_hash::AHashSet::new()),
             compiler_counters_enabled: crate::perf_counters::enabled(),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
@@ -830,44 +833,44 @@ impl TypeContext {
             variant_layouts: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
-            type_decl_store: RefCell::new(ahash::AHashMap::new()),
-            type_decl_by_stamp: RefCell::new(ahash::AHashMap::new()),
-            type_decl_by_path: RefCell::new(ahash::AHashMap::new()),
-            type_decl_by_exact_path: RefCell::new(ahash::AHashMap::new()),
+            type_decl_store: RefCell::new(crate::fast_hash::AHashMap::new()),
+            type_decl_by_stamp: RefCell::new(crate::fast_hash::AHashMap::new()),
+            type_decl_by_path: RefCell::new(crate::fast_hash::AHashMap::new()),
+            type_decl_by_exact_path: RefCell::new(crate::fast_hash::AHashMap::new()),
             exact_path_batches: RefCell::new(Vec::new()),
-            exact_path_memo: RefCell::new((0, ahash::AHashMap::new())),
+            exact_path_memo: RefCell::new((0, crate::fast_hash::AHashMap::new())),
             type_decl_log: RefCell::new(Vec::new()),
             type_decl_log_replayed: Default::default(),
-            type_item_by_path: RefCell::new(ahash::AHashMap::new()),
-            missing_type_item_by_path: RefCell::new(ahash::AHashSet::new()),
-            resolved_pdot_type_cache: RefCell::new(ahash::AHashMap::new()),
-            resolved_module_sig_cache: RefCell::new(ahash::AHashMap::new()),
-            qualified_module_components_cache: RefCell::new(ahash::AHashMap::new()),
-            component_alias_sources: RefCell::new(ahash::AHashMap::new()),
-            signature_indexes: RefCell::new(ahash::AHashMap::new()),
-            component_paths_by_alias_source: RefCell::new(ahash::AHashMap::new()),
-            resolved_module_value_cache: RefCell::new(ahash::AHashMap::new()),
-            resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
-            resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
-            qualified_module_decl_cache: RefCell::new(ahash::AHashMap::new()),
-            resolved_type_item_cache: RefCell::new(ahash::AHashMap::new()),
-            normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
+            type_item_by_path: RefCell::new(crate::fast_hash::AHashMap::new()),
+            missing_type_item_by_path: RefCell::new(crate::fast_hash::AHashSet::new()),
+            resolved_pdot_type_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_module_sig_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            qualified_module_components_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            component_alias_sources: RefCell::new(crate::fast_hash::AHashMap::new()),
+            signature_indexes: RefCell::new(crate::fast_hash::AHashMap::new()),
+            component_paths_by_alias_source: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_module_value_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_module_type_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_child_module_path_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            qualified_module_decl_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_type_item_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            normalized_path_full_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             pdot_expansions: RefCell::new(hashbrown::HashMap::default()),
             typeopt_answers: RefCell::new(None),
-            normalized_path_forward_cache: RefCell::new(ahash::AHashMap::new()),
-            occur_variance_masks: RefCell::new(ahash::AHashMap::new()),
-            type_newtype_levels: RefCell::new(ahash::AHashMap::new()),
-            forced_normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
-            forced_type_path_compare_cache: RefCell::new(ahash::AHashMap::new()),
+            normalized_path_forward_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            occur_variance_masks: RefCell::new(crate::fast_hash::AHashMap::new()),
+            type_newtype_levels: RefCell::new(crate::fast_hash::AHashMap::new()),
+            forced_normalized_path_full_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            forced_type_path_compare_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             load_paths: RefCell::new(Arc::new(Vec::new())),
             persistent_env: RefCell::new(None),
-            renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
+            renamed_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
             reserved_rename_stamps: Cell::new(None),
-            raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
-            gentype_raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
-            gentype_portable_raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
-            raw_component_module_sigs: RefCell::new(ahash::AHashMap::new()),
-            cmi_longident_names: RefCell::new(ahash::AHashMap::new()),
+            raw_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
+            gentype_raw_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
+            gentype_portable_raw_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
+            raw_component_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
+            cmi_longident_names: RefCell::new(crate::fast_hash::AHashMap::new()),
             arena_longident_names: RefCell::new(Vec::new()),
             next_cmi_longident_idx: Cell::new(0xF000_0000),
             predef_int: Cell::new(None),
@@ -881,15 +884,16 @@ impl TypeContext {
             predef_option_inner: Cell::new(None),
             predef_option_type: Cell::new(None),
             predef_option_layout: Cell::new(None),
-            arity_aliases: RefCell::new(ahash::AHashMap::new()),
-            record_labels_cache: RefCell::new(ahash::AHashMap::new()),
-            record_label_descriptions_cache: RefCell::new(ahash::AHashMap::new()),
-            record_label_description_summaries_cache: RefCell::new(ahash::AHashMap::new()),
-            qualified_record_label_cache: RefCell::new(ahash::AHashMap::new()),
+            arity_aliases: RefCell::new(crate::fast_hash::AHashMap::new()),
+            record_labels_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            record_label_descriptions_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            record_label_description_summaries_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            qualified_record_label_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             dict_pattern_labels_cache: RefCell::new(Vec::new()),
-            synthesized_record_lidents: RefCell::new(ahash::AHashMap::new()),
+            synthesized_record_lidents: RefCell::new(crate::fast_hash::AHashMap::new()),
             typed_envs: RefCell::new(Vec::new()),
-            typed_envs_by_id: RefCell::new(ahash::AHashMap::new()),
+            typed_envs_by_id: RefCell::new(crate::fast_hash::AHashMap::new()),
+            last_typed_env: Cell::new((u64::MAX, EnvRef(0))),
         }
     }
 
@@ -974,7 +978,12 @@ impl TypeContext {
     /// Store a typedtree environment snapshot and return a stable reference.
     pub fn store_typed_env(&self, env: &Env) -> EnvRef {
         self.poison_store_build_for("store_typed_env");
+        let (last_id, last_ref) = self.last_typed_env.get();
+        if last_id == env.id() {
+            return last_ref;
+        }
         if let Some(existing) = self.typed_envs_by_id.borrow().get(&env.id()).copied() {
+            self.last_typed_env.set((env.id(), existing));
             return existing;
         }
 
@@ -985,6 +994,7 @@ impl TypeContext {
             env_ref
         };
         self.typed_envs_by_id.borrow_mut().insert(env.id(), env_ref);
+        self.last_typed_env.set((env.id(), env_ref));
         env_ref
     }
 
@@ -1683,7 +1693,7 @@ impl TypeContext {
     /// Start or stop answering repeated `typeopt` queries from a cache. Only
     /// enabled while a finished typed tree is lowered to lambda.
     pub(crate) fn set_typeopt_cache(&self, enabled: bool) {
-        *self.typeopt_answers.borrow_mut() = enabled.then(ahash::AHashMap::new);
+        *self.typeopt_answers.borrow_mut() = enabled.then(crate::fast_hash::AHashMap::new);
     }
 
     /// Answer a `typeopt` query `query` about `ty` in the env `env_id`,

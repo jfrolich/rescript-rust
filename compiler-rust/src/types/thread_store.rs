@@ -27,7 +27,7 @@ use crate::cmi::persistent_env::PersStruct;
 use crate::cmi::portable_types::PortablePersStruct;
 use crate::intern::StrIdx;
 use std::cell::{Cell, RefCell};
-use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
@@ -97,7 +97,7 @@ pub(crate) struct SigTypeRegistration {
 #[derive(Debug)]
 pub(crate) struct SigTypeBatch {
     entries: Box<[SigTypeRegistration]>,
-    exact_index: std::sync::OnceLock<ahash::AHashMap<Path, u32>>,
+    exact_index: std::sync::OnceLock<crate::fast_hash::AHashMap<Path, u32>>,
 }
 
 impl SigTypeBatch {
@@ -105,7 +105,7 @@ impl SigTypeBatch {
     /// its entries into a map keyed by `qualified_path` would leave it.
     pub(crate) fn find_exact(&self, path: &Path) -> Option<&Arc<TypeDeclaration>> {
         let index = self.exact_index.get_or_init(|| {
-            let mut index = ahash::AHashMap::with_capacity(self.entries.len());
+            let mut index = crate::fast_hash::AHashMap::with_capacity(self.entries.len());
             for (position, entry) in self.entries.iter().enumerate() {
                 index.insert(entry.qualified_path.clone(), position as u32);
             }
