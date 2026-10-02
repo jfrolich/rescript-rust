@@ -29,6 +29,7 @@ use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
 };
 use std::ops::Deref;
+use std::sync::Arc;
 
 /// A located value (convenience alias).
 pub type Loc<T> = Located<T>;
@@ -221,7 +222,9 @@ pub enum PatternDesc {
     Tpat_tuple(Vec<Pattern>),
 
     /// Constructor: `C`, `C(P)`, `C(P1, ..., Pn)`.
-    Tpat_construct(Loc<LidentIdx>, ConstructorDescription, Vec<Pattern>),
+    /// The description is shared like OCaml's physical `constructor_description`
+    /// record, so pattern copies in exhaustiveness and matching stay cheap.
+    Tpat_construct(Loc<LidentIdx>, Arc<ConstructorDescription>, Vec<Pattern>),
 
     /// Variant: `` `A ``, `` `A(P) ``.
     Tpat_variant(String, Option<Box<Pattern>>, RowDescRef),
@@ -229,9 +232,9 @@ pub enum PatternDesc {
     /// Record: `{l1: P1, ..., ln: Pn}` or `{l1: P1, ..., _}`.
     /// The bool indicates whether the field is optional.
     Tpat_record(
-        Vec<(Loc<LidentIdx>, LabelDescription, Pattern, bool)>,
+        Vec<(Loc<LidentIdx>, Arc<LabelDescription>, Pattern, bool)>,
         ClosedFlag,
-        Option<RecordPatternRest>,
+        Option<Box<RecordPatternRest>>,
     ),
 
     /// Array: `[| P1, ..., Pn |]`.
@@ -239,7 +242,7 @@ pub enum PatternDesc {
 
     /// Or-pattern: `P1 | P2`.
     /// The RowDesc is Some when translating type patterns.
-    Tpat_or(Box<Pattern>, Box<Pattern>, Option<RowDesc>),
+    Tpat_or(Box<Pattern>, Box<Pattern>, Option<Box<RowDesc>>),
 }
 
 /// Typed record-rest binding (compiler/ml/typedtree.ml:38-43).
@@ -295,7 +298,7 @@ pub enum ExpExtra {
 #[derive(Debug, Clone)]
 pub enum ExpressionDesc {
     /// Identifier: `x`, `M.x`.
-    Texp_ident(Path, Loc<LidentIdx>, ValueDescription),
+    Texp_ident(Path, Loc<LidentIdx>, Arc<ValueDescription>),
 
     /// Constant: `1`, `'a'`, `"hello"`, `1.0`.
     Texp_constant(Constant),
@@ -333,7 +336,7 @@ pub enum ExpressionDesc {
     Texp_tuple(Vec<Expression>),
 
     /// Constructor: `C`, `C(E)`, `C(E1, ..., En)`.
-    Texp_construct(Loc<LidentIdx>, ConstructorDescription, Vec<Expression>),
+    Texp_construct(Loc<LidentIdx>, Arc<ConstructorDescription>, Vec<Expression>),
 
     /// Variant: `` `A ``, `` `A(E) ``.
     Texp_variant(String, Option<Box<Expression>>),
@@ -372,13 +375,13 @@ pub enum ExpressionDesc {
     },
 
     /// Field access: `E.l`.
-    Texp_field(Box<Expression>, Loc<LidentIdx>, LabelDescription),
+    Texp_field(Box<Expression>, Loc<LidentIdx>, Arc<LabelDescription>),
 
     /// Field mutation: `E.l = E'`.
     Texp_setfield(
         Box<Expression>,
         Loc<LidentIdx>,
-        LabelDescription,
+        Arc<LabelDescription>,
         Box<Expression>,
     ),
 
@@ -436,7 +439,7 @@ pub enum ExpressionDesc {
     Texp_letmodule(Ident, Loc<String>, Box<ModuleExpr>, Box<Expression>),
 
     /// Let exception: `let exception C of T in E`.
-    Texp_letexception(ExtensionConstructor, Box<Expression>),
+    Texp_letexception(Box<ExtensionConstructor>, Box<Expression>),
 
     /// Assert: `assert E`.
     Texp_assert(Box<Expression>),
@@ -698,7 +701,7 @@ impl ModuleType {
     pub fn placeholder() -> Self {
         Self {
             mty_desc: ModuleTypeDesc::Tmty_placeholder,
-            mty_type: DeclModuleType::MtySignature(vec![]),
+            mty_type: DeclModuleType::MtySignature(std::sync::Arc::new(vec![])),
             mty_env: EnvRef(0),
             mty_loc: LocIdx(0),
             mty_attributes: Attributes::new(),
@@ -1266,5 +1269,17 @@ mod tests {
         let unknown = arena.push_arity(None);
         assert_eq!(arena.get_arity(full2a), arena.get_arity(full2b));
         assert_ne!(arena.get_arity(full2a), arena.get_arity(unknown));
+    }
+}
+
+#[cfg(test)]
+mod node_size_tests {
+    // Typed expressions are built, moved and matched throughout typing and
+    // lowering; keep rare large payloads out of line.
+    #[test]
+    fn typed_expression_sizes_stay_compact() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<super::ExpressionDesc>(), 72);
+        assert_eq!(size_of::<super::Expression>(), 112);
     }
 }

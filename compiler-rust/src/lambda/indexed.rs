@@ -377,18 +377,20 @@ impl IndexedLambda {
             NodeView::Var(id) => Lambda::Lvar(id.clone()),
             NodeView::GlobalModule(id, dynamic) => Lambda::LglobalModule(id.clone(), dynamic),
             NodeView::Const(c) => Lambda::Lconst(c.clone()),
-            NodeView::Apply(func, args, info, jsx) => Lambda::Lapply(Apply {
+            NodeView::Apply(func, args, info, jsx) => Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(self.materialize_node(func)),
                 ap_args: args.iter().map(|x| self.materialize_node(*x)).collect(),
                 ap_info: info.clone(),
                 ap_transformed_jsx: jsx,
-            }),
-            NodeView::Function(arity, params, body, attr) => Lambda::Lfunction(LFunction {
-                arity,
-                params: params.to_vec(),
-                body: Box::new(self.materialize_node(body)),
-                attr: attr.clone(),
-            }),
+            })),
+            NodeView::Function(arity, params, body, attr) => {
+                Lambda::Lfunction(Box::new(LFunction {
+                    arity,
+                    params: params.to_vec(),
+                    body: Box::new(self.materialize_node(body)),
+                    attr: attr.clone(),
+                }))
+            }
             NodeView::Let(kind, ident, value, body) => Lambda::Llet(
                 kind,
                 ident.clone(),
@@ -402,11 +404,11 @@ impl IndexedLambda {
                     .collect(),
                 Box::new(self.materialize_node(body)),
             ),
-            NodeView::Prim(primitive, args, loc) => Lambda::Lprim(PrimInfo {
+            NodeView::Prim(primitive, args, loc) => Lambda::Lprim(Box::new(PrimInfo {
                 primitive: primitive.clone(),
                 args: args.iter().map(|x| self.materialize_node(*x)).collect(),
                 loc: loc.clone(),
-            }),
+            })),
             NodeView::Switch {
                 scrutinee,
                 consts_full,
@@ -417,7 +419,7 @@ impl IndexedLambda {
                 dispatch,
             } => Lambda::Lswitch(
                 Box::new(self.materialize_node(scrutinee)),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: consts_full,
                     sw_consts: consts
                         .iter()
@@ -430,7 +432,7 @@ impl IndexedLambda {
                         .collect(),
                     sw_failaction: fail_action.map(|value| Box::new(self.materialize_node(value))),
                     sw_dispatch: dispatch.clone(),
-                },
+                }),
             ),
             NodeView::StringSwitch(scrutinee, cases, default) => Lambda::LstringSwitch(
                 Box::new(self.materialize_node(scrutinee)),
@@ -1369,7 +1371,8 @@ impl IndexedLambdaContext {
     /// reference eligibility checks and resolver query have selected the
     /// function for beta reduction.
     pub(crate) fn import_cmj_function(&mut self, function: LFunction) -> NodeId {
-        self.store.append_compat_lambda(Lambda::Lfunction(function))
+        self.store
+            .append_compat_lambda(Lambda::Lfunction(Box::new(function)))
     }
 
     /// Splits the owner-held state needed by consumer-side indexed beta.
@@ -1504,13 +1507,13 @@ mod tests {
             status: ApplyStatus::InferFull,
         };
         let samples = vec![
-            Lambda::Lapply(Apply {
+            Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(var()),
                 ap_args: vec![int(), Lambda::Lvar(y.clone())],
                 ap_info: info,
                 ap_transformed_jsx: true,
-            }),
-            Lambda::Lfunction(LFunction {
+            })),
+            Lambda::Lfunction(Box::new(LFunction {
                 arity: 2,
                 params: vec![x.clone(), y.clone()],
                 body: Box::new(var()),
@@ -1518,27 +1521,27 @@ mod tests {
                     async_: true,
                     ..FunctionAttribute::default()
                 },
-            }),
+            })),
             Lambda::Llet(LetKind::Strict, x.clone(), Box::new(int()), Box::new(var())),
             Lambda::Lletrec(
                 vec![(x.clone(), int()), (y.clone(), var())],
                 Box::new(var()),
             ),
-            Lambda::Lprim(PrimInfo {
+            Lambda::Lprim(Box::new(PrimInfo {
                 primitive: Primitive::Pnot,
                 args: vec![int(), var()],
                 loc: loc.clone(),
-            }),
+            })),
             Lambda::Lswitch(
                 Box::new(var()),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: false,
                     sw_consts: vec![(SwitchKey::Int(2), int()), (SwitchKey::Int(1), var())],
                     sw_blocks_full: true,
                     sw_blocks: vec![(SwitchKey::Int(4), int()), (SwitchKey::Int(3), var())],
                     sw_failaction: Some(Box::new(int())),
                     sw_dispatch: SwitchDispatch::Direct,
-                },
+                }),
             ),
             Lambda::LstringSwitch(
                 Box::new(var()),

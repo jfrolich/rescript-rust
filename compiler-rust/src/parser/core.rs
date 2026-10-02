@@ -1141,6 +1141,11 @@ pub fn make_infix_operator(
 
 /// Check if the current position indicates an ES6 arrow expression.
 pub fn is_es6_arrow_expression(p: &mut Parser<'_>, in_ternary: bool) -> bool {
+    // Every other token makes the lookahead below answer `false`, and the
+    // lookahead restores all parser state, so skip it for them.
+    if !matches!(p.token, Token::Lident(_) | Token::Underscore | Token::Lparen) {
+        return false;
+    }
     p.lookahead(|state| {
         // Check for async prefix
         if let Token::Lident(ref s) = state.token {
@@ -1205,6 +1210,9 @@ pub fn is_es6_arrow_expression(p: &mut Parser<'_>, in_ternary: bool) -> bool {
 
 /// Check if the current position indicates an ES6 arrow functor.
 pub fn is_es6_arrow_functor(p: &mut Parser<'_>) -> bool {
+    if !matches!(p.token, Token::Lparen) {
+        return false;
+    }
     p.lookahead(|state| {
         if !matches!(state.token, Token::Lparen) {
             return false;
@@ -1229,6 +1237,9 @@ pub fn is_es6_arrow_functor(p: &mut Parser<'_>) -> bool {
 
 /// Check if the current position indicates an ES6 arrow type.
 pub fn is_es6_arrow_type(p: &mut Parser<'_>) -> bool {
+    if !matches!(p.token, Token::Lparen | Token::Tilde) {
+        return false;
+    }
     p.lookahead(|state| match &state.token {
         Token::Lparen => {
             state.next();

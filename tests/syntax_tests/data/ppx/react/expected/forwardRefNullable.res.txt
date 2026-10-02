@@ -1,0 +1,66 @@
+module NullableT = {
+  @res.jsxComponentProps
+  type props<'id, 'children, 'ref> = {
+    id: 'id,
+    children?: 'children,
+    ref?: 'ref,
+  }
+  let make = (
+    {id, ?children, _}: props<string, _, React.ref<Nullable.t<Dom.element>>>,
+    ref: Nullable.t<React.ref<Nullable.t<Dom.element>>>,
+  ) => {
+    ignore(ref)
+    (
+      ReactDOM.jsx(
+        "div",
+        {id, children: ?ReactDOM.someElement({children->Option.getOr(React.null)})},
+      ): React.element
+    )
+  }
+  let make = React.forwardRef({
+    let \"ForwardRefNullable$NullableT" = (props: props<_>, ref) => make(props, ref)
+    \"ForwardRefNullable$NullableT"
+  })
+}
+
+module StdlibNullableT = {
+  @res.jsxComponentProps
+  type props<'id, 'ref> = {
+    id: 'id,
+    ref?: 'ref,
+  }
+
+  let make = (
+    {id, _}: props<string, React.ref<Nullable.t<Dom.element>>>,
+    ref: Stdlib.Nullable.t<React.ref<Nullable.t<Dom.element>>>,
+  ) => {
+    ignore(ref)
+    (ReactDOM.jsx("div", {id: id}): React.element)
+  }
+  let make = React.forwardRef({
+    let \"ForwardRefNullable$StdlibNullableT" = (props: props<_>, ref) => make(props, ref)
+
+    \"ForwardRefNullable$StdlibNullableT"
+  })
+}
+
+module LowercaseNullable = {
+  @res.jsxComponentProps
+  type props<'id, 'ref> = {
+    id: 'id,
+    ref?: 'ref,
+  }
+
+  let make = (
+    {id, _}: props<string, React.ref<Nullable.t<Dom.element>>>,
+    ref: nullable<React.ref<Nullable.t<Dom.element>>>,
+  ) => {
+    ignore(ref)
+    (ReactDOM.jsx("div", {id: id}): React.element)
+  }
+  let make = React.forwardRef({
+    let \"ForwardRefNullable$LowercaseNullable" = (props: props<_>, ref) => make(props, ref)
+
+    \"ForwardRefNullable$LowercaseNullable"
+  })
+}

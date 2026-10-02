@@ -4,7 +4,7 @@
 //! projections, and marks dead code for elimination.
 
 use ahash::AHashMap as HashMap;
-use std::collections::HashSet;
+use ahash::AHashSet as HashSet;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
@@ -142,7 +142,7 @@ fn flatten_and_mark_dead_statement(
                         }
 
                         let rewritten_value = Expression {
-                            source_loc,
+                            source_loc: source_loc.clone(),
                             desc: ExpressionDesc::CamlBlock(
                                 rewritten_items,
                                 MutableFlag::Immutable,
@@ -153,7 +153,7 @@ fn flatten_and_mark_dead_statement(
                         substitution.insert(decl.ident.clone(), rewritten_value.clone());
 
                         let original = Statement {
-                            source_loc,
+                            source_loc: source_loc.clone(),
                             desc: StatementDesc::Variable(VariableDeclaration {
                                 ident: decl.ident,
                                 value: Some(rewritten_value),
@@ -182,7 +182,7 @@ fn flatten_and_mark_dead_statement(
                     // object shape is already materialized before this pass in
                     // the OCaml backend.
                     return Statement {
-                        source_loc,
+                        source_loc: source_loc.clone(),
                         desc: {
                             let rewritten_value = Expression {
                                 source_loc,
@@ -281,9 +281,9 @@ fn flatten_and_mark_dead_statement(
             desc: StatementDesc::ForRange(
                 label,
                 start.map(|expr| {
-                    flatten_and_mark_dead_expression(expr, id_gen, substitution, jsx_preserve)
+                    Box::new(flatten_and_mark_dead_expression(*expr, id_gen, substitution, jsx_preserve))
                 }),
-                flatten_and_mark_dead_expression(finish, id_gen, substitution, jsx_preserve),
+                Box::new(flatten_and_mark_dead_expression(*finish, id_gen, substitution, jsx_preserve)),
                 ident,
                 direction,
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
@@ -295,7 +295,7 @@ fn flatten_and_mark_dead_statement(
             desc: StatementDesc::ForOf(
                 label,
                 ident,
-                flatten_and_mark_dead_expression(iterable, id_gen, substitution, jsx_preserve),
+                Box::new(flatten_and_mark_dead_expression(*iterable, id_gen, substitution, jsx_preserve)),
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
             ),
             comment,
@@ -305,7 +305,7 @@ fn flatten_and_mark_dead_statement(
             desc: StatementDesc::ForAwaitOf(
                 label,
                 ident,
-                flatten_and_mark_dead_expression(iterable, id_gen, substitution, jsx_preserve),
+                Box::new(flatten_and_mark_dead_expression(*iterable, id_gen, substitution, jsx_preserve)),
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
             ),
             comment,
@@ -813,7 +813,7 @@ fn substituted_caml_block_item(
         return None;
     };
     if let Some(field) = field {
-        match tag_info {
+        match &**tag_info {
             TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. } => {
                 let item = items
                     .iter()
@@ -890,7 +890,9 @@ fn is_simple_substituted_index_value(expr: &Expression) -> bool {
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Str { .. }
         | ExpressionDesc::Undefined { .. } => true,
-        ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, TagInfo::Constructor { .. }) => {
+        ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, tag)
+            if matches!(**tag, TagInfo::Constructor { .. }) =>
+        {
             items.iter().all(is_simple_substituted_index_value)
         }
         _ => false,
@@ -1429,7 +1431,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
                         Statement::block(block)
                     } else {
                         Statement {
-                            source_loc,
+                            source_loc: source_loc.clone(),
                             desc: StatementDesc::Exp(flatten_expression(Expression {
                                 source_loc,
                                 desc: ExpressionDesc::Bin(BinOp::Eq, target, value),
@@ -1440,7 +1442,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
                     }
                 }
                 desc => Statement {
-                    source_loc,
+                    source_loc: source_loc.clone(),
                     desc: StatementDesc::Exp(flatten_expression(Expression {
                         source_loc,
                         desc,
@@ -1493,7 +1495,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
                     Statement::block(block)
                 }
                 desc => Statement {
-                    source_loc,
+                    source_loc: source_loc.clone(),
                     desc: StatementDesc::Return(flatten_expression(Expression {
                         source_loc,
                         desc,
@@ -1542,8 +1544,8 @@ fn flatten_statement(stmt: Statement) -> Statement {
             source_loc,
             desc: StatementDesc::ForRange(
                 label,
-                start.map(flatten_expression),
-                flatten_expression(finish),
+                start.map(|expr| Box::new(flatten_expression(*expr))),
+                Box::new(flatten_expression(*finish)),
                 ident,
                 direction,
                 flatten_block(body),
@@ -1555,7 +1557,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
             desc: StatementDesc::ForOf(
                 label,
                 ident,
-                flatten_expression(iterable),
+                Box::new(flatten_expression(*iterable)),
                 flatten_block(body),
             ),
             comment,
@@ -1565,7 +1567,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
             desc: StatementDesc::ForAwaitOf(
                 label,
                 ident,
-                flatten_expression(iterable),
+                Box::new(flatten_expression(*iterable)),
                 flatten_block(body),
             ),
             comment,

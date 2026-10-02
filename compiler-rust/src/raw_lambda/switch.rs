@@ -154,7 +154,7 @@ fn make_lambda_key(lam: &RawLambda) -> Option<u64> {
     use std::hash::{Hash, Hasher};
 
     fn hash_lambda(lam: &RawLambda, h: &mut DefaultHasher) -> bool {
-        match lam {
+        match lam.peel() {
             RawLambda::Lvar(id) => {
                 0u8.hash(h);
                 id.name().hash(h);
@@ -222,11 +222,11 @@ fn make_const(i: i32) -> RawLambda {
 }
 
 fn make_prim(prim: Primitive, args: Vec<RawLambda>) -> RawLambda {
-    RawLambda::Lprim(RawPrimInfo {
+    RawLambda::Lprim(Box::new(RawPrimInfo {
         primitive: prim,
         args,
         loc: Location::none(),
-    })
+    }))
 }
 
 fn make_offset(arg: RawLambda, n: i32) -> RawLambda {
@@ -240,7 +240,7 @@ fn make_offset(arg: RawLambda, n: i32) -> RawLambda {
 fn make_isout(h: RawLambda, arg: RawLambda) -> RawLambda {
     // OCaml: Lprim(Pisout, [h; arg])
     // Rust Pisout(n) bakes the constant in. Extract from h.
-    match &h {
+    match h.peel() {
         RawLambda::Lconst(Constant::Int { i, .. }) => make_prim(Primitive::Pisout(*i), vec![arg]),
         _ => {
             // Shouldn't happen - h is always make_const(d)
@@ -279,7 +279,7 @@ fn build_lswitch(
     cases.reverse();
     RawLambda::Lswitch(
         Box::new(arg),
-        RawLambdaSwitch {
+        Box::new(RawLambdaSwitch {
             sw_numconsts: tbl.len(),
             sw_consts_full: false,
             sw_consts: cases
@@ -291,7 +291,7 @@ fn build_lswitch(
             sw_blocks: Vec::new(),
             sw_failaction: None,
             sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-        },
+        }),
         loc.clone(),
     )
 }
@@ -302,7 +302,7 @@ fn make_exit(i: i32) -> RawLambda {
 
 /// Check if a lambda is a simple static raise.
 fn as_simple_exit(lam: &RawLambda) -> Option<i32> {
-    match lam {
+    match lam.peel() {
         RawLambda::LstaticRaise(i, args) if args.is_empty() => Some(*i),
         RawLambda::Llet(LetKind::Alias, _, _, body) => as_simple_exit(body),
         _ => None,
@@ -1043,6 +1043,11 @@ fn build_clustered_test(
 
 /// Fix up any Lswitch nodes that have a unit placeholder as their arg.
 fn fix_switch_arg(lam: &mut RawLambda, real_arg: &RawLambda) {
+    if matches!(lam, RawLambda::Lshared(_))
+        && matches!(lam.peel(), RawLambda::Lswitch(switch_arg, _, _) if switch_arg.is_unit())
+    {
+        *lam = std::mem::replace(lam, RawLambda::Lbreak).unshare();
+    }
     match lam {
         RawLambda::Lswitch(switch_arg, _, _) => {
             if switch_arg.is_unit() {
@@ -1083,7 +1088,7 @@ fn wrap_handlers(mut result: RawLambda, handlers: Vec<(i32, RawLambda)>) -> RawL
     // OCaml composes handlers as h(oh(x)), so first handler is outermost.
     // We reverse to get the first handler as outermost.
     for (exit_id, handler) in handlers.into_iter().rev() {
-        if let RawLambda::LstaticRaise(j, _) = &result {
+        if let RawLambda::LstaticRaise(j, _) = result.peel() {
             if *j == exit_id {
                 result = handler;
                 continue;

@@ -6,7 +6,7 @@
 //! that can be extended with more advanced codegen passes.
 
 use ahash::{AHashMap, AHashSet};
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::sync::Arc;
 
 use crate::cmi::persistent_env::{CmjExportArity, CmjExportConstant};
@@ -1015,7 +1015,7 @@ impl LambdaCompiler {
     fn compile_apply_call(&mut self, apply: &Apply) -> Compiled {
         let mut compiled = self.compile_apply_call_inner(apply);
         if compiled.expr.source_loc.is_none() {
-            compiled.expr.source_loc = self.source_loc(&apply.ap_info.loc);
+            compiled.expr.source_loc = (self.source_loc(&apply.ap_info.loc)).map(Box::new);
         }
         compiled
     }
@@ -1131,12 +1131,15 @@ impl LambdaCompiler {
     }
 
     fn module_field_apply_target<'a>(&self, lam: &'a Lambda) -> Option<(ModuleId, &'a str)> {
-        let Lambda::Lprim(crate::lambda::PrimInfo {
+        let Lambda::Lprim(__prim202) = lam
+        else {
+            return None;
+        };
+        let crate::lambda::PrimInfo {
             primitive: Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }),
             args,
             ..
-        }) = lam
-        else {
+        } = __prim202.as_ref() else {
             return None;
         };
         let [Lambda::LglobalModule(id, dynamic_import)] = args.as_slice() else {
@@ -1250,7 +1253,7 @@ impl LambdaCompiler {
             && lfunction_can_be_inlined(&function)
         {
             let reduced =
-                self.import_and_beta_indexed_cmj_function(context, function, args.as_slice());
+                self.import_and_beta_indexed_cmj_function(context, *function, args.as_slice());
             return Some(PreparedIndexedExternalApply::Reduced(reduced));
         }
 
@@ -1407,11 +1410,19 @@ impl LambdaCompiler {
     ) -> bool {
         match lam {
             Lambda::Lsequence(set, rest) => match set.as_ref() {
-                Lambda::Lprim(PrimInfo {
+                Lambda::Lprim(__prim5) if matches!(__prim5.as_ref(), PrimInfo {
                     primitive: Primitive::Psetfield(_, field_info),
                     args,
                     ..
-                }) if matches!(args.as_slice(), [Lambda::Lvar(id), _] if id == copy_id) => {
+                } if matches!(args.as_slice(), [Lambda::Lvar(id), _] if id == copy_id)) => {
+            let PrimInfo {
+                    primitive: Primitive::Psetfield(_, field_info),
+                    args,
+                    ..
+                } = __prim5.as_ref() else {
+                unreachable!()
+            };
+
                     overrides.push((field_info, &args[1]));
                     Self::collect_record_spread_overrides(copy_id, rest, overrides)
                 }
@@ -1432,12 +1443,15 @@ impl LambdaCompiler {
         value: &Lambda,
         body: &Lambda,
     ) -> Option<Compiled> {
-        let Lambda::Lprim(PrimInfo {
+        let Lambda::Lprim(__prim201) = value
+        else {
+            return None;
+        };
+        let PrimInfo {
             primitive: Primitive::Pduprecord,
             args,
             ..
-        }) = value
-        else {
+        } = __prim201.as_ref() else {
             return None;
         };
         let [init] = args.as_slice() else {
@@ -1496,7 +1510,7 @@ impl LambdaCompiler {
             Lambda::Lapply(apply) => {
                 let mut compiled = self.compile_apply_call(apply);
                 if compiled.expr.source_loc.is_none() {
-                    compiled.expr.source_loc = self.source_loc(&apply.ap_info.loc);
+                    compiled.expr.source_loc = (self.source_loc(&apply.ap_info.loc)).map(Box::new);
                 }
                 compiled
             }
@@ -1531,7 +1545,7 @@ impl LambdaCompiler {
                     env: Default::default(),
                     return_unit: func.attr.return_unit,
                     async_: func.attr.async_,
-                    directive: func.attr.directive.clone(),
+                    directive: (func.attr.directive.clone()).map(Box::new),
                 });
                 Compiled {
                     prelude: vec![],
@@ -1557,10 +1571,10 @@ impl LambdaCompiler {
                     Lambda::Llet(..)
                         | Lambda::Lletrec(..)
                         | Lambda::Lsequence(..)
-                        | Lambda::Lprim(crate::lambda::PrimInfo {
-                            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_), _,),
-                            ..
-                        })
+                ) || matches!(
+                    body.as_ref(),
+                    Lambda::Lprim(prim)
+                        if matches!(prim.primitive, Primitive::Pmakeblock(TagInfo::ModuleExport(_), _))
                 );
                 let mut prelude = if is_top_level_let {
                     self.with_fresh_loop_label_counter(|this| {
@@ -1590,10 +1604,10 @@ impl LambdaCompiler {
                     Lambda::Llet(..)
                         | Lambda::Lletrec(..)
                         | Lambda::Lsequence(..)
-                        | Lambda::Lprim(crate::lambda::PrimInfo {
-                            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_), _,),
-                            ..
-                        })
+                ) || matches!(
+                    body.as_ref(),
+                    Lambda::Lprim(prim)
+                        if matches!(prim.primitive, Primitive::Pmakeblock(TagInfo::ModuleExport(_), _))
                 );
                 let mut prelude = if is_top_level {
                     self.with_fresh_loop_label_counter(|this| {
@@ -1734,10 +1748,10 @@ impl LambdaCompiler {
                     Lambda::Llet(..)
                         | Lambda::Lletrec(..)
                         | Lambda::Lsequence(..)
-                        | Lambda::Lprim(crate::lambda::PrimInfo {
-                            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_), _,),
-                            ..
-                        })
+                ) || matches!(
+                    b.as_ref(),
+                    Lambda::Lprim(prim)
+                        if matches!(prim.primitive, Primitive::Pmakeblock(TagInfo::ModuleExport(_), _))
                 );
                 let first = if head_is_top_level {
                     self.with_fresh_loop_label_counter(|this| this.compile_effect_output(a))
@@ -1965,14 +1979,14 @@ impl LambdaCompiler {
         }
 
         let push_loop = |block: &mut Block, init: Option<Expression>, finish: Expression| {
-            block.push(Statement::new(StatementDesc::ForRange(
+            block.push(Statement::for_range(
                 loop_label.clone(),
                 init,
                 finish,
                 var.clone(),
                 direction,
                 body_block.clone(),
-            )));
+            ));
         };
 
         if finish_compiled.prelude.is_empty() {
@@ -2504,7 +2518,7 @@ impl LambdaCompiler {
         if let Some(first) = block.first_mut()
             && first.source_loc.is_none()
         {
-            first.source_loc = source_loc;
+            first.source_loc = (source_loc).map(Box::new);
         }
         block
     }
@@ -2840,7 +2854,7 @@ impl LambdaCompiler {
                 let compiled = self.compile_apply_call(apply);
                 let mut block = compiled.prelude;
                 let mut statement = Statement::return_(compiled.expr);
-                statement.source_loc = self.source_loc(&apply.ap_info.loc);
+                statement.source_loc = (self.source_loc(&apply.ap_info.loc)).map(Box::new);
                 block.push(statement);
                 block
             }
@@ -3272,10 +3286,16 @@ impl LambdaCompiler {
         bindings: &[Ident],
         handler: &Lambda,
     ) -> bool {
-        if self.try_body_depth > 0 {
-            return false;
-        }
-        if !self.fallthrough_return_handlers.is_empty() {
+        // The pseudo-jump arm of OCaml compile_staticcatch (lam_compile.ml:1052-1060)
+        // requires Tail_with_name {in_staticcatch = false}. A nested catch
+        // compiled in an enclosing catch body has in_staticcatch = true and
+        // must use the explicit exit dispatch instead of unconditionally
+        // falling through to its handler.
+        if self.try_body_depth > 0
+            || !self.fallthrough_return_handlers.is_empty()
+            || !self.static_handlers.is_empty()
+            || !self.static_jump_handlers.is_empty()
+        {
             return false;
         }
         // lam_compile.ml:937-962: the pseudo-jmp arm needs
@@ -3435,7 +3455,11 @@ impl LambdaCompiler {
         bindings: &[Ident],
         handler: &Lambda,
     ) -> bool {
-        if self.try_body_depth > 0 {
+        if self.try_body_depth > 0
+            || !self.static_handlers.is_empty()
+            || !self.static_jump_handlers.is_empty()
+            || !self.fallthrough_return_handlers.is_empty()
+        {
             return false;
         }
         self.return_unit_stack.last().copied() == Some(true)
@@ -3585,7 +3609,7 @@ impl LambdaCompiler {
     ) -> Expression {
         let has_self_tailcall = function_has_self_tailcall(tail_targets, &func.body);
         if !has_self_tailcall {
-            return self.compile_expr(&Lambda::Lfunction(func.clone())).expr;
+            return self.compile_expr(&Lambda::Lfunction(Box::new(func.clone()))).expr;
         }
 
         let params = if func.attr.one_unit_arg {
@@ -3597,7 +3621,7 @@ impl LambdaCompiler {
         let body = self.compile_tail_loop_return_block(&func.body, &mut tail_loop);
 
         if !tail_loop.triggered {
-            return self.compile_expr(&Lambda::Lfunction(func.clone())).expr;
+            return self.compile_expr(&Lambda::Lfunction(Box::new(func.clone()))).expr;
         }
 
         let lowered_params = params
@@ -3638,7 +3662,7 @@ impl LambdaCompiler {
             env: Default::default(),
             return_unit: func.attr.return_unit,
             async_: func.attr.async_,
-            directive: func.attr.directive.clone(),
+            directive: (func.attr.directive.clone()).map(Box::new),
         })
     }
 
@@ -4700,8 +4724,6 @@ impl LambdaCompiler {
         let mut block = cond_compiled.prelude;
         block.extend(self.compile_test_return_block_with_fallback(
             cond_compiled.expr,
-            then_block_raw.clone(),
-            else_block_raw.clone(),
             then_block_raw,
             else_block_raw,
         ));
@@ -4714,13 +4736,7 @@ impl LambdaCompiler {
         then_block: Block,
         else_block: Block,
     ) -> Block {
-        self.compile_test_return_block_with_fallback(
-            cond,
-            then_block.clone(),
-            else_block.clone(),
-            then_block,
-            else_block,
-        )
+        self.compile_test_return_block_with_fallback(cond, then_block, else_block)
     }
 
     /// Separate the raw blocks used for rule-4 folding
@@ -4732,8 +4748,6 @@ impl LambdaCompiler {
     fn compile_test_return_block_with_fallback(
         &self,
         cond: Expression,
-        then_for_fold: Block,
-        else_for_fold: Block,
         then_fallback: Block,
         else_fallback: Block,
     ) -> Block {
@@ -4765,51 +4779,50 @@ impl LambdaCompiler {
         // `if (typeof ty !== "object") { ... } else { ... }` because the inner
         // flip produces a Block-wrapped 3-statement sequence; Rust's aggressive
         // fold lost that shape.)
-        let folded = match (
-            strict_single_return_expr(&then_for_fold),
-            strict_single_return_expr(&else_for_fold),
-        ) {
-            (Some(then_expr), Some(else_expr)) => Some((then_expr.clone(), else_expr.clone())),
-            _ => None,
-        };
-        match folded {
-            Some((then_expr, else_expr)) => {
-                // Go through `S.if_` instead of calling `E.econd` directly:
-                // OCaml applies the `Js_not` branch swap before the
-                // single-Return fold (compiler/core/js_stmt_make.ml:237-246).
-                vec![Statement::if_(
-                    cond,
-                    vec![Statement::return_(then_expr)],
-                    vec![Statement::return_(else_expr)],
-                )]
-            }
-            None => {
-                // OCaml S.if_ rule 5 (js_stmt_make.ml:247-248): when the
-                // else branch is *exactly* `[Return _]`, flip to
-                // `if (!cond) { return _; }` and emit the then branch as
-                // sibling statements. This matches the `if (cond) { return; }
-                // body;` early-return shape OCaml produces for function
-                // bodies like `if cond then body else ()` in return context.
-                if matches!(
-                    else_fallback.as_slice(),
-                    [stmt] if matches!(stmt.desc, StatementDesc::Return(_))
-                ) {
-                    let mut out =
-                        vec![Statement::if_(Expression::not(cond), else_fallback, vec![])];
-                    out.extend(then_fallback);
-                    // OCaml wraps the rule-5 result with `block
-                    // ({If ...} :: ifso)` (compiler/core/js_stmt_make.ml:
-                    // 247-248, with `block` at lines 37-42). That block
-                    // boundary is observable by an outer `S.if_`: it hides the
-                    // trailing return until `js_pass_flatten` runs later.
-                    return vec![Statement::block(out)];
-                }
-                // Use the normalized fallback blocks when we can't collapse
-                // to `Return(Cond)`, matching the previous behavior for
-                // non-both-single-return cases.
-                vec![Statement::if_(cond, then_fallback, else_fallback)]
-            }
+        // The fold inspects the same raw blocks that are used as the
+        // fallback; move the single return expressions out instead of
+        // cloning both branches.
+        if strict_single_return_expr(&then_fallback).is_some()
+            && strict_single_return_expr(&else_fallback).is_some()
+        {
+            let take_return = |block: Block| match block.into_iter().next().map(|stmt| stmt.desc) {
+                Some(StatementDesc::Return(expr)) => expr,
+                _ => unreachable!("strict single return block"),
+            };
+            let then_expr = take_return(then_fallback);
+            let else_expr = take_return(else_fallback);
+            // Go through `S.if_` instead of calling `E.econd` directly:
+            // OCaml applies the `Js_not` branch swap before the
+            // single-Return fold (compiler/core/js_stmt_make.ml:237-246).
+            return vec![Statement::if_(
+                cond,
+                vec![Statement::return_(then_expr)],
+                vec![Statement::return_(else_expr)],
+            )];
         }
+        // OCaml S.if_ rule 5 (js_stmt_make.ml:247-248): when the
+        // else branch is *exactly* `[Return _]`, flip to
+        // `if (!cond) { return _; }` and emit the then branch as
+        // sibling statements. This matches the `if (cond) { return; }
+        // body;` early-return shape OCaml produces for function
+        // bodies like `if cond then body else ()` in return context.
+        if matches!(
+            else_fallback.as_slice(),
+            [stmt] if matches!(stmt.desc, StatementDesc::Return(_))
+        ) {
+            let mut out = vec![Statement::if_(Expression::not(cond), else_fallback, vec![])];
+            out.extend(then_fallback);
+            // OCaml wraps the rule-5 result with `block
+            // ({If ...} :: ifso)` (compiler/core/js_stmt_make.ml:
+            // 247-248, with `block` at lines 37-42). That block
+            // boundary is observable by an outer `S.if_`: it hides the
+            // trailing return until `js_pass_flatten` runs later.
+            return vec![Statement::block(out)];
+        }
+        // Use the normalized fallback blocks when we can't collapse
+        // to `Return(Cond)`, matching the previous behavior for
+        // non-both-single-return cases.
+        vec![Statement::if_(cond, then_fallback, else_fallback)]
     }
 
     pub(crate) fn compile_switch_value_block(&mut self, result: &Ident, lam: &Lambda) -> Block {
@@ -4937,6 +4950,39 @@ impl LambdaCompiler {
                         Expression::var(result.clone()),
                         compiled.expr,
                     )));
+                }
+                block
+            }
+            Lambda::Lprim(info)
+                if short_circuit_primitive(&info.primitive, &info.args).is_some() =>
+            {
+                let (op, lhs, rhs) = short_circuit_primitive(&info.primitive, &info.args)
+                    .expect("matched short-circuit primitive");
+                let lhs = self.compile_expr(lhs);
+                let rhs = self.compile_expr(rhs);
+                let mut block = lhs.prelude;
+                // compile_sequand/compile_sequor Assign (lam_compile.ml:1153-1162,
+                // 1193-1202) write the existing target in both branches instead
+                // of creating a NeedValue temporary and assigning it afterwards.
+                if rhs.prelude.is_empty() {
+                    let operator = match op {
+                        ShortCircuitOp::And => BinOp::And,
+                        ShortCircuitOp::Or => BinOp::Or,
+                    };
+                    block.push(
+                        self.result_assignment(
+                            result,
+                            Expression::bin(operator, lhs.expr, rhs.expr),
+                        ),
+                    );
+                } else {
+                    let mut body = rhs.prelude;
+                    body.push(self.result_assignment(result, rhs.expr));
+                    block.push(Statement::if_(
+                        op.test_expr(lhs.expr),
+                        body,
+                        vec![self.result_assignment(result, op.default_expr())],
+                    ));
                 }
                 block
             }
@@ -5473,7 +5519,9 @@ impl LambdaCompiler {
     fn dynamic_import_supported_argument(lam: &Lambda) -> bool {
         match lam {
             Lambda::LglobalModule(_, _) | Lambda::Lvar(_) => true,
-            Lambda::Lprim(PrimInfo { primitive, .. }) => {
+            Lambda::Lprim(__prim4) => {
+            let PrimInfo { primitive, .. } = __prim4.as_ref();
+
                 matches!(
                     primitive,
                     Primitive::Pfield(_, _) | Primitive::PjsCall { .. }
@@ -6290,6 +6338,40 @@ impl LambdaCompiler {
         }
     }
 
+    /// OCaml `compile_general_cases` groups equal Lambda bodies before
+    /// compiling the final arm of each group (lam_compile.ml:668-707).
+    /// Group the original handler lambdas, not their lowered JS statements:
+    /// distinct compilation of identical handlers can allocate different
+    /// temporaries and prevents their cases from sharing one body.
+    fn compile_grouped_staticcatch_handlers<'a>(
+        &mut self,
+        handlers: &'a [FlatHandler],
+        first_code: i32,
+        mut compile: impl FnMut(&mut Self, &Lambda) -> Block,
+    ) -> Vec<(i32, Block, bool, &'a Lambda)> {
+        let cases = handlers
+            .iter()
+            .enumerate()
+            .map(|(i, handler)| {
+                (
+                    first_code + i32::try_from(i).expect("exit handler index fits in i32"),
+                    &handler.handler,
+                )
+            })
+            .collect();
+        stable_group_switch_cases(cases, |_, _| true)
+            .into_iter()
+            .map(|(code, handler, is_last)| {
+                let block = if is_last {
+                    compile(self, handler)
+                } else {
+                    Vec::new()
+                };
+                (code, block, is_last, handler)
+            })
+            .collect()
+    }
+
     /// Emit the `compile_cases ~cxt ~switch_exp:exit_expr handlers` call at
     /// lam_compile.ml:987/996/1010/1017. For a single handler + NonComplete
     /// default this reduces to `if (exit === code) { handler_block }`
@@ -6298,65 +6380,31 @@ impl LambdaCompiler {
     fn compile_exit_dispatch(
         &self,
         exit_id: &Ident,
-        first_code: i32,
-        handler_blocks: Vec<Block>,
-        handler_lambdas: &[&Lambda],
+        handlers: Vec<(i32, Block, bool, &Lambda)>,
         is_return_context: bool,
     ) -> Option<Statement> {
-        if handler_blocks.is_empty() {
+        if handlers.is_empty() {
             return None;
         }
-        if handler_blocks.len() == 1 {
-            let handler_block = handler_blocks.into_iter().next().unwrap();
+        if handlers.len() == 1 {
+            let (code, handler_block, _, _) = handlers.into_iter().next().unwrap();
             if handler_block.is_empty() {
                 return None;
             }
             return Some(Statement::if_(
-                self.staticcatch_exit_test(exit_id, first_code),
+                self.staticcatch_exit_test(exit_id, code),
                 handler_block,
                 vec![],
             ));
         }
-        // Multi-handler: emit an Int_switch. Per OCaml's `compile_general_cases`
-        // (lam_compile.ml:607-624), every per-group last clause computes
-        // `should_break` from `Js_output.to_break_block` (~ `!block_terminates`)
-        // and, when the surrounding continuation `continuation_is_return`
-        // (lam_compile_context.ml:68-72), additionally ANDs with
-        // `Lam_exit_code.has_exit lam`. In `compile_exit_dispatch` each handler
-        // is its own group, so the same per-clause logic applies uniformly —
-        // including the trailing case (mario_game's `process_collision` case 3).
-        debug_assert_eq!(handler_blocks.len(), handler_lambdas.len());
-        // `compile_cases` (lam_compile.ml:1106-1136) dispatches the handlers
-        // with `compile_general_cases`, whose `group_apply`
-        // (lam_compile.ml:184-188, 685-715) merges `Lam.eq_approx` handlers:
-        // only the last clause of a group carries the body.
-        let indexed: Vec<(usize, &Lambda)> =
-            handler_lambdas.iter().copied().enumerate().collect();
-        let grouped = crate::lambda::lam_compile_variant::stable_group_switch_cases(indexed, |_, _| true);
-        let mut blocks: Vec<Option<Block>> = handler_blocks.into_iter().map(Some).collect();
-        let clauses: Vec<(i32, CaseClause)> = grouped
+        // OCaml compile_general_cases (lam_compile.ml:668-707) emits empty
+        // clauses for all but the last case of an equal-Lambda group.
+        let clauses: Vec<(i32, CaseClause)> = handlers
             .into_iter()
-            .map(|(i, handler_lam, is_last)| {
-                let code = first_code + i32::try_from(i).expect("exit handler index fits in i32");
-                if !is_last {
-                    return (
-                        code,
-                        CaseClause {
-                            source_loc: None,
-                            body: vec![],
-                            should_break: false,
-                            comment: None,
-                        },
-                    );
-                }
-                let body = blocks[i].take().expect("each handler clause is emitted once");
-                let should_break = if block_terminates(&body) {
-                    false
-                } else if is_return_context {
-                    has_exit_code(handler_lam, |_| true)
-                } else {
-                    true
-                };
+            .map(|(code, body, is_last, handler_lam)| {
+                let should_break = is_last
+                    && !block_terminates(&body)
+                    && (!is_return_context || has_exit_code(handler_lam, |_| true));
                 (
                     code,
                     CaseClause {
@@ -6385,25 +6433,17 @@ impl LambdaCompiler {
         // If the body already terminates (e.g. every path returned), OCaml
         // would still emit the dispatch but it'd be dead. Match
         // `compile_staticcatch_return_block`'s current behavior: skip it.
-        let handler_blocks: Vec<Block> = if block_terminates(&body_block) {
+        let grouped_handlers = if block_terminates(&body_block) {
             Vec::new()
         } else {
-            handlers
-                .iter()
-                .map(|h| self.compile_return_block(&h.handler))
-                .collect()
+            self.compile_grouped_staticcatch_handlers(handlers, first_code, |this, handler| {
+                this.compile_return_block(handler)
+            })
         };
         self.pop_multi_staticcatch_handlers(handlers.len());
         block.extend(body_block);
         if !block_terminates(&block) {
-            let handler_lambdas: Vec<&Lambda> = handlers.iter().map(|h| &h.handler).collect();
-            if let Some(dispatch) = self.compile_exit_dispatch(
-                &exit_id,
-                first_code,
-                handler_blocks,
-                &handler_lambdas,
-                true,
-            ) {
+            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, grouped_handlers, true) {
                 block.push(dispatch);
             }
         }
@@ -6417,25 +6457,17 @@ impl LambdaCompiler {
     ) -> Block {
         let (exit_id, first_code, mut block) = self.emit_multi_staticcatch_prelude(handlers);
         let body_block = self.compile_effect_block(body);
-        let handler_blocks: Vec<Block> = if block_terminates(&body_block) {
+        let grouped_handlers = if block_terminates(&body_block) {
             Vec::new()
         } else {
-            handlers
-                .iter()
-                .map(|h| self.compile_effect_block(&h.handler))
-                .collect()
+            self.compile_grouped_staticcatch_handlers(handlers, first_code, |this, handler| {
+                this.compile_effect_block(handler)
+            })
         };
         self.pop_multi_staticcatch_handlers(handlers.len());
         block.extend(body_block);
         if !block_terminates(&block) {
-            let handler_lambdas: Vec<&Lambda> = handlers.iter().map(|h| &h.handler).collect();
-            if let Some(dispatch) = self.compile_exit_dispatch(
-                &exit_id,
-                first_code,
-                handler_blocks,
-                &handler_lambdas,
-                false,
-            ) {
+            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, grouped_handlers, false) {
                 block.push(dispatch);
             }
         }
@@ -6450,25 +6482,17 @@ impl LambdaCompiler {
     ) -> Block {
         let (exit_id, first_code, mut block) = self.emit_multi_staticcatch_prelude(handlers);
         let body_block = self.compile_assign_to_target_block(result, body);
-        let handler_blocks: Vec<Block> = if block_terminates(&body_block) {
+        let grouped_handlers = if block_terminates(&body_block) {
             Vec::new()
         } else {
-            handlers
-                .iter()
-                .map(|h| self.compile_assign_to_target_block(result, &h.handler))
-                .collect()
+            self.compile_grouped_staticcatch_handlers(handlers, first_code, |this, handler| {
+                this.compile_assign_to_target_block(result, handler)
+            })
         };
         self.pop_multi_staticcatch_handlers(handlers.len());
         block.extend(body_block);
         if !block_terminates(&block) {
-            let handler_lambdas: Vec<&Lambda> = handlers.iter().map(|h| &h.handler).collect();
-            if let Some(dispatch) = self.compile_exit_dispatch(
-                &exit_id,
-                first_code,
-                handler_blocks,
-                &handler_lambdas,
-                false,
-            ) {
+            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, grouped_handlers, false) {
                 block.push(dispatch);
             }
         }
@@ -6483,25 +6507,17 @@ impl LambdaCompiler {
     ) -> Block {
         let (exit_id, first_code, mut block) = self.emit_multi_staticcatch_prelude(handlers);
         let body_block = self.compile_tail_loop_return_block(body, tail_loop);
-        let handler_blocks: Vec<Block> = if block_terminates(&body_block) {
+        let grouped_handlers = if block_terminates(&body_block) {
             Vec::new()
         } else {
-            handlers
-                .iter()
-                .map(|h| self.compile_tail_loop_return_block(&h.handler, tail_loop))
-                .collect()
+            self.compile_grouped_staticcatch_handlers(handlers, first_code, |this, handler| {
+                this.compile_tail_loop_return_block(handler, tail_loop)
+            })
         };
         self.pop_multi_staticcatch_handlers(handlers.len());
         block.extend(body_block);
         if !block_terminates(&block) {
-            let handler_lambdas: Vec<&Lambda> = handlers.iter().map(|h| &h.handler).collect();
-            if let Some(dispatch) = self.compile_exit_dispatch(
-                &exit_id,
-                first_code,
-                handler_blocks,
-                &handler_lambdas,
-                true,
-            ) {
+            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, grouped_handlers, true) {
                 block.push(dispatch);
             }
         }
@@ -6583,7 +6599,7 @@ fn staticcatch_debug_kind(lam: &Lambda) -> &'static str {
 
 fn recursive_function_binding_value(expr: &Lambda) -> Option<LFunction> {
     match expr {
-        Lambda::Lfunction(func) => Some(func.clone()),
+        Lambda::Lfunction(func) => Some(*func.clone()),
         _ => None,
     }
 }
@@ -6761,27 +6777,45 @@ fn lower_ocaml_for_range_direction<'a>(
     match (direction, finish) {
         (
             crate::lambda::DirectionFlag::Upto,
-            Lambda::Lprim(crate::lambda::PrimInfo {
+            Lambda::Lprim(__prim3),
+        ) if matches!(__prim3.as_ref(), crate::lambda::PrimInfo {
                 primitive: Primitive::Psubint,
                 args,
                 ..
-            }),
-        ) => match args.as_slice() {
+            }) => {
+            let crate::lambda::PrimInfo {
+                primitive: Primitive::Psubint,
+                args,
+                ..
+            } = __prim3.as_ref() else {
+                unreachable!()
+            };
+            match args.as_slice() {
             [new_finish, Lambda::Lconst(Constant::Int { i: 1, .. })] => {
                 (new_finish, ForDirection::Up)
             }
             _ => (finish, ForDirection::Upto),
+        }
         },
         (
             crate::lambda::DirectionFlag::Upto,
-            Lambda::Lprim(crate::lambda::PrimInfo {
+            Lambda::Lprim(__prim2),
+        ) if matches!(__prim2.as_ref(), crate::lambda::PrimInfo {
                 primitive: Primitive::Poffsetint(-1),
                 args,
                 ..
-            }),
-        ) => match args.as_slice() {
+            }) => {
+            let crate::lambda::PrimInfo {
+                primitive: Primitive::Poffsetint(-1),
+                args,
+                ..
+            } = __prim2.as_ref() else {
+                unreachable!()
+            };
+            match args.as_slice() {
             [new_finish] => (new_finish, ForDirection::Up),
             _ => (finish, ForDirection::Upto),
+        }
         },
         (crate::lambda::DirectionFlag::Upto, _) => (finish, ForDirection::Upto),
         (crate::lambda::DirectionFlag::Downto, _) => (finish, ForDirection::Downto),
@@ -6853,7 +6887,9 @@ pub(crate) fn trailing_return_expression(block: &[Statement]) -> Option<&Express
 
 fn function_has_self_tailcall(tail_targets: &[Ident], lam: &Lambda) -> bool {
     match lam {
-        Lambda::Lapply(Apply { ap_func, .. }) => {
+        Lambda::Lapply(__apply1) => {
+            let Apply { ap_func, .. } = __apply1.as_ref();
+
             matches!(ap_func.as_ref(), Lambda::Lvar(id) if tail_targets.iter().any(|target| id.same(target)))
         }
         Lambda::Llet(_, _, _, body) => function_has_self_tailcall(tail_targets, body),
@@ -7363,13 +7399,12 @@ fn collect_cmj_export_arities_from_simplified_lambda(
                         .unwrap_or(arg),
                     _ => arg,
                 };
-                if let Lambda::Lprim(PrimInfo {
+                if let Lambda::Lprim(__prim200) = value && let PrimInfo {
                     primitive:
                         Primitive::Pmakeblock(_, crate::lambda::lam_primitive::Mutable::Immutable),
                     args,
                     ..
-                }) = value
-                {
+                } = __prim200.as_ref() {
                     let submodule_arities = args
                         .iter()
                         .map(|lam| get_arity(&meta, lam))
@@ -7401,11 +7436,20 @@ fn collect_toplevel_export_bindings<'a>(
             collect_toplevel_export_bindings(body, bindings)
         }
         Lambda::Lsequence(_, right) => collect_toplevel_export_bindings(right, bindings),
-        Lambda::Lprim(PrimInfo {
+        Lambda::Lprim(__prim0) if matches!(__prim0.as_ref(), PrimInfo {
             primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(exports), _),
             args,
             ..
-        }) => Some((exports, args)),
+        }) => {
+            let PrimInfo {
+            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(exports), _),
+            args,
+            ..
+        } = __prim0.as_ref() else {
+                unreachable!()
+            };
+            Some((exports, args))
+        },
         _ => None,
     }
 }
@@ -8359,7 +8403,7 @@ fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleS
     match &expr.desc {
         ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, _)) => {
             if !module.dynamic_import {
-                modules.insert(module.clone());
+                modules.insert((**module).clone());
             }
         }
         ExpressionDesc::Length(inner, _)

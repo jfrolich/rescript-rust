@@ -15,8 +15,14 @@ use std::time::Duration;
 pub enum Phase {
     /// Source read, parsing, PPX rewriting, and dependency extraction.
     Parse,
+    /// Per-module type context, initial environment, persistent-environment
+    /// view and implicit opens (`Pervasives`, `Stdlib`, `-open` modules).
+    EnvSetup,
     /// Type checking into typedtree.
     Typecheck,
+    /// Inferred-signature registration, current-unit raw signature copy and
+    /// portable signature extraction for in-process publication.
+    SignaturePublish,
     /// Typedtree to raw lambda and raw lambda to lambda lowering.
     Lambda,
     /// Lambda simplification before JavaScript IR generation.
@@ -34,8 +40,12 @@ pub struct PhaseTimingSnapshot {
     pub total: Duration,
     /// Aggregate parse phase time.
     pub parse: Duration,
+    /// Aggregate per-module environment setup time.
+    pub env_setup: Duration,
     /// Aggregate typecheck phase time.
     pub typecheck: Duration,
+    /// Aggregate signature publication time.
+    pub signature_publish: Duration,
     /// Aggregate lambda phase time.
     pub lambda: Duration,
     /// Aggregate lambda optimization phase time.
@@ -50,7 +60,9 @@ impl PhaseTimingSnapshot {
     /// Sum of all explicitly recorded phase buckets.
     pub fn recorded(self) -> Duration {
         self.parse
+            .saturating_add(self.env_setup)
             .saturating_add(self.typecheck)
+            .saturating_add(self.signature_publish)
             .saturating_add(self.lambda)
             .saturating_add(self.lambda_optimization)
             .saturating_add(self.gentype)
@@ -65,7 +77,9 @@ impl PhaseTimingSnapshot {
 
 static ENABLED: OnceLock<bool> = OnceLock::new();
 static PARSE_NS: AtomicU64 = AtomicU64::new(0);
+static ENV_SETUP_NS: AtomicU64 = AtomicU64::new(0);
 static TYPECHECK_NS: AtomicU64 = AtomicU64::new(0);
+static SIGNATURE_PUBLISH_NS: AtomicU64 = AtomicU64::new(0);
 static LAMBDA_NS: AtomicU64 = AtomicU64::new(0);
 static LAMBDA_OPT_NS: AtomicU64 = AtomicU64::new(0);
 static GENTYPE_NS: AtomicU64 = AtomicU64::new(0);
@@ -78,7 +92,9 @@ thread_local! {
 #[derive(Clone, Copy, Debug, Default)]
 struct ThreadPhaseCounters {
     parse_ns: u64,
+    env_setup_ns: u64,
     typecheck_ns: u64,
+    signature_publish_ns: u64,
     lambda_ns: u64,
     lambda_optimization_ns: u64,
     gentype_ns: u64,
@@ -89,7 +105,11 @@ impl ThreadPhaseCounters {
     fn record(&mut self, phase: Phase, nanos: u64) {
         match phase {
             Phase::Parse => self.parse_ns = self.parse_ns.saturating_add(nanos),
+            Phase::EnvSetup => self.env_setup_ns = self.env_setup_ns.saturating_add(nanos),
             Phase::Typecheck => self.typecheck_ns = self.typecheck_ns.saturating_add(nanos),
+            Phase::SignaturePublish => {
+                self.signature_publish_ns = self.signature_publish_ns.saturating_add(nanos);
+            }
             Phase::Lambda => self.lambda_ns = self.lambda_ns.saturating_add(nanos),
             Phase::LambdaOptimization => {
                 self.lambda_optimization_ns = self.lambda_optimization_ns.saturating_add(nanos);
@@ -103,7 +123,9 @@ impl ThreadPhaseCounters {
         PhaseTimingSnapshot {
             total: Duration::default(),
             parse: Duration::from_nanos(self.parse_ns),
+            env_setup: Duration::from_nanos(self.env_setup_ns),
             typecheck: Duration::from_nanos(self.typecheck_ns),
+            signature_publish: Duration::from_nanos(self.signature_publish_ns),
             lambda: Duration::from_nanos(self.lambda_ns),
             lambda_optimization: Duration::from_nanos(self.lambda_optimization_ns),
             gentype: Duration::from_nanos(self.gentype_ns),
@@ -204,7 +226,9 @@ pub fn reset() {
     }
 
     PARSE_NS.store(0, Ordering::Relaxed);
+    ENV_SETUP_NS.store(0, Ordering::Relaxed);
     TYPECHECK_NS.store(0, Ordering::Relaxed);
+    SIGNATURE_PUBLISH_NS.store(0, Ordering::Relaxed);
     LAMBDA_NS.store(0, Ordering::Relaxed);
     LAMBDA_OPT_NS.store(0, Ordering::Relaxed);
     GENTYPE_NS.store(0, Ordering::Relaxed);
@@ -224,7 +248,9 @@ pub fn record(phase: Phase, duration: Duration) {
     let nanos = duration.as_nanos().min(u64::MAX as u128) as u64;
     match phase {
         Phase::Parse => PARSE_NS.fetch_add(nanos, Ordering::Relaxed),
+        Phase::EnvSetup => ENV_SETUP_NS.fetch_add(nanos, Ordering::Relaxed),
         Phase::Typecheck => TYPECHECK_NS.fetch_add(nanos, Ordering::Relaxed),
+        Phase::SignaturePublish => SIGNATURE_PUBLISH_NS.fetch_add(nanos, Ordering::Relaxed),
         Phase::Lambda => LAMBDA_NS.fetch_add(nanos, Ordering::Relaxed),
         Phase::LambdaOptimization => LAMBDA_OPT_NS.fetch_add(nanos, Ordering::Relaxed),
         Phase::Gentype => GENTYPE_NS.fetch_add(nanos, Ordering::Relaxed),
@@ -275,7 +301,9 @@ pub fn snapshot() -> PhaseTimingSnapshot {
             }
         },
         parse: Duration::from_nanos(PARSE_NS.load(Ordering::Relaxed)),
+        env_setup: Duration::from_nanos(ENV_SETUP_NS.load(Ordering::Relaxed)),
         typecheck: Duration::from_nanos(TYPECHECK_NS.load(Ordering::Relaxed)),
+        signature_publish: Duration::from_nanos(SIGNATURE_PUBLISH_NS.load(Ordering::Relaxed)),
         lambda: Duration::from_nanos(LAMBDA_NS.load(Ordering::Relaxed)),
         lambda_optimization: Duration::from_nanos(LAMBDA_OPT_NS.load(Ordering::Relaxed)),
         gentype: Duration::from_nanos(GENTYPE_NS.load(Ordering::Relaxed)),
@@ -298,7 +326,9 @@ pub fn print_report() {
         ms(snapshot.overhead())
     );
     print_phase("parse", snapshot.parse, total);
+    print_phase("env_setup", snapshot.env_setup, total);
     print_phase("typecheck", snapshot.typecheck, total);
+    print_phase("signature_publish", snapshot.signature_publish, total);
     print_phase("lambda", snapshot.lambda, total);
     print_phase("lambda_optimization", snapshot.lambda_optimization, total);
     print_phase("gentype", snapshot.gentype, total);

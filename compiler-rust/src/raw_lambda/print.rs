@@ -166,7 +166,7 @@ fn print_tag_info<W: Write>(f: &mut Formatter<W>, tag_info: &TagInfo) {
 
 fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
     match cst {
-        Constant::Int { i, comment } => match comment {
+        Constant::Int { i, comment } => match comment.as_deref() {
             Some(PointerInfo::ShapeNone) => f.string("shape_none"),
             Some(PointerInfo::Constructor(tag)) => f.print(format_args!("`{}", tag.name)),
             Some(PointerInfo::PolyVariant(name)) => {
@@ -198,7 +198,7 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
             }
         }
         Constant::Pointer(name) => print_internal_utf8(f, name),
-        Constant::Block { tag_info, elements } if elements.is_empty() => match tag_info {
+        Constant::Block { tag_info, elements } if elements.is_empty() => match &**tag_info {
             TagInfo::Constructor { name, .. } | TagInfo::RecordInlined { name, .. } => {
                 f.print(format_args!("[{name}]"))
             }
@@ -206,7 +206,7 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
         },
         Constant::Block { tag_info, elements } => {
             f.open_box(BoxKind::Box, 1);
-            match tag_info {
+            match &**tag_info {
                 TagInfo::Constructor { name, .. } | TagInfo::RecordInlined { name, .. } => {
                     f.print(format_args!("[{name}:"))
                 }
@@ -422,6 +422,7 @@ fn sequence<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Optio
 
 fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Ident>) {
     match lam0 {
+        RawLambda::Lshared(inner) => lam(f, inner, reraise_exn),
         RawLambda::Lvar(id) => print_ident(f, id),
         RawLambda::LglobalModule(id, dynamic_import) => {
             f.open_box(BoxKind::Box, 2);
@@ -477,11 +478,13 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
             f.string(")");
             f.close_box();
         }
-        RawLambda::Lprim(RawPrimInfo {
-            primitive,
-            args,
-            loc: _,
-        }) => {
+        RawLambda::Lprim(__prim0) => {
+            let RawPrimInfo {
+                primitive,
+                args,
+                loc: _,
+            } = __prim0.as_ref();
+
             if matches!(primitive, Primitive::Praise) {
                 if let ([RawLambda::Lvar(id)], Some(exn_id)) = (args.as_slice(), reraise_exn) {
                     if id.same(exn_id) {

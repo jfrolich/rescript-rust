@@ -17,6 +17,7 @@ pub mod op;
 pub mod printer;
 pub mod program_printer;
 pub mod source_map;
+pub(crate) mod walk;
 
 use ahash::AHashMap;
 use std::cell::RefCell;
@@ -634,7 +635,7 @@ fn normalize_absolute_path(path: &FsPath) -> PathBuf {
     let base = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir()
+        crate::process_cwd::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
     };
@@ -725,7 +726,7 @@ pub enum VIdent {
     /// Local identifier
     Id(Ident),
     /// Qualified identifier (module.member)
-    Qualified(ModuleId, Option<String>),
+    Qualified(Box<ModuleId>, Option<String>),
 }
 
 /// String delimiter type
@@ -878,10 +879,10 @@ pub enum ExpressionDesc {
         is_method: bool,
         params: Vec<Ident>,
         body: Block,
-        env: FunEnv,
+        env: Box<FunEnv>,
         return_unit: bool,
         async_: bool,
-        directive: Option<String>,
+        directive: Option<Box<String>>,
     },
 
     /// String literal
@@ -897,7 +898,7 @@ pub enum ExpressionDesc {
     OptionalBlock(Box<Expression>, bool),
 
     /// Caml block (variant, record, tuple)
-    CamlBlock(Vec<Expression>, MutableFlag, TagInfo),
+    CamlBlock(Vec<Expression>, MutableFlag, Box<TagInfo>),
 
     /// Block tag access
     CamlBlockTag(Box<Expression>, String),
@@ -940,9 +941,9 @@ pub struct Expression {
     /// Expression description
     pub desc: ExpressionDesc,
     /// Optional comment
-    pub comment: Option<String>,
+    pub comment: Option<Box<String>>,
     /// Original ReScript source location used by source map generation.
-    pub source_loc: Option<crate::location::Location>,
+    pub source_loc: Option<Box<crate::location::Location>>,
 }
 
 impl Expression {
@@ -959,7 +960,7 @@ impl Expression {
     pub fn with_comment(desc: ExpressionDesc, comment: impl Into<String>) -> Self {
         Self {
             desc,
-            comment: Some(comment.into()),
+            comment: Some(Box::new(comment.into())),
             source_loc: None,
         }
     }
@@ -975,8 +976,8 @@ impl Expression {
     }
 
     /// Create a qualified variable expression
-    pub fn qualified(module: ModuleId, member: Option<String>) -> Self {
-        Self::new(ExpressionDesc::Var(VIdent::Qualified(module, member)))
+    pub fn qualified(module: impl Into<Box<ModuleId>>, member: Option<String>) -> Self {
+        Self::new(ExpressionDesc::Var(VIdent::Qualified(module.into(), member)))
     }
 
     /// Create a string expression
@@ -1749,8 +1750,8 @@ pub enum StatementDesc {
     /// For loop (label, init, end, ident, direction, body).
     ForRange(
         Option<String>,
-        Option<Expression>,
-        Expression,
+        Option<Box<Expression>>,
+        Box<Expression>,
         Ident,
         ForDirection,
         Block,
@@ -1759,11 +1760,11 @@ pub enum StatementDesc {
     /// `for (let ident of iterable) { body }` (upstream #7887).
     /// The optional label is lazily attached when a nested switch needs to
     /// emit a labeled `break`/`continue` targeting this loop.
-    ForOf(Option<String>, Ident, Expression, Block),
+    ForOf(Option<String>, Ident, Box<Expression>, Block),
 
     /// `for await (let ident of iterable) { body }` (upstream #7887).
     /// Only emitted inside async functions.
-    ForAwaitOf(Option<String>, Ident, Expression, Block),
+    ForAwaitOf(Option<String>, Ident, Box<Expression>, Block),
 
     /// Continue statement (optional target label)
     Continue(Option<String>),
@@ -1796,9 +1797,9 @@ pub struct Statement {
     /// Statement description
     pub desc: StatementDesc,
     /// Optional comment
-    pub comment: Option<String>,
+    pub comment: Option<Box<String>>,
     /// Original ReScript source location used by source map generation.
-    pub source_loc: Option<crate::location::Location>,
+    pub source_loc: Option<Box<crate::location::Location>>,
 }
 
 impl Statement {
@@ -1861,11 +1862,30 @@ impl Statement {
         Self::new(StatementDesc::While(label, cond, body))
     }
 
+    /// Create a counted `for` loop statement.
+    pub fn for_range(
+        label: Option<String>,
+        init: Option<Expression>,
+        finish: Expression,
+        ident: Ident,
+        direction: ForDirection,
+        body: Block,
+    ) -> Self {
+        Self::new(StatementDesc::ForRange(
+            label,
+            init.map(Box::new),
+            Box::new(finish),
+            ident,
+            direction,
+            body,
+        ))
+    }
+
     /// Create a `for (let id of iterable) { body }` statement.
     /// Port of OCaml `S.for_of`. The optional label is lazily attached when
     /// a nested switch requires a labeled break/continue target.
     pub fn for_of(label: Option<String>, ident: Ident, iterable: Expression, body: Block) -> Self {
-        Self::new(StatementDesc::ForOf(label, ident, iterable, body))
+        Self::new(StatementDesc::ForOf(label, ident, Box::new(iterable), body))
     }
 
     /// Create a `for await (let id of iterable) { body }` statement.
@@ -1876,12 +1896,12 @@ impl Statement {
         iterable: Expression,
         body: Block,
     ) -> Self {
-        Self::new(StatementDesc::ForAwaitOf(label, ident, iterable, body))
+        Self::new(StatementDesc::ForAwaitOf(label, ident, Box::new(iterable), body))
     }
 
     /// Create a return statement
     pub fn return_(expr: Expression) -> Self {
-        let source_loc = expr.source_loc;
+        let source_loc = expr.source_loc.clone();
         let mut statement = Self::new(StatementDesc::Return(expr));
         statement.source_loc = source_loc;
         statement
@@ -1928,7 +1948,7 @@ fn block_with_comment(block: Block, comment: Option<String>) -> Statement {
         [] => Statement {
             source_loc: None,
             desc: StatementDesc::Block(vec![]),
-            comment,
+            comment: comment.map(Box::new),
         },
         [stmt] => match &stmt.desc {
             StatementDesc::Block(inner) => block_with_comment(inner.clone(), comment),
@@ -1937,7 +1957,7 @@ fn block_with_comment(block: Block, comment: Option<String>) -> Statement {
         _ => Statement {
             source_loc: None,
             desc: StatementDesc::Block(block),
-            comment,
+            comment: comment.map(Box::new),
         },
     }
 }
@@ -1980,7 +2000,7 @@ fn normalize_statement(desc: StatementDesc, comment: Option<String>) -> Statemen
         _ => Statement {
             source_loc: None,
             desc,
-            comment,
+            comment: comment.map(Box::new),
         },
     }
 }
@@ -2306,7 +2326,7 @@ fn js_or_expression(left: Expression, right: Expression) -> Expression {
 
 fn simplify_and_if_no_side_effects(left: &Expression, right: &Expression) -> Option<Expression> {
     if expression_has_no_side_effects(left) && expression_has_no_side_effects(right) {
-        simplify_and_expression(left, right)
+        simplify_and_expression_with_depth(left, right, 0, true)
     } else {
         None
     }
@@ -2314,20 +2334,22 @@ fn simplify_and_if_no_side_effects(left: &Expression, right: &Expression) -> Opt
 
 fn simplify_or_if_no_side_effects(left: &Expression, right: &Expression) -> Option<Expression> {
     if expression_has_no_side_effects(left) && expression_has_no_side_effects(right) {
-        simplify_or_expression(left, right)
+        simplify_or_expression_with_depth(left, right, 0, true)
     } else {
         None
     }
 }
 
-fn simplify_and_expression(left: &Expression, right: &Expression) -> Option<Expression> {
-    simplify_and_expression_with_depth(left, right, 0)
-}
-
+/// `pure` is true when both operands are already known to have no side
+/// effects. Sub-expressions of pure `&&`/`||` operands, their negations and
+/// conjunctions of them are pure as well, so recursive calls on those pass it
+/// on instead of walking the operands again (for long `||` chains that walk
+/// made each step linear and whole-chain construction quadratic).
 fn simplify_and_expression_with_depth(
     left: &Expression,
     right: &Expression,
     depth: usize,
+    pure: bool,
 ) -> Option<Expression> {
     if depth > JS_SIMPLIFY_MAX_DEPTH {
         return None;
@@ -2342,15 +2364,15 @@ fn simplify_and_expression_with_depth(
         _ => {}
     }
 
-    if expression_has_no_side_effects(left) && expression_has_no_side_effects(right) {
+    if pure || (expression_has_no_side_effects(left) && expression_has_no_side_effects(right)) {
         match (&left.desc, &right.desc) {
             (ExpressionDesc::Bin(BinOp::And, left_a, left_b), _) => {
                 let simplified_left_a =
-                    simplify_and_expression_with_depth(left_a, right, depth + 1);
+                    simplify_and_expression_with_depth(left_a, right, depth + 1, true);
                 let simplified_left_b =
-                    simplify_and_expression_with_depth(left_b, right, depth + 1);
+                    simplify_and_expression_with_depth(left_b, right, depth + 1, true);
                 return match (simplified_left_a, simplified_left_b) {
-                    (None, None) => simplify_and_expression_with_depth(left_a, left_b, depth + 1)
+                    (None, None) => simplify_and_expression_with_depth(left_a, left_b, depth + 1, true)
                         .and_then(|expr| simplify_and_force(&expr, right, depth + 1)),
                     (Some(left_a), None) => simplify_and_force(&left_a, left_b, depth + 1),
                     (None, Some(left_b)) => simplify_and_force(left_a, &left_b, depth + 1),
@@ -2360,13 +2382,13 @@ fn simplify_and_expression_with_depth(
             (_, ExpressionDesc::Bin(BinOp::And, right_a, right_b)) => {
                 let combined =
                     raw_bin_expression(BinOp::And, left.clone(), right_a.as_ref().clone());
-                return simplify_and_expression_with_depth(&combined, right_b, depth + 1);
+                return simplify_and_expression_with_depth(&combined, right_b, depth + 1, true);
             }
             (ExpressionDesc::Bin(BinOp::Or, left_a, left_b), _) => {
                 let simplified_left_a =
-                    simplify_and_expression_with_depth(left_a, right, depth + 1);
+                    simplify_and_expression_with_depth(left_a, right, depth + 1, true);
                 let simplified_left_b =
-                    simplify_and_expression_with_depth(left_b, right, depth + 1);
+                    simplify_and_expression_with_depth(left_b, right, depth + 1, true);
                 return match (simplified_left_a, simplified_left_b) {
                     (Some(expr), None) if matches!(expr.desc, ExpressionDesc::Bool(false)) => Some(
                         raw_bin_expression(BinOp::And, left_b.as_ref().clone(), right.clone()),
@@ -2375,7 +2397,7 @@ fn simplify_and_expression_with_depth(
                         raw_bin_expression(BinOp::And, left_a.as_ref().clone(), right.clone()),
                     ),
                     (None, _) | (_, None) => {
-                        simplify_or_expression_with_depth(left_a, left_b, depth + 1)
+                        simplify_or_expression_with_depth(left_a, left_b, depth + 1, true)
                             .and_then(|expr| simplify_and_force(&expr, right, depth + 1))
                     }
                     (Some(left_a), Some(left_b)) => simplify_or_force(&left_a, &left_b, depth + 1),
@@ -2389,10 +2411,14 @@ fn simplify_and_expression_with_depth(
         return Some(left.clone());
     }
 
-    if expression_has_no_side_effects(left) && disjunction_contains_expression(left, right) {
+    if (pure || expression_has_no_side_effects(left))
+        && disjunction_contains_expression(left, right)
+    {
         return Some(right.clone());
     }
-    if expression_has_no_side_effects(right) && disjunction_contains_expression(right, left) {
+    if (pure || expression_has_no_side_effects(right))
+        && disjunction_contains_expression(right, left)
+    {
         return Some(left.clone());
     }
 
@@ -2417,14 +2443,12 @@ fn simplify_and_expression_with_depth(
     None
 }
 
-fn simplify_or_expression(left: &Expression, right: &Expression) -> Option<Expression> {
-    simplify_or_expression_with_depth(left, right, 0)
-}
-
+/// See `simplify_and_expression_with_depth` for `pure`.
 fn simplify_or_expression_with_depth(
     left: &Expression,
     right: &Expression,
     depth: usize,
+    pure: bool,
 ) -> Option<Expression> {
     if depth > JS_SIMPLIFY_MAX_DEPTH {
         return None;
@@ -2439,26 +2463,31 @@ fn simplify_or_expression_with_depth(
         _ => {}
     }
 
-    if expression_has_no_side_effects(left) && conjunction_contains_expression(left, right) {
+    if (pure || expression_has_no_side_effects(left))
+        && conjunction_contains_expression(left, right)
+    {
         return Some(right.clone());
     }
-    if expression_has_no_side_effects(right) && conjunction_contains_expression(right, left) {
+    if (pure || expression_has_no_side_effects(right))
+        && conjunction_contains_expression(right, left)
+    {
         return Some(left.clone());
     }
 
     let left_not = push_negation(left.clone())?;
     let right_not = push_negation(right.clone())?;
-    let simplified = simplify_and_expression_with_depth(&left_not, &right_not, depth + 1)?;
+    // Negation keeps operands pure.
+    let simplified = simplify_and_expression_with_depth(&left_not, &right_not, depth + 1, pure)?;
     push_negation(simplified)
 }
 
 fn simplify_and_force(left: &Expression, right: &Expression, depth: usize) -> Option<Expression> {
-    simplify_and_expression_with_depth(left, right, depth)
+    simplify_and_expression_with_depth(left, right, depth, false)
         .or_else(|| Some(raw_bin_expression(BinOp::And, left.clone(), right.clone())))
 }
 
 fn simplify_or_force(left: &Expression, right: &Expression, depth: usize) -> Option<Expression> {
-    simplify_or_expression_with_depth(left, right, depth)
+    simplify_or_expression_with_depth(left, right, depth, false)
         .or_else(|| Some(raw_bin_expression(BinOp::Or, left.clone(), right.clone())))
 }
 
@@ -2872,7 +2901,7 @@ pub struct Program {
     /// Exported identifiers
     pub exports: Exports,
     /// Set of exported identifiers
-    pub export_set: std::collections::HashSet<Ident>,
+    pub export_set: ahash::AHashSet<Ident>,
     /// Idents that occupy printed names without emitting statements.
     pub name_reservations: Vec<Ident>,
 }
@@ -2909,7 +2938,7 @@ impl Program {
         Self {
             block: vec![],
             exports: vec![],
-            export_set: std::collections::HashSet::new(),
+            export_set: ahash::AHashSet::new(),
             name_reservations: Vec::new(),
         }
     }
@@ -3031,13 +3060,13 @@ fn dispose_statement_nonrecursive(statement: Statement, stack: &mut Vec<DisposeI
             stack.push(DisposeItem::Block(body));
         }
         StatementDesc::ForRange(_, start, finish, _, _, body) => {
-            push_optional_expression(start, stack);
-            stack.push(DisposeItem::Expression(finish));
+            push_optional_expression(start.map(|expr| *expr), stack);
+            stack.push(DisposeItem::Expression(*finish));
             stack.push(DisposeItem::Block(body));
         }
         StatementDesc::ForOf(_, _, iterable, body)
         | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
-            stack.push(DisposeItem::Expression(iterable));
+            stack.push(DisposeItem::Expression(*iterable));
             stack.push(DisposeItem::Block(body));
         }
         StatementDesc::IntSwitch(expr, clauses, default) => {
@@ -3951,6 +3980,31 @@ mod tests {
     }
 
     #[test]
+    fn test_if_statement_rewrites_await_return_tail() {
+        let cond = Expression::var(Ident::create_local("value"));
+        let effect = Statement::exp(Expression::new(ExpressionDesc::Await(Box::new(
+            Expression::call(
+                Expression::var(Ident::create_local("load")),
+                vec![],
+                CallInfo::default(),
+            ),
+        ))));
+        let then_block = vec![effect, Statement::return_(Expression::undefined(true))];
+        let else_block = vec![Statement::return_(Expression::undefined(true))];
+
+        let stmt = Statement::if_(cond.clone(), then_block.clone(), else_block.clone());
+        // js_stmt_make.ml:262-269: a single Return else becomes an early guard.
+        let mut expected = vec![Statement::new(StatementDesc::If(
+            Expression::not(cond), else_block, vec![],
+        ))];
+        expected.extend(then_block);
+        assert_eq!(
+            print_block(&vec![stmt]),
+            print_block(&vec![Statement::block(expected)]),
+        );
+    }
+
+    #[test]
     fn test_if_statement_rewrites_sync_return_undefined_tail_to_negative_guard() {
         let cond = Expression::var(Ident::create_local("value"));
         let effect = Statement::exp(Expression::call(
@@ -3995,6 +4049,115 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn test_if_statement_rewrites_literal_dispatch_return_tail() {
+        let key = Ident::create_local("key");
+        let active = Ident::create_local("active");
+        let dispatch = raw_bin_expression(
+            BinOp::Or,
+            Expression::bin(
+                BinOp::EqEqEq,
+                Expression::var(key.clone()),
+                Expression::string("space"),
+            ),
+            Expression::bin(
+                BinOp::EqEqEq,
+                Expression::var(key.clone()),
+                Expression::string("a"),
+            ),
+        );
+        let inner_cond = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(key.clone()),
+            Expression::string("space"),
+        );
+        let then_block = vec![Statement::new(StatementDesc::If(
+            inner_cond.clone(),
+            vec![Statement::new(StatementDesc::If(
+                Expression::var(active),
+                vec![
+                    Statement::exp(Expression::call(
+                        Expression::var(Ident::create_local("seen")),
+                        vec![],
+                        CallInfo::default(),
+                    )),
+                    Statement::return_(Expression::undefined(true)),
+                ],
+                vec![Statement::return_(Expression::undefined(true))],
+            ))],
+            vec![],
+        ))];
+        let else_block = vec![Statement::return_(Expression::undefined(true))];
+
+        let stmt = Statement::if_(dispatch.clone(), then_block.clone(), else_block.clone());
+        // js_stmt_make.ml:262-269: a single Return else becomes an early guard.
+        let mut expected = vec![Statement::new(StatementDesc::If(
+            Expression::not(dispatch), else_block, vec![],
+        ))];
+        expected.extend(then_block);
+        assert_eq!(
+            print_block(&vec![stmt]),
+            print_block(&vec![Statement::block(expected)]),
+        );
+    }
+
+    #[test]
+    fn test_if_statement_rewrites_block_wrapped_literal_dispatch_return_tail() {
+        let key = Ident::create_local("key");
+        let active = Ident::create_local("active");
+        let dispatch = raw_bin_expression(
+            BinOp::Or,
+            Expression::bin(
+                BinOp::EqEqEq,
+                Expression::var(key.clone()),
+                Expression::string("space"),
+            ),
+            Expression::bin(
+                BinOp::EqEqEq,
+                Expression::var(key.clone()),
+                Expression::string("a"),
+            ),
+        );
+        let inner_cond = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(key.clone()),
+            Expression::string("space"),
+        );
+        let active_guard = Statement::new(StatementDesc::If(
+            Expression::var(active),
+            vec![
+                Statement::exp(Expression::call(
+                    Expression::var(Ident::create_local("seen")),
+                    vec![],
+                    CallInfo::default(),
+                )),
+                Statement::return_(Expression::undefined(true)),
+            ],
+            vec![Statement::new(StatementDesc::Block(vec![
+                Statement::return_(Expression::undefined(true)),
+            ]))],
+        ));
+        let then_block = vec![Statement::new(StatementDesc::Block(vec![Statement::new(
+            StatementDesc::If(
+                inner_cond.clone(),
+                vec![Statement::new(StatementDesc::Block(vec![active_guard]))],
+                vec![],
+            ),
+        )]))];
+        let else_block = vec![Statement::return_(Expression::undefined(true))];
+
+        let stmt = Statement::if_(dispatch.clone(), then_block.clone(), else_block.clone());
+        // js_stmt_make.ml:262-269: a single Return else becomes an early guard.
+        let mut expected = vec![Statement::new(StatementDesc::If(
+            Expression::not(dispatch), else_block, vec![],
+        ))];
+        expected.extend(then_block);
+        assert_eq!(
+            print_block(&vec![stmt]),
+            print_block(&vec![Statement::block(expected)]),
+        );
     }
 
     #[test]
@@ -4058,6 +4221,30 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn test_if_statement_rewrites_loose_nullish_else_to_fallthrough() {
+        let elem = Ident::create_local("elem");
+        let cond = Expression::is_null_or_undefined(Expression::var(elem.clone()));
+        let then_block = vec![Statement::return_(Expression::number(Number::int(1)))];
+        let else_block = vec![
+            Statement::exp(Expression::call(
+                Expression::var(Ident::create_local("seen")),
+                vec![Expression::var(elem.clone())],
+                CallInfo::default(),
+            )),
+            Statement::return_(Expression::number(Number::int(2))),
+        ];
+
+        let stmt = Statement::if_(cond.clone(), then_block.clone(), else_block.clone());
+        // js_stmt_make.ml:270-274: terminal then arm precedes the else body.
+        let mut expected = vec![Statement::new(StatementDesc::If(cond, then_block, vec![]))];
+        expected.extend(else_block);
+        assert_eq!(
+            print_block(&vec![stmt]),
+            print_block(&vec![Statement::block(expected)]),
+        );
     }
 
     #[test]

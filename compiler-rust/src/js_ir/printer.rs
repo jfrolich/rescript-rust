@@ -16,7 +16,7 @@ use crate::ident::Ident;
 use crate::js_ir::source_map::SourceMapBuilder;
 use crate::lambda::SwitchCaseTag;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::fmt::Write;
 
 #[derive(Clone, Default)]
@@ -437,8 +437,8 @@ impl JsPrinter {
             self.newline();
         }
 
-        self.mark_source_loc(stmt.source_loc.as_ref());
-        self.fallback_expression_source_loc = stmt.source_loc;
+        self.mark_source_loc(stmt.source_loc.as_ref().map(|v| &**v));
+        self.fallback_expression_source_loc = stmt.source_loc.as_deref().copied();
         self.print_statement_desc(&stmt.desc, top_level);
         self.fallback_expression_source_loc = None;
     }
@@ -509,7 +509,7 @@ impl JsPrinter {
                             body,
                             *return_unit,
                             *async_,
-                            directive.as_deref(),
+                            directive.as_deref().map(|x| x.as_str()),
                         );
                         return;
                     }
@@ -919,7 +919,7 @@ impl JsPrinter {
                     ..
                 } = &value.desc
                 {
-                    self.mark_source_loc(value.source_loc.as_ref());
+                    self.mark_source_loc(value.source_loc.as_ref().map(|v| &**v));
                     // OCaml reference: compiler/core/js_dump.ml:337-360 builds
                     // `set_env` including `Name_non_top id`, then
                     // compiler/core/js_dump.ml:411-414 prints the function in
@@ -933,7 +933,7 @@ impl JsPrinter {
                         body,
                         return_unit: *return_unit,
                         async_: *async_,
-                        directive: directive.as_deref(),
+                        directive: directive.as_deref().map(|x| x.as_str()),
                         function_ident: Some(&decl.ident),
                     });
                 } else {
@@ -1293,7 +1293,7 @@ impl JsPrinter {
             ExpressionDesc::Fun { .. } | ExpressionDesc::Object(_, _) => true,
             ExpressionDesc::RawJsCode(info) => !info.is_stmt,
             ExpressionDesc::CamlBlock(_, _, tag_info) => matches!(
-                tag_info,
+                &**tag_info,
                 crate::lambda::TagInfo::Record { .. }
                     | crate::lambda::TagInfo::Module(_)
                     | crate::lambda::TagInfo::PolyVar(_)
@@ -1407,14 +1407,17 @@ impl JsPrinter {
                 self.collect_jsx_fields_from_object(props)?,
                 dup.as_ref().map(|dup| dup.as_ref()),
             )),
-            ExpressionDesc::CamlBlock(
-                elements,
-                _,
-                crate::lambda::TagInfo::Record { fields, .. },
-            ) => Some((
-                self.collect_jsx_fields_from_record_block(elements, fields)?,
-                None,
-            )),
+            ExpressionDesc::CamlBlock(elements, _, tag)
+                if matches!(**tag, crate::lambda::TagInfo::Record { .. }) =>
+            {
+                let crate::lambda::TagInfo::Record { fields, .. } = &**tag else {
+                    unreachable!()
+                };
+                Some((
+                    self.collect_jsx_fields_from_record_block(elements, fields)?,
+                    None,
+                ))
+            }
             ExpressionDesc::Seq(_, _) => {
                 let (fields, spread_props) = self.collect_jsx_spread_assignments(props)?;
                 Some((fields, Some(spread_props)))
@@ -1652,7 +1655,7 @@ impl JsPrinter {
             self.write(" */");
         }
 
-        self.mark_source_loc(expr.source_loc.as_ref());
+        self.mark_source_loc(expr.source_loc.as_ref().map(|v| &**v));
         self.print_expression_desc(&expr.desc, level);
     }
 
@@ -1939,7 +1942,9 @@ impl JsPrinter {
                 // `P.group f 1` around the whole access plus
                 // `P.bracket_group f 1` around the index (js_dump.ml:1039-1043).
                 self.write_char('[');
-                self.with_indent(2, |this| this.print_expression(idx, 0));
+                // The index sits inside both the outer `P.group f 1` and
+                // `P.bracket_group f 1` (js_dump.ml `Array_index`).
+                self.with_indent(2, |p| p.print_expression(idx, 0));
                 self.write_char(']');
                 if needs_paren {
                     self.write_char(')');
@@ -2019,7 +2024,7 @@ impl JsPrinter {
                     body,
                     return_unit: *return_unit,
                     async_: *async_,
-                    directive: directive.as_deref(),
+                    directive: directive.as_deref().map(|x| x.as_str()),
                     function_ident: None,
                 });
             }
@@ -2110,13 +2115,13 @@ impl JsPrinter {
             ExpressionDesc::CamlBlock(elements, _mutable, tag_info) => {
                 use crate::lambda::TagInfo;
 
-                if matches!(tag_info, TagInfo::Extension | TagInfo::RecordExt { .. }) {
+                if matches!(&**tag_info, TagInfo::Extension | TagInfo::RecordExt { .. }) {
                     self.print_exception_block_literal(level, elements, tag_info, false);
                     return;
                 }
 
                 // Check if this is a record with field names
-                match tag_info {
+                match &**tag_info {
                     TagInfo::Record { fields, .. } if fields.len() == elements.len() => {
                         if record_uses_array_syntax(fields) {
                             self.print_array_literal(elements);
@@ -2327,7 +2332,7 @@ impl JsPrinter {
         match &expr.desc {
             ExpressionDesc::CamlBlock(elements, _, tag_info)
                 if matches!(
-                    tag_info,
+                    &**tag_info,
                     crate::lambda::TagInfo::Extension | crate::lambda::TagInfo::RecordExt { .. }
                 ) =>
             {
@@ -2441,8 +2446,8 @@ impl JsPrinter {
 
         self.write_char('{');
         let mut props = props.into_iter().peekable();
-        // js_dump.ml:1093-1095: the source prints as `Spread e` at level 1,
-        // whose operand is printed at level 13 (js_dump.ml:1117-1120).
+        // OCaml `js_dump.ml` prints the spread through `J.Spread` at level 1,
+        // whose operand is printed at level 13 (so object literals get parens).
         if let (Some(spread), None) = (dup, props.peek()) {
             self.write("...");
             self.print_expression(spread, 13);
@@ -2698,50 +2703,49 @@ impl JsPrinter {
         }
     }
 
-    /// Print a function body using the same return-unit elision rules as OCaml.
-    /// `function_body` (js_dump.ml:1743-1771).
-    fn print_function_body(&mut self, stmts: &Block, return_unit: bool) {
-        self.print_function_body_ocaml(stmts, return_unit);
+    /// Port of compiler/core/js_dump.ml:1743-1771. Only the final
+    /// statement is eligible for unit-return elision; do not optimize guards
+    /// here after the JS passes have established their control-flow shape.
+    fn print_function_body(&mut self, mut stmts: &[Statement], return_unit: bool) {
+        while let Some((stmt, rest)) = stmts.split_first() {
+            match rest {
+                [] => {
+                    self.print_function_tail_statement(stmt, return_unit);
+                    return;
+                }
+                [tail] if return_is_undefined(tail) => {
+                    self.print_statement(stmt, false);
+                    return;
+                }
+                _ => {
+                    self.print_statement(stmt, false);
+                    self.newline();
+                    stmts = rest;
+                }
+            }
+        }
     }
 
-    fn print_function_body_ocaml(&mut self, stmts: &[Statement], return_unit: bool) {
-        match stmts {
-            [] => {}
-            [stmt] => match &stmt.desc {
-                StatementDesc::If(cond, then_, else_) if else_is_single_return_undefined(else_) => {
-                    self.print_statement(
-                        &Statement {
-                            source_loc: stmt.source_loc,
-                            desc: StatementDesc::If(cond.clone(), then_.clone(), vec![]),
-                            comment: stmt.comment.clone(),
-                        },
-                        false,
-                    );
-                }
-                StatementDesc::Return(Expression {
-                    desc: ExpressionDesc::Undefined { .. },
-                    ..
-                }) => {}
-                StatementDesc::Return(expr) if return_unit => {
-                    self.print_statement(
-                        &Statement {
-                            source_loc: stmt.source_loc,
-                            desc: StatementDesc::Exp(expr.clone()),
-                            comment: stmt.comment.clone(),
-                        },
-                        false,
-                    );
-                }
-                _ => self.print_statement(stmt, false),
-            },
-            [stmt, trailing] if return_is_undefined(trailing) => {
-                self.print_statement(stmt, false);
+    fn print_function_tail_statement(&mut self, stmt: &Statement, return_unit: bool) {
+        match &stmt.desc {
+            StatementDesc::If(cond, then_, else_) if else_is_single_return_undefined(else_) => {
+                self.print_statement(
+                    &Statement {
+                        source_loc: stmt.source_loc.clone(),
+                        desc: StatementDesc::If(cond.clone(), then_.clone(), vec![]),
+                        comment: stmt.comment.clone(),
+                    },
+                    false,
+                );
             }
-            [stmt, rest @ ..] => {
-                self.print_statement(stmt, false);
-                self.newline();
-                self.print_function_body_ocaml(rest, return_unit);
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Undefined { .. },
+                ..
+            }) => {}
+            StatementDesc::Return(expr) if return_unit => {
+                self.print_statement(&Statement::exp(expr.clone()), false);
             }
+            _ => self.print_statement(stmt, false),
         }
     }
 
@@ -2926,7 +2930,7 @@ fn is_undefined_literal(expr: &Expression) -> bool {
 }
 
 fn else_is_single_return_undefined(block: &Block) -> bool {
-    return_is_undefined_block(block)
+    matches!(block.as_slice(), [stmt] if return_is_undefined(stmt))
 }
 
 fn else_block_is_omitted_like_ocaml(block: &Block) -> bool {
@@ -2974,10 +2978,6 @@ fn single_else_if_stmt_like_ocaml(block: &Block) -> Option<&Statement> {
         },
         _ => None,
     }
-}
-
-fn return_is_undefined_block(block: &Block) -> bool {
-    matches!(block.as_slice(), [stmt] if return_is_undefined(stmt))
 }
 
 fn return_is_undefined(stmt: &Statement) -> bool {
@@ -3717,6 +3717,46 @@ mod tests {
     use crate::lambda::TagInfo;
     use std::path::Path;
 
+    #[test]
+    fn function_body_preserves_nested_guards_and_inner_returns() {
+        // js_dump.ml:1752-1766 only elides the outermost unit-return tail.
+        let outer = Expression::var(Ident::create_local("outer"));
+        let inner = Expression::var(Ident::create_local("inner"));
+        let body = vec![Statement::new(StatementDesc::If(
+            outer,
+            vec![Statement::new(StatementDesc::If(
+                inner,
+                vec![Statement::exp(Expression::call(
+                    Expression::var(Ident::create_local("act")),
+                    vec![],
+                    CallInfo::default(),
+                ))],
+                vec![Statement::return_(Expression::undefined(true))],
+            ))],
+            vec![Statement::return_(Expression::undefined(true))],
+        ))];
+        let mut printer = JsPrinter::new();
+        printer.print_function_body(&body, true);
+        assert_eq!(printer.into_output(), "if (outer) {\n  if (inner) {\n    act();\n  } else {\n    return;\n  }\n}");
+    }
+
+    #[test]
+    fn function_body_trailing_return_does_not_rewrite_preceding_if() {
+        // The two-element clause prints s as a statement, not function_body [s].
+        let cond = Expression::var(Ident::create_local("cond"));
+        let body = vec![
+            Statement::new(StatementDesc::If(
+                cond,
+                vec![Statement::return_(Expression::number(Number::int(1)))],
+                vec![Statement::return_(Expression::undefined(true))],
+            )),
+            Statement::return_(Expression::undefined(true)),
+        ];
+        let mut printer = JsPrinter::new();
+        printer.print_function_body(&body, true);
+        assert_eq!(printer.into_output(), "if (cond) {\n  return 1;\n} else {\n  return;\n}");
+    }
+
     fn jsx_runtime_module() -> ModuleId {
         ModuleId {
             id: Ident::create_persistent("JsxRuntime"),
@@ -3791,7 +3831,7 @@ mod tests {
     #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_for_range_finish_binding_suffix_persists_across_sibling_loops_like_ocaml() {
-        let first = Statement::new(StatementDesc::ForRange(
+        let first = Statement::for_range(
             None,
             Some(Expression::number(Number::int(0))),
             Expression::call(
@@ -3802,9 +3842,9 @@ mod tests {
             Ident::create_local("i"),
             ForDirection::Up,
             vec![],
-        ));
+        );
 
-        let second = Statement::new(StatementDesc::ForRange(
+        let second = Statement::for_range(
             None,
             Some(Expression::number(Number::int(0))),
             Expression::call(
@@ -3815,7 +3855,7 @@ mod tests {
             Ident::create_local("i"),
             ForDirection::Up,
             vec![],
-        ));
+        );
 
         let rendered = print_block(&vec![first, second]);
 
@@ -4331,7 +4371,7 @@ mod tests {
                 Expression::new(ExpressionDesc::CamlBlock(
                     vec![],
                     MutableFlag::Immutable,
-                    TagInfo::record(vec![], crate::parser::ast::MutableFlag::Immutable),
+                    Box::new(TagInfo::record(vec![], crate::parser::ast::MutableFlag::Immutable)),
                 )),
             ],
             CallInfo {
@@ -4352,13 +4392,13 @@ mod tests {
                         ),
                     ],
                     MutableFlag::Immutable,
-                    TagInfo::record(
+                    Box::new(TagInfo::record(
                         vec![
                             ("className".to_string(), true),
                             ("children".to_string(), false),
                         ],
                         crate::parser::ast::MutableFlag::Immutable,
-                    ),
+                    )),
                 )),
             ],
             CallInfo {
@@ -4681,14 +4721,14 @@ mod tests {
             Box::new(Expression::var(xs)),
             LengthObject::Array,
         ));
-        let stmt = Statement::new(StatementDesc::ForRange(
+        let stmt = Statement::for_range(
             None,
             Some(Expression::number(Number::int(0))),
             finish,
             i,
             ForDirection::Up,
             vec![],
-        ));
+        );
         assert_eq!(
             print_block(&vec![stmt]),
             "for (let i = 0, i_finish = xs.length; i < i_finish; ++i) {}"
@@ -4704,14 +4744,14 @@ mod tests {
             Box::new(Expression::var(xs)),
             LengthObject::Array,
         ));
-        let stmt = Statement::new(StatementDesc::ForRange(
+        let stmt = Statement::for_range(
             None,
             None,
             finish,
             i,
             ForDirection::Upto,
             vec![],
-        ));
+        );
         assert_eq!(
             print_block(&vec![stmt]),
             "for (let i_finish = xs.length; i <= i_finish; ++i) {}"
@@ -4736,14 +4776,14 @@ mod tests {
             Box::new(Expression::var(xs)),
             LengthObject::Array,
         ));
-        let stmt = Statement::new(StatementDesc::ForRange(
+        let stmt = Statement::for_range(
             None,
             Some(init),
             finish,
             i,
             ForDirection::Upto,
             vec![],
-        ));
+        );
         assert_eq!(
             print_block(&vec![stmt]),
             "for (let i = (sideEffect(), 0), i_finish = xs.length; i <= i_finish; ++i) {}"
@@ -5083,7 +5123,7 @@ mod tests {
                 ExpressionDesc::CamlBlock(
                     vec![Expression::number(Number::int(1))],
                     MutableFlag::Immutable,
-                    TagInfo::constructor("Some", 1),
+                    Box::new(TagInfo::constructor("Some", 1)),
                 ),
             ))],
             env: Default::default(),
@@ -5155,243 +5195,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-    fn test_print_unit_function_body_with_large_literal_dispatch_merges_to_exact_literal_like_ocaml()
-     {
-        let handle_key = Ident::create_local("handleKey");
-        let state = Ident::create_local("state");
-        let key = Ident::create_local("key");
-        let do_action = Ident::create_local("doAction");
-        let key_is_space = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(key.clone()),
-            Expression::string("space"),
-        );
-        let rest = [
-            "q", "p", "o", "n", "m", "l", "k", "j", "i", "h", "g", "f", "e", "d", "c", "b", "a",
-        ]
-        .into_iter()
-        .map(|txt| {
-            Expression::bin(
-                BinOp::EqEqEq,
-                Expression::var(key.clone()),
-                Expression::string(txt),
-            )
-        })
-        .reduce(|acc, expr| Expression::bin(BinOp::Or, acc, expr))
-        .expect("expected a non-empty literal chain");
-        let dispatch = Expression::bin(BinOp::Or, key_is_space.clone(), rest);
-        let state_active = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::var(state.clone())),
-            "active".to_string(),
-            None,
-        ));
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle_key,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![state.clone(), key.clone()],
-                body: vec![
-                    Statement::new(StatementDesc::If(
-                        dispatch,
-                        vec![Statement::new(StatementDesc::If(
-                            key_is_space,
-                            vec![Statement::new(StatementDesc::If(
-                                state_active,
-                                vec![
-                                    Statement::exp(Expression::call(
-                                        Expression::var(do_action),
-                                        vec![Expression::var(state)],
-                                        CallInfo::default(),
-                                    )),
-                                    Statement::return_(Expression::undefined(true)),
-                                ],
-                                vec![Statement::return_(Expression::undefined(true))],
-                            ))],
-                            vec![],
-                        ))],
-                        vec![],
-                    )),
-                    Statement::return_(Expression::undefined(true)),
-                ],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(rendered.contains("if (key === \"space\" && state.active) {"));
-        assert!(rendered.contains("doAction(state);"));
-        assert!(rendered.contains("return;"));
-        assert!(!rendered.contains("key === \"q\""));
-        assert!(!rendered.contains("if (key === \"space\" ||"));
-        assert!(!rendered.contains("if (key === \"space\")"));
-        assert!(!rendered.contains("if (state.active)"));
-        assert!(!rendered.contains("else"));
-    }
-
-    #[test]
-    #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-    fn test_print_unit_function_body_collapses_nested_negative_guard_chain_like_ocaml() {
-        let handle_key = Ident::create_local("handleKey");
-        let state = Ident::create_local("state");
-        let key = Ident::create_local("key");
-        let do_action = Ident::create_local("doAction");
-        let key_not_space = Expression::bin(
-            BinOp::NotEqEq,
-            Expression::var(key.clone()),
-            Expression::string("space"),
-        );
-        let rest = [
-            "q", "p", "o", "n", "m", "l", "k", "j", "i", "h", "g", "f", "e", "d", "c", "b", "a",
-        ]
-        .into_iter()
-        .map(|txt| {
-            Expression::bin(
-                BinOp::NotEqEq,
-                Expression::var(key.clone()),
-                Expression::string(txt),
-            )
-        })
-        .reduce(|acc, expr| Expression::bin(BinOp::And, acc, expr))
-        .expect("expected a non-empty literal chain");
-        let dispatch = Expression::bin(BinOp::And, key_not_space.clone(), rest);
-        let state_active = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::var(state.clone())),
-            "active".to_string(),
-            None,
-        ));
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle_key,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![state.clone(), key.clone()],
-                body: vec![Statement::new(StatementDesc::Block(vec![
-                    Statement::new(StatementDesc::If(
-                        dispatch,
-                        vec![Statement::return_(Expression::undefined(true))],
-                        vec![],
-                    )),
-                    Statement::new(StatementDesc::Block(vec![
-                        Statement::new(StatementDesc::If(
-                            key_not_space,
-                            vec![Statement::return_(Expression::undefined(true))],
-                            vec![],
-                        )),
-                        Statement::new(StatementDesc::Block(vec![
-                            Statement::new(StatementDesc::If(
-                                Expression::not(state_active.clone()),
-                                vec![Statement::return_(Expression::undefined(true))],
-                                vec![],
-                            )),
-                            Statement::exp(Expression::call(
-                                Expression::var(do_action),
-                                vec![Expression::var(state)],
-                                CallInfo::default(),
-                            )),
-                            Statement::return_(Expression::undefined(true)),
-                        ])),
-                    ])),
-                ]))],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(rendered.contains("if (key === \"space\" && state.active) {"));
-        assert!(rendered.contains("doAction(state);"));
-        assert!(rendered.contains("return;"));
-        assert!(!rendered.contains("key !== \"q\""));
-        assert!(!rendered.contains("if (key !== \"space\")"));
-        assert!(!rendered.contains("if (!state.active)"));
-        assert!(!rendered.contains("else"));
-    }
-
-    #[test]
-    #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-    fn test_print_unit_function_body_collapses_flat_negative_guard_chain_like_ocaml() {
-        let handle_key = Ident::create_local("handleKey");
-        let state = Ident::create_local("state");
-        let key = Ident::create_local("key");
-        let do_action = Ident::create_local("doAction");
-        let key_not_space = Expression::bin(
-            BinOp::NotEqEq,
-            Expression::var(key.clone()),
-            Expression::string("space"),
-        );
-        let rest = [
-            "q", "p", "o", "n", "m", "l", "k", "j", "i", "h", "g", "f", "e", "d", "c", "b", "a",
-        ]
-        .into_iter()
-        .map(|txt| {
-            Expression::bin(
-                BinOp::NotEqEq,
-                Expression::var(key.clone()),
-                Expression::string(txt),
-            )
-        })
-        .reduce(|acc, expr| Expression::bin(BinOp::And, acc, expr))
-        .expect("expected a non-empty literal chain");
-        let dispatch = Expression::bin(BinOp::And, key_not_space.clone(), rest);
-        let state_active = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::var(state.clone())),
-            "active".to_string(),
-            None,
-        ));
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle_key,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![state.clone(), key.clone()],
-                body: vec![
-                    Statement::new(StatementDesc::If(
-                        dispatch,
-                        vec![Statement::return_(Expression::undefined(true))],
-                        vec![],
-                    )),
-                    Statement::new(StatementDesc::If(
-                        key_not_space,
-                        vec![Statement::return_(Expression::undefined(true))],
-                        vec![],
-                    )),
-                    Statement::new(StatementDesc::If(
-                        Expression::not(state_active.clone()),
-                        vec![Statement::return_(Expression::undefined(true))],
-                        vec![],
-                    )),
-                    Statement::exp(Expression::call(
-                        Expression::var(do_action),
-                        vec![Expression::var(state)],
-                        CallInfo::default(),
-                    )),
-                    Statement::return_(Expression::undefined(true)),
-                ],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(rendered.contains("if (key === \"space\" && state.active) {"));
-        assert!(rendered.contains("doAction(state);"));
-        assert!(rendered.contains("return;"));
-        assert!(!rendered.contains("key !== \"q\""));
-        assert!(!rendered.contains("if (key !== \"space\")"));
-        assert!(!rendered.contains("if (!state.active)"));
-        assert!(!rendered.contains("else"));
-    }
-
-    #[test]
     fn test_print_unit_function_body_keeps_single_negative_guard_like_ocaml() {
         let handle = Ident::create_local("handle");
         let q = Ident::create_local("q");
@@ -5452,14 +5255,14 @@ mod tests {
                         vec![Statement::return_(Expression::undefined(true))],
                         vec![],
                     )),
-                    Statement::new(StatementDesc::ForRange(
+                    Statement::for_range(
                         None,
                         Some(Expression::number(Number::int(0))),
                         Expression::number(Number::int(1)),
                         k,
                         ForDirection::Up,
                         vec![],
-                    )),
+                    ),
                 ],
                 env: Default::default(),
                 return_unit: true,
@@ -5536,63 +5339,6 @@ mod tests {
             !rendered.contains("if (typeof obj !== \"function\") {"),
             "{rendered}"
         );
-    }
-
-    #[test]
-    #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-    fn test_print_unit_function_body_with_trailing_return_merges_nested_if_without_inner_else() {
-        let handle_key = Ident::create_local("handleKey");
-        let state = Ident::create_local("state");
-        let key = Ident::create_local("key");
-        let do_action = Ident::create_local("doAction");
-        let key_is_space = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(key.clone()),
-            Expression::string("space"),
-        );
-        let state_active = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::var(state.clone())),
-            "active".to_string(),
-            None,
-        ));
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle_key,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![state.clone(), key.clone()],
-                body: vec![
-                    Statement::new(StatementDesc::If(
-                        key_is_space,
-                        vec![Statement::new(StatementDesc::If(
-                            state_active,
-                            vec![
-                                Statement::exp(Expression::call(
-                                    Expression::var(do_action),
-                                    vec![Expression::var(state)],
-                                    CallInfo::default(),
-                                )),
-                                Statement::return_(Expression::undefined(true)),
-                            ],
-                            vec![],
-                        ))],
-                        vec![],
-                    )),
-                    Statement::return_(Expression::undefined(true)),
-                ],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(rendered.contains("if (key === \"space\" && state.active) {"));
-        assert!(rendered.contains("doAction(state);"));
-        assert!(rendered.contains("return;"));
-        assert!(!rendered.contains("if (state.active)"));
-        assert!(!rendered.contains("else"));
     }
 
     #[test]
@@ -6103,7 +5849,7 @@ mod tests {
                 env: Default::default(),
                 return_unit: false,
                 async_: false,
-                directive: Some("'use memo'".to_string()),
+                directive: Some(Box::new("'use memo'".to_string())),
             })),
             property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
@@ -6123,7 +5869,7 @@ mod tests {
             env: Default::default(),
             return_unit: false,
             async_: false,
-            directive: Some("'use cache'".to_string()),
+            directive: Some(Box::new("'use cache'".to_string())),
         }));
 
         assert_eq!(
@@ -6187,7 +5933,7 @@ mod tests {
                 Expression::number(Number::int(0)),
             ],
             MutableFlag::Immutable,
-            TagInfo::constructor("::", 1),
+            Box::new(TagInfo::constructor("::", 1)),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  hd: 1,\n  tl: 0\n}");
@@ -6198,7 +5944,7 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::number(Number::int(1))],
             MutableFlag::Immutable,
-            TagInfo::constructor("Some", 1),
+            Box::new(TagInfo::constructor("Some", 1)),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  TAG: \"Some\",\n  _0: 1\n}");
@@ -6212,7 +5958,7 @@ mod tests {
                 Expression::number(Number::int(2)),
             ],
             MutableFlag::Immutable,
-            TagInfo::constructor("A", 2),
+            Box::new(TagInfo::constructor("A", 2)),
         ));
 
         assert_eq!(
@@ -6233,10 +5979,10 @@ mod tests {
                 Expression::undefined(false),
             ],
             MutableFlag::Immutable,
-            TagInfo::record(
+            Box::new(TagInfo::record(
                 vec![("x".to_string(), false), ("i".to_string(), true)],
                 crate::parser::ast::MutableFlag::Immutable,
-            ),
+            )),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  x: 10\n}");
@@ -6247,21 +5993,21 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::string("hello")],
             MutableFlag::Immutable,
-            TagInfo::RecordInlined {
+            Box::new(TagInfo::RecordInlined {
                 name: "One".to_string(),
                 num_nonconst: 1,
-                runtime: crate::types::BlockRuntime {
+                runtime: Box::new(crate::types::BlockRuntime {
                     tag: crate::types::VariantTag {
                         name: "One".to_string(),
                         tag_type: None,
                     },
                     tag_name: None,
                     untagged: false,
-                },
+                }),
                 fields: vec![("name".to_string(), false)],
                 logical_field_count: None,
                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-            },
+            }),
         ));
 
         assert_eq!(
@@ -6278,10 +6024,10 @@ mod tests {
                 Expression::number(Number::int(2)),
             ],
             MutableFlag::Immutable,
-            TagInfo::record(
+            Box::new(TagInfo::record(
                 vec![("0".to_string(), false), ("1".to_string(), false)],
                 crate::parser::ast::MutableFlag::Immutable,
-            ),
+            )),
         ));
 
         assert_eq!(print_expression(&expr), "[\n  1,\n  2\n]");
@@ -6292,7 +6038,7 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::number(Number::int(1))],
             MutableFlag::Immutable,
-            TagInfo::Module(vec!["value".to_string()]),
+            Box::new(TagInfo::Module(vec!["value".to_string()])),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  value: 1\n}");
@@ -6303,7 +6049,7 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::string("Not_found")],
             MutableFlag::Immutable,
-            TagInfo::Extension,
+            Box::new(TagInfo::Extension),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  RE_EXN_ID: \"Not_found\"\n}");
@@ -6317,10 +6063,10 @@ mod tests {
                 Expression::number(Number::int(3)),
             ],
             MutableFlag::Immutable,
-            TagInfo::RecordExt {
+            Box::new(TagInfo::RecordExt {
                 fields: vec!["value".to_string()],
                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-            },
+            }),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  RE_EXN_ID: A,\n  value: 3\n}");
@@ -6332,7 +6078,7 @@ mod tests {
             ExpressionDesc::CamlBlock(
                 vec![Expression::string("Not_found")],
                 MutableFlag::Immutable,
-                TagInfo::Extension,
+                Box::new(TagInfo::Extension),
             ),
         ))]);
 

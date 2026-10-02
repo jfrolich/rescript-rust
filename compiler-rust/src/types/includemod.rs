@@ -26,7 +26,7 @@ use crate::types::type_expr::{FieldKind, RowDesc, RowField, TypeDesc};
 use crate::types::typedtree::ModuleCoercion;
 use crate::types::{TypeContext, TypeExprRef};
 use crate::{parser::code_frame, types::ArgLabel};
-use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 
 // ============================================================================
 // Error Types
@@ -1265,7 +1265,7 @@ fn modtypes_inner<'a>(
             let param_binding_type = expected_param_type
                 .clone()
                 .or_else(|| param_type_impl.as_deref().cloned())
-                .unwrap_or_else(|| ModuleType::MtySignature(vec![]));
+                .unwrap_or_else(|| ModuleType::MtySignature(std::sync::Arc::new(vec![])));
             result_env.add_module(
                 param_impl.clone(),
                 ModuleDeclaration {
@@ -2220,7 +2220,7 @@ fn primitive_coerce(
     {
         return true;
     }
-    fn ffi(native: &str) -> Option<OcamlValue> {
+    fn ffi(native: &str) -> Option<std::rc::Rc<OcamlValue>> {
         if crate::raw_lambda::convert::is_bs_primitive(native) {
             crate::raw_lambda::convert::decode_marshaled_ffi_type(native)
         } else {
@@ -2697,7 +2697,7 @@ fn substitute_module_type_paths_no_freshen(
                 type_ctx, result, subst,
             )),
         },
-        ModuleType::MtySignature(sig) => ModuleType::MtySignature(
+        ModuleType::MtySignature(sig) => ModuleType::MtySignature(std::sync::Arc::new(
             sig.iter()
                 .map(|item| match item {
                     SignatureItem::SigValue(id, desc) => SignatureItem::SigValue(
@@ -2706,7 +2706,7 @@ fn substitute_module_type_paths_no_freshen(
                     ),
                     SignatureItem::SigType(id, decl, rec_status) => SignatureItem::SigType(
                         id.clone(),
-                        substitute_type_declaration_paths(type_ctx, decl, subst),
+                        std::sync::Arc::new(substitute_type_declaration_paths(type_ctx, decl, subst)),
                         *rec_status,
                     ),
                     SignatureItem::SigTypext(id, ext, ext_status) => SignatureItem::SigTypext(
@@ -2726,7 +2726,7 @@ fn substitute_module_type_paths_no_freshen(
                     _ => item.clone(),
                 })
                 .collect(),
-        ),
+        )),
     }
 }
 
@@ -4806,10 +4806,10 @@ mod tests {
             SignatureItem::SigModule(
                 impl_mod_id,
                 ModuleDeclaration {
-                    md_type: ModuleType::MtySignature(vec![SignatureItem::SigValue(
+                    md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![SignatureItem::SigValue(
                         Ident::create_local("x"),
                         value_desc(impl_ty),
-                    )]),
+                    )])),
                     md_attributes: vec![],
                     md_loc: Location::none(),
                     md_path: None,
@@ -4818,7 +4818,7 @@ mod tests {
             ),
             SignatureItem::SigType(
                 impl_type_id.clone(),
-                abstract_type_decl(Some(Path::pident(impl_type_id))),
+                std::sync::Arc::new(abstract_type_decl(Some(Path::pident(impl_type_id)))),
                 RecStatus::TrecNot,
             ),
         ];
@@ -4826,17 +4826,17 @@ mod tests {
             SignatureItem::SigModule(
                 sig_mod_id,
                 ModuleDeclaration {
-                    md_type: ModuleType::MtySignature(vec![SignatureItem::SigValue(
+                    md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![SignatureItem::SigValue(
                         Ident::create_local("x"),
                         value_desc(sig_ty),
-                    )]),
+                    )])),
                     md_attributes: vec![],
                     md_loc: Location::none(),
                     md_path: None,
                 },
                 RecStatus::TrecNot,
             ),
-            SignatureItem::SigType(sig_type_id, abstract_type_decl(None), RecStatus::TrecNot),
+            SignatureItem::SigType(sig_type_id, std::sync::Arc::new(abstract_type_decl(None)), RecStatus::TrecNot),
         ];
 
         let result = signatures(&type_ctx, &env, &sig_impl, &sig_sig);
@@ -4887,7 +4887,7 @@ mod tests {
         env.add_modtype(
             modtype_id.clone(),
             ModtypeDeclaration {
-                mtd_type: Some(ModuleType::MtySignature(sig.clone())),
+                mtd_type: Some(ModuleType::MtySignature(std::sync::Arc::new(sig.clone()))),
                 mtd_attributes: vec![],
                 mtd_loc: Location::none(),
             },
@@ -4896,7 +4896,7 @@ mod tests {
         let result = modtypes(
             &type_ctx,
             &env,
-            &ModuleType::MtySignature(sig),
+            &ModuleType::MtySignature(std::sync::Arc::new(sig)),
             &ModuleType::MtyIdent(Path::pident(modtype_id)),
         );
         assert!(matches!(result, Ok(ModuleCoercion::Tcoerce_none)));
@@ -4908,8 +4908,8 @@ mod tests {
         let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&type_ctx);
 
-        let param_sig = ModuleType::MtySignature(vec![]);
-        let result_sig = ModuleType::MtySignature(vec![]);
+        let param_sig = ModuleType::MtySignature(std::sync::Arc::new(vec![]));
+        let result_sig = ModuleType::MtySignature(std::sync::Arc::new(vec![]));
 
         let mty_impl = ModuleType::MtyFunctor {
             param: Ident::create_local("X"),
@@ -4975,7 +4975,7 @@ mod tests {
             ),
             SignatureItem::SigType(
                 Ident::create_local("t"),
-                TypeDeclaration {
+                std::sync::Arc::new(TypeDeclaration {
                     type_params: vec![],
                     type_arity: 0,
                     type_kind: TypeKind::TypeAbstract,
@@ -4989,7 +4989,7 @@ mod tests {
                     type_representation: TypeRepresentation::Boxed,
                     type_inlined_types: vec![],
                     type_path: None,
-                },
+                }),
                 RecStatus::TrecNot,
             ),
         ];

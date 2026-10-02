@@ -25,7 +25,7 @@
 //! - OCaml runtime: runtime/caml/intext.h
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use crate::fast_hash::AHashMap as HashMap;
 
 use crate::location::{Location, Position};
 use crate::parse_arena::{ArityIdx, ExprIdx, LidentIdx, LocIdx, ParseArena, PosIdx, StrIdx};
@@ -848,6 +848,10 @@ impl<'a> MarshalWriter<'a> {
     ///
     /// For raw binary data (e.g. pval_prim), use write_string() directly instead.
     pub fn write_str(&mut self, s: &str) {
+        if s.is_ascii() {
+            self.write_string(s.as_bytes());
+            return;
+        }
         let latin1_bytes: Vec<u8> = s.chars().map(|c| c as u8).collect();
         self.write_string(&latin1_bytes);
     }

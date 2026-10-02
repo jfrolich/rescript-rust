@@ -17,35 +17,10 @@ use rescript_compiler::binary_ast::{
     write_structure_ast_current_with_extra_deps_and_builtin_ppx,
 };
 use rescript_compiler::parser::{Parser, module};
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use tracing::info_span;
-
-#[derive(Serialize, Deserialize)]
-pub(super) struct DiskDependencies {
-    pub implementation: Dependencies,
-    pub interface: Option<Dependencies>,
-}
-
-pub(super) fn dependencies_path(package: &Package, source: &Path) -> PathBuf {
-    helpers::get_compiler_asset(package, &package.namespace, source, "cmi")
-        .with_extension("in-process-deps.json")
-}
-
-pub(super) fn load_dependencies(package: &Package, source: &Path) -> Option<DiskDependencies> {
-    let bytes = std::fs::read(dependencies_path(package, source)).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-fn save_dependencies(package: &Package, source: &Path, deps: &DiskDependencies) -> anyhow::Result<()> {
-    let path = dependencies_path(package, source);
-    let tmp = path.with_extension("in-process-deps.tmp");
-    std::fs::write(&tmp, serde_json::to_vec(deps)?)?;
-    std::fs::rename(tmp, path)?;
-    Ok(())
-}
 
 struct GeneratedAst {
     path: PathBuf,
@@ -125,7 +100,7 @@ pub fn generate_asts(
                         debug!("Generating AST for module: {module_name}");
                         inc();
                         let ast_result = generate_ast(
-                            package.to_owned(),
+                            package,
                             &source_file.implementation.path.to_owned(),
                             build_state,
                             build_state.get_warn_error_override(),
@@ -139,7 +114,7 @@ pub fn generate_asts(
                         let iast_result = match source_file.interface.as_ref().map(|i| i.path.to_owned()) {
                             Some(interface_file_path) => {
                                 match generate_ast(
-                                    package.to_owned(),
+                                    package,
                                     &interface_file_path.to_owned(),
                                     build_state,
                                     build_state.get_warn_error_override(),
@@ -175,21 +150,6 @@ pub fn generate_asts(
                         )
                     };
 
-                    if in_process && dirty {
-                        if let (Ok(implementation), Ok(interface)) = (&ast_result, &iast_result) {
-                            if let Some(implementation) = &implementation.deps {
-                                let deps = DiskDependencies {
-                                    implementation: implementation.clone(),
-                                    interface: interface.as_ref().and_then(|ast| ast.deps.clone()),
-                                };
-                                if let Err(err) =
-                                    save_dependencies(package, &source_file.implementation.path, &deps)
-                                {
-                                    return (module_name.to_owned(), Err(err.to_string()), Ok(None), true);
-                                }
-                            }
-                        }
-                    }
                     (module_name.to_owned(), ast_result, iast_result, dirty)
                 }
             }
@@ -446,25 +406,9 @@ pub fn generate_asts(
                     if dirty_packages.contains(&package_name) {
                         if in_process {
                             // In-process builds synthesize namespace signatures directly into
-                            // the module registry during compilation. The namespace changes
-                            // exactly when its member list does, which a file-backed build
-                            // detects through the digest of the compiled mlmap; compare the
-                            // member list with the copy kept from the previous build.
-                            let package = build_state
-                                .build_state
-                                .packages
-                                .get(&package_name)
-                                .expect("Package not found");
-                            let mlmap = package.get_mlmap_path();
-                            let previous = package
-                                .get_ocaml_build_path()
-                                .join(mlmap.file_name().expect("mlmap path has a file name"));
-                            let current = std::fs::read(&mlmap).ok();
-                            let changed = current.is_none() || std::fs::read(&previous).ok() != current;
-                            if changed {
-                                let _ = std::fs::copy(&mlmap, &previous);
-                            }
-                            changed
+                            // the module registry during compilation. The file-backed mlmap
+                            // compiler only creates .cmi/.cmj/.cmt assets for subprocess mode.
+                            true
                         } else {
                             let package = build_state
                                 .build_state
@@ -622,7 +566,7 @@ fn make_parse_file_span(
 }
 
 fn generate_ast(
-    package: Package,
+    package: &Package,
     filename: &Path,
     build_state: &BuildState,
     warn_error_override: Option<String>,
@@ -640,18 +584,26 @@ fn generate_ast(
     let source_path_str = helpers::ocaml_absname(&file_path).to_string_lossy().to_string();
     let bsc_flags = config::flatten_flags(&package.config.compiler_flags);
     let open_deps = open_dependencies_from_bsc_flags(&bsc_flags);
+    // The Rust parser reads the source once, for both the ppx filter and
+    // parsing.
+    let source_bytes = if use_rust_parser {
+        Some(std::fs::read(&file_path).with_context(|| format!("Failed to read {}", file_path.display()))?)
+    } else {
+        None
+    };
 
     // The Rust parser runs the same frontend as `bsc -bs-ast` in process, so it
     // reads the flags OCaml's `-bs-ast` would receive (see `parser_args`).
     // `-ppx` rewriters from `ppx-flags`, as `parser_args` passes them to
     // `bsc -bs-ast`.
-    let external_ppxs = match &package.config.ppx_flags {
+    let mut external_ppxs: Vec<String> = match &package.config.ppx_flags {
         Some(flags) if use_rust_parser && !flags.is_empty() => {
-            let contents = helpers::read_file(&file_path).unwrap_or_default();
+            let contents =
+                std::str::from_utf8(source_bytes.as_deref().unwrap_or_default()).unwrap_or_default();
             let ppx_args = config::flatten_ppx_flags(
                 &build_state.project_context,
                 &package.config,
-                &filter_ppx_flags(&package.config.ppx_flags, &contents),
+                &filter_ppx_flags(&package.config.ppx_flags, contents),
             )?;
             ppx_args
                 .chunks(2)
@@ -660,6 +612,13 @@ fn generate_ast(
                 .collect()
         }
         _ => Vec::new(),
+    };
+    // The builtin spice mapper implements `ppx-spice`, so run it in process
+    // instead of spawning the configured executable for every module.
+    let spice_ppx = !external_ppxs.is_empty() && {
+        let before = external_ppxs.len();
+        external_ppxs.retain(|command| !command.contains("spice"));
+        external_ppxs.len() != before
     };
     let frontend_options = use_rust_parser.then(|| {
         let root_config = build_state.project_context.get_root_config();
@@ -684,6 +643,7 @@ fn generate_ast(
             experimental_let_unwrap: parsed.experimental_let_unwrap
                 || rust_parser_let_unwrap_enabled(root_config, &package.config),
             no_builtin_ppx: parsed.no_builtin_ppx,
+            spice_ppx,
             external_ppxs,
             ..Default::default()
         }
@@ -705,7 +665,7 @@ fn generate_ast(
     };
 
     let _parse_span = if tracing::enabled!(tracing::Level::INFO) {
-        make_parse_file_span(filename, &package, &parser_args, build_state, parent_span).entered()
+        make_parse_file_span(filename, package, &parser_args, build_state, parent_span).entered()
     } else {
         tracing::Span::none().entered()
     };
@@ -720,6 +680,7 @@ fn generate_ast(
     let result = if use_rust_parser {
         generate_ast_with_rust_parser(
             &file_path,
+            source_bytes.expect("Rust parser source"),
             &ast_output_path,
             &source_path_str,
             &open_deps,
@@ -840,6 +801,7 @@ fn source_bytes_to_latin1(bytes: Vec<u8>) -> String {
 
 fn generate_ast_with_rust_parser(
     source_file: &Path,
+    bytes: Vec<u8>,
     ast_output_path: &Path,
     source_path_for_ast: &str,
     extra_deps: &[String],
@@ -852,8 +814,6 @@ fn generate_ast_with_rust_parser(
     Option<Dependencies>,
 )> {
     rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
-        let bytes = std::fs::read(source_file)
-            .with_context(|| format!("Failed to read {}", source_file.display()))?;
         let source = source_bytes_to_latin1(bytes);
         let mut parser = Parser::new(source_path_for_ast.to_string(), &source);
         // Frontend warning reports, in the order `bsc -bs-ast` prints them.

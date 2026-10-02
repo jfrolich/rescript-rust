@@ -5,6 +5,7 @@ mod dependency_cycle;
 use super::build_types::*;
 use super::logs;
 use super::packages;
+use super::qos;
 use crate::config;
 use crate::config::Config;
 use crate::helpers;
@@ -19,423 +20,22 @@ use rescript_compiler::cmi::persistent_env::{
     CmjExportArity, CmjExportConstant, InMemoryModuleInfo, ModuleRegistry,
 };
 use rescript_compiler::cmi::portable_types::PortablePersStruct;
-use rescript_compiler::lambda::lam_arity::Arity;
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::ast::{Signature, Structure};
 use rescript_compiler::types::path::Path as TypePath;
-use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use tracing::{Span, info_span, instrument};
-
-/// Backend data not stored in the typed `.cmi`. Keep it next to the typed
-/// artifacts so a fresh one-shot process can resolve clean modules exactly as
-/// the in-memory registry does during a full build.
-#[derive(Serialize, Deserialize)]
-struct DiskJsMetadata {
-    is_pure: bool,
-    cmt: bool,
-    cmti: bool,
-    warning: Option<String>,
-    constants: std::collections::HashMap<String, DiskConstant>,
-    arities: std::collections::HashMap<String, DiskExportArity>,
-    hoisted_exports: Vec<(Vec<String>, String)>,
-    /// The module exports `persistent_closed_lambda`s for cross-module
-    /// inlining. They are not persisted, so such a module is recompiled
-    /// rather than reused: its dependents need the lambdas to inline.
-    #[serde(default)]
-    inline_lambdas: bool,
-}
-
-#[derive(Serialize, Deserialize)]
-enum DiskConstant {
-    Bool(bool),
-    Null,
-    Undefined(bool),
-}
-
-#[derive(Serialize, Deserialize)]
-enum DiskArity {
-    Na,
-    Info(Vec<i32>, bool),
-}
-
-#[derive(Serialize, Deserialize)]
-enum DiskExportArity {
-    Single(DiskArity),
-    Submodule(Vec<DiskArity>),
-}
-
-impl From<&Arity> for DiskArity {
-    fn from(arity: &Arity) -> Self {
-        match arity {
-            Arity::Na => Self::Na,
-            Arity::Info { arities, variadic } => Self::Info(arities.clone(), *variadic),
-        }
-    }
-}
-
-impl From<DiskArity> for Arity {
-    fn from(arity: DiskArity) -> Self {
-        match arity {
-            DiskArity::Na => Self::Na,
-            DiskArity::Info(arities, variadic) => Self::Info { arities, variadic },
-        }
-    }
-}
-
-fn metadata_path(package: &packages::Package, source: &Path) -> PathBuf {
-    helpers::get_compiler_asset(package, &package.namespace, source, "cmi")
-        .with_extension("in-process-js.json")
-}
-
-fn save_js_metadata(
-    package: &packages::Package,
-    source: &Path,
-    is_pure: bool,
-    constants: &AHashMap<String, CmjExportConstant>,
-    arities: &AHashMap<String, CmjExportArity>,
-    hoisted: &[rescript_compiler::lambda::HoistedExport],
-    inline_lambdas: bool,
-    warning: Option<&str>,
-) -> Result<()> {
-    let cmi_path = helpers::get_compiler_asset(package, &package.namespace, source, "cmi");
-    let metadata = DiskJsMetadata {
-        cmt: cmi_path.with_extension("cmt").exists(),
-        cmti: cmi_path.with_extension("cmti").exists(),
-        warning: warning.map(str::to_owned),
-        is_pure,
-        constants: constants
-            .iter()
-            .map(|(key, value)| {
-                (
-                    key.clone(),
-                    match value {
-                        CmjExportConstant::Bool(value) => DiskConstant::Bool(*value),
-                        CmjExportConstant::Null => DiskConstant::Null,
-                        CmjExportConstant::Undefined { is_unit } => DiskConstant::Undefined(*is_unit),
-                    },
-                )
-            })
-            .collect(),
-        arities: arities
-            .iter()
-            .map(|(key, value)| {
-                (
-                    key.clone(),
-                    match value {
-                        CmjExportArity::Single(arity) => DiskExportArity::Single(arity.into()),
-                        CmjExportArity::Submodule(items) => {
-                            DiskExportArity::Submodule(items.iter().map(Into::into).collect())
-                        }
-                    },
-                )
-            })
-            .collect(),
-        hoisted_exports: hoisted
-            .iter()
-            .map(|item| (item.path.clone(), item.export_name.clone()))
-            .collect(),
-        inline_lambdas,
-    };
-    let path = metadata_path(package, source);
-    let bytes = serde_json::to_vec(&metadata)?;
-    // A failed build must not leave a partially-written cache entry.
-    let tmp = path.with_extension("in-process-js.tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(tmp, path)?;
-    Ok(())
-}
-
-fn load_js_metadata(
-    package: &packages::Package,
-    source: &Path,
-) -> Option<(InMemoryModuleInfo, bool, bool, Option<String>)> {
-    let bytes = std::fs::read(metadata_path(package, source)).ok()?;
-    let metadata: DiskJsMetadata = serde_json::from_slice(&bytes).ok()?;
-    if metadata.inline_lambdas {
-        return None;
-    }
-    let constants = metadata
-        .constants
-        .into_iter()
-        .map(|(key, value)| {
-            (
-                key,
-                match value {
-                    DiskConstant::Bool(value) => CmjExportConstant::Bool(value),
-                    DiskConstant::Null => CmjExportConstant::Null,
-                    DiskConstant::Undefined(is_unit) => CmjExportConstant::Undefined { is_unit },
-                },
-            )
-        })
-        .collect();
-    let arities = metadata
-        .arities
-        .into_iter()
-        .map(|(key, value)| {
-            (
-                key,
-                match value {
-                    DiskExportArity::Single(arity) => CmjExportArity::Single(arity.into()),
-                    DiskExportArity::Submodule(items) => {
-                        CmjExportArity::Submodule(items.into_iter().map(Into::into).collect())
-                    }
-                },
-            )
-        })
-        .collect();
-    let hoisted = metadata
-        .hoisted_exports
-        .into_iter()
-        .map(|(path, export_name)| rescript_compiler::lambda::HoistedExport { path, export_name })
-        .collect();
-    Some((
-        InMemoryModuleInfo::new(
-            package.path.join(source),
-            metadata.is_pure,
-            constants,
-            package.name == "@rescript/runtime",
-        )
-        .with_cmj_export_arities(arities)
-        .with_cmj_hoisted_exports(hoisted),
-        metadata.cmt,
-        metadata.cmti,
-        metadata.warning,
-    ))
-}
-
-/// Recover dependency lists before parsing a fresh one-shot build. The cache is
-/// valid only for modules whose typed outputs are still current; changed sources
-/// must regenerate both their AST and their dependency list.
-pub fn seed_clean_in_process_dependencies(build_state: &mut BuildCommandState) {
-    let deps_cache = &build_state.in_memory_deps;
-    let root_config = build_state.get_root_config().clone();
-    let state = &mut build_state.build_state;
-    for (name, module) in &mut state.modules {
-        let SourceType::SourceFile(source) = &mut module.source_type else {
-            continue;
-        };
-        let package = &state.packages[&module.package_name];
-        let source_time = source
-            .interface
-            .as_ref()
-            .map_or(source.implementation.last_modified, |iface| {
-                source.implementation.last_modified.max(iface.last_modified)
-            });
-        let metadata = metadata_path(package, &source.implementation.path);
-        let deps_path = super::parse::dependencies_path(package, &source.implementation.path);
-        if [metadata, deps_path].iter().any(|path| {
-            std::fs::metadata(path)
-                .and_then(|m| m.modified())
-                .map_or(true, |t| t < source_time)
-        }) {
-            continue;
-        }
-        let Some(deps) = super::parse::load_dependencies(package, &source.implementation.path) else {
-            continue;
-        };
-        if source.interface.is_some() != deps.interface.is_some() {
-            continue;
-        }
-        let cmi =
-            helpers::get_compiler_asset(package, &package.namespace, &source.implementation.path, "cmi");
-        let cmt = cmi.with_extension("cmt");
-        let cmti = cmi.with_extension("cmti");
-        let Some((_, has_cmt, has_cmti, _)) = load_js_metadata(package, &source.implementation.path) else {
-            continue;
-        };
-        if !cmi.exists()
-            || (has_cmt && !cmt.exists())
-            || (has_cmti && !cmti.exists())
-            || root_config
-                .get_package_specs()
-                .iter()
-                .map(|spec| js_output_path_for_spec(package, &source.implementation.path, &root_config, spec))
-                .any(|output| !output.exists())
-            || rescript_compiler::cmi::cmi_format::read_cmi(&cmi.to_string_lossy()).is_err()
-        {
-            continue;
-        }
-        source.implementation.parse_dirty = false;
-        if let Some(interface) = &mut source.interface {
-            interface.parse_dirty = false;
-        }
-        deps_cache
-            .lock()
-            .unwrap()
-            .insert(format!("{name}:impl"), deps.implementation);
-        if let Some(deps) = deps.interface {
-            deps_cache.lock().unwrap().insert(format!("{name}:intf"), deps);
-        }
-    }
-}
-
-/// Recover one-shot outputs after the parse phase has reconstructed the dependency
-/// graph. Only a complete set of artifacts from this compiler is eligible.
-pub fn seed_clean_in_process_modules(build_state: &mut BuildCommandState, reparsed: &AHashSet<String>) {
-    let root_config = build_state.get_root_config();
-    let mut clean = Vec::new();
-    for (name, module) in &build_state.modules {
-        if reparsed.contains(name) {
-            continue;
-        }
-        let SourceType::SourceFile(source) = &module.source_type else {
-            continue;
-        };
-        let package = &build_state.packages[&module.package_name];
-        let path = &source.implementation.path;
-        let cmi = helpers::get_compiler_asset(package, &package.namespace, path, "cmi");
-        let cmt = cmi.with_extension("cmt");
-        let cmti = cmi.with_extension("cmti");
-        let metadata = metadata_path(package, path);
-        let source_time = source
-            .interface
-            .as_ref()
-            .map_or(source.implementation.last_modified, |iface| {
-                source.implementation.last_modified.max(iface.last_modified)
-            });
-        // Typed artifacts and JS may deliberately retain their mtime when their
-        // contents are unchanged. The metadata file is rewritten after each
-        // successful compilation, so its mtime is the build generation marker.
-        // The dependency cache plays the role of the `.ast` file: a module
-        // without one (e.g. dropped because it had warnings) stays dirty, as in
-        // `cleanup_previous_build`.
-        let deps_path = super::parse::dependencies_path(package, path);
-        if [&metadata, &deps_path].iter().any(|file| {
-            std::fs::metadata(file)
-                .and_then(|m| m.modified())
-                .map_or(true, |t| t < source_time)
-        }) {
-            continue;
-        }
-        let Some((info, has_cmt, has_cmti, warning)) = load_js_metadata(package, path) else {
-            continue;
-        };
-        if !cmi.exists()
-            || (has_cmt && !cmt.exists())
-            || (has_cmti && !cmti.exists())
-            || root_config
-                .get_package_specs()
-                .iter()
-                .map(|spec| js_output_path_for_spec(package, path, root_config, spec))
-                .any(|output| !output.exists())
-        {
-            continue;
-        }
-        if rescript_compiler::cmi::cmi_format::read_cmi(&cmi.to_string_lossy()).is_err() {
-            continue;
-        }
-        let info = info.with_package(
-            package.name.clone(),
-            package.path.clone(),
-            js_output_suffix_for_registry(root_config),
-        );
-        clean.push((name.clone(), info, warning));
-    }
-    for (name, info, warning) in clean {
-        let module = build_state.modules.get_mut(&name).unwrap();
-        module.compile_dirty = false;
-        if let SourceType::SourceFile(source) = &mut module.source_type {
-            source.implementation.compile_warnings = warning;
-        }
-        build_state
-            .module_registry
-            .lock()
-            .unwrap()
-            .register_disk_module(&name, info);
-    }
-}
-
-/// On a fresh process the dependency graph is available from sidecars, but
-/// clean modules have no stored AST. Prepare the entire potential compile
-/// universe before scheduling: an interface change can make any dependent
-/// compile even if its own source has not changed.
-pub fn mark_potential_in_process_compiles_for_parsing(build_state: &mut BuildCommandState) -> Vec<String> {
-    let stored = build_state.stored_asts.lock().unwrap();
-    let mut frontier = build_state
-        .modules
-        .iter()
-        .filter(|(_, module)| module.compile_dirty)
-        .map(|(name, _)| name.clone())
-        .collect::<Vec<_>>();
-    let mut seen = frontier.iter().cloned().collect::<ahash::AHashSet<_>>();
-    while let Some(name) = frontier.pop() {
-        for dependent in &build_state.modules[&name].dependents {
-            if seen.insert(dependent.clone()) {
-                frontier.push(dependent.clone());
-            }
-        }
-    }
-    let mut clean_dependents = Vec::new();
-    for name in seen {
-        let module = build_state.build_state.modules.get_mut(&name).unwrap();
-        if let SourceType::SourceFile(source) = &mut module.source_type {
-            let missing = !stored.contains_key(&format!("{name}:impl"))
-                || (source.interface.is_some() && !stored.contains_key(&format!("{name}:intf")));
-            if missing && !source.implementation.parse_dirty {
-                source.implementation.parse_dirty = true;
-                if !module.compile_dirty {
-                    clean_dependents.push(name);
-                }
-            }
-        }
-    }
-    clean_dependents
-}
-
-/// Recover dependents of an interrupted build: a changed dependency CMI may
-/// have been written before its dependents were reached. Unchanged CMI files
-/// retain their mtime, so implementation-only edits do not invalidate users.
-pub fn mark_clean_with_expired_interfaces_dirty(build_state: &mut BuildCommandState) {
-    let mut expired = Vec::new();
-    for (name, module) in &build_state.modules {
-        if module.compile_dirty {
-            continue;
-        }
-        let SourceType::SourceFile(source) = &module.source_type else {
-            continue;
-        };
-        let package = &build_state.packages[&module.package_name];
-        let Ok(compiled_at) = std::fs::metadata(metadata_path(package, &source.implementation.path))
-            .and_then(|metadata| metadata.modified())
-        else {
-            continue;
-        };
-        if module.deps.iter().any(|dep| {
-            let Some(dependency) = build_state.modules.get(dep) else {
-                return false;
-            };
-            let SourceType::SourceFile(dep_source) = &dependency.source_type else {
-                return false;
-            };
-            let dep_package = &build_state.packages[&dependency.package_name];
-            let cmi = helpers::get_compiler_asset(
-                dep_package,
-                &dep_package.namespace,
-                &dep_source.implementation.path,
-                "cmi",
-            );
-            std::fs::metadata(cmi)
-                .and_then(|metadata| metadata.modified())
-                .is_ok_and(|modified| modified > compiled_at)
-        }) {
-            expired.push(name.clone());
-        }
-    }
-    for name in expired {
-        build_state.modules.get_mut(&name).unwrap().compile_dirty = true;
-    }
-}
 
 /// Decode captured compiler output (stdout or stderr) into a String.
 ///
@@ -609,6 +209,7 @@ struct InProcessSchedulerHooks {
 #[derive(Default)]
 struct InProcessSchedulerCounters {
     scheduled_typecheck: usize,
+    critical_scheduled: usize,
     scheduled_js: usize,
     signature_ready: usize,
     pre_js_ready: usize,
@@ -658,9 +259,11 @@ impl InProcessSchedulerCounters {
 
     fn print_report(&self, capacity: usize) {
         eprintln!(
-            "[scheduler-counter] capacity={} scheduled_typecheck={} scheduled_js={} signature_ready={} pre_js_ready={} completed={} js_scheduled_while_typecheck_ready={} max_ready_typecheck={} max_ready_js={} max_pending_js={} max_in_flight={} blocked_events_with_idle_slots={} max_idle_slots={} dispatcher_wait_ms={:.3} idle_slot_wait_ms={:.3}",
+            "[scheduler-counter] capacity={} critical_slots={} scheduled_typecheck={} critical_scheduled={} scheduled_js={} signature_ready={} pre_js_ready={} completed={} js_scheduled_while_typecheck_ready={} max_ready_typecheck={} max_ready_js={} max_pending_js={} max_in_flight={} blocked_events_with_idle_slots={} max_idle_slots={} dispatcher_wait_ms={:.3} idle_slot_wait_ms={:.3}",
             capacity,
+            qos::critical_slots(),
             self.scheduled_typecheck,
+            self.critical_scheduled,
             self.scheduled_js,
             self.signature_ready,
             self.pre_js_ready,
@@ -898,7 +501,9 @@ fn compile_one(
     dump_typed_sexp: bool,
     parent_span: Span,
     in_process_hooks: Option<InProcessSchedulerHooks>,
+    placement: qos::UnitClass,
 ) -> WorkerMsg {
+    let _placement = qos::UnitPlacementGuard::enter(placement);
     let module = build_state.get_module(module_name).unwrap();
     let package = build_state
         .get_package(&module.package_name)
@@ -1180,11 +785,15 @@ pub fn compile(
     if build_state.build_mode().is_in_process() {
         build_state.purge_deleted_modules(&build_state.build_state.deleted_modules.clone());
         build_state.clear_gentype_contexts();
+        // Worker type stores hold dependency graphs published by this build
+        // only; a new build starts every worker from an empty store.
+        rescript_compiler::types::thread_store::begin_build();
     }
 
     // In --in-process mode, synthesize namespace module signatures in memory
     // before any source modules are compiled. Source modules may use `-open Namespace`,
     // so the namespace signature must be available in the PersistentEnv first.
+    crate::build::phase_mark("compile-start");
     if build_state.build_mode().is_in_process() {
         register_namespace_signatures(build_state);
         register_source_fallback_paths(build_state);
@@ -1202,7 +811,10 @@ pub fn compile(
                 .stack_size(256 * 1024 * 1024)
                 .spawn_scoped(scope, || {
                     let _parent = parent_span.enter();
-                    pre_compile_runtime_modules(build_state)
+                    pre_compile_runtime_modules(
+                        &build_state.module_registry,
+                        &build_state.build_state.compiler_info.runtime_path,
+                    )
                 })
                 .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))?;
 
@@ -1221,6 +833,7 @@ pub fn compile(
             }
         });
         pre_compile_result?;
+        crate::build::phase_mark("runtime-precompile-end");
 
         // Clear source-fallback paths after pre-compilation.
         build_state
@@ -1293,9 +906,13 @@ pub fn compile(
     let build_command_state_ref: &BuildCommandState = build_state;
 
     let (tx, rx) = mpsc::channel::<WorkerMsg>();
-    // Bound concurrency to rayon's pool size so the priority heap actually
-    // orders work — dumping everything into rayon's deque would defeat #2.
-    let capacity = rayon::current_num_threads().max(1);
+    let js_writer = JsWriter::spawn();
+    // Bound the jobs handed to rayon so the priority heap still orders work —
+    // dumping everything into rayon's queue would defeat #2. Allow one queued
+    // job per thread beyond the running ones: a worker that finishes then
+    // starts its next job at once instead of idling until this dispatcher
+    // has received its message and spawned a replacement.
+    let capacity = 2 * rayon::current_num_threads().max(1);
     // Worker snapshots share the registry's Arc-backed maps. Publishing a
     // dependency updates those shared maps, so a single template snapshot is
     // enough; each worker still clones it before adding local provisional
@@ -1306,6 +923,7 @@ pub fn compile(
         ModuleRegistry::new()
     };
 
+    crate::build::phase_mark("schedule-start");
     let mut completed: AHashSet<String> = AHashSet::new();
     let mut signature_ready: AHashSet<String> = AHashSet::new();
     let mut results_buffer: Vec<CompletionMsg> = Vec::with_capacity(compile_universe_count);
@@ -1319,6 +937,11 @@ pub fn compile(
     let mut scheduler_counters = (in_process_mode
         && std::env::var_os("RESCRIPT_SCHEDULER_COUNTERS").is_some())
     .then(InProcessSchedulerCounters::default);
+    // Critical-path placement: the highest-priority ready typecheck units get
+    // performance-core QoS, at most one per performance core at a time.
+    let critical_slots = if in_process_mode { qos::critical_slots() } else { 0 };
+    let mut critical_in_flight: usize = 0;
+    let mut critical_modules: AHashSet<String> = AHashSet::new();
 
     rayon::in_place_scope(|scope| {
         let mut in_flight: usize = 0;
@@ -1345,6 +968,7 @@ pub fn compile(
                     }
                     let module_name = pre_js_msg.module_name.clone();
                     let tx = tx.clone();
+                    let write_tx = js_writer.sender();
                     let inc_ref = &inc;
                     let parent_span = compile_parent_span.clone();
                     let registry_snapshot = worker_registry_template.clone();
@@ -1365,6 +989,7 @@ pub fn compile(
                             parent_span,
                             registry_snapshot,
                             &tx,
+                            &write_tx,
                         );
                         if show_progress {
                             inc_ref();
@@ -1384,6 +1009,16 @@ pub fn compile(
                 let tx = tx.clone();
                 let inc_ref = &inc;
                 in_flight += 1;
+                let placement = if critical_in_flight < critical_slots {
+                    critical_in_flight += 1;
+                    critical_modules.insert(module_name.clone());
+                    if let Some(counters) = scheduler_counters.as_mut() {
+                        counters.critical_scheduled += 1;
+                    }
+                    qos::UnitClass::Critical
+                } else {
+                    qos::UnitClass::Default
+                };
                 if let Some(counters) = scheduler_counters.as_mut() {
                     counters.observe_queues(
                         ready_heap.len(),
@@ -1411,6 +1046,7 @@ pub fn compile(
                         dump_typed_sexp,
                         parent_span,
                         in_process_hooks,
+                        placement,
                     );
                     if show_progress && matches!(msg, WorkerMsg::Completed(_)) {
                         inc_ref();
@@ -1473,6 +1109,9 @@ pub fn compile(
                         }
                         in_flight -= 1;
                         let module_name = msg.module_name.clone();
+                        if critical_modules.remove(&module_name) {
+                            critical_in_flight -= 1;
+                        }
                         let pending_deps_for_js = msg
                             .needed_modules
                             .iter()
@@ -1525,6 +1164,9 @@ pub fn compile(
                             counters.completed += 1;
                         }
                         in_flight -= 1;
+                        if critical_modules.remove(&msg.module_name) {
+                            critical_in_flight -= 1;
+                        }
                         if in_process_mode {
                             apply_pending_registry_updates(
                                 build_command_state_ref,
@@ -1608,6 +1250,7 @@ pub fn compile(
     // Close our sender handle so any lingering clones in already-spawned
     // workers don't keep the channel open past the scope.
     drop(tx);
+    let js_write_failures = js_writer.finish();
 
     trace!(
         "Compiled {} out of {} in the universe",
@@ -1828,6 +1471,15 @@ pub fn compile(
         }
 
         compile_errors.push_str(&message);
+    }
+
+    // A module whose JS output could not be written must be recompiled next
+    // time, exactly as when the write still happened on the worker.
+    for (module_name, err) in js_write_failures {
+        if let Some(module) = build_state.build_state.modules.get_mut(&module_name) {
+            module.compile_dirty = true;
+        }
+        compile_errors.push_str(&format!("Failed to write JS output for {module_name}: {err:#}\n"));
     }
 
     // Collect replayed warnings into the same list as fresh warnings so mixed
@@ -2460,10 +2112,9 @@ fn build_compiler_options(
         make_runtime: parsed_flags.make_runtime,
         gentype_config,
         gentype_resolver,
-        typed_artifacts: Some(std::sync::Arc::new(typed_artifact_output(
-            package,
-            source_file_path,
-        ))),
+        // In-process builds keep typed results in memory; they write no
+        // `.cmi`/`.cmt`/`.cmti` files.
+        typed_artifacts: None,
         keep_locs: parsed_flags.keep_locs,
         binary_annotations: parsed_flags.binary_annotations,
         visible_package_roots: Some(visible_package_roots),
@@ -2476,24 +2127,6 @@ fn build_compiler_options(
             .map(|ns| ns.to_string()),
         ..Default::default()
     })
-}
-
-/// Where editor tooling expects the typed artifacts of a module: next to the
-/// `.ast` under `lib/bs`, plus a flat copy in `lib/ocaml` (the same files the
-/// bsc subprocess path copies after compiling).
-fn typed_artifact_output(
-    package: &packages::Package,
-    source_file_path: &Path,
-) -> rescript_compiler::driver::TypedArtifactOutput {
-    let build_path = package.get_build_path();
-    let dir = source_file_path.parent().unwrap_or_else(|| Path::new(""));
-    let basename = helpers::file_path_to_compiler_asset_basename(source_file_path, &package.namespace);
-    rescript_compiler::driver::TypedArtifactOutput {
-        output_prefix: build_path.join(dir).join(basename),
-        copy_dirs: vec![package.get_ocaml_build_path()],
-        builddir: build_path.to_string_lossy().into_owned(),
-        args: std::env::args().collect(),
-    }
 }
 
 fn package_spec_to_module_format(spec: &config::PackageSpec) -> rescript_compiler::js_ir::ModuleFormat {
@@ -2685,17 +2318,54 @@ fn write_js_output(
     Ok(())
 }
 
-fn write_compiled_js_outputs(
-    js_outputs: &[rescript_compiler::driver::JsOutput],
-    fallback_js_output: &str,
-    package: &packages::Package,
-    source_file_path: &Path,
-    root_config: &config::Config,
-) -> Result<()> {
-    if js_outputs.is_empty() {
-        return write_js_output(fallback_js_output, package, source_file_path, root_config);
+/// JS outputs of one module, queued for the writer thread.
+struct JsWriteJob {
+    module_name: String,
+    outputs: Vec<rescript_compiler::driver::JsOutput>,
+}
+
+/// Writes compiled JS on one dedicated thread. The kernel serializes file
+/// creation in a directory tree, so creating thousands of files from every
+/// worker at once spends most of the time contending inside `open`; a single
+/// writer does the same work in less total time and keeps the workers on
+/// compilation.
+struct JsWriter {
+    tx: mpsc::Sender<JsWriteJob>,
+    handle: std::thread::JoinHandle<Vec<(String, anyhow::Error)>>,
+}
+
+impl JsWriter {
+    fn spawn() -> Self {
+        let (tx, rx) = mpsc::channel::<JsWriteJob>();
+        let handle = std::thread::Builder::new()
+            .name("js-writer".to_string())
+            .spawn(move || {
+                let mut failures = Vec::new();
+                for job in rx {
+                    if let Err(err) = write_js_write_job(&job.outputs) {
+                        failures.push((job.module_name, err));
+                    }
+                }
+                failures
+            })
+            .expect("failed to spawn the JS writer thread");
+        JsWriter { tx, handle }
     }
 
+    fn sender(&self) -> mpsc::Sender<JsWriteJob> {
+        self.tx.clone()
+    }
+
+    /// Wait for every queued write and return the modules whose write failed.
+    fn finish(self) -> Vec<(String, anyhow::Error)> {
+        drop(self.tx);
+        self.handle
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+}
+
+fn write_js_write_job(js_outputs: &[rescript_compiler::driver::JsOutput]) -> Result<()> {
     for output in js_outputs {
         write_file_creating_parent_on_missing(&output.path, &output.code)?;
         let map_path = PathBuf::from(format!("{}.map", output.path.display()));
@@ -2706,6 +2376,19 @@ fn write_compiled_js_outputs(
         }
     }
     Ok(())
+}
+
+fn write_compiled_js_outputs(
+    js_outputs: &[rescript_compiler::driver::JsOutput],
+    fallback_js_output: &str,
+    package: &packages::Package,
+    source_file_path: &Path,
+    root_config: &config::Config,
+) -> Result<()> {
+    if js_outputs.is_empty() {
+        return write_js_output(fallback_js_output, package, source_file_path, root_config);
+    }
+    write_js_write_job(js_outputs)
 }
 
 /// Mirror in-source JS (and its source map) into `lib/bs`, as a file-backed
@@ -2748,6 +2431,39 @@ fn copy_in_source_js_to_build_dir(
     }
 }
 
+/// The `lib/bs` copies of in-source JS outputs (see
+/// [`copy_in_source_js_to_build_dir`]), for the writer thread.
+fn build_dir_js_mirrors(
+    outputs: &[rescript_compiler::driver::JsOutput],
+    package: &packages::Package,
+    source_file_path: &Path,
+    root_config: &config::Config,
+) -> Vec<rescript_compiler::driver::JsOutput> {
+    let mut mirrors = Vec::new();
+    for spec in root_config.get_package_specs() {
+        if !spec.in_source {
+            continue;
+        }
+        let suffix = root_config.get_suffix(&spec);
+        let source = js_output_path_for_spec(package, source_file_path, root_config, &spec);
+        let destination = helpers::get_source_file_from_rescript_file(
+            &package.get_build_path().join(source_file_path),
+            &suffix,
+        );
+        mirrors.extend(
+            outputs
+                .iter()
+                .filter(|output| output.path == source)
+                .map(|output| rescript_compiler::driver::JsOutput {
+                    path: destination.clone(),
+                    code: output.code.clone(),
+                    source_map: output.source_map.clone(),
+                }),
+        );
+    }
+    mirrors
+}
+
 /// Register namespace module signatures in the PersistentEnv for --in-process mode.
 ///
 /// For each package with a namespace, synthesizes the namespace module's
@@ -2755,6 +2471,15 @@ fn copy_in_source_js_to_build_dir(
 /// the shared ModuleRegistry so that `-open Namespace` works during compilation.
 ///
 /// This replaces the `compile_mlmap` bsc subprocess call used in file-based modes.
+/// Register everything the runtime pre-compilation reads from the registry
+/// (namespace signatures and source fallback paths). Both depend only on the
+/// discovered packages, so a fresh in-process build can do this before parsing
+/// and pre-compile the runtime while source files are parsed.
+pub(crate) fn prepare_registry_for_runtime_precompile(build_state: &BuildCommandState) {
+    register_namespace_signatures(build_state);
+    register_source_fallback_paths(build_state);
+}
+
 fn register_namespace_signatures(build_state: &BuildCommandState) {
     for (_package_name, package) in build_state.packages.iter() {
         let namespace_suffix = match package.namespace.to_suffix() {
@@ -2797,32 +2522,13 @@ fn register_namespace_signatures(build_state: &BuildCommandState) {
             // bsc-compiled `.mlmap` (js_implementation.ml:207-226).
             let mut sorted_aliases = module_aliases.clone();
             sorted_aliases.sort();
-            let build_path = package.get_build_path();
-            let output = rescript_compiler::driver::TypedArtifactOutput {
-                output_prefix: build_path.join(&namespace_suffix),
-                copy_dirs: vec![package.get_ocaml_build_path()],
-                builddir: build_path.to_string_lossy().into_owned(),
-                args: std::env::args().collect(),
-            };
-            let runtime_path = get_runtime_path(&package.config, &build_state.project_context).ok();
-            // Importers record the saved unit's CRC list (env.ml:627-638).
-            let crcs = match rescript_compiler::driver::save_namespace_typed_artifacts(
-                &namespace_suffix,
-                &sorted_aliases,
-                &output,
-                runtime_path.as_deref(),
-            ) {
-                Ok(crcs) => crcs,
-                Err(err) => {
-                    log::warn!("Could not write namespace artifacts for {namespace_suffix}: {err}");
-                    Vec::new()
-                }
-            };
+            // In-process builds write no namespace `.cmi`/`.cmt`, so there
+            // is no saved CRC list for importers to record.
             build_state.register_namespace_in_registry(
                 &namespace_suffix,
                 &module_aliases,
                 package.path.clone(),
-                crcs,
+                Vec::new(),
             );
         }
     }
@@ -2966,37 +2672,35 @@ struct RuntimeCompletionMsg {
 ///
 /// Runs on a dedicated thread with a large stack to handle any remaining
 /// source-fallback chains during the pre-compilation itself.
-fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
+pub(crate) fn pre_compile_runtime_modules(
+    registry: &Mutex<ModuleRegistry>,
+    runtime_root: &Path,
+) -> Result<()> {
     let _span = info_span!("build.runtime_precompile").entered();
     let runtime_timing_enabled = std::env::var_os("RESCRIPT_RUNTIME_TIMINGS").is_some()
         || std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
     let runtime_timing_start = runtime_timing_enabled.then(Instant::now);
     let runtime_timing_before = runtime_timing_enabled.then(rescript_compiler::timing::snapshot);
-    let runtime_root = &build_state.build_state.compiler_info.runtime_path;
     let runtime_config = packages::read_config(runtime_root)
         .with_context(|| format!("failed to read runtime config from {}", runtime_root.display()))?;
     let runtime_path = runtime_root.join("lib").join("ocaml");
-    let mut runtime_modules = collect_runtime_sources(&runtime_path)?;
-    tracing::Span::current().record("runtime_modules", runtime_modules.len());
+    let runtime_paths = runtime_source_paths(&runtime_path)?;
+    tracing::Span::current().record("runtime_modules", runtime_paths.len());
 
-    if runtime_modules.is_empty() {
+    if runtime_paths.is_empty() {
         return Ok(());
     }
 
     let already_registered = {
-        let registry = build_state.module_registry.lock().unwrap();
-        runtime_modules.iter().all(|module| {
-            registry.module_info_is_runtime(&module.module_name)
-                && registry.has_cached_module(&module.module_name)
+        let registry = registry.lock().unwrap();
+        runtime_paths.iter().all(|(module_name, _)| {
+            registry.module_info_is_runtime(module_name) && registry.has_cached_module(module_name)
         })
     };
     if already_registered {
         return Ok(());
     }
 
-    populate_runtime_deps(&mut runtime_modules);
-
-    seed_runtime_registry(build_state, &runtime_modules);
     let runtime_compile_threads = rayon::current_num_threads().max(2);
     // Runtime module compilation runs inside Rayon workers, so the outer
     // precompile thread stack is not enough for very large runtime IR cleanup.
@@ -3006,9 +2710,13 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
         .stack_size(256 * 1024 * 1024)
         .build()
         .context("failed to create runtime in-process compiler pool")?;
+    let mut runtime_modules = runtime_compile_pool.install(|| collect_runtime_sources(runtime_paths))?;
+    populate_runtime_deps(&mut runtime_modules);
+
+    seed_runtime_registry(registry, &runtime_modules);
     runtime_compile_pool.install(|| {
         compile_runtime_modules_parallel(
-            build_state,
+            registry,
             runtime_root,
             &runtime_path,
             &runtime_config,
@@ -3020,24 +2728,30 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
         let after = rescript_compiler::timing::snapshot();
         let wall = start.elapsed();
         let parse = duration_delta(after.parse, before.parse);
+        let env_setup = duration_delta(after.env_setup, before.env_setup);
         let typecheck = duration_delta(after.typecheck, before.typecheck);
+        let signature_publish = duration_delta(after.signature_publish, before.signature_publish);
         let lambda = duration_delta(after.lambda, before.lambda);
         let lambda_optimization = duration_delta(after.lambda_optimization, before.lambda_optimization);
         let gentype = duration_delta(after.gentype, before.gentype);
         let codegen = duration_delta(after.codegen, before.codegen);
         let recorded = parse
+            .saturating_add(env_setup)
             .saturating_add(typecheck)
+            .saturating_add(signature_publish)
             .saturating_add(lambda)
             .saturating_add(lambda_optimization)
             .saturating_add(gentype)
             .saturating_add(codegen);
         let overhead = wall.saturating_sub(recorded);
         eprintln!(
-            "[runtime-timing] modules={} wall_ms={:.3} parse_ms={:.3} typecheck_ms={:.3} lambda_ms={:.3} lambda_optimization_ms={:.3} gentype_ms={:.3} codegen_ms={:.3} overhead_ms={:.3}",
+            "[runtime-timing] modules={} wall_ms={:.3} parse_ms={:.3} env_setup_ms={:.3} typecheck_ms={:.3} signature_publish_ms={:.3} lambda_ms={:.3} lambda_optimization_ms={:.3} gentype_ms={:.3} codegen_ms={:.3} overhead_ms={:.3}",
             runtime_modules.len(),
             duration_ms(wall),
             duration_ms(parse),
+            duration_ms(env_setup),
             duration_ms(typecheck),
+            duration_ms(signature_publish),
             duration_ms(lambda),
             duration_ms(lambda_optimization),
             duration_ms(gentype),
@@ -3053,8 +2767,8 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
     Ok(())
 }
 
-fn seed_runtime_registry(build_state: &BuildCommandState, runtime_modules: &[RuntimeModuleSource]) {
-    let mut registry = build_state.module_registry.lock().unwrap();
+fn seed_runtime_registry(registry: &Mutex<ModuleRegistry>, runtime_modules: &[RuntimeModuleSource]) {
+    let mut registry = registry.lock().unwrap();
     for module in runtime_modules {
         let fallback_path = module
             .resi
@@ -3075,7 +2789,7 @@ fn seed_runtime_registry(build_state: &BuildCommandState, runtime_modules: &[Run
 }
 
 fn compile_runtime_modules_parallel(
-    build_state: &BuildCommandState,
+    registry: &Mutex<ModuleRegistry>,
     runtime_root: &Path,
     runtime_path: &Path,
     runtime_config: &config::Config,
@@ -3096,7 +2810,7 @@ fn compile_runtime_modules_parallel(
 
     let (tx, rx) = mpsc::channel::<RuntimeCompletionMsg>();
     let capacity = rayon::current_num_threads().max(1);
-    let worker_registry_template = build_state.snapshot_module_registry();
+    let worker_registry_template = registry.lock().unwrap().for_worker_snapshot();
     let mut in_flight = 0usize;
     let mut completed = vec![false; runtime_modules.len()];
     let mut completed_count = 0usize;
@@ -3113,7 +2827,7 @@ fn compile_runtime_modules_parallel(
                 in_flight += 1;
                 scope.spawn(move |_| {
                     let result = compile_runtime_module_from_source(
-                        build_state,
+                        registry,
                         runtime_root,
                         runtime_path,
                         runtime_config,
@@ -3160,7 +2874,7 @@ fn compile_runtime_modules_parallel(
 
     if completed_count != runtime_modules.len() {
         compile_runtime_cycle_remainder_serial(
-            build_state,
+            registry,
             runtime_root,
             runtime_path,
             runtime_config,
@@ -3173,7 +2887,7 @@ fn compile_runtime_modules_parallel(
 }
 
 fn compile_runtime_cycle_remainder_serial(
-    build_state: &BuildCommandState,
+    registry: &Mutex<ModuleRegistry>,
     runtime_root: &Path,
     runtime_path: &Path,
     runtime_config: &config::Config,
@@ -3181,14 +2895,14 @@ fn compile_runtime_cycle_remainder_serial(
     completed: &[bool],
 ) -> Result<()> {
     debug!("runtime dependency graph has a cycle; compiling remaining modules serially");
-    let worker_registry_template = build_state.snapshot_module_registry();
+    let worker_registry_template = registry.lock().unwrap().for_worker_snapshot();
     for idx in runtime_compile_order(runtime_modules) {
         if completed[idx] {
             continue;
         }
         let registry_snapshot = worker_registry_template.clone();
         compile_runtime_module_from_source(
-            build_state,
+            registry,
             runtime_root,
             runtime_path,
             runtime_config,
@@ -3200,7 +2914,7 @@ fn compile_runtime_cycle_remainder_serial(
 }
 
 fn compile_runtime_module_from_source(
-    build_state: &BuildCommandState,
+    registry: &Mutex<ModuleRegistry>,
     runtime_root: &Path,
     runtime_path: &Path,
     runtime_config: &config::Config,
@@ -3275,7 +2989,7 @@ fn compile_runtime_module_from_source(
     .with_cmj_export_lambdas(compile_result.cmj_export_lambdas)
     .with_cmj_hoisted_exports(compile_result.hoisted_exports);
 
-    let mut shared_registry = build_state.module_registry.lock().unwrap();
+    let mut shared_registry = registry.lock().unwrap();
     if has_runtime_interface {
         // OCaml compiler/ml/typemod.ml:1742-1758 checks the implementation
         // against the already-saved interface `.cmi`; typemod.ml:1779-1787
@@ -3304,8 +3018,10 @@ fn compile_runtime_module_from_source(
     Ok(())
 }
 
-fn collect_runtime_sources(runtime_path: &Path) -> Result<Vec<RuntimeModuleSource>> {
-    let mut runtime_modules = Vec::new();
+/// List the runtime `.res` sources as `(module name, path)`, sorted by module
+/// name.
+fn runtime_source_paths(runtime_path: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let mut paths = Vec::new();
     for entry in std::fs::read_dir(runtime_path)
         .with_context(|| format!("failed to read runtime directory {}", runtime_path.display()))?
     {
@@ -3326,35 +3042,44 @@ fn collect_runtime_sources(runtime_path: &Path) -> Result<Vec<RuntimeModuleSourc
         let Some(module_name) = module_name_from_stem(stem) else {
             continue;
         };
-
-        let res_source = read_source_latin1(&path)?;
-        let (res_arena, structure, mut deps) = parse_runtime_structure(&path, &res_source)?;
-        let resi_path = path.with_extension("resi");
-        let resi = if resi_path.exists() {
-            let source = read_source_latin1(&resi_path)?;
-            let (arena, signature, intf_deps) = parse_runtime_signature(&resi_path, &source)?;
-            deps.extend(intf_deps);
-            Some(RuntimeInterfaceSource {
-                path: resi_path,
-                arena,
-                signature,
-            })
-        } else {
-            None
-        };
-
-        runtime_modules.push(RuntimeModuleSource {
-            module_name,
-            res_path: path,
-            res_arena,
-            structure,
-            resi,
-            deps,
-        });
+        paths.push((module_name, path));
     }
+    paths.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(paths)
+}
 
-    runtime_modules.sort_by(|a, b| a.module_name.cmp(&b.module_name));
-    Ok(runtime_modules)
+/// Read and parse the runtime sources (in parallel on the current Rayon
+/// pool), keeping the order of `paths`.
+fn collect_runtime_sources(paths: Vec<(String, PathBuf)>) -> Result<Vec<RuntimeModuleSource>> {
+    paths
+        .into_par_iter()
+        .map(|(module_name, path)| {
+            let res_source = read_source_latin1(&path)?;
+            let (res_arena, structure, mut deps) = parse_runtime_structure(&path, &res_source)?;
+            let resi_path = path.with_extension("resi");
+            let resi = if resi_path.exists() {
+                let source = read_source_latin1(&resi_path)?;
+                let (arena, signature, intf_deps) = parse_runtime_signature(&resi_path, &source)?;
+                deps.extend(intf_deps);
+                Some(RuntimeInterfaceSource {
+                    path: resi_path,
+                    arena,
+                    signature,
+                })
+            } else {
+                None
+            };
+
+            Ok(RuntimeModuleSource {
+                module_name,
+                res_path: path,
+                res_arena,
+                structure,
+                resi,
+                deps,
+            })
+        })
+        .collect()
 }
 
 fn module_name_from_stem(stem: &str) -> Option<String> {
@@ -3926,30 +3651,33 @@ fn compile_module_in_process_to_js_boundary(
         let timings = guard.snapshot();
         let wall = start.elapsed();
         let parse = timings.parse;
+        let env_setup = timings.env_setup;
         let typecheck = timings.typecheck;
+        let signature_publish = timings.signature_publish;
         let lambda = timings.lambda;
         let lambda_optimization = timings.lambda_optimization;
         let gentype = timings.gentype;
         let codegen = timings.codegen;
-        let recorded = parse
-            .saturating_add(typecheck)
-            .saturating_add(lambda)
-            .saturating_add(lambda_optimization)
-            .saturating_add(gentype)
-            .saturating_add(codegen);
+        let recorded = timings.recorded();
         let overhead = wall.saturating_sub(recorded);
         eprintln!(
-            "[module-timing] module={} package={} wall_ms={:.3} parse_ms={:.3} typecheck_ms={:.3} lambda_ms={:.3} lambda_optimization_ms={:.3} gentype_ms={:.3} codegen_ms={:.3} overhead_ms={:.3}",
+            "[module-timing] module={} package={} wall_ms={:.3} parse_ms={:.3} env_setup_ms={:.3} typecheck_ms={:.3} signature_publish_ms={:.3} lambda_ms={:.3} lambda_optimization_ms={:.3} gentype_ms={:.3} codegen_ms={:.3} overhead_ms={:.3} end_epoch_ms={:.3}",
             module_name,
             package.name,
             duration_ms(wall),
             duration_ms(parse),
+            duration_ms(env_setup),
             duration_ms(typecheck),
+            duration_ms(signature_publish),
             duration_ms(lambda),
             duration_ms(lambda_optimization),
             duration_ms(gentype),
             duration_ms(codegen),
-            duration_ms(overhead)
+            duration_ms(overhead),
+            // Wall-clock end, so profiler samples can be attributed to one module.
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0.0, |elapsed| elapsed.as_secs_f64() * 1000.0)
         );
     }
 
@@ -3994,7 +3722,9 @@ fn finish_in_process_js(
     parent_span: Span,
     registry_snapshot: ModuleRegistry,
     metadata_tx: &mpsc::Sender<WorkerMsg>,
+    write_tx: &mpsc::Sender<JsWriteJob>,
 ) -> CompletionMsg {
+    let _placement = qos::UnitPlacementGuard::enter(qos::UnitClass::Background);
     let module_name = pre_js_msg.module_name.clone();
     let is_clean = pre_js_msg.is_clean;
     let result = finish_in_process_js_inner(
@@ -4004,6 +3734,7 @@ fn finish_in_process_js(
         parent_span,
         registry_snapshot,
         metadata_tx,
+        write_tx,
     );
     let (result, registry_updates) = match result {
         Ok(outcome) => (Ok(outcome.warning), outcome.registry_updates),
@@ -4026,6 +3757,7 @@ fn finish_in_process_js_inner(
     parent_span: Span,
     registry_snapshot: ModuleRegistry,
     metadata_tx: &mpsc::Sender<WorkerMsg>,
+    write_tx: &mpsc::Sender<JsWriteJob>,
 ) -> Result<InProcessModuleResult> {
     let PreJsMsg {
         module_name,
@@ -4096,7 +3828,7 @@ fn finish_in_process_js_inner(
         )
     }));
     drop(metadata_hook);
-    let compile_result = match compile_result {
+    let mut compile_result = match compile_result {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             return Err(anyhow!("JS compilation failed for {}: {}", module_name, e));
@@ -4143,14 +3875,29 @@ fn finish_in_process_js_inner(
         )
         .entered();
         let write_start = module_timing_enabled.then(Instant::now);
-        write_compiled_js_outputs(
-            &compile_result.js_outputs,
-            &compile_result.js_output,
-            package,
-            &implementation_path,
-            root_config,
-        )?;
-        copy_in_source_js_to_build_dir(package, &implementation_path, root_config);
+        // A post-build command reads the file, so it must exist before the
+        // command runs. Otherwise hand the outputs to the writer thread.
+        if package.config.js_post_build.is_some() || compile_result.js_outputs.is_empty() {
+            write_compiled_js_outputs(
+                &compile_result.js_outputs,
+                &compile_result.js_output,
+                package,
+                &implementation_path,
+                root_config,
+            )?;
+            copy_in_source_js_to_build_dir(package, &implementation_path, root_config);
+        } else {
+            let mut outputs = std::mem::take(&mut compile_result.js_outputs);
+            let mirrors = build_dir_js_mirrors(&outputs, package, &implementation_path, root_config);
+            outputs.extend(mirrors);
+            let job = JsWriteJob {
+                module_name: module_name.clone(),
+                outputs,
+            };
+            if let Err(mpsc::SendError(job)) = write_tx.send(job) {
+                write_js_write_job(&job.outputs)?;
+            }
+        }
         if let Some(write_start) = write_start {
             write_duration = write_start.elapsed();
         }
@@ -4184,27 +3931,19 @@ fn finish_in_process_js_inner(
         let codegen = timings.codegen;
         let overhead = wall.saturating_sub(codegen.saturating_add(write_duration));
         eprintln!(
-            "[module-js-timing] module={} package={} wall_ms={:.3} codegen_ms={:.3} write_ms={:.3} overhead_ms={:.3} outputs={}",
+            "[module-js-timing] module={} package={} wall_ms={:.3} codegen_ms={:.3} write_ms={:.3} overhead_ms={:.3} outputs={} end_epoch_ms={:.3}",
             module_name,
             package.name,
             duration_ms(wall),
             duration_ms(codegen),
             duration_ms(write_duration),
             duration_ms(overhead),
-            js_output_count
+            js_output_count,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0.0, |elapsed| elapsed.as_secs_f64() * 1000.0)
         );
     }
-
-    save_js_metadata(
-        package,
-        &implementation_path,
-        compile_result.is_pure,
-        &compile_result.cmj_export_constants,
-        &compile_result.cmj_export_arities,
-        &compile_result.hoisted_exports,
-        !compile_result.cmj_export_lambdas.is_empty(),
-        warning.as_deref(),
-    )?;
 
     Ok(InProcessModuleResult {
         warning,

@@ -1896,7 +1896,7 @@ fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_to_tail_across_
             match &arg.desc {
                 ExpressionDesc::Var(VIdent::Qualified(module_id, Some(field))) => {
                     assert_eq!(field, "v");
-                    assert_eq!(module_id, &module);
+                    assert_eq!(&**module_id, &module);
                 }
                 other => panic!(
                     "expected the later effect to inline to the module field access, got {other:?}"
@@ -1918,7 +1918,7 @@ fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_to_tail_across_
         }) => {
             assert!(ident.same(&exported));
             assert_eq!(field, "v");
-            assert_eq!(module_id, &module);
+            assert_eq!(&**module_id, &module);
             assert_eq!(*property, LetKind::Alias);
         }
         other => panic!("expected the late same-name module-field alias second, got {other:?}"),
@@ -1992,7 +1992,7 @@ fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_with_different_
             ..
         }) => {
             assert!(ident.same(&exported));
-            assert_eq!(module_id, &module);
+            assert_eq!(&**module_id, &module);
             assert_eq!(field, "make");
             assert_eq!(*property, LetKind::Alias);
         }

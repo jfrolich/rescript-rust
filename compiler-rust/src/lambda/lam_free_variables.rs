@@ -5,7 +5,7 @@
 //! expression. This analysis is essential for closure conversion and
 //! determining what variables need to be captured in closures.
 
-use std::collections::HashSet;
+use ahash::AHashSet as HashSet;
 
 use crate::ident::Ident;
 use crate::lambda::Lambda;

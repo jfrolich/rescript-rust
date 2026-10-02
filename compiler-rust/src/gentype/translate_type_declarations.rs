@@ -604,13 +604,13 @@ pub fn translate_type_declaration(
     let declaration_kind = match &type_declaration.typ_type.type_kind {
         TypeKind::TypeRecord(label_declarations, representation) => {
             DeclarationKind::RecordDeclarationFromTypes(
-                label_declarations.clone(),
+                label_declarations.to_vec(),
                 representation.clone(),
             )
         }
         TypeKind::TypeVariant(constructor_declarations, layout_ref) => {
             DeclarationKind::VariantDeclarationFromTypes(
-                constructor_declarations.clone(),
+                constructor_declarations.to_vec(),
                 ctx.variant_layout(*layout_ref),
                 type_declaration.typ_type.type_representation,
             )

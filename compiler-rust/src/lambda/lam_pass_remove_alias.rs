@@ -17,7 +17,9 @@ use crate::lambda::lam_hit::hit_variable;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::lam_util::field_flatten_get;
+use crate::lambda::map_prim_args;
 use crate::lambda::{Apply, Lambda, LambdaSwitch, PrimInfo};
+use crate::lambda::{LFunction, map_box};
 use crate::location::Location;
 
 /// Rust counterpart to `Lam_compile_env.query_external_id_info` used by
@@ -63,7 +65,7 @@ fn is_const_some(cst: &Constant) -> bool {
     match cst {
         Constant::Some(_) => true,
         Constant::Block { tag_info, .. } => {
-            matches!(tag_info, TagInfo::Some | TagInfo::SomeNotNested)
+            matches!(&**tag_info, TagInfo::Some | TagInfo::SomeNotNested)
         }
         _ => false,
     }
@@ -73,25 +75,43 @@ fn is_const_some(cst: &Constant) -> bool {
 /// to keep the outcome shape clean; otherwise wraps the argument in `Pnot`.
 fn lam_not(loc: Location, x: Lambda) -> Lambda {
     match x {
-        Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pintcomp(Comparison::Neq),
-            args,
-            loc: l,
-        }) => Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pintcomp(Comparison::Eq),
-            args,
-            loc: l,
-        }),
+        Lambda::Lprim(__prim9)
+            if matches!(
+                __prim9.as_ref(),
+                PrimInfo {
+                    primitive: Primitive::Pintcomp(Comparison::Neq),
+                    args: _,
+                    loc: _l,
+                }
+            ) =>
+        {
+            let PrimInfo {
+                primitive: Primitive::Pintcomp(Comparison::Neq),
+                args,
+                loc: l,
+            } = *__prim9
+            else {
+                unreachable!()
+            };
+            Lambda::Lprim(Box::new(PrimInfo {
+                primitive: Primitive::Pintcomp(Comparison::Eq),
+                args,
+                loc: l,
+            }))
+        }
         x => Lambda::prim(Primitive::Pnot, vec![x], loc),
     }
 }
 
 fn module_field_apply_target(lam: &Lambda) -> Option<(&Ident, bool, &str)> {
-    let Lambda::Lprim(PrimInfo {
+    let Lambda::Lprim(__prim201) = lam else {
+        return None;
+    };
+    let PrimInfo {
         primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
         args,
         ..
-    }) = lam
+    } = __prim201.as_ref()
     else {
         return None;
     };
@@ -214,24 +234,28 @@ impl<'a> Simplifier<'a> {
             Lambda::Lvar(_) => lam,
 
             // lam_pass_remove_alias.ml:54-62 — JSX preserve guard for jsx/jsxs.
-            Lambda::Lprim(PrimInfo {
-                primitive,
-                args,
-                loc,
-            }) if self.jsx_preserve
-                && matches!(
-                    &primitive,
-                    Primitive::PjsCall { prim_name, .. }
-                        if prim_name == "jsx" || prim_name == "jsxs"
-                )
-                && matches!(
-                    args.first(),
-                    Some(Lambda::Lprim(PrimInfo {
-                        primitive: Primitive::Pfield(_, _),
-                        ..
-                    }))
-                ) =>
+            Lambda::Lprim(__prim8)
+                if matches!(__prim8.as_ref(), PrimInfo {
+                    primitive,
+                    args,
+                    loc,
+                } if self.jsx_preserve
+                    && matches!(
+                        &primitive,
+                        Primitive::PjsCall { prim_name, .. }
+                            if prim_name == "jsx" || prim_name == "jsxs"
+                    )
+                    && matches!(
+                        args.first(),
+                        Some(Lambda::Lprim(first)) if matches!(first.primitive, Primitive::Pfield(_, _))
+                    )) =>
             {
+                let PrimInfo {
+                    primitive,
+                    args,
+                    loc,
+                } = *__prim8;
+
                 let mut new_args = Vec::with_capacity(args.len());
                 let mut iter = args.into_iter();
                 if let Some(first) = iter.next() {
@@ -242,11 +266,22 @@ impl<'a> Simplifier<'a> {
             }
 
             // lam_pass_remove_alias.ml:63-71 — Pfield [arg] with a known Lvar.
-            Lambda::Lprim(PrimInfo {
+            Lambda::Lprim(__prim7)
+                if matches!(__prim7.as_ref(), PrimInfo {
                 primitive: Primitive::Pfield(i, info),
-                mut args,
+                args,
                 loc,
-            }) if args.len() == 1 => {
+            } if args.len() == 1) =>
+            {
+                let PrimInfo {
+                    primitive: Primitive::Pfield(i, info),
+                    mut args,
+                    loc,
+                } = *__prim7
+                else {
+                    unreachable!()
+                };
+
                 let simplified = self.simpl_owned(args.pop().expect("checked one Pfield arg"));
                 match simplified {
                     Lambda::Lvar(v) => {
@@ -271,22 +306,33 @@ impl<'a> Simplifier<'a> {
             }
 
             // lam_pass_remove_alias.ml:72-79 — unwrap known optional blocks.
-            Lambda::Lprim(PrimInfo {
+            Lambda::Lprim(__prim6)
+                if matches!(__prim6.as_ref(), PrimInfo {
                 primitive: p @ (Primitive::PvalFromOption | Primitive::PvalFromOptionNotNest),
-                mut args,
+                args,
                 loc,
-            }) if matches!(args.as_slice(), [Lambda::Lvar(_)]) => {
+            } if matches!(args.as_slice(), [Lambda::Lvar(_)])) =>
+            {
+                let PrimInfo {
+                    primitive: p @ (Primitive::PvalFromOption | Primitive::PvalFromOptionNotNest),
+                    mut args,
+                    loc,
+                } = *__prim6
+                else {
+                    unreachable!()
+                };
+
                 let Lambda::Lvar(v) = args.pop().expect("checked one optional arg") else {
                     unreachable!()
                 };
                 match self.ident_tbl.get(&v).cloned() {
                     Some(IdKind::OptionalBlock(l, _)) => l,
                     _ if matches!(p, Primitive::PvalFromOptionNotNest) => Lambda::Lvar(v),
-                    _ => Lambda::Lprim(PrimInfo {
+                    _ => Lambda::Lprim(Box::new(PrimInfo {
                         primitive: p,
                         args: vec![Lambda::Lvar(v)],
                         loc,
-                    }),
+                    })),
                 }
             }
 
@@ -294,24 +340,27 @@ impl<'a> Simplifier<'a> {
             Lambda::LglobalModule(_, _) => lam,
 
             // lam_pass_remove_alias.ml:81-82 — fallback Lprim.
-            Lambda::Lprim(PrimInfo {
-                primitive,
-                args,
-                loc,
-            }) => Lambda::prim(
-                primitive,
-                args.into_iter().map(|arg| self.simpl_owned(arg)).collect(),
-                loc,
-            ),
+            Lambda::Lprim(info) => map_prim_args(info, |arg| self.simpl_owned(arg)),
 
             // lam_pass_remove_alias.ml:83-117 — Lifthenelse special cases,
             // followed by the generic boolean simplification fallback.
             Lambda::LifThenElse(cond, then_, else_) => match *cond {
-                Lambda::Lprim(PrimInfo {
+                Lambda::Lprim(__prim4)
+                    if matches!(__prim4.as_ref(), PrimInfo {
                     primitive: Primitive::PisNotNone,
-                    mut args,
+                    args,
                     loc,
-                }) if matches!(args.as_slice(), [Lambda::Lvar(_)]) => {
+                } if matches!(args.as_slice(), [Lambda::Lvar(_)])) =>
+                {
+                    let PrimInfo {
+                        primitive: Primitive::PisNotNone,
+                        mut args,
+                        loc,
+                    } = *__prim4
+                    else {
+                        unreachable!()
+                    };
+
                     let Lambda::Lvar(id) = args.pop().expect("checked one Pis_not_none arg") else {
                         unreachable!()
                     };
@@ -353,11 +402,11 @@ impl<'a> Simplifier<'a> {
                             )
                         }
                         _ => Lambda::if_(
-                            Lambda::Lprim(PrimInfo {
+                            Lambda::Lprim(Box::new(PrimInfo {
                                 primitive: Primitive::PisNotNone,
                                 args: vec![Lambda::Lvar(id)],
                                 loc,
-                            }),
+                            })),
                             self.simpl_owned(*then_),
                             self.simpl_owned(*else_),
                         ),
@@ -383,9 +432,12 @@ impl<'a> Simplifier<'a> {
             Lambda::Lconst(_) => lam,
 
             // lam_pass_remove_alias.ml:119
-            Lambda::Llet(kind, v, l1, l2) => {
-                Lambda::let_(kind, v, self.simpl_owned(*l1), self.simpl_owned(*l2))
-            }
+            Lambda::Llet(kind, v, l1, l2) => Lambda::Llet(
+                kind,
+                v,
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
 
             // lam_pass_remove_alias.ml:120-122
             Lambda::Lletrec(bindings, body) => {
@@ -393,7 +445,7 @@ impl<'a> Simplifier<'a> {
                     .into_iter()
                     .map(|(id, expr)| (id, self.simpl_owned(expr)))
                     .collect();
-                Lambda::letrec(bindings, self.simpl_owned(*body))
+                Lambda::Lletrec(bindings, map_box(body, |inner| self.simpl_owned(inner)))
             }
 
             // lam_pass_remove_alias.ml:131-246 — cross-module, local, and
@@ -407,7 +459,7 @@ impl<'a> Simplifier<'a> {
                     ap_args,
                     ap_info,
                     ap_transformed_jsx,
-                } = apply;
+                } = *apply;
 
                 if let Some((module_id, dynamic_import, field_name)) =
                     module_field_apply_target(ap_func.as_ref())
@@ -557,12 +609,12 @@ impl<'a> Simplifier<'a> {
             }
 
             // lam_pass_remove_alias.ml:247-248
-            Lambda::Lfunction(func) => Lambda::function_(
-                func.arity,
-                func.params,
-                self.simpl_owned(*func.body),
-                func.attr,
-            ),
+            Lambda::Lfunction(func) => Lambda::Lfunction(Box::new(LFunction {
+                arity: func.arity,
+                params: func.params,
+                body: map_box(func.body, |inner| self.simpl_owned(inner)),
+                attr: func.attr,
+            })),
 
             // lam_pass_remove_alias.ml:249-267
             Lambda::Lswitch(scrut, switch) => Lambda::switch(
@@ -582,7 +634,7 @@ impl<'a> Simplifier<'a> {
                         .collect(),
                     sw_failaction: switch
                         .sw_failaction
-                        .map(|expr| Box::new(self.simpl_owned(*expr))),
+                        .map(|expr| map_box(expr, |inner| self.simpl_owned(inner))),
                     sw_dispatch: switch.sw_dispatch,
                 },
             ),
@@ -601,7 +653,7 @@ impl<'a> Simplifier<'a> {
                     sw.into_iter()
                         .map(|(k, v)| (k, self.simpl_owned(v)))
                         .collect(),
-                    d.map(|d| Box::new(self.simpl_owned(*d))),
+                    d.map(|d| map_box(d, |inner| self.simpl_owned(inner))),
                 )
             }
 
@@ -611,44 +663,57 @@ impl<'a> Simplifier<'a> {
             }
 
             // lam_pass_remove_alias.ml:279
-            Lambda::LstaticCatch(l1, ids, l2) => {
-                Lambda::static_catch(self.simpl_owned(*l1), ids.0, ids.1, self.simpl_owned(*l2))
-            }
+            Lambda::LstaticCatch(l1, ids, l2) => Lambda::LstaticCatch(
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                (ids.0, ids.1),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
 
             // lam_pass_remove_alias.ml:280
-            Lambda::LtryWith(l1, v, l2) => {
-                Lambda::try_(self.simpl_owned(*l1), v, self.simpl_owned(*l2))
-            }
+            Lambda::LtryWith(l1, v, l2) => Lambda::LtryWith(
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                v,
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
 
             // lam_pass_remove_alias.ml:281
             Lambda::Lsequence(l1, l2) => Lambda::seq(self.simpl_owned(*l1), self.simpl_owned(*l2)),
 
             // lam_pass_remove_alias.ml:282
-            Lambda::Lwhile(l1, l2) => Lambda::while_(self.simpl_owned(*l1), self.simpl_owned(*l2)),
+            Lambda::Lwhile(l1, l2) => Lambda::Lwhile(
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
 
             // lam_pass_remove_alias.ml:283-284
-            Lambda::Lfor(var, l1, l2, dir, l3) => Lambda::for_(
+            Lambda::Lfor(var, l1, l2, dir, l3) => Lambda::Lfor(
                 var,
-                self.simpl_owned(*l1),
-                self.simpl_owned(*l2),
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
                 dir,
-                self.simpl_owned(*l3),
+                map_box(l3, |inner| self.simpl_owned(inner)),
             ),
 
             // lam_pass_remove_alias.ml after #7887.
-            Lambda::Lfor_of(var, l1, l2) => {
-                Lambda::for_of(var, self.simpl_owned(*l1), self.simpl_owned(*l2))
-            }
-            Lambda::Lfor_await_of(var, l1, l2) => {
-                Lambda::for_await_of(var, self.simpl_owned(*l1), self.simpl_owned(*l2))
-            }
+            Lambda::Lfor_of(var, l1, l2) => Lambda::Lfor_of(
+                var,
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
+            Lambda::Lfor_await_of(var, l1, l2) => Lambda::Lfor_await_of(
+                var,
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
 
             // OCaml `Lam_pass_remove_alias.simplify_alias` after #8348.
             Lambda::Lbreak => Lambda::break_(),
             Lambda::Lcontinue => Lambda::continue_(),
 
             // lam_pass_remove_alias.ml:285-288
-            Lambda::Lassign(v, l) => Lambda::assign(v, self.simpl_owned(*l)),
+            Lambda::Lassign(v, l) => {
+                Lambda::Lassign(v, map_box(l, |inner| self.simpl_owned(inner)))
+            }
         }
     }
 
@@ -660,24 +725,31 @@ impl<'a> Simplifier<'a> {
             // lam_pass_remove_alias.ml:54-62 — JSX preserve guard for jsx/jsxs
             // calls. The first argument (the field-bearing Pfield) is kept
             // verbatim, the rest are recursively simplified.
-            Lambda::Lprim(PrimInfo {
-                primitive: primitive @ Primitive::PjsCall { .. },
-                args,
-                loc,
-            }) if self.jsx_preserve
-                && matches!(
-                    primitive,
-                    Primitive::PjsCall { prim_name, .. }
-                        if prim_name == "jsx" || prim_name == "jsxs"
-                )
-                && matches!(
-                    args.first(),
-                    Some(Lambda::Lprim(PrimInfo {
-                        primitive: Primitive::Pfield(_, _),
-                        ..
-                    }))
-                ) =>
+            Lambda::Lprim(__prim3)
+                if matches!(__prim3.as_ref(), PrimInfo {
+                    primitive: primitive @ Primitive::PjsCall { .. },
+                    args,
+                    loc,
+                } if self.jsx_preserve
+                    && matches!(
+                        primitive,
+                        Primitive::PjsCall { prim_name, .. }
+                            if prim_name == "jsx" || prim_name == "jsxs"
+                    )
+                    && matches!(
+                        args.first(),
+                        Some(Lambda::Lprim(first)) if matches!(first.primitive, Primitive::Pfield(_, _))
+                    )) =>
             {
+                let PrimInfo {
+                    primitive: primitive @ Primitive::PjsCall { .. },
+                    args,
+                    loc,
+                } = __prim3.as_ref()
+                else {
+                    unreachable!()
+                };
+
                 let mut new_args: Vec<Lambda> = Vec::with_capacity(args.len());
                 let mut iter = args.iter();
                 if let Some(first) = iter.next() {
@@ -692,11 +764,22 @@ impl<'a> Simplifier<'a> {
             // lam_pass_remove_alias.ml:63-71 — `Pfield(i, info) [arg]` where
             // arg simplifies to `Lvar v`: use `field_flatten_get` to lift the
             // known slot out of the binding.
-            Lambda::Lprim(PrimInfo {
+            Lambda::Lprim(__prim2)
+                if matches!(__prim2.as_ref(), PrimInfo {
                 primitive: primitive @ Primitive::Pfield(i, info),
                 args,
                 loc,
-            }) if args.len() == 1 => {
+            } if args.len() == 1) =>
+            {
+                let PrimInfo {
+                    primitive: primitive @ Primitive::Pfield(i, info),
+                    args,
+                    loc,
+                } = __prim2.as_ref()
+                else {
+                    unreachable!()
+                };
+
                 let simplified = self.simpl(&args[0]);
                 match simplified {
                     Lambda::Lvar(ref v) => {
@@ -719,11 +802,22 @@ impl<'a> Simplifier<'a> {
             // [Lvar v]` where v is known to be an OptionalBlock: unwrap to
             // the inner lambda. The `_not_nest` variant additionally folds
             // away the outer wrapper even if the binding is unknown.
-            Lambda::Lprim(PrimInfo {
+            Lambda::Lprim(__prim1)
+                if matches!(__prim1.as_ref(), PrimInfo {
                 primitive: p @ (Primitive::PvalFromOption | Primitive::PvalFromOptionNotNest),
                 args,
                 loc: _,
-            }) if matches!(args.as_slice(), [Lambda::Lvar(_)]) => {
+            } if matches!(args.as_slice(), [Lambda::Lvar(_)])) =>
+            {
+                let PrimInfo {
+                    primitive: p @ (Primitive::PvalFromOption | Primitive::PvalFromOptionNotNest),
+                    args,
+                    loc: _,
+                } = __prim1.as_ref()
+                else {
+                    unreachable!()
+                };
+
                 let Lambda::Lvar(v) = &args[0] else {
                     unreachable!()
                 };
@@ -744,15 +838,18 @@ impl<'a> Simplifier<'a> {
             Lambda::LglobalModule(_, _) => lam.clone(),
 
             // lam_pass_remove_alias.ml:81-82 — fallback Lprim: recurse args.
-            Lambda::Lprim(PrimInfo {
-                primitive,
-                args,
-                loc,
-            }) => Lambda::prim(
-                primitive.clone(),
-                args.iter().map(|a| self.simpl(a)).collect(),
-                loc.clone(),
-            ),
+            Lambda::Lprim(__prim0) => {
+                let PrimInfo {
+                    primitive,
+                    args,
+                    loc,
+                } = __prim0.as_ref();
+                Lambda::prim(
+                    primitive.clone(),
+                    args.iter().map(|a| self.simpl(a)).collect(),
+                    loc.clone(),
+                )
+            }
 
             // lam_pass_remove_alias.ml:83-104 — Lifthenelse with a
             // `Pis_not_none [Lvar id]` discriminator: consult `meta.ident_tbl`
@@ -760,20 +857,20 @@ impl<'a> Simplifier<'a> {
             // probe.
             Lambda::LifThenElse(cond, then_, else_)
                 if matches!(
-                    cond.as_ref(),
-                    Lambda::Lprim(PrimInfo {
-                        primitive: Primitive::PisNotNone,
-                        args,
-                        ..
-                    }) if matches!(args.as_slice(), [Lambda::Lvar(_)])
+                                    cond.as_ref(),
+                                    Lambda::Lprim(__prim100) if matches!(__prim100.as_ref(), PrimInfo {
+                                        primitive: Primitive::PisNotNone,
+                                        args,
+                                        ..
+                                    } if matches!(args.as_slice(), [Lambda::Lvar(_)]))
                 ) =>
             {
-                let Lambda::Lprim(PrimInfo {
-                    args: cond_args, ..
-                }) = cond.as_ref()
-                else {
+                let Lambda::Lprim(__prim200) = cond.as_ref() else {
                     unreachable!()
                 };
+                let PrimInfo {
+                    args: cond_args, ..
+                } = __prim200.as_ref();
                 let Lambda::Lvar(id) = &cond_args[0] else {
                     unreachable!()
                 };

@@ -213,7 +213,7 @@ pub fn build_config_from_flags(namespace: Option<String>, flags: FlagState) -> T
             });
 
     let project_root = match flags.project_root.as_str() {
-        "" => std::env::current_dir()
+        "" => crate::process_cwd::current_dir()
             .unwrap_or_else(|_| Path::new("").to_path_buf())
             .to_string_lossy()
             .to_string(),

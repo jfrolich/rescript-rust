@@ -9,7 +9,7 @@ fn untagged_object_return_switches_keep_outer_plain_handler_inside_the_switch() 
     let block = compiler.compile_return_block(&Lambda::LstaticCatch(
         Box::new(Lambda::Lswitch(
             Box::new(Lambda::var(value.clone())),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: false,
                 sw_consts: vec![],
                 sw_blocks_full: false,
@@ -57,7 +57,7 @@ fn untagged_object_return_switches_keep_outer_plain_handler_inside_the_switch() 
                         has_other_literal: true,
                     },
                 ),
-            },
+            }),
         )),
         (1, vec![]),
         Box::new(Lambda::const_(Constant::int(0))),
@@ -85,7 +85,7 @@ fn named_variant_switch_expressions_split_const_and_block_dispatch() {
     let scrutinee = Ident::create_local("scrutinee");
     let compiled = compiler.compile_expr(&Lambda::Lswitch(
         Box::new(Lambda::var(scrutinee.clone())),
-        LambdaSwitch {
+        Box::new(LambdaSwitch {
             sw_consts_full: false,
             sw_consts: vec![(
                 crate::lambda::SwitchKey::Constructor(
@@ -126,7 +126,7 @@ fn named_variant_switch_expressions_split_const_and_block_dispatch() {
                     has_other_literal: true,
                 },
             ),
-        },
+        }),
     ));
 
     let rendered = print_block(&compiled.prelude);
@@ -156,7 +156,7 @@ fn named_variant_constant_return_switch_skips_redundant_match_temp() {
     let mut compiler = LambdaCompiler::new();
     let block = compiler.compile_return_block(&Lambda::Lswitch(
         Box::new(Lambda::const_(Constant::int(2))),
-        LambdaSwitch {
+        Box::new(LambdaSwitch {
             sw_consts_full: true,
             sw_consts: vec![
                 (
@@ -194,7 +194,7 @@ fn named_variant_constant_return_switch_skips_redundant_match_temp() {
                     has_other_literal: true,
                 },
             ),
-        },
+        }),
     ));
 
     let [stmt] = block.as_slice() else {
@@ -229,7 +229,7 @@ fn named_variant_effect_switches_keep_payload_cases() {
     let captured = Ident::create_local("captured");
     let block = compiler.compile_effect_block(&Lambda::Lswitch(
         Box::new(Lambda::var(action.clone())),
-        LambdaSwitch {
+        Box::new(LambdaSwitch {
             sw_consts_full: false,
             sw_consts: vec![(
                 crate::lambda::SwitchKey::Constructor(
@@ -270,7 +270,7 @@ fn named_variant_effect_switches_keep_payload_cases() {
                     has_other_literal: true,
                 },
             ),
-        },
+        }),
     ));
 
     let rendered = print_block(&block);
@@ -290,7 +290,7 @@ fn named_variant_return_switches_with_only_payload_cases_skip_object_split() {
     let action = Ident::create_local("action");
     let block = compiler.compile_return_block(&Lambda::Lswitch(
         Box::new(Lambda::var(action.clone())),
-        LambdaSwitch {
+        Box::new(LambdaSwitch {
             sw_consts_full: true,
             sw_consts: vec![],
             sw_blocks_full: true,
@@ -339,7 +339,7 @@ fn named_variant_return_switches_with_only_payload_cases_skip_object_split() {
                     has_other_literal: false,
                 },
             ),
-        },
+        }),
     ));
 
     let rendered = print_block(&block);
@@ -368,7 +368,7 @@ fn named_variant_mixed_const_and_identical_payload_return_cases_drop_redundant_t
     );
     let block = compiler.compile_return_block(&Lambda::Lswitch(
         Box::new(Lambda::var(state.clone())),
-        LambdaSwitch {
+        Box::new(LambdaSwitch {
             sw_consts_full: true,
             sw_consts: vec![(
                 crate::lambda::SwitchKey::Constructor(
@@ -427,7 +427,7 @@ fn named_variant_mixed_const_and_identical_payload_return_cases_drop_redundant_t
                     has_other_literal: true,
                 },
             ),
-        },
+        }),
     ));
 
     assert_eq!(
@@ -442,7 +442,7 @@ fn named_variant_incomplete_payload_only_return_switches_keep_default_as_negated
     let action = Ident::create_local("action");
     let block = compiler.compile_return_block(&Lambda::Lswitch(
         Box::new(Lambda::var(action.clone())),
-        LambdaSwitch {
+        Box::new(LambdaSwitch {
             sw_consts_full: false,
             sw_consts: vec![],
             sw_blocks_full: false,
@@ -476,7 +476,7 @@ fn named_variant_incomplete_payload_only_return_switches_keep_default_as_negated
                     has_other_literal: true,
                 },
             ),
-        },
+        }),
     ));
 
     let rendered = print_block(&block);
@@ -492,7 +492,7 @@ fn named_variant_incomplete_const_only_return_switches_keep_literal_guard() {
     let action = Ident::create_local("action");
     let block = compiler.compile_return_block(&Lambda::Lswitch(
         Box::new(Lambda::var(action.clone())),
-        LambdaSwitch {
+        Box::new(LambdaSwitch {
             sw_consts_full: false,
             sw_consts: vec![(
                 crate::lambda::SwitchKey::Constructor(
@@ -519,7 +519,7 @@ fn named_variant_incomplete_const_only_return_switches_keep_literal_guard() {
                     has_other_literal: true,
                 },
             ),
-        },
+        }),
     ));
 
     let rendered = print_block(&block);
@@ -747,7 +747,7 @@ fn named_variant_return_switches_keep_shared_final_groups_inside_the_switch_with
     let action = Ident::create_local("action");
     let block = compiler.compile_return_block(&Lambda::Lswitch(
         Box::new(Lambda::var(action.clone())),
-        LambdaSwitch {
+        Box::new(LambdaSwitch {
             sw_consts_full: true,
             sw_consts: vec![],
             sw_blocks_full: true,
@@ -812,7 +812,7 @@ fn named_variant_return_switches_keep_shared_final_groups_inside_the_switch_with
                     has_other_literal: false,
                 },
             ),
-        },
+        }),
     ));
 
     let [switch_stmt] = block.as_slice() else {
@@ -856,7 +856,7 @@ fn nested_named_variant_complete_return_switches_keep_plain_handlers_inside_swit
         Box::new(Lambda::LstaticCatch(
             Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(action.clone())),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: true,
                     sw_consts: vec![],
                     sw_blocks_full: true,
@@ -945,7 +945,7 @@ fn nested_named_variant_complete_return_switches_keep_plain_handlers_inside_swit
                             has_other_literal: false,
                         },
                     ),
-                },
+                }),
             )),
             (1, vec![]),
             Box::new(Lambda::prim(
@@ -996,7 +996,7 @@ fn named_variant_return_switches_inline_resolved_static_handler_values_inside_th
     let block = compiler.compile_return_block(&Lambda::LstaticCatch(
         Box::new(Lambda::Lswitch(
             Box::new(Lambda::var(action.clone())),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: true,
                 sw_consts: vec![
                     (
@@ -1050,7 +1050,7 @@ fn named_variant_return_switches_inline_resolved_static_handler_values_inside_th
                         has_other_literal: true,
                     },
                 ),
-            },
+            }),
         )),
         (7, vec![]),
         Box::new(Lambda::const_(Constant::int(2))),
@@ -1089,7 +1089,7 @@ fn nested_named_variant_return_switches_keep_complete_payload_handlers_inline() 
         Box::new(Lambda::LstaticCatch(
             Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(action.clone())),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: true,
                     sw_consts: vec![
                         (
@@ -1198,7 +1198,7 @@ fn nested_named_variant_return_switches_keep_complete_payload_handlers_inline() 
                             has_other_literal: true,
                         },
                     ),
-                },
+                }),
             )),
             (19, vec![]),
             Box::new(Lambda::const_(Constant::int(2))),
@@ -1240,7 +1240,7 @@ fn named_variant_return_switches_preserve_binding_temps_in_hoisted_shared_tails(
         Box::new(Lambda::LstaticCatch(
             Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(action.clone())),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: true,
                     sw_consts: vec![
                         (
@@ -1294,7 +1294,7 @@ fn named_variant_return_switches_preserve_binding_temps_in_hoisted_shared_tails(
                             has_other_literal: true,
                         },
                     ),
-                },
+                }),
             )),
             (3, vec![]),
             Box::new(Lambda::let_(
@@ -1334,7 +1334,7 @@ fn builtin_untagged_block_switch_expressions_dispatch_on_object_runtime_shape() 
     let body_id = Ident::create_local("body");
     let compiled = compiler.compile_expr(&Lambda::Lswitch(
         Box::new(Lambda::var(value.clone())),
-        LambdaSwitch {
+        Box::new(LambdaSwitch {
             sw_consts_full: false,
             sw_consts: vec![],
             sw_blocks_full: false,
@@ -1370,7 +1370,7 @@ fn builtin_untagged_block_switch_expressions_dispatch_on_object_runtime_shape() 
                     has_other_literal: false,
                 },
             ),
-        },
+        }),
     ));
 
     let [declare, dispatch] = compiled.prelude.as_slice() else {
@@ -1434,7 +1434,7 @@ fn builtin_untagged_object_switches_use_plain_object_check_after_array_split() {
     let object_seen = Ident::create_local("object_seen");
     let block = compiler.compile_effect_block(&Lambda::Lswitch(
         Box::new(Lambda::var(value.clone())),
-        LambdaSwitch {
+        Box::new(LambdaSwitch {
             sw_consts_full: false,
             sw_consts: vec![],
             sw_blocks_full: false,
@@ -1496,7 +1496,7 @@ fn builtin_untagged_object_switches_use_plain_object_check_after_array_split() {
                     has_other_literal: false,
                 },
             ),
-        },
+        }),
     ));
 
     let [dispatch] = block.as_slice() else {
@@ -1927,7 +1927,7 @@ fn mixed_array_object_function_untagged_effect_switches_keep_typeof_tail_as_swit
     let function_seen = Ident::create_local("function_seen");
     let block = compiler.compile_effect_block(&Lambda::Lswitch(
         Box::new(Lambda::var(value.clone())),
-        LambdaSwitch {
+        Box::new(LambdaSwitch {
             sw_consts_full: true,
             sw_consts: vec![],
             sw_blocks_full: true,
@@ -2009,7 +2009,7 @@ fn mixed_array_object_function_untagged_effect_switches_keep_typeof_tail_as_swit
                     has_other_literal: false,
                 },
             ),
-        },
+        }),
     ));
     let statements = match block.as_slice() {
         [
@@ -2401,7 +2401,7 @@ fn small_untagged_object_value_switches_keep_ocaml_runtime_guards() {
     let value = Ident::create_local("value");
     let compiled = compiler.compile_expr(&Lambda::Lswitch(
         Box::new(Lambda::var(value.clone())),
-        LambdaSwitch {
+        Box::new(LambdaSwitch {
             sw_consts_full: false,
             sw_consts: vec![],
             sw_blocks_full: false,
@@ -2437,7 +2437,7 @@ fn small_untagged_object_value_switches_keep_ocaml_runtime_guards() {
                     has_other_literal: false,
                 },
             ),
-        },
+        }),
     ));
 
     let rendered = print_block(&compiled.prelude);

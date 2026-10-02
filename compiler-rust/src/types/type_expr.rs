@@ -155,6 +155,213 @@ impl PartialOrd for TypeExpr {
     }
 }
 
+/// Number of type references a `TypeRefList` stores without allocating.
+const TYPE_REF_LIST_INLINE: usize = 3;
+
+/// Immutable list of type references in a type descriptor (constructor and
+/// package arguments, tuple components, polymorphic variables).
+///
+/// Intentional Rust performance representation of the OCaml `type_expr list`
+/// fields in `compiler/ml/types.ml:24-50`. Type-checking code snapshots
+/// descriptors constantly (`TypeContext::get_desc`); short lists are stored
+/// inline and longer ones share one allocation, so snapshots never allocate.
+/// Element order and physical identities are unchanged.
+#[derive(Clone)]
+pub enum TypeRefList {
+    Inline {
+        len: u8,
+        items: [TypeExprRef; TYPE_REF_LIST_INLINE],
+    },
+    Shared(std::sync::Arc<[TypeExprRef]>),
+}
+
+impl TypeRefList {
+    pub const fn new() -> Self {
+        TypeRefList::Inline {
+            len: 0,
+            items: [TypeExprRef(0); TYPE_REF_LIST_INLINE],
+        }
+    }
+
+    pub fn from_slice(items: &[TypeExprRef]) -> Self {
+        if items.len() <= TYPE_REF_LIST_INLINE {
+            let mut inline = [TypeExprRef(0); TYPE_REF_LIST_INLINE];
+            inline[..items.len()].copy_from_slice(items);
+            TypeRefList::Inline {
+                len: items.len() as u8,
+                items: inline,
+            }
+        } else {
+            TypeRefList::Shared(std::sync::Arc::from(items))
+        }
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[TypeExprRef] {
+        match self {
+            TypeRefList::Inline { len, items } => &items[..*len as usize],
+            TypeRefList::Shared(items) => items,
+        }
+    }
+}
+
+impl Default for TypeRefList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::ops::Deref for TypeRefList {
+    type Target = [TypeExprRef];
+
+    #[inline]
+    fn deref(&self) -> &[TypeExprRef] {
+        self.as_slice()
+    }
+}
+
+impl std::fmt::Debug for TypeRefList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.as_slice()).finish()
+    }
+}
+
+impl PartialEq for TypeRefList {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for TypeRefList {}
+
+impl<const N: usize> PartialEq<[TypeExprRef; N]> for TypeRefList {
+    fn eq(&self, other: &[TypeExprRef; N]) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl PartialEq<Vec<TypeExprRef>> for TypeRefList {
+    fn eq(&self, other: &Vec<TypeExprRef>) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl From<Vec<TypeExprRef>> for TypeRefList {
+    fn from(items: Vec<TypeExprRef>) -> Self {
+        if items.len() <= TYPE_REF_LIST_INLINE {
+            Self::from_slice(&items)
+        } else {
+            TypeRefList::Shared(std::sync::Arc::from(items))
+        }
+    }
+}
+
+impl From<&[TypeExprRef]> for TypeRefList {
+    fn from(items: &[TypeExprRef]) -> Self {
+        Self::from_slice(items)
+    }
+}
+
+impl<const N: usize> From<[TypeExprRef; N]> for TypeRefList {
+    fn from(items: [TypeExprRef; N]) -> Self {
+        Self::from_slice(&items)
+    }
+}
+
+impl FromIterator<TypeExprRef> for TypeRefList {
+    fn from_iter<I: IntoIterator<Item = TypeExprRef>>(iter: I) -> Self {
+        let items: smallvec::SmallVec<[TypeExprRef; 8]> = iter.into_iter().collect();
+        Self::from_slice(&items)
+    }
+}
+
+impl<'a> IntoIterator for &'a TypeRefList {
+    type Item = &'a TypeExprRef;
+    type IntoIter = std::slice::Iter<'a, TypeExprRef>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+
+impl IntoIterator for TypeRefList {
+    type Item = TypeExprRef;
+    type IntoIter = smallvec::IntoIter<[TypeExprRef; 8]>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        smallvec::SmallVec::<[TypeExprRef; 8]>::from_slice(self.as_slice()).into_iter()
+    }
+}
+
+/// Immutable list of arrow parameters (see `TypeRefList`): cloning a
+/// descriptor shares it instead of copying parameters and their labels.
+#[derive(Clone)]
+pub struct TypeArgList(std::sync::Arc<[TypeArg]>);
+
+impl TypeArgList {
+    #[inline]
+    pub fn as_slice(&self) -> &[TypeArg] {
+        &self.0
+    }
+}
+
+impl Default for TypeArgList {
+    fn default() -> Self {
+        TypeArgList(std::sync::Arc::from(Vec::new()))
+    }
+}
+
+impl std::ops::Deref for TypeArgList {
+    type Target = [TypeArg];
+
+    #[inline]
+    fn deref(&self) -> &[TypeArg] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for TypeArgList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.0.iter()).finish()
+    }
+}
+
+impl From<Vec<TypeArg>> for TypeArgList {
+    fn from(items: Vec<TypeArg>) -> Self {
+        TypeArgList(std::sync::Arc::from(items))
+    }
+}
+
+impl From<&[TypeArg]> for TypeArgList {
+    fn from(items: &[TypeArg]) -> Self {
+        TypeArgList(std::sync::Arc::from(items))
+    }
+}
+
+impl FromIterator<TypeArg> for TypeArgList {
+    fn from_iter<I: IntoIterator<Item = TypeArg>>(iter: I) -> Self {
+        TypeArgList(iter.into_iter().collect())
+    }
+}
+
+impl<'a> IntoIterator for &'a TypeArgList {
+    type Item = &'a TypeArg;
+    type IntoIter = std::slice::Iter<'a, TypeArg>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl IntoIterator for TypeArgList {
+    type Item = TypeArg;
+    type IntoIter = std::vec::IntoIter<TypeArg>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.to_vec().into_iter()
+    }
+}
+
 /// Type descriptor - the actual content of a type expression.
 #[derive(Debug, Clone)]
 pub enum TypeDesc {
@@ -167,20 +374,20 @@ pub enum TypeDesc {
     /// parameter list in one node rather than a chain of unary arrows.
     Tarrow {
         /// Arguments in source order.
-        args: Vec<TypeArg>,
+        args: TypeArgList,
         /// The return type.
         ret: TypeExprRef,
     },
 
     /// Tuple type: `(t1, t2, ...)`
-    Ttuple(Vec<TypeExprRef>),
+    Ttuple(TypeRefList),
 
     /// Type constructor: `int`, `list<'a>`, etc.
     Tconstr {
         /// The path to the type constructor
         path: Path,
         /// Type arguments
-        args: Vec<TypeExprRef>,
+        args: TypeRefList,
         /// Abbreviation memo (for expansion caching)
         abbrev: AbbrevMemoRef,
     },
@@ -215,7 +422,7 @@ pub enum TypeDesc {
     Tsubst(TypeExprRef),
 
     /// Polymorphic variant type
-    Tvariant(RowDesc),
+    Tvariant(Box<RowDesc>),
 
     /// Universal type variable (from forall quantifier)
     Tunivar(Option<String>),
@@ -225,7 +432,7 @@ pub enum TypeDesc {
         /// The body type
         body: TypeExprRef,
         /// Bound type variables
-        vars: Vec<TypeExprRef>,
+        vars: TypeRefList,
     },
 
     /// First-class module type (package)
@@ -233,24 +440,26 @@ pub enum TypeDesc {
         /// Module type path
         path: Path,
         /// Longidents for package constraints
-        lids: Vec<Longident>,
+        lids: Box<Vec<Longident>>,
         /// Type arguments
-        args: Vec<TypeExprRef>,
+        args: TypeRefList,
     },
 }
 
-/// A reference to a type expression.
-///
-/// Intentional Rust performance representation for OCaml type-node identity.
-///
-/// OCaml stores a type node as `{mutable desc; mutable level; id}`
-/// (compiler/ml/types.ml:22) and relies on physical identity plus the `id`.
-/// Rust keeps that identity as an arena index instead of a pointer-shaped
-/// object handle.
-///
-/// In the arena-based design, this is an index or pointer.
-/// Type arenas are dense and far below `u32::MAX`; keeping the handle compact
-/// reduces typedtree and type descriptor memory traffic.
+/// Top bit distinguishes worker-store indices from compilation-local indices.
+pub(crate) const STORE_REF_TAG: u32 = 1 << 31;
+
+/// Second bit (only with `STORE_REF_TAG`) selects the process-wide shared
+/// pool of immutable dependency graphs (`types::shared_store`) instead of the
+/// worker store. Shared references are also `is_store()`: every non-local
+/// cell is read-only outside a store build and written through overlays.
+pub(crate) const SHARED_REF_TAG: u32 = 1 << 30;
+const SHARED_REF_BITS: u32 = STORE_REF_TAG | SHARED_REF_TAG;
+
+/// Compact physical identity for a type node, matching OCaml `type_expr`
+/// identity (`compiler/ml/types.ml:22`, `compiler/ml/btype.ml:46-48`).
+/// The top bit selects the worker store; remaining bits index its arena or
+/// the compilation-local arena. No structural equality or deduplication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeExprRef(pub u32);
 
@@ -262,11 +471,79 @@ impl TypeExprRef {
 
     #[inline]
     pub(crate) fn from_usize(idx: usize) -> Self {
-        Self(u32::try_from(idx).expect("type arena index exceeds u32::MAX"))
+        let raw = u32::try_from(idx).expect("type arena index exceeds u32::MAX");
+        assert!(
+            raw & STORE_REF_TAG == 0,
+            "local type arena index collides with the store tag"
+        );
+        Self(raw)
     }
 
+    /// Reference to the `idx`-th node of the per-thread store.
+    #[inline]
+    pub(crate) fn from_store_index(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("type store index exceeds u32::MAX");
+        assert!(
+            raw & SHARED_REF_BITS == 0,
+            "type store index exceeds the tag range"
+        );
+        Self(raw | STORE_REF_TAG)
+    }
+
+    /// Reference to the `idx`-th node of the process-wide shared pool.
+    #[inline]
+    pub(crate) fn from_shared_index(idx: u32) -> Self {
+        assert!(
+            idx & SHARED_REF_BITS == 0,
+            "shared type index exceeds the tag range"
+        );
+        Self(idx | SHARED_REF_BITS)
+    }
+
+    /// Whether this node lives outside the compilation (worker store or
+    /// shared pool).
+    #[inline]
+    pub(crate) fn is_store(self) -> bool {
+        self.0 & STORE_REF_TAG != 0
+    }
+
+    /// Whether this node lives in the process-wide shared pool.
+    #[inline]
+    pub(crate) fn is_shared(self) -> bool {
+        self.0 & SHARED_REF_BITS == SHARED_REF_BITS
+    }
+
+    /// Index into the shared pool.
+    #[inline]
+    pub(crate) fn shared_index(self) -> u32 {
+        debug_assert!(self.is_shared(), "non-shared type reference used as a shared index");
+        self.0 & !SHARED_REF_BITS
+    }
+
+    /// Index into the compilation-local arena.
     #[inline]
     pub(crate) fn index(self) -> usize {
+        debug_assert!(
+            !self.is_store(),
+            "store type reference used as a local index"
+        );
+        self.0 as usize
+    }
+
+    /// Index into the per-thread store arena.
+    #[inline]
+    pub(crate) fn store_index(self) -> usize {
+        debug_assert!(
+            self.is_store() && !self.is_shared(),
+            "local or shared type reference used as a store index"
+        );
+        (self.0 & !STORE_REF_TAG) as usize
+    }
+
+    /// Identity key for visited sets and side tables: unique across the local
+    /// arena and the store, never an arena position.
+    #[inline]
+    pub(crate) fn key(self) -> usize {
         self.0 as usize
     }
 }
@@ -292,7 +569,7 @@ enum TypeExprRefMapStorage<T> {
         offset: u32,
         values: Vec<Option<T>>,
     },
-    Sparse(ahash::AHashMap<TypeExprRef, T>),
+    Sparse(crate::fast_hash::AHashMap<TypeExprRef, T>),
 }
 
 /// Identity-exact hybrid storage for short-lived type-copy maps.
@@ -398,7 +675,7 @@ impl<T> TypeExprRefMap<T> {
         key: TypeExprRef,
         value: T,
     ) -> TypeExprRefMapStorage<T> {
-        let mut values = ahash::AHashMap::with_capacity(len + 1);
+        let mut values = crate::fast_hash::AHashMap::with_capacity(len + 1);
         for entry in entries.iter_mut().take(len) {
             let (stored, stored_value) = entry.take().expect("occupied inline type-map slot");
             values.insert(stored, stored_value);
@@ -461,7 +738,7 @@ impl<T> TypeExprRefMap<T> {
                 if span > TYPE_EXPR_MAP_MIN_SPARSE_SPAN
                     && span > entry_count.saturating_mul(TYPE_EXPR_MAP_DENSE_RATIO)
                 {
-                    let mut sparse = ahash::AHashMap::with_capacity(entry_count);
+                    let mut sparse = crate::fast_hash::AHashMap::with_capacity(entry_count);
                     for (idx, slot) in values.iter_mut().enumerate() {
                         if let Some(stored_value) = slot.take() {
                             sparse.insert(TypeExprRef(*offset + idx as u32), stored_value);
@@ -512,54 +789,104 @@ impl<T> Default for TypeExprRefMap<T> {
     }
 }
 
-/// Intentional Rust performance representation for short-lived type-node sets.
-///
-/// Like [`TypeExprRefMap`], this is still keyed by exact type-node identity.
-/// It replaces short-lived `HashSet<TypeExprRef>` visited tables in hot
-/// type traversals without changing OCaml physical-sharing semantics from
-/// compiler/ml/types.ml:22.
+
+/// Number of keys a `TypeExprRefSet` holds inline before it spills to a
+/// hash set.
+const TYPE_EXPR_SET_INLINE: usize = 16;
+
+/// Multiplicative hash for `TypeExprRef` keys (arena indices).
+#[derive(Default, Clone, Copy)]
+struct TypeKeyHasher(u64);
+
+impl Hasher for TypeKeyHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ u64::from(b)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+
+    #[inline]
+    fn write_u32(&mut self, n: u32) {
+        self.0 = u64::from(n).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+type TypeKeySet = std::collections::HashSet<u32, std::hash::BuildHasherDefault<TypeKeyHasher>>;
+
 #[derive(Debug, Clone)]
 pub(crate) struct TypeExprRefSet {
-    offset: u32,
-    values: Vec<u8>,
+    /// Most traversals visit only a few nodes; keep those keys inline so the
+    /// set allocates nothing.
+    inline: [u32; TYPE_EXPR_SET_INLINE],
+    inline_len: u8,
+    /// Keys once the inline storage is full; storage comes from a per-thread
+    /// pool so large traversals reuse capacity.
+    spilled: Option<TypeKeySet>,
 }
+
+thread_local! {
+    /// Cleared hash sets of dropped spilled `TypeExprRefSet`s.
+    static SPILLED_SET_POOL: std::cell::RefCell<Vec<TypeKeySet>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+const SPILLED_SET_POOL_MAX: usize = 8;
+const SPILLED_SET_POOL_MAX_CAPACITY: usize = 1 << 16;
 
 impl TypeExprRefSet {
     pub(crate) fn new() -> Self {
         Self {
-            offset: 0,
-            values: Vec::new(),
+            inline: [0; TYPE_EXPR_SET_INLINE],
+            inline_len: 0,
+            spilled: None,
         }
     }
 
     #[inline]
     pub(crate) fn insert(&mut self, key: TypeExprRef) -> bool {
-        if self.values.is_empty() {
-            self.offset = key.0;
-            self.values.push(1);
+        if let Some(spilled) = self.spilled.as_mut() {
+            return spilled.insert(key.0);
+        }
+        let len = self.inline_len as usize;
+        if self.inline[..len].contains(&key.0) {
+            return false;
+        }
+        if len < TYPE_EXPR_SET_INLINE {
+            self.inline[len] = key.0;
+            self.inline_len += 1;
             return true;
         }
+        self.spill().insert(key.0)
+    }
 
-        if key.0 < self.offset {
-            let prepend = (self.offset - key.0) as usize;
-            let mut values = Vec::with_capacity(self.values.len() + prepend);
-            values.resize(prepend, 0);
-            values.append(&mut self.values);
-            self.values = values;
-            self.offset = key.0;
-        }
+    #[cold]
+    fn spill(&mut self) -> &mut TypeKeySet {
+        let mut set = SPILLED_SET_POOL
+            .with(|pool| pool.borrow_mut().pop())
+            .unwrap_or_default();
+        set.extend(self.inline[..self.inline_len as usize].iter().copied());
+        self.spilled.insert(set)
+    }
+}
 
-        let idx = (key.0 - self.offset) as usize;
-        if idx >= self.values.len() {
-            self.values.resize(idx + 1, 0);
-        }
-
-        let slot = &mut self.values[idx];
-        if *slot == 0 {
-            *slot = 1;
-            true
-        } else {
-            false
+impl Drop for TypeExprRefSet {
+    fn drop(&mut self) {
+        if let Some(mut set) = self.spilled.take() {
+            if set.capacity() > SPILLED_SET_POOL_MAX_CAPACITY {
+                return;
+            }
+            set.clear();
+            SPILLED_SET_POOL.with(|pool| {
+                let mut pool = pool.borrow_mut();
+                if pool.len() < SPILLED_SET_POOL_MAX {
+                    pool.push(set);
+                }
+            });
         }
     }
 }
@@ -640,12 +967,66 @@ impl AbbrevMemoRef {
 
     #[inline]
     pub(crate) fn from_usize(idx: usize) -> Self {
-        Self(u32::try_from(idx).expect("abbrev memo arena index exceeds u32::MAX"))
+        let raw = u32::try_from(idx).expect("abbrev memo arena index exceeds u32::MAX");
+        assert!(
+            raw & STORE_REF_TAG == 0,
+            "local abbrev memo index collides with the store tag"
+        );
+        Self(raw)
+    }
+
+    /// Reference to the `idx`-th abbreviation memo cell of the per-thread store.
+    #[inline]
+    pub(crate) fn from_store_index(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("abbrev memo store index exceeds u32::MAX");
+        assert!(
+            raw & SHARED_REF_BITS == 0,
+            "abbrev memo store index exceeds the tag range"
+        );
+        Self(raw | STORE_REF_TAG)
+    }
+
+    /// Memo cell of the shared-pool `Tconstr` node with index `idx`; one cell
+    /// per node, initially `Mnil` (`compiler/ml/subst.ml:173-177`).
+    #[inline]
+    pub(crate) fn from_shared_index(idx: u32) -> Self {
+        assert!(
+            idx & SHARED_REF_BITS == 0,
+            "shared abbrev memo index exceeds the tag range"
+        );
+        Self(idx | SHARED_REF_BITS)
+    }
+
+    #[inline]
+    pub(crate) fn is_shared(self) -> bool {
+        self.0 & SHARED_REF_BITS == SHARED_REF_BITS
+    }
+
+    #[inline]
+    pub(crate) fn shared_index(self) -> usize {
+        debug_assert!(self.is_shared());
+        (self.0 & !SHARED_REF_BITS) as usize
+    }
+
+    /// Whether this memo cell belongs to a per-thread store node.
+    #[inline]
+    pub(crate) fn is_store(self) -> bool {
+        self.0 & STORE_REF_TAG != 0
     }
 
     #[inline]
     pub(crate) fn index(self) -> usize {
+        debug_assert!(!self.is_store(), "store abbrev memo used as a local index");
         self.0 as usize
+    }
+
+    #[inline]
+    pub(crate) fn store_index(self) -> usize {
+        debug_assert!(
+            self.is_store() && !self.is_shared(),
+            "local or shared abbrev memo used as a store index"
+        );
+        (self.0 & !STORE_REF_TAG) as usize
     }
 }
 
@@ -674,15 +1055,32 @@ pub struct FieldKindRef(pub u32);
 impl FieldKindRef {
     #[inline]
     pub(crate) fn from_usize(idx: usize) -> Self {
-        Self(u32::try_from(idx).expect("field kind arena index exceeds u32::MAX"))
+        let raw = u32::try_from(idx).expect("field kind arena index exceeds u32::MAX");
+        assert!(
+            raw & STORE_REF_TAG == 0,
+            "local field kind index collides with the store tag"
+        );
+        Self(raw)
+    }
+
+    /// Reference to the `idx`-th field kind cell of the per-thread store.
+    #[inline]
+    pub(crate) fn from_store_index(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("field kind store index exceeds u32::MAX");
+        assert!(
+            raw & STORE_REF_TAG == 0,
+            "field kind store index exceeds the tag range"
+        );
+        Self(raw | STORE_REF_TAG)
     }
 }
 
 /// Row description for polymorphic variants.
 #[derive(Debug, Clone)]
 pub struct RowDesc {
-    /// The variant fields: (label, row_field)
-    pub row_fields: Vec<(Label, RowField)>,
+    /// The variant fields: (label, row_field). Shared copy-on-write, so
+    /// snapshots of variant descriptors do not copy the field list.
+    pub row_fields: super::decl::SharedVec<(Label, RowField)>,
     /// The row variable
     pub row_more: TypeExprRef,
     /// Is the row closed?
@@ -730,12 +1128,46 @@ impl RowFieldRef {
 
     #[inline]
     pub(crate) fn from_usize(idx: usize) -> Self {
-        Self(u32::try_from(idx).expect("row field arena index exceeds u32::MAX"))
+        let raw = u32::try_from(idx).expect("row field arena index exceeds u32::MAX");
+        assert!(
+            raw & STORE_REF_TAG == 0,
+            "local row field index collides with the store tag"
+        );
+        Self(raw)
+    }
+
+    /// Reference to the `idx`-th row field cell of the per-thread store.
+    #[inline]
+    pub(crate) fn from_store_index(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("row field store index exceeds u32::MAX");
+        assert!(
+            raw < STORE_REF_TAG - 1,
+            "row field store index collides with null sentinel"
+        );
+        assert!(
+            raw & STORE_REF_TAG == 0,
+            "row field store index exceeds the tag range"
+        );
+        Self(raw | STORE_REF_TAG)
+    }
+
+    /// Whether this cell belongs to a per-thread store row. The null
+    /// sentinel also has the top bit set and is excluded.
+    #[inline]
+    pub(crate) fn is_store(self) -> bool {
+        self.0 & STORE_REF_TAG != 0 && !self.is_null()
     }
 
     #[inline]
     pub(crate) fn index(self) -> usize {
+        debug_assert!(!self.is_store(), "store row field used as a local index");
         self.0 as usize
+    }
+
+    #[inline]
+    pub(crate) fn store_index(self) -> usize {
+        debug_assert!(self.is_store(), "local row field used as a store index");
+        (self.0 & !STORE_REF_TAG) as usize
     }
 }
 
@@ -769,6 +1201,76 @@ pub enum TypeDescSer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_type_node_sizes() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<crate::ident::Ident>(), 16);
+        assert_eq!(size_of::<Path>(), 24);
+        assert!(size_of::<TypeDesc>() <= 72);
+        assert!(size_of::<TypeExpr>() <= 88);
+    }
+
+    #[test]
+    fn store_tags_preserve_identity_and_sentinels() {
+        for index in [0, 1, 255, 256, 10_000] {
+            let local = TypeExprRef::from_usize(index);
+            let store = TypeExprRef::from_store_index(index);
+            assert!(!local.is_store());
+            assert!(store.is_store());
+            assert_eq!(local.index(), index);
+            assert_eq!(store.store_index(), index);
+            assert_ne!(local, store);
+            assert_eq!(AbbrevMemoRef::from_store_index(index).store_index(), index);
+            assert_eq!(RowFieldRef::from_store_index(index).store_index(), index);
+            assert_eq!(
+                FieldKindRef::from_store_index(index).0,
+                STORE_REF_TAG | index as u32
+            );
+        }
+        assert!(!RowFieldRef::null().is_store());
+        assert!(!RowFieldRef::from_store_index(0).is_null());
+        assert_ne!(AbbrevMemoRef::nil(), AbbrevMemoRef::from_store_index(0));
+        assert_eq!(std::mem::size_of::<TypeExprRef>(), 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "collides with the store tag")]
+    fn local_index_cannot_use_store_bit() {
+        TypeExprRef::from_usize(STORE_REF_TAG as usize);
+    }
+
+    #[test]
+    #[should_panic(expected = "null sentinel")]
+    fn store_row_index_cannot_use_null_sentinel() {
+        RowFieldRef::from_store_index((STORE_REF_TAG - 1) as usize);
+    }
+
+    #[test]
+    fn mixed_store_local_maps_and_sets_stay_small() {
+        for store_first in [false, true] {
+            let mut map = TypeExprRefMap::new();
+            let mut set = TypeExprRefSet::new();
+            for store in [store_first, !store_first] {
+                for index in 0..40 {
+                    let key = if store {
+                        TypeExprRef::from_store_index(index)
+                    } else {
+                        TypeExprRef::from_usize(index)
+                    };
+                    assert!(set.insert(key));
+                    assert!(!set.insert(key));
+                    assert_eq!(map.insert(key, store), None);
+                }
+            }
+            for index in 0..40 {
+                assert_eq!(map.get(TypeExprRef::from_store_index(index)), Some(&true));
+                assert_eq!(map.get(TypeExprRef::from_usize(index)), Some(&false));
+            }
+            assert!(matches!(map.storage, TypeExprRefMapStorage::Sparse(_)));
+            assert_eq!(set.spilled.as_ref().unwrap().len(), 80);
+        }
+    }
 
     #[test]
     fn test_type_expr_creation() {
@@ -814,13 +1316,18 @@ mod tests {
             assert_eq!(std::mem::size_of::<TypeArg>(), 16);
         }
         let typ = TypeExprRef(u32::MAX);
-        for arg in [TypeArg::unlabeled(typ), TypeArg::new(ArgLabel::Nolabel, typ)] {
+        for arg in [
+            TypeArg::unlabeled(typ),
+            TypeArg::new(ArgLabel::Nolabel, typ),
+        ] {
             assert!(arg.label.is_none());
             assert!(arg.clone().label.is_none());
             assert!(matches!(arg.label(), ArgLabel::Nolabel));
             assert_eq!(arg.typ, typ);
-            assert_eq!(format!("{:?}", arg),
-                format!("TypeArg {{ lbl: Nolabel, typ: {:?} }}", typ));
+            assert_eq!(
+                format!("{:?}", arg),
+                format!("TypeArg {{ lbl: Nolabel, typ: {:?} }}", typ)
+            );
         }
         for ghost in [false, true] {
             let loc = Location {
@@ -1036,7 +1543,7 @@ mod tests {
             }
             items.push(ctx.new_var(None));
         }
-        ctx.set_desc(cycle, TypeDesc::Ttuple(items.clone()));
+        ctx.set_desc(cycle, TypeDesc::Ttuple(items.clone().into()));
         let value = ValueDescription {
             val_type: cycle,
             val_kind: ValueKind::ValReg,
@@ -1061,7 +1568,7 @@ mod tests {
     #[test]
     fn test_row_desc() {
         let row = RowDesc {
-            row_fields: vec![],
+            row_fields: vec![].into(),
             row_more: TypeExprRef(1),
             row_closed: true,
             row_fixed: false,

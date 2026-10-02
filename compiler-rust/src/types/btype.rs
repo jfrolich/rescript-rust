@@ -159,42 +159,46 @@ pub fn row_repr_ref<'row>(ctx: &TypeContext, row: &'row RowDesc) -> Cow<'row, Ro
 
 fn row_repr_aux(
     ctx: &TypeContext,
-    ll: &[Vec<(crate::types::asttypes::Label, RowField)>],
+    ll: &[super::decl::SharedVec<(crate::types::asttypes::Label, RowField)>],
     row: &RowDesc,
 ) -> RowDesc {
-    let more = ctx.repr(row.row_more);
-    match &*ctx.borrow_desc(more) {
-        TypeDesc::Tvariant(inner_row) => {
-            let f = &row.row_fields;
-            let new_ll: Vec<Vec<(crate::types::asttypes::Label, RowField)>> = if f.is_empty() {
-                ll.to_vec()
-            } else {
-                let mut new_ll = vec![f.clone()];
-                new_ll.extend(ll.iter().cloned());
-                new_ll
-            };
-            row_repr_aux(ctx, &new_ll, inner_row)
-        }
-        _ => {
-            if ll.is_empty() {
-                row.clone()
-            } else {
-                // Match OCaml `rev_concat row.row_fields ll`: prepend accumulated
-                // nested row-field blocks (outermost first), then terminal fields.
-                let mut combined_fields = Vec::new();
-                for fields in ll.iter().rev() {
-                    combined_fields.extend(fields.iter().cloned());
+    // OCaml btype.ml `row_repr_aux`: follow `row_more` through nested
+    // `Tvariant`s, prepending each non-empty field list to `ll`, then return
+    // `rev_concat row.row_fields ll`. Collect the lists outermost first
+    // instead of re-prepending, which yields the same concatenation order.
+    let mut outer: Vec<super::decl::SharedVec<(crate::types::asttypes::Label, RowField)>> =
+        ll.iter().rev().cloned().collect();
+    let mut current = row.clone();
+    loop {
+        let more = ctx.repr(current.row_more);
+        let inner = match &*ctx.borrow_desc(more) {
+            TypeDesc::Tvariant(inner_row) => Some(inner_row.clone()),
+            _ => None,
+        };
+        match inner {
+            Some(inner_row) => {
+                if !current.row_fields.is_empty() {
+                    outer.push(current.row_fields.clone());
                 }
-                combined_fields.extend(row.row_fields.iter().cloned());
-                RowDesc {
-                    row_fields: combined_fields,
-                    row_more: row.row_more,
-                    row_closed: row.row_closed,
-                    row_fixed: row.row_fixed,
-                    row_name: row.row_name.clone(),
-                }
+                current = *inner_row;
             }
+            None => break,
         }
+    }
+    if outer.is_empty() {
+        return current;
+    }
+    let mut combined_fields = Vec::new();
+    for fields in &outer {
+        combined_fields.extend(fields.iter().cloned());
+    }
+    combined_fields.extend(current.row_fields.iter().cloned());
+    RowDesc {
+        row_fields: combined_fields.into(),
+        row_more: current.row_more,
+        row_closed: current.row_closed,
+        row_fixed: current.row_fixed,
+        row_name: current.row_name,
     }
 }
 
@@ -271,7 +275,7 @@ where
     let action = {
         let desc = ctx.borrow_desc(more);
         match &*desc {
-            TypeDesc::Tvariant(inner_row) => MoreAction::Variant(inner_row.clone()),
+            TypeDesc::Tvariant(inner_row) => MoreAction::Variant(*inner_row.clone()),
             TypeDesc::Tvar(_)
             | TypeDesc::Tunivar(_)
             | TypeDesc::Tsubst(_)
@@ -304,10 +308,10 @@ where
         None,
         One(TypeExprRef),
         Two(TypeExprRef, TypeExprRef),
-        Many(Vec<TypeExprRef>),
+        Many(smallvec::SmallVec<[TypeExprRef; 8]>),
         Variant(RowDesc, TypeExprRef),
         Object(TypeExprRef, Option<Vec<TypeExprRef>>),
-        Poly(TypeExprRef, Vec<TypeExprRef>),
+        Poly(TypeExprRef, smallvec::SmallVec<[TypeExprRef; 8]>),
     }
 
     let children = {
@@ -316,12 +320,15 @@ where
             TypeDesc::Tvar(_) => Children::None,
             // compiler/ml/btype.ml:258-260 visits every n-ary parameter, then the return.
             TypeDesc::Tarrow { args, ret } => {
-                let mut children = args.iter().map(|arg| arg.typ).collect::<Vec<_>>();
+                let mut children = args
+                    .iter()
+                    .map(|arg| arg.typ)
+                    .collect::<smallvec::SmallVec<[TypeExprRef; 8]>>();
                 children.push(*ret);
                 Children::Many(children)
             }
-            TypeDesc::Ttuple(types) => Children::Many(types.clone()),
-            TypeDesc::Tconstr { args, .. } => Children::Many(args.clone()),
+            TypeDesc::Ttuple(types) => Children::Many(types.iter().copied().collect()),
+            TypeDesc::Tconstr { args, .. } => Children::Many(args.iter().copied().collect()),
             TypeDesc::Tobject { fields, name, .. } => {
                 let name_types = name.as_ref().map(|(_, types)| types.clone());
                 Children::Object(*fields, name_types)
@@ -329,15 +336,15 @@ where
             TypeDesc::Tvariant(row) => {
                 let row_clone = row.clone();
                 let more = row.row_more;
-                Children::Variant(row_clone, more)
+                Children::Variant(*row_clone, more)
             }
             TypeDesc::Tfield { typ, rest, .. } => Children::Two(*typ, *rest),
             TypeDesc::Tnil => Children::None,
             TypeDesc::Tlink(t) => Children::One(*t),
             TypeDesc::Tsubst(t) => Children::One(*t),
             TypeDesc::Tunivar(_) => Children::None,
-            TypeDesc::Tpoly { body, vars } => Children::Poly(*body, vars.clone()),
-            TypeDesc::Tpackage { args, .. } => Children::Many(args.clone()),
+            TypeDesc::Tpoly { body, vars } => Children::Poly(*body, vars.iter().copied().collect()),
+            TypeDesc::Tpackage { args, .. } => Children::Many(args.iter().copied().collect()),
         }
     };
 
@@ -507,7 +514,7 @@ pub fn proxy(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
         match &*desc {
             TypeDesc::Tvariant(row) => {
                 // Clone the row to check static_row outside the borrow
-                ProxyAction::VariantRow(row.clone())
+                ProxyAction::VariantRow(*row.clone())
             }
             TypeDesc::Tobject { fields, .. } => ProxyAction::ObjectFields(*fields),
             _ => ProxyAction::Return,
@@ -561,7 +568,7 @@ pub fn row_of_type(ctx: &TypeContext, t: TypeExprRef) -> TypeExprRef {
         let desc = ctx.borrow_desc(t);
         match &*desc {
             TypeDesc::Tobject { fields, .. } => RowAction::ObjectFields(*fields),
-            TypeDesc::Tvariant(row) => RowAction::VariantRow(row.clone()),
+            TypeDesc::Tvariant(row) => RowAction::VariantRow(*row.clone()),
             _ => RowAction::Return,
         }
     };

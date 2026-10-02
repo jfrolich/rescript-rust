@@ -7,6 +7,8 @@
 //! Each match arm cites the OCaml line in `lam_pass_lets_dce.ml` that
 //! justifies it. Do not introduce Rust-only logic.
 
+use crate::lambda::map_box;
+use crate::lambda::map_prim_args;
 use ahash::AHashMap as HashMap;
 
 use crate::ident::Ident;
@@ -82,12 +84,12 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
         // kind; on failure fall back to refine_let with the original kind.
         Lambda::Llet(LetKind::Strict, v, value, lbody)
             if matches!(
-                value.as_ref(),
-                Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::Pmakeblock( _, Mutable::Mutable),
-                    args,
-                    ..
-                }) if args.len() == 1
+                            value.as_ref(),
+                            Lambda::Lprim(__prim104) if matches!(__prim104.as_ref(), PrimInfo {
+                                primitive: Primitive::Pmakeblock( _, Mutable::Mutable),
+                                args,
+                                ..
+                            } if args.len() == 1)
             ) =>
         {
             let (primitive, linit, loc) = match value.as_ref() {
@@ -141,12 +143,12 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
                 )
             );
             let pfield_from_global = matches!(
-                l1.as_ref(),
-                Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::Pfield(_, _),
-                    args,
-                    ..
-                }) if args.len() == 1 && matches!(args[0], Lambda::LglobalModule(_, _))
+                            l1.as_ref(),
+                            Lambda::Lprim(__prim103) if matches!(__prim103.as_ref(), PrimInfo {
+                                primitive: Primitive::Pfield(_, _),
+                                args,
+                                ..
+                            } if args.len() == 1 && matches!(args[0], Lambda::LglobalModule(_, _)))
             );
             let subst_now = (info.times == 1 && !info.captured)
                 || (info.times == 1
@@ -185,11 +187,12 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
             }
 
             // ref-cell special case (lam_pass_lets_dce.ml:95-111).
-            if let Lambda::Lprim(PrimInfo {
-                primitive: Primitive::Pmakeblock(info, Mutable::Mutable),
-                args,
-                loc,
-            }) = l1.as_ref()
+            if let Lambda::Lprim(__prim202) = l1.as_ref()
+                && let PrimInfo {
+                    primitive: Primitive::Pmakeblock(info, Mutable::Mutable),
+                    args,
+                    loc,
+                } = __prim202.as_ref()
             {
                 if args.len() == 1 {
                     let primitive = Primitive::Pmakeblock(info.clone(), Mutable::Mutable);
@@ -274,21 +277,23 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
                 .iter()
                 .map(|a| lets_helper(state, a))
                 .collect();
-            Lambda::Lapply(Apply {
+            Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(new_func),
                 ap_args: new_args,
                 ap_info: apply.ap_info.clone(),
                 ap_transformed_jsx: apply.ap_transformed_jsx,
-            })
+            }))
         }
 
         // Lfunction (lam_pass_lets_dce.ml:150-151).
-        Lambda::Lfunction(LFunction {
-            arity,
-            params,
-            body,
-            attr,
-        }) => {
+        Lambda::Lfunction(__func3) => {
+            let LFunction {
+                arity,
+                params,
+                body,
+                attr,
+            } = __func3.as_ref();
+
             let new_body = lets_helper(state, body);
             Lambda::function_(*arity, params.clone(), new_body, attr.clone())
         }
@@ -308,11 +313,22 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
 
         // Lprim Pstringadd [l; r] (lam_pass_lets_dce.ml:155-175). Folds string
         // concatenation through the precomputed string_table.
-        Lambda::Lprim(PrimInfo {
+        Lambda::Lprim(__prim2)
+            if matches!(__prim2.as_ref(), PrimInfo {
             primitive: Primitive::Pstringadd,
             args,
             loc,
-        }) if args.len() == 2 => {
+        } if args.len() == 2) =>
+        {
+            let PrimInfo {
+                primitive: Primitive::Pstringadd,
+                args,
+                loc,
+            } = __prim2.as_ref()
+            else {
+                unreachable!()
+            };
+
             let l_simpl = lets_helper(state, &args[0]);
             let r_simpl = lets_helper(state, &args[1]);
             let opt_l = lookup_string(&l_simpl, &state.string_table);
@@ -361,14 +377,14 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
                 .map(|x| Box::new(lets_helper(state, x)));
             Lambda::Lswitch(
                 Box::new(new_scrut),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: sw.sw_consts_full,
                     sw_consts: new_consts,
                     sw_blocks_full: sw.sw_blocks_full,
                     sw_blocks: new_blocks,
                     sw_failaction: new_failaction,
                     sw_dispatch: sw.sw_dispatch.clone(),
-                },
+                }),
             )
         }
 
@@ -477,22 +493,22 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
 
         Lambda::Llet(LetKind::Strict, v, value, lbody)
             if matches!(
-                value.as_ref(),
-                Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::Pmakeblock( _, Mutable::Mutable),
-                    args,
-                    ..
-                }) if args.len() == 1
+                            value.as_ref(),
+                            Lambda::Lprim(__prim102) if matches!(__prim102.as_ref(), PrimInfo {
+                                primitive: Primitive::Pmakeblock( _, Mutable::Mutable),
+                                args,
+                                ..
+                            } if args.len() == 1)
             ) =>
         {
-            let Lambda::Lprim(PrimInfo {
+            let Lambda::Lprim(__prim201) = *value else {
+                unreachable!()
+            };
+            let PrimInfo {
                 primitive,
                 mut args,
                 loc,
-            }) = *value
-            else {
-                unreachable!()
-            };
+            } = *__prim201;
             let linit = args.pop().expect("checked one ref initializer");
             let slinit = lets_helper_owned(state, linit);
             let slbody = lets_helper_owned(state, *lbody);
@@ -529,12 +545,12 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
                 )
             );
             let pfield_from_global = matches!(
-                l1.as_ref(),
-                Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::Pfield(_, _),
-                    args,
-                    ..
-                }) if args.len() == 1 && matches!(args[0], Lambda::LglobalModule(_, _))
+                            l1.as_ref(),
+                            Lambda::Lprim(__prim101) if matches!(__prim101.as_ref(), PrimInfo {
+                                primitive: Primitive::Pfield(_, _),
+                                args,
+                                ..
+                            } if args.len() == 1 && matches!(args[0], Lambda::LglobalModule(_, _)))
             );
             let subst_now = (info.times == 1 && !info.captured)
                 || (info.times == 1
@@ -566,21 +582,21 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
             }
 
             if matches!(
-                l1.as_ref(),
-                Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::Pmakeblock( _, Mutable::Mutable),
-                    args,
-                    ..
-                }) if args.len() == 1
+                            l1.as_ref(),
+                            Lambda::Lprim(__prim100) if matches!(__prim100.as_ref(), PrimInfo {
+                                primitive: Primitive::Pmakeblock( _, Mutable::Mutable),
+                                args,
+                                ..
+                            } if args.len() == 1)
             ) {
-                let Lambda::Lprim(PrimInfo {
+                let Lambda::Lprim(__prim200) = *l1 else {
+                    unreachable!()
+                };
+                let PrimInfo {
                     primitive,
                     mut args,
                     loc,
-                }) = *l1
-                else {
-                    unreachable!()
-                };
+                } = *__prim200;
                 let linit = args.pop().expect("checked one ref initializer");
                 let slinit = lets_helper_owned(state, linit);
                 let slbody = lets_helper_owned(state, *lbody);
@@ -639,7 +655,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
                 ap_args,
                 ap_info,
                 ap_transformed_jsx,
-            } = apply;
+            } = *apply;
             match *ap_func {
                 Lambda::Lfunction(func)
                     if func.params.len() == ap_args.len() && lfunction_can_be_inlined(&func) =>
@@ -653,22 +669,30 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
                         .into_iter()
                         .map(|a| lets_helper_owned(state, a))
                         .collect();
-                    Lambda::Lapply(Apply {
+                    Lambda::Lapply(Box::new(Apply {
                         ap_func: Box::new(new_func),
                         ap_args: new_args,
                         ap_info,
                         ap_transformed_jsx,
-                    })
+                    }))
                 }
             }
         }
 
-        Lambda::Lfunction(LFunction {
-            arity,
-            params,
-            body,
-            attr,
-        }) => Lambda::function_(arity, params, lets_helper_owned(state, *body), attr),
+        Lambda::Lfunction(__func1) => {
+            let LFunction {
+                arity,
+                params,
+                body,
+                attr,
+            } = *__func1;
+            Lambda::Lfunction(Box::new(LFunction {
+                arity: arity,
+                params: params,
+                body: map_box(body, |inner| lets_helper_owned(state, inner)),
+                attr: attr,
+            }))
+        }
 
         Lambda::Lconst(_) | Lambda::LglobalModule(_, _) => lam,
 
@@ -681,11 +705,22 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
             Lambda::letrec(new_bindings, new_body)
         }
 
-        Lambda::Lprim(PrimInfo {
+        Lambda::Lprim(__prim0)
+            if matches!(__prim0.as_ref(), PrimInfo {
             primitive: Primitive::Pstringadd,
             args,
             loc,
-        }) if args.len() == 2 => {
+        } if args.len() == 2) =>
+        {
+            let PrimInfo {
+                primitive: Primitive::Pstringadd,
+                args,
+                loc,
+            } = *__prim0
+            else {
+                unreachable!()
+            };
+
             let mut args = args.into_iter();
             let l_simpl = lets_helper_owned(state, args.next().expect("checked left arg"));
             let r_simpl = lets_helper_owned(state, args.next().expect("checked right arg"));
@@ -705,14 +740,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
             }
         }
 
-        Lambda::Lprim(prim) => Lambda::prim(
-            prim.primitive,
-            prim.args
-                .into_iter()
-                .map(|a| lets_helper_owned(state, a))
-                .collect(),
-            prim.loc,
-        ),
+        Lambda::Lprim(prim) => map_prim_args(prim, |a| lets_helper_owned(state, a)),
 
         Lambda::Lswitch(scrut, sw) => {
             let new_scrut = lets_helper_owned(state, *scrut);
@@ -728,17 +756,17 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
                 .collect();
             let new_failaction = sw
                 .sw_failaction
-                .map(|x| Box::new(lets_helper_owned(state, *x)));
+                .map(|x| map_box(x, |inner| lets_helper_owned(state, inner)));
             Lambda::Lswitch(
                 Box::new(new_scrut),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: sw.sw_consts_full,
                     sw_consts: new_consts,
                     sw_blocks_full: sw.sw_blocks_full,
                     sw_blocks: new_blocks,
                     sw_failaction: new_failaction,
                     sw_dispatch: sw.sw_dispatch,
-                },
+                }),
             )
         }
 
@@ -748,7 +776,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
                 .into_iter()
                 .map(|(s, e)| (s, lets_helper_owned(state, e)))
                 .collect();
-            let new_default = default.map(|x| Box::new(lets_helper_owned(state, *x)));
+            let new_default = default.map(|x| map_box(x, |inner| lets_helper_owned(state, inner)));
             Lambda::LstringSwitch(Box::new(new_scrut), new_cases, new_default)
         }
 

@@ -29,6 +29,9 @@
 
 #### :bug: Bug fix
 
+- Fix Rust compiler parity for nullable component refs, record spreads, optional values through local aliases, constructor string escapes, control-flow output, configured PPX activation, JSX type printing, and long type diagnostics. https://github.com/jfrolich/rescript-rust/pull/21
+
+- Preserve unification links and type-level changes when the Rust in-process compiler reuses dependency signatures, while isolating those mutations between compilation units. https://github.com/jfrolich/rescript-rust/pull/21
 - Preserve source filename casing in Rust CLI package outputs on case-sensitive filesystems. https://github.com/jfrolich/rescript-rust/pull/10
 
 - Fix formatter breaking the opening brace of a functor module type's result signature onto a new line (e.g. `module Make: Pattern => {`). https://github.com/rescript-lang/rescript/pull/8519

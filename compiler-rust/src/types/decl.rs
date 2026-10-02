@@ -137,16 +137,98 @@ pub enum TypeInlinedType {
     },
 }
 
+/// A `Vec` shared by reference count and copied on write.
+///
+/// Type declarations are cloned whenever they are strengthened, qualified, or
+/// copied through a component substitution; OCaml shares the untouched
+/// constructor and label lists physically in those copies. Sharing the lists
+/// keeps those declaration copies from deep-cloning every constructor.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SharedVec<T>(std::sync::Arc<Vec<T>>);
+
+impl<T> SharedVec<T> {
+    pub fn new(items: Vec<T>) -> Self {
+        Self(std::sync::Arc::new(items))
+    }
+}
+
+impl<T> Default for SharedVec<T> {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for SharedVec<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<T> std::ops::Deref for SharedVec<T> {
+    type Target = Vec<T>;
+    fn deref(&self) -> &Vec<T> {
+        &self.0
+    }
+}
+
+impl<T: Clone> std::ops::DerefMut for SharedVec<T> {
+    fn deref_mut(&mut self) -> &mut Vec<T> {
+        std::sync::Arc::make_mut(&mut self.0)
+    }
+}
+
+impl<T> From<Vec<T>> for SharedVec<T> {
+    fn from(items: Vec<T>) -> Self {
+        Self::new(items)
+    }
+}
+
+impl<T> FromIterator<T> for SharedVec<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self::new(iter.into_iter().collect())
+    }
+}
+
+impl<'a, T> IntoIterator for &'a SharedVec<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<'a, T: Clone> IntoIterator for &'a mut SharedVec<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        std::sync::Arc::make_mut(&mut self.0).iter_mut()
+    }
+}
+
+impl<T: Clone> IntoIterator for SharedVec<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter {
+        std::sync::Arc::unwrap_or_clone(self.0).into_iter()
+    }
+}
+
+impl<T: Clone> SharedVec<T> {
+    pub fn into_vec(self) -> Vec<T> {
+        std::sync::Arc::unwrap_or_clone(self.0)
+    }
+}
+
 /// Kind of type definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeKind {
     /// Abstract type
     TypeAbstract,
     /// Record type
-    TypeRecord(Vec<LabelDeclaration>, RecordRepresentation),
+    TypeRecord(SharedVec<LabelDeclaration>, RecordRepresentation),
     /// Variant type with its canonical runtime layout.
     TypeVariant(
-        Vec<ConstructorDeclaration>,
+        SharedVec<ConstructorDeclaration>,
         super::variant_runtime::LayoutRef,
     ),
     /// Open type (extensible)
@@ -355,8 +437,9 @@ pub struct LabelArrayRef(pub u32);
 pub enum ModuleType {
     /// Module type identifier
     MtyIdent(Path),
-    /// Signature
-    MtySignature(Signature),
+    /// Signature. Shared like OCaml's immutable signature list, so copying a
+    /// module type during lookup does not copy every item.
+    MtySignature(std::sync::Arc<Signature>),
     /// Functor
     MtyFunctor {
         param: Ident,
@@ -379,13 +462,19 @@ pub enum AliasPresence {
 /// A signature (list of signature items).
 pub type Signature = Vec<SignatureItem>;
 
+/// Copy-on-write access to a shared module-type signature.
+pub fn signature_mut(signature: &mut std::sync::Arc<Signature>) -> &mut Signature {
+    std::sync::Arc::make_mut(signature)
+}
+
 /// A signature item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignatureItem {
     /// Value in signature
     SigValue(Ident, ValueDescription),
-    /// Type in signature
-    SigType(Ident, TypeDeclaration, RecStatus),
+    /// Type in signature. The declaration is shared like OCaml's immutable
+    /// record, so lookups can return it without copying.
+    SigType(Ident, std::sync::Arc<TypeDeclaration>, RecStatus),
     /// Type extension in signature
     SigTypext(Ident, ExtensionConstructor, ExtStatus),
     /// Module in signature
@@ -627,7 +716,7 @@ pub fn walk_signature_locations(sig: &mut [SignatureItem], v: &mut dyn Signature
     }
     fn module_type(mty: &mut ModuleType, v: &mut dyn SignatureLocationVisitor) {
         match mty {
-            ModuleType::MtySignature(sig) => walk_signature_locations(sig, v),
+            ModuleType::MtySignature(sig) => walk_signature_locations(&mut std::sync::Arc::make_mut(sig)[..], v),
             ModuleType::MtyFunctor {
                 param_type, result, ..
             } => {
@@ -646,6 +735,7 @@ pub fn walk_signature_locations(sig: &mut [SignatureItem], v: &mut dyn Signature
                 attrs(&mut vd.val_attributes, v);
             }
             SignatureItem::SigType(_, td, _) => {
+                let td = std::sync::Arc::make_mut(td);
                 v.location(&mut td.type_loc);
                 attrs(&mut td.type_attributes, v);
                 match &mut td.type_kind {

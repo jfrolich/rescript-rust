@@ -43,6 +43,7 @@ pub mod cache;
 /// CMI file loading infrastructure.
 pub mod cmi;
 pub mod config;
+pub mod fast_hash;
 pub mod context;
 /// Cached debug environment flags.
 pub mod debug_flags;
@@ -50,7 +51,9 @@ pub mod diagnostics;
 pub mod driver;
 /// GenType TypeScript emitter port.
 pub mod gentype;
+pub mod hash_seed;
 pub mod ident;
+pub mod name;
 pub mod intern;
 pub mod js_ir;
 pub mod lambda;
@@ -60,6 +63,7 @@ pub mod parse_arena;
 pub mod parser;
 /// Optional aggregate compiler performance counters.
 pub mod perf_counters;
+pub mod process_cwd;
 pub mod raw_lambda;
 /// Source text decoding helpers.
 pub mod source_text;

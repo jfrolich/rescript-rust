@@ -379,13 +379,13 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: "effect".into(),
                 arg_types: vec![],
-                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
                     spec: None,
                     obj_params: None,
                     return_wrapper: crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
                     inline_constant: None,
-                },
+                }),
                 dynamic_import: false,
                 transformed_jsx: false,
             },
@@ -444,13 +444,13 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: "must_not_run".into(),
                 arg_types: vec![],
-                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
                     spec: None,
                     obj_params: None,
                     return_wrapper: crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
                     inline_constant: None,
-                },
+                }),
                 dynamic_import: false,
                 transformed_jsx: false,
             },
@@ -578,14 +578,14 @@ mod tests {
                 Primitive::PjsCall {
                     prim_name: "unselected".into(),
                     arg_types: vec![],
-                    ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                    ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                         kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
                         spec: None,
                         obj_params: None,
                         return_wrapper:
                             crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
                         inline_constant: None,
-                    },
+                    }),
                     dynamic_import: false,
                     transformed_jsx: false,
                 },
@@ -755,13 +755,13 @@ mod tests {
                 superseded_nodes: 15,
                 hot_node_occupied_bytes: 192,
                 hot_node_capacity_bytes: 256,
-                side_payload_shallow_occupied_bytes: 1920,
-                side_payload_shallow_capacity_bytes: 2496,
+                side_payload_shallow_occupied_bytes: 1312,
+                side_payload_shallow_capacity_bytes: 1600,
                 nested_heap_bytes_included: false,
-                current_live_side_payload_shallow_bytes: 736,
+                current_live_side_payload_shallow_bytes: 384,
                 backend_retained_only_side_payload_shallow_bytes: 0,
-                metadata_retained_only_side_payload_shallow_bytes: 112,
-                superseded_unreachable_side_payload_shallow_bytes: 1072,
+                metadata_retained_only_side_payload_shallow_bytes: 80,
+                superseded_unreachable_side_payload_shallow_bytes: 848,
             }
         );
     }

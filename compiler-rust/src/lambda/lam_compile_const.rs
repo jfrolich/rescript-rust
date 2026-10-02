@@ -3,7 +3,7 @@
 //! Port of `lam_compile_const.ml`.
 //! Extracted from `lam_compile.rs` for organization.
 
-use std::collections::HashMap;
+use ahash::AHashMap as HashMap;
 
 use super::js_exp_make::{
     int_expr, js_expr_no_side_effects, poly_var_tag_access, poly_var_value_access,
@@ -70,10 +70,15 @@ impl LambdaCompiler {
             Constant::JsFalse => Expression::bool(false),
             Constant::Int {
                 i,
-                comment: Some(PointerInfo::Constructor(tag)),
-            } => match &tag.runtime_tag {
+                comment: Some(info),
+            } if matches!(**info, PointerInfo::Constructor(_)) => {
+                let PointerInfo::Constructor(tag) = &**info else {
+                    unreachable!()
+                };
+                match &tag.runtime_tag {
                 Some(ConstructorRuntimeTag::Int(value)) => Self::compile_runtime_int(*value),
-                // js_exp_make.ml:1360-1361 `E.tag_type`: `str s ~delim:DStarJ`.
+                // OCaml `Js_exp_make.tag_type` (js_exp_make.ml:1361) emits `@as`
+                // strings with `~delim:DStarJ`, printing the payload verbatim.
                 Some(ConstructorRuntimeTag::String(value)) => Expression::new(ExpressionDesc::Str {
                     delim: Delim::StarJ,
                     txt: value.clone(),
@@ -92,8 +97,9 @@ impl LambdaCompiler {
                     ExpressionDesc::Number(Number::int(*i)),
                     tag.name.clone(),
                 ),
+            }
             },
-            Constant::Int { i, comment } => match pointer_info_comment_text(comment.as_ref()) {
+            Constant::Int { i, comment } => match pointer_info_comment_text(comment.as_ref().map(|v| &**v)) {
                 Some(comment) => {
                     Expression::with_comment(ExpressionDesc::Number(Number::int(*i)), comment)
                 }
@@ -130,7 +136,7 @@ impl LambdaCompiler {
                 None => Expression::string(tag.name.clone()),
             },
             Constant::NativeInt { i, comment } => {
-                match pointer_info_comment_text(comment.as_ref()) {
+                match pointer_info_comment_text(comment.as_ref().map(|v| &**v)) {
                     Some(comment) => Expression::with_comment(
                         ExpressionDesc::Number(Number::float(i.to_string())),
                         comment,

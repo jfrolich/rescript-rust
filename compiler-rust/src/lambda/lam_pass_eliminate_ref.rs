@@ -40,11 +40,22 @@ pub fn eliminate_ref(id: &Ident, lam: &Lambda) -> Result<Lambda, RealReference> 
         }
 
         // `!id` read via `Pfield(0, _)` (lam_pass_eliminate_ref.ml:20-21).
-        Lambda::Lprim(PrimInfo {
+        Lambda::Lprim(__prim2)
+            if matches!(__prim2.as_ref(), PrimInfo {
             primitive: Primitive::Pfield(0, _),
             args,
             ..
-        }) if args.len() == 1 && matches!(&args[0], Lambda::Lvar(v) if v == id) => {
+        } if args.len() == 1 && matches!(&args[0], Lambda::Lvar(v) if v == id)) =>
+        {
+            let PrimInfo {
+                primitive: Primitive::Pfield(0, _),
+                args,
+                ..
+            } = __prim2.as_ref()
+            else {
+                unreachable!()
+            };
+
             Ok(Lambda::Lvar(id.clone()))
         }
 
@@ -59,21 +70,43 @@ pub fn eliminate_ref(id: &Ident, lam: &Lambda) -> Result<Lambda, RealReference> 
         }
 
         // `id := e` via `Psetfield(0, _)` (lam_pass_eliminate_ref.ml:47-49).
-        Lambda::Lprim(PrimInfo {
+        Lambda::Lprim(__prim1)
+            if matches!(__prim1.as_ref(), PrimInfo {
             primitive: Primitive::Psetfield(0, _),
             args,
             ..
-        }) if args.len() == 2 && matches!(&args[0], Lambda::Lvar(v) if v == id) => {
+        } if args.len() == 2 && matches!(&args[0], Lambda::Lvar(v) if v == id)) =>
+        {
+            let PrimInfo {
+                primitive: Primitive::Psetfield(0, _),
+                args,
+                ..
+            } = __prim1.as_ref()
+            else {
+                unreachable!()
+            };
+
             let new_value = eliminate_ref(id, &args[1])?;
             Ok(Lambda::Lassign(id.clone(), Box::new(new_value)))
         }
 
         // `incr`/`decr` via `Poffsetref delta` (lam_pass_eliminate_ref.ml:50-53).
-        Lambda::Lprim(PrimInfo {
+        Lambda::Lprim(__prim0)
+            if matches!(__prim0.as_ref(), PrimInfo {
             primitive: Primitive::Poffsetref(delta),
             args,
             loc,
-        }) if args.len() == 1 && matches!(&args[0], Lambda::Lvar(v) if v == id) => {
+        } if args.len() == 1 && matches!(&args[0], Lambda::Lvar(v) if v == id)) =>
+        {
+            let PrimInfo {
+                primitive: Primitive::Poffsetref(delta),
+                args,
+                loc,
+            } = __prim0.as_ref()
+            else {
+                unreachable!()
+            };
+
             let inc = Lambda::prim(
                 Primitive::Poffsetint(*delta),
                 vec![Lambda::Lvar(id.clone())],
@@ -90,12 +123,12 @@ pub fn eliminate_ref(id: &Ident, lam: &Lambda) -> Result<Lambda, RealReference> 
             let new_func = eliminate_ref(id, &apply.ap_func)?;
             let new_args: Result<Vec<_>, _> =
                 apply.ap_args.iter().map(|a| eliminate_ref(id, a)).collect();
-            Ok(Lambda::Lapply(Apply {
+            Ok(Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(new_func),
                 ap_args: new_args?,
                 ap_info: apply.ap_info.clone(),
                 ap_transformed_jsx: apply.ap_transformed_jsx,
-            }))
+            })))
         }
 
         // Llet (lam_pass_eliminate_ref.ml:59-60).
@@ -148,14 +181,14 @@ pub fn eliminate_ref(id: &Ident, lam: &Lambda) -> Result<Lambda, RealReference> 
             };
             Ok(Lambda::Lswitch(
                 Box::new(new_scrut),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: sw.sw_consts_full,
                     sw_consts: new_consts?,
                     sw_blocks_full: sw.sw_blocks_full,
                     sw_blocks: new_blocks?,
                     sw_failaction: new_failaction,
                     sw_dispatch: sw.sw_dispatch.clone(),
-                },
+                }),
             ))
         }
 

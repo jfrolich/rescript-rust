@@ -29,7 +29,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use smol_str::SmolStr;
+use crate::name::Name;
 use std::cell::Cell;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -115,9 +115,9 @@ impl IdentFlags {
 /// Two identifiers are considered the "same" (`same` method) if:
 /// - Both have non-zero stamps and the stamps are equal, OR
 /// - Both have stamp 0 and the names are equal
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct Ident {
-    name: SmolStr,
+    name: Name,
     stamp: i32,
     flags: IdentFlags,
 }
@@ -127,7 +127,7 @@ impl Ident {
     ///
     /// Prefer using [`IdGenerator::create`] for normal identifier creation.
     #[inline]
-    pub fn new(name: impl Into<SmolStr>, stamp: i32, flags: IdentFlags) -> Self {
+    pub fn new(name: impl Into<Name>, stamp: i32, flags: IdentFlags) -> Self {
         Self {
             name: name.into(),
             stamp,
@@ -140,7 +140,7 @@ impl Ident {
     /// Persistent identifiers represent globally visible names like
     /// module names or external declarations.
     #[inline]
-    pub fn create_persistent(name: impl Into<SmolStr>) -> Self {
+    pub fn create_persistent(name: impl Into<Name>) -> Self {
         Self {
             name: name.into(),
             stamp: 0,
@@ -157,7 +157,7 @@ impl Ident {
     /// This is mainly useful for tests and simple cases where
     /// an explicit generator is not available.
     #[inline]
-    pub fn create_local(name: impl Into<SmolStr>) -> Self {
+    pub fn create_local(name: impl Into<Name>) -> Self {
         let stamp = LOCAL_IDENT_COUNTER.with(|counter| {
             let stamp = counter.get() + 1;
             counter.set(stamp);
@@ -185,8 +185,14 @@ impl Ident {
 
     /// Get the name of this identifier.
     #[inline]
-    pub fn name(&self) -> &str {
-        &self.name
+    pub fn name(&self) -> &'static str {
+        self.name.as_str()
+    }
+
+    /// The interned name, for use as a cheap map key.
+    #[inline]
+    pub fn name_atom(&self) -> Name {
+        self.name
     }
 
     /// Get the stamp of this identifier.
@@ -246,7 +252,7 @@ impl Ident {
         self.flags.is_js()
     }
 
-    pub fn create_js(name: impl Into<SmolStr>) -> Self {
+    pub fn create_js(name: impl Into<Name>) -> Self {
         Self::new(name, 0, IdentFlags::JS)
     }
 
@@ -280,7 +286,7 @@ impl Ident {
     #[inline]
     pub fn with_global(&self) -> Self {
         Self {
-            name: self.name.clone(),
+            name: self.name,
             stamp: self.stamp,
             flags: self.flags.with_global(),
         }
@@ -290,7 +296,7 @@ impl Ident {
     #[inline]
     pub fn hide(&self) -> Self {
         Self {
-            name: self.name.clone(),
+            name: self.name,
             stamp: -1,
             flags: self.flags,
         }
@@ -301,10 +307,19 @@ impl Ident {
     /// This creates a new identifier with the same name and flags
     /// but a fresh stamp.
     #[inline]
+    /// Copy this identifier with a stamp reserved earlier from the generator.
+    pub(crate) fn with_stamp(&self, stamp: i32) -> Self {
+        Self {
+            name: self.name,
+            stamp,
+            flags: self.flags,
+        }
+    }
+
     pub fn rename(&self, id_gen: &super::context::IdGenerator) -> Self {
         let stamp = id_gen.next_stamp();
         Self {
-            name: self.name.clone(),
+            name: self.name,
             stamp,
             flags: self.flags,
         }

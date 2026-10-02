@@ -30,10 +30,18 @@ The highest-leverage work is removing whole classes of repeated work, not polish
 9. Adaptive indexing for large signatures.
 10. Built-in counters for clone/scan/allocation/queue behavior.
 
-The package signature store design is tracked separately in
-`projects/in-process-performance/PACKAGE_SIGNATURE_STORE.md`. It is the
-preferred path for reusing stable package signatures across clean in-process
-builds, starting with `@rescript/runtime`.
+The current implementation is tracked in
+[`THREAD_TYPE_STORE.md`](THREAD_TYPE_STORE.md): reuse dependency graphs only
+**within a single clean build**, with no persisted compiler results. Stage 1
+adds tagged handles, worker-store ownership, and mutation overlays. Stage 2
+now internalizes eligible dependency graphs once per worker (measured at
+4.421 s with 12 workers, versus 4.699 s baseline). The attempted stage-3
+identifier continuity was rejected: OCaml reinitializes identifiers per unit,
+and stamp-hashed SCC traversal makes continuity change JS output order.
+Shared component templates, per-unit forced views, prelude layers, and
+registry reuse remain in progress. See the corrected stamp policy in the
+store design before implementing those stages. The older
+`PACKAGE_SIGNATURE_STORE.md` persisted-store proposal is outside this goal.
 
 ## Top 10 Improvements
 

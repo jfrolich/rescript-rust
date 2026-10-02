@@ -4,7 +4,7 @@
 //! by optimized-lambda parity dumps and now also feeds the JS backend entry
 //! point in `driver.rs`.
 
-use std::collections::{HashMap, HashSet};
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::sync::Arc;
 
 use crate::context::IdGenerator;
@@ -43,6 +43,10 @@ impl<'a> LoweringContext<'a> {
 
     fn lower_lambda_with_dynamic_import(&mut self, raw: RawLambda, dynamic_import: bool) -> Lambda {
         match raw {
+            RawLambda::Lshared(inner) => self.lower_lambda_with_dynamic_import(
+                std::sync::Arc::unwrap_or_clone(inner),
+                dynamic_import,
+            ),
             RawLambda::Lvar(id) => Lambda::var(self.alias_target(id)),
             RawLambda::LglobalModule(id, imported) => {
                 if id.is_predef_exn() {
@@ -55,7 +59,7 @@ impl<'a> LoweringContext<'a> {
                 }
             }
             RawLambda::Lconst(c) => Lambda::const_(lower_constant(c)),
-            RawLambda::Lapply(apply) => self.lower_apply(apply),
+            RawLambda::Lapply(apply) => self.lower_apply(*apply),
             RawLambda::Lfunction(func) => {
                 let (renamed_params, renamed_body) =
                     rename_optional_parameters(&self.id_gen, func.params, *func.body);
@@ -77,7 +81,7 @@ impl<'a> LoweringContext<'a> {
             RawLambda::Lprim(info) => {
                 self.lower_primitive(info.primitive, info.args, info.loc, dynamic_import)
             }
-            RawLambda::Lswitch(scrutinee, switch, _) => self.lower_switch(*scrutinee, switch),
+            RawLambda::Lswitch(scrutinee, switch, _) => self.lower_switch(*scrutinee, *switch),
             RawLambda::LstringSwitch(scrutinee, cases, default) => {
                 // `Lam.stringswitch (convert_aux e) ... (convert_aux default)` depends on
                 // OCaml's right-to-left argument evaluation, so lower the tail before
@@ -461,26 +465,26 @@ impl<'a> LoweringContext<'a> {
         if const_only_switch {
             Lambda::Lswitch(
                 Box::new(lowered_scrutinee),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: lowered_consts.len() >= switch.sw_numconsts,
                     sw_consts: lowered_consts,
                     sw_blocks_full: true,
                     sw_blocks: lowered_blocks,
                     sw_failaction: lowered_failaction,
                     sw_dispatch: switch.sw_dispatch,
-                },
+                }),
             )
         } else {
             Lambda::Lswitch(
                 Box::new(lowered_scrutinee),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: lowered_consts.len() >= switch.sw_numconsts,
                     sw_consts: lowered_consts,
                     sw_blocks_full: lowered_blocks.len() >= switch.sw_numblocks,
                     sw_blocks: lowered_blocks,
                     sw_failaction: lowered_failaction,
                     sw_dispatch: switch.sw_dispatch,
-                },
+                }),
             )
         }
     }
@@ -509,6 +513,7 @@ impl<'a> LoweringContext<'a> {
 
 fn collect_exported_idents(raw: &RawLambda, exports: &mut HashSet<Ident>) {
     match raw {
+        RawLambda::Lshared(inner) => collect_exported_idents(inner, exports),
         RawLambda::Lvar(_) | RawLambda::LglobalModule(_, _) | RawLambda::Lconst(_) => {}
         RawLambda::Lapply(apply) => {
             collect_exported_idents(&apply.ap_func, exports);
@@ -605,17 +610,20 @@ fn lower_constant(constant: Constant) -> Constant {
             comment,
         },
         Constant::Int {
-            comment: Some(PointerInfo::ShapeNone),
+            comment: Some(info),
             ..
-        } => {
+        } if matches!(*info, PointerInfo::ShapeNone) => {
             // OCaml compiler/core/lam_constant_convert.ml:40-43 maps
             // Pt_shape_none to Lam_constant.lam_none.
             Constant::JsUndefined { is_unit: false }
         }
         Constant::Int {
             i,
-            comment: Some(PointerInfo::Constructor(tag)),
-        } => {
+            comment: Some(info),
+        } if matches!(*info, PointerInfo::Constructor(_)) => {
+            let PointerInfo::Constructor(tag) = *info else {
+                unreachable!()
+            };
             let i = match tag.runtime_tag.as_ref() {
                 Some(ConstructorRuntimeTag::Int(runtime_int)) => {
                     i32::try_from(*runtime_int).unwrap_or(i)
@@ -628,17 +636,21 @@ fn lower_constant(constant: Constant) -> Constant {
                 }
                 _ => Constant::Int {
                     i,
-                    comment: Some(PointerInfo::Constructor(tag)),
+                    comment: Some(Box::new(PointerInfo::Constructor(tag))),
                 },
             }
         }
         Constant::Int {
             i: _,
-            comment: Some(PointerInfo::PolyVariant(name)),
-        } => name
-            .parse::<i32>()
-            .map(|i| Constant::Int { i, comment: None })
-            .unwrap_or_else(|_| Constant::Pointer(name)),
+            comment: Some(info),
+        } if matches!(*info, PointerInfo::PolyVariant(_)) => {
+            let PointerInfo::PolyVariant(name) = *info else {
+                unreachable!()
+            };
+            name.parse::<i32>()
+                .map(|i| Constant::Int { i, comment: None })
+                .unwrap_or_else(|_| Constant::Pointer(name))
+        }
         Constant::String { s, delim } => Constant::String { s, delim },
         Constant::ImmString(s) => Constant::String { s, delim: None },
         Constant::Pointer(name) => match name.strip_suffix('a') {
@@ -650,7 +662,7 @@ fn lower_constant(constant: Constant) -> Constant {
         },
         Constant::Block { tag_info, elements } => {
             let mut elements = elements.into_iter().map(lower_constant).collect::<Vec<_>>();
-            match tag_info {
+            match *tag_info {
                 TagInfo::Some | TagInfo::SomeNotNested if elements.len() == 1 => {
                     Constant::Some(Box::new(elements.remove(0)))
                 }
@@ -658,17 +670,17 @@ fn lower_constant(constant: Constant) -> Constant {
                     2 => {
                         let value = elements.pop().expect("polyvariant block payload");
                         Constant::Block {
-                            tag_info: TagInfo::PolyVar(name.clone()),
+                            tag_info: Box::new(TagInfo::PolyVar(name.clone())),
                             elements: vec![polyvar_block_tag_constant(&name), value],
                         }
                     }
                     _ => Constant::Block {
-                        tag_info: TagInfo::PolyVar(name),
+                        tag_info: Box::new(TagInfo::PolyVar(name)),
                         elements,
                     },
                 },
                 other => Constant::Block {
-                    tag_info: other,
+                    tag_info: Box::new(other),
                     elements,
                 },
             }
@@ -828,37 +840,55 @@ fn eta_reduce_function_apply(
     ap_info: &ApInfo,
 ) -> Option<Lambda> {
     match function.body.as_ref() {
-        Lambda::Lprim(PrimInfo {
-            primitive:
-                Primitive::PnullToOpt
-                | Primitive::PnullUndefinedToOpt
-                | Primitive::PisNull
-                | Primitive::PisNullUndefined
-                | Primitive::Ptypeof,
-            args: wrap_args,
-            ..
-        }) => {
+        Lambda::Lprim(__prim1)
+            if matches!(
+                __prim1.as_ref(),
+                PrimInfo {
+                    primitive: Primitive::PnullToOpt
+                        | Primitive::PnullUndefinedToOpt
+                        | Primitive::PisNull
+                        | Primitive::PisNullUndefined
+                        | Primitive::Ptypeof,
+                    args: _wrap_args,
+                    ..
+                }
+            ) =>
+        {
+            let PrimInfo {
+                primitive:
+                    Primitive::PnullToOpt
+                    | Primitive::PnullUndefinedToOpt
+                    | Primitive::PisNull
+                    | Primitive::PisNullUndefined
+                    | Primitive::Ptypeof,
+                args: wrap_args,
+                ..
+            } = __prim1.as_ref()
+            else {
+                unreachable!()
+            };
+
             let [Lambda::Lprim(inner_call)] = wrap_args.as_slice() else {
                 return None;
             };
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
-            Some(Lambda::Lprim(PrimInfo {
+            Some(Lambda::Lprim(Box::new(PrimInfo {
                 primitive: function_primitive(function.body.as_ref())?,
-                args: vec![Lambda::Lprim(PrimInfo {
+                args: vec![Lambda::Lprim(Box::new(PrimInfo {
                     primitive: inner_call.primitive.clone(),
                     args: eta_args,
                     loc: ap_info.loc.clone(),
-                })],
+                }))],
                 loc: ap_info.loc.clone(),
-            }))
+            })))
         }
         Lambda::Lprim(inner_call) => {
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
-            Some(Lambda::Lprim(PrimInfo {
+            Some(Lambda::Lprim(Box::new(PrimInfo {
                 primitive: inner_call.primitive.clone(),
                 args: eta_args,
                 loc: ap_info.loc.clone(),
-            }))
+            })))
         }
         Lambda::Lsequence(first, second) => {
             let Lambda::Lprim(inner_call) = first.as_ref() else {
@@ -869,11 +899,11 @@ fn eta_reduce_function_apply(
             };
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
             Some(Lambda::Lsequence(
-                Box::new(Lambda::Lprim(PrimInfo {
+                Box::new(Lambda::Lprim(Box::new(PrimInfo {
                     primitive: inner_call.primitive.clone(),
                     args: eta_args,
                     loc: ap_info.loc.clone(),
-                })),
+                }))),
                 Box::new(Lambda::Lconst(constant.clone())),
             ))
         }
@@ -883,7 +913,10 @@ fn eta_reduce_function_apply(
 
 fn function_primitive(body: &Lambda) -> Option<Primitive> {
     match body {
-        Lambda::Lprim(PrimInfo { primitive, .. }) => Some(primitive.clone()),
+        Lambda::Lprim(__prim0) => {
+            let PrimInfo { primitive, .. } = __prim0.as_ref();
+            Some(primitive.clone())
+        }
         _ => None,
     }
 }
@@ -914,12 +947,12 @@ fn make_lapply(
     ap_info: ApInfo,
     ap_transformed_jsx: bool,
 ) -> Lambda {
-    Lambda::Lapply(Apply {
+    Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(func),
         ap_args: args,
         ap_info,
         ap_transformed_jsx,
-    })
+    }))
 }
 
 fn bool_const(value: bool) -> Lambda {
@@ -1192,11 +1225,14 @@ fn collapse_module_alias(fields: &[String], args: &[Lambda]) -> Option<Lambda> {
 }
 
 fn module_field_access(arg: &Lambda) -> Option<(String, i32, Lambda)> {
-    let Lambda::Lprim(PrimInfo {
+    let Lambda::Lprim(__prim200) = arg else {
+        return None;
+    };
+    let PrimInfo {
         primitive: Primitive::Pfield(index, FieldDbgInfo::Module { name }),
         args,
         ..
-    }) = arg
+    } = __prim200.as_ref()
     else {
         return None;
     };
@@ -1397,7 +1433,7 @@ fn fold_offset_switch_alias(id: &Ident, value: &Lambda, body: &Lambda) -> Option
 
     Some(Lambda::Lswitch(
         Box::new(matcher.clone()),
-        LambdaSwitch {
+        Box::new(LambdaSwitch {
             sw_consts_full: switch.sw_consts_full,
             sw_consts: switch
                 .sw_consts
@@ -1415,7 +1451,7 @@ fn fold_offset_switch_alias(id: &Ident, value: &Lambda, body: &Lambda) -> Option
             sw_blocks: Vec::new(),
             sw_failaction: switch.sw_failaction.clone(),
             sw_dispatch: switch.sw_dispatch.clone(),
-        },
+        }),
     ))
 }
 
@@ -1678,6 +1714,7 @@ fn max_ident_stamp(raw: &RawLambda) -> i32 {
 
     fn visit_raw(max_stamp: &mut i32, raw: &RawLambda) {
         match raw {
+            RawLambda::Lshared(inner) => visit_raw(max_stamp, inner),
             RawLambda::Lvar(id) | RawLambda::LglobalModule(id, _) => visit_ident(max_stamp, id),
             RawLambda::Lconst(_) => {}
             RawLambda::Lapply(apply) => {
@@ -1853,12 +1890,12 @@ mod tests {
     fn lowers_unit_constructor_pointer_to_unit_constant() {
         let raw = RawLambda::const_(Constant::Int {
             i: 0,
-            comment: Some(PointerInfo::Constructor(ConstructorTag {
+            comment: Some(Box::new(PointerInfo::Constructor(ConstructorTag {
                 name: "()".to_string(),
                 const_: 1,
                 non_const: 0,
                 runtime_tag: None,
-            })),
+            }))),
         });
 
         assert!(matches!(
@@ -1871,7 +1908,7 @@ mod tests {
     fn lowers_apply_to_uncurry_status() {
         let func = Ident::create_local("f");
         let arg = Ident::create_local("x");
-        let raw = RawLambda::Lapply(RawApply {
+        let raw = RawLambda::Lapply(Box::new(RawApply {
             ap_func: Box::new(RawLambda::var(func)),
             ap_args: vec![RawLambda::var(arg)],
             ap_info: ApInfo {
@@ -1880,7 +1917,7 @@ mod tests {
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
-        });
+        }));
 
         let lowered = lower_to_lambda(raw);
         let Lambda::Lapply(apply) = lowered else {
@@ -1895,7 +1932,7 @@ mod tests {
         let prim1 = Ident::create_local("prim1");
         let lhs = Ident::create_local("lhs");
         let rhs = Ident::create_local("rhs");
-        let raw = RawLambda::Lapply(RawApply {
+        let raw = RawLambda::Lapply(Box::new(RawApply {
             ap_func: Box::new(RawLambda::function_(
                 2,
                 vec![prim0.clone(), prim1.clone()],
@@ -1913,7 +1950,7 @@ mod tests {
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
-        });
+        }));
 
         let lowered = lower_to_lambda(raw);
         let Lambda::Lprim(info) = lowered else {
@@ -2038,7 +2075,7 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: String::new(),
                 arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
-                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::ObjCreate,
                     spec: None,
                     obj_params: Some(vec![crate::lambda::lam_primitive::ExternalObjSpec {
@@ -2049,7 +2086,7 @@ mod tests {
                     }]),
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: None,
-                },
+                }),
                 dynamic_import: false,
                 transformed_jsx: false,
             },
@@ -2070,7 +2107,7 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: String::new(),
                 arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
-                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
                     obj_params: Some(vec![crate::lambda::lam_primitive::ExternalObjSpec {
@@ -2081,7 +2118,7 @@ mod tests {
                     }]),
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: None,
-                },
+                }),
                 dynamic_import: false,
                 transformed_jsx: false,
             },
@@ -2143,13 +2180,13 @@ mod tests {
                     crate::lambda::lam_primitive::ExternalArgSpec::dummy(),
                     crate::lambda::lam_primitive::ExternalArgSpec::dummy(),
                 ],
-                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
                     obj_params: None,
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: None,
-                },
+                }),
                 dynamic_import: false,
                 transformed_jsx: false,
             },
@@ -2173,7 +2210,7 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: String::new(),
                 arg_types: Vec::new(),
-                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
                     obj_params: None,
@@ -2182,7 +2219,7 @@ mod tests {
                         s: "hello".to_string(),
                         delim: Some(crate::lambda::lam_constant::StringDelim::StarJ),
                     }),
-                },
+                }),
                 dynamic_import: false,
                 transformed_jsx: false,
             },
@@ -2202,13 +2239,13 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: "get".to_string(),
                 arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
-                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
                     obj_params: None,
                     return_wrapper: ExternalReturnWrapper::NullToOpt,
                     inline_constant: None,
-                },
+                }),
                 dynamic_import: false,
                 transformed_jsx: false,
             },
@@ -2235,13 +2272,13 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: "get".to_string(),
                 arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
-                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
                     obj_params: None,
                     return_wrapper: ExternalReturnWrapper::NullUndefinedToOpt,
                     inline_constant: None,
-                },
+                }),
                 dynamic_import: false,
                 transformed_jsx: false,
             },
@@ -2259,7 +2296,7 @@ mod tests {
     fn lowers_shape_none_to_none_constant() {
         let raw = RawLambda::const_(Constant::Int {
             i: 0,
-            comment: Some(PointerInfo::ShapeNone),
+            comment: Some(Box::new(PointerInfo::ShapeNone)),
         });
 
         assert!(matches!(
@@ -2272,20 +2309,20 @@ mod tests {
     fn keeps_constructor_named_none_without_shape_info() {
         let raw = RawLambda::const_(Constant::Int {
             i: 0,
-            comment: Some(PointerInfo::Constructor(ConstructorTag {
+            comment: Some(Box::new(PointerInfo::Constructor(ConstructorTag {
                 name: "None".to_string(),
                 const_: 1,
                 non_const: 1,
                 runtime_tag: None,
-            })),
+            }))),
         });
 
         assert!(matches!(
             lower_to_lambda(raw),
             Lambda::Lconst(Constant::Int {
                 i: 0,
-                comment: Some(PointerInfo::Constructor(_)),
-            })
+                comment: Some(comment),
+            }) if matches!(*comment, PointerInfo::Constructor(_))
         ));
     }
 
@@ -2406,7 +2443,7 @@ mod tests {
     fn lowers_polyvariant_hash_to_pointer_name() {
         let lowered = lower_to_lambda(RawLambda::const_(Constant::Int {
             i: crate::types::btype::hash_variant("One"),
-            comment: Some(PointerInfo::PolyVariant("One".to_string())),
+            comment: Some(Box::new(PointerInfo::PolyVariant("One".to_string()))),
         }));
 
         assert!(matches!(
@@ -2422,7 +2459,7 @@ mod tests {
             vec![
                 RawLambda::const_(Constant::Int {
                     i: crate::types::btype::hash_variant("V"),
-                    comment: Some(PointerInfo::PolyVariant("V".to_string())),
+                    comment: Some(Box::new(PointerInfo::PolyVariant("V".to_string()))),
                 }),
                 RawLambda::const_(Constant::int(1)),
             ],
@@ -2444,14 +2481,14 @@ mod tests {
     #[test]
     fn lowers_constant_polyvariant_block_payload_tag_from_name() {
         let lowered = lower_to_lambda(RawLambda::const_(Constant::Block {
-            tag_info: TagInfo::PolyVar("Pair".to_string()),
+            tag_info: Box::new(TagInfo::PolyVar("Pair".to_string())),
             elements: vec![
                 Constant::Int {
                     i: crate::types::btype::hash_variant("Pair"),
-                    comment: Some(PointerInfo::PolyVariant("Pair".to_string())),
+                    comment: Some(Box::new(PointerInfo::PolyVariant("Pair".to_string()))),
                 },
                 Constant::Block {
-                    tag_info: TagInfo::Tuple,
+                    tag_info: Box::new(TagInfo::Tuple),
                     elements: vec![
                         Constant::Int {
                             i: 1,
@@ -2473,8 +2510,9 @@ mod tests {
                     elements.as_slice(),
                     [
                         Constant::String { s, delim: None },
-                        Constant::Block { tag_info: TagInfo::Tuple, elements }
+                        Constant::Block { tag_info, elements }
                     ] if s == "Pair"
+                        && matches!(**tag_info, TagInfo::Tuple)
                         && matches!(
                             elements.as_slice(),
                             [
@@ -2490,20 +2528,20 @@ mod tests {
     fn lowers_constructor_runtime_int_tag() {
         let lowered = lower_to_lambda(RawLambda::const_(Constant::Int {
             i: 0,
-            comment: Some(PointerInfo::Constructor(ConstructorTag {
+            comment: Some(Box::new(PointerInfo::Constructor(ConstructorTag {
                 name: "One1".to_string(),
                 const_: 3,
                 non_const: 0,
                 runtime_tag: Some(ConstructorRuntimeTag::Int(1)),
-            })),
+            }))),
         }));
 
         assert!(matches!(
             lowered,
             Lambda::Lconst(Constant::Int {
                 i: 1,
-                comment: Some(PointerInfo::Constructor(_)),
-            })
+                comment: Some(comment),
+            }) if matches!(*comment, PointerInfo::Constructor(_))
         ));
     }
 
@@ -2518,12 +2556,12 @@ mod tests {
                 }),
                 RawLambda::const_(Constant::Int {
                     i: 1,
-                    comment: Some(PointerInfo::Constructor(ConstructorTag {
+                    comment: Some(Box::new(PointerInfo::Constructor(ConstructorTag {
                         name: "B".to_string(),
                         const_: 2,
                         non_const: 0,
                         runtime_tag: Some(ConstructorRuntimeTag::Int(2)),
-                    })),
+                    }))),
                 }),
             ],
             Location::none(),
@@ -2542,7 +2580,7 @@ mod tests {
     fn marks_switch_full_when_names_cover_all_cases() {
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(RawLambda::var(Ident::create_local("v"))),
-            RawLambdaSwitch {
+            Box::new(RawLambdaSwitch {
                 sw_numconsts: 1,
                 sw_consts_full: false,
                 sw_consts: vec![(
@@ -2570,7 +2608,7 @@ mod tests {
                         has_other_literal: true,
                     },
                 ),
-            },
+            }),
             Location::none(),
         ));
 
@@ -2585,7 +2623,7 @@ mod tests {
     fn keeps_const_only_switch_consts_full_from_input_without_names() {
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(RawLambda::var(Ident::create_local("v"))),
-            RawLambdaSwitch {
+            Box::new(RawLambdaSwitch {
                 sw_numconsts: 3,
                 sw_consts_full: false,
                 sw_consts: vec![
@@ -2603,7 +2641,7 @@ mod tests {
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            },
+            }),
             Location::none(),
         ));
 
@@ -2688,7 +2726,7 @@ mod tests {
 
     #[test]
     fn lowers_apply_arguments_before_function_for_exit_aliases() {
-        let lowered = lower_to_lambda(RawLambda::Lapply(RawApply {
+        let lowered = lower_to_lambda(RawLambda::Lapply(Box::new(RawApply {
             ap_func: Box::new(RawLambda::LstaticRaise(7, Vec::new())),
             ap_args: vec![raw_exit_alias(7, 8)],
             ap_info: ApInfo {
@@ -2697,7 +2735,7 @@ mod tests {
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
-        }));
+        })));
 
         let Lambda::Lapply(apply) = lowered else {
             panic!("expected apply");
@@ -2716,7 +2754,7 @@ mod tests {
     fn lowers_switch_cases_before_scrutinee_for_exit_aliases() {
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(raw_exit_alias(7, 8)),
-            RawLambdaSwitch {
+            Box::new(RawLambdaSwitch {
                 sw_numconsts: 1,
                 sw_consts_full: true,
                 sw_consts: vec![(
@@ -2728,7 +2766,7 @@ mod tests {
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            },
+            }),
             Location::none(),
         ));
 
@@ -2749,7 +2787,7 @@ mod tests {
     fn lowers_switch_failaction_before_scrutinee_for_exit_aliases() {
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(RawLambda::LstaticRaise(7, Vec::new())),
-            RawLambdaSwitch {
+            Box::new(RawLambdaSwitch {
                 sw_numconsts: 0,
                 sw_consts_full: false,
                 sw_consts: Vec::new(),
@@ -2758,7 +2796,7 @@ mod tests {
                 sw_blocks: Vec::new(),
                 sw_failaction: Some(Box::new(raw_exit_alias(7, 8))),
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            },
+            }),
             Location::none(),
         ));
 
@@ -2780,7 +2818,7 @@ mod tests {
         let scrutinee = Ident::create_local("scrutinee");
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(RawLambda::var(scrutinee.clone())),
-            RawLambdaSwitch {
+            Box::new(RawLambdaSwitch {
                 sw_numconsts: 2,
                 sw_consts_full: true,
                 sw_consts: vec![
@@ -2824,7 +2862,7 @@ mod tests {
                         has_other_literal: true,
                     },
                 ),
-            },
+            }),
             Location::none(),
         ));
 
@@ -2856,7 +2894,7 @@ mod tests {
             Box::new(RawLambda::LstaticRaise(exit, Vec::new())),
             Box::new(RawLambda::Lswitch(
                 Box::new(RawLambda::var(scrutinee.clone())),
-                RawLambdaSwitch {
+                Box::new(RawLambdaSwitch {
                     sw_numconsts: 3,
                     sw_consts_full: false,
                     sw_consts: vec![
@@ -2878,7 +2916,7 @@ mod tests {
                     sw_blocks: Vec::new(),
                     sw_failaction: None,
                     sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-                },
+                }),
                 loc,
             )),
         ));
@@ -3018,13 +3056,13 @@ mod tests {
                 Primitive::PjsCall {
                     prim_name: "default".to_string(),
                     arg_types: Vec::new(),
-                    ffi: ExternalFfiSpec {
+                    ffi: Box::new(ExternalFfiSpec {
                         kind: ExternalFfiKind::Default,
                         spec: None,
                         obj_params: None,
                         return_wrapper: ExternalReturnWrapper::Identity,
                         inline_constant: None,
-                    },
+                    }),
                     dynamic_import: false,
                     transformed_jsx: false,
                 },

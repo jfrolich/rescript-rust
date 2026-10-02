@@ -2147,7 +2147,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             }
             PatternDesc::Tpat_construct(lid, cstr, args) => Desc::Construct {
                 lid: Some(*lid),
-                cstr: Cow::Owned(cstr.clone()),
+                cstr: Cow::Owned((**cstr).clone()),
                 args: args.iter().map(|arg| self.import_owned(arg)).collect(),
             },
             PatternDesc::Tpat_variant(label, arg, _) => Desc::Variant {
@@ -2159,7 +2159,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     .iter()
                     .map(|(lid, lbl, p, opt)| Field {
                         lid: Some(*lid),
-                        lbl: Cow::Owned(lbl.clone()),
+                        lbl: Cow::Owned((**lbl).clone()),
                         pat: self.import_owned(p),
                         opt: *opt,
                     })
@@ -2217,7 +2217,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 });
                 PatternDesc::Tpat_construct(
                     lid,
-                    cstr.into_owned(),
+                    std::sync::Arc::new(cstr.into_owned()),
                     args.into_iter().map(|p| self.export(p)).collect(),
                 )
             }
@@ -2248,7 +2248,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                                 txt: placeholder,
                                 loc: LocIdx::none(),
                             });
-                            (lid, field.lbl.into_owned(), self.export(field.pat), field.opt)
+                            (lid, std::sync::Arc::new(field.lbl.into_owned()), self.export(field.pat), field.opt)
                         })
                         .collect(),
                     closed,

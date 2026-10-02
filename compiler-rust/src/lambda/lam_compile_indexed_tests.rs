@@ -56,7 +56,7 @@ fn assign(owner: &mut IndexedJsConsumer<'_>, id: &Ident, node: NodeId) -> Block 
 }
 
 fn external_application(args: Vec<Lambda>, status: ApplyStatus, jsx: bool) -> Lambda {
-    Lambda::Lapply(Apply {
+    Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::prim(
             Primitive::Pfield(0, FieldDbgInfo::Module { name: "run".into() }),
             vec![Lambda::global_module(
@@ -72,7 +72,7 @@ fn external_application(args: Vec<Lambda>, status: ApplyStatus, jsx: bool) -> La
             status,
         },
         ap_transformed_jsx: jsx,
-    })
+    }))
 }
 
 #[test]
@@ -256,7 +256,7 @@ fn normal_calls_visit_arguments_then_function_rtl_but_emit_source_order() {
     let mut compiler =
         LambdaCompiler::with_shared_generator_and_options(generator, None, false, true, false);
     let mut context = IndexedLambdaContext::from_lambda(
-        Lambda::Lapply(Apply {
+        Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(Lambda::var(Ident::new("f", 41, IdentFlags::NONE))),
             ap_args: vec![
                 Lambda::const_(Constant::int(1)),
@@ -268,7 +268,7 @@ fn normal_calls_visit_arguments_then_function_rtl_but_emit_source_order() {
                 inlined: InlineAttribute::Default,
             },
             ap_transformed_jsx: false,
-        }),
+        })),
         [],
     );
     let root = context.current_root();
@@ -379,11 +379,11 @@ fn indexed_for_of_uses_full_flag_membership_and_allocates_before_iterable() {
 #[test]
 fn indexed_for_compiles_finish_then_start_and_removes_native_minus_one_shape() {
     let mut compiler = LambdaCompiler::new();
-    let finish = Lambda::Lprim(PrimInfo {
+    let finish = Lambda::Lprim(Box::new(PrimInfo {
         primitive: Primitive::Poffsetint(-1),
         args: vec![Lambda::var(Ident::new("finish", 42, IdentFlags::NONE))],
         loc: Location::none(),
-    });
+    }));
     let mut context = IndexedLambdaContext::from_lambda(
         Lambda::Lfor(
             Ident::new("i", 43, IdentFlags::NONE),
@@ -514,7 +514,7 @@ fn indexed_function_keeps_attributes_and_restores_outer_control_state() {
     else {
         panic!("function")
     };
-    assert_eq!(directive.as_deref(), Some("use server"));
+    assert_eq!(directive.as_deref().map(String::as_str), Some("use server"));
     assert_eq!(params[0].name(), id.name());
     assert_eq!(params[0].stamp(), id.stamp());
     assert_eq!(params[0].flags(), id.flags());
@@ -584,7 +584,7 @@ fn indexed_short_circuit_preserves_distinct_native_nonreturn_continuations() {
                 )
             };
             let mut context = IndexedLambdaContext::from_lambda(
-                Lambda::Lprim(PrimInfo {
+                Lambda::Lprim(Box::new(PrimInfo {
                     primitive: if and {
                         Primitive::Psequand
                     } else {
@@ -592,7 +592,7 @@ fn indexed_short_circuit_preserves_distinct_native_nonreturn_continuations() {
                     },
                     args: vec![branch("left"), branch("right")],
                     loc: Location::none(),
-                }),
+                })),
                 [],
             );
             let root = context.current_root();
@@ -639,7 +639,7 @@ fn indexed_short_circuit_return_rewrites_once_and_keeps_the_same_continuation() 
     for and in [true, false] {
         let mut compiler = LambdaCompiler::new();
         let mut context = IndexedLambdaContext::from_lambda(
-            Lambda::Lprim(PrimInfo {
+            Lambda::Lprim(Box::new(PrimInfo {
                 primitive: if and {
                     Primitive::Psequand
                 } else {
@@ -650,7 +650,7 @@ fn indexed_short_circuit_return_rewrites_once_and_keeps_the_same_continuation() 
                     Lambda::var(Ident::new("right", 42, IdentFlags::NONE)),
                 ],
                 loc: Location::none(),
-            }),
+            })),
             [],
         );
         let root = context.current_root();

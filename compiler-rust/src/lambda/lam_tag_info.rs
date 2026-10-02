@@ -15,7 +15,7 @@ pub enum TagInfo {
     Constructor {
         name: String,
         num_nonconst: i32,
-        runtime: crate::types::BlockRuntime,
+        runtime: Box<crate::types::BlockRuntime>,
     },
 
     /// Inlined record (record inside a variant)
@@ -25,7 +25,7 @@ pub enum TagInfo {
         fields: Vec<(String, bool)>, // (name, optional)
         logical_field_count: Option<usize>,
         mutable_flag: MutableFlag,
-        runtime: crate::types::BlockRuntime,
+        runtime: Box<crate::types::BlockRuntime>,
     },
 
     /// Tuple
@@ -102,14 +102,14 @@ impl TagInfo {
     pub fn constructor(name: impl Into<String>, num_nonconst: i32) -> Self {
         let name = name.into();
         TagInfo::Constructor {
-            runtime: crate::types::BlockRuntime {
+            runtime: Box::new(crate::types::BlockRuntime {
                 tag: crate::types::VariantTag {
                     name: name.clone(),
                     tag_type: None,
                 },
                 tag_name: None,
                 untagged: false,
-            },
+            }),
             name,
             num_nonconst,
         }

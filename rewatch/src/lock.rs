@@ -176,10 +176,12 @@ pub fn get(kind: LockKind, folder: &str) -> Lock {
     loop {
         match guard_file.try_lock_exclusive() {
             Ok(()) => {
+                // The exclusive lock itself is kernel state on the open file;
+                // the PID written here is informational, so it is not synced
+                // (on macOS `sync_data` is a full-device flush).
                 if let Err(e) = guard_file.set_len(0).and_then(|()| {
                     guard_file.seek(SeekFrom::Start(0))?;
-                    guard_file.write_all(pid.to_string().as_bytes())?;
-                    guard_file.sync_data()
+                    guard_file.write_all(pid.to_string().as_bytes())
                 }) {
                     return Lock::Error(Error::WritingLockfile(e));
                 }

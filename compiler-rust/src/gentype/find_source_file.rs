@@ -33,7 +33,7 @@ pub fn implementation(arena: &ParseArena, items: &[StructureItem]) -> Option<Str
 pub fn transform_to_absolute_path(path: Option<String>) -> Option<String> {
     path.map(|path| {
         if Path::new(&path).is_relative() {
-            std::env::current_dir()
+            crate::process_cwd::current_dir()
                 .unwrap_or_else(|_| PathBuf::new())
                 .join(path)
                 .to_string_lossy()

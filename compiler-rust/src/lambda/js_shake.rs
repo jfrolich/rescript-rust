@@ -4,7 +4,7 @@
 //! of the program block. Also includes free variable analysis and side-effect
 //! checking for JS IR statements and expressions.
 
-use std::collections::HashSet;
+use ahash::AHashSet as HashSet;
 
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, Kind, UsedStats};
@@ -1852,7 +1852,7 @@ fn js_statement_no_side_effects(stmt: &Statement) -> bool {
             js_expr_no_side_effects(cond) && js_block_no_side_effects(body)
         }
         StatementDesc::ForRange(_, start, finish, _, _, body) => {
-            start.as_ref().is_none_or(js_expr_no_side_effects)
+            start.as_deref().is_none_or(js_expr_no_side_effects)
                 && js_expr_no_side_effects(finish)
                 && js_block_no_side_effects(body)
         }

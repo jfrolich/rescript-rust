@@ -216,7 +216,7 @@ impl<'a> Printtyp<'a> {
         if !(id.is_persistent() && matches!(id.name(), "Pervasives" | "Stdlib")) {
             return false;
         }
-        if let Some((_, found)) = self.signature_types.iter().rev().find(|(name, _)| name == s) {
+        if let Some((_, found)) = self.signature_types.iter().rev().find(|(name, _)| name == s.as_str()) {
             return path.same(found);
         }
         match &self.printing_env_lookup_type {
@@ -998,7 +998,7 @@ impl<'a> Printtyp<'a> {
                     match &row.row_name {
                         Some((Path::Pident(id2), _)) if id2.same(id) => self
                             .ctx
-                            .new_generic_type(TypeDesc::Tvariant(RowDesc { row_name: None, ..row })),
+                            .new_generic_type(TypeDesc::Tvariant(Box::new(RowDesc { row_name: None, ..row }))),
                         _ => ty,
                     }
                 }
@@ -2348,11 +2348,11 @@ impl<'a> Printtyp<'a> {
         let row_more = self.ctx.alloc_type_at_level(TypeDesc::Tvar(None), more_level);
         let level = self.ctx.get_level(t);
         self.ctx.alloc_type_at_level(
-            TypeDesc::Tvariant(RowDesc {
+            TypeDesc::Tvariant(Box::new(RowDesc {
                 row_name: None,
                 row_more,
                 ..row
-            }),
+            })),
             level,
         )
     }
@@ -2370,7 +2370,7 @@ impl<'a> Printtyp<'a> {
                 let more_desc = (*self.ctx.get_desc(more)).clone();
                 let row_more = self.ctx.alloc_type_at_level(more_desc, self.ctx.get_level(more));
                 self.ctx
-                    .alloc_type_at_level(TypeDesc::Tvariant(RowDesc { row_more, ..row }), level)
+                    .alloc_type_at_level(TypeDesc::Tvariant(Box::new(RowDesc { row_more, ..row })), level)
             }
             TypeDesc::Tobject { fields, name } => {
                 // `newty2 ty.level` reads the shadowed `ty`: the fields' level.

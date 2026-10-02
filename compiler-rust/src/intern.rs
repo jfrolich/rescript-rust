@@ -30,7 +30,6 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // ============================================================================
 // String Index
@@ -71,11 +70,14 @@ impl StrIdx {
 /// StrIdx with its own `Box<str>` allocation.
 #[derive(Debug)]
 pub struct Interner {
-    /// Maps string content to StrIdx — used by `intern()` for deduplication.
-    /// Only `intern()` reads/writes this map.
-    map: HashMap<String, StrIdx>,
-    /// Stores the actual strings, indexed by StrIdx
-    strings: Vec<Box<str>>,
+    /// `StrIdx` of each string deduplicated by `intern()`, keyed by content.
+    /// Only `intern()`/`intern_owned()` read or write this table.
+    table: hashbrown::HashTable<StrIdx>,
+    hasher: ahash::RandomState,
+    /// All strings back to back; `spans[idx]` is the byte range of `idx`.
+    /// One buffer instead of an allocation per string.
+    bytes: String,
+    spans: Vec<(u32, u32)>,
 }
 
 impl Default for Interner {
@@ -84,50 +86,72 @@ impl Default for Interner {
     }
 }
 
+fn interner_hasher() -> ahash::RandomState {
+    ahash::RandomState::with_seeds(
+        0x243f_6a88_85a3_08d3,
+        0x1319_8a2e_0370_7344,
+        0xa409_3822_299f_31d0,
+        0x082e_fa98_ec4e_6c89,
+    )
+}
+
 impl Interner {
     /// Create a new empty interner.
     pub fn new() -> Self {
         Self {
-            map: HashMap::new(),
-            strings: Vec::new(),
+            table: hashbrown::HashTable::new(),
+            hasher: interner_hasher(),
+            bytes: String::new(),
+            spans: Vec::new(),
         }
     }
 
     /// Create a new interner with pre-allocated capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            map: HashMap::with_capacity(capacity),
-            strings: Vec::with_capacity(capacity),
+            table: hashbrown::HashTable::with_capacity(capacity),
+            hasher: interner_hasher(),
+            bytes: String::with_capacity(capacity * 8),
+            spans: Vec::with_capacity(capacity),
         }
+    }
+
+    #[inline]
+    fn push_str(&mut self, s: &str) -> StrIdx {
+        let idx = StrIdx(self.spans.len() as u32);
+        let start = self.bytes.len();
+        self.bytes.push_str(s);
+        let end = self.bytes.len();
+        assert!(end <= u32::MAX as usize, "interned strings exceed 4 GiB");
+        self.spans.push((start as u32, end as u32));
+        idx
     }
 
     /// Intern a string, returning its index.
     ///
-    /// If the string was previously interned, returns the existing index.
-    /// Otherwise, stores the string and returns a new index.
+    /// If the string was already interned with `intern()`, returns the existing index.
     pub fn intern(&mut self, s: &str) -> StrIdx {
-        if let Some(&idx) = self.map.get(s) {
+        let hash = self.hasher.hash_one(s);
+        let (bytes, spans) = (&self.bytes, &self.spans);
+        let span_str = |idx: StrIdx| {
+            let (start, end) = spans[idx.0 as usize];
+            &bytes[start as usize..end as usize]
+        };
+        if let Some(&idx) = self.table.find(hash, |&idx| span_str(idx) == s) {
             return idx;
         }
-
-        let idx = StrIdx(self.strings.len() as u32);
-        self.map.insert(s.to_owned(), idx);
-        self.strings.push(Box::from(s));
+        let idx = self.push_str(s);
+        let (bytes, spans, hasher) = (&self.bytes, &self.spans, &self.hasher);
+        self.table.insert_unique(hash, idx, |&idx| {
+            let (start, end) = spans[idx.0 as usize];
+            hasher.hash_one(&bytes[start as usize..end as usize])
+        });
         idx
     }
 
     /// Intern an owned string, returning its index.
-    ///
-    /// This avoids an allocation if the string is not already interned.
     pub fn intern_owned(&mut self, s: String) -> StrIdx {
-        if let Some(&idx) = self.map.get(s.as_str()) {
-            return idx;
-        }
-
-        let idx = StrIdx(self.strings.len() as u32);
-        self.strings.push(s.as_str().into());
-        self.map.insert(s, idx);
-        idx
+        self.intern(&s)
     }
 
     /// Push a string without deduplication, always creating a new entry.
@@ -138,24 +162,20 @@ impl Interner {
     /// For static strings that should be shared, use `intern()` instead.
     /// For dynamic strings that should have unique indices, use `push_interned()`.
     pub fn push(&mut self, s: String) -> StrIdx {
-        let idx = StrIdx(self.strings.len() as u32);
-        self.strings.push(s.into_boxed_str());
-        // Note: We don't add to the map, so this string won't be found by intern()
-        idx
+        // Not added to the table, so this string won't be found by intern().
+        self.push_str(&s)
     }
 
     /// Push a string with a unique StrIdx.
     ///
     /// Like `push()`, this always returns a NEW StrIdx (unique for marshal
-    /// identity). Takes a `&str` reference and allocates a fresh `Box<str>`.
+    /// identity).
     ///
     /// Use this for parser identifiers where each occurrence needs a unique
     /// StrIdx (for marshal parity).
     #[inline]
     pub fn push_interned(&mut self, s: &str) -> StrIdx {
-        let idx = StrIdx(self.strings.len() as u32);
-        self.strings.push(Box::from(s));
-        idx
+        self.push_str(s)
     }
 
     /// Get the string for an index.
@@ -164,28 +184,54 @@ impl Interner {
     ///
     /// Panics if the index is invalid.
     #[inline]
+    #[inline]
     pub fn get(&self, idx: StrIdx) -> &str {
-        &self.strings[idx.0 as usize]
+        let (start, end) = self.spans[idx.0 as usize];
+        &self.bytes[start as usize..end as usize]
     }
 
     /// Get the string for an index, returning None if invalid.
     pub fn try_get(&self, idx: StrIdx) -> Option<&str> {
-        self.strings.get(idx.0 as usize).map(|s| &**s)
+        let &(start, end) = self.spans.get(idx.0 as usize)?;
+        Some(&self.bytes[start as usize..end as usize])
     }
 
-    /// Return the number of unique strings interned.
+    /// Return the number of strings (interned or pushed).
     pub fn len(&self) -> usize {
-        self.strings.len()
+        self.spans.len()
     }
 
     /// Reserve storage for additional strings without changing existing indices.
     pub fn reserve(&mut self, additional: usize) {
-        self.strings.reserve(additional);
+        self.spans.reserve(additional);
     }
 
     /// Check if the interner is empty.
     pub fn is_empty(&self) -> bool {
-        self.strings.is_empty()
+        self.spans.is_empty()
+    }
+
+    /// Copy of every string by index, without the deduplication table.
+    pub fn snapshot(&self) -> InternedStrings {
+        InternedStrings {
+            bytes: self.bytes.clone(),
+            spans: self.spans.clone(),
+        }
+    }
+}
+
+/// Read-only copy of an `Interner`'s strings (see `Interner::snapshot`).
+#[derive(Debug, Clone, Default)]
+pub struct InternedStrings {
+    bytes: String,
+    spans: Vec<(u32, u32)>,
+}
+
+impl InternedStrings {
+    /// The string at `idx`, if the snapshot has it.
+    pub fn get(&self, idx: StrIdx) -> Option<&str> {
+        let &(start, end) = self.spans.get(idx.0 as usize)?;
+        Some(&self.bytes[start as usize..end as usize])
     }
 }
 

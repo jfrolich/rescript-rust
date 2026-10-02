@@ -41,13 +41,13 @@ use std::sync::Arc;
 /// - `typed_arena::Arena<TypeExpr>` gives stable addresses for allocated nodes
 /// - The pointer Vec only grows (push), never shrinks or reorders
 /// - Individual TypeExpr.desc RefCells are independent
-struct TypeArena {
+pub(crate) struct TypeArena {
     arena: typed_arena::Arena<TypeExpr>,
     types: std::cell::UnsafeCell<Vec<NonNull<TypeExpr>>>,
 }
 
 impl TypeArena {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         TypeArena {
             arena: typed_arena::Arena::new(),
             types: std::cell::UnsafeCell::new(Vec::new()),
@@ -56,16 +56,28 @@ impl TypeArena {
 
     #[inline]
     fn get(&self, r: TypeExprRef) -> &TypeExpr {
-        // Safety: `r` is an arena index returned by `push`, and `types` only
-        // grows append-only after the pointed `TypeExpr` has been arena
+        self.get_at(r.index())
+    }
+
+    /// Node at raw arena position `idx` (local index or store index; the
+    /// caller has already stripped the store tag).
+    #[inline]
+    pub(crate) fn get_at(&self, idx: usize) -> &TypeExpr {
+        // Safety: `idx` is an arena index returned by `push_raw`, and `types`
+        // only grows append-only after the pointed `TypeExpr` has been arena
         // allocated.
         unsafe {
             let types = &*self.types.get();
-            types[r.index()].as_ref()
+            types[idx].as_ref()
         }
     }
 
     fn push(&self, ty: TypeExpr) -> TypeExprRef {
+        TypeExprRef::from_usize(self.push_raw(ty))
+    }
+
+    /// Append a node and return its raw arena position.
+    pub(crate) fn push_raw(&self, ty: TypeExpr) -> usize {
         let ptr = NonNull::from(self.arena.alloc(ty));
         // Safety: `types` is an append-only side table of stable arena
         // pointers. `UnsafeCell` is used so `TypeContext` can allocate through
@@ -74,17 +86,18 @@ impl TypeArena {
             let types = &mut *self.types.get();
             let idx = types.len();
             types.push(ptr);
-            TypeExprRef::from_usize(idx)
+            idx
         }
     }
 
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         // Safety: immutable length read from the append-only side table.
         unsafe { (*self.types.get()).len() }
     }
 }
 
-/// Type alias for the desc borrow returned by get_desc().
+/// Borrow of a type descriptor. Shared dependency nodes are borrowed through
+/// `TypeContext::shared_pages` (`Ref::map`), so every borrow is a `Ref`.
 pub type TypeDescRef<'a> = std::cell::Ref<'a, TypeDesc>;
 
 /// Cloned snapshot of a type descriptor, for cases where the caller
@@ -147,16 +160,18 @@ struct ActiveTypeSnapshot {
 }
 
 impl ActiveTypeSnapshot {
+    /// Nodes allocated since the snapshot are dropped with it; worker-store
+    /// and shared nodes always predate it.
     fn records_type(self, ty: TypeExprRef) -> bool {
-        ty.index() < self.type_len
+        ty.is_store() || ty.index() < self.type_len
     }
 
     fn records_row_field(self, row: RowFieldRef) -> bool {
-        row.index() < self.row_field_len
+        row.is_store() || row.index() < self.row_field_len
     }
 
     fn records_abbrev(self, memo: AbbrevMemoRef) -> bool {
-        memo.index() < self.abbrev_len
+        memo.is_store() || memo.index() < self.abbrev_len
     }
 }
 
@@ -214,22 +229,39 @@ impl TypeMutationJournal {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct QualifiedModuleComponentsCacheKey {
-    path: Path,
+    // OCaml compiler/ml/path.ml:20-24 ignores `Pdot` positions in
+    // `Path.same`; component lookup in env.ml:781-793 keys module identity by
+    // that path equality while still carrying positions in the selected access
+    // path. `SamePathKey` compares and hashes with that equality directly.
+    path: SamePathKey,
     env_id: Option<u64>,
 }
 
 impl QualifiedModuleComponentsCacheKey {
     pub(crate) fn new(path: Path, env_id: Option<u64>) -> Self {
         Self {
-            path: normalize_component_cache_path(path),
+            path: SamePathKey(path),
             env_id,
         }
+    }
+
+    /// Whether the view for this key is the same in every compilation: a
+    /// path rooted at a persistent unit, not scoped to one environment.
+    pub(crate) fn is_worker_shareable(&self) -> bool {
+        fn persistent_root(path: &Path) -> bool {
+            match path {
+                Path::Pident(id) => id.is_persistent(),
+                Path::Pdot(parent, _, _) => persistent_root(parent),
+                Path::Papply(_, _) => false,
+            }
+        }
+        self.env_id.is_none() && persistent_root(&self.path.0)
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct QualifiedRecordLabelCacheKey {
-    path: Path,
+    path: SamePathKey,
     env_id: u64,
     lbl_pos: i32,
 }
@@ -237,7 +269,7 @@ struct QualifiedRecordLabelCacheKey {
 impl QualifiedRecordLabelCacheKey {
     fn new(path: Path, env_id: u64, lbl_pos: i32) -> Self {
         Self {
-            path: normalize_component_cache_path(path),
+            path: SamePathKey(path),
             env_id,
             lbl_pos,
         }
@@ -246,7 +278,7 @@ impl QualifiedRecordLabelCacheKey {
 
 #[derive(Clone, Debug)]
 pub(crate) struct RecordLabelDescriptionSummary {
-    label_positions: Arc<ahash::AHashMap<String, usize>>,
+    label_positions: Arc<crate::fast_hash::AHashMap<String, usize>>,
     pub(crate) mandatory_count: usize,
     pub(crate) has_optional: bool,
     pub(crate) has_dotdotdot: bool,
@@ -255,7 +287,7 @@ pub(crate) struct RecordLabelDescriptionSummary {
 
 impl RecordLabelDescriptionSummary {
     pub(crate) fn from_labels(labels: &[super::decl::LabelDescription]) -> Self {
-        let mut label_positions = ahash::AHashMap::with_capacity(labels.len());
+        let mut label_positions = crate::fast_hash::AHashMap::with_capacity(labels.len());
         let mut mandatory_count = 0;
         let mut has_optional = false;
         let mut has_dotdotdot = false;
@@ -299,25 +331,6 @@ impl RecordLabelDescriptionSummary {
     }
 }
 
-fn normalize_component_cache_path(path: Path) -> Path {
-    match path {
-        Path::Pident(_) => path,
-        Path::Pdot(parent, name, _) => {
-            // OCaml compiler/ml/path.ml:20-24 ignores `Pdot` positions in
-            // `Path.same`; component lookup in env.ml:781-793 keys module
-            // identity by that path equality while still carrying positions in
-            // the selected access path. Mirror that only for Rust's cache key.
-            Path::pdot(
-                normalize_component_cache_path(parent.as_ref().clone()),
-                name,
-            )
-        }
-        Path::Papply(functor, arg) => Path::papply(
-            normalize_component_cache_path(functor.as_ref().clone()),
-            normalize_component_cache_path(arg.as_ref().clone()),
-        ),
-    }
-}
 
 /// The refs captured by an `Env.open_signature` `using` callback.
 #[derive(Debug, Clone)]
@@ -426,7 +439,7 @@ pub struct TypeContext {
     simple_abbrevs: Cell<AbbrevMemoRef>,
     /// Counters for OCaml `Ctype.get_new_abstract_name` when reifying local
     /// GADT constraint variables.
-    reified_var_counters: RefCell<ahash::AHashMap<String, usize>>,
+    reified_var_counters: RefCell<crate::fast_hash::AHashMap<String, usize>>,
     /// Previous env ID for check_abbrev_env (OCaml ctype.ml:1272)
     previous_env_id: Cell<u64>,
 
@@ -438,6 +451,54 @@ pub struct TypeContext {
     /// Type expression storage. Uses UnsafeCell-based arena for zero-copy access.
     types: TypeArena,
 
+    /// Exclusive lease of the worker's persistent arena for this compilation.
+    /// Returned on drop; overlapping contexts get independent stores.
+    store: super::thread_store::StoreLease,
+    /// Descriptor writes preserve the stored handle's physical identity, but
+    /// live only for this compilation. The append-only arena keeps descriptor
+    /// borrows valid while another stored node is written.
+    store_descs: TypeArena,
+    store_desc_overlay: RefCell<super::thread_store::PagedOverlay<usize>>,
+    /// Level marking and lowering are also compilation-local, including on
+    /// diagnostic exits that do not finish a mark/unmark traversal.
+    store_level_overlay: RefCell<super::thread_store::PagedOverlay<i32>>,
+    /// This compilation's writes to abbreviation memo cells of store nodes;
+    /// unset cells read the store's initial `Mnil`, matching a fresh process
+    /// (`compiler/ml/subst.ml:173-177`).
+    store_abbrev_overlay: RefCell<super::thread_store::PagedOverlay<AbbrevMemo>>,
+    /// This compilation's writes to row field cells of store rows.
+    store_row_field_overlay: RefCell<super::thread_store::PagedOverlay<Option<RowField>>>,
+    /// The same overlays for nodes of the process-wide shared pool, keyed by
+    /// shared index (descriptor overlays point into `store_descs`).
+    shared_desc_overlay: RefCell<super::thread_store::PagedOverlay<usize>>,
+    shared_level_overlay: RefCell<super::thread_store::PagedOverlay<i32>>,
+    shared_abbrev_overlay: RefCell<super::thread_store::PagedOverlay<AbbrevMemo>>,
+    /// Direct handle to the shared pool's page table for node reads. Never
+    /// borrowed mutably: the `RefCell` only lets shared descriptor borrows be
+    /// `Ref`s like local ones (`Ref::map`), so callers see one borrow type.
+    shared_pages: RefCell<super::shared_store::SharedPages>,
+
+    /// Nesting depth of `build_in_store`; allocations go to the worker store
+    /// while it is non-zero.
+    store_build_depth: Cell<u32>,
+    /// Store arena lengths when the outermost store build started: nodes and
+    /// row fields at or above these are still being built and are written in
+    /// place.
+    store_build_type_start: Cell<usize>,
+    store_build_row_start: Cell<usize>,
+    /// The current store build read compilation-local state, so its result
+    /// must stay private to this compilation.
+    store_build_poisoned: Cell<bool>,
+    /// Effects of the current store build on this compilation.
+    store_build_effects: RefCell<Vec<StoreEffect>>,
+    /// Shared pieces whose effects this compilation has already applied.
+    touched_store_pieces: RefCell<crate::fast_hash::AHashSet<u64>>,
+    /// Component tables of store-resident modules whose build read state
+    /// private to this compilation, so they could not be published to the
+    /// worker store. Keyed by `StoredModuleComponents` id; reused for the rest
+    /// of this compilation instead of being rebuilt on every lookup.
+    local_stored_components:
+        RefCell<crate::fast_hash::AHashMap<u64, Arc<super::env_lazy::QualifiedModuleComponents>>>,
     /// OCaml-shaped mutation trail. Logging is dormant unless a snapshot lives.
     mutation_journal: RefCell<TypeMutationJournal>,
     mutation_logging: Cell<bool>,
@@ -491,38 +552,55 @@ pub struct TypeContext {
     /// Global type declaration store, indexed by type name.
     /// Populated when loading CMI module signatures so that type alias
     /// expansion can find declarations for types not directly in the env.
-    type_decl_store: RefCell<ahash::AHashMap<String, Arc<super::decl::TypeDeclaration>>>,
+    type_decl_store: RefCell<crate::fast_hash::AHashMap<smol_str::SmolStr, Arc<super::decl::TypeDeclaration>>>,
 
     /// Global type declaration store, indexed by ident stamp.
     /// Used for looking up CMI-loaded type declarations by their stamp
     /// when the type name is too generic (e.g., "t").
-    type_decl_by_stamp: RefCell<ahash::AHashMap<i32, Arc<super::decl::TypeDeclaration>>>,
+    type_decl_by_stamp: RefCell<crate::fast_hash::AHashMap<i32, Arc<super::decl::TypeDeclaration>>>,
 
     /// Global type declaration store, indexed by full qualified path string.
     /// Used for looking up types via Pdot paths (e.g., "Js.Promise.t").
-    type_decl_by_path: RefCell<ahash::AHashMap<String, Arc<super::decl::TypeDeclaration>>>,
+    type_decl_by_path: RefCell<crate::fast_hash::AHashMap<smol_str::SmolStr, Arc<super::decl::TypeDeclaration>>>,
     /// Qualified declarations keyed by Path identity, preserving local stamps.
-    type_decl_by_exact_path: RefCell<ahash::AHashMap<Path, Arc<super::decl::TypeDeclaration>>>,
-    type_item_by_path: RefCell<ahash::AHashMap<String, (Ident, super::decl::TypeDeclaration)>>,
-    missing_type_item_by_path: RefCell<ahash::AHashSet<String>>,
+    /// Only single `Exact` registrations, with their log position; batches
+    /// are kept whole in `exact_path_batches` and probed through their shared
+    /// index, so a unit never copies every dependency type into this map.
+    type_decl_by_exact_path:
+        RefCell<crate::fast_hash::AHashMap<Path, (usize, Arc<super::decl::TypeDeclaration>)>>,
+    exact_path_batches: RefCell<Vec<(usize, Arc<super::thread_store::SigTypeBatch>)>>,
+    /// Exact-path answers, valid while the log length equals the first field.
+    exact_path_memo: RefCell<(
+        usize,
+        crate::fast_hash::AHashMap<Path, Option<Arc<super::decl::TypeDeclaration>>>,
+    )>,
+    /// Registrations for the four maps above, in registration order. Each map
+    /// replays the log up to the present only when it is read: modules
+    /// register every type of every loaded dependency but read these maps
+    /// rarely, and most registrations come as one shared batch per signature.
+    type_decl_log: RefCell<Vec<TypeDeclRegistration>>,
+    /// Log position each map has been replayed to: name, stamp, path, exact.
+    type_decl_log_replayed: [Cell<usize>; 4],
+    type_item_by_path: RefCell<crate::fast_hash::AHashMap<String, (Ident, super::decl::TypeDeclaration)>>,
+    missing_type_item_by_path: RefCell<crate::fast_hash::AHashSet<String>>,
 
     /// Cache for type declarations resolved through module signatures (Pdot paths).
     /// Separate from type_decl_by_path to avoid conflicts with expand_head_once
     /// entries which have unqualified paths. This approximates OCaml's
     /// components_of_module_maker lazy caching.
-    resolved_pdot_type_cache: RefCell<ahash::AHashMap<String, Arc<super::decl::TypeDeclaration>>>,
+    resolved_pdot_type_cache: RefCell<crate::fast_hash::AHashMap<SamePathKey, Arc<super::decl::TypeDeclaration>>>,
 
     /// Cache for resolved module signatures. Keyed by module path name.
     /// OCaml `compiler/ml/env.ml:1513-1514,1516-1588` stores forced module
     /// components behind lazy cells; cache hits share the already-substituted
     /// signature snapshot instead of cloning every `SignatureItem`.
     resolved_module_sig_cache:
-        RefCell<ahash::AHashMap<String, (Path, Arc<super::decl::Signature>)>>,
+        RefCell<crate::fast_hash::AHashMap<String, (Path, Arc<super::decl::Signature>)>>,
 
     /// Cached qualified module-component views keyed by access-path semantics.
     /// This is the Rust analogue of OCaml's lazy `components_of_module_maker`.
     qualified_module_components_cache: RefCell<
-        ahash::AHashMap<
+        crate::fast_hash::AHashMap<
             QualifiedModuleComponentsCacheKey,
             Arc<super::env_lazy::QualifiedModuleComponents>,
         >,
@@ -536,12 +614,17 @@ pub struct TypeContext {
     /// declaration-derived source path available when Rust later reaches a
     /// cached component view without `PersistentEnv`; it must not be inferred
     /// from flattened module-name spelling.
-    component_alias_sources: RefCell<ahash::AHashMap<Path, Vec<Path>>>,
-    component_paths_by_alias_source: RefCell<ahash::AHashMap<Path, Vec<Path>>>,
+    component_alias_sources: RefCell<crate::fast_hash::AHashMap<SamePathKey, Vec<Path>>>,
+    /// Component-table name indexes of compilation-local signatures, keyed by
+    /// address; the entry keeps the signature alive so the key stays unique.
+    signature_indexes: RefCell<
+        crate::fast_hash::AHashMap<usize, (Arc<super::decl::Signature>, Arc<super::env_lazy::SignatureIndex>)>,
+    >,
+    component_paths_by_alias_source: RefCell<crate::fast_hash::AHashMap<SamePathKey, Vec<Path>>>,
 
     /// Cached dotted value lookups keyed by resolved module access path.
     resolved_module_value_cache: RefCell<
-        ahash::AHashMap<Path, ahash::AHashMap<String, (Path, super::decl::ValueDescription)>>,
+        crate::fast_hash::AHashMap<Path, crate::fast_hash::AHashMap<String, (Path, Arc<super::decl::ValueDescription>)>>,
     >,
 
     /// Cached dotted type lookups keyed by resolved module access path.
@@ -549,35 +632,60 @@ pub struct TypeContext {
     /// never change under an existing path, but Rust's Env is mutated in
     /// place (`add_module`) and must invalidate these derived entries.
     resolved_module_type_cache: RefCell<
-        ahash::AHashMap<
+        crate::fast_hash::AHashMap<
             (u64, Path),
-            ahash::AHashMap<String, (Path, Ident, Arc<super::decl::TypeDeclaration>)>,
+            crate::fast_hash::AHashMap<String, (Path, Ident, Arc<super::decl::TypeDeclaration>)>,
         >,
     >,
 
     /// Cached child-module access paths keyed by resolved parent access path.
-    resolved_child_module_path_cache: RefCell<ahash::AHashMap<Path, ahash::AHashMap<String, Path>>>,
+    resolved_child_module_path_cache: RefCell<crate::fast_hash::AHashMap<Path, crate::fast_hash::AHashMap<String, Path>>>,
 
     /// Forced declarations shared by persistent/global alias component views.
     /// Local component views keep their own thunk state in StructureComponentTables.
     qualified_module_decl_cache: RefCell<
-        ahash::AHashMap<
+        crate::fast_hash::AHashMap<
             Path,
-            ahash::AHashMap<String, (Ident, Arc<super::decl::ModuleDeclaration>)>,
+            crate::fast_hash::AHashMap<String, (Ident, Arc<super::decl::ModuleDeclaration>)>,
         >,
     >,
 
+    /// Resolved dotted type paths keyed by `Env::scope_id`, path, and whether
+    /// alias targets were strengthened (see `ctype::resolve_type_item_through_env`).
+    resolved_type_item_cache: RefCell<
+        crate::fast_hash::AHashMap<(u64, Path, bool), (Ident, Arc<super::decl::TypeDeclaration>)>,
+    >,
+
     /// Cached full normalize_path results keyed by environment identity.
-    normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
+    normalized_path_full_cache: RefCell<crate::fast_hash::AHashMap<(u64, Path), Path>>,
+    /// Answers of `raw_lambda::typeopt` queries while the finished typed tree
+    /// is lowered (`None` outside that phase): the types no longer change.
+    typeopt_answers: RefCell<Option<crate::fast_hash::AHashMap<(u64, TypeExprRef, u8), bool>>>,
+    /// Outcome of expanding a `Pdot`-headed constructor, per module scope
+    /// (see `ctype::PdotExpansion`).
+    pdot_expansions: RefCell<hashbrown::HashMap<PdotExpansionKey, super::ctype::PdotExpansion, ahash::RandomState>>,
+
+    /// Cached forward-only (unification) normalize_path results, keyed like
+    /// `normalized_path_full_cache`.
+    normalized_path_forward_cache: RefCell<crate::fast_hash::AHashMap<(u64, Path), Path>>,
+
+    /// `occur_univar` argument masks per (scope, constructor path): bit `i`
+    /// is set when argument `i` has a may-positive or may-negative variance;
+    /// `None` when the declaration is not found (every argument is visited).
+    occur_variance_masks: RefCell<crate::fast_hash::AHashMap<(u64, Path), Option<u64>>>,
+
+    /// `Ctype.get_level` declaration levels per (scope, type path): the
+    /// `type_newtype_level` of the declaration `Env.find_type` returns.
+    type_newtype_levels: RefCell<crate::fast_hash::AHashMap<(u64, Path), Option<i32>>>,
 
     /// Cached side-effectful normalize_path results keyed by environment identity.
-    forced_normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
+    forced_normalized_path_full_cache: RefCell<crate::fast_hash::AHashMap<(u64, Path), Path>>,
 
     /// Cached side-effectful type-path comparisons keyed by environment identity.
-    forced_type_path_compare_cache: RefCell<ahash::AHashMap<(u64, Path, Path), bool>>,
+    forced_type_path_compare_cache: RefCell<crate::fast_hash::AHashMap<(u64, Path, Path), bool>>,
 
     /// Load paths for resolving CMI files during type alias expansion.
-    load_paths: RefCell<Vec<std::path::PathBuf>>,
+    load_paths: RefCell<Arc<Vec<std::path::PathBuf>>>,
 
     /// In-process persistent environment used by abbreviation expansion when a
     /// persistent module root is not present in the local Env. OCaml resolves
@@ -590,12 +698,17 @@ pub struct TypeContext {
     /// Cache of renamed module signatures.
     /// Matches OCaml's lazy ps_sig = Subst.signature Subst.identity sign.
     /// Populated by PersistentEnv::get_renamed_sig, consumed by normalize_path.
-    pub(crate) renamed_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
+    pub(crate) renamed_module_sigs: RefCell<crate::fast_hash::AHashMap<String, Arc<DeferredRenamedSig>>>,
+
+    /// Reserved stamp cursor `(next, last)` used while materializing a
+    /// [`DeferredRenamedSig`], so its binders get the stamps reserved when the
+    /// rename was forced.
+    reserved_rename_stamps: Cell<Option<(i32, i32)>>,
 
     /// Raw (un-renamed) module signatures for persistent modules.
     /// Used by trigger_module_sig_rename to lazily rename on first access
     /// from normalize_path, matching OCaml's lazy ps_sig forcing.
-    raw_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
+    raw_module_sigs: RefCell<crate::fast_hash::AHashMap<String, Arc<super::decl::Signature>>>,
 
     /// Raw signature copies used only by GenType's CMT-shaped alias scraping.
     ///
@@ -604,9 +717,9 @@ pub struct TypeContext {
     /// TypeContext boundaries through PortablePersStruct, so keep those raw
     /// copied signatures separate from `raw_module_sigs`; typechecking lookup
     /// paths expect the normal component/rename caches, not this CMT view.
-    gentype_raw_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
+    gentype_raw_module_sigs: RefCell<crate::fast_hash::AHashMap<String, Arc<super::decl::Signature>>>,
     gentype_portable_raw_module_sigs:
-        RefCell<ahash::AHashMap<String, Arc<crate::cmi::portable_types::PortablePersStruct>>>,
+        RefCell<crate::fast_hash::AHashMap<String, Arc<crate::cmi::portable_types::PortablePersStruct>>>,
 
     /// Raw signatures loaded only for persistent component lookup.
     ///
@@ -614,16 +727,18 @@ pub struct TypeContext {
     /// same one-shot component backing store without making
     /// `trigger_all_module_sig_renames` see modules that were only touched by
     /// descriptor lookup.
-    raw_component_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
+    raw_component_module_sigs: RefCell<crate::fast_hash::AHashMap<String, Arc<super::decl::Signature>>>,
 
     /// String table for CMI-decoded Longident components.
     /// CMI decoding happens without a ParseArena, so we allocate synthetic
     /// StrIdx values here and resolve them later when needed.
-    cmi_longident_names: RefCell<ahash::AHashMap<u32, String>>,
+    cmi_longident_names: RefCell<crate::fast_hash::AHashMap<u32, String>>,
 
     /// String table for ParseArena Longident components whose StrIdx values are
     /// intentionally unique per source occurrence for marshal identity.
-    arena_longident_names: RefCell<ahash::AHashMap<u32, String>>,
+    /// Registered arenas' strings in registration order; the first arena
+    /// that has an index names it.
+    arena_longident_names: RefCell<Vec<crate::intern::InternedStrings>>,
 
     /// Next synthetic StrIdx raw value for CMI longident strings.
     next_cmi_longident_idx: Cell<u32>,
@@ -648,14 +763,14 @@ pub struct TypeContext {
     /// sharing `t.id`, so the sexp serializer deduplicates them. In Rust, we create
     /// separate TypeExprRef nodes but record the alias here so the sexp serializer
     /// can use the original's dedup key.
-    arity_aliases: RefCell<ahash::AHashMap<TypeExprRef, TypeExprRef>>,
+    arity_aliases: RefCell<crate::fast_hash::AHashMap<TypeExprRef, TypeExprRef>>,
 
     /// Record type labels cache.
     /// Maps type path (with stamp for uniqueness) → Vec<(field_name, position, mutable, repr, attributes)>.
     /// Populated during type checking when record patterns are processed.
     /// Used by raw lambda conversion to bind ALL record fields (matching OCaml's make_record_matching).
     record_labels_cache: RefCell<
-        ahash::AHashMap<
+        crate::fast_hash::AHashMap<
             Path,
             Vec<(
                 String,
@@ -675,9 +790,9 @@ pub struct TypeContext {
     /// literals instead of rebuilding or cloning large records such as
     /// `JsxDOM.domProps` for every JSX literal.
     record_label_descriptions_cache:
-        RefCell<ahash::AHashMap<super::path::Path, Arc<Vec<super::decl::LabelDescription>>>>,
+        RefCell<crate::fast_hash::AHashMap<super::path::Path, Arc<Vec<super::decl::LabelDescription>>>>,
     record_label_description_summaries_cache:
-        RefCell<ahash::AHashMap<super::path::Path, Arc<RecordLabelDescriptionSummary>>>,
+        RefCell<crate::fast_hash::AHashMap<super::path::Path, Arc<RecordLabelDescriptionSummary>>>,
 
     /// Qualified persistent record labels keyed by environment and label slot.
     /// OCaml caches module components with already-substituted `lbl_all`
@@ -685,7 +800,7 @@ pub struct TypeContext {
     /// repeatedly copying the same persistent JSX prop label skeleton before
     /// each `instance_label` call.
     qualified_record_label_cache:
-        RefCell<ahash::AHashMap<QualifiedRecordLabelCacheKey, super::decl::LabelDescription>>,
+        RefCell<crate::fast_hash::AHashMap<QualifiedRecordLabelCacheKey, super::decl::LabelDescription>>,
 
     /// Synthetic dict-pattern labels created by type-directed label lookup.
     /// OCaml mutates `lbl_all` on the predefined dict magic field as each dict
@@ -703,18 +818,151 @@ pub struct TypeContext {
     /// Lident indices synthesized while filling omitted optional record fields.
     /// This avoids repeated reverse scans through the parse arena for large JSX
     /// DOM prop records while preserving the same index that the scan found.
-    synthesized_record_lidents: RefCell<ahash::AHashMap<String, LidentIdx>>,
+    synthesized_record_lidents: RefCell<crate::fast_hash::AHashMap<String, LidentIdx>>,
 
     /// Stored typedtree environment snapshots, keyed by EnvRef.
     typed_envs: RefCell<Vec<Arc<Env>>>,
 
     /// Reuse EnvRefs for identical logical environments.
-    typed_envs_by_id: RefCell<ahash::AHashMap<u64, EnvRef>>,
+    typed_envs_by_id: RefCell<crate::fast_hash::AHashMap<u64, EnvRef>>,
     /// `Cmt_format.value_deps` (compiler/ml/cmt_format_common.ml:149-183):
     /// implementation/specification value pairs matched by inclusion checks.
     value_deps: RefCell<Vec<(super::decl::ValueDescription, super::decl::ValueDescription)>>,
     /// `Cmt_format.deprecated_used` (cmt_format_common.ml:152-178).
     deprecated_used: RefCell<Vec<DeprecatedUse>>,
+    /// The most recently stored (env id, EnvRef): consecutive typed nodes
+    /// usually share their environment.
+    last_typed_env: Cell<(u64, EnvRef)>,
+}
+
+/// Effect of building shared store data on the state of the compilation that
+/// built it. Another compilation that reuses the data replays these effects
+/// the first time it touches the data, so its own state (identifier stamps,
+/// forced pieces) evolves exactly as if it had built the data itself.
+#[derive(Debug, Clone)]
+pub(crate) enum StoreEffect {
+    /// Local identifier stamps consumed.
+    Stamps(i32),
+    /// A shared piece forced while building this one.
+    Piece(Arc<StorePiece>),
+    /// A component view registered in this compilation's component cache.
+    RegisterComponents(
+        QualifiedModuleComponentsCacheKey,
+        Arc<super::env_lazy::QualifiedModuleComponents>,
+    ),
+    /// `PersistentEnv::find_pers_struct` for this unit, which prepares the
+    /// module for the compilation on first use.
+    PreparePers(smol_str::SmolStr),
+    /// `trigger_module_sig_rename`: forces the lazy rename of a persistent
+    /// signature (reserving its binder stamps) in this compilation.
+    TriggerRename(smol_str::SmolStr),
+    /// Registrations in this compilation's declaration and alias tables.
+    RegisterTypeDecl(smol_str::SmolStr, Arc<super::decl::TypeDeclaration>),
+    RegisterTypeDeclByStamp(i32, Arc<super::decl::TypeDeclaration>),
+    RegisterAliasSource(Path, Path),
+    RegisterQualifiedModuleDecl(Path, smol_str::SmolStr, Ident, Arc<super::decl::ModuleDeclaration>),
+}
+
+/// Replay record of one piece of shared store data (see
+/// `TypeContext::build_in_store`).
+#[derive(Debug)]
+pub(crate) struct StorePiece {
+    id: u64,
+    effects: Vec<StoreEffect>,
+}
+
+pub(crate) fn store_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RESCRIPT_STORE_DEBUG").is_some())
+}
+
+static NEXT_STORE_PIECE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// One registration for the global type-declaration maps.
+#[derive(Debug)]
+enum TypeDeclRegistration {
+    /// Every type of a store-owned signature, for all four maps.
+    Batch(Arc<super::thread_store::SigTypeBatch>),
+    Name(smol_str::SmolStr, Arc<super::decl::TypeDeclaration>),
+    Stamp(i32, Arc<super::decl::TypeDeclaration>),
+    Path(smol_str::SmolStr, Arc<super::decl::TypeDeclaration>),
+    Exact(Path, Arc<super::decl::TypeDeclaration>),
+}
+
+/// A map key that compares paths with `Path::same` (ignoring `Pdot`
+/// positions and comparing identifiers by stamp, or by name when persistent).
+#[derive(Clone, Debug)]
+pub(crate) struct SamePathKey(Path);
+
+impl SamePathKey {
+    pub(crate) fn new(path: Path) -> Self {
+        SamePathKey(path)
+    }
+}
+
+impl PartialEq for SamePathKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.same(&other.0)
+    }
+}
+
+impl Eq for SamePathKey {}
+
+impl std::hash::Hash for SamePathKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        fn hash_path<H: std::hash::Hasher>(path: &Path, state: &mut H) {
+            match path {
+                Path::Pident(id) => {
+                    if id.stamp() != 0 {
+                        state.write_u8(0);
+                        state.write_i32(id.stamp());
+                    } else {
+                        state.write_u8(1);
+                        std::hash::Hash::hash(&id.name_atom(), state);
+                    }
+                }
+                Path::Pdot(parent, name, _) => {
+                    state.write_u8(2);
+                    std::hash::Hash::hash(name, state);
+                    hash_path(parent, state);
+                }
+                Path::Papply(functor, argument) => {
+                    state.write_u8(3);
+                    hash_path(functor, state);
+                    hash_path(argument, state);
+                }
+            }
+        }
+        hash_path(&self.0, state);
+    }
+}
+
+/// Key of `TypeContext::pdot_expansions`.
+#[derive(PartialEq, Eq, Hash)]
+struct PdotExpansionKey {
+    scope_id: u64,
+    mode: u8,
+    arity: usize,
+    path: Path,
+}
+
+/// Borrowed form of [`PdotExpansionKey`], so lookups do not clone the path.
+/// Field order and hashing match the owned key.
+#[derive(Hash)]
+struct PdotExpansionKeyRef<'a> {
+    scope_id: u64,
+    mode: u8,
+    arity: usize,
+    path: &'a Path,
+}
+
+impl hashbrown::Equivalent<PdotExpansionKey> for PdotExpansionKeyRef<'_> {
+    fn equivalent(&self, key: &PdotExpansionKey) -> bool {
+        self.scope_id == key.scope_id
+            && self.mode == key.mode
+            && self.arity == key.arity
+            && *self.path == key.path
+    }
 }
 
 fn push_unique_path(paths: &mut Vec<Path>, path: Path) {
@@ -723,9 +971,22 @@ fn push_unique_path(paths: &mut Vec<Path>, path: Path) {
     }
 }
 
+/// A forced persistent-signature rename whose copy is built on first read.
+/// See [`TypeContext::defer_renamed_sig`].
+#[derive(Debug)]
+pub(crate) struct DeferredRenamedSig {
+    kind: &'static str,
+    source: Arc<super::decl::Signature>,
+    first_stamp: i32,
+    stamp_count: i32,
+    renamed: std::sync::OnceLock<Arc<super::decl::Signature>>,
+}
+
 impl TypeContext {
     /// Create a new type context.
     pub fn new(id_gen: Arc<IdGenerator>) -> Self {
+        let store = super::thread_store::current();
+        let shared_pages = store.shared_pool().pages();
         TypeContext {
             id_gen,
             current_level: Cell::new(0),
@@ -735,10 +996,27 @@ impl TypeContext {
             trace_gadt_instances: Cell::new(false),
             passive_variants: Cell::new(false),
             simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
-            reified_var_counters: RefCell::new(ahash::AHashMap::new()),
+            reified_var_counters: RefCell::new(crate::fast_hash::AHashMap::new()),
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: TypeArena::new(),
+            store,
+            store_descs: TypeArena::new(),
+            store_desc_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            store_level_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            store_abbrev_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            store_row_field_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            shared_desc_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            shared_level_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            shared_abbrev_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            shared_pages: RefCell::new(shared_pages),
+            store_build_depth: Cell::new(0),
+            store_build_type_start: Cell::new(0),
+            store_build_row_start: Cell::new(0),
+            store_build_poisoned: Cell::new(false),
+            store_build_effects: RefCell::new(Vec::new()),
+            touched_store_pieces: RefCell::new(crate::fast_hash::AHashSet::new()),
+            local_stored_components: RefCell::new(crate::fast_hash::AHashMap::new()),
             mutation_journal: RefCell::new(TypeMutationJournal::default()),
             mutation_logging: Cell::new(false),
             compiler_counters_enabled: crate::perf_counters::enabled(),
@@ -758,33 +1036,45 @@ impl TypeContext {
             variant_layouts: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
-            type_decl_store: RefCell::new(ahash::AHashMap::new()),
-            type_decl_by_stamp: RefCell::new(ahash::AHashMap::new()),
-            type_decl_by_path: RefCell::new(ahash::AHashMap::new()),
-            type_decl_by_exact_path: RefCell::new(ahash::AHashMap::new()),
-            type_item_by_path: RefCell::new(ahash::AHashMap::new()),
-            missing_type_item_by_path: RefCell::new(ahash::AHashSet::new()),
-            resolved_pdot_type_cache: RefCell::new(ahash::AHashMap::new()),
-            resolved_module_sig_cache: RefCell::new(ahash::AHashMap::new()),
-            qualified_module_components_cache: RefCell::new(ahash::AHashMap::new()),
-            component_alias_sources: RefCell::new(ahash::AHashMap::new()),
-            component_paths_by_alias_source: RefCell::new(ahash::AHashMap::new()),
-            resolved_module_value_cache: RefCell::new(ahash::AHashMap::new()),
-            resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
-            resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
-            qualified_module_decl_cache: RefCell::new(ahash::AHashMap::new()),
-            normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
-            forced_normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
-            forced_type_path_compare_cache: RefCell::new(ahash::AHashMap::new()),
-            load_paths: RefCell::new(Vec::new()),
+            type_decl_store: RefCell::new(crate::fast_hash::AHashMap::new()),
+            type_decl_by_stamp: RefCell::new(crate::fast_hash::AHashMap::new()),
+            type_decl_by_path: RefCell::new(crate::fast_hash::AHashMap::new()),
+            type_decl_by_exact_path: RefCell::new(crate::fast_hash::AHashMap::new()),
+            exact_path_batches: RefCell::new(Vec::new()),
+            exact_path_memo: RefCell::new((0, crate::fast_hash::AHashMap::new())),
+            type_decl_log: RefCell::new(Vec::new()),
+            type_decl_log_replayed: Default::default(),
+            type_item_by_path: RefCell::new(crate::fast_hash::AHashMap::new()),
+            missing_type_item_by_path: RefCell::new(crate::fast_hash::AHashSet::new()),
+            resolved_pdot_type_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_module_sig_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            qualified_module_components_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            component_alias_sources: RefCell::new(crate::fast_hash::AHashMap::new()),
+            signature_indexes: RefCell::new(crate::fast_hash::AHashMap::new()),
+            component_paths_by_alias_source: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_module_value_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_module_type_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_child_module_path_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            qualified_module_decl_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_type_item_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            normalized_path_full_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            pdot_expansions: RefCell::new(hashbrown::HashMap::default()),
+            typeopt_answers: RefCell::new(None),
+            normalized_path_forward_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            occur_variance_masks: RefCell::new(crate::fast_hash::AHashMap::new()),
+            type_newtype_levels: RefCell::new(crate::fast_hash::AHashMap::new()),
+            forced_normalized_path_full_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            forced_type_path_compare_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            load_paths: RefCell::new(Arc::new(Vec::new())),
             persistent_env: RefCell::new(None),
-            renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
-            raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
-            gentype_raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
-            gentype_portable_raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
-            raw_component_module_sigs: RefCell::new(ahash::AHashMap::new()),
-            cmi_longident_names: RefCell::new(ahash::AHashMap::new()),
-            arena_longident_names: RefCell::new(ahash::AHashMap::new()),
+            renamed_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
+            reserved_rename_stamps: Cell::new(None),
+            raw_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
+            gentype_raw_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
+            gentype_portable_raw_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
+            raw_component_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
+            cmi_longident_names: RefCell::new(crate::fast_hash::AHashMap::new()),
+            arena_longident_names: RefCell::new(Vec::new()),
             next_cmi_longident_idx: Cell::new(0xF000_0000),
             predef_int: Cell::new(None),
             predef_char: Cell::new(None),
@@ -797,23 +1087,26 @@ impl TypeContext {
             predef_option_inner: Cell::new(None),
             predef_option_type: Cell::new(None),
             predef_option_layout: Cell::new(None),
-            arity_aliases: RefCell::new(ahash::AHashMap::new()),
-            record_labels_cache: RefCell::new(ahash::AHashMap::new()),
-            record_label_descriptions_cache: RefCell::new(ahash::AHashMap::new()),
-            record_label_description_summaries_cache: RefCell::new(ahash::AHashMap::new()),
-            qualified_record_label_cache: RefCell::new(ahash::AHashMap::new()),
+            arity_aliases: RefCell::new(crate::fast_hash::AHashMap::new()),
+            record_labels_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            record_label_descriptions_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            record_label_description_summaries_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            qualified_record_label_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             dict_pattern_labels_cache: RefCell::new(Vec::new()),
-            synthesized_record_lidents: RefCell::new(ahash::AHashMap::new()),
+            synthesized_record_lidents: RefCell::new(crate::fast_hash::AHashMap::new()),
             typed_envs: RefCell::new(Vec::new()),
-            typed_envs_by_id: RefCell::new(ahash::AHashMap::new()),
+            typed_envs_by_id: RefCell::new(crate::fast_hash::AHashMap::new()),
+            last_typed_env: Cell::new((u64::MAX, EnvRef(0))),
             value_deps: RefCell::new(Vec::new()),
             deprecated_used: RefCell::new(Vec::new()),
         }
     }
 
     pub fn pending_variant_layout(&self) -> super::variant_runtime::LayoutRef {
+        // A pending layout is completed later by this compilation.
+        self.poison_store_build();
         let mut layouts = self.variant_layouts.borrow_mut();
-        let layout_ref = super::variant_runtime::LayoutRef(layouts.len() as u32);
+        let layout_ref = super::variant_runtime::LayoutRef::from_usize(layouts.len());
         layouts.push(RefCell::new(super::variant_runtime::LayoutState::Pending));
         layout_ref
     }
@@ -822,6 +1115,11 @@ impl TypeContext {
         &self,
         layout: super::variant_runtime::Layout,
     ) -> super::variant_runtime::LayoutRef {
+        // Like `alloc_type`: a store build allocates in the worker store, where
+        // layouts are complete on allocation.
+        if self.in_store_build() {
+            return self.store.alloc_complete_variant_layout(layout);
+        }
         let layout_ref = self.pending_variant_layout();
         self.complete_variant_layout(layout_ref, layout);
         layout_ref
@@ -832,8 +1130,12 @@ impl TypeContext {
         layout_ref: super::variant_runtime::LayoutRef,
         layout: super::variant_runtime::Layout,
     ) {
+        assert!(
+            !layout_ref.is_store(),
+            "variant layouts in the thread store are complete on allocation"
+        );
         let layouts = self.variant_layouts.borrow();
-        let Some(state) = layouts.get(layout_ref.0 as usize) else {
+        let Some(state) = layouts.get(layout_ref.index()) else {
             panic!("variant layout reference belongs to another TypeContext")
         };
         let mut state = state.borrow_mut();
@@ -853,8 +1155,14 @@ impl TypeContext {
         layout_ref: super::variant_runtime::LayoutRef,
         read: impl FnOnce(&super::variant_runtime::Layout) -> R,
     ) -> R {
+        if layout_ref.is_shared() {
+            return read(self.store.shared_pool().layout(layout_ref));
+        }
+        if layout_ref.is_store() {
+            return self.store.with_variant_layout(layout_ref, read);
+        }
         let layouts = self.variant_layouts.borrow();
-        let Some(state) = layouts.get(layout_ref.0 as usize) else {
+        let Some(state) = layouts.get(layout_ref.index()) else {
             panic!("variant layout reference belongs to another TypeContext")
         };
         match &*state.borrow() {
@@ -874,7 +1182,13 @@ impl TypeContext {
 
     /// Store a typedtree environment snapshot and return a stable reference.
     pub fn store_typed_env(&self, env: &Env) -> EnvRef {
+        self.poison_store_build_for("store_typed_env");
+        let (last_id, last_ref) = self.last_typed_env.get();
+        if last_id == env.id() {
+            return last_ref;
+        }
         if let Some(existing) = self.typed_envs_by_id.borrow().get(&env.id()).copied() {
+            self.last_typed_env.set((env.id(), existing));
             return existing;
         }
 
@@ -885,6 +1199,7 @@ impl TypeContext {
             env_ref
         };
         self.typed_envs_by_id.borrow_mut().insert(env.id(), env_ref);
+        self.last_typed_env.set((env.id(), env_ref));
         env_ref
     }
 
@@ -900,6 +1215,7 @@ impl TypeContext {
 
     /// Intern a CMI longident component and return a synthetic StrIdx.
     pub fn intern_cmi_longident_name(&self, name: &str) -> StrIdx {
+        self.poison_store_build_for("intern_cmi_longident_name");
         let raw = self.next_cmi_longident_idx.get();
         self.next_cmi_longident_idx.set(raw.wrapping_add(1));
         self.cmi_longident_names
@@ -909,7 +1225,28 @@ impl TypeContext {
     }
 
     pub(crate) fn cmi_longident_component_name(&self, idx: StrIdx) -> Option<String> {
-        self.cmi_longident_names.borrow().get(&idx.raw()).cloned()
+        self.cmi_longident_names
+            .borrow()
+            .get(&idx.raw())
+            .cloned()
+            .or_else(|| self.store.shared_pool().longident_name(idx))
+    }
+
+    /// The worker's persistent store leased by this compilation.
+    pub(crate) fn thread_store(&self) -> &super::thread_store::ThreadTypeStore {
+        &self.store
+    }
+
+    /// Whether `r` names an allocated node of this compilation's arena or of
+    /// the worker store.
+    pub fn contains_type_ref(&self, r: TypeExprRef) -> bool {
+        if r.is_shared() {
+            self.store.shared_pool().contains(r.shared_index())
+        } else if r.is_store() {
+            r.store_index() < self.store.type_count()
+        } else {
+            r.index() < self.types.len()
+        }
     }
 
     /// Resolve a Longident component StrIdx to string, checking CMI synthetic
@@ -919,38 +1256,39 @@ impl TypeContext {
         arena: &crate::parse_arena::ParseArena,
         idx: StrIdx,
     ) -> String {
-        self.cmi_longident_names
-            .borrow()
-            .get(&idx.raw())
-            .cloned()
+        self.cmi_longident_component_name(idx)
             .unwrap_or_else(|| arena.get_string(idx).to_string())
     }
 
     pub fn resolve_cmi_longident_component(&self, idx: StrIdx) -> Option<String> {
-        self.cmi_longident_names.borrow().get(&idx.raw()).cloned()
+        self.cmi_longident_component_name(idx)
     }
 
     pub(crate) fn register_arena_longident_names(&self, arena: &crate::parse_arena::ParseArena) {
-        let mut names = self.arena_longident_names.borrow_mut();
-        for raw in 0..arena.string_count() {
-            let idx = StrIdx::from_raw(raw as u32);
-            names
-                .entry(raw as u32)
-                .or_insert_with(|| arena.get_string(idx).to_string());
+        self.poison_store_build_for("register_arena_longident_names");
+        if arena.string_count() > 0 {
+            self.arena_longident_names
+                .borrow_mut()
+                .push(arena.snapshot_strings());
         }
     }
 
     pub(crate) fn resolve_any_longident_component(&self, idx: StrIdx) -> Option<String> {
-        self.cmi_longident_names
-            .borrow()
-            .get(&idx.raw())
-            .cloned()
-            .or_else(|| self.arena_longident_names.borrow().get(&idx.raw()).cloned())
+        self.cmi_longident_component_name(idx)
+            .or_else(|| {
+                self.arena_longident_names
+                    .borrow()
+                    .iter()
+                    .find_map(|strings| strings.get(idx).map(str::to_string))
+            })
     }
 
     /// Snapshot synthetic CMI longident component names so portable signatures
     /// can move across TypeContexts without losing the side table.
     pub fn snapshot_cmi_longident_names(&self) -> Vec<(u32, String)> {
+        // Store and shared-pool names resolve process-wide through
+        // `cmi_longident_component_name`; only this context's own names
+        // travel with the signature.
         self.cmi_longident_names
             .borrow()
             .iter()
@@ -960,6 +1298,7 @@ impl TypeContext {
 
     /// Import synthetic CMI longident names from a portable signature.
     pub fn import_cmi_longident_names(&self, names: &[(u32, String)]) {
+        self.poison_store_build_for("import_cmi_longident_names");
         let mut table = self.cmi_longident_names.borrow_mut();
         let mut next = self.next_cmi_longident_idx.get();
         for (raw, name) in names {
@@ -973,8 +1312,8 @@ impl TypeContext {
 
     /// Register a type declaration for type alias expansion.
     /// Called when loading module signatures from CMI files.
-    pub fn register_type_decl(&self, name: &str, decl: super::decl::TypeDeclaration) {
-        self.register_shared_type_decl(name, Arc::new(decl));
+    pub fn register_type_decl(&self, name: &str, decl: impl Into<Arc<super::decl::TypeDeclaration>>) {
+        self.register_shared_type_decl(name, decl.into());
     }
 
     pub(crate) fn register_shared_type_decl(
@@ -982,14 +1321,125 @@ impl TypeContext {
         name: &str,
         decl: Arc<super::decl::TypeDeclaration>,
     ) {
-        self.type_decl_store
+        if self.in_store_build() {
+            self.record_store_effect(StoreEffect::RegisterTypeDecl(name.into(), decl.clone()));
+        }
+        self.type_decl_log
             .borrow_mut()
-            .insert(name.to_string(), decl);
+            .push(TypeDeclRegistration::Name(smol_str::SmolStr::new(name), decl));
+    }
+
+    /// Install the type registrations of a store-owned signature, in order.
+    /// Equivalent to calling the four `register_shared_type_decl*` methods for
+    /// each entry.
+    pub(crate) fn register_sig_type_registrations(
+        &self,
+        registrations: &Arc<super::thread_store::SigTypeBatch>,
+    ) {
+        self.poison_store_build_for("register_sig_type_registrations");
+        self.type_decl_log
+            .borrow_mut()
+            .push(TypeDeclRegistration::Batch(registrations.clone()));
+    }
+
+    /// Bring map `map` (0 name, 1 stamp, 2 path, 3 exact) up to date with the
+    /// registration log.
+    fn replay_type_decl_log(&self, map: usize) {
+        let log = self.type_decl_log.borrow();
+        let start = self.type_decl_log_replayed[map].get();
+        if start == log.len() {
+            return;
+        }
+        let pending = &log[start..];
+        // Upper bound on inserts, so the map grows once instead of rehashing
+        // repeatedly while a batch is replayed.
+        let additional: usize = pending
+            .iter()
+            .map(|entry| match entry {
+                TypeDeclRegistration::Batch(registrations) => registrations.len(),
+                _ => 1,
+            })
+            .sum();
+        match map {
+            0 => {
+                let mut by_name = self.type_decl_store.borrow_mut();
+                by_name.reserve(additional);
+                for entry in pending {
+                    match entry {
+                        TypeDeclRegistration::Batch(registrations) => {
+                            for registration in registrations.iter() {
+                                by_name.insert(registration.name.clone(), registration.decl.clone());
+                            }
+                        }
+                        TypeDeclRegistration::Name(name, decl) => {
+                            by_name.insert(name.clone(), decl.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            1 => {
+                let mut by_stamp = self.type_decl_by_stamp.borrow_mut();
+                by_stamp.reserve(additional);
+                for entry in pending {
+                    match entry {
+                        TypeDeclRegistration::Batch(registrations) => {
+                            for registration in registrations.iter() {
+                                if registration.stamp != 0 {
+                                    by_stamp.insert(registration.stamp, registration.decl.clone());
+                                }
+                            }
+                        }
+                        TypeDeclRegistration::Stamp(stamp, decl) => {
+                            by_stamp.insert(*stamp, decl.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            2 => {
+                let mut by_path = self.type_decl_by_path.borrow_mut();
+                by_path.reserve(additional);
+                for entry in pending {
+                    match entry {
+                        TypeDeclRegistration::Batch(registrations) => {
+                            for registration in registrations.iter() {
+                                by_path.insert(
+                                    registration.qualified_name.clone(),
+                                    registration.decl.clone(),
+                                );
+                            }
+                        }
+                        TypeDeclRegistration::Path(path, decl) => {
+                            by_path.insert(path.clone(), decl.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {
+                let mut by_exact_path = self.type_decl_by_exact_path.borrow_mut();
+                let mut batches = self.exact_path_batches.borrow_mut();
+                for (offset, entry) in pending.iter().enumerate() {
+                    let position = start + offset;
+                    match entry {
+                        TypeDeclRegistration::Batch(registrations) => {
+                            batches.push((position, registrations.clone()));
+                        }
+                        TypeDeclRegistration::Exact(path, decl) => {
+                            by_exact_path.insert(path.clone(), (position, decl.clone()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        self.type_decl_log_replayed[map].set(log.len());
     }
 
     /// Register a type declaration by ident stamp for alias expansion.
-    pub fn register_type_decl_by_stamp(&self, stamp: i32, decl: super::decl::TypeDeclaration) {
-        self.register_shared_type_decl_by_stamp(stamp, Arc::new(decl));
+    pub fn register_type_decl_by_stamp(&self, stamp: i32, decl: impl Into<Arc<super::decl::TypeDeclaration>>) {
+        self.register_shared_type_decl_by_stamp(stamp, decl.into());
     }
 
     pub(crate) fn register_shared_type_decl_by_stamp(
@@ -997,11 +1447,17 @@ impl TypeContext {
         stamp: i32,
         decl: Arc<super::decl::TypeDeclaration>,
     ) {
-        self.type_decl_by_stamp.borrow_mut().insert(stamp, decl);
+        if self.in_store_build() {
+            self.record_store_effect(StoreEffect::RegisterTypeDeclByStamp(stamp, decl.clone()));
+        }
+        self.type_decl_log
+            .borrow_mut()
+            .push(TypeDeclRegistration::Stamp(stamp, decl));
     }
 
     /// Match OCaml `Ctype.get_new_abstract_name`.
     pub(crate) fn next_reified_abstract_name(&self, prefix: &str) -> String {
+        self.poison_store_build_for("next_reified_abstract_name");
         let mut counters = self.reified_var_counters.borrow_mut();
         let index = counters.get(prefix).map_or(0, |previous| previous + 1);
         counters.insert(prefix.to_string(), index);
@@ -1017,6 +1473,7 @@ impl TypeContext {
         &self,
         name: &str,
     ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+        self.replay_type_decl_log(0);
         let store = self.type_decl_store.borrow();
         if store.contains_key(name) {
             Some(std::cell::Ref::map(store, |s| {
@@ -1028,10 +1485,19 @@ impl TypeContext {
     }
 
     /// Look up a type declaration by stamp from the global store.
+    pub(crate) fn find_type_decl_arc_by_stamp(
+        &self,
+        stamp: i32,
+    ) -> Option<Arc<super::decl::TypeDeclaration>> {
+        self.replay_type_decl_log(1);
+        self.type_decl_by_stamp.borrow().get(&stamp).cloned()
+    }
+
     pub fn find_type_decl_by_stamp(
         &self,
         stamp: i32,
     ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+        self.replay_type_decl_log(1);
         let store = self.type_decl_by_stamp.borrow();
         if store.contains_key(&stamp) {
             Some(std::cell::Ref::map(store, |s| {
@@ -1043,8 +1509,8 @@ impl TypeContext {
     }
 
     /// Register a type declaration by full qualified path string for alias expansion.
-    pub fn register_type_decl_by_path(&self, path: &str, decl: super::decl::TypeDeclaration) {
-        self.register_shared_type_decl_by_path(path, Arc::new(decl));
+    pub fn register_type_decl_by_path(&self, path: &str, decl: impl Into<Arc<super::decl::TypeDeclaration>>) {
+        self.register_shared_type_decl_by_path(path, decl.into());
     }
 
     pub(crate) fn register_shared_type_decl_by_path(
@@ -1052,14 +1518,15 @@ impl TypeContext {
         path: &str,
         decl: Arc<super::decl::TypeDeclaration>,
     ) {
-        self.type_decl_by_path
+        self.poison_store_build_for("register_shared_type_decl_by_path");
+        self.type_decl_log
             .borrow_mut()
-            .insert(path.to_string(), decl);
+            .push(TypeDeclRegistration::Path(smol_str::SmolStr::new(path), decl));
     }
 
     /// Register a qualified declaration by exact Path identity.
-    pub fn register_type_decl_by_exact_path(&self, path: Path, decl: super::decl::TypeDeclaration) {
-        self.register_shared_type_decl_by_exact_path(path, Arc::new(decl));
+    pub fn register_type_decl_by_exact_path(&self, path: Path, decl: impl Into<Arc<super::decl::TypeDeclaration>>) {
+        self.register_shared_type_decl_by_exact_path(path, decl.into());
     }
 
     pub(crate) fn register_shared_type_decl_by_exact_path(
@@ -1067,7 +1534,10 @@ impl TypeContext {
         path: Path,
         decl: Arc<super::decl::TypeDeclaration>,
     ) {
-        self.type_decl_by_exact_path.borrow_mut().insert(path, decl);
+        self.poison_store_build_for("register_shared_type_decl_by_exact_path");
+        self.type_decl_log
+            .borrow_mut()
+            .push(TypeDeclRegistration::Exact(path, decl));
     }
 
     pub(crate) fn register_type_item_by_path(
@@ -1076,6 +1546,7 @@ impl TypeContext {
         id: Ident,
         decl: super::decl::TypeDeclaration,
     ) {
+        self.poison_store_build_for("register_type_item_by_path");
         self.type_item_by_path
             .borrow_mut()
             .insert(path.to_string(), (id, decl));
@@ -1089,6 +1560,7 @@ impl TypeContext {
     }
 
     pub(crate) fn register_missing_type_item_by_path(&self, path: &str) {
+        self.poison_store_build_for("register_missing_type_item_by_path");
         self.missing_type_item_by_path
             .borrow_mut()
             .insert(path.to_string());
@@ -1099,15 +1571,46 @@ impl TypeContext {
     }
 
     /// Cache a type declaration resolved through module signatures (Pdot paths).
-    pub fn register_resolved_pdot_type(&self, path: &str, decl: Arc<super::decl::TypeDeclaration>) {
+    /// Keyed by `Path::same` identity; only paths without a functor
+    /// application are cached.
+    pub(crate) fn register_resolved_pdot_type(
+        &self,
+        path: &Path,
+        decl: Arc<super::decl::TypeDeclaration>,
+    ) {
         self.resolved_pdot_type_cache
             .borrow_mut()
-            .insert(path.to_string(), decl);
+            .insert(SamePathKey(path.clone()), decl);
     }
 
     /// Look up a cached resolved Pdot type declaration.
-    pub fn find_resolved_pdot_type(&self, path: &str) -> Option<Arc<super::decl::TypeDeclaration>> {
-        self.resolved_pdot_type_cache.borrow().get(path).cloned()
+    pub(crate) fn find_resolved_pdot_type(
+        &self,
+        path: &Path,
+    ) -> Option<Arc<super::decl::TypeDeclaration>> {
+        self.resolved_pdot_type_cache
+            .borrow()
+            .get(&SamePathKey(path.clone()))
+            .cloned()
+    }
+
+    /// Look up a cached resolved declaration by printed name: only paths
+    /// rooted at a persistent (stamp-0) identifier are reachable this way.
+    pub(crate) fn find_resolved_pdot_type_by_name(
+        &self,
+        path: &Path,
+    ) -> Option<Arc<super::decl::TypeDeclaration>> {
+        fn persistent_dotted(path: &Path) -> bool {
+            match path {
+                Path::Pident(id) => id.is_persistent() || id.stamp() == 0,
+                Path::Pdot(parent, _, _) => persistent_dotted(parent),
+                Path::Papply(_, _) => false,
+            }
+        }
+        if !matches!(path, Path::Pdot(..)) || !persistent_dotted(path) {
+            return None;
+        }
+        self.find_resolved_pdot_type(path)
     }
 
     /// Cache a resolved module signature.
@@ -1117,6 +1620,7 @@ impl TypeContext {
         access_path: Path,
         sig: Arc<super::decl::Signature>,
     ) {
+        self.poison_store_build_for("register_resolved_module_sig");
         self.resolved_module_sig_cache
             .borrow_mut()
             .insert(path.to_string(), (access_path, sig));
@@ -1127,15 +1631,38 @@ impl TypeContext {
         &self,
         path: &str,
     ) -> Option<(Path, Arc<super::decl::Signature>)> {
+        self.poison_store_build_for("read:find_resolved_module_sig");
         self.resolved_module_sig_cache.borrow().get(path).cloned()
     }
 
     /// Cache a lazily-built qualified module-components view.
+    /// Register a (possibly shared) component view in this compilation's
+    /// component cache.
+    pub(crate) fn register_qualified_module_components_arc(
+        &self,
+        key: QualifiedModuleComponentsCacheKey,
+        components: Arc<super::env_lazy::QualifiedModuleComponents>,
+    ) {
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_qualified_component_registered();
+        }
+        if self.in_store_build() {
+            self.record_store_effect(StoreEffect::RegisterComponents(
+                key.clone(),
+                components.clone(),
+            ));
+        }
+        self.qualified_module_components_cache
+            .borrow_mut()
+            .insert(key, components);
+    }
+
     pub(crate) fn register_qualified_module_components(
         &self,
         key: QualifiedModuleComponentsCacheKey,
         components: super::env_lazy::QualifiedModuleComponents,
     ) {
+        self.poison_store_build_for("register_qualified_module_components");
         if self.compiler_counters_enabled {
             crate::perf_counters::record_qualified_component_registered();
         }
@@ -1154,6 +1681,7 @@ impl TypeContext {
         key: &QualifiedModuleComponentsCacheKey,
         f: impl FnOnce(&super::env_lazy::QualifiedModuleComponents) -> R,
     ) -> Option<R> {
+        self.poison_store_build_for("read:with_qualified_module_components");
         let cache = self.qualified_module_components_cache.borrow();
         let Some(components) = cache.get(key) else {
             if self.compiler_counters_enabled {
@@ -1171,6 +1699,7 @@ impl TypeContext {
         &self,
         key: &QualifiedModuleComponentsCacheKey,
     ) -> bool {
+        self.poison_store_build_for("read:has_qualified_module_components");
         // OCaml compiler/ml/env.ml:781-793 lets `find_module_descr` reuse
         // `ps_comps` without forcing `ps_sig`; Rust stores that selected
         // component view explicitly, so later normalization can observe that
@@ -1180,7 +1709,33 @@ impl TypeContext {
             .contains_key(key)
     }
 
+    /// Name index for the component tables of `sig`, shared by every table
+    /// built from the same signature.
+    pub(crate) fn signature_index(
+        &self,
+        sig: &Arc<super::decl::Signature>,
+    ) -> Arc<super::env_lazy::SignatureIndex> {
+        if self.store.owns_signature(sig) {
+            return self.store.signature_index(sig);
+        }
+        let key = Arc::as_ptr(sig) as usize;
+        if let Some((_, found)) = self.signature_indexes.borrow().get(&key) {
+            return found.clone();
+        }
+        let built = Arc::new(super::env_lazy::SignatureIndex::build(sig));
+        self.signature_indexes
+            .borrow_mut()
+            .insert(key, (sig.clone(), built.clone()));
+        built
+    }
+
     pub(crate) fn register_component_alias_source(&self, component_path: Path, alias_source: Path) {
+        if self.in_store_build() {
+            self.record_store_effect(StoreEffect::RegisterAliasSource(
+                component_path.clone(),
+                alias_source.clone(),
+            ));
+        }
         // OCaml compiler/ml/env.ml:1440-1446 scrapes aliases by resolving the
         // target path through `find_module`; env.ml:1530 then prefixes the
         // selected component path. Record exactly that pair so later helpers
@@ -1196,31 +1751,18 @@ impl TypeContext {
         }
 
         for alias_source in alias_sources {
-            let component_key = {
-                let by_component = self.component_alias_sources.borrow();
-                by_component
-                    .keys()
-                    .find(|existing| existing.same(&component_path))
-                    .cloned()
-                    .unwrap_or_else(|| component_path.clone())
-            };
-            let mut by_component = self.component_alias_sources.borrow_mut();
             push_unique_path(
-                by_component.entry(component_key).or_default(),
+                self.component_alias_sources
+                    .borrow_mut()
+                    .entry(SamePathKey(component_path.clone()))
+                    .or_default(),
                 alias_source.clone(),
             );
-
-            let source_key = {
-                let by_source = self.component_paths_by_alias_source.borrow();
-                by_source
-                    .keys()
-                    .find(|existing| existing.same(&alias_source))
-                    .cloned()
-                    .unwrap_or_else(|| alias_source.clone())
-            };
-            let mut by_source = self.component_paths_by_alias_source.borrow_mut();
             push_unique_path(
-                by_source.entry(source_key).or_default(),
+                self.component_paths_by_alias_source
+                    .borrow_mut()
+                    .entry(SamePathKey(alias_source))
+                    .or_default(),
                 component_path.clone(),
             );
         }
@@ -1260,15 +1802,11 @@ impl TypeContext {
     }
 
     pub(crate) fn component_paths_for_alias_source(&self, alias_source: &Path) -> Vec<Path> {
-        let mut paths = Vec::new();
-        for (source, component_paths) in self.component_paths_by_alias_source.borrow().iter() {
-            if source.same(alias_source) {
-                for component_path in component_paths {
-                    push_unique_path(&mut paths, component_path.clone());
-                }
-            }
-        }
-        paths
+        self.component_paths_by_alias_source
+            .borrow()
+            .get(&SamePathKey(alias_source.clone()))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Return alias source paths that back a selected component path.
@@ -1277,15 +1815,11 @@ impl TypeContext {
     /// through `scrape_alias`, while env.ml:1573-1578 stores child
     /// declaration/component thunks under the selected access path.
     pub(crate) fn alias_sources_for_component_path(&self, component_path: &Path) -> Vec<Path> {
-        let mut sources = Vec::new();
-        for (path, alias_sources) in self.component_alias_sources.borrow().iter() {
-            if path.same(component_path) {
-                for alias_source in alias_sources {
-                    push_unique_path(&mut sources, alias_source.clone());
-                }
-            }
-        }
-        sources
+        self.component_alias_sources
+            .borrow()
+            .get(&SamePathKey(component_path.clone()))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Look up a module alias target from the qualified module components cache.
@@ -1301,6 +1835,7 @@ impl TypeContext {
         parent_path: &Path,
         module_name: &str,
     ) -> Option<Path> {
+        self.poison_store_build_for("read:find_module_alias_in_components");
         let key = QualifiedModuleComponentsCacheKey::new(parent_path.clone(), None);
         self.with_qualified_module_components(&key, |components| {
             let (_, _, md) = components.lookup_module(module_name)?;
@@ -1319,7 +1854,7 @@ impl TypeContext {
         module_path: &Path,
         value_name: &str,
         path: Path,
-        desc: super::decl::ValueDescription,
+        desc: Arc<super::decl::ValueDescription>,
     ) {
         self.resolved_module_value_cache
             .borrow_mut()
@@ -1333,7 +1868,7 @@ impl TypeContext {
         &self,
         module_path: &Path,
         value_name: &str,
-    ) -> Option<(Path, super::decl::ValueDescription)> {
+    ) -> Option<(Path, Arc<super::decl::ValueDescription>)> {
         self.resolved_module_value_cache
             .borrow()
             .get(module_path)
@@ -1358,7 +1893,94 @@ impl TypeContext {
             .insert(type_name.to_string(), (access_path, id, decl));
     }
 
+    /// Start or stop answering repeated `typeopt` queries from a cache. Only
+    /// enabled while a finished typed tree is lowered to lambda.
+    pub(crate) fn set_typeopt_cache(&self, enabled: bool) {
+        *self.typeopt_answers.borrow_mut() = enabled.then(crate::fast_hash::AHashMap::new);
+    }
+
+    /// Answer a `typeopt` query `query` about `ty` in the env `env_id`,
+    /// reusing an earlier answer while the cache is enabled.
+    pub(crate) fn typeopt_answer(
+        &self,
+        env_id: u64,
+        ty: TypeExprRef,
+        query: u8,
+        compute: impl FnOnce() -> bool,
+    ) -> bool {
+        if self.typeopt_answers.borrow().is_none() {
+            return compute();
+        }
+        let ty = self.repr(ty);
+        if let Some(answer) = self
+            .typeopt_answers
+            .borrow()
+            .as_ref()
+            .and_then(|answers| answers.get(&(env_id, ty, query)))
+        {
+            return *answer;
+        }
+        let answer = compute();
+        if let Some(answers) = self.typeopt_answers.borrow_mut().as_mut() {
+            answers.insert((env_id, ty, query), answer);
+        }
+        answer
+    }
+
+    /// The cached expansion outcome of a `Pdot` head (`ctype::PdotExpansion`).
+    pub(crate) fn find_pdot_expansion(
+        &self,
+        scope_id: u64,
+        mode: u8,
+        arity: usize,
+        path: &Path,
+    ) -> Option<super::ctype::PdotExpansion> {
+        self.pdot_expansions
+            .borrow()
+            .get(&PdotExpansionKeyRef { scope_id, mode, arity, path })
+            .cloned()
+    }
+
+    pub(crate) fn register_pdot_expansion(
+        &self,
+        scope_id: u64,
+        mode: u8,
+        arity: usize,
+        path: &Path,
+        expansion: super::ctype::PdotExpansion,
+    ) {
+        self.pdot_expansions.borrow_mut().insert(
+            PdotExpansionKey { scope_id, mode, arity, path: path.clone() },
+            expansion,
+        );
+    }
+
     /// Look up a cached dotted type lookup for a resolved module access path.
+    pub(crate) fn find_resolved_type_item(
+        &self,
+        scope_id: u64,
+        path: &Path,
+        strengthen_alias_types: bool,
+    ) -> Option<(Ident, Arc<super::decl::TypeDeclaration>)> {
+        self.resolved_type_item_cache
+            .borrow()
+            .get(&(scope_id, path.clone(), strengthen_alias_types))
+            .cloned()
+    }
+
+    pub(crate) fn register_resolved_type_item(
+        &self,
+        scope_id: u64,
+        path: &Path,
+        strengthen_alias_types: bool,
+        id: Ident,
+        decl: Arc<super::decl::TypeDeclaration>,
+    ) {
+        self.resolved_type_item_cache
+            .borrow_mut()
+            .insert((scope_id, path.clone(), strengthen_alias_types), (id, decl));
+    }
+
     pub(crate) fn find_resolved_module_type(
         &self,
         env_id: u64,
@@ -1411,6 +2033,14 @@ impl TypeContext {
         id: Ident,
         md: Arc<super::decl::ModuleDeclaration>,
     ) {
+        if self.in_store_build() {
+            self.record_store_effect(StoreEffect::RegisterQualifiedModuleDecl(
+                parent_path.clone(),
+                child_name.into(),
+                id.clone(),
+                md.clone(),
+            ));
+        }
         let Some(head) = parent_path.head_opt() else {
             return;
         };
@@ -1453,6 +2083,54 @@ impl TypeContext {
             .insert((env_id, original_path.clone()), normalized_path);
     }
 
+    pub(crate) fn find_type_newtype_level(&self, scope_id: u64, path: &Path) -> Option<Option<i32>> {
+        self.type_newtype_levels
+            .borrow()
+            .get(&(scope_id, path.clone()))
+            .copied()
+    }
+
+    pub(crate) fn register_type_newtype_level(&self, scope_id: u64, path: &Path, level: Option<i32>) {
+        self.type_newtype_levels
+            .borrow_mut()
+            .insert((scope_id, path.clone()), level);
+    }
+
+    pub(crate) fn find_occur_variance_mask(&self, scope_id: u64, path: &Path) -> Option<Option<u64>> {
+        self.occur_variance_masks
+            .borrow()
+            .get(&(scope_id, path.clone()))
+            .copied()
+    }
+
+    pub(crate) fn register_occur_variance_mask(&self, scope_id: u64, path: &Path, mask: Option<u64>) {
+        self.occur_variance_masks
+            .borrow_mut()
+            .insert((scope_id, path.clone()), mask);
+    }
+
+    pub(crate) fn register_normalized_path_forward(
+        &self,
+        env_id: u64,
+        original_path: &Path,
+        normalized_path: Path,
+    ) {
+        self.normalized_path_forward_cache
+            .borrow_mut()
+            .insert((env_id, original_path.clone()), normalized_path);
+    }
+
+    pub(crate) fn find_normalized_path_forward(
+        &self,
+        env_id: u64,
+        original_path: &Path,
+    ) -> Option<Path> {
+        self.normalized_path_forward_cache
+            .borrow()
+            .get(&(env_id, original_path.clone()))
+            .cloned()
+    }
+
     /// Look up a cached normalized path for a specific environment identity.
     pub(crate) fn find_normalized_path_full(
         &self,
@@ -1472,6 +2150,7 @@ impl TypeContext {
         original_path: &Path,
         normalized_path: Path,
     ) {
+        self.poison_store_build_for("register_forced_normalized_path_full");
         self.forced_normalized_path_full_cache
             .borrow_mut()
             .insert((env_id, original_path.clone()), normalized_path);
@@ -1498,6 +2177,7 @@ impl TypeContext {
         right: &Path,
         same: bool,
     ) {
+        self.poison_store_build_for("register_forced_type_path_compare");
         let mut cache = self.forced_type_path_compare_cache.borrow_mut();
         cache.insert((env_id, left.clone(), right.clone()), same);
         cache.insert((env_id, right.clone(), left.clone()), same);
@@ -1518,12 +2198,17 @@ impl TypeContext {
 
     /// Set load paths for resolving CMI files.
     pub fn set_load_paths(&self, paths: Vec<std::path::PathBuf>) {
+        *self.load_paths.borrow_mut() = Arc::new(paths);
+    }
+
+    /// Set the load paths from a shared list.
+    pub fn set_load_paths_shared(&self, paths: Arc<Vec<std::path::PathBuf>>) {
         *self.load_paths.borrow_mut() = paths;
     }
 
     /// Get the load paths.
     pub fn load_paths(&self) -> std::cell::Ref<'_, Vec<std::path::PathBuf>> {
-        self.load_paths.borrow()
+        std::cell::Ref::map(self.load_paths.borrow(), |paths| paths.as_ref())
     }
 
     pub(crate) fn set_persistent_env(&self, env: crate::cmi::persistent_env::PersistentEnv) {
@@ -1555,6 +2240,7 @@ impl TypeContext {
         &self,
         path: &str,
     ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+        self.replay_type_decl_log(2);
         let store = self.type_decl_by_path.borrow();
         if store.contains_key(path) {
             Some(std::cell::Ref::map(store, |s| {
@@ -1566,18 +2252,40 @@ impl TypeContext {
     }
 
     /// Look up a qualified declaration by exact Path identity.
+    /// The declaration registered last under exactly `path`.
     pub fn find_type_decl_by_exact_path(
         &self,
         path: &Path,
-    ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
-        let store = self.type_decl_by_exact_path.borrow();
-        if store.contains_key(path) {
-            Some(std::cell::Ref::map(store, |entries| {
-                entries.get(path).expect("checked exact type path").as_ref()
-            }))
-        } else {
-            None
+    ) -> Option<Arc<super::decl::TypeDeclaration>> {
+        self.replay_type_decl_log(3);
+        let log_len = self.type_decl_log.borrow().len();
+        {
+            let mut memo = self.exact_path_memo.borrow_mut();
+            if memo.0 != log_len {
+                memo.0 = log_len;
+                memo.1.clear();
+            } else if let Some(found) = memo.1.get(path) {
+                return found.clone();
+            }
         }
+        let singles = self.type_decl_by_exact_path.borrow();
+        let single = singles.get(path);
+        let mut found = None;
+        for (position, batch) in self.exact_path_batches.borrow().iter().rev() {
+            if single.is_some_and(|(single_position, _)| position < single_position) {
+                break;
+            }
+            if let Some(decl) = batch.find_exact(path) {
+                found = Some(decl.clone());
+                break;
+            }
+        }
+        let found = found.or_else(|| single.map(|(_, decl)| decl.clone()));
+        self.exact_path_memo
+            .borrow_mut()
+            .1
+            .insert(path.clone(), found.clone());
+        found
     }
 
     // ========================================================================
@@ -1589,6 +2297,10 @@ impl TypeContext {
         // A n-ary arrow owns exactly the parameters supplied by its syntax
         // node. Its return type may itself be an arrow (a sequential
         // application such as `f(a)(b)`); never flatten that nested boundary.
+        if self.in_store_build() {
+            self.check_store_desc(&desc);
+            return self.store.alloc_type(desc, level);
+        }
         let id = self.id_gen.next_type_id();
         self.types.push(TypeExpr::new(desc, level, id))
     }
@@ -1646,7 +2358,7 @@ impl TypeContext {
                 _ => ret_type,
             }
         };
-        self.new_type(TypeDesc::Tarrow { args, ret })
+        self.new_type(TypeDesc::Tarrow { args: args.into(), ret })
     }
 
     /// Create an unlabeled arrow type.
@@ -1656,19 +2368,19 @@ impl TypeContext {
 
     /// Create a tuple type.
     pub fn new_tuple(&self, types: Vec<TypeExprRef>) -> TypeExprRef {
-        self.new_type(TypeDesc::Ttuple(types))
+        self.new_type(TypeDesc::Ttuple(types.into()))
     }
 
     /// Create a type constructor application.
     pub fn new_constr(&self, path: Path, args: Vec<TypeExprRef>) -> TypeExprRef {
         let abbrev = self.alloc_abbrev(AbbrevMemo::Mnil);
-        self.new_type(TypeDesc::Tconstr { path, args, abbrev })
+        self.new_type(TypeDesc::Tconstr { path, args: args.into(), abbrev })
     }
 
     /// Create a type constructor at generic level (for type schemes).
     pub fn new_generic_constr(&self, path: Path, args: Vec<TypeExprRef>) -> TypeExprRef {
         let abbrev = self.alloc_abbrev(AbbrevMemo::Mnil);
-        self.new_generic_type(TypeDesc::Tconstr { path, args, abbrev })
+        self.new_generic_type(TypeDesc::Tconstr { path, args: args.into(), abbrev })
     }
 
     /// Get or create a cached predef singleton helper.
@@ -1769,7 +2481,7 @@ impl TypeContext {
                 _ => ret_type,
             }
         };
-        self.new_generic_type(TypeDesc::Tarrow { args, ret })
+        self.new_generic_type(TypeDesc::Tarrow { args: args.into(), ret })
     }
 
     /// Create a link type (for unification).
@@ -1779,7 +2491,7 @@ impl TypeContext {
 
     /// Create a polymorphic type.
     pub fn new_poly(&self, body: TypeExprRef, vars: Vec<TypeExprRef>) -> TypeExprRef {
-        self.new_type(TypeDesc::Tpoly { body, vars })
+        self.new_type(TypeDesc::Tpoly { body, vars: vars.into() })
     }
 
     /// Create a universal type variable.
@@ -1789,34 +2501,92 @@ impl TypeContext {
 
     /// Create a variant type.
     pub fn new_variant(&self, row: RowDesc) -> TypeExprRef {
-        self.new_type(TypeDesc::Tvariant(row))
+        self.new_type(TypeDesc::Tvariant(Box::new(row)))
     }
 
     // ========================================================================
     // Type Access
     // ========================================================================
 
-    /// Get the descriptor of a type.
-    /// Returns a cloned snapshot to avoid RefCell borrow conflicts when
-    /// the desc is held across function calls that may modify the same node.
+    /// Borrow the descriptor of a stored (worker-store or shared) node:
+    /// this compilation's overlay copy if it wrote one, else the immutable
+    /// published descriptor.
+    #[inline(never)]
+    fn store_desc_ref(&self, r: TypeExprRef) -> TypeDescRef<'_> {
+        if r.is_shared() {
+            let idx = r.shared_index();
+            if let Some(index) = self.shared_desc_overlay.borrow().get(idx as usize) {
+                return self.store_descs.get_at(*index).desc();
+            }
+            return std::cell::Ref::map(self.shared_pages.borrow(), |pages| {
+                &super::shared_store::page_node(pages, idx).desc
+            });
+        }
+        if let Some(index) = self.store_desc_overlay.borrow().get(r.store_index()) {
+            return self.store_descs.get_at(*index).desc();
+        }
+        self.store.node(r).desc()
+    }
+
+    /// Clone the descriptor so callers can hold it across node mutations.
     #[inline]
     pub fn get_desc(&self, r: TypeExprRef) -> TypeDescSnapshot {
-        TypeDescSnapshot(self.types.get(r).desc().clone())
+        TypeDescSnapshot(self.with_desc(r, TypeDesc::clone))
+    }
+
+    /// Apply `f` to the descriptor of `r`. The local path is a plain
+    /// `RefCell` borrow, so hot readers (`repr`, `get_desc`) inline exactly as
+    /// they did before stored nodes had two representations.
+    #[inline(always)]
+    pub(crate) fn with_desc<R>(&self, r: TypeExprRef, f: impl FnOnce(&TypeDesc) -> R) -> R {
+        if r.is_store() {
+            return f(&self.store_desc_ref(r));
+        }
+        self.poison_store_build();
+        f(&self.types.get(r).desc())
     }
 
     /// Borrow the descriptor of a type without cloning it.
     ///
     /// Prefer this in short read-only hot paths. Use `get_desc()` when the
     /// descriptor must be held across code that may mutate the same type node.
+    /// Local nodes are by far the most common (hundreds of millions of reads
+    /// per build), so their path is inlined into callers.
     #[inline]
     pub fn borrow_desc(&self, r: TypeExprRef) -> TypeDescRef<'_> {
+        if r.is_store() {
+            return self.store_desc_ref(r);
+        }
+        self.poison_store_build();
         self.types.get(r).desc()
     }
 
     /// Get the level of a type.
     #[inline]
     pub fn get_level(&self, r: TypeExprRef) -> i32 {
+        if r.is_store() {
+            return self.store_level(r);
+        }
+        self.poison_store_build();
         self.types.get(r).level()
+    }
+
+    #[inline(never)]
+    fn store_level(&self, r: TypeExprRef) -> i32 {
+        if r.is_shared() {
+            let idx = r.shared_index();
+            return self
+                .shared_level_overlay
+                .borrow()
+                .get(idx as usize)
+                .copied()
+                .unwrap_or_else(|| super::shared_store::page_node(&self.shared_pages.borrow(), idx).level);
+        }
+        self.store_level_overlay
+            .borrow()
+            .get(r.store_index())
+            .copied()
+            .unwrap_or_else(|| self.store.node(r).level())
     }
 
     /// Number of allocated type expressions.
@@ -1831,7 +2601,7 @@ impl TypeContext {
         ty: TypeExprRef,
         kind: crate::perf_counters::TypeMutationKind,
     ) {
-        if !self.mutation_logging.get() {
+        if !self.mutation_logging.get() || self.store_build_owns(ty) {
             return;
         }
         let mut journal = self.mutation_journal.borrow_mut();
@@ -1860,7 +2630,7 @@ impl TypeContext {
 
     #[inline]
     fn record_row_field_mutation(&self, mutation: impl FnOnce() -> TypeMutation, row: RowFieldRef) {
-        if !self.mutation_logging.get() {
+        if !self.mutation_logging.get() || self.store_build_owns_row_field(row) {
             return;
         }
         let mut journal = self.mutation_journal.borrow_mut();
@@ -1890,7 +2660,9 @@ impl TypeContext {
         }
     }
 
-    /// Set the level of a type.
+    /// Set the level of a type. Stored nodes are never written in place
+    /// unless the current store build is still creating them: the write goes
+    /// to this compilation's overlay.
     #[inline]
     pub fn set_level(&self, r: TypeExprRef, level: i32) {
         self.record_type_mutation(
@@ -1898,10 +2670,33 @@ impl TypeContext {
             r,
             crate::perf_counters::TypeMutationKind::Level,
         );
-        self.types.get(r).set_level(level);
+        self.write_level_raw(r, level);
     }
 
-    /// Set the descriptor of a type.
+    /// Level write without journaling (also used to undo).
+    #[inline]
+    fn write_level_raw(&self, r: TypeExprRef, level: i32) {
+        if r.is_store() {
+            if r.is_shared() {
+                self.shared_level_overlay
+                    .borrow_mut()
+                    .set(r.shared_index() as usize, level);
+                return;
+            }
+            if self.store_build_owns(r) {
+                self.store.set_level_backing(r, level);
+                return;
+            }
+            self.store_level_overlay
+                .borrow_mut()
+                .set(r.store_index(), level);
+        } else {
+            self.poison_store_build();
+            self.types.get(r).set_level(level);
+        }
+    }
+
+    /// Set the descriptor without changing the immutable dependency graph.
     #[inline]
     pub fn set_desc(&self, r: TypeExprRef, desc: TypeDesc) {
         self.record_type_mutation(
@@ -1909,7 +2704,63 @@ impl TypeContext {
             r,
             crate::perf_counters::TypeMutationKind::Desc,
         );
-        self.types.get(r).set_desc(desc);
+        self.write_desc_raw(r, desc);
+    }
+
+    /// Descriptor write without journaling (also used to undo).
+    #[inline]
+    fn write_desc_raw(&self, r: TypeExprRef, desc: TypeDesc) {
+        if r.is_store() {
+            if r.is_shared() {
+                self.set_shared_desc(r, desc);
+                return;
+            }
+            if self.store_build_owns(r) {
+                self.check_store_desc(&desc);
+                self.store.set_desc_backing(r, desc);
+                return;
+            }
+            let index = self
+                .store_desc_overlay
+                .borrow()
+                .get(r.store_index())
+                .copied();
+            if let Some(index) = index {
+                self.store_descs.get_at(index).set_desc(desc);
+            } else {
+                let original = self.store.node(r);
+                let index =
+                    self.store_descs
+                        .push_raw(TypeExpr::new(desc, original.level(), original.id()));
+                self.store_desc_overlay
+                    .borrow_mut()
+                    .set(r.store_index(), index);
+            }
+        } else {
+            self.poison_store_build();
+            self.types.get(r).set_desc(desc);
+        }
+    }
+
+    /// Descriptor write to a shared dependency node: copy-on-write into this
+    /// compilation's overlay; the published node is never mutated.
+    #[inline(never)]
+    fn set_shared_desc(&self, r: TypeExprRef, desc: TypeDesc) {
+        let idx = r.shared_index();
+        let index = self.shared_desc_overlay.borrow().get(idx as usize).copied();
+        if let Some(index) = index {
+            self.store_descs.get_at(index).set_desc(desc);
+        } else {
+            let (level, id) = {
+                let pages = self.shared_pages.borrow();
+                let original = super::shared_store::page_node(&pages, idx);
+                (original.level, original.id)
+            };
+            let index = self.store_descs.push_raw(TypeExpr::new(desc, level, id));
+            self.shared_desc_overlay
+                .borrow_mut()
+                .set(idx as usize, index);
+        }
     }
 
     /// Create the `used_slot` of a warning-tracked open (env.ml:1842).
@@ -1994,13 +2845,7 @@ impl TypeContext {
             return (Err("_none_".to_string()), 1, 0, -1);
         }
         let name = self
-            .resolve_cmi_longident_component(pos.file_name)
-            .or_else(|| {
-                self.arena_longident_names
-                    .borrow()
-                    .get(&pos.file_name.raw())
-                    .cloned()
-            })
+            .resolve_any_longident_component(pos.file_name)
             .map(Err)
             .unwrap_or(Ok(pos.file_name.raw()));
         (name, pos.line, pos.bol, pos.cnum)
@@ -2097,7 +2942,7 @@ impl TypeContext {
         };
         for (ty, old, target) in compressions {
             if matches!(self.get_desc(ty).0, TypeDesc::Tlink(current) if current == target) {
-                self.types.get(ty).set_desc(old);
+                self.write_desc_raw(ty, old);
             }
         }
     }
@@ -2140,29 +2985,24 @@ impl TypeContext {
         });
         if has_changes {
             let refs = std::mem::take(&mut *self.memoized_abbrev_refs.borrow_mut());
-            let abbrevs = self.abbrevs.borrow();
             for memo in refs {
-                if let Some(cell) = abbrevs.get(memo.index()) {
-                    *cell.borrow_mut() = AbbrevMemo::Mnil;
-                }
+                self.write_abbrev(memo, AbbrevMemo::Mnil);
             }
         }
         let mut restored = 0;
         for mutation in mutations.into_iter().rev() {
             match mutation {
                 TypeMutation::TypeDesc(ty, desc) | TypeMutation::Compress(ty, desc, _) => {
-                    self.types.get(ty).set_desc(desc);
+                    self.write_desc_raw(ty, desc);
                     restored += 1;
                 }
                 TypeMutation::TypeLevel(ty, level) => {
-                    self.types.get(ty).set_level(level);
+                    self.write_level_raw(ty, level);
                     restored += 1;
                 }
                 TypeMutation::RowField(row, field) => {
-                    if let Some(cell) = self.row_fields.borrow().get(row.index()) {
-                        *cell.borrow_mut() = field;
-                        restored += 1;
-                    }
+                    self.write_row_field_raw(row, field);
+                    restored += 1;
                 }
                 TypeMutation::AbbrevMemo(..) | TypeMutation::MemoizedAbbrevRefs(..) => {}
                 TypeMutation::CurrentAbbreviations(value) => {
@@ -2200,6 +3040,7 @@ impl TypeContext {
     /// Record that `new_ref` is an arity-updated version of `original_ref`.
     /// The sexp serializer will use `original_ref` as the dedup key for both.
     pub fn set_arity_alias(&self, new_ref: TypeExprRef, original_ref: TypeExprRef) {
+        self.poison_store_build_for("set_arity_alias");
         self.arity_aliases
             .borrow_mut()
             .insert(new_ref, original_ref);
@@ -2223,6 +3064,7 @@ impl TypeContext {
             Vec<super::decl::Attribute>,
         )>,
     ) {
+        self.poison_store_build_for("register_record_labels");
         self.record_labels_cache
             .borrow_mut()
             .insert(type_path.clone(), labels);
@@ -2250,7 +3092,23 @@ impl TypeContext {
         type_path: &Path,
         labels: Arc<Vec<super::decl::LabelDescription>>,
     ) {
+        self.poison_store_build_for("register_record_label_descriptions");
         let summary = Arc::new(RecordLabelDescriptionSummary::from_labels(&labels));
+        self.record_label_descriptions_cache
+            .borrow_mut()
+            .insert(type_path.clone(), labels);
+        self.record_label_description_summaries_cache
+            .borrow_mut()
+            .insert(type_path.clone(), summary);
+    }
+
+    /// Register label descriptions and their already-built summary.
+    pub(crate) fn register_record_label_descriptions_with_summary(
+        &self,
+        type_path: &Path,
+        labels: Arc<Vec<super::decl::LabelDescription>>,
+        summary: Arc<RecordLabelDescriptionSummary>,
+    ) {
         self.record_label_descriptions_cache
             .borrow_mut()
             .insert(type_path.clone(), labels);
@@ -2303,6 +3161,7 @@ impl TypeContext {
         lbl_pos: i32,
         label: super::decl::LabelDescription,
     ) {
+        self.poison_store_build_for("cache_qualified_record_label");
         self.qualified_record_label_cache.borrow_mut().insert(
             QualifiedRecordLabelCacheKey::new(type_path.clone(), env_id, lbl_pos),
             label,
@@ -2319,6 +3178,7 @@ impl TypeContext {
 
     /// Cache the lident chosen for a synthesized record field.
     pub fn cache_synthesized_record_lident(&self, label_name: String, lid: LidentIdx) {
+        self.poison_store_build_for("cache_synthesized_record_lident");
         self.synthesized_record_lidents
             .borrow_mut()
             .entry(label_name)
@@ -2336,6 +3196,7 @@ impl TypeContext {
             Vec<super::decl::Attribute>,
         )>,
     ) {
+        self.poison_store_build_for("set_dict_pattern_labels");
         *self.dict_pattern_labels_cache.borrow_mut() = labels;
     }
 
@@ -2385,20 +3246,77 @@ impl TypeContext {
     /// Clear all per-node abbreviation memo chains (OCaml cleanup_abbrev).
     pub fn clear_abbrev_memos(&self) {
         let refs = self.memoized_abbrev_refs.borrow().clone();
-        let abbrevs = self.abbrevs.borrow();
         for memo in refs {
-            if let Some(cell) = abbrevs.get(memo.index()) {
-                let previous = cell.borrow().clone();
-                self.record_abbrev_mutation(|| TypeMutation::AbbrevMemo(memo, previous), memo);
-                *cell.borrow_mut() = AbbrevMemo::Mnil;
-            }
+            self.write_abbrev(memo, AbbrevMemo::Mnil);
         }
-        drop(abbrevs);
-        self.record_mutation(
-            || TypeMutation::MemoizedAbbrevRefs(self.memoized_abbrev_refs.borrow().clone()),
-            crate::perf_counters::TypeMutationKind::Abbrev,
-        );
         self.memoized_abbrev_refs.borrow_mut().clear();
+    }
+
+    /// Current value of a memo cell: this compilation's overlay for store
+    /// cells, the local table otherwise. Missing cells read as `Mnil`.
+    fn read_abbrev(&self, memo: AbbrevMemoRef) -> AbbrevMemo {
+        if memo.is_shared() {
+            return self
+                .shared_abbrev_overlay
+                .borrow()
+                .get(memo.shared_index())
+                .cloned()
+                .unwrap_or(AbbrevMemo::Mnil);
+        }
+        if memo.is_store() {
+            if let Some(value) = self.store_abbrev_overlay.borrow().get(memo.store_index()) {
+                return value.clone();
+            }
+            return self.store.abbrev(memo);
+        }
+        let abbrevs = self.abbrevs.borrow();
+        abbrevs
+            .get(memo.index())
+            .map(|cell| cell.borrow().clone())
+            .unwrap_or(AbbrevMemo::Mnil)
+    }
+
+    /// Apply `f` to a memo cell without copying it (the chain scans below
+    /// only compare paths and follow `next`).
+    fn with_abbrev<R>(&self, memo: AbbrevMemoRef, f: impl FnOnce(&AbbrevMemo) -> R) -> R {
+        if memo.is_shared() {
+            return match self.shared_abbrev_overlay.borrow().get(memo.shared_index()) {
+                Some(value) => f(value),
+                None => f(&AbbrevMemo::Mnil),
+            };
+        }
+        if memo.is_store() {
+            if let Some(value) = self.store_abbrev_overlay.borrow().get(memo.store_index()) {
+                return f(value);
+            }
+            return self.store.with_abbrev(memo, f);
+        }
+        let abbrevs = self.abbrevs.borrow();
+        match abbrevs.get(memo.index()) {
+            Some(cell) => f(&cell.borrow()),
+            None => f(&AbbrevMemo::Mnil),
+        }
+    }
+
+    /// Write a memo cell; store cells are written to this compilation's
+    /// overlay only. Missing local cells are ignored.
+    fn write_abbrev(&self, memo: AbbrevMemoRef, value: AbbrevMemo) {
+        if memo.is_shared() {
+            self.shared_abbrev_overlay
+                .borrow_mut()
+                .set(memo.shared_index(), value);
+            return;
+        }
+        if memo.is_store() {
+            self.store_abbrev_overlay
+                .borrow_mut()
+                .set(memo.store_index(), value);
+            return;
+        }
+        let abbrevs = self.abbrevs.borrow();
+        if let Some(cell) = abbrevs.get(memo.index()) {
+            *cell.borrow_mut() = value;
+        }
     }
 
     /// Get the current abbreviation context (set during subst_with_memo).
@@ -2424,15 +3342,8 @@ impl TypeContext {
     ) -> Option<TypeExprRef> {
         let mut current = memo;
         for _ in 0..128 {
-            let node = {
-                let abbrevs = self.abbrevs.borrow();
-                abbrevs
-                    .get(current.index())
-                    .map(|cell| cell.borrow().clone())
-                    .unwrap_or(AbbrevMemo::Mnil)
-            };
-            match node {
-                AbbrevMemo::Mnil => return None,
+            let step = self.with_abbrev(current, |node| match node {
+                AbbrevMemo::Mnil => Err(None),
                 AbbrevMemo::Mcons {
                     private_flag: cached_private,
                     path: cached_path,
@@ -2440,14 +3351,17 @@ impl TypeContext {
                     next,
                     ..
                 } => {
-                    if private_flag <= cached_private && path.same(&cached_path) {
-                        return Some(expansion);
+                    if private_flag <= *cached_private && path.same(cached_path) {
+                        Err(Some(*expansion))
+                    } else {
+                        Ok(*next)
                     }
-                    current = next;
                 }
-                AbbrevMemo::Mlink(next) => {
-                    current = next;
-                }
+                AbbrevMemo::Mlink(next) => Ok(*next),
+            });
+            match step {
+                Ok(next) => current = next,
+                Err(found) => return found,
             }
         }
         None
@@ -2459,15 +3373,8 @@ impl TypeContext {
     pub fn find_abbrev_repr(&self, memo: AbbrevMemoRef, path: &Path) -> Option<TypeExprRef> {
         let mut current = memo;
         for _ in 0..128 {
-            let node = {
-                let abbrevs = self.abbrevs.borrow();
-                abbrevs
-                    .get(current.index())
-                    .map(|cell| cell.borrow().clone())
-                    .unwrap_or(AbbrevMemo::Mnil)
-            };
-            match node {
-                AbbrevMemo::Mnil => return None,
+            let step = self.with_abbrev(current, |node| match node {
+                AbbrevMemo::Mnil => Err(None),
                 AbbrevMemo::Mcons {
                     private_flag: cached_private,
                     path: cached_path,
@@ -2477,14 +3384,17 @@ impl TypeContext {
                 } => {
                     // Match OCaml find_repr: only public memo entries participate
                     // in repr reuse during copy.
-                    if cached_private == PrivateFlag::Public && path.same(&cached_path) {
-                        return Some(abbrev);
+                    if *cached_private == PrivateFlag::Public && path.same(cached_path) {
+                        Err(Some(*abbrev))
+                    } else {
+                        Ok(*next)
                     }
-                    current = next;
                 }
-                AbbrevMemo::Mlink(next) => {
-                    current = next;
-                }
+                AbbrevMemo::Mlink(next) => Ok(*next),
+            });
+            match step {
+                Ok(next) => current = next,
+                Err(found) => return found,
             }
         }
         None
@@ -2492,11 +3402,7 @@ impl TypeContext {
 
     /// Snapshot an abbreviation memo node.
     pub fn get_abbrev_memo(&self, memo: AbbrevMemoRef) -> AbbrevMemo {
-        let abbrevs = self.abbrevs.borrow();
-        abbrevs
-            .get(memo.index())
-            .map(|cell| cell.borrow().clone())
-            .unwrap_or(AbbrevMemo::Mnil)
+        self.read_abbrev(memo)
     }
 
     /// Debug snapshot of an abbreviation memo chain.
@@ -2553,14 +3459,7 @@ impl TypeContext {
         if memo == AbbrevMemoRef::nil() {
             return;
         }
-        let abbrevs = self.abbrevs.borrow();
-        if let Some(cell) = abbrevs.get(memo.index()) {
-            self.record_abbrev_mutation(
-                || TypeMutation::AbbrevMemo(memo, cell.borrow().clone()),
-                memo,
-            );
-            *cell.borrow_mut() = AbbrevMemo::Mnil;
-        }
+        self.write_abbrev(memo, AbbrevMemo::Mnil);
     }
 
     /// Overwrite a per-node abbreviation memo chain with a saved snapshot.
@@ -2568,14 +3467,7 @@ impl TypeContext {
         if memo == AbbrevMemoRef::nil() {
             return;
         }
-        let abbrevs = self.abbrevs.borrow();
-        if let Some(cell) = abbrevs.get(memo.index()) {
-            self.record_abbrev_mutation(
-                || TypeMutation::AbbrevMemo(memo, cell.borrow().clone()),
-                memo,
-            );
-            *cell.borrow_mut() = value;
-        }
+        self.write_abbrev(memo, value);
     }
 
     /// Prepend a cached abbreviation expansion to a node-local memo chain.
@@ -2589,6 +3481,32 @@ impl TypeContext {
     ) {
         // Nil is a shared sentinel and must not be mutated.
         if memo == AbbrevMemoRef::nil() {
+            return;
+        }
+
+        if memo.is_store() {
+            let previous = self.read_abbrev(memo);
+            self.record_abbrev_mutation(|| TypeMutation::AbbrevMemo(memo, previous.clone()), memo);
+            let next = if matches!(previous, AbbrevMemo::Mnil) {
+                AbbrevMemoRef::nil()
+            } else {
+                self.alloc_abbrev(previous)
+            };
+            self.write_abbrev(
+                memo,
+                AbbrevMemo::Mcons {
+                    private_flag,
+                    path,
+                    abbrev,
+                    expansion,
+                    next,
+                },
+            );
+            self.record_mutation(
+                || TypeMutation::MemoizedAbbrevRefs(self.memoized_abbrev_refs.borrow().clone()),
+                crate::perf_counters::TypeMutationKind::Abbrev,
+            );
+            self.memoized_abbrev_refs.borrow_mut().push(memo);
             return;
         }
 
@@ -2635,6 +3553,17 @@ impl TypeContext {
 
     /// Allocate an abbreviation memo.
     pub fn alloc_abbrev(&self, memo: AbbrevMemo) -> AbbrevMemoRef {
+        if self.in_store_build() {
+            if let AbbrevMemo::Mcons {
+                abbrev, expansion, next, ..
+            } = &memo
+            {
+                self.check_store_ref(*abbrev);
+                self.check_store_ref(*expansion);
+                self.check_store_memo(*next);
+            }
+            return self.store.alloc_abbrev(memo);
+        }
         let mut abbrevs = self.abbrevs.borrow_mut();
         let idx = abbrevs.len();
         abbrevs.push(RefCell::new(memo));
@@ -2647,6 +3576,12 @@ impl TypeContext {
 
     /// Allocate a row field reference.
     pub fn alloc_row_field(&self, field: Option<RowField>) -> RowFieldRef {
+        if self.in_store_build() {
+            if let Some(field) = &field {
+                self.check_store_row_field(field);
+            }
+            return self.store.alloc_row_field(field);
+        }
         let mut row_fields = self.row_fields.borrow_mut();
         let idx = row_fields.len();
         row_fields.push(RefCell::new(field));
@@ -2658,6 +3593,12 @@ impl TypeContext {
         if rf.is_null() {
             return None;
         }
+        if rf.is_store() {
+            if let Some(value) = self.store_row_field_overlay.borrow().get(rf.store_index()) {
+                return value.clone();
+            }
+            return self.store.row_field(rf);
+        }
         let row_fields = self.row_fields.borrow();
         row_fields
             .get(rf.index())
@@ -2666,31 +3607,45 @@ impl TypeContext {
 
     /// Set the value of a row field reference (like OCaml's set_row_field).
     pub fn set_row_field(&self, rf: RowFieldRef, field: RowField) {
-        if rf.is_null() {
-            return;
-        }
-        let row_fields = self.row_fields.borrow();
-        if let Some(cell) = row_fields.get(rf.index()) {
-            self.record_row_field_mutation(
-                || TypeMutation::RowField(rf, cell.borrow().clone()),
-                rf,
-            );
-            *cell.borrow_mut() = Some(field);
-        }
+        self.write_row_field(rf, Some(field));
     }
 
     /// Clear the value stored in a row field reference.
     pub fn clear_row_field(&self, rf: RowFieldRef) {
+        self.write_row_field(rf, None);
+    }
+
+    fn write_row_field(&self, rf: RowFieldRef, value: Option<RowField>) {
         if rf.is_null() {
+            return;
+        }
+        self.record_row_field_mutation(|| TypeMutation::RowField(rf, self.get_row_field(rf)), rf);
+        self.write_row_field_raw(rf, value);
+    }
+
+    /// Row field write without journaling (also used to undo). Store rows
+    /// still being built are written in place; other store rows go to this
+    /// compilation's overlay.
+    fn write_row_field_raw(&self, rf: RowFieldRef, value: Option<RowField>) {
+        if rf.is_null() {
+            return;
+        }
+        if rf.is_store() {
+            if self.store_build_owns_row_field(rf) {
+                if let Some(field) = &value {
+                    self.check_store_row_field(field);
+                }
+                self.store.set_row_field_backing(rf, value);
+                return;
+            }
+            self.store_row_field_overlay
+                .borrow_mut()
+                .set(rf.store_index(), value);
             return;
         }
         let row_fields = self.row_fields.borrow();
         if let Some(cell) = row_fields.get(rf.index()) {
-            self.record_row_field_mutation(
-                || TypeMutation::RowField(rf, cell.borrow().clone()),
-                rf,
-            );
-            *cell.borrow_mut() = None;
+            *cell.borrow_mut() = value;
         }
     }
 
@@ -2708,6 +3663,10 @@ impl TypeContext {
 
     /// Allocate a field kind reference.
     fn alloc_field_kind(&self, kind: Option<FieldKind>) -> FieldKindRef {
+        if self.in_store_build() {
+            // Field-kind cells are never read back; `Fvar` links stay unchecked.
+            return self.store.alloc_field_kind(kind);
+        }
         let mut field_kinds = self.field_kinds.borrow_mut();
         let idx = field_kinds.len();
         field_kinds.push(RefCell::new(kind));
@@ -2823,6 +3782,7 @@ impl TypeContext {
     /// Register a raw module signature for lazy renaming.
     /// Called during load_pervasives to store sigs for normalize_path.
     pub fn register_raw_module_sig(&self, name: &str, sig: Arc<super::decl::Signature>) {
+        self.poison_store_build_for("register_raw_module_sig");
         self.raw_module_sigs
             .borrow_mut()
             .insert(name.to_string(), sig);
@@ -2833,6 +3793,7 @@ impl TypeContext {
         name: &str,
         sig: Arc<super::decl::Signature>,
     ) {
+        self.poison_store_build_for("register_gentype_raw_module_sig");
         self.gentype_raw_module_sigs
             .borrow_mut()
             .insert(name.to_string(), sig);
@@ -2843,6 +3804,7 @@ impl TypeContext {
         name: &str,
         pers_struct: Arc<crate::cmi::portable_types::PortablePersStruct>,
     ) {
+        self.poison_store_build_for("register_gentype_portable_raw_module_sig");
         self.gentype_portable_raw_module_sigs
             .borrow_mut()
             .insert(name.to_string(), pers_struct);
@@ -2869,6 +3831,7 @@ impl TypeContext {
     }
 
     pub fn has_raw_module_sig(&self, name: &str) -> bool {
+        self.poison_store_build_for("read:has_raw_module_sig");
         self.raw_module_sigs.borrow().contains_key(name)
     }
 
@@ -2893,6 +3856,7 @@ impl TypeContext {
         &self,
         module_name: &str,
     ) -> Option<Arc<super::decl::Signature>> {
+        self.poison_store_build_for("get_or_load_raw_module_sig");
         if let Some(sig) = self.raw_module_sigs.borrow().get(module_name).cloned() {
             return Some(sig);
         }
@@ -2922,6 +3886,11 @@ impl TypeContext {
     /// Matches OCaml's find_module → Lazy.force ps.ps_sig which renames
     /// bound idents the first time a module is accessed during normalize_path.
     pub fn trigger_module_sig_rename(&self, module_name: &str) {
+        if self.in_store_build() {
+            self.record_store_effect(StoreEffect::TriggerRename(module_name.into()));
+            self.suspend_store_build(|| self.trigger_module_sig_rename(module_name));
+            return;
+        }
         if self.renamed_module_sigs.borrow().contains_key(module_name) {
             return; // Already renamed
         }
@@ -2947,6 +3916,7 @@ impl TypeContext {
     }
 
     fn rename_one_module_sig(&self, module_name: &str) {
+        self.poison_store_build_for("rename_one_module_sig");
         let raw_sig = {
             let raw = self.raw_module_sigs.borrow();
             raw.get(module_name).cloned()
@@ -2974,13 +3944,7 @@ impl TypeContext {
             // sequence (compiler/ml/subst.ml:358-364). Keep this lazy rename
             // to that single pass instead of copying before calling the
             // freshening helper.
-            let renamed = Arc::new(
-                crate::cmi::persistent_env::freshened_signature_bound_idents_from_kind(
-                    "type_context_lazy_rename",
-                    sig.as_ref(),
-                    self,
-                ),
-            );
+            let renamed = self.defer_renamed_sig("type_context_lazy_rename", sig);
             self.renamed_module_sigs
                 .borrow_mut()
                 .insert(module_name.to_string(), renamed);
@@ -3040,6 +4004,9 @@ impl TypeContext {
 
     /// Create a new identifier using the typing context's shared stamp source.
     pub fn create_ident(&self, name: &str) -> Ident {
+        if self.in_store_build() {
+            return self.store_binder(&Ident::create_persistent(name));
+        }
         // OCaml compiler/ext/ident.ml:28-40 increments the active
         // currentstamp directly in `Ident.create`/`Ident.rename`; unrelated
         // helper-created local identifiers must not advance the typedtree
@@ -3047,10 +4014,394 @@ impl TypeContext {
         self.id_gen.create(name)
     }
 
+    /// Fresh binder for shared store data. The compilation's own stamp stream
+    /// advances exactly as it would have (and later users replay that), but
+    /// the binder gets a store stamp so it can never be `Ident::same` as an
+    /// identifier of another compilation.
+    fn store_binder(&self, id: &Ident) -> Ident {
+        self.id_gen.next_stamp();
+        let mut effects = self.store_build_effects.borrow_mut();
+        match effects.last_mut() {
+            Some(StoreEffect::Stamps(count)) => *count += 1,
+            _ => effects.push(StoreEffect::Stamps(1)),
+        }
+        let stamp = super::thread_store::next_store_stamp();
+        let mut fresh = id.with_stamp(stamp);
+        if id.is_persistent() {
+            fresh = Ident::new(id.name(), stamp, crate::ident::IdentFlags::NONE);
+        }
+        fresh
+    }
+
+    /// Whether allocations currently go to the worker store.
+    #[inline(always)]
+    pub(crate) fn in_store_build(&self) -> bool {
+        self.store_build_depth.get() != 0
+    }
+
+    /// Record that the current store build depends on compilation-local
+    /// state; its result is then kept private to this compilation.
+    #[inline(always)]
+    pub(crate) fn poison_store_build(&self) {
+        self.poison_store_build_for("local-read");
+    }
+
+    #[inline(always)]
+    pub(crate) fn poison_store_build_for(&self, reason: &'static str) {
+        if self.store_build_depth.get() != 0 {
+            self.poison_store_build_slow(reason);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn poison_store_build_slow(&self, reason: &'static str) {
+        if !self.store_build_poisoned.replace(true) && store_debug_enabled() {
+            eprintln!("[store-poison] {reason}");
+            if std::env::var_os("RESCRIPT_STORE_DEBUG_BT").is_some() {
+                let bt = std::backtrace::Backtrace::force_capture().to_string();
+                let frames: Vec<&str> = bt
+                    .lines()
+                    .filter(|l| l.contains("rescript_compiler::") && !l.contains("poison_store"))
+                    .take(8)
+                    .collect();
+                eprintln!(
+                    "[store-poison-bt] {reason} :: {}",
+                    frames.join(" <- ").replace("rescript_compiler::", "")
+                );
+            }
+        }
+    }
+
+    /// Whether `r` is a store node created by the current store build.
+    #[inline]
+    /// Whether `r` was allocated by the store build in progress. Such nodes
+    /// are written straight into the store and outlive any type snapshot
+    /// taken before the build, so the undo journal must not record (and
+    /// later roll back) their writes, just as it skips nodes created after
+    /// the snapshot.
+    fn store_build_owns(&self, r: TypeExprRef) -> bool {
+        r.is_store()
+            && self.in_store_build()
+            && !r.is_shared()
+            && r.store_index() >= self.store_build_type_start.get()
+    }
+
+    /// Row-field counterpart of [`Self::store_build_owns`].
+    fn store_build_owns_row_field(&self, rf: RowFieldRef) -> bool {
+        rf.is_store() && self.in_store_build() && rf.store_index() >= self.store_build_row_start.get()
+    }
+
+    #[inline]
+    fn check_store_ref(&self, r: TypeExprRef) {
+        if !r.is_store() {
+            self.poison_store_build();
+        }
+    }
+
+    #[inline]
+    fn check_store_memo(&self, memo: AbbrevMemoRef) {
+        // Memo cells 0 (`Mnil`) and 1 (`simple_abbrevs`) have the same role in
+        // every compilation.
+        if !memo.is_store() && memo.0 > 1 {
+            self.poison_store_build();
+        }
+    }
+
+    fn check_store_row_field(&self, field: &RowField) {
+        match field {
+            RowField::Rpresent(Some(ty)) => self.check_store_ref(*ty),
+            RowField::Rpresent(None) | RowField::Rabsent => {}
+            RowField::Reither { types, link, .. } => {
+                for ty in types {
+                    self.check_store_ref(*ty);
+                }
+                if !link.is_null() && !link.is_store() {
+                    self.poison_store_build();
+                }
+            }
+        }
+    }
+
+    /// Poison the store build if `desc` refers to compilation-local cells.
+    fn check_store_desc(&self, desc: &TypeDesc) {
+        match desc {
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+            TypeDesc::Tarrow { args, ret } => {
+                for arg in args.iter() {
+                    self.check_store_ref(arg.typ);
+                }
+                self.check_store_ref(*ret);
+            }
+            TypeDesc::Ttuple(items) => {
+                for ty in items.iter() {
+                    self.check_store_ref(*ty);
+                }
+            }
+            TypeDesc::Tconstr { args, abbrev, .. } => {
+                for ty in args.iter() {
+                    self.check_store_ref(*ty);
+                }
+                self.check_store_memo(*abbrev);
+            }
+            TypeDesc::Tobject { fields, name } => {
+                self.check_store_ref(*fields);
+                if let Some((_, args)) = name {
+                    for ty in args.iter() {
+                        self.check_store_ref(*ty);
+                    }
+                }
+            }
+            TypeDesc::Tfield { typ, rest, .. } => {
+                self.check_store_ref(*typ);
+                self.check_store_ref(*rest);
+            }
+            TypeDesc::Tlink(ty) | TypeDesc::Tsubst(ty) => self.check_store_ref(*ty),
+            TypeDesc::Tvariant(row) => {
+                self.check_store_ref(row.row_more);
+                for (_, field) in row.row_fields.iter() {
+                    self.check_store_row_field(field);
+                }
+                if let Some((_, args)) = &row.row_name {
+                    for ty in args {
+                        self.check_store_ref(*ty);
+                    }
+                }
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                self.check_store_ref(*body);
+                for ty in vars.iter() {
+                    self.check_store_ref(*ty);
+                }
+            }
+            TypeDesc::Tpackage { args, .. } => {
+                for ty in args.iter() {
+                    self.check_store_ref(*ty);
+                }
+            }
+        }
+    }
+
+    /// Run `build` with every type-graph allocation going to the worker
+    /// store, so its result can be shared with later compilations on this
+    /// worker. Returns the replay record to publish with the result, or
+    /// `None` when the build read compilation-local state (the result is
+    /// then only valid in this compilation).
+    pub(crate) fn local_stored_components(
+        &self,
+        id: u64,
+    ) -> Option<Arc<super::env_lazy::QualifiedModuleComponents>> {
+        self.local_stored_components.borrow().get(&id).cloned()
+    }
+
+    pub(crate) fn set_local_stored_components(
+        &self,
+        id: u64,
+        components: Arc<super::env_lazy::QualifiedModuleComponents>,
+    ) {
+        self.local_stored_components.borrow_mut().insert(id, components);
+    }
+
+    pub(crate) fn build_in_store<R>(&self, build: impl FnOnce() -> R) -> (R, Option<Arc<StorePiece>>) {
+        let depth = self.store_build_depth.get();
+        let outer_effects = std::mem::take(&mut *self.store_build_effects.borrow_mut());
+        let outer_poisoned = self.store_build_poisoned.replace(false);
+        if depth == 0 {
+            self.store_build_type_start.set(self.store.type_count());
+            self.store_build_row_start.set(self.store.row_field_count());
+        }
+        self.store_build_depth.set(depth + 1);
+        super::thread_store::set_store_build_depth(depth + 1);
+        let result = build();
+        self.store_build_depth.set(depth);
+        super::thread_store::set_store_build_depth(depth);
+        let effects = std::mem::replace(&mut *self.store_build_effects.borrow_mut(), outer_effects);
+        let poisoned = self.store_build_poisoned.replace(outer_poisoned);
+        if poisoned {
+            if depth > 0 {
+                // The enclosing build may hold this result.
+                self.store_build_poisoned.set(true);
+                self.store_build_effects.borrow_mut().extend(effects);
+            }
+            return (result, None);
+        }
+        let piece = Arc::new(StorePiece {
+            id: NEXT_STORE_PIECE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            effects,
+        });
+        self.touched_store_pieces.borrow_mut().insert(piece.id);
+        if depth > 0 {
+            self.store_build_effects
+                .borrow_mut()
+                .push(StoreEffect::Piece(piece.clone()));
+        }
+        (result, Some(piece))
+    }
+
+    /// Note that this compilation is using shared store data built by `piece`:
+    /// the first time, apply the effects that building it had.
+    pub(crate) fn touch_store_piece(&self, piece: &Arc<StorePiece>) {
+        if self.in_store_build() {
+            self.store_build_effects
+                .borrow_mut()
+                .push(StoreEffect::Piece(piece.clone()));
+        }
+        if self.touched_store_pieces.borrow().contains(&piece.id) {
+            return;
+        }
+        self.suspend_store_build(|| self.replay_store_piece(piece));
+    }
+
+    fn replay_store_piece(&self, piece: &StorePiece) {
+        if !self.touched_store_pieces.borrow_mut().insert(piece.id) {
+            return;
+        }
+        for effect in &piece.effects {
+            match effect {
+                StoreEffect::Stamps(count) => {
+                    self.id_gen.advance_stamp_by(*count);
+                }
+                StoreEffect::Piece(inner) => self.replay_store_piece(inner),
+                StoreEffect::RegisterComponents(key, components) => {
+                    self.qualified_module_components_cache
+                        .borrow_mut()
+                        .insert(key.clone(), components.clone());
+                }
+                StoreEffect::PreparePers(name) => {
+                    if let Some(mut pers) = self.persistent_env_clone() {
+                        let _ = pers.find_pers_struct(name, self);
+                    }
+                }
+                StoreEffect::TriggerRename(name) => self.trigger_module_sig_rename(name),
+                StoreEffect::RegisterTypeDecl(name, decl) => {
+                    self.register_shared_type_decl(name, decl.clone())
+                }
+                StoreEffect::RegisterTypeDeclByStamp(stamp, decl) => {
+                    self.register_shared_type_decl_by_stamp(*stamp, decl.clone())
+                }
+                StoreEffect::RegisterAliasSource(component, source) => {
+                    self.register_component_alias_source(component.clone(), source.clone())
+                }
+                StoreEffect::RegisterQualifiedModuleDecl(parent, name, id, md) => {
+                    self.register_qualified_module_decl(parent, name, id.clone(), md.clone())
+                }
+            }
+        }
+    }
+
+    /// Record an effect of the current store build on this compilation.
+    pub(crate) fn record_store_effect(&self, effect: StoreEffect) {
+        if !self.in_store_build() {
+            return;
+        }
+        let mut effects = self.store_build_effects.borrow_mut();
+        let duplicate = match &effect {
+            StoreEffect::PreparePers(name) => effects
+                .iter()
+                .any(|e| matches!(e, StoreEffect::PreparePers(other) if other == name)),
+            StoreEffect::TriggerRename(name) => effects
+                .iter()
+                .any(|e| matches!(e, StoreEffect::TriggerRename(other) if other == name)),
+            _ => false,
+        };
+        if !duplicate {
+            effects.push(effect);
+        }
+    }
+
+    /// Run `f` as this compilation (allocating locally), in the middle of a
+    /// store build: used for effects on the compilation that are journaled
+    /// separately.
+    pub(crate) fn suspend_store_build<R>(&self, f: impl FnOnce() -> R) -> R {
+        let depth = self.store_build_depth.replace(0);
+        super::thread_store::set_store_build_depth(0);
+        let result = f();
+        self.store_build_depth.set(depth);
+        super::thread_store::set_store_build_depth(depth);
+        result
+    }
+
     /// Rename an identifier using the typing context's shared stamp source.
     pub fn rename_ident(&self, id: &Ident) -> Ident {
+        if self.in_store_build() {
+            if self.reserved_rename_stamps.get().is_some() {
+                // A deferred rename uses stamps this compilation reserved.
+                self.poison_store_build();
+            } else {
+                return self.store_binder(id);
+            }
+        }
+        if let Some((next, last)) = self.reserved_rename_stamps.get() {
+            assert!(
+                next <= last,
+                "deferred signature rename used more stamps than it reserved"
+            );
+            self.reserved_rename_stamps.set(Some((next + 1, last)));
+            return id.with_stamp(next);
+        }
         // See `create_ident`: this mirrors compiler/ext/ident.ml:38-40.
         id.rename(&self.id_gen)
+    }
+
+    /// Force a lazy `Subst.signature Subst.identity` rename of `source`.
+    ///
+    /// OCaml `ps_sig` (compiler/ml/env.ml:669-678) is forced by `find_module`
+    /// (compiler/ml/env.ml:865-875), and most forces only come from
+    /// `normalize_path` (compiler/ml/env.ml:903-914), which discards the
+    /// signature unless it is an alias. The only observable effect of the
+    /// force is the fresh binder stamps allocated by `Subst.signature`
+    /// (compiler/ml/subst.ml:358-364), so reserve exactly those stamps now and
+    /// copy the signature with them when its contents are first read.
+    pub(crate) fn defer_renamed_sig(
+        &self,
+        kind: &'static str,
+        source: Arc<super::decl::Signature>,
+    ) -> Arc<DeferredRenamedSig> {
+        let stamp_count = crate::cmi::persistent_env::signature_freshen_stamp_count(&source);
+        let first_stamp = self.id_gen.current_stamp() + 1;
+        self.id_gen.advance_stamp_by(stamp_count);
+        Arc::new(DeferredRenamedSig {
+            kind,
+            source,
+            first_stamp,
+            stamp_count,
+            renamed: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// Copy a deferred renamed signature, using its reserved stamps.
+    pub(crate) fn materialize_renamed_sig(
+        &self,
+        deferred: &DeferredRenamedSig,
+    ) -> Arc<super::decl::Signature> {
+        deferred
+            .renamed
+            .get_or_init(|| {
+                let last = deferred.first_stamp + deferred.stamp_count - 1;
+                let saved = self
+                    .reserved_rename_stamps
+                    .replace(Some((deferred.first_stamp, last)));
+                let renamed = crate::cmi::persistent_env::freshened_signature_bound_idents_from_kind(
+                    deferred.kind,
+                    deferred.source.as_ref(),
+                    self,
+                );
+                let cursor = self.reserved_rename_stamps.replace(saved);
+                assert_eq!(
+                    cursor,
+                    Some((last + 1, last)),
+                    "deferred signature rename used fewer stamps than it reserved"
+                );
+                Arc::new(renamed)
+            })
+            .clone()
+    }
+
+    /// Materialized renamed signature for `module_name`, if it was forced.
+    pub(crate) fn renamed_module_sig(&self, module_name: &str) -> Option<Arc<super::decl::Signature>> {
+        self.poison_store_build_for("read:renamed_module_sig");
+        let deferred = self.renamed_module_sigs.borrow().get(module_name).cloned()?;
+        Some(self.materialize_renamed_sig(&deferred))
     }
 
     /// Initialize definition level (equivalent of OCaml's `Ctype.init_def`).
@@ -3188,21 +4539,28 @@ impl TypeContext {
     /// This uses path compression to update intermediate links
     /// to point directly to the representative, improving
     /// subsequent lookup performance.
+    #[inline]
     pub fn repr(&self, t: TypeExprRef) -> TypeExprRef {
-        // Fast path: check if t is already a representative (no link).
-        // This avoids any allocation for the common case.
-        let first_next = {
-            let desc = self.borrow_desc(t);
-            match &*desc {
-                TypeDesc::Tlink(next) => *next,
-                TypeDesc::Tfield {
-                    kind: FieldKind::Fabsent,
-                    rest,
-                    ..
-                } => *rest,
-                _ => return t,
-            }
+        // Fast path, inlined into callers: `t` is already a representative.
+        let next = self.with_desc(t, |desc| match desc {
+            TypeDesc::Tlink(next) => Some(*next),
+            TypeDesc::Tfield {
+                kind: FieldKind::Fabsent,
+                rest,
+                ..
+            } => Some(*rest),
+            _ => None,
+        });
+        let Some(first_next) = next else {
+            return t;
         };
+        self.repr_chain(t, first_next)
+    }
+
+    /// Follow a link chain starting at `t` (whose next node is `first_next`)
+    /// and compress it.
+    #[inline(never)]
+    fn repr_chain(&self, t: TypeExprRef, first_next: TypeExprRef) -> TypeExprRef {
 
         // Follow chain to the end, collecting nodes for path compression.
         // Uses a fixed-size stack buffer — chains longer than 32 are
@@ -3213,18 +4571,15 @@ impl TypeContext {
 
         let mut current = first_next;
         for _ in 0..10_000 {
-            let next = {
-                let desc = self.borrow_desc(current);
-                match &*desc {
-                    TypeDesc::Tlink(next) => Some(*next),
-                    TypeDesc::Tfield {
-                        kind: FieldKind::Fabsent,
-                        rest,
-                        ..
-                    } => Some(*rest),
-                    _ => None,
-                }
-            };
+            let next = self.with_desc(current, |desc| match desc {
+                TypeDesc::Tlink(next) => Some(*next),
+                TypeDesc::Tfield {
+                    kind: FieldKind::Fabsent,
+                    rest,
+                    ..
+                } => Some(*rest),
+                _ => None,
+            });
             match next {
                 Some(next_ref) => {
                     if chain_len < 32 {
@@ -3237,19 +4592,27 @@ impl TypeContext {
             }
         }
 
-        // Path compression: relink all traversed nodes to the representative.
-        // btype.ml `repr_link` logs each one as `Ccompress`.
+        // Path compression: relink all traversed nodes to the representative
+        // (OCaml `Btype.repr_link`). Stored handles use compilation-local
+        // descriptor overlays, just like ordinary unification writes.
         for i in 0..chain_len {
             let node = chain[i];
             if node != current {
-                if self.mutation_logging.get() {
-                    let old = self.get_desc(node).0;
-                    self.mutation_journal
-                        .borrow_mut()
-                        .entries
-                        .push(TypeMutation::Compress(node, old, current));
+                // A direct link already points at the representative. OCaml
+                // btype.ml:107-115 does not log/write it (`compress = false`);
+                // otherwise `repr_link` logs the write as `Ccompress`.
+                let direct =
+                    matches!(*self.borrow_desc(node), TypeDesc::Tlink(target) if target == current);
+                if !direct {
+                    if self.mutation_logging.get() && !self.store_build_owns(node) {
+                        let old = self.get_desc(node).0;
+                        self.mutation_journal
+                            .borrow_mut()
+                            .entries
+                            .push(TypeMutation::Compress(node, old, current));
+                    }
+                    self.write_desc_raw(node, TypeDesc::Tlink(current));
                 }
-                self.types.get(node).set_desc(TypeDesc::Tlink(current));
             }
         }
 
@@ -3261,6 +4624,89 @@ impl TypeContext {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn shared_node_writes_stay_in_the_writing_compilation() {
+        let a = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
+        let pool = a.store.shared_pool();
+        let base = pool
+            .publish(2, 0, |_| {
+                (
+                    vec![(TypeDesc::Tvar(None), GENERIC_LEVEL), (TypeDesc::Tnil, GENERIC_LEVEL)],
+                    Vec::new(),
+                )
+            })
+            .expect("pool has room");
+        let var = super::super::shared_store::shared_ref(base, 0);
+        let nil = super::super::shared_store::shared_ref(base, 1);
+        assert!(var.is_shared() && a.contains_type_ref(var));
+
+        // OCaml `link_type`/level updates on a dependency node: visible in this
+        // compilation only.
+        a.set_desc(var, TypeDesc::Tlink(nil));
+        a.set_level(var, 3);
+        assert_eq!(a.repr(var), nil);
+        assert_eq!(a.get_level(var), 3);
+
+        let b = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
+        assert!(matches!(*b.borrow_desc(var), TypeDesc::Tvar(None)));
+        assert_eq!(b.get_level(var), GENERIC_LEVEL);
+        std::thread::spawn(move || {
+            let c = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
+            assert!(matches!(*c.borrow_desc(var), TypeDesc::Tvar(None)));
+            assert!(matches!(*c.borrow_desc(nil), TypeDesc::Tnil));
+        })
+        .join()
+        .unwrap();
+
+        // Backtracking restores the published view.
+        let snapshot = b.snapshot_type_state();
+        b.set_desc(var, TypeDesc::Tnil);
+        b.restore_type_state(snapshot);
+        assert!(matches!(*b.borrow_desc(var), TypeDesc::Tvar(None)));
+    }
+
+    #[test]
+    fn store_build_allocates_shared_nodes_and_replays_stamps() {
+        let builder = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
+        let ((ty, binder), piece) = builder.build_in_store(|| {
+            let var = builder.new_generic_var(Some("a".into()));
+            let ty = builder.new_generic_type(TypeDesc::Ttuple(vec![var, var].into()));
+            let binder = builder.rename_ident(&Ident::create_persistent("t"));
+            (ty, binder)
+        });
+        let piece = piece.expect("store build stays shareable");
+        assert!(ty.is_store(), "store builds allocate in the worker store");
+        // The builder's own stamp stream advanced as for a local rename, but
+        // the binder is in the store range, disjoint from local stamps.
+        assert_eq!(builder.current_stamp(), 11);
+        assert!(binder.stamp() > super::super::thread_store::next_store_stamp() - 1000);
+        assert!(binder.stamp() >= 1 << 29);
+        drop(builder);
+
+        // A later compilation on the worker reuses the node and replays the
+        // stamp once, on first touch.
+        let user = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
+        user.touch_store_piece(&piece);
+        user.touch_store_piece(&piece);
+        assert_eq!(user.current_stamp(), 11);
+        match &*user.get_desc(ty) {
+            TypeDesc::Ttuple(items) => assert_eq!(items.len(), 2),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn store_build_reading_local_nodes_is_private() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let local = ctx.new_generic_var(None);
+        let (_, piece) = ctx.build_in_store(|| {
+            ctx.new_generic_type(TypeDesc::Ttuple(vec![local].into()))
+        });
+        assert!(piece.is_none(), "a build referring to a local node is not shared");
+        let (_, piece) = ctx.build_in_store(|| ctx.repr(local));
+        assert!(piece.is_none(), "a build reading a local node is not shared");
+    }
 
     #[test]
     fn downstream_id_generator_accessor_keeps_compilation_identity() {
@@ -3379,6 +4825,122 @@ mod tests {
             ctx.component_paths_for_alias_source(&spelling_only_source)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn store_access_and_overlay_backtracking() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let local = ctx.new_var(None);
+        let stored = ctx.store.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
+        assert!(matches!(*ctx.borrow_desc(stored), TypeDesc::Tnil));
+        assert_eq!(ctx.get_level(stored), GENERIC_LEVEL);
+        assert_eq!(ctx.repr(stored), stored);
+        let link = ctx.new_link(stored);
+        assert_eq!(ctx.repr(link), stored);
+        assert_ne!(local, stored);
+
+        let memo = ctx.store.alloc_abbrev(AbbrevMemo::Mnil);
+        let row = ctx.store.alloc_row_field(Some(RowField::Rabsent));
+        let snapshot = ctx.snapshot_type_state();
+        ctx.restore_abbrev_memo(memo, AbbrevMemo::Mlink(AbbrevMemoRef::nil()));
+        ctx.set_row_field(row, RowField::Rpresent(Some(local)));
+        assert!(matches!(ctx.get_abbrev_memo(memo), AbbrevMemo::Mlink(_)));
+        assert!(matches!(ctx.get_row_field(row), Some(RowField::Rpresent(Some(t))) if t == local));
+        assert!(matches!(ctx.store.abbrev(memo), AbbrevMemo::Mnil));
+        assert!(matches!(ctx.store.row_field(row), Some(RowField::Rabsent)));
+        ctx.restore_type_state(snapshot);
+        // Memo contents are not part of the trail (btype.ml:692-700); store
+        // memos stay in this compilation's overlay.
+        assert!(matches!(ctx.get_abbrev_memo(memo), AbbrevMemo::Mlink(_)));
+        assert!(matches!(ctx.store.abbrev(memo), AbbrevMemo::Mnil));
+        assert!(matches!(ctx.get_row_field(row), Some(RowField::Rabsent)));
+
+        ctx.clear_row_field(row);
+        assert!(ctx.get_row_field(row).is_none());
+        assert!(matches!(ctx.store.row_field(row), Some(RowField::Rabsent)));
+        ctx.memoized_abbrev_refs.borrow_mut().push(memo);
+        ctx.restore_abbrev_memo(memo, AbbrevMemo::Mlink(AbbrevMemoRef::nil()));
+        ctx.clear_abbrev_memos();
+        assert!(matches!(ctx.get_abbrev_memo(memo), AbbrevMemo::Mnil));
+    }
+
+    #[test]
+    fn store_descriptor_and_level_writes_are_isolated_and_backtracked() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let ty = ctx.store.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
+        let untouched = ctx.store.alloc_type(TypeDesc::Tvar(None), GENERIC_LEVEL);
+        let initial = ctx.snapshot_type_state();
+        ctx.set_desc(ty, TypeDesc::Tvar(Some("stored".into())));
+        ctx.set_level(ty, 12);
+        let changed = ctx.snapshot_type_state();
+        let local = ctx.new_var(None);
+        super::super::ctype::link_type(&ctx, ty, local);
+        assert_eq!(ctx.repr(ty), local);
+        assert_eq!(ctx.get_level(ty), 12);
+        assert!(
+            matches!(*ctx.borrow_desc(local), TypeDesc::Tvar(Some(ref name)) if name == "stored")
+        );
+        ctx.set_desc(untouched, TypeDesc::Tlink(local));
+        ctx.set_level(untouched, 5);
+        assert!(matches!(*ctx.store.node(ty).desc(), TypeDesc::Tnil));
+        assert_eq!(ctx.store.node(ty).level(), GENERIC_LEVEL);
+        ctx.restore_type_state(changed);
+        assert!(matches!(*ctx.borrow_desc(ty), TypeDesc::Tvar(Some(ref name)) if name == "stored"));
+        assert_eq!(ctx.get_level(ty), 12);
+        assert!(matches!(*ctx.borrow_desc(untouched), TypeDesc::Tvar(None)));
+        assert_eq!(ctx.get_level(untouched), GENERIC_LEVEL);
+        ctx.restore_type_state(initial);
+        assert!(matches!(*ctx.borrow_desc(ty), TypeDesc::Tnil));
+        assert_eq!(ctx.get_level(ty), GENERIC_LEVEL);
+        // Writing after rollback cannot reuse a descriptor from the abandoned
+        // snapshot (its arena allocation intentionally remains alive).
+        ctx.set_desc(ty, TypeDesc::Ttuple(vec![local].into()));
+        assert!(matches!(*ctx.borrow_desc(ty), TypeDesc::Ttuple(ref ts) if ts == &[local]));
+    }
+
+    #[test]
+    fn failed_unification_restores_stored_constructor_links() {
+        use super::super::ctype::{UnifyState, unify};
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let int_path = super::super::predef::path_int();
+        let stored_int = ctx.store.alloc_type(
+            TypeDesc::Tconstr {
+                path: int_path.clone(),
+                args: vec![].into(),
+                abbrev: ctx.store.alloc_abbrev(AbbrevMemo::Mnil),
+            },
+            GENERIC_LEVEL,
+        );
+        let local_int = ctx.new_constr(int_path, vec![]);
+        let left_bool = ctx.new_constr(super::super::predef::path_bool(), vec![]);
+        let right_string = ctx.new_constr(super::super::predef::path_string(), vec![]);
+        let left = ctx.new_tuple(vec![stored_int, left_bool]);
+        let right = ctx.new_tuple(vec![local_int, right_string]);
+        let snapshot = ctx.snapshot_type_state();
+        let mut state = UnifyState::new();
+        assert!(unify(&ctx, &mut state, left, right).is_err());
+        // The first tuple element unified before the second element failed.
+        // Skipping stored-source links would incorrectly leave it unchanged.
+        assert_eq!(ctx.repr(stored_int), local_int);
+        ctx.restore_type_state(snapshot);
+        assert_eq!(ctx.repr(stored_int), stored_int);
+        assert_eq!(ctx.get_level(stored_int), GENERIC_LEVEL);
+        assert!(matches!(
+            *ctx.store.node(stored_int).desc(),
+            TypeDesc::Tconstr { .. }
+        ));
+    }
+
+    #[test]
+    fn store_links_compress_without_mutating_dependencies() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let target = ctx.new_var(None);
+        let middle = ctx.new_link(target);
+        let stored = ctx.store.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
+        super::super::ctype::link_type(&ctx, stored, middle);
+        assert_eq!(ctx.repr(stored), target);
+        assert!(matches!(*ctx.borrow_desc(stored), TypeDesc::Tlink(t) if t == target));
+        assert!(matches!(*ctx.store.node(stored).desc(), TypeDesc::Tnil));
     }
 
     #[test]

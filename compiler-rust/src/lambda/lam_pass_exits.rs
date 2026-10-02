@@ -5,6 +5,8 @@
 //! OCaml's `Lam_pass_exits.simplify_exits` exactly. Each clause cites the
 //! OCaml file and line number that justifies it.
 
+use crate::lambda::map_box;
+use crate::lambda::map_prim_args;
 use ahash::AHashMap as HashMap;
 
 use crate::context::IdGenerator;
@@ -288,11 +290,10 @@ fn subst_helper_owned(
                 subst.insert(i, (xs, simplified_l2));
                 subst_helper_owned(subst, counts, id_gen, *l1)
             } else {
-                Lambda::static_catch(
-                    subst_helper_owned(subst, counts, id_gen, *l1),
-                    i,
-                    xs,
-                    simplified_l2,
+                Lambda::LstaticCatch(
+                    map_box(l1, |inner| subst_helper_owned(subst, counts, id_gen, inner)),
+                    (i, xs),
+                    Box::new(simplified_l2),
                 )
             }
         }
@@ -347,38 +348,37 @@ fn subst_helper_owned(
             apply.ap_transformed_jsx,
         ),
         // lam_pass_exits.ml:206-207
-        Lambda::Lfunction(func) => Lambda::Lfunction(LFunction {
+        Lambda::Lfunction(func) => Lambda::Lfunction(Box::new(LFunction {
             arity: func.arity,
             params: func.params,
-            body: Box::new(subst_helper_owned(subst, counts, id_gen, *func.body)),
+            body: map_box(func.body, |inner| {
+                subst_helper_owned(subst, counts, id_gen, inner)
+            }),
             attr: func.attr,
-        }),
+        })),
         // lam_pass_exits.ml:208
-        Lambda::Llet(kind, v, l1, l2) => Lambda::let_(
+        Lambda::Llet(kind, v, l1, l2) => Lambda::Llet(
             kind,
             v,
-            subst_helper_owned(subst, counts, id_gen, *l1),
-            subst_helper_owned(subst, counts, id_gen, *l2),
+            map_box(l1, |inner| subst_helper_owned(subst, counts, id_gen, inner)),
+            map_box(l2, |inner| subst_helper_owned(subst, counts, id_gen, inner)),
         ),
         // lam_pass_exits.ml:209-210
-        Lambda::Lletrec(bindings, body) => Lambda::letrec(
+        Lambda::Lletrec(bindings, body) => Lambda::Lletrec(
             bindings
                 .into_iter()
                 .map(|(id, e)| (id, subst_helper_owned(subst, counts, id_gen, e)))
                 .collect(),
-            subst_helper_owned(subst, counts, id_gen, *body),
+            map_box(body, |inner| {
+                subst_helper_owned(subst, counts, id_gen, inner)
+            }),
         ),
         // lam_pass_exits.ml:211
         Lambda::LglobalModule(_, _) => lam,
         // lam_pass_exits.ml:212-214
-        Lambda::Lprim(info) => Lambda::prim(
-            info.primitive,
-            info.args
-                .into_iter()
-                .map(|arg| subst_helper_owned(subst, counts, id_gen, arg))
-                .collect(),
-            info.loc,
-        ),
+        Lambda::Lprim(info) => {
+            map_prim_args(info, |arg| subst_helper_owned(subst, counts, id_gen, arg))
+        }
         // lam_pass_exits.ml:215-226
         Lambda::Lswitch(l, sw) => Lambda::switch(
             subst_helper_owned(subst, counts, id_gen, *l),
@@ -397,7 +397,7 @@ fn subst_helper_owned(
                     .collect(),
                 sw_failaction: sw
                     .sw_failaction
-                    .map(|a| Box::new(subst_helper_owned(subst, counts, id_gen, *a))),
+                    .map(|a| map_box(a, |inner| subst_helper_owned(subst, counts, id_gen, inner))),
                 sw_dispatch: sw.sw_dispatch,
             },
         ),
@@ -407,13 +407,13 @@ fn subst_helper_owned(
             sw.into_iter()
                 .map(|(s, b)| (s, subst_helper_owned(subst, counts, id_gen, b)))
                 .collect(),
-            d.map(|a| Box::new(subst_helper_owned(subst, counts, id_gen, *a))),
+            d.map(|a| map_box(a, |inner| subst_helper_owned(subst, counts, id_gen, inner))),
         ),
         // lam_pass_exits.ml:231
-        Lambda::LtryWith(l1, v, l2) => Lambda::try_(
-            subst_helper_owned(subst, counts, id_gen, *l1),
+        Lambda::LtryWith(l1, v, l2) => Lambda::LtryWith(
+            map_box(l1, |inner| subst_helper_owned(subst, counts, id_gen, inner)),
             v,
-            subst_helper_owned(subst, counts, id_gen, *l2),
+            map_box(l2, |inner| subst_helper_owned(subst, counts, id_gen, inner)),
         ),
         // lam_pass_exits.ml:232
         Lambda::LifThenElse(l1, l2, l3) => Lambda::if_(
@@ -427,31 +427,34 @@ fn subst_helper_owned(
             subst_helper_owned(subst, counts, id_gen, *l2),
         ),
         // lam_pass_exits.ml:234
-        Lambda::Lwhile(l1, l2) => Lambda::while_(
-            subst_helper_owned(subst, counts, id_gen, *l1),
-            subst_helper_owned(subst, counts, id_gen, *l2),
+        Lambda::Lwhile(l1, l2) => Lambda::Lwhile(
+            map_box(l1, |inner| subst_helper_owned(subst, counts, id_gen, inner)),
+            map_box(l2, |inner| subst_helper_owned(subst, counts, id_gen, inner)),
         ),
         // lam_pass_exits.ml:235-236
-        Lambda::Lfor(v, l1, l2, dir, l3) => Lambda::for_(
+        Lambda::Lfor(v, l1, l2, dir, l3) => Lambda::Lfor(
             v,
-            subst_helper_owned(subst, counts, id_gen, *l1),
-            subst_helper_owned(subst, counts, id_gen, *l2),
+            map_box(l1, |inner| subst_helper_owned(subst, counts, id_gen, inner)),
+            map_box(l2, |inner| subst_helper_owned(subst, counts, id_gen, inner)),
             dir,
-            subst_helper_owned(subst, counts, id_gen, *l3),
+            map_box(l3, |inner| subst_helper_owned(subst, counts, id_gen, inner)),
         ),
         // lam_pass_exits.ml after #7887: Lfor_of / Lfor_await_of.
-        Lambda::Lfor_of(v, l1, l2) => Lambda::for_of(
+        Lambda::Lfor_of(v, l1, l2) => Lambda::Lfor_of(
             v,
-            subst_helper_owned(subst, counts, id_gen, *l1),
-            subst_helper_owned(subst, counts, id_gen, *l2),
+            map_box(l1, |inner| subst_helper_owned(subst, counts, id_gen, inner)),
+            map_box(l2, |inner| subst_helper_owned(subst, counts, id_gen, inner)),
         ),
-        Lambda::Lfor_await_of(v, l1, l2) => Lambda::for_await_of(
+        Lambda::Lfor_await_of(v, l1, l2) => Lambda::Lfor_await_of(
             v,
-            subst_helper_owned(subst, counts, id_gen, *l1),
-            subst_helper_owned(subst, counts, id_gen, *l2),
+            map_box(l1, |inner| subst_helper_owned(subst, counts, id_gen, inner)),
+            map_box(l2, |inner| subst_helper_owned(subst, counts, id_gen, inner)),
         ),
         // lam_pass_exits.ml:237
-        Lambda::Lassign(v, l) => Lambda::assign(v, subst_helper_owned(subst, counts, id_gen, *l)),
+        Lambda::Lassign(v, l) => Lambda::Lassign(
+            v,
+            map_box(l, |inner| subst_helper_owned(subst, counts, id_gen, inner)),
+        ),
         // OCaml `Lam_pass_exits.subst_helper` after #8348:
         // `Lbreak -> Lam.break | Lcontinue -> Lam.continue`.
         Lambda::Lbreak => Lambda::break_(),

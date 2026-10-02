@@ -45,7 +45,7 @@ fn lowers_js_var_without_args_to_a_value() {
         Primitive::PjsCall {
             prim_name: "process".to_string(),
             arg_types: vec![],
-            ffi: ExternalFfiSpec {
+            ffi: Box::new(ExternalFfiSpec {
                 kind: ExternalFfiKind::Default,
                 spec: Some(ExternalSpec::JsVar {
                     name: "process".to_string(),
@@ -55,7 +55,7 @@ fn lowers_js_var_without_args_to_a_value() {
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
                 inline_constant: None,
-            },
+            }),
             dynamic_import: false,
             transformed_jsx: false,
         },
@@ -81,7 +81,7 @@ fn lowers_js_var_calls_with_runtime_args_even_without_external_arg_metadata() {
         Primitive::PjsCall {
             prim_name: "foo1".to_string(),
             arg_types: vec![],
-            ffi: ExternalFfiSpec {
+            ffi: Box::new(ExternalFfiSpec {
                 kind: ExternalFfiKind::Default,
                 spec: Some(ExternalSpec::JsVar {
                     name: "foo1".to_string(),
@@ -91,7 +91,7 @@ fn lowers_js_var_calls_with_runtime_args_even_without_external_arg_metadata() {
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
                 inline_constant: None,
-            },
+            }),
             dynamic_import: false,
             transformed_jsx: false,
         },
@@ -138,7 +138,7 @@ fn lowers_module_external_calls_to_namespace_imports() {
         Primitive::PjsCall {
             prim_name: "describe".to_string(),
             arg_types: vec![],
-            ffi: ExternalFfiSpec {
+            ffi: Box::new(ExternalFfiSpec {
                 kind: ExternalFfiKind::Default,
                 spec: Some(ExternalSpec::JsCall {
                     name: "describe".to_string(),
@@ -149,7 +149,7 @@ fn lowers_module_external_calls_to_namespace_imports() {
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
                 inline_constant: None,
-            },
+            }),
             dynamic_import: false,
             transformed_jsx: false,
         },
@@ -178,15 +178,14 @@ fn lowers_module_external_calls_to_namespace_imports() {
             assert!(matches!(
                 func.as_ref(),
                 Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(
-                        ModuleId {
-                            kind: Kind::External { name, default, .. },
-                            ..
-                        },
-                        Some(field),
-                    )),
+                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, Some(field))),
                     ..
-                } if field == "describe" && name == "mocha" && !default
+                } if field == "describe"
+                    && matches!(
+                        &**module,
+                        ModuleId { kind: Kind::External { name, default, .. }, .. }
+                            if name == "mocha" && !default
+                    )
             ));
         }
         other => panic!("expected external module call, got {other:?}"),
@@ -206,19 +205,14 @@ fn translates_external_module_values_to_qualified_members_like_ocaml() {
     assert!(matches!(
         expr,
         Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(
-                ModuleId {
-                    kind: Kind::External {
-                        name: ref name,
-                        default,
-                        ..
-                    },
-                    ..
-                },
-                Some(ref member),
-            )),
+            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(ref module, Some(ref member))),
             ..
-        } if name == "react/jsx-runtime" && !default && member == "jsx"
+        } if member == "jsx"
+            && matches!(
+                &**module,
+                ModuleId { kind: Kind::External { name, default, .. }, .. }
+                    if name == "react/jsx-runtime" && !default
+            )
     ));
     assert_eq!(print_expression(&expr), "JsxRuntime.jsx");
 }
@@ -227,7 +221,7 @@ fn translates_external_module_values_to_qualified_members_like_ocaml() {
 fn lowers_pjs_unsafe_downgrade_getters_to_method_calls() {
     let mut compiler = LambdaCompiler::new();
     let john = Ident::create_persistent("john");
-    let lam = Lambda::Lapply(Apply {
+    let lam = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::prim(
             Primitive::PjsUnsafeDowngrade {
                 name: "say".to_string(),
@@ -252,7 +246,7 @@ fn lowers_pjs_unsafe_downgrade_getters_to_method_calls() {
             status: ApplyStatus::Uncurry,
         },
         ap_transformed_jsx: false,
-    });
+    }));
 
     let program = compiler.compile_program(&lam);
     let rendered = print_block(&program.block);
@@ -290,7 +284,7 @@ fn lowers_spliced_js_calls_by_flattening_literal_variadic_arrays() {
         Primitive::PjsCall {
             prim_name: "join".to_string(),
             arg_types: vec![ExternalArgSpec::dummy()],
-            ffi: ExternalFfiSpec {
+            ffi: Box::new(ExternalFfiSpec {
                 kind: ExternalFfiKind::Default,
                 spec: Some(ExternalSpec::JsCall {
                     name: "join".to_string(),
@@ -301,7 +295,7 @@ fn lowers_spliced_js_calls_by_flattening_literal_variadic_arrays() {
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
                 inline_constant: None,
-            },
+            }),
             dynamic_import: false,
             transformed_jsx: false,
         },
@@ -334,7 +328,7 @@ fn lowers_default_module_values_in_dynamic_imports() {
         Primitive::PjsCall {
             prim_name: "default".to_string(),
             arg_types: vec![],
-            ffi: ExternalFfiSpec {
+            ffi: Box::new(ExternalFfiSpec {
                 kind: ExternalFfiKind::Default,
                 spec: Some(ExternalSpec::JsVar {
                     name: "default".to_string(),
@@ -344,7 +338,7 @@ fn lowers_default_module_values_in_dynamic_imports() {
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
                 inline_constant: None,
-            },
+            }),
             dynamic_import: false,
             transformed_jsx: false,
         },
@@ -364,7 +358,7 @@ fn lowers_default_module_values_in_dynamic_imports() {
 fn lowers_unit_returning_default_module_functions_in_dynamic_imports() {
     let mut compiler = LambdaCompiler::new();
     let param = Ident::create_local("prim");
-    let eta_expanded_default = Lambda::Lfunction(crate::lambda::LFunction {
+    let eta_expanded_default = Lambda::Lfunction(Box::new(crate::lambda::LFunction {
         arity: 1,
         params: vec![param.clone()],
         body: Box::new(Lambda::seq(
@@ -372,7 +366,7 @@ fn lowers_unit_returning_default_module_functions_in_dynamic_imports() {
                 Primitive::PjsCall {
                     prim_name: "default".to_string(),
                     arg_types: vec![ExternalArgSpec::dummy()],
-                    ffi: ExternalFfiSpec {
+                    ffi: Box::new(ExternalFfiSpec {
                         kind: ExternalFfiKind::Default,
                         spec: Some(ExternalSpec::JsVar {
                             name: "default".to_string(),
@@ -382,7 +376,7 @@ fn lowers_unit_returning_default_module_functions_in_dynamic_imports() {
                         obj_params: None,
                         return_wrapper: ExternalReturnWrapper::Identity,
                         inline_constant: None,
-                    },
+                    }),
                     dynamic_import: false,
                     transformed_jsx: false,
                 },
@@ -392,7 +386,7 @@ fn lowers_unit_returning_default_module_functions_in_dynamic_imports() {
             Lambda::const_(Constant::JsUndefined { is_unit: true }),
         )),
         attr: crate::lambda::FunctionAttribute::default(),
-    });
+    }));
     let program = compiler.compile_program(&Lambda::prim(
         Primitive::Pimport,
         vec![eta_expanded_default],
@@ -412,7 +406,7 @@ fn lowers_js_new_to_new_expression() {
         Primitive::PjsCall {
             prim_name: "URL".to_string(),
             arg_types: vec![],
-            ffi: ExternalFfiSpec {
+            ffi: Box::new(ExternalFfiSpec {
                 kind: ExternalFfiKind::Default,
                 spec: Some(ExternalSpec::JsNew {
                     name: "URL".to_string(),
@@ -423,7 +417,7 @@ fn lowers_js_new_to_new_expression() {
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
                 inline_constant: None,
-            },
+            }),
             dynamic_import: false,
             transformed_jsx: false,
         },
@@ -478,7 +472,7 @@ fn lowers_js_call_omits_trailing_optional_undefined_args_like_ocaml() {
                     arg_label: ExternalArgLabel::Optional,
                 },
             ],
-            ffi: ExternalFfiSpec {
+            ffi: Box::new(ExternalFfiSpec {
                 kind: ExternalFfiKind::Default,
                 spec: Some(ExternalSpec::JsCall {
                     name: "formatDate".to_string(),
@@ -489,7 +483,7 @@ fn lowers_js_call_omits_trailing_optional_undefined_args_like_ocaml() {
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
                 inline_constant: None,
-            },
+            }),
             dynamic_import: false,
             transformed_jsx: false,
         },
@@ -527,7 +521,7 @@ fn lowers_js_send_omits_trailing_optional_undefined_args_like_ocaml() {
                     arg_label: ExternalArgLabel::Optional,
                 },
             ],
-            ffi: ExternalFfiSpec {
+            ffi: Box::new(ExternalFfiSpec {
                 kind: ExternalFfiKind::Default,
                 spec: Some(ExternalSpec::JsSend {
                     name: "toString".to_string(),
@@ -537,7 +531,7 @@ fn lowers_js_send_omits_trailing_optional_undefined_args_like_ocaml() {
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
                 inline_constant: None,
-            },
+            }),
             dynamic_import: false,
             transformed_jsx: false,
         },
@@ -568,7 +562,7 @@ fn lowers_js_new_omits_trailing_optional_undefined_args_like_ocaml() {
                     arg_label: ExternalArgLabel::Optional,
                 },
             ],
-            ffi: ExternalFfiSpec {
+            ffi: Box::new(ExternalFfiSpec {
                 kind: ExternalFfiKind::Default,
                 spec: Some(ExternalSpec::JsNew {
                     name: "RegExp".to_string(),
@@ -579,7 +573,7 @@ fn lowers_js_new_omits_trailing_optional_undefined_args_like_ocaml() {
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
                 inline_constant: None,
-            },
+            }),
             dynamic_import: false,
             transformed_jsx: false,
         },
@@ -623,7 +617,7 @@ fn lowers_external_polyvar_string_and_int_args_like_ocaml() {
                     arg_label: ExternalArgLabel::Empty,
                 },
             ],
-            ffi: ExternalFfiSpec {
+            ffi: Box::new(ExternalFfiSpec {
                 kind: ExternalFfiKind::Default,
                 spec: Some(ExternalSpec::JsCall {
                     name: "consume".to_string(),
@@ -634,7 +628,7 @@ fn lowers_external_polyvar_string_and_int_args_like_ocaml() {
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
                 inline_constant: None,
-            },
+            }),
             dynamic_import: false,
             transformed_jsx: false,
         },
@@ -661,7 +655,7 @@ fn lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml() {
                 },
                 arg_label: ExternalArgLabel::Empty,
             }],
-            ffi: ExternalFfiSpec {
+            ffi: Box::new(ExternalFfiSpec {
                 kind: ExternalFfiKind::Default,
                 spec: Some(ExternalSpec::JsCall {
                     name: "handle".to_string(),
@@ -672,12 +666,12 @@ fn lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml() {
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
                 inline_constant: None,
-            },
+            }),
             dynamic_import: false,
             transformed_jsx: false,
         },
         vec![Lambda::const_(Constant::Block {
-            tag_info: TagInfo::PolyVar("b".to_string()),
+            tag_info: Box::new(TagInfo::PolyVar("b".to_string())),
             elements: vec![Constant::Pointer("b".to_string()), Constant::int(2)],
         })],
         Location::none(),
@@ -738,7 +732,7 @@ fn lowers_marshaled_constant_args_in_js_call() {
                 )),
                 arg_label: ExternalArgLabel::Empty,
             }],
-            ffi: ExternalFfiSpec {
+            ffi: Box::new(ExternalFfiSpec {
                 kind: ExternalFfiKind::Default,
                 spec: Some(ExternalSpec::JsCall {
                     name: "somefn".to_string(),
@@ -749,7 +743,7 @@ fn lowers_marshaled_constant_args_in_js_call() {
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
                 inline_constant: None,
-            },
+            }),
             dynamic_import: false,
             transformed_jsx: false,
         },
@@ -1267,7 +1261,7 @@ fn lowers_ignored_js_call_args_to_ocaml_sequence_effects() {
                     arg_label: ExternalArgLabel::Empty,
                 },
             ],
-            ffi: ExternalFfiSpec {
+            ffi: Box::new(ExternalFfiSpec {
                 kind: ExternalFfiKind::Default,
                 spec: Some(ExternalSpec::JsCall {
                     name: "somefn".to_string(),
@@ -1278,7 +1272,7 @@ fn lowers_ignored_js_call_args_to_ocaml_sequence_effects() {
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
                 inline_constant: None,
-            },
+            }),
             dynamic_import: false,
             transformed_jsx: false,
         },

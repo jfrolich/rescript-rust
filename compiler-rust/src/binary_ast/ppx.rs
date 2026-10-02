@@ -1548,7 +1548,7 @@ fn is_js_regex_literal(s: &str) -> bool {
 /// Process args from list_of_arrow into FFI Param specs and compute arity.
 /// This mirrors OCaml's fold_right in handle_attributes which builds
 /// arg_type_specs and arg_type_specs_length.
-fn build_arg_type_specs(typ: &CoreType, arena: &mut ParseArena) -> (Params, usize) {
+fn build_arg_type_specs(typ: &CoreType, arena: &ParseArena) -> (Params, usize) {
     let (args, _result) = list_of_arrow(typ, arena);
 
     let mut param_specs: Vec<Param> = Vec::new();
@@ -2313,7 +2313,7 @@ fn validate_external_attribute_errors(
 
 /// Determine the arg type for a non-labeled argument type.
 /// Mirrors OCaml's refine_arg_type / spec_of_ptyp.
-fn refine_arg_type(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
+fn refine_arg_type(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
     // For Ptyp_any with @as attribute, handle constant args
     if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
         // Check for @as attribute on the type
@@ -2887,7 +2887,7 @@ fn mark_single_ffi_type_attr(typ: &CoreType, arena: &ParseArena) {
     }
 }
 
-fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
+fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
     // Check for special attributes on the type (@string, @int, @unwrap, @ignore)
     mark_single_ffi_type_attr(typ, arena);
     let attr_type = check_type_ffi_attrs(typ, arena);
@@ -11796,7 +11796,7 @@ fn validate_expression_extension_payload_error(
 fn validate_obj_extension_payload_error(
     payload: &Payload,
     ext_loc: LocIdx,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     let Some(fields) = payload_single_record_fields_without_spread(payload, arena) else {
         return Err(PpxError::at_loc(ext_loc, "Expect a record expression here"));

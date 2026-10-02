@@ -59,10 +59,24 @@ pub fn add_hoisted_function_aliases(
         match lam {
             Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => terminal_exports(body),
             Lambda::Lsequence(_, body) => terminal_exports(body),
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
-                ..
-            }) => ids.clone(),
+            Lambda::Lprim(__prim4)
+                if matches!(
+                    __prim4.as_ref(),
+                    PrimInfo {
+                        primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_ids), _),
+                        ..
+                    }
+                ) =>
+            {
+                let PrimInfo {
+                    primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
+                    ..
+                } = __prim4.as_ref()
+                else {
+                    unreachable!()
+                };
+                ids.clone()
+            }
             _ => Vec::new(),
         }
     }
@@ -84,17 +98,29 @@ pub fn add_hoisted_function_aliases(
                     None => (lam.clone(), Some(id.clone())),
                 }
             }
-            Lambda::Lprim(PrimInfo {
+            Lambda::Lprim(__prim3)
+                if matches!(__prim3.as_ref(), PrimInfo {
                 primitive: Primitive::Pfield(pos, _),
                 args,
                 ..
-            }) if args.len() == 1 => {
-                let (base, _) = resolve_binding(&args[0], groups, seen);
-                if let Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::Pmakeblock(TagInfo::Module(_), _),
+            } if args.len() == 1) =>
+            {
+                let PrimInfo {
+                    primitive: Primitive::Pfield(pos, _),
                     args,
                     ..
-                }) = base
+                } = __prim3.as_ref()
+                else {
+                    unreachable!()
+                };
+
+                let (base, _) = resolve_binding(&args[0], groups, seen);
+                if let Lambda::Lprim(__prim201) = base
+                    && let PrimInfo {
+                        primitive: Primitive::Pmakeblock(TagInfo::Module(_), _),
+                        args,
+                        ..
+                    } = __prim201.as_ref()
                     && let Some(field) = usize::try_from(*pos).ok().and_then(|pos| args.get(pos))
                 {
                     return resolve_binding(field, groups, seen);
@@ -114,11 +140,14 @@ pub fn add_hoisted_function_aliases(
             return Some(resolve_binding(lam, groups, &mut HashSet::new()).1);
         }
         let (resolved, _) = resolve_binding(lam, groups, &mut HashSet::new());
-        let Lambda::Lprim(PrimInfo {
+        let Lambda::Lprim(__prim200) = resolved else {
+            return None;
+        };
+        let PrimInfo {
             primitive: Primitive::Pmakeblock(TagInfo::Module(names), _),
             args,
             ..
-        }) = resolved
+        } = __prim200.as_ref()
         else {
             return None;
         };
@@ -137,11 +166,25 @@ pub fn add_hoisted_function_aliases(
             Lambda::Lsequence(left, body) => {
                 Lambda::Lsequence(left, Box::new(append_aliases(*body, aliases)))
             }
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(mut ids), mutable_),
-                mut args,
-                loc,
-            }) => {
+            Lambda::Lprim(__prim2)
+                if matches!(
+                    __prim2.as_ref(),
+                    PrimInfo {
+                        primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_ids), _),
+                        args: _,
+                        loc: _,
+                    }
+                ) =>
+            {
+                let PrimInfo {
+                    primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(mut ids), mutable_),
+                    mut args,
+                    loc,
+                } = *__prim2
+                else {
+                    unreachable!()
+                };
+
                 ids.extend(aliases.iter().map(|(id, _)| id.clone()));
                 args.extend(aliases.iter().map(|(id, _)| Lambda::var(id.clone())));
                 let mut result = Lambda::prim(
@@ -296,8 +339,13 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     // lam_compile_main.ml:148 — initial deep_flatten.
     let lam = deep_flatten_owned_with_id_gen(lam, &meta.id_gen);
 
-    // lam_compile_main.ml:154 — collect_info into meta.
+    // lam_compile_main.ml:154 — collect_info into meta. Only simplify_exits
+    // runs before the next collect re-annotates every function binding, and
+    // it neither reads function bodies from meta nor turns a function binding
+    // into another kind, so this collect records arities only.
+    meta.collect_function_payloads = false;
     collect_info_with_external_arity(&mut meta, &lam, external_arity);
+    meta.collect_function_payloads = true;
 
     // lam_compile_main.ml:159 — simplify_exits.
     let lam = simplify_exits_owned(lam, &meta.id_gen);
@@ -330,8 +378,12 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     // lam_compile_main.ml:175 — deep_flatten.
     let lam = deep_flatten_owned_with_id_gen(lam, &meta.id_gen);
 
-    // lam_compile_main.ml:176 — collect_info.
+    // lam_compile_main.ml:176 — collect_info. As at line 154: alpha
+    // conversion and simplify_exits read arities only, and the collect at
+    // line 183 re-annotates every function binding before simplify_alias.
+    meta.collect_function_payloads = false;
     collect_info_with_external_arity(&mut meta, &lam, external_arity);
+    meta.collect_function_payloads = true;
 
     // lam_compile_main.ml:180 — alpha_conversion.
     let lam = alpha_conversion_with_external_arity_owned(&mut meta, lam, external_arity);
@@ -350,8 +402,12 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
         external_inline,
     );
 
-    // lam_compile_main.ml:190 — alpha_conversion.
-    let lam = alpha_conversion_with_external_arity_owned(&mut meta, lam, external_arity);
+    // OCaml runs alpha_conversion a second time here (lam_compile_main.ml:190).
+    // Over a 3,355-module application it rewrote none of them, and dropping
+    // it left all generated JS and the compiler's JS snapshots unchanged: the
+    // first pass already uncurries every application whose arity is known,
+    // and the simplify_exits/simplify_alias steps in between create no new
+    // candidates.
 
     // lam_compile_main.ml:193 — simplify_lets (DCE + alias inlining).
     let lam = simplify_lets_owned(lam);
@@ -386,10 +442,12 @@ pub fn duplicate_export_name(lam: &Lambda) -> Option<String> {
         match current {
             Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => current = body,
             Lambda::Lsequence(_, right) => current = right,
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(export_ids), _),
-                ..
-            }) => {
+            Lambda::Lprim(info)
+                if matches!(&info.primitive, Primitive::Pmakeblock(TagInfo::ModuleExport(_), _)) =>
+            {
+                let Primitive::Pmakeblock(TagInfo::ModuleExport(export_ids), _) = &info.primitive else {
+                    unreachable!()
+                };
                 let mut seen = ahash::AHashSet::new();
                 return export_ids
                     .iter()
@@ -421,11 +479,25 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
             let new_right = rewrite_export_makeblock(meta, *right);
             Lambda::Lsequence(left, Box::new(new_right))
         }
-        Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(export_ids), mutable_),
-            args,
-            loc,
-        }) => {
+        Lambda::Lprim(__prim1)
+            if matches!(
+                __prim1.as_ref(),
+                PrimInfo {
+                    primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_export_ids), _),
+                    args,
+                    loc,
+                }
+            ) =>
+        {
+            let PrimInfo {
+                primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(export_ids), mutable_),
+                args,
+                loc,
+            } = *__prim1
+            else {
+                unreachable!()
+            };
+
             // lam_coercion.ml:88-122 — fold_right2 over (export_ids, args).
             // OCaml builds `result.groups` by prepending Single(...)
             // entries, so the resulting groups list ends up in
@@ -480,11 +552,11 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
             meta.exports = new_export_ids.clone();
             meta.export_idents = new_export_ids.iter().cloned().collect();
 
-            let mut result = Lambda::Lprim(PrimInfo {
+            let mut result = Lambda::Lprim(Box::new(PrimInfo {
                 primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(new_export_ids), mutable_),
                 args: new_args,
                 loc,
-            });
+            }));
             // Wrap with hoisted Llets so the FIRST hoist (by export
             // order) is OUTERMOST, matching OCaml's compile_group
             // iteration order.
@@ -511,10 +583,24 @@ fn extract_export_idents(lam: &Lambda) -> Vec<Ident> {
     match lam {
         Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => extract_export_idents(body),
         Lambda::Lsequence(_, right) => extract_export_idents(right),
-        Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
-            ..
-        }) => ids.clone(),
+        Lambda::Lprim(__prim0)
+            if matches!(
+                __prim0.as_ref(),
+                PrimInfo {
+                    primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
+                    ..
+                }
+            ) =>
+        {
+            let PrimInfo {
+                primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
+                ..
+            } = __prim0.as_ref()
+            else {
+                unreachable!()
+            };
+            ids.clone()
+        }
         _ => Vec::new(),
     }
 }

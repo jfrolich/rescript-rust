@@ -73,8 +73,7 @@ impl<'a> SigReadContext<'a> {
             OcamlValue::Block(tag, fields) => match tag {
                 0 => {
                     let id = read_ident(&fields[0]);
-                    let debug_sig_values = std::env::var("RUST_DEBUG_SIG_VALUE").ok();
-                    let debug_this_value = debug_sig_values.as_deref().is_some_and(|raw| {
+                    let debug_this_value = crate::debug_flags::debug_sig_value().is_some_and(|raw| {
                         raw.split(',')
                             .map(|part| part.trim())
                             .filter(|part| !part.is_empty())
@@ -101,7 +100,7 @@ impl<'a> SigReadContext<'a> {
                     let id = read_ident(&fields[0]);
                     let decl = self.read_type_declaration(&fields[1]);
                     let rec_status = read_rec_status(&fields[2]);
-                    SignatureItem::SigType(id, decl, rec_status)
+                    SignatureItem::SigType(id, std::sync::Arc::new(decl), rec_status)
                 }
                 2 => {
                     let id = read_ident(&fields[0]);
@@ -247,7 +246,7 @@ impl<'a> SigReadContext<'a> {
                     .map(|ld| self.read_label_declaration(ld))
                     .collect();
                 let repr = self.read_record_representation(&fields[1]);
-                TypeKind::TypeRecord(labels, repr)
+                TypeKind::TypeRecord(crate::types::decl::SharedVec::from(labels), repr)
             }
             OcamlValue::Block(1, fields) => {
                 // Type_variant(constructor_declaration list, layout_ref)
@@ -261,7 +260,7 @@ impl<'a> SigReadContext<'a> {
                         .get(1)
                         .expect("variant type kind must carry a layout"),
                 );
-                TypeKind::TypeVariant(constrs, layout)
+                TypeKind::TypeVariant(crate::types::decl::SharedVec::from(constrs), layout)
             }
             _ => TypeKind::TypeAbstract, // fallback
         }
@@ -604,7 +603,7 @@ impl<'a> SigReadContext<'a> {
             OcamlValue::Block(1, fields) => {
                 let sig_items: Vec<OcamlValue> = fields[0].as_list().into_iter().cloned().collect();
                 let signature = self.read_signature(&sig_items);
-                ModuleType::MtySignature(signature)
+                ModuleType::MtySignature(std::sync::Arc::new(signature))
             }
             OcamlValue::Block(2, fields) => {
                 let param = read_ident(&fields[0]);
@@ -625,7 +624,7 @@ impl<'a> SigReadContext<'a> {
             }
             _ => {
                 // Fallback: create an empty signature
-                ModuleType::MtySignature(vec![])
+                ModuleType::MtySignature(std::sync::Arc::new(vec![]))
             }
         }
     }
@@ -736,7 +735,7 @@ impl<'a> SigReadContext<'a> {
                         .iter()
                         .map(|te| self.read_type_expr(te))
                         .collect();
-                    TypeDesc::Ttuple(types)
+                    TypeDesc::Ttuple(types.into())
                 }
                 3 => {
                     // Tconstr(Path.t, type_expr list, abbrev_memo ref)
@@ -748,7 +747,7 @@ impl<'a> SigReadContext<'a> {
                         .collect();
                     let abbrev = self.ctx.alloc_abbrev_nil();
 
-                    TypeDesc::Tconstr { path, args, abbrev }
+                    TypeDesc::Tconstr { path, args: args.into(), abbrev }
                 }
                 4 => {
                     // Tobject(type_expr, (Path.t * type_expr list) option ref)
@@ -785,7 +784,7 @@ impl<'a> SigReadContext<'a> {
                 8 => {
                     // Tvariant(row_desc)
                     let row = self.read_row_desc(&fields[0]);
-                    TypeDesc::Tvariant(row)
+                    TypeDesc::Tvariant(Box::new(row))
                 }
                 9 => {
                     // Tunivar(string option)
@@ -800,7 +799,7 @@ impl<'a> SigReadContext<'a> {
                         .iter()
                         .map(|te| self.read_type_expr(te))
                         .collect();
-                    TypeDesc::Tpoly { body, vars }
+                    TypeDesc::Tpoly { body, vars: vars.into() }
                 }
                 11 => {
                     // Tpackage(Path.t, Longident.t list, type_expr list)
@@ -815,7 +814,7 @@ impl<'a> SigReadContext<'a> {
                         .iter()
                         .map(|te| self.read_type_expr(te))
                         .collect();
-                    TypeDesc::Tpackage { path, lids, args }
+                    TypeDesc::Tpackage { path, lids: Box::new(lids), args: args.into() }
                 }
                 _ => {
                     // Unknown type_desc tag, treat as Tvar
@@ -905,7 +904,7 @@ impl<'a> SigReadContext<'a> {
         });
 
         RowDesc {
-            row_fields,
+            row_fields: row_fields.into(),
             row_more,
             row_closed,
             row_fixed,

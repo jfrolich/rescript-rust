@@ -32,6 +32,22 @@ pub(crate) fn apply_external_shadow_pass(mut deps: DepsProgram) -> DepsProgram {
         return deps;
     }
 
+    // Both rewrites below only replace a reference to a JS global whose name
+    // is also the name of a lexical binding (`shadowed_globals` holds the
+    // top-level ones; `rewrite_shadowed_global_in_expr` runs for every
+    // lexical binding at any depth). When no JS global referenced in the
+    // program shares a name with any binding, the pass rebuilds the program
+    // unchanged, so skip it.
+    let mut names = ReferencedNames::default();
+    crate::js_ir::walk::walk_block(&mut names, &deps.program.block);
+    if names
+        .globals
+        .iter()
+        .all(|name| !names.bindings.contains(name))
+    {
+        return deps;
+    }
+
     deps.program.block = rewrite_block(std::mem::take(&mut deps.program.block), &shadowed_globals);
     deps
 }
@@ -95,8 +111,8 @@ fn rewrite_statement(stmt: Statement, shadowed_globals: &HashSet<String>) -> Sta
         ),
         StatementDesc::ForRange(label, init, end, id, direction, body) => StatementDesc::ForRange(
             label,
-            init.map(|expr| rewrite_global_static_index_expr(expr, shadowed_globals)),
-            rewrite_global_static_index_expr(end, shadowed_globals),
+            init.map(|expr| Box::new(rewrite_global_static_index_expr(*expr, shadowed_globals))),
+            Box::new(rewrite_global_static_index_expr(*end, shadowed_globals)),
             id,
             direction,
             rewrite_block(body, shadowed_globals),
@@ -104,13 +120,13 @@ fn rewrite_statement(stmt: Statement, shadowed_globals: &HashSet<String>) -> Sta
         StatementDesc::ForOf(label, id, iterable, body) => StatementDesc::ForOf(
             label,
             id,
-            rewrite_global_static_index_expr(iterable, shadowed_globals),
+            Box::new(rewrite_global_static_index_expr(*iterable, shadowed_globals)),
             rewrite_block(body, shadowed_globals),
         ),
         StatementDesc::ForAwaitOf(label, id, iterable, body) => StatementDesc::ForAwaitOf(
             label,
             id,
-            rewrite_global_static_index_expr(iterable, shadowed_globals),
+            Box::new(rewrite_global_static_index_expr(*iterable, shadowed_globals)),
             rewrite_block(body, shadowed_globals),
         ),
         StatementDesc::Continue(label) => StatementDesc::Continue(label),
@@ -391,8 +407,8 @@ fn rewrite_statement_exprs(
         }
         StatementDesc::ForRange(label, init, end, id, direction, body) => StatementDesc::ForRange(
             label,
-            init.map(&mut *rewrite),
-            rewrite(end),
+            init.map(|expr| Box::new(rewrite(*expr))),
+            Box::new(rewrite(*end)),
             id,
             direction,
             rewrite_block_exprs(body, rewrite),
@@ -400,13 +416,13 @@ fn rewrite_statement_exprs(
         StatementDesc::ForOf(label, id, iterable, body) => StatementDesc::ForOf(
             label,
             id,
-            rewrite(iterable),
+            Box::new(rewrite(*iterable)),
             rewrite_block_exprs(body, rewrite),
         ),
         StatementDesc::ForAwaitOf(label, id, iterable, body) => StatementDesc::ForAwaitOf(
             label,
             id,
-            rewrite(iterable),
+            Box::new(rewrite(*iterable)),
             rewrite_block_exprs(body, rewrite),
         ),
         StatementDesc::Continue(label) => StatementDesc::Continue(label),
@@ -453,4 +469,26 @@ fn global_this_field(name: &str) -> Expression {
         name.to_string(),
         None,
     ))
+}
+
+/// Names of the JS globals a program references and of the variables it
+/// declares.
+#[derive(Default)]
+struct ReferencedNames<'a> {
+    globals: HashSet<&'a str>,
+    bindings: HashSet<&'a str>,
+}
+
+impl<'a> crate::js_ir::walk::Visitor<'a> for ReferencedNames<'a> {
+    fn visit_expression(&mut self, expression: &'a Expression) {
+        if let ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) = &expression.desc
+            && id.is_global()
+        {
+            self.globals.insert(id.name());
+        }
+    }
+
+    fn visit_declaration(&mut self, declaration: &'a VariableDeclaration) {
+        self.bindings.insert(declaration.ident.name());
+    }
 }

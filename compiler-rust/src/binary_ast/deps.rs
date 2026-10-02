@@ -103,38 +103,45 @@ impl<'a> DependencyCollector<'a> {
     // ========== Arena index helper methods ==========
 
     fn add_expr_idx(&mut self, idx: ExprIdx) {
-        let expr = self.arena.get_expr(idx).clone();
-        self.add_expression(&expr);
+        let arena = self.arena;
+        let expr = arena.get_expr(idx);
+        self.add_expression(expr);
     }
 
     fn add_pat_idx(&mut self, idx: PatIdx) {
-        let pat = self.arena.get_pat(idx).clone();
-        self.add_pattern(&pat);
+        let arena = self.arena;
+        let pat = arena.get_pat(idx);
+        self.add_pattern(pat);
     }
 
     fn add_pat_idx_collecting_unpack(&mut self, idx: PatIdx) -> HashSet<String> {
-        let pat = self.arena.get_pat(idx).clone();
-        self.add_pattern_collecting_unpack(&pat)
+        let arena = self.arena;
+        let pat = arena.get_pat(idx);
+        self.add_pattern_collecting_unpack(pat)
     }
 
     fn add_pat_idx_inner(&mut self, idx: PatIdx, unpack_names: &mut HashSet<String>) {
-        let pat = self.arena.get_pat(idx).clone();
+        let arena = self.arena;
+        let pat = arena.get_pat(idx);
         self.add_pattern_inner(&pat, unpack_names);
     }
 
     fn add_core_type_idx(&mut self, idx: CoreTypeIdx) {
-        let ty = self.arena.get_core_type(idx).clone();
-        self.add_core_type(&ty);
+        let arena = self.arena;
+        let ty = arena.get_core_type(idx);
+        self.add_core_type(ty);
     }
 
     fn add_mod_expr_idx(&mut self, idx: ModExprIdx) {
-        let me = self.arena.get_mod_expr(idx).clone();
-        self.add_module_expr(&me);
+        let arena = self.arena;
+        let me = arena.get_mod_expr(idx);
+        self.add_module_expr(me);
     }
 
     fn add_mod_type_idx(&mut self, idx: ModTypeIdx) {
-        let mt = self.arena.get_mod_type(idx).clone();
-        self.add_module_type(&mt);
+        let arena = self.arena;
+        let mt = arena.get_mod_type(idx);
+        self.add_module_type(mt);
     }
 
     // ========== Longident methods ==========

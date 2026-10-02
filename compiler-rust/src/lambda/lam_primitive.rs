@@ -219,7 +219,7 @@ pub enum Primitive {
     PjsCall {
         prim_name: String,
         arg_types: Vec<ExternalArgSpec>,
-        ffi: ExternalFfiSpec,
+        ffi: Box<ExternalFfiSpec>,
         dynamic_import: bool,
         transformed_jsx: bool,
     },

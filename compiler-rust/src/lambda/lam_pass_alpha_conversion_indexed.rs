@@ -314,12 +314,12 @@ mod tests {
         }
     }
     fn apply(function: Lambda, args: Vec<Lambda>, status: ApplyStatus, jsx: bool) -> Lambda {
-        Lambda::Lapply(Apply {
+        Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(function),
             ap_args: args,
             ap_info: info(status),
             ap_transformed_jsx: jsx,
-        })
+        }))
     }
     fn run(input: Lambda, start: i32) -> (Lambda, i32) {
         let generator = IdGenerator::with_start_stamp(start);
@@ -342,7 +342,7 @@ mod tests {
             )
         };
         let call = |function, argument, jsx| {
-            Lambda::Lapply(Apply {
+            Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(function),
                 ap_args: vec![Lambda::const_(Constant::int(argument))],
                 ap_info: ApInfo {
@@ -351,7 +351,7 @@ mod tests {
                     status: ApplyStatus::Na,
                 },
                 ap_transformed_jsx: jsx,
-            })
+            }))
         };
         let input = Lambda::seq(
             call(access("first"), 1, false),
@@ -592,14 +592,14 @@ mod tests {
         };
         let input = Lambda::Lswitch(
             Box::new(call("scrutinee")),
-            crate::lambda::LambdaSwitch {
+            Box::new(crate::lambda::LambdaSwitch {
                 sw_consts_full: false,
                 sw_consts: vec![(crate::lambda::SwitchKey::Int(0), call("constant"))],
                 sw_blocks_full: false,
                 sw_blocks: vec![(crate::lambda::SwitchKey::Int(0), call("block"))],
                 sw_failaction: Some(Box::new(call("failure"))),
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            },
+            }),
         );
         let generator = IdGenerator::new();
         let mut context = IndexedLambdaContext::from_lambda(input, []);
@@ -763,14 +763,14 @@ mod tests {
                 Primitive::PjsCall {
                     prim_name: name.into(),
                     arg_types: vec![],
-                    ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                    ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                         kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
                         spec: None,
                         obj_params: None,
                         return_wrapper:
                             crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
                         inline_constant: None,
-                    },
+                    }),
                     dynamic_import: false,
                     transformed_jsx: false,
                 },
@@ -976,14 +976,14 @@ mod tests {
                 Primitive::PjsCall {
                     prim_name: name.into(),
                     arg_types: vec![],
-                    ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                    ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                         kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
                         spec: None,
                         obj_params: None,
                         return_wrapper:
                             crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
                         inline_constant: None,
-                    },
+                    }),
                     dynamic_import: false,
                     transformed_jsx: false,
                 },

@@ -1189,6 +1189,9 @@ pub struct CompilerOptions {
     pub transparent_modules: bool,
     /// Mirror `Js_config.no_builtin_ppx` / `-bs-no-builtin-ppx`.
     pub no_builtin_ppx: bool,
+    /// Run the builtin Spice mapper in place of a configured spice PPX
+    /// (set by the in-process build, which then omits it from `external_ppxs`).
+    pub spice_ppx: bool,
     /// External `-ppx` rewriters, in command-line order.
     pub external_ppxs: Vec<String>,
     /// When true, do not implicitly open Pervasives and Stdlib.
@@ -1457,7 +1460,7 @@ fn strip_saved_extension_locations(sig: &mut [crate::types::decl::SignatureItem]
     use crate::types::decl::{ModuleType, SignatureItem};
     fn module_type(mty: &mut ModuleType) {
         match mty {
-            ModuleType::MtySignature(sig) => strip_saved_extension_locations(sig),
+            ModuleType::MtySignature(sig) => strip_saved_extension_locations(&mut std::sync::Arc::make_mut(sig)[..]),
             ModuleType::MtyFunctor {
                 param_type, result, ..
             } => {
@@ -1494,6 +1497,11 @@ fn unit_crcs(
     saved_crc: Option<[u8; 16]>,
     imports: &[(String, Option<[u8; 16]>)],
 ) -> Vec<(String, Option<[u8; 16]>)> {
+    // CRC lists only feed written `.cmi`/`.cmt` files; a compile that writes
+    // none has nothing to check them against.
+    if options.typed_artifacts.is_none() {
+        return Vec::new();
+    }
     if saved_crc.is_none()
         && let Some(crcs) = crate::cmi::cmi_format::read_cmi_crcs(
             &std::path::Path::new(filename).with_extension("cmi").to_string_lossy(),
@@ -1740,6 +1748,7 @@ impl Default for CompilerOptions {
             noassert: false,
             transparent_modules: false,
             no_builtin_ppx: false,
+            spice_ppx: false,
             external_ppxs: Vec::new(),
             nopervasives: false,
             module_name: None,
@@ -2007,11 +2016,12 @@ fn run_external_ppxs(
 /// rewriters are covered by the builtin spice mapper (`binary_ast::spice_ppx`),
 /// which runs as part of the builtin PPX.
 impl CompilerOptions {
-    /// Whether the builtin spice mapper rewrites the AST. OCaml runs every
-    /// configured `-ppx` executable (cmd_ppx_apply.ml:97-110), so the CLI
-    /// never substitutes the builtin mapper for an external spice PPX.
+    /// Whether the builtin spice mapper rewrites the AST. The `bsc` CLI runs
+    /// every configured `-ppx` executable as OCaml does (cmd_ppx_apply.ml:97-110);
+    /// the in-process build sets `spice_ppx` instead of passing a configured
+    /// spice PPX, so the builtin mapper replaces a per-module subprocess.
     pub fn builtin_spice(&self) -> bool {
-        false
+        self.spice_ppx
     }
 }
 
@@ -5766,7 +5776,7 @@ fn format_unbound_type_declaration_variable_report(
                     labels.iter().map(|l| l.ld_type).collect()
                 }
             };
-            let typ_ti = type_ctx.new_generic_type(TypeDesc::Ttuple(tys));
+            let typ_ti = type_ctx.new_generic_type(TypeDesc::Ttuple(tys.into()));
             let mut printer = TypeExprPrinter::new(type_ctx);
             printer.reset();
             printer.mark_loops(typ_ti);
@@ -6387,6 +6397,20 @@ fn emit_type_warnings(
     let output = format_type_warnings(arena, source, filename, warnings);
     let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
     let _ = std::io::Write::flush(&mut stderr);
+}
+
+/// [`format_type_warnings`], reading the source only when there is a
+/// warning to report.
+fn format_type_warnings_lazy<'s>(
+    arena: &ParseArena,
+    source: &dyn Fn() -> &'s str,
+    filename: &str,
+    warnings: &[TypeCoreWarning],
+) -> String {
+    if warnings.is_empty() {
+        return String::new();
+    }
+    format_type_warnings(arena, source(), filename, warnings)
 }
 
 /// The reports [`emit_type_warnings`] prints, as one string.
@@ -7025,7 +7049,7 @@ fn format_expr_type_clash_report(
         let actual = type_alias_full_expansion(type_ctx, *actual)
             .or_else(|| rendered_alias_expansion(type_ctx, *actual, trace, true))
             .unwrap_or_else(|| type_ctx.repr(*actual));
-        matches!(&*type_ctx.get_desc(actual), TypeDesc::Tarrow { .. })
+        matches!(&*type_ctx.borrow_desc(actual), TypeDesc::Tarrow { .. })
     });
     let expected_is_jsx_component = trace
         .iter()
@@ -7342,6 +7366,10 @@ fn format_expr_type_clash_report(
         }
     }
     append_extra_type_clash_help(type_ctx, arena, source, loc, context, trace, &mut message);
+    // Printtyp.super_unification_error uses a <hov 2> box for each heading
+    // and type (printtyp.ml). The break after the heading is taken when the
+    // complete type expansion cannot fit in the remaining line.
+    message = wrap_type_clash_headings(&message);
 
     if matches!(
         context,
@@ -7651,6 +7679,76 @@ fn append_pattern_option_type_clash_help(
         message.push_str(RESET);
         message.push_str(" to make it work.");
     }
+}
+
+// Format's default margin is 78. The Location reporter adds two columns
+// before the message; each <hov 2> heading box adds two more on a break.
+fn type_clash_visible_width(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let mut width = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\x1b' && bytes.get(i + 1) == Some(&b'[') {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'm' {
+                i += 1;
+            }
+            i += usize::from(i < bytes.len());
+        } else {
+            let ch = text[i..].chars().next().expect("valid UTF-8");
+            width += 1;
+            i += ch.len_utf8();
+        }
+    }
+    width
+}
+
+fn wrap_type_clash_headings(message: &str) -> String {
+    const MARGIN: usize = 78;
+    const ERROR: &str = "\x1b[1;31m";
+    const INFO: &str = "\x1b[1;33m";
+    let mut lines = message.splitn(3, '\n');
+    let Some(actual) = lines.next() else {
+        return message.to_string();
+    };
+    let Some(expected) = lines.next() else {
+        return message.to_string();
+    };
+    if !expected.starts_with("But ") {
+        return message.to_string();
+    }
+    let rest = lines.next();
+    let wrap = |line: &str, color: &str| {
+        let Some(at) = line.find(color) else {
+            return line.to_string();
+        };
+        let prefix = &line[..at];
+        let ty = &line[at..];
+        let mut result = if 2 + type_clash_visible_width(line) > MARGIN && prefix.ends_with(' ') {
+            format!("{}\n  {}", prefix.trim_end(), ty)
+        } else {
+            line.to_string()
+        };
+        // super_type_expansion prints aliases in a nested <2> box. If the
+        // expansion does not fit, break at the space following "defined as".
+        if let Some(marker) = result.find("(defined as\x1b[0m ") {
+            let expansion = marker + "(defined as\x1b[0m ".len();
+            let start = result[..expansion].rfind('\n').map_or(0, |pos| pos + 1);
+            let indent = if start == 0 { 2 } else { 4 };
+            if indent + type_clash_visible_width(&result[start..]) > MARGIN {
+                result.replace_range(expansion - 1..expansion, "\n    ");
+            }
+        }
+        result
+    };
+    let mut output = wrap(actual, ERROR);
+    output.push('\n');
+    output.push_str(&wrap(expected, INFO));
+    if let Some(rest) = rest {
+        output.push('\n');
+        output.push_str(rest);
+    }
+    output
 }
 
 /// `Printtyp.super_unification_error` starts with `reset ()` and marks the
@@ -8464,7 +8562,7 @@ fn append_extra_type_clash_help(
         message.push_str(RESET);
     } else if trace.iter().any(|(actual, expected)| {
         matches!(
-            &*type_ctx.get_desc(type_ctx.repr(*actual)),
+            &*type_ctx.borrow_desc(type_ctx.repr(*actual)),
             TypeDesc::Tarrow { .. }
         ) && type_is_jsx_component(type_ctx, *expected)
     }) {
@@ -8725,7 +8823,7 @@ fn escaped_constructor_path(
     var_ty: TypeExprRef,
 ) -> Option<String> {
     let var_ty = type_ctx.repr(var_ty);
-    if !matches!(&*type_ctx.get_desc(var_ty), TypeDesc::Tvar(_)) {
+    if !matches!(&*type_ctx.borrow_desc(var_ty), TypeDesc::Tvar(_)) {
         return None;
     }
 
@@ -9431,7 +9529,7 @@ fn record_fields_for_type(
     let decl = type_decl_for_path(type_ctx, path)?;
     match decl.type_kind {
         crate::types::decl::TypeKind::TypeRecord(fields, record_repr) => {
-            Some((record_repr, fields))
+            Some((record_repr, fields.into_vec()))
         }
         _ => None,
     }
@@ -9542,7 +9640,7 @@ fn variant_constructors_for_type(
                 || layout.configuration().unboxed;
             Some((
                 path.clone(),
-                constructors,
+                constructors.into_vec(),
                 decl.type_params,
                 layout,
                 unboxed,
@@ -9758,7 +9856,7 @@ fn concrete_variant_constructors(
                 let decl = type_decl_for_path(type_ctx, path)?;
                 match decl.type_kind {
                     crate::types::decl::TypeKind::TypeVariant(constructors, layout_ref) => {
-                        return Some((constructors, type_ctx.variant_layout(layout_ref)));
+                        return Some((constructors.into_vec(), type_ctx.variant_layout(layout_ref)));
                     }
                     crate::types::decl::TypeKind::TypeAbstract => {
                         current = type_ctx.repr(decl.type_manifest?);
@@ -10589,7 +10687,7 @@ fn polyvariant_row(
 
 fn type_is_polyvariant(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
     matches!(
-        &*type_ctx.get_desc(type_ctx.repr(ty)),
+        &*type_ctx.borrow_desc(type_ctx.repr(ty)),
         TypeDesc::Tvariant(_)
     )
 }
@@ -10778,7 +10876,7 @@ fn object_field_missing_pair(
 }
 
 fn type_is_nil(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
-    matches!(&*type_ctx.get_desc(type_ctx.repr(ty)), TypeDesc::Tnil)
+    matches!(&*type_ctx.borrow_desc(type_ctx.repr(ty)), TypeDesc::Tnil)
 }
 
 fn append_dict_literal_help(
@@ -10811,7 +10909,7 @@ fn append_dict_literal_help(
 fn type_is_object(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
     let repr = type_ctx.repr(ty);
     matches!(
-        &*type_ctx.get_desc(repr),
+        &*type_ctx.borrow_desc(repr),
         TypeDesc::Tobject { .. } | TypeDesc::Tfield { .. }
     )
 }
@@ -10878,7 +10976,7 @@ fn type_clash_array_to_tuple(type_ctx: &TypeContext, trace: &[(TypeExprRef, Type
             _ => false,
         };
         let expected_is_tuple = matches!(
-            &*type_ctx.get_desc(type_ctx.repr(expected)),
+            &*type_ctx.borrow_desc(type_ctx.repr(expected)),
             TypeDesc::Ttuple(_)
         );
 
@@ -11985,9 +12083,9 @@ fn compile_source_to_js_with_options_inner(
 
     // Load Pervasives and extend the initial environment
     let mut pers_env = PersistentEnv::new();
-    let (load_path, load_path_display) = build_load_path_with_display(options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path_with_display(load_path.clone(), load_path_display);
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    type_ctx.set_load_paths_shared(load_path.clone());
+    pers_env.set_load_path_shared(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     let current_unit_name = options.current_unit_name();
@@ -12085,7 +12183,7 @@ fn compile_source_to_js_with_options_inner(
         &env,
         &typed_structure,
         source_file_for_interface,
-        source,
+        &|| source.to_string(),
         filename,
         has_resi,
         None,
@@ -12747,7 +12845,7 @@ fn check_compunit_inclusion_for_errors(
     env: &Env,
     typed_structure: &crate::types::typedtree::Structure,
     source_file: &str,
-    source: &str,
+    source: &dyn Fn() -> String,
     filename: &str,
     has_resi: bool,
     interface_file: Option<&str>,
@@ -12805,7 +12903,7 @@ fn check_compunit_inclusion_for_errors(
         Err(error) => Err(UserDiagnostic::new(
             format_compunit_mismatch_report(
                 type_ctx,
-                source,
+                &source(),
                 filename,
                 source_file,
                 &interface_file
@@ -13075,9 +13173,9 @@ pub fn typecheck_interface_source(
 
     // Load Pervasives and extend the initial environment
     let mut pers_env = PersistentEnv::new();
-    let (load_path, load_path_display) = build_load_path_with_display(options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path_with_display(load_path.clone(), load_path_display);
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    type_ctx.set_load_paths_shared(load_path.clone());
+    pers_env.set_load_path_shared(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     let current_unit_name = options.current_unit_name();
@@ -13196,12 +13294,45 @@ fn build_load_path(options: &CompilerOptions) -> Vec<PathBuf> {
     build_load_path_with_display(options).0
 }
 
+/// Load path shared by modules with the same compiler options, built once
+/// per worker thread. Normalizing every include path again for each
+/// in-process module allocated thousands of paths per module.
+fn shared_load_path_with_display(
+    options: &CompilerOptions,
+) -> (std::sync::Arc<Vec<PathBuf>>, std::sync::Arc<Vec<PathBuf>>) {
+    type Key = (Option<PathBuf>, Vec<PathBuf>, Option<PathBuf>);
+    thread_local! {
+        static CACHE: std::cell::RefCell<Vec<(Key, std::sync::Arc<Vec<PathBuf>>, std::sync::Arc<Vec<PathBuf>>)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let cwd = crate::process_cwd::current_dir().ok();
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some((_, paths, display)) = cache.iter().find(|((runtime, includes, entry_cwd), _, _)| {
+            runtime == &options.runtime_path && includes == &options.include_paths && entry_cwd == &cwd
+        }) {
+            return (paths.clone(), display.clone());
+        }
+        let (paths, display) = build_load_path_with_display(options);
+        let (paths, display) = (std::sync::Arc::new(paths), std::sync::Arc::new(display));
+        if cache.len() >= 64 {
+            cache.remove(0);
+        }
+        cache.push((
+            (options.runtime_path.clone(), options.include_paths.clone(), cwd),
+            paths.clone(),
+            display.clone(),
+        ));
+        (paths, display)
+    })
+}
+
 fn build_load_path_with_display(options: &CompilerOptions) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let stdlib_dir = options
         .runtime_path
         .as_ref()
         .map(|runtime_path| runtime_path.join("lib").join("ocaml"));
-    let cwd = std::env::current_dir().ok();
+    let cwd = crate::process_cwd::current_dir().ok();
 
     let mut paths = Vec::new();
     let mut display_paths = Vec::new();
@@ -13338,7 +13469,7 @@ pub fn load_pervasives<'a>(
             if !pers_env.is_in_process_mode() {
                 if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
                     if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                        ctx.register_raw_module_sig("Pervasives", std::sync::Arc::new(sig.clone()));
+                        ctx.register_raw_module_sig("Pervasives", sig.clone());
                     }
                 }
             }
@@ -13352,7 +13483,7 @@ pub fn load_pervasives<'a>(
             if !pers_env.is_in_process_mode() {
                 if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
                     if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                        ctx.register_raw_module_sig("Stdlib", std::sync::Arc::new(sig.clone()));
+                        ctx.register_raw_module_sig("Stdlib", sig.clone());
                     }
                 }
             }
@@ -13376,7 +13507,7 @@ pub fn load_pervasives<'a>(
             if !pers_env.is_in_process_mode() {
                 if let Some(md) = pers_env.get_module_declaration(module_name, ctx) {
                     if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                        ctx.register_raw_module_sig(module_name, std::sync::Arc::new(sig.clone()));
+                        ctx.register_raw_module_sig(module_name, sig.clone());
                     }
                 }
             }
@@ -13471,9 +13602,9 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let mut env = initial_env(&type_ctx);
 
         let mut pers_env = PersistentEnv::new();
-        let (load_path, load_path_display) = build_load_path_with_display(options);
-        type_ctx.set_load_paths(load_path.clone());
-        pers_env.set_load_path_with_display(load_path, load_path_display);
+        let (load_path, load_path_display) = shared_load_path_with_display(options);
+        type_ctx.set_load_paths_shared(load_path.clone());
+        pers_env.set_load_path_shared(load_path, load_path_display);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
         let current_unit_name = options.current_unit_name();
@@ -13600,9 +13731,9 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let mut env = initial_env(&type_ctx);
 
         let mut pers_env = PersistentEnv::new();
-        let (load_path, load_path_display) = build_load_path_with_display(options);
-        type_ctx.set_load_paths(load_path.clone());
-        pers_env.set_load_path_with_display(load_path, load_path_display);
+        let (load_path, load_path_display) = shared_load_path_with_display(options);
+        type_ctx.set_load_paths_shared(load_path.clone());
+        pers_env.set_load_path_shared(load_path, load_path_display);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
         let current_unit_name = options.current_unit_name();
@@ -14876,9 +15007,9 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::new();
-    let (load_path, load_path_display) = build_load_path_with_display(options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path_with_display(load_path, load_path_display);
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    type_ctx.set_load_paths_shared(load_path.clone());
+    pers_env.set_load_path_shared(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     let current_unit_name = options.current_unit_name();
@@ -14934,9 +15065,9 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::new();
-    let (load_path, load_path_display) = build_load_path_with_display(options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path_with_display(load_path, load_path_display);
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    type_ctx.set_load_paths_shared(load_path.clone());
+    pers_env.set_load_path_shared(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     let current_unit_name = options.current_unit_name();
@@ -15617,6 +15748,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         module_name
     );
     let env_setup_span = info_span!("compiler.env_setup").entered();
+    let env_setup_start = crate::timing::enabled().then(std::time::Instant::now);
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
@@ -15635,9 +15767,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
 
     let mut pers_env = PersistentEnv::from_registry(registry);
     pers_env.set_visible_package_roots(options.visible_package_roots.clone());
-    let (load_path, load_path_display) = build_load_path_with_display(options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path_with_display(load_path.clone(), load_path_display);
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    type_ctx.set_load_paths_shared(load_path.clone());
+    pers_env.set_load_path_shared(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     pers_env.set_nopervasives(options.nopervasives);
@@ -15653,6 +15785,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
 
     tctx.set_persistent_env(pers_env);
     drop(env_setup_span);
+    if let Some(start) = env_setup_start {
+        crate::timing::record(crate::timing::Phase::EnvSetup, start.elapsed());
+    }
 
     // Diagnostics are reported against the source file, read only when
     // there is something to report.
@@ -15669,7 +15804,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             // As in the file compile: the warnings reported so far precede
             // the error report.
             tctx.drain_open_slot_uses();
-            let warnings = format_type_warnings(arena, source(), filename, &tctx.warnings);
+            let warnings = format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
             let suppress_info_style =
                 !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
             if let Some(error) = tctx
@@ -15696,6 +15831,10 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     }
 
     let mut inferred_implementation_coercion = None;
+    // Interface matching, non-generalizable checks and signature
+    // normalization are part of OCaml's `type_implementation`
+    // (compiler/ml/typemod.ml:1740-1788); account for them as typecheck.
+    let signature_prepare_start = crate::timing::enabled().then(std::time::Instant::now);
     let mut saved_cmi_signature = None;
     let mut published_signature = {
         let _phase = info_span!("compiler.signature_prepare").entered();
@@ -15728,7 +15867,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 &final_env,
                 &simple_signature,
             ) {
-                let warnings = format_type_warnings(arena, source(), filename, &tctx.warnings);
+                let warnings = format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
                 let suppress_info_style =
                     !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
                 return Err(prefix_diagnostic(
@@ -15751,6 +15890,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
 
         simple_signature
     };
+    if let Some(start) = signature_prepare_start {
+        crate::timing::record(crate::timing::Phase::Typecheck, start.elapsed());
+    }
     // typemod.ml:1742-1758: with an interface, the implementation is checked
     // against it (marking the included declarations used) before the delayed
     // checks, as the file compile does.
@@ -15762,12 +15904,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             &env,
             &typed_structure,
             filename,
-            source(),
+            &|| source().to_string(),
             filename,
             true,
             interface_file.as_deref(),
         ) {
-            let warnings = format_type_warnings(arena, source(), filename, &tctx.warnings);
+            let warnings = format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
             return Err(prefix_diagnostic(&warnings, error));
         }
     }
@@ -15781,6 +15923,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let imports = tctx
         .persistent_env
         .as_ref()
+        .filter(|_| options.typed_artifacts.is_some())
         .map(|pers| pers.imports(options.dont_record_crc_unit.as_deref()))
         .unwrap_or_default();
     let saved_cmi_crc = save_typed_artifacts(
@@ -15824,6 +15967,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         )
     } else {
         let _phase = info_span!("compiler.signature_extract").entered();
+        let signature_publish_start = crate::timing::enabled().then(std::time::Instant::now);
         let mut internal_env = tctx
             .persistent_env
             .take()
@@ -15888,6 +16032,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         // (compiler/ml/typeopt.ml:40-88; compiler/ml/matching.ml:1259-1267).
         // `finish_preprocessed_structure_in_process_from_js_boundary` hides it
         // again before JS module-path probing.
+        if let Some(start) = signature_publish_start {
+            crate::timing::record(crate::timing::Phase::SignaturePublish, start.elapsed());
+        }
         (pers_struct, new_alias_rewrites, internal_env)
     };
     if !has_interface && let Some(hook) = signature_ready.as_deref_mut() {
@@ -15989,9 +16136,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // (js_implementation.ml:161-167); a Translmod error escapes before
     // `Warnings.check_fatal`.
     let mut warnings =
-        format_type_warnings(arena, source(), filename, &tctx.warnings[..post_type_warning_start]);
+        format_type_warnings_lazy(arena, &source, filename, &tctx.warnings[..post_type_warning_start]);
     if let Some(diagnostic) = raw_diagnostic {
-        warnings.push_str(&format_type_warnings(arena, source(), filename, &raw_warnings));
+        warnings.push_str(&format_type_warnings_lazy(arena, &source, filename, &raw_warnings));
         return Err(prefix_diagnostic(
             &warnings,
             UserDiagnostic::new(
@@ -16007,8 +16154,8 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         ));
     }
     let late_type_warnings = &tctx.warnings[post_type_warning_start..];
-    warnings.push_str(&format_type_warnings(arena, source(), filename, late_type_warnings));
-    warnings.push_str(&format_type_warnings(arena, source(), filename, &raw_warnings));
+    warnings.push_str(&format_type_warnings_lazy(arena, &source, filename, late_type_warnings));
+    warnings.push_str(&format_type_warnings_lazy(arena, &source, filename, &raw_warnings));
     // lam_compile_main.ml:420 `Warnings.check_fatal ()`: a warning configured
     // as an error fails the compilation after its reports.
     if type_warnings_have_errors(&tctx.warnings) || type_warnings_have_errors(&raw_warnings) {
@@ -16097,8 +16244,8 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
     )
     .entered();
     let mut persistent_env_for_js = PersistentEnv::from_registry(registry);
-    let (load_path, load_path_display) = build_load_path_with_display(options);
-    persistent_env_for_js.set_load_path_with_display(load_path, load_path_display);
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    persistent_env_for_js.set_load_path_shared(load_path, load_path_display);
     persistent_env_for_js.set_open_modules(options.open_modules.clone());
     persistent_env_for_js.set_jsx_version(options.jsx_version);
     persistent_env_for_js.set_nopervasives(options.nopervasives);
@@ -16392,9 +16539,9 @@ pub fn typecheck_preprocessed_signature_in_process(
 
     let mut pers_env = PersistentEnv::from_registry(registry);
     pers_env.set_visible_package_roots(options.visible_package_roots.clone());
-    let (load_path, load_path_display) = build_load_path_with_display(options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path_with_display(load_path, load_path_display);
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    type_ctx.set_load_paths_shared(load_path.clone());
+    pers_env.set_load_path_shared(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     pers_env.set_nopervasives(options.nopervasives);
@@ -16425,7 +16572,7 @@ pub fn typecheck_preprocessed_signature_in_process(
             // As in the file compile: the warnings reported so far precede
             // the error report.
             tctx.drain_open_slot_uses();
-            let warnings = format_type_warnings(arena, source(), filename, &tctx.warnings);
+            let warnings = format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
             let suppress_info_style =
                 !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
             if let Some(error) = tctx
@@ -16452,7 +16599,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     );
     // js_implementation.ml:64 `Delayed_checks.force_delayed_checks ()`.
     tctx.flush_value_usage_checks();
-    let warnings = format_type_warnings(arena, source(), filename, &tctx.warnings);
+    let warnings = format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
     if type_warnings_have_errors(&tctx.warnings) {
         return Err(UserDiagnostic::new(warnings, 2).into());
     }
@@ -16485,14 +16632,14 @@ pub fn typecheck_preprocessed_signature_in_process(
 
     let typed_module_type = crate::types::typedtree::ModuleType {
         mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature),
-        mty_type: crate::types::decl::ModuleType::MtySignature(decl_signature),
+        mty_type: crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(decl_signature)),
         mty_env: crate::types::typedtree::EnvRef(0),
         mty_loc: crate::parse_arena::LocIdx(0),
         mty_attributes: crate::parser::ast::Attributes::new(),
     };
     let published_signature =
         match crate::types::typemod::decl_module_type_from_typed(&typed_module_type) {
-            Some(crate::types::decl::ModuleType::MtySignature(sig)) => sig,
+            Some(crate::types::decl::ModuleType::MtySignature(sig)) => std::sync::Arc::unwrap_or_clone(sig),
             _ => {
                 return Err(anyhow!(
                     "Failed to extract interface signature from typed tree"
@@ -16503,6 +16650,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     let imports = tctx
         .persistent_env
         .as_ref()
+        .filter(|_| options.typed_artifacts.is_some())
         .map(|pers| pers.imports(options.dont_record_crc_unit.as_deref()))
         .unwrap_or_default();
     let mut saved_cmi_crc = None;
@@ -16631,9 +16779,9 @@ pub fn typecheck_implementation_in_process(
 
     let mut pers_env = PersistentEnv::from_registry(registry);
     pers_env.set_visible_package_roots(options.visible_package_roots.clone());
-    let (load_path, load_path_display) = build_load_path_with_display(options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path_with_display(load_path, load_path_display);
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    type_ctx.set_load_paths_shared(load_path.clone());
+    pers_env.set_load_path_shared(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     pers_env.set_nopervasives(options.nopervasives);
@@ -16745,13 +16893,13 @@ mod tests {
             exp_desc: ExpressionDesc::Texp_ident(
                 TypePath::pident(expr_path_id),
                 Located::mknoloc(LidentIdx(0)),
-                ValueDescription {
+                std::sync::Arc::new(ValueDescription {
                     val_type: TypeExprRef::null(),
                     val_kind: ValueKind::ValReg,
                     val_loc: Location::none(),
                     val_attributes: Vec::new(),
                     val_path: None,
-                },
+                }),
             ),
             exp_loc: LocIdx::none(),
             exp_extra: Default::default(),

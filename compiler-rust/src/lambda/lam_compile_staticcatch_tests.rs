@@ -1,6 +1,83 @@
 use super::*;
 
 #[test]
+fn equal_flattened_staticcatch_handlers_share_one_switch_body() {
+    let mut compiler = LambdaCompiler::new();
+    let cond = Ident::create_local("cond");
+    let report = Ident::create_local("report");
+    let message = Ident::create_local("message");
+    let handler = Lambda::Lsequence(
+        Box::new(Lambda::apply(
+            Lambda::var(report),
+            vec![Lambda::var(message.clone())],
+            ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            false,
+        )),
+        Box::new(Lambda::var(message)),
+    );
+    let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+        Box::new(Lambda::LstaticCatch(
+            Box::new(Lambda::if_(
+                Lambda::var(cond),
+                Lambda::static_raise(2, vec![]),
+                Lambda::static_raise(1, vec![]),
+            )),
+            (2, vec![]),
+            Box::new(handler.clone()),
+        )),
+        (1, vec![]),
+        Box::new(handler),
+    ));
+    let rendered = print_block(&block);
+    assert!(
+        rendered.contains("case 1 :") && rendered.contains("case 2 :"),
+        "both flattened exit codes must be dispatched:\n{rendered}"
+    );
+    assert_eq!(
+        rendered.matches("report(message)").count(),
+        1,
+        "equal Lambda handlers must share their compiled switch body:\n{rendered}"
+    );
+}
+
+#[test]
+fn nested_return_staticcatch_preserves_exit_dispatch_in_enclosing_jump() {
+    let mut compiler = LambdaCompiler::new();
+    let outer_exit = Ident::create_local("outerExit");
+    let state = Ident::create_local("state");
+    let enabled = Ident::create_local("enabled");
+    let inner = Lambda::LstaticCatch(
+        Box::new(Lambda::LstringSwitch(
+            Box::new(Lambda::var(state)),
+            vec![("Initial".to_string(), Lambda::static_raise(2, vec![]))],
+            Some(Box::new(Lambda::if_(
+                Lambda::var(enabled.clone()),
+                Lambda::static_raise(1, vec![]),
+                Lambda::static_raise(2, vec![]),
+            ))),
+        )),
+        (2, vec![]),
+        Box::new(Lambda::if_(
+            Lambda::var(enabled),
+            Lambda::const_(Constant::JsTrue),
+            Lambda::const_(Constant::JsFalse),
+        )),
+    );
+    let block = compiler.with_static_jump_handler(1, &outer_exit, &[], |compiler| {
+        compiler.compile_return_block(&inner)
+    });
+    let rendered = print_block(&block);
+    assert!(
+        rendered.contains("let exit = 0;") && rendered.contains("if (exit === 2)"),
+        "a nested catch must dispatch only when its exit was raised:\n{rendered}"
+    );
+}
+
+#[test]
 fn staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let x = Ident::create_local("x");
@@ -11,7 +88,7 @@ fn staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml() 
         Box::new(Lambda::LtryWith(
             Box::new(Lambda::LstaticRaise(
                 -2,
-                vec![Lambda::Lapply(Apply {
+                vec![Lambda::Lapply(Box::new(Apply {
                     ap_func: Box::new(Lambda::var(x.clone())),
                     ap_args: vec![],
                     ap_info: ApInfo {
@@ -20,13 +97,13 @@ fn staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml() 
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
-                })],
+                }))],
             )),
             exn.clone(),
             Box::new(Lambda::const_(Constant::int(1))),
         )),
         (-2, vec![val.clone()]),
-        Box::new(Lambda::Lapply(Apply {
+        Box::new(Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(Lambda::var(g.clone())),
             ap_args: vec![],
             ap_info: ApInfo {
@@ -35,7 +112,7 @@ fn staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml() 
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
-        })),
+        }))),
     ));
 
     let [declare, try_stmt, ret] = block.as_slice() else {
@@ -115,7 +192,7 @@ fn staticcatch_wrapped_trywith_identity_handler_returns_directly_like_ocaml() {
         Box::new(Lambda::LtryWith(
             Box::new(Lambda::LstaticRaise(
                 -1,
-                vec![Lambda::Lapply(Apply {
+                vec![Lambda::Lapply(Box::new(Apply {
                     ap_func: Box::new(Lambda::var(g.clone())),
                     ap_args: vec![Lambda::var(x.clone())],
                     ap_info: ApInfo {
@@ -124,7 +201,7 @@ fn staticcatch_wrapped_trywith_identity_handler_returns_directly_like_ocaml() {
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
-                })],
+                }))],
             )),
             exn.clone(),
             Box::new(Lambda::const_(Constant::int(3))),
@@ -196,7 +273,7 @@ fn staticcatch_trywith_tail_loop_keeps_bound_exit_effects_outside_try_like_ocaml
                     Box::new(Lambda::LtryWith(
                         Box::new(Lambda::LstaticRaise(
                             -1,
-                            vec![Lambda::Lapply(Apply {
+                            vec![Lambda::Lapply(Box::new(Apply {
                                 ap_func: Box::new(Lambda::var(read.clone())),
                                 ap_args: vec![Lambda::var(acc.clone())],
                                 ap_info: ApInfo {
@@ -205,13 +282,13 @@ fn staticcatch_trywith_tail_loop_keeps_bound_exit_effects_outside_try_like_ocaml
                                     status: ApplyStatus::Na,
                                 },
                                 ap_transformed_jsx: false,
-                            })],
+                            }))],
                         )),
                         exn.clone(),
                         Box::new(Lambda::const_(Constant::int(0))),
                     )),
                     (-1, vec![next_acc.clone()]),
-                    Box::new(Lambda::Lapply(Apply {
+                    Box::new(Lambda::Lapply(Box::new(Apply {
                         ap_func: Box::new(Lambda::var(loop_.clone())),
                         ap_args: vec![Lambda::var(next_acc.clone())],
                         ap_info: ApInfo {
@@ -220,7 +297,7 @@ fn staticcatch_trywith_tail_loop_keeps_bound_exit_effects_outside_try_like_ocaml
                             status: ApplyStatus::Na,
                         },
                         ap_transformed_jsx: false,
-                    })),
+                    }))),
                 ),
                 FunctionAttribute::default(),
             ),
@@ -278,14 +355,14 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
             TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
-                runtime: crate::types::BlockRuntime {
+                runtime: Box::new(crate::types::BlockRuntime {
                     tag: crate::types::VariantTag {
                         name: "::".to_string(),
                         tag_type: None,
                     },
                     tag_name: None,
                     untagged: false,
-                },
+                }),
             },
             Mutable::Immutable,
         ),
@@ -309,7 +386,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                         Box::new(Lambda::LtryWith(
                                             Box::new(Lambda::LstaticRaise(
                                                 -1,
-                                                vec![Lambda::Lapply(Apply {
+                                                vec![Lambda::Lapply(Box::new(Apply {
                                                     ap_func: Box::new(Lambda::var(
                                                         read.clone(),
                                                     )),
@@ -320,7 +397,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                         status: ApplyStatus::Na,
                                                     },
                                                     ap_transformed_jsx: false,
-                                                })],
+                                                }))],
                                             )),
                                             raw_exn.clone(),
                                             Box::new(Lambda::let_(
@@ -352,7 +429,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                             ],
                                                             Location::none(),
                                                         ),
-                                                        Lambda::Lapply(Apply {
+                                                        Lambda::Lapply(Box::new(Apply {
                                                             ap_func: Box::new(Lambda::var(
                                                                 reverse.clone(),
                                                             )),
@@ -366,7 +443,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                                 status: ApplyStatus::Na,
                                                             },
                                                             ap_transformed_jsx: false,
-                                                        }),
+                                                        })),
                                                         Lambda::LstaticRaise(3, vec![]),
                                                     )),
                                                     (3, vec![]),
@@ -379,7 +456,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                             )),
                                         )),
                                         (-1, vec![next_acc.clone()]),
-                                        Box::new(Lambda::Lapply(Apply {
+                                        Box::new(Lambda::Lapply(Box::new(Apply {
                                             ap_func: Box::new(Lambda::var(loop_.clone())),
                                             ap_args: vec![cons],
                                             ap_info: ApInfo {
@@ -388,12 +465,12 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                 status: ApplyStatus::Na,
                                             },
                                             ap_transformed_jsx: false,
-                                        })),
+                                        }))),
                                     ),
                                     FunctionAttribute::default(),
                                 ),
                         )],
-                        Lambda::Lapply(Apply {
+                        Lambda::Lapply(Box::new(Apply {
                             ap_func: Box::new(Lambda::var(loop_.clone())),
                             ap_args: vec![Lambda::const_(Constant::int(0))],
                             ap_info: ApInfo {
@@ -402,7 +479,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                 status: ApplyStatus::Na,
                             },
                             ap_transformed_jsx: false,
-                        }),
+                        })),
                     ),
                     FunctionAttribute::default(),
                 ),
@@ -623,7 +700,7 @@ fn staticcatch_wrapped_int_return_switches_omit_empty_default_arms() {
         Box::new(Lambda::LstaticCatch(
             Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(action.clone())),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: false,
                     sw_consts: vec![
                         (
@@ -639,7 +716,7 @@ fn staticcatch_wrapped_int_return_switches_omit_empty_default_arms() {
                     sw_blocks: vec![],
                     sw_failaction: Some(Box::new(Lambda::static_raise(2, Vec::new()))),
                     sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-                },
+                }),
             )),
             (2, vec![]),
             Box::new(Lambda::static_raise(1, Vec::new())),
@@ -681,7 +758,7 @@ fn partial_int_return_switch_cases_break_to_shared_handler_like_test_set() {
     let block = compiler.compile_return_block(&Lambda::LstaticCatch(
         Box::new(Lambda::Lswitch(
             Box::new(Lambda::var(action.clone())),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: false,
                 sw_consts: vec![
                     (
@@ -701,7 +778,7 @@ fn partial_int_return_switch_cases_break_to_shared_handler_like_test_set() {
                 sw_blocks: vec![],
                 sw_failaction: None,
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            },
+            }),
         )),
         (1, vec![]),
         Box::new(Lambda::const_(Constant::int(30))),
@@ -753,7 +830,7 @@ fn direct_return_switch_cases_with_shared_plain_handlers_fall_through_like_ocaml
     let block = compiler.compile_return_block(&Lambda::LstaticCatch(
         Box::new(Lambda::Lswitch(
             Box::new(Lambda::var(action.clone())),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: false,
                 sw_consts: vec![
                     (
@@ -773,7 +850,7 @@ fn direct_return_switch_cases_with_shared_plain_handlers_fall_through_like_ocaml
                 sw_blocks: vec![],
                 sw_failaction: None,
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            },
+            }),
         )),
         (1, vec![]),
         Box::new(Lambda::const_(Constant::int(30))),
@@ -861,7 +938,7 @@ fn staticcatch_wrapped_int_return_switches_keep_single_handlers_as_default_arms(
     let block = compiler.compile_return_block(&Lambda::LstaticCatch(
         Box::new(Lambda::Lswitch(
             Box::new(Lambda::var(action.clone())),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: false,
                 sw_consts: vec![
                     (
@@ -877,7 +954,7 @@ fn staticcatch_wrapped_int_return_switches_keep_single_handlers_as_default_arms(
                 sw_blocks: vec![],
                 sw_failaction: Some(Box::new(Lambda::static_raise(2, Vec::new()))),
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            },
+            }),
         )),
         (2, vec![]),
         Box::new(Lambda::const_(Constant::int(30))),
@@ -1013,7 +1090,7 @@ fn nested_staticcatch_switch_forwarders_to_outer_handlers_avoid_exit_temps_like_
         Box::new(Lambda::LstaticCatch(
             Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(state.clone())),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: true,
                     sw_consts: vec![(
                         crate::lambda::SwitchKey::Constructor(
@@ -1078,7 +1155,7 @@ fn nested_staticcatch_switch_forwarders_to_outer_handlers_avoid_exit_temps_like_
                             has_other_literal: true,
                         },
                     ),
-                },
+                }),
             )),
             (2, vec![]),
             Box::new(Lambda::let_(
@@ -1141,7 +1218,7 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
         Box::new(Lambda::LstaticCatch(
             Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(state.clone())),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: true,
                     sw_consts: vec![(
                         crate::lambda::SwitchKey::Constructor(
@@ -1206,7 +1283,7 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                             has_other_literal: true,
                         },
                     ),
-                },
+                }),
             )),
             (2, vec![]),
             Box::new(Lambda::let_(
@@ -1451,7 +1528,7 @@ fn single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_
         compiler.compile_return_block(&Lambda::LstaticCatch(
             Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(action.clone())),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: false,
                     sw_consts: vec![(
                         crate::lambda::SwitchKey::Constructor(
@@ -1479,7 +1556,7 @@ fn single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_
                             has_other_literal: true,
                         },
                     ),
-                },
+                }),
             )),
             (7, vec![]),
             Box::new(Lambda::const_(Constant::int(2))),
@@ -1523,7 +1600,7 @@ fn single_case_staticcatch_wrapped_named_variant_non_unit_return_switch_falls_th
     let block = compiler.compile_return_block(&Lambda::LstaticCatch(
         Box::new(Lambda::Lswitch(
             Box::new(Lambda::var(action.clone())),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: false,
                 sw_consts: vec![(
                     crate::lambda::SwitchKey::Constructor(
@@ -1549,7 +1626,7 @@ fn single_case_staticcatch_wrapped_named_variant_non_unit_return_switch_falls_th
                         has_other_literal: true,
                     },
                 ),
-            },
+            }),
         )),
         (7, vec![]),
         Box::new(Lambda::const_(Constant::int(2))),
@@ -1585,7 +1662,7 @@ fn single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like
         compiler.compile_return_block(&Lambda::LstaticCatch(
             Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(action.clone())),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: false,
                     sw_consts: vec![(
                         crate::lambda::SwitchKey::Constructor(
@@ -1616,7 +1693,7 @@ fn single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like
                             has_other_literal: true,
                         },
                     ),
-                },
+                }),
             )),
             (7, vec![]),
             Box::new(Lambda::Lassign(
@@ -1665,7 +1742,7 @@ fn js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard()
             Lambda::LstaticCatch(
                 Box::new(Lambda::Lswitch(
                     Box::new(Lambda::var(action.clone())),
-                    LambdaSwitch {
+                    Box::new(LambdaSwitch {
                         sw_consts_full: false,
                         sw_consts: vec![(
                             crate::lambda::SwitchKey::Constructor(
@@ -1696,7 +1773,7 @@ fn js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard()
                                 has_other_literal: true,
                             },
                         ),
-                    },
+                    }),
                 )),
                 (7, vec![]),
                 Box::new(Lambda::Lassign(
@@ -1750,7 +1827,7 @@ fn single_case_staticcatch_wrapped_untagged_object_unit_handler_keeps_negative_g
         compiler.compile_return_block(&Lambda::LstaticCatch(
             Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(json.clone())),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: false,
                     sw_consts: vec![],
                     sw_blocks_full: false,
@@ -1788,7 +1865,7 @@ fn single_case_staticcatch_wrapped_untagged_object_unit_handler_keeps_negative_g
                             has_other_literal: false,
                         },
                     ),
-                },
+                }),
             )),
             (9, vec![]),
             Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
@@ -1824,7 +1901,7 @@ fn effectful_unit_staticcatch_handlers_keep_fail_first_guards() {
         compiler.compile_return_block(&Lambda::LstaticCatch(
             Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(s.clone())),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: false,
                     sw_consts: vec![],
                     sw_blocks_full: false,
@@ -1877,7 +1954,7 @@ fn effectful_unit_staticcatch_handlers_keep_fail_first_guards() {
                                     ),
                                     Lambda::Lswitch(
                                         Box::new(Lambda::var(match_.clone())),
-                                        LambdaSwitch {
+                                        Box::new(LambdaSwitch {
                                             sw_consts_full: false,
                                             sw_consts: vec![(
                                                 crate::lambda::SwitchKey::Constructor(
@@ -1925,7 +2002,7 @@ fn effectful_unit_staticcatch_handlers_keep_fail_first_guards() {
                                                     has_other_literal: true,
                                                 },
                                             ),
-                                        },
+                                        }),
                                     ),
                                 )),
                             ),
@@ -1944,7 +2021,7 @@ fn effectful_unit_staticcatch_handlers_keep_fail_first_guards() {
                             has_other_literal: false,
                         },
                     ),
-                },
+                }),
             )),
             (11, vec![]),
             Box::new(Lambda::Lsequence(
@@ -1982,7 +2059,7 @@ fn multi_case_staticcatch_wrapped_named_variant_return_switch_moves_fallthrough_
             Box::new(Lambda::LstaticCatch(
                 Box::new(Lambda::Lswitch(
                     Box::new(Lambda::var(action.clone())),
-                    LambdaSwitch {
+                    Box::new(LambdaSwitch {
                         sw_consts_full: true,
                         sw_consts: vec![
                             (
@@ -2036,7 +2113,7 @@ fn multi_case_staticcatch_wrapped_named_variant_return_switch_moves_fallthrough_
                                 has_other_literal: true,
                             },
                         ),
-                    },
+                    }),
                 )),
                 (4, vec![]),
                 Box::new(Lambda::static_raise(2, Vec::new())),
@@ -2092,7 +2169,7 @@ fn nested_named_variant_return_switches_keep_plain_inner_handlers_as_default_arm
             Box::new(Lambda::LstaticCatch(
                 Box::new(Lambda::Lswitch(
                     Box::new(Lambda::var(action.clone())),
-                    LambdaSwitch {
+                    Box::new(LambdaSwitch {
                         sw_consts_full: false,
                         sw_consts: vec![
                             (
@@ -2164,7 +2241,7 @@ fn nested_named_variant_return_switches_keep_plain_inner_handlers_as_default_arm
                                 has_other_literal: true,
                             },
                         ),
-                    },
+                    }),
                 )),
                 (3, vec![]),
                 Box::new(Lambda::const_(Constant::int(10))),
@@ -2222,14 +2299,14 @@ fn nested_plain_int_return_switches_can_fall_through_like_gpr_1438() {
         Box::new(Lambda::LstaticCatch(
             Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(key.clone())),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: false,
                     sw_consts: gpr_1438_switch_cases(&b, &c, &d, &e),
                     sw_blocks_full: true,
                     sw_blocks: vec![],
                     sw_failaction: Some(Box::new(Lambda::static_raise(2, Vec::new()))),
                     sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-                },
+                }),
             )),
             (2, vec![]),
             Box::new(gpr_1438_fallthrough_handler()),

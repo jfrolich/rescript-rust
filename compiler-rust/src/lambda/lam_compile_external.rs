@@ -173,8 +173,9 @@ impl LambdaCompiler {
         dispatches: Option<&[(String, String)]>,
     ) -> Vec<Expression> {
         match &arg.desc {
-            ExpressionDesc::CamlBlock(items, _, TagInfo::PolyVar(_))
-                if matches!(
+            ExpressionDesc::CamlBlock(items, _, tag)
+                if matches!(**tag, TagInfo::PolyVar(_))
+                    && matches!(
                     items.as_slice(),
                     [
                         Expression {
@@ -636,9 +637,15 @@ impl LambdaCompiler {
         arg_label: ExternalArgLabel,
         arg_type: &ExternalArgAttr,
     ) -> (Vec<Expression>, Option<Expression>) {
-        let arg = match arg_label {
-            ExternalArgLabel::Optional => self.external_optional_to_undefined_expr(raw_arg.clone()),
-            ExternalArgLabel::Label | ExternalArgLabel::Empty => raw_arg.clone(),
+        // Only `Unwrap` of an optional argument reads the raw argument again.
+        let keep_raw = matches!(arg_type, ExternalArgAttr::Unwrap)
+            && matches!(arg_label, ExternalArgLabel::Optional);
+        let (arg, raw_arg) = match arg_label {
+            ExternalArgLabel::Optional => {
+                let raw_copy = keep_raw.then(|| raw_arg.clone());
+                (self.external_optional_to_undefined_expr(raw_arg), raw_copy)
+            }
+            ExternalArgLabel::Label | ExternalArgLabel::Empty => (raw_arg, None),
         };
 
         match arg_type {
@@ -665,7 +672,9 @@ impl LambdaCompiler {
             }
             ExternalArgAttr::Unwrap => {
                 let value = match arg_label {
-                    ExternalArgLabel::Optional => self.external_option_unwrap_expr(raw_arg),
+                    ExternalArgLabel::Optional => self.external_option_unwrap_expr(
+                        raw_arg.expect("optional unwrap keeps the raw argument"),
+                    ),
                     ExternalArgLabel::Label | ExternalArgLabel::Empty => {
                         self.external_polyvar_unwrap_expr(arg)
                     }
@@ -1276,17 +1285,17 @@ impl LambdaCompiler {
     ) -> Option<(ModuleId, Option<String>)> {
         match &expr.desc {
             ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, member)) => {
-                Some((module.clone(), member.clone()))
+                Some(((**module).clone(), member.clone()))
             }
             ExpressionDesc::StaticIndex(target, field, _) => match &target.desc {
                 ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, None)) => {
-                    Some((module.clone(), Some(field.clone())))
+                    Some(((**module).clone(), Some(field.clone())))
                 }
                 _ => None,
             },
             ExpressionDesc::Call(func, _, _) => match &func.desc {
                 ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, member)) => {
-                    Some((module.clone(), member.clone()))
+                    Some(((**module).clone(), member.clone()))
                 }
                 _ => None,
             },
