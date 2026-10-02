@@ -296,7 +296,7 @@ pub enum ExpExtra {
 #[derive(Debug, Clone)]
 pub enum ExpressionDesc {
     /// Identifier: `x`, `M.x`.
-    Texp_ident(Path, Loc<LidentIdx>, Box<ValueDescription>),
+    Texp_ident(Path, Loc<LidentIdx>, Arc<ValueDescription>),
 
     /// Constant: `1`, `'a'`, `"hello"`, `1.0`.
     Texp_constant(Constant),

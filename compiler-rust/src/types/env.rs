@@ -1167,6 +1167,13 @@ impl Env {
             .ok_or_else(|| EnvError::ValueNotFound(name.into()))
     }
 
+    /// Like `find_value_with_path`, sharing the stored description.
+    pub fn find_value_arc_with_path(&self, name: &str) -> EnvResult<(Path, &Arc<ValueDescription>)> {
+        self.data.values
+            .find_by_name_with_path(name)
+            .ok_or_else(|| EnvError::ValueNotFound(name.into()))
+    }
+
     /// Iterate over visible value bindings.
     pub fn iter_values(&self) -> impl Iterator<Item = (&Ident, &ValueDescription)> {
         self.data.values.iter().map(|(id, v)| (id, v.as_ref()))

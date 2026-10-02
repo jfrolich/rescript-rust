@@ -436,7 +436,7 @@ pub struct TypeContext {
 
     /// Cached dotted value lookups keyed by resolved module access path.
     resolved_module_value_cache: RefCell<
-        ahash::AHashMap<Path, ahash::AHashMap<String, (Path, super::decl::ValueDescription)>>,
+        ahash::AHashMap<Path, ahash::AHashMap<String, (Path, Arc<super::decl::ValueDescription>)>>,
     >,
 
     /// Cached dotted type lookups keyed by resolved module access path.
@@ -1641,7 +1641,7 @@ impl TypeContext {
         module_path: &Path,
         value_name: &str,
         path: Path,
-        desc: super::decl::ValueDescription,
+        desc: Arc<super::decl::ValueDescription>,
     ) {
         self.resolved_module_value_cache
             .borrow_mut()
@@ -1655,7 +1655,7 @@ impl TypeContext {
         &self,
         module_path: &Path,
         value_name: &str,
-    ) -> Option<(Path, super::decl::ValueDescription)> {
+    ) -> Option<(Path, Arc<super::decl::ValueDescription>)> {
         self.resolved_module_value_cache
             .borrow()
             .get(module_path)
