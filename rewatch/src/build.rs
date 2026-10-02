@@ -18,8 +18,8 @@ use crate::helpers::{self};
 use crate::lock::{LockKind, drop_lock, get_lock_or_exit};
 use crate::project_context::ProjectContext;
 use crate::sourcedirs;
-use anyhow::{Context, Result, anyhow};
 use ahash::AHashSet;
+use anyhow::{Context, Result, anyhow};
 use build_types::*;
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -209,7 +209,6 @@ pub fn initialize_build(
     plain_output: bool,
     warn_error: Option<String>,
     build_mode: BuildMode,
-    subprocess: bool,
     dump_typed_sexp: bool,
     prod: bool,
     features: Option<Vec<String>>,
@@ -219,7 +218,6 @@ pub fn initialize_build(
         "build.initialize",
         working_dir = %path.display(),
         in_process = build_mode.is_in_process(),
-        subprocess,
         prod
     )
     .entered();
@@ -245,7 +243,6 @@ pub fn initialize_build(
         compiler,
         warn_error,
         build_mode,
-        subprocess,
         dump_typed_sexp,
         features,
         source_map_command,
@@ -776,7 +773,6 @@ pub fn build(
     plain_output: bool,
     warn_error: Option<String>,
     build_mode: BuildMode,
-    subprocess: bool,
     dump_typed_sexp: bool,
     prod: bool,
     features: Option<Vec<String>>,
@@ -785,7 +781,6 @@ pub fn build(
         "rewatch.build",
         working_dir = %path.display(),
         in_process = build_mode.is_in_process(),
-        subprocess,
         prod
     )
     .entered();
@@ -804,7 +799,6 @@ pub fn build(
             plain_output,
             warn_error,
             build_mode,
-            subprocess,
             dump_typed_sexp,
             prod,
             features,
@@ -925,8 +919,7 @@ mod tests {
                 false,
                 true,
                 None,
-                BuildMode::Default,
-                false,
+                BuildMode::ExternalBsc,
                 false,
                 false,
                 None,

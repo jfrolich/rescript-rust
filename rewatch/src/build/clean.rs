@@ -7,7 +7,7 @@ use crate::helpers;
 use crate::helpers::emojis::*;
 use crate::project_context::ProjectContext;
 use ahash::{AHashMap, AHashSet};
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use console::style;
 use rayon::prelude::*;
 use std::io::Write;
@@ -455,7 +455,7 @@ pub fn cleanup_after_build(build_state: &BuildCommandState) {
 #[instrument(name = "clean.clean", skip_all)]
 pub fn clean(path: &Path, show_progress: bool, plain_output: bool, prod: bool) -> Result<()> {
     let project_context = ProjectContext::new(path)?;
-    let build_mode = crate::cli::resolve_build_mode(false, false).map_err(|err| anyhow!(err))?;
+    let build_mode = crate::cli::resolve_build_mode(false);
     let compiler_info = build::get_compiler_info(&project_context, build_mode)?;
     // `clean` always acts on the full set of source directories regardless of which features are
     // active. We explicitly pass `None` so every tagged source folder is included and its

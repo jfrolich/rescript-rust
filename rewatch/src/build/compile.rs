@@ -26,7 +26,6 @@ use rescript_compiler::types::path::Path as TypePath;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -896,7 +895,6 @@ fn compile_one(
     module_name: &str,
     is_dirty: bool,
     warn_error_override: Option<String>,
-    subprocess: bool,
     dump_typed_sexp: bool,
     parent_span: Span,
     in_process_hooks: Option<InProcessSchedulerHooks>,
@@ -1020,11 +1018,9 @@ fn compile_one(
                     package,
                     &helpers::get_ast_path(&iface.path),
                     module,
-                    module_name,
                     true,
                     build_state,
                     warn_error_override.clone(),
-                    subprocess,
                     dump_typed_sexp,
                 )
             });
@@ -1032,11 +1028,9 @@ fn compile_one(
                 package,
                 &helpers::get_ast_path(&source_file.implementation.path),
                 module,
-                module_name,
                 false,
                 build_state,
                 warn_error_override,
-                subprocess,
                 dump_typed_sexp,
             );
             let cmi_digest_after = helpers::compute_file_hash(Path::new(&cmi_path));
@@ -1067,54 +1061,6 @@ fn compile_one(
 /// The sexp starts with "(structure" or "(signature" and continues to the end.
 /// Everything before that is warnings.
 /// Returns (warnings, Option<sexp>).
-fn extract_warning_prefix_from_sexp_file(path: &Path) -> std::io::Result<String> {
-    const MAX_WARNING_BYTES: usize = 16 * 1024 * 1024;
-
-    let file = std::fs::File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut warnings = Vec::new();
-    let mut offset = 0_u64;
-    let mut at_line_start = true;
-    let mut sexp_offset = None;
-
-    loop {
-        let buffer = reader.fill_buf()?;
-        if buffer.is_empty() {
-            break;
-        }
-        if at_line_start && (buffer.starts_with(b"(structure") || buffer.starts_with(b"(signature")) {
-            sexp_offset = Some(offset);
-            break;
-        }
-
-        let consumed = buffer
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(buffer.len(), |position| position + 1);
-        let remaining = MAX_WARNING_BYTES.saturating_sub(warnings.len());
-        warnings.extend_from_slice(&buffer[..consumed.min(remaining)]);
-        at_line_start = buffer[consumed - 1] == b'\n';
-        reader.consume(consumed);
-        offset += consumed as u64;
-    }
-
-    if warnings.len() == MAX_WARNING_BYTES {
-        warnings.extend_from_slice(b"\n[compiler warning output truncated]\n");
-    }
-
-    if let Some(sexp_offset) = sexp_offset.filter(|offset| *offset > 0) {
-        let mut source = reader.into_inner();
-        source.seek(SeekFrom::Start(sexp_offset))?;
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let mut replacement = tempfile::NamedTempFile::new_in(parent)?;
-        std::io::copy(&mut source, &mut replacement)?;
-        replacement.flush()?;
-        replacement.persist(path).map_err(|error| error.error)?;
-    }
-
-    Ok(String::from_utf8_lossy(&warnings).into_owned())
-}
-
 fn extract_sexp_from_stderr(stderr: &str) -> (String, Option<String>) {
     // Find the start of the sexp - it begins with "(structure" or "(signature" at the start of a line
     let pos = stderr
@@ -1342,7 +1288,6 @@ pub fn compile(
     let mut dirty_set: AHashSet<String> = dirty_modules;
 
     let warn_error_override = build_state.get_warn_error_override();
-    let subprocess = build_state.subprocess();
     let dump_typed_sexp = build_state.dump_typed_sexp();
     let build_state_ref: &BuildState = &build_state.build_state;
     let build_command_state_ref: &BuildCommandState = build_state;
@@ -1463,7 +1408,6 @@ pub fn compile(
                         &module_name,
                         is_dirty,
                         warn_override,
-                        subprocess,
                         dump_typed_sexp,
                         parent_span,
                         in_process_hooks,
@@ -4272,11 +4216,9 @@ fn compile_file(
     package: &packages::Package,
     ast_path: &Path,
     module: &Module,
-    module_name: &str,
     is_interface: bool,
     build_state: &BuildState,
     warn_error_override: Option<String>,
-    subprocess: bool,
     dump_typed_sexp: bool,
 ) -> Result<Option<String>> {
     let BuildState {
@@ -4329,125 +4271,6 @@ fn compile_file(
         .map(StrippedVerbatimPath::to_stripped_verbatim_path)
         .ok()
         .unwrap();
-
-    // --subprocess: run bsc as subprocess with timeout (non-fatal on crash/timeout).
-    // This REPLACES the normal bsc call — only one bsc runs per compile_file.
-    if subprocess {
-        // Redirect stderr to sexp file when dump_typed_sexp is set
-        let sexp_file = if dump_typed_sexp {
-            let path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            Some(std::fs::File::create(&path).map_err(|e| anyhow!("Failed to create sexp file: {e}"))?)
-        } else {
-            None
-        };
-
-        match Command::new(&compiler_info.bsc_path)
-            .current_dir(&cwd)
-            .args(&to_mjs_args)
-            .stdout(std::process::Stdio::null())
-            .stderr(match sexp_file {
-                Some(f) => std::process::Stdio::from(f),
-                None => std::process::Stdio::piped(),
-            })
-            .spawn()
-        {
-            Ok(mut child) => {
-                // Drain piped stderr while the compiler is running. Waiting with try_wait while a
-                // full pipe blocks the child would otherwise turn ordinary diagnostics into a
-                // misleading timeout.
-                let stderr_reader = child.stderr.take().map(|mut stderr| {
-                    std::thread::spawn(move || {
-                        let mut bytes = Vec::new();
-                        stderr.read_to_end(&mut bytes).map(|_| bytes)
-                    })
-                });
-                let timeout = std::time::Duration::from_secs(30);
-                let start = std::time::Instant::now();
-                let mut timed_out = false;
-                let mut wait_error = None;
-                let exit_status = loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => break Some(status),
-                        Ok(None) if start.elapsed() > timeout => {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            timed_out = true;
-                            break None;
-                        }
-                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                        Err(error) => {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            wait_error = Some(error);
-                            break None;
-                        }
-                    }
-                };
-                let stderr = match stderr_reader {
-                    Some(reader) => reader
-                        .join()
-                        .map_err(|_| anyhow!("bsc stderr reader thread panicked"))??,
-                    None => Vec::new(),
-                };
-
-                if timed_out {
-                    if dump_typed_sexp {
-                        // Truncate the sexp file (partial output is invalid)
-                        let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-                        let _ = std::fs::write(&sexp_path, "");
-                    }
-                    let msg = format!(
-                        "Timeout ({:.0}s) compiling `{module_name}`",
-                        timeout.as_secs_f64()
-                    );
-                    log::warn!("{}", msg);
-                    return Ok(Some(msg));
-                }
-                if let Some(error) = wait_error {
-                    let msg = format!("bsc subprocess failed while waiting for `{module_name}`: {error}");
-                    log::warn!("{msg}");
-                    return Ok(Some(msg));
-                }
-                if let Some(status) = exit_status.filter(|status| !status.success()) {
-                    let diagnostics = if dump_typed_sexp {
-                        let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-                        std::fs::read_to_string(&sexp_path).unwrap_or_default()
-                    } else {
-                        String::from_utf8_lossy(&stderr).into_owned()
-                    };
-
-                    // An exit without a code represents a crash (for example, termination by a
-                    // signal). Subprocess mode deliberately keeps crashes nonfatal.
-                    if status.code().is_none() {
-                        let msg = format!("bsc subprocess crashed for `{module_name}`: {diagnostics}");
-                        log::warn!("{msg}");
-                        return Ok(Some(msg));
-                    }
-
-                    return Err(anyhow!(if diagnostics.is_empty() {
-                        format!("bsc exited with {status} compiling `{module_name}`")
-                    } else {
-                        diagnostics
-                    }));
-                }
-
-                let warnings = if dump_typed_sexp {
-                    let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-                    extract_warning_prefix_from_sexp_file(&sexp_path).unwrap_or_default()
-                } else {
-                    compiler_output_to_string(&stderr)
-                };
-                return Ok(visible_compiler_warnings(&warnings, package.is_local_dep));
-            }
-            Err(e) => {
-                log::warn!("Failed to spawn bsc subprocess: {e}");
-            }
-        }
-        return Ok(None);
-    }
 
     // Normal mode: run bsc via Command::output()
     // When generating sexp, redirect stderr directly to file to avoid buffering
@@ -4929,31 +4752,6 @@ mod tests {
             visible_compiler_warnings(warning, true),
             Some(warning.to_string())
         );
-    }
-
-    #[test]
-    fn typed_sexp_warning_prefix_is_removed_without_buffering_the_sexp() {
-        let temp_dir = tempfile::tempdir().expect("temp directory should be created");
-        let path = temp_dir.path().join("Module.sexp");
-        let warning = "Warning number 26\nunused variable x\n";
-        let sexp_body = "x".repeat(4 * 1024 * 1024);
-        let sexp = format!("(structure\n{sexp_body})\n");
-        let mut contents = warning.as_bytes().to_vec();
-        contents.extend_from_slice(sexp.as_bytes());
-        fs::write(&path, contents).expect("mixed compiler output should be written");
-
-        let extracted =
-            extract_warning_prefix_from_sexp_file(&path).expect("warning prefix should be extracted");
-
-        assert_eq!(extracted, warning);
-        assert_eq!(
-            fs::metadata(&path).expect("sexp should remain").len(),
-            sexp.len() as u64
-        );
-        let mut file = fs::File::open(&path).expect("sexp should open");
-        let mut prefix = [0_u8; 10];
-        file.read_exact(&mut prefix).expect("sexp prefix should read");
-        assert_eq!(&prefix, b"(structure");
     }
 
     #[test]
