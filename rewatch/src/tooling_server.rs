@@ -6,7 +6,8 @@
 //!
 //! Discovery: `lib/rescript-watch.addr` in the watched project holds
 //! `<host:port> <token>`. Only the owner can read it, and every connection
-//! must present the token first.
+//! must present the token first. The watcher writes it once the initial
+//! build has finished, so its presence also means the artifacts are ready.
 //!
 //! Protocol (one request per line, any number per connection):
 //! - `AUTH <token>` → `OK 0`
@@ -27,6 +28,14 @@ pub const ADDRESS_FILE: &str = "rescript-watch.addr";
 /// thread ends with the process.
 pub struct ToolingServer {
     address_file: PathBuf,
+    address: String,
+}
+
+impl ToolingServer {
+    /// Write the discovery file, announcing the server to tooling.
+    pub fn publish(&self) -> std::io::Result<()> {
+        write_address_file(&self.address_file, &self.address)
+    }
 }
 
 impl Drop for ToolingServer {
@@ -67,7 +76,7 @@ pub fn start(project_root: &Path, store: TypedArtifactStore) -> std::io::Result<
     let address = listener.local_addr()?;
     let token = random_token();
     let address_file = project_root.join("lib").join(ADDRESS_FILE);
-    write_address_file(&address_file, &format!("{address} {token}\n"))?;
+    let address = format!("{address} {token}\n");
     std::thread::Builder::new()
         .name("rewatch-tooling-server".to_string())
         .spawn(move || {
@@ -81,7 +90,10 @@ pub fn start(project_root: &Path, store: TypedArtifactStore) -> std::io::Result<
                     });
             }
         })?;
-    Ok(ToolingServer { address_file })
+    Ok(ToolingServer {
+        address_file,
+        address,
+    })
 }
 
 /// The stored artifact for `path`. Tooling may name the project through a
@@ -171,6 +183,7 @@ mod tests {
         let cmt = project.path().join("lib/bs/src/Foo.cmt");
         store.insert(cmt.clone(), b"cmt bytes".to_vec());
         let server = start(project.path(), store).unwrap();
+        server.publish().unwrap();
 
         let address_file = project.path().join("lib").join(ADDRESS_FILE);
         let content = std::fs::read_to_string(&address_file).unwrap();

@@ -604,7 +604,7 @@ pub fn start(
         // In-process builds write no typed artifacts: keep them in memory and
         // serve them to editor tooling while watching.
         let typed_artifacts = build_mode.is_in_process().then(TypedArtifactStore::default);
-        let _tooling_server = typed_artifacts.as_ref().and_then(|store| {
+        let tooling_server = typed_artifacts.as_ref().and_then(|store| {
             crate::tooling_server::start(path, store.clone())
                 .map_err(|err| log::warn!("Could not start the editor tooling server: {err}"))
                 .ok()
@@ -657,6 +657,14 @@ pub fn start(
         if ctrlc_pressed.load(Ordering::SeqCst) {
             cleanup_before_watch_exit(path, &build_state, show_progress, "\nExiting...");
             return Ok(());
+        }
+
+        // The initial build has produced the typed artifacts: announce the
+        // tooling server.
+        if let Some(server) = &tooling_server
+            && let Err(err) = server.publish()
+        {
+            log::warn!("Could not publish the editor tooling server: {err}");
         }
 
         // Run after-build outside build.lock. Hooks may invoke ReScript commands that need the same lock.
