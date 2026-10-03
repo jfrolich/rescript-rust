@@ -2127,14 +2127,23 @@ fn value_descriptions<'a>(
 
     // Check that the value types are compatible
     // The implementation type should be more general than (or equal to) the signature type
-    let expected_ty = substitute_value_type_paths(type_ctx, sig_desc.val_type, subst);
+    // A signature checked against itself (js_implementation.ml:62 marks an
+    // interface's declarations used that way) pairs each value with itself,
+    // and a type is always more general than itself.
+    let same_value = std::ptr::eq(impl_desc, sig_desc);
+    let expected_ty = if same_value {
+        impl_desc.val_type
+    } else {
+        substitute_value_type_paths(type_ctx, sig_desc.val_type, subst)
+    };
 
     // OCaml compiler/ml/includemod.ml:56-60 only substitutes the expected
     // value description before calling compiler/ml/includecore.ml:43-48,
     // where `Ctype.moregeneral` compares the two value types directly. Forcing
     // manifest aliases up front changes Env.normalize_path side effects and
     // shifts subsequent Ident stamps.
-    let moregeneral = ctype::moregeneral(type_ctx, env, true, impl_desc.val_type, expected_ty);
+    let moregeneral =
+        same_value || ctype::moregeneral(type_ctx, env, true, impl_desc.val_type, expected_ty);
     let mut expected_desc = sig_desc.clone();
     expected_desc.val_type = expected_ty;
     if !moregeneral {
