@@ -189,6 +189,18 @@ impl UriStyle {
         }
     }
 
+    /// `Uri.to_path` of `Uri.from_path path`: the test style drops the
+    /// leading `/`.
+    pub fn to_path(self, path: &str) -> String {
+        let p = lsp_to_path(&of_path(path));
+        if self.strip_path { p[1..].to_string() } else { p }
+    }
+
+    /// `Uri.to_string uri |> Uri.from_path`, as LSP prints it.
+    pub fn lsp_string_of_path_string(self, path: &str) -> String {
+        to_lsp_string(&of_path(&self.to_string(path)))
+    }
+
     /// `Files.canonicalize_uri |> Uri.from_string`, as LSP prints it.
     pub fn canonical_lsp_string(self, path: &str) -> String {
         let path = std::fs::canonicalize(path)

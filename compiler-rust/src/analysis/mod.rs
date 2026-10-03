@@ -182,6 +182,24 @@ impl Cli<'_> {
         }
     }
 
+    /// `Cli.rename`.
+    fn rename(&self, out: &mut Output, path: &str, pos: (i32, i32), new_name: &str, debug: bool) {
+        let full = self.full(path);
+        match commands::rename(&self.session, self.uri_style, full, pos, new_name, debug, out) {
+            Some(changes) => print_json(out, &Json::List(changes)),
+            None => print_json(out, &Json::Null),
+        }
+    }
+
+    /// `Cli.prepare_rename`.
+    fn prepare_rename(&self, out: &mut Output, path: &str, pos: (i32, i32), debug: bool) {
+        let full = self.full(path);
+        match commands::prepare_rename(full, pos, debug, out) {
+            Some(result) => print_json(out, &result),
+            None => print_json(out, &Json::Null),
+        }
+    }
+
     /// `Cli.references`.
     fn references(&self, out: &mut Output, path: &str, pos: (i32, i32), debug: bool) {
         let full = self.full(path);
@@ -219,6 +237,8 @@ pub fn run(request: &Request, project: &dyn session::Project) -> Result<Vec<u8>,
             *supports_markdown_links == "true",
             false,
         ),
+        ["prepareRename", path, line, col] => cli.prepare_rename(&mut out, path, parse_pos(line, col)?, false),
+        ["rename", path, line, col, new_name] => cli.rename(&mut out, path, parse_pos(line, col)?, new_name, false),
         ["references", path, line, col] => cli.references(&mut out, path, parse_pos(line, col)?, false),
         ["test", path] => test(&mut out, &mut cli, path)?,
         [command, ..] => return Err(format!("`{command}` is not available inside the watcher yet")),
@@ -283,6 +303,15 @@ fn test(out: &mut Output, cli: &mut Cli<'_>, path: &str) -> Result<(), String> {
             "hov" => {
                 out.print_endline(&format!("Hover {position}"));
                 cli.hover(out, path, pos, true, true);
+            }
+            "pre" => {
+                out.print_endline(&format!("PrepareRename {position}"));
+                cli.prepare_rename(out, path, pos, true);
+            }
+            "ren" => {
+                let new_name = line.get(mlen + 4..).unwrap_or("");
+                out.print_endline(&format!("Rename {position} {new_name}"));
+                cli.rename(out, path, pos, new_name, true);
             }
             "ref" => {
                 out.print_endline(&format!("References {position}"));
