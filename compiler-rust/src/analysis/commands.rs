@@ -79,3 +79,50 @@ pub fn references(
     locations.reverse();
     locations
 }
+
+/// `Commands.hover`. Hovering where no item is located goes through
+/// completion, which is not ported yet.
+pub fn hover(
+    session: &ProjectSession<'_>,
+    style: UriStyle,
+    full: Option<&Loaded>,
+    pos: (i32, i32),
+    supports_markdown_links: bool,
+    debug: bool,
+    out: &mut Output,
+) -> Option<Json> {
+    let full = full?;
+    let value = match references::get_loc_item(full, pos, debug, out) {
+        None => {
+            if debug {
+                out.print("Nothing at that position. Now trying to use completion.\n");
+            }
+            None
+        }
+        Some(loc_item) => {
+            let is_module = matches!(loc_item.loc_type, LocType::LModule(_) | LocType::TopLevelModule(_));
+            let skip_zero = match references::definition_for_loc_item(session, full, &loc_item) {
+                None => false,
+                Some((_, loc)) => {
+                    let is_interface = super::uri::is_interface(&full.file.uri);
+                    let pos_is_zero = |p: &Pos| !is_interface && p.line == 1 && p.cnum - p.bol == 0;
+                    !is_module && pos_is_zero(&loc.start) && pos_is_zero(&loc.end)
+                }
+            };
+            if skip_zero {
+                None
+            } else {
+                super::hover::Hover {
+                    session,
+                    style,
+                    supports_markdown_links,
+                }
+                .new_hover(full, &loc_item)
+            }
+        }
+    }?;
+    Some(Json::assoc([(
+        "contents",
+        Json::assoc([("kind", Json::String("markdown".to_string())), ("value", Json::String(value))]),
+    )]))
+}

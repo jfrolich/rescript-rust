@@ -9,6 +9,7 @@
 pub mod commands;
 pub mod document_symbol;
 pub mod hashtbl;
+pub mod hover;
 pub mod json;
 pub mod process_attributes;
 pub mod process_cmt;
@@ -16,6 +17,7 @@ pub mod process_extra;
 pub mod references;
 pub mod resolve_path;
 pub mod session;
+pub mod shared;
 pub mod shared_types;
 pub mod uri;
 
@@ -171,6 +173,15 @@ impl Cli<'_> {
         }
     }
 
+    /// `Cli.hover`.
+    fn hover(&self, out: &mut Output, path: &str, pos: (i32, i32), supports_markdown_links: bool, debug: bool) {
+        let full = self.full(path);
+        match commands::hover(&self.session, self.uri_style, full, pos, supports_markdown_links, debug, out) {
+            None => print_json(out, &Json::Null),
+            Some(hover) => print_json(out, &hover),
+        }
+    }
+
     /// `Cli.references`.
     fn references(&self, out: &mut Output, path: &str, pos: (i32, i32), debug: bool) {
         let full = self.full(path);
@@ -201,6 +212,13 @@ pub fn run(request: &Request, project: &dyn session::Project) -> Result<Vec<u8>,
         ["documentSymbol", path] => document_symbol(&mut out, &request.cwd, path),
         ["definition", path, line, col] => cli.definition(&mut out, path, parse_pos(line, col)?, false),
         ["typeDefinition", path, line, col] => cli.type_definition(&mut out, path, parse_pos(line, col)?, false),
+        ["hover", path, line, col, _current_file, supports_markdown_links] => cli.hover(
+            &mut out,
+            path,
+            parse_pos(line, col)?,
+            *supports_markdown_links == "true",
+            false,
+        ),
         ["references", path, line, col] => cli.references(&mut out, path, parse_pos(line, col)?, false),
         ["test", path] => test(&mut out, &mut cli, path)?,
         [command, ..] => return Err(format!("`{command}` is not available inside the watcher yet")),
@@ -261,6 +279,10 @@ fn test(out: &mut Output, cli: &mut Cli<'_>, path: &str) -> Result<(), String> {
             "def" => {
                 out.print_endline(&format!("Definition {position}"));
                 cli.definition(out, path, pos, true);
+            }
+            "hov" => {
+                out.print_endline(&format!("Hover {position}"));
+                cli.hover(out, path, pos, true, true);
             }
             "ref" => {
                 out.print_endline(&format!("References {position}"));

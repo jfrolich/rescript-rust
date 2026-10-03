@@ -69,8 +69,9 @@ compiler assets from disk; it works on the Rust parse and typed trees.
 | Loading modules (`.cmt` reading) | `cmt.ml`, `process_cmt.ml` | `analysis/session.rs` + `rewatch/src/build/tooling.rs` (`WatchProject`) | done: on-demand type-checking, runtime included |
 | URIs | `uri.ml`, `lsp` `Uri` | `analysis/uri.rs` | done |
 | definition, typeDefinition, references | `references.ml`, `commands.ml` | `analysis/references.rs`, `analysis/commands.rs` | done: all 36 test cases match |
-| Type printing | `Printtyp` via `shared.ml` | - | |
-| hover, rename, prepareRename | | - | next |
+| Type printing | `print_type.ml`, `shared.ml` | `analysis/shared.rs` over `types/printtyp.rs` | done |
+| hover | `hover.ml`, `commands.ml` | `analysis/hover.rs` | done except the completion fallback (needs completion) |
+| rename, prepareRename | | - | |
 | completion (+ partial typing) | `completion_*.ml` | - | |
 | signatureHelp, inlayHint, codeLens, semanticTokens, codeActions, createInterface, format, diagnosticSyntax | | - | |
 | reanalyze | `analysis/reanalyze` | - | |
@@ -97,6 +98,17 @@ binary and moves to `rescript analysis` as commands are ported.
   which asks whether `"i"` ends with the URI, so it is false for every file.
   Definition and references across `.res`/`.resi` pairs (and their expected
   output) depend on it.
+
+## Known type-checker divergences found through the tests
+
+- `Hover.res` 116/119 (`AA.fnnxx`, a constrained polymorphic-variant
+  abbreviation unified with itself): OCaml `unify3` (ctype.ml:2197-2202)
+  links the expanded side to the original opposite type *before* unifying
+  the expansions; Rust's `unify_after_expansion` does it afterwards for all
+  but same-path constructors, so the row field reached through the
+  generalized type differs (`[< #str(string)]` vs
+  `[< #str(string) & (string) & ...]`). The typed-tree corpus does not cover
+  it.
 
 ## Reference oracle
 

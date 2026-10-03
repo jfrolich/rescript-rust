@@ -1907,6 +1907,11 @@ fn print_type_params_doc(params: Vec<Doc>, trailing_comma: bool) -> Doc {
 
 /// `print_out_sig_item_doc ~print_name_as_is:false` (res_outcome_printer.ml:481-655).
 pub(crate) fn print_out_sig_item_doc(item: &OutSigItem) -> Doc {
+    print_out_sig_item_doc_with(item, false)
+}
+
+/// `print_out_sig_item_doc ?print_name_as_is` (res_outcome_printer.ml:481-655).
+pub(crate) fn print_out_sig_item_doc_with(item: &OutSigItem, print_name_as_is: bool) -> Doc {
     match item {
         OutSigItem::Osig_class => Doc::nil(),
         OutSigItem::Osig_ellipsis => Doc::dotdotdot(),
@@ -2036,7 +2041,11 @@ pub(crate) fn print_out_sig_item_doc(item: &OutSigItem) -> Doc {
                 attrs,
                 Doc::group(Doc::concat(vec![
                     kw,
-                    print_ident_like(&decl.name, false, false),
+                    if print_name_as_is {
+                        Doc::text(decl.name.clone())
+                    } else {
+                        print_ident_like(&decl.name, false, false)
+                    },
                     type_params,
                     kind,
                 ])),

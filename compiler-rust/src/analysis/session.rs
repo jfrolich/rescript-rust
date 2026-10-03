@@ -106,6 +106,11 @@ impl<'p> ProjectSession<'p> {
             .expect("a file's module id names a loaded module")
     }
 
+    /// The type context of module `id`'s types.
+    pub fn types(&self, id: ModuleId) -> &crate::types::TypeContext {
+        &self.loaded(id).source.typed.type_ctx
+    }
+
     /// `Cmt.full_from_module`: the interface when there is one.
     pub fn full_from_module(&self, module_name: &str) -> Option<&Loaded> {
         let paths = self.project.paths_for_module(module_name)?;

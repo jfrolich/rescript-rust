@@ -225,9 +225,10 @@ pub fn exported_for_tip(session: &ProjectSession<'_>, env: &QueryEnv, path: &[St
     Some((env, name, stamp))
 }
 
-/// What `defined_for_loc` found (OCaml's polymorphic variants).
+/// What `defined_for_loc` found (OCaml's polymorphic variants). A
+/// constructor comes with the module its types belong to.
 pub enum Defined {
-    Constructor(Constructor),
+    Constructor(Constructor, ModuleId),
     Field,
     Declared,
 }
@@ -237,7 +238,10 @@ pub fn defined_for_loc(session: &ProjectSession<'_>, file: &File, loc_kind: &Loc
     let inner = |file: &File, stamp: i32, tip: &Tip| match tip {
         Tip::Constructor(name) => {
             let constructor = get_constructor(file, stamp, name)?;
-            Some((constructor.docstring.clone(), Defined::Constructor(constructor.clone())))
+            Some((
+                constructor.docstring.clone(),
+                Defined::Constructor(constructor.clone(), file.module),
+            ))
         }
         Tip::Field(name) => Some((
             get_field(file, stamp, name).map(|f| f.docstring.clone()).unwrap_or_default(),
@@ -282,7 +286,7 @@ pub fn alternate_declared<'s>(
 }
 
 /// `resolve_module_reference`.
-fn resolve_module_reference<'s>(
+pub fn resolve_module_reference<'s>(
     session: &'s ProjectSession<'_>,
     file: &'s File,
     declared: &Declared<Module>,
