@@ -246,6 +246,11 @@ pub struct BuildCommandState {
     pub in_memory_deps: Mutex<AHashMap<String, Dependencies>>,
     // GenType config and resolver inputs are immutable within one compile wave.
     pub gentype_contexts: Mutex<AHashMap<PathBuf, Arc<GentypeCompileContext>>>,
+    // In-process compiler options shared by every module of a package (keyed
+    // by package path and whether the module is a dev source); immutable
+    // within one compile wave like the GenType contexts.
+    pub package_compiler_options:
+        Mutex<AHashMap<(PathBuf, bool), Arc<rescript_compiler::driver::CompilerOptions>>>,
     // Command-line --features override. `None` means all features are active; `Some(list)`
     // restricts the root package to those features (and whatever they transitively imply).
     pub features: Option<Vec<String>>,
@@ -344,6 +349,7 @@ impl BuildCommandState {
             module_registry: Mutex::new(ModuleRegistry::new()),
             in_memory_deps: Mutex::new(AHashMap::new()),
             gentype_contexts: Mutex::new(AHashMap::new()),
+            package_compiler_options: Mutex::new(AHashMap::new()),
             features,
         }
     }
@@ -370,6 +376,7 @@ impl BuildCommandState {
 
     pub fn clear_gentype_contexts(&self) {
         self.gentype_contexts.lock().unwrap().clear();
+        self.package_compiler_options.lock().unwrap().clear();
     }
 
     pub fn get_warn_error_override(&self) -> Option<String> {

@@ -1931,6 +1931,62 @@ fn build_compiler_options(
     build_command_state: &BuildCommandState,
 ) -> Result<rescript_compiler::driver::CompilerOptions> {
     let build_state = &build_command_state.build_state;
+    let is_type_dev = build_state
+        .modules
+        .get(module_name)
+        .is_some_and(|module| module.is_type_dev);
+    let key = (package.path.clone(), is_type_dev);
+    let cached = build_command_state
+        .package_compiler_options
+        .lock()
+        .unwrap()
+        .get(&key)
+        .cloned();
+    let template = match cached {
+        Some(template) => template,
+        None => {
+            let template = Arc::new(build_package_compiler_options(
+                package,
+                is_type_dev,
+                build_command_state,
+            )?);
+            build_command_state
+                .package_compiler_options
+                .lock()
+                .unwrap()
+                .insert(key, template.clone());
+            template
+        }
+    };
+    let mut options = (*template).clone();
+
+    // Source filename for interface constraint and JS import resolution. OCaml
+    // computes output_dir from the package output prefix before rebasing module
+    // imports; see compiler/core/js_dump_program.ml:128 and
+    // compiler/core/js_name_of_module_id.ml:135-139.
+    options.source_filename = Some(
+        Path::new(&package.path)
+            .join(source_file_path)
+            .to_string_lossy()
+            .to_string(),
+    );
+    // Output path and module format for JS import resolution.
+    let js_output_targets =
+        js_output_targets_for_source(package, source_file_path, build_state.get_root_config());
+    options.output_module_format = js_output_targets.first().map(|target| target.module_format);
+    options.output_path = js_output_targets.first().map(|target| target.path.clone());
+    options.js_output_targets = js_output_targets;
+    options.module_name = Some(module_name.to_string());
+    Ok(options)
+}
+
+/// The compiler options shared by every module of `package` (and dev-ness).
+fn build_package_compiler_options(
+    package: &packages::Package,
+    is_type_dev: bool,
+    build_command_state: &BuildCommandState,
+) -> Result<rescript_compiler::driver::CompilerOptions> {
+    let build_state = &build_command_state.build_state;
     let root_config = build_state.get_root_config();
     let project_context = &build_state.project_context;
 
@@ -1962,10 +2018,6 @@ fn build_compiler_options(
     // OCaml compiles with `-I` for the package, its dependencies and, for
     // `type: dev` sources, its dev dependencies (`get_dependency_paths`);
     // units of other packages are not visible.
-    let is_type_dev = build_state
-        .modules
-        .get(module_name)
-        .is_some_and(|module| module.is_type_dev);
     let mut visible_package_roots = vec![package.path.clone()];
     let visible_deps = package.config.get_dependency_names().into_iter().chain(
         is_type_dev
@@ -2014,21 +2066,6 @@ fn build_compiler_options(
     // Runtime path
     let runtime_path = get_runtime_path(&package.config, project_context).ok();
 
-    // Source filename for interface constraint and JS import resolution. OCaml
-    // computes output_dir from the package output prefix before rebasing module
-    // imports; see compiler/core/js_dump_program.ml:128 and
-    // compiler/core/js_name_of_module_id.ml:135-139.
-    let source_filename = Some(
-        Path::new(&package.path)
-            .join(source_file_path)
-            .to_string_lossy()
-            .to_string(),
-    );
-
-    // Output path and module format for JS import resolution.
-    let js_output_targets = js_output_targets_for_source(package, source_file_path, root_config);
-    let output_module_format = js_output_targets.first().map(|target| target.module_format);
-    let output_path = js_output_targets.first().map(|target| target.path.clone());
     let gentype_context = package.config.gentype_config.as_ref().map(|_| {
         build_command_state.gentype_context(&package.path, || {
             // Mirrors the bsc CLI path in compiler/bsc/rescript_compiler_main.ml:300-343:
@@ -2141,10 +2178,6 @@ fn build_compiler_options(
         open_modules,
         warning_specs: parsed_flags.warning_specs,
         warning_error_specs: parsed_flags.warning_error_specs,
-        source_filename,
-        output_path,
-        output_module_format,
-        js_output_targets,
         source_map,
         source_map_sources_content,
         source_map_root,
@@ -2160,7 +2193,6 @@ fn build_compiler_options(
         no_builtin_ppx: parsed_flags.no_builtin_ppx,
         nopervasives: parsed_flags.nopervasives,
         no_version_header: parsed_flags.no_version_header,
-        module_name: Some(module_name.to_string()),
         package_name: Some(package.config.name.clone()),
         make_runtime: parsed_flags.make_runtime,
         gentype_config,
