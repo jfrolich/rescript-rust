@@ -374,33 +374,46 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
     }
 
     fn coherent_heads(&mut self, hp1: P, hp2: P) -> bool {
-        match (self.desc(hp1).clone(), self.desc(hp2).clone()) {
-            (Desc::Construct { .. }, Desc::Construct { .. }) => {
-                match (self.head_path(hp1), self.head_path(hp2)) {
-                    (Some(path1), Some(path2)) => path1.same(&path2),
-                    _ => false,
-                }
-            }
-            (Desc::Constant(c1), Desc::Constant(c2)) => matches!(
-                (&*c1, &*c2),
+        enum Check {
+            Done(bool),
+            HeadPaths,
+            RecordLabelCounts(TypeExprRef, TypeExprRef),
+        }
+        let check = match (self.desc(hp1), self.desc(hp2)) {
+            (Desc::Construct { .. }, Desc::Construct { .. }) => Check::HeadPaths,
+            (Desc::Constant(c1), Desc::Constant(c2)) => Check::Done(matches!(
+                (&**c1, &**c2),
                 (Constant::Char(_), Constant::Char(_))
                     | (Constant::Int(_), Constant::Int(_))
                     | (Constant::BigInt(..), Constant::BigInt(..))
                     | (Constant::Float(_), Constant::Float(_))
                     | (Constant::String(..), Constant::String(..))
-            ),
-            (Desc::Tuple(l1), Desc::Tuple(l2)) => l1.len() == l2.len(),
+            )),
+            (Desc::Tuple(l1), Desc::Tuple(l2)) => Check::Done(l1.len() == l2.len()),
             (Desc::Record { fields: f1, .. }, Desc::Record { fields: f2, .. })
                 if !f1.is_empty() && !f2.is_empty() =>
             {
-                self.record_label_count(hp1, &f1[0].lbl) == self.record_label_count(hp2, &f2[0].lbl)
+                Check::RecordLabelCounts(f1[0].lbl.lbl_res, f2[0].lbl.lbl_res)
             }
             (Desc::Any, _)
             | (_, Desc::Any)
             | (Desc::Record { .. }, Desc::Record { .. })
             | (Desc::Variant { .. }, Desc::Variant { .. })
-            | (Desc::Array(_), Desc::Array(_)) => true,
-            _ => false,
+            | (Desc::Array(_), Desc::Array(_)) => Check::Done(true),
+            _ => Check::Done(false),
+        };
+        match check {
+            Check::Done(result) => result,
+            Check::HeadPaths => match (self.head_path(hp1), self.head_path(hp2)) {
+                (Some(path1), Some(path2)) => path1.same(&path2),
+                _ => false,
+            },
+            Check::RecordLabelCounts(res1, res2) => {
+                let env1 = self.node(hp1).env;
+                let env2 = self.node(hp2).env;
+                self.oracle.record_labels(env1, res1).len()
+                    == self.oracle.record_labels(env2, res2).len()
+            }
         }
     }
 
@@ -2075,33 +2088,63 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 
     /// `le_pat p q` (parmatch.ml:1757-1777).
     fn le_pat(&mut self, p: P, q: P) -> bool {
-        match (self.desc(p).clone(), self.desc(q).clone()) {
-            (Desc::Var(_) | Desc::Any, _) => true,
-            (Desc::Alias(p), _) => self.le_pat(p, q),
-            (_, Desc::Alias(q)) => self.le_pat(p, q),
+        enum Step {
+            Done(bool),
+            Pat(P, P),
+            Pats(Vec<P>, Vec<P>),
+            NotSatisfiable,
+        }
+        let step = match (self.desc(p), self.desc(q)) {
+            (Desc::Var(_) | Desc::Any, _) => Step::Done(true),
+            (Desc::Alias(p), _) => Step::Pat(*p, q),
+            (_, Desc::Alias(q)) => Step::Pat(p, *q),
             (Desc::Constant(c1), Desc::Constant(c2)) => {
-                const_compare(&c1, &c2) == std::cmp::Ordering::Equal
+                Step::Done(const_compare(c1, c2) == std::cmp::Ordering::Equal)
             }
             (
                 Desc::Construct { cstr: c1, args: ps, .. },
                 Desc::Construct { cstr: c2, args: qs, .. },
-            ) => same_constructor(&c1, &c2) && self.le_pats(&ps, &qs),
+            ) => {
+                if same_constructor(c1, c2) {
+                    Step::Pats(ps.clone(), qs.clone())
+                } else {
+                    Step::Done(false)
+                }
+            }
             (
                 Desc::Variant { label: l1, arg: Some(p1) },
                 Desc::Variant { label: l2, arg: Some(p2) },
-            ) => l1 == l2 && self.le_pat(p1, p2),
+            ) => {
+                if l1 == l2 {
+                    Step::Pat(*p1, *p2)
+                } else {
+                    Step::Done(false)
+                }
+            }
             (
                 Desc::Variant { label: l1, arg: None },
                 Desc::Variant { label: l2, arg: None },
-            ) => l1 == l2,
-            (Desc::Variant { .. }, Desc::Variant { .. }) => false,
-            (Desc::Tuple(ps), Desc::Tuple(qs)) => self.le_pats(&ps, &qs),
+            ) => Step::Done(l1 == l2),
+            (Desc::Variant { .. }, Desc::Variant { .. }) => Step::Done(false),
+            (Desc::Tuple(ps), Desc::Tuple(qs)) => Step::Pats(ps.clone(), qs.clone()),
             (Desc::Record { fields: l1, .. }, Desc::Record { fields: l2, .. }) => {
-                let (ps, qs) = self.records_args(&l1, &l2);
-                self.le_pats(&ps, &qs)
+                let (ps, qs) = self.records_args(l1, l2);
+                Step::Pats(ps, qs)
             }
-            (Desc::Array(ps), Desc::Array(qs)) => ps.len() == qs.len() && self.le_pats(&ps, &qs),
-            _ => !self.satisfiable(&[vec![p]], &[q]),
+            (Desc::Array(ps), Desc::Array(qs)) => {
+                if ps.len() == qs.len() {
+                    Step::Pats(ps.clone(), qs.clone())
+                } else {
+                    Step::Done(false)
+                }
+            }
+            _ => Step::NotSatisfiable,
+        };
+        match step {
+            Step::Done(result) => result,
+            Step::Pat(p, q) => self.le_pat(p, q),
+            Step::Pats(ps, qs) => self.le_pats(&ps, &qs),
+            Step::NotSatisfiable => !self.satisfiable(&[vec![p]], &[q]),
         }
     }
 
