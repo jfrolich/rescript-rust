@@ -2284,25 +2284,39 @@ fn update_level_expand_with_lookup_capture<'a>(
         let desc = ctx.borrow_desc(ty);
         match &*desc {
             TypeDesc::Tconstr { path, args, .. } => {
-                let path = path.clone();
                 let has_args = !args.is_empty();
                 // OCaml compiler/ml/ctype.ml:695 calls `get_level env p`
                 // here. Keep the same lookup side effects even when the
-                // numeric result falls back to `Path.binding_time`.
-                let path_level =
-                    get_level_with_lookup_capture(ctx, env, &path, pending_type_lookup_paths);
+                // numeric result falls back to `Path.binding_time`. A path
+                // rooted at a persistent unit answers with its binding time
+                // without a lookup (see `get_level_with_lookup_capture`), so
+                // it needs no copy unless it is recorded or expanded.
+                let persistent_level = (path_root_is_persistent(path)
+                    && (pending_type_lookup_paths.is_none() || !matches!(path, Path::Pdot(..))))
+                .then(|| path_binding_time(path));
+                let path_level = match persistent_level {
+                    Some(path_level) => path_level,
+                    None => {
+                        let path = path.clone();
+                        get_level_with_lookup_capture(ctx, env, &path, pending_type_lookup_paths)
+                    }
+                };
                 // OCaml compiler/ml/ctype.ml:742-768 only requires
                 // `level < get_level env p` after the outer `ty.level > level`
                 // check. Generic-level constructor nodes are still eligible
                 // for abbreviation expansion during `moregeneral`.
                 let should_try_expand = level < path_level;
+                let expansion_path = (should_try_expand && pending_type_expansion_paths.is_some())
+                    .then(|| path.clone());
                 drop(desc);
                 // OCaml compiler/ml/ctype.ml:568-578: try to replace the
                 // constructor by its expansion; a constructor that cannot be
                 // expanded would escape its scope.
                 if should_try_expand {
-                    if let Some(paths) = pending_type_expansion_paths.as_deref_mut() {
-                        paths.push(path.clone());
+                    if let (Some(paths), Some(path)) =
+                        (pending_type_expansion_paths.as_deref_mut(), expansion_path)
+                    {
+                        paths.push(path);
                     }
                     if let Some(expanded) = try_expand_head(ctx, env, ty) {
                         let expanded = ctx.repr(expanded);
@@ -2394,18 +2408,21 @@ fn update_level_expand_with_lookup_capture<'a>(
                 );
             }
             TypeDesc::Tvariant(row) => {
-                let row = row.clone();
+                let name_path = row_repr_ref(ctx, row).row_name.as_ref().map(|(path, _)| path.clone());
                 drop(desc);
-                let mut row = row_repr(ctx, &row);
                 // OCaml compiler/ml/ctype.ml:723-730 checks the polymorphic
                 // variant `row_name` path with `get_level env p` before
                 // lowering the row. That call reaches Env.find_type
                 // (compiler/ml/ctype.ml:666-673), so persistent alias
                 // signatures force at the same point as OCaml.
-                if let Some((path, _)) = &row.row_name
+                if let Some(path) = name_path
                     && level
-                        < get_level_with_lookup_capture(ctx, env, path, pending_type_lookup_paths)
+                        < get_level_with_lookup_capture(ctx, env, &path, pending_type_lookup_paths)
                 {
+                    let mut row = match &*ctx.borrow_desc(ty) {
+                        TypeDesc::Tvariant(row) => row_repr(ctx, row),
+                        _ => unreachable!("update_level: variant descriptor changed"),
+                    };
                     row.row_name = None;
                     ctx.set_desc(ty, TypeDesc::Tvariant(Box::new(row)));
                 }
