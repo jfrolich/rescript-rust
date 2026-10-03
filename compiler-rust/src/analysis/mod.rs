@@ -11,6 +11,9 @@ pub mod hashtbl;
 pub mod json;
 pub mod process_attributes;
 pub mod process_cmt;
+pub mod process_extra;
+pub mod resolve_path;
+pub mod session;
 pub mod shared_types;
 
 use json::Json;

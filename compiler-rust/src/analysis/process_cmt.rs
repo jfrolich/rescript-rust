@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 /// What processing a typed tree reads: the module's parse arena (typed-tree
 /// locations and attributes point into it) and type context.
+#[derive(Clone, Copy)]
 pub struct Ctx<'a> {
     pub arena: &'a ParseArena,
     pub types: &'a TypeContext,
@@ -282,7 +283,7 @@ impl Processor<'_> {
         Structure {
             name: name.to_string(),
             docstring: Vec::new(),
-            exported,
+            exported: Arc::new(exported),
             items,
             deprecated: None,
         }
@@ -293,7 +294,7 @@ impl Processor<'_> {
         match module_type {
             decl::ModuleType::MtyIdent(path) | decl::ModuleType::MtyAlias(_, path) => Module::Ident(path.clone()),
             decl::ModuleType::MtySignature(signature) => {
-                Module::Structure(Box::new(self.for_type_signature(name, env, signature)))
+                Module::Structure(Arc::new(self.for_type_signature(name, env, signature)))
             }
             decl::ModuleType::MtyFunctor { result, .. } => self.for_type_module(name, env, result),
         }
@@ -497,7 +498,7 @@ impl Processor<'_> {
         Structure {
             name: name.to_string(),
             docstring: attrs_to_docstring(attributes),
-            exported,
+            exported: Arc::new(exported),
             items,
             deprecated: attrs::find_deprecated_attribute(attributes),
         }
@@ -682,7 +683,7 @@ impl Processor<'_> {
             tt::ModuleExprDesc::Tmod_ident(path, _) => Module::Ident(path.clone()),
             tt::ModuleExprDesc::Tmod_structure(structure) => {
                 let env = env.add_module(module_name);
-                Module::Structure(Box::new(self.for_structure(module_name, &env, &structure.str_items)))
+                Module::Structure(Arc::new(self.for_structure(module_name, &env, &structure.str_items)))
             }
             tt::ModuleExprDesc::Tmod_functor(ident, arg_name, maybe_type, result) => {
                 if let Some(t) = maybe_type {
@@ -796,7 +797,7 @@ impl Processor<'_> {
         Structure {
             name: name.to_string(),
             docstring: attrs_to_docstring(attributes),
-            exported,
+            exported: Arc::new(exported),
             items,
             deprecated: attrs::find_deprecated_attribute(attributes),
         }
@@ -814,6 +815,7 @@ fn get_module_path(mod_desc: &tt::ModuleExprDesc) -> Option<crate::types::Path> 
 }
 
 /// What a module's typed annotations are (`Cmt_format.binary_annots`).
+#[derive(Clone, Copy)]
 pub enum Annots<'a> {
     Implementation(&'a [tt::StructureItem]),
     Interface(&'a [tt::TypedSignatureItem]),
@@ -836,7 +838,7 @@ pub fn file_for_annots(ctx: Ctx<'_>, module: ModuleId, module_name: &str, uri: S
         uri,
         stamps: processor.stamps,
         module_name: module_name.to_string(),
-        structure,
+        structure: Arc::new(structure),
         module,
     }
 }

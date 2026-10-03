@@ -47,6 +47,7 @@ pub mod predef;
 pub mod printtyp;
 pub mod sexp_typedtree;
 pub mod shared_store;
+pub mod tast_iterator;
 pub mod thread_store;
 pub mod type_expr;
 pub mod typecore;

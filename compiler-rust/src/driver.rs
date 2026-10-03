@@ -15456,6 +15456,7 @@ pub struct ToolingTypedModule {
 /// What type-checking a module for editor tooling produced.
 pub enum ToolingTyped {
     Implementation(crate::types::typedtree::Structure),
+    Interface(crate::types::typedtree::TypedSignature),
     /// The compiler's report of a module that does not type-check.
     Failed(String),
 }
@@ -15489,6 +15490,67 @@ pub fn typecheck_structure_for_tooling(
         );
         match type_structure(&mut tctx, &env, arena, structure) {
             Ok((typed_structure, _final_env)) => ToolingTyped::Implementation(typed_structure),
+            Err(e) => {
+                let source = read_in_process_source(filename);
+                let report = match tctx.persistent_env.as_ref().and_then(|env| env.last_error()) {
+                    Some(error) => persistent_env_error_to_anyhow(error, filename),
+                    None => type_mod_error_to_anyhow(e, &type_ctx, arena, &source, filename, false),
+                };
+                ToolingTyped::Failed(format!("{report:#}"))
+            }
+        }
+    };
+    ToolingTypedModule { type_ctx, typed }
+}
+
+/// Type-check an interface for editor tooling, as the in-process build does
+/// (`typecheck_preprocessed_signature_in_process`), keeping the typed tree.
+pub fn typecheck_signature_for_tooling(
+    arena: &crate::parse_arena::ParseArena,
+    signature: &Signature,
+    filename: &str,
+    module_name: &str,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+) -> ToolingTypedModule {
+    let file_config = extract_file_config_from_signature(signature, arena);
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena);
+    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
+    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    let _ = id_gen.next_stamp();
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    let typed = {
+        let mut tctx = TypeCheckContext::new(&type_ctx, arena);
+        tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
+        tctx.transparent_modules = options.transparent_modules;
+        apply_warning_options(&mut tctx, options);
+        if !options.frontend_already_reported {
+            apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+        }
+        apply_file_config_warning_options(&mut tctx, &file_config);
+        let mut env = initial_env(&type_ctx);
+        let mut pers_env = PersistentEnv::from_registry(registry);
+        pers_env.set_visible_package_roots(options.visible_package_roots.clone());
+        let (load_path, load_path_display) = shared_load_path_with_display(options);
+        type_ctx.set_load_paths_shared(load_path.clone());
+        pers_env.set_load_path_shared(load_path, load_path_display);
+        pers_env.set_open_modules(options.open_modules.clone());
+        pers_env.set_jsx_version(options.jsx_version);
+        pers_env.set_jsx_module(options.jsx_module.clone());
+        pers_env.set_nopervasives(options.nopervasives);
+        pers_env.set_compiling_module(Some(module_name.to_string()));
+        load_pervasives(
+            &mut pers_env,
+            &mut env,
+            &type_ctx,
+            &options.open_modules,
+            options.nopervasives,
+            Some(module_name),
+        );
+        tctx.set_persistent_env(pers_env);
+        match transl_signature(&mut tctx, &env, arena, signature) {
+            Ok(typed_signature) => ToolingTyped::Interface(typed_signature),
             Err(e) => {
                 let source = read_in_process_source(filename);
                 let report = match tctx.persistent_env.as_ref().and_then(|env| env.last_error()) {

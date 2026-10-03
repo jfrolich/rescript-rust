@@ -34,8 +34,9 @@ impl Pos {
     }
 }
 
-/// A source location (`Location.t`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// A source location (`Location.t`). The derived order is OCaml's
+/// polymorphic compare on the record, file names aside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Loc {
     pub start: Pos,
     pub end: Pos,
@@ -67,6 +68,28 @@ impl Loc {
             start: Pos::of_lexing(arena.get_position(location.loc_start)),
             end: Pos::of_lexing(arena.get_position(location.loc_end)),
             ghost: location.loc_ghost,
+        }
+    }
+
+    /// `Utils.end_of_location`: the last `length` characters.
+    pub fn end_of_location(&self, length: i32) -> Loc {
+        Loc {
+            start: Pos {
+                cnum: self.end.cnum - length,
+                ..self.end
+            },
+            ..*self
+        }
+    }
+
+    /// `Utils.chop_location_end`: drop the last `length` characters.
+    pub fn chop_location_end(&self, length: i32) -> Loc {
+        Loc {
+            end: Pos {
+                cnum: self.end.cnum - length,
+                ..self.end
+            },
+            ..*self
         }
     }
 
@@ -270,7 +293,7 @@ pub struct ModuleItem {
 pub struct Structure {
     pub name: String,
     pub docstring: Vec<String>,
-    pub exported: Exported,
+    pub exported: Arc<Exported>,
     pub items: Vec<ModuleItem>,
     pub deprecated: Option<String>,
 }
@@ -279,7 +302,7 @@ pub struct Structure {
 #[derive(Debug, Clone)]
 pub enum Module {
     Ident(Path),
-    Structure(Box<Structure>),
+    Structure(Arc<Structure>),
     Constraint(Box<Module>, Box<Module>),
 }
 
@@ -383,7 +406,7 @@ pub struct File {
     pub uri: String,
     pub stamps: Stamps,
     pub module_name: String,
-    pub structure: Structure,
+    pub structure: Arc<Structure>,
     /// The session module whose type context the file's types live in.
     pub module: ModuleId,
 }
@@ -395,13 +418,13 @@ impl File {
             uri,
             stamps: Stamps::default(),
             module_name: module_name.to_string(),
-            structure: Structure {
+            structure: Arc::new(Structure {
                 name: module_name.to_string(),
                 docstring: Vec::new(),
-                exported: Exported::default(),
+                exported: Arc::new(Exported::default()),
                 items: Vec::new(),
                 deprecated: None,
-            },
+            }),
             module,
         }
     }
@@ -480,4 +503,100 @@ pub enum LocType {
 pub struct LocItem {
     pub loc: Loc,
     pub loc_type: LocType,
+}
+
+/// `Query_env.t`. The file is named by its session module id rather than
+/// held, so a file's stamps can grow while environments over it exist (as
+/// OCaml's mutable stamp tables do).
+#[derive(Debug, Clone)]
+pub struct QueryEnv {
+    pub file: ModuleId,
+    pub file_module_name: String,
+    pub exported: Arc<Exported>,
+    pub path_rev: Vec<String>,
+    pub parent: Option<Box<QueryEnv>>,
+}
+
+impl QueryEnv {
+    /// `Query_env.from_file`.
+    pub fn from_file(file: &File) -> QueryEnv {
+        QueryEnv {
+            file: file.module,
+            file_module_name: file.module_name.clone(),
+            exported: file.structure.exported.clone(),
+            path_rev: Vec::new(),
+            parent: None,
+        }
+    }
+
+    /// `Query_env.to_string`.
+    pub fn to_string(&self) -> String {
+        let mut parts = vec![self.file_module_name.clone()];
+        parts.extend(self.path_rev.iter().rev().cloned());
+        parts.join(".")
+    }
+
+    /// `prune_path`: `path_rev` is this env's path, or a suffix of it while
+    /// walking up the parents.
+    fn prune_path(path_rev: &[String], env: &QueryEnv, name: &str) -> (bool, Vec<String>) {
+        if env.exported.find(ExportedKind::Module, name).is_some() {
+            (true, path_rev.to_vec())
+        } else {
+            match (path_rev.split_first(), &env.parent) {
+                (Some((_, rest)), Some(parent)) => QueryEnv::prune_path(rest, parent, name),
+                _ => (false, Vec::new()),
+            }
+        }
+    }
+
+    /// `Query_env.path_from_env`.
+    pub fn path_from_env(&self, path: &[String]) -> (bool, ModulePathList) {
+        match path.first() {
+            None => (true, self.path_rev.iter().rev().cloned().collect()),
+            Some(name) => {
+                let (found, pruned_path_rev) = QueryEnv::prune_path(&self.path_rev, self, name);
+                let mut result: Vec<String> = pruned_path_rev.into_iter().rev().collect();
+                result.extend(path.iter().cloned());
+                (found, result)
+            }
+        }
+    }
+
+    /// `Query_env.enter_structure`.
+    pub fn enter_structure(&self, structure: &Structure) -> QueryEnv {
+        let name = structure.name.clone();
+        let mut path_rev = vec![name.clone()];
+        path_rev.extend(QueryEnv::prune_path(&self.path_rev, self, &name).1);
+        QueryEnv {
+            exported: structure.exported.clone(),
+            path_rev,
+            parent: Some(Box::new(self.clone())),
+            ..self.clone()
+        }
+    }
+}
+
+/// `Location_set`: OCaml orders it by the reversed compare.
+pub type LocationSet = std::collections::BTreeSet<std::cmp::Reverse<Loc>>;
+
+/// `extra`.
+#[derive(Debug, Clone)]
+pub struct Extra {
+    pub internal_references: Hashtbl<i32, Vec<Loc>>,
+    pub external_references: Hashtbl<String, Vec<(ModulePathList, Tip, Loc)>>,
+    pub file_references: Hashtbl<String, LocationSet>,
+    /// In insertion order: the reverse of OCaml's consed list.
+    pub loc_items: Vec<LocItem>,
+}
+
+impl Default for Extra {
+    /// `init_extra`.
+    fn default() -> Self {
+        Extra {
+            internal_references: Hashtbl::create(10),
+            external_references: Hashtbl::create(10),
+            file_references: Hashtbl::create(10),
+            loc_items: Vec::new(),
+        }
+    }
 }
