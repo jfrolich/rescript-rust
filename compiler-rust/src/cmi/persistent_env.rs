@@ -721,7 +721,7 @@ pub struct PersistentEnv {
     /// `None` makes every registered unit visible.
     visible_package_roots: Option<Arc<Vec<PathBuf>>>,
     /// `outside_load_path` answers for `visible_package_roots`, by unit name.
-    outside_load_path_memo: Arc<Mutex<crate::fast_hash::AHashMap<String, bool>>>,
+    outside_load_path_memo: OutsideLoadPathMemo,
     /// First persistent-loader error observed through any clone of this env.
     last_error: Arc<Mutex<Option<PersistentEnvError>>>,
     /// Consistency table for imported CMI digests, matching OCaml `Consistbl`.
@@ -730,6 +730,18 @@ pub struct PersistentEnv {
     /// units this compilation found and the units their CRC lists name.
     imported_units: Arc<Mutex<ImportedUnits>>,
     view: Arc<ResolutionView>,
+}
+
+/// Per-environment memo of `outside_load_path`. Each clone starts empty:
+/// clones are per compilation, and sharing one lock across workers made it
+/// contended.
+#[derive(Default)]
+struct OutsideLoadPathMemo(Mutex<crate::fast_hash::AHashMap<String, bool>>);
+
+impl Clone for OutsideLoadPathMemo {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
 }
 
 /// `imported_units` plus the units whose CRC lists were already merged, so
@@ -802,7 +814,7 @@ impl PersistentEnv {
             portable_cache: SharedRegistryMap::default(),
             module_package_roots: SharedRegistryMap::default(),
             visible_package_roots: None,
-            outside_load_path_memo: Arc::default(),
+            outside_load_path_memo: OutsideLoadPathMemo::default(),
             last_error: Arc::new(Mutex::new(None)),
             crc_units: Arc::new(Mutex::new(HashMap::new())),
             imported_units: Arc::default(),
@@ -837,7 +849,7 @@ impl PersistentEnv {
             portable_cache: registry.cached_modules.clone(),
             module_package_roots: registry.module_package_roots.clone(),
             visible_package_roots: None,
-            outside_load_path_memo: Arc::default(),
+            outside_load_path_memo: OutsideLoadPathMemo::default(),
             last_error: Arc::new(Mutex::new(None)),
             crc_units: Arc::new(Mutex::new(HashMap::new())),
             imported_units: Arc::default(),
@@ -1088,7 +1100,7 @@ impl PersistentEnv {
     /// `visible_package_roots`).
     pub fn set_visible_package_roots(&mut self, roots: Option<Vec<PathBuf>>) {
         self.visible_package_roots = roots.map(Arc::new);
-        self.outside_load_path_memo = Arc::default();
+        self.outside_load_path_memo = OutsideLoadPathMemo::default();
     }
 
     /// Whether `name` is a registered unit of a package outside the load path.
@@ -1096,7 +1108,7 @@ impl PersistentEnv {
         let Some(visible) = self.visible_package_roots.as_deref() else {
             return false;
         };
-        if let Some(&outside) = self.outside_load_path_memo.lock().unwrap().get(name) {
+        if let Some(&outside) = self.outside_load_path_memo.0.lock().unwrap().get(name) {
             return outside;
         }
         let visible_root = |root: &FsPath| visible.iter().any(|v| v == root);
@@ -1119,6 +1131,7 @@ impl PersistentEnv {
             return false;
         };
         self.outside_load_path_memo
+            .0
             .lock()
             .unwrap()
             .insert(name.to_string(), outside);
