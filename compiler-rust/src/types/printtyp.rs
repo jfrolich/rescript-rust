@@ -15,7 +15,7 @@ use crate::types::context::TypeContext;
 use crate::types::path::Path;
 use crate::parser::longident::Longident;
 use crate::types::asttypes::ArgLabel;
-use crate::types::type_expr::{FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
+use crate::types::type_expr::{GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
 
 // ============================================================================
 // Outcometree (compiler/ml/outcometree.ml)
@@ -51,10 +51,10 @@ pub(crate) enum OutType {
     Otyp_open,
     Otyp_alias(Box<OutType>, String),
     Otyp_arrow(Vec<(OutArgLabel, OutType)>, Box<OutType>),
-    Otyp_class(bool, OutIdent, Vec<OutType>),
     Otyp_constr(OutIdent, Vec<OutType>),
     Otyp_manifest(Box<OutType>, Box<OutType>),
-    Otyp_object(Vec<(String, OutType)>, Option<bool>),
+    /// Fields are (name, mutable, type).
+    Otyp_object(Vec<(String, bool, OutType)>, Option<bool>),
     /// `(name, mutable, optional, type)` rows.
     Otyp_record(Vec<(String, bool, bool, OutType)>),
     Otyp_stuff(String),
@@ -517,36 +517,21 @@ impl<'a> Printtyp<'a> {
                     }
                 }
             }
-            TypeDesc::Tobject { fields, name } => {
+            TypeDesc::Tobject { fields } => {
                 if self.visited_objects.contains(&px) {
                     self.add_alias(px);
                 } else {
                     if self.opened_object(ty) {
                         self.visited_objects.insert(0, px);
                     }
-                    match name {
-                        None => {
-                            let (fields, _) = flatten_fields(self.ctx, fields);
-                            for (_, kind, t) in fields {
-                                if matches!(kind, FieldKind::Fpresent) {
-                                    self.mark_loops_rec(visited, t);
-                                }
-                            }
-                        }
-                        Some((_, l)) => {
-                            for t in l.into_iter().skip(1) {
-                                self.mark_loops_rec(visited, t);
-                            }
-                        }
+                    let (fields, _) = flatten_fields(self.ctx, fields);
+                    for field in fields {
+                        self.mark_loops_rec(visited, field.typ);
                     }
                 }
             }
-            TypeDesc::Tfield {
-                kind, typ, rest, ..
-            } => {
-                if matches!(kind, FieldKind::Fpresent) {
-                    self.mark_loops_rec(visited, typ);
-                }
+            TypeDesc::Tfield { typ, rest, .. } => {
+                self.mark_loops_rec(visited, typ);
                 self.mark_loops_rec(visited, rest);
             }
             TypeDesc::Tnil => {}
@@ -666,10 +651,8 @@ impl<'a> Printtyp<'a> {
                     OutType::Otyp_constr(this.tree_of_path(path), this.tree_of_typlist(sch, args))
                 }
                 TypeDesc::Tvariant(row) => this.tree_of_variant(sch, px, row),
-                TypeDesc::Tobject { fields, name } => {
-                    this.tree_of_typobject(sch, *fields, name.clone())
-                }
-                TypeDesc::Tnil | TypeDesc::Tfield { .. } => this.tree_of_typobject(sch, ty, None),
+                TypeDesc::Tobject { fields } => this.tree_of_typobject(sch, *fields),
+                TypeDesc::Tnil | TypeDesc::Tfield { .. } => this.tree_of_typobject(sch, ty),
                 TypeDesc::Tsubst(t) => this.tree_of_typexp(sch, *t),
                 TypeDesc::Tlink(_) => unreachable!("Printtyp.tree_of_typexp"),
                 TypeDesc::Tpoly { body, vars } => {
@@ -784,40 +767,30 @@ impl<'a> Printtyp<'a> {
         tyl.iter().map(|t| self.tree_of_typexp(sch, *t)).collect()
     }
 
-    fn tree_of_typobject(
-        &mut self,
-        sch: bool,
-        fi: TypeExprRef,
-        nm: Option<(Path, Vec<TypeExprRef>)>,
-    ) -> OutType {
-        match nm {
-            None => {
-                let (fields, rest) = flatten_fields(self.ctx, fi);
-                let mut present: Vec<(String, TypeExprRef)> = fields
-                    .into_iter()
-                    .filter(|(_, k, _)| matches!(k, FieldKind::Fpresent))
-                    .map(|(n, _, t)| (n, t))
-                    .collect();
-                present.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
-                let fields = present
-                    .into_iter()
-                    .map(|(s, t)| (s, self.tree_of_typexp(sch, t)))
-                    .collect();
-                let rest = match &*self.ctx.borrow_desc(rest) {
-                    TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => Some(self.is_non_gen(sch, rest)),
-                    TypeDesc::Tconstr { .. } => Some(false),
-                    TypeDesc::Tnil => None,
-                    _ => unreachable!("typfields (1)"),
-                };
-                OutType::Otyp_object(fields, rest)
-            }
-            Some((p, tyl)) if !tyl.is_empty() => {
-                let non_gen = self.is_non_gen(sch, self.ctx.repr(tyl[0]));
-                let args = self.tree_of_typlist(sch, &tyl[1..]);
-                OutType::Otyp_class(non_gen, self.tree_of_path(&p), args)
-            }
-            Some(_) => unreachable!("Printtyp.tree_of_typobject"),
-        }
+    fn tree_of_typobject(&mut self, sch: bool, fi: TypeExprRef) -> OutType {
+        let (fields, rest) = flatten_fields(self.ctx, fi);
+        let mut present: Vec<(String, bool, TypeExprRef)> = fields
+            .into_iter()
+            .map(|f| {
+                let mutable = matches!(
+                    self.ctx.mutability_repr(f.mutability),
+                    crate::types::asttypes::MutableFlag::Mutable
+                );
+                (f.name, mutable, f.typ)
+            })
+            .collect();
+        present.sort_by(|(a, _, _), (b, _, _)| a.as_bytes().cmp(b.as_bytes()));
+        let fields = present
+            .into_iter()
+            .map(|(s, mutable, t)| (s, mutable, self.tree_of_typexp(sch, t)))
+            .collect();
+        let rest = match &*self.ctx.borrow_desc(rest) {
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => Some(self.is_non_gen(sch, rest)),
+            TypeDesc::Tconstr { .. } => Some(false),
+            TypeDesc::Tnil => None,
+            _ => unreachable!("typfields (1)"),
+        };
+        OutType::Otyp_object(fields, rest)
     }
 
     /// `tree_of_label` (compiler/ml/printtyp.ml).
@@ -1484,27 +1457,8 @@ fn ocaml_string_escaped(s: &str) -> String {
 fn flatten_fields(
     ctx: &TypeContext,
     ty: TypeExprRef,
-) -> (Vec<(String, FieldKind, TypeExprRef)>, TypeExprRef) {
-    let mut fields = Vec::new();
-    let mut current = ctx.repr(ty);
-    loop {
-        let next = match &*ctx.borrow_desc(current) {
-            TypeDesc::Tfield {
-                name,
-                kind,
-                typ,
-                rest,
-            } => {
-                fields.push((name.clone(), kind.clone(), *typ));
-                *rest
-            }
-            _ => break,
-        };
-        current = ctx.repr(next);
-    }
-    fields.reverse();
-    fields.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-    (fields, current)
+) -> (Vec<crate::types::ctype::FieldInfo>, TypeExprRef) {
+    crate::types::ctype::flatten_fields(ctx, ty)
 }
 
 /// `Longident.flatten`.
@@ -1587,7 +1541,6 @@ pub(crate) fn print_out_type_doc(out_type: &OutType) -> Doc {
             Doc::text(s.clone()),
         ]),
         OutType::Otyp_object(fields, rest) => print_object_fields(fields, rest),
-        OutType::Otyp_class(..) => Doc::nil(),
         OutType::Otyp_constr(out_ident, args) => {
             let args_doc = Doc::concat(vec![
                 Doc::less_than(),
@@ -1759,7 +1712,7 @@ fn print_out_variant(variant: &OutVariant) -> Doc {
     }
 }
 
-fn print_object_fields(fields: &[(String, OutType)], rest: &Option<bool>) -> Doc {
+fn print_object_fields(fields: &[(String, bool, OutType)], rest: &Option<bool>) -> Doc {
     let dots = match rest {
         Some(non_gen) => Doc::text(if *non_gen { "_.." } else { ".." }),
         None => {
@@ -1779,8 +1732,9 @@ fn print_object_fields(fields: &[(String, OutType)], rest: &Option<bool>) -> Doc
                 Doc::concat(vec![Doc::comma(), Doc::line()]),
                 fields
                     .iter()
-                    .map(|(lbl, out_type)| {
+                    .map(|(lbl, mutable, out_type)| {
                         Doc::group(Doc::concat(vec![
+                            if *mutable { Doc::text("@set ") } else { Doc::nil() },
                             Doc::text(format!("\"{lbl}\": ")),
                             print_out_type_doc(out_type),
                         ]))
@@ -2557,13 +2511,12 @@ impl<'a> Printtyp<'a> {
                 self.ctx
                     .alloc_type_at_level(TypeDesc::Tvariant(Box::new(RowDesc { row_more, ..row })), level)
             }
-            TypeDesc::Tobject { fields, name } => {
+            TypeDesc::Tobject { fields } => {
                 // `newty2 ty.level` reads the shadowed `ty`: the fields' level.
                 let fields = self.ctx.repr(fields);
                 let fields_level = self.ctx.get_level(fields);
                 let fields = self.unalias_object(fields);
-                self.ctx
-                    .alloc_type_at_level(TypeDesc::Tobject { fields, name }, fields_level)
+                self.ctx.alloc_type_at_level(TypeDesc::Tobject { fields }, fields_level)
             }
             desc => self.ctx.alloc_type_at_level(desc, level),
         }
@@ -2576,7 +2529,7 @@ impl<'a> Printtyp<'a> {
         match desc {
             TypeDesc::Tfield {
                 name,
-                kind,
+                mutability,
                 typ,
                 rest,
             } => {
@@ -2584,7 +2537,7 @@ impl<'a> Printtyp<'a> {
                 self.ctx.alloc_type_at_level(
                     TypeDesc::Tfield {
                         name,
-                        kind,
+                        mutability,
                         typ,
                         rest,
                     },

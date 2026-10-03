@@ -878,7 +878,7 @@ fn check_gentype_cmt_file(cmt_file: &Path) -> Result<()> {
     // Cmt_format.read_cmt raises Cmt_format.Error(Not_a_typedtree _) when the
     // selected file contains a compiled interface without typedtree data.
     const CMT_MAGIC: &[u8; 12] = b"Caml1999T022";
-    const CMI_MAGIC: &[u8; 12] = b"Caml1999I025";
+    const CMI_MAGIC: &[u8; 12] = b"Caml1999I029";
 
     let data = fs::read(cmt_file).with_context(|| cmt_file.display().to_string())?;
     if data.len() < CMT_MAGIC.len() {

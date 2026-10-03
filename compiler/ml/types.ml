@@ -28,8 +28,13 @@ and type_desc =
   | Tarrow of arg list * type_expr
   | Ttuple of type_expr list
   | Tconstr of Path.t * type_expr list * abbrev_memo ref
-  | Tobject of type_expr * (Path.t * type_expr list) option ref
-  | Tfield of string * field_kind * type_expr * type_expr
+  | Tobject of type_expr
+  | Tfield of {
+      name: string;
+      mutability: field_mutability ref;
+      typ: type_expr;
+      rest: type_expr;
+    }
   | Tnil
   | Tlink of type_expr
   | Tsubst of type_expr (* for copying *)
@@ -59,7 +64,9 @@ and abbrev_memo =
   | Mcons of private_flag * Path.t * type_expr * type_expr * abbrev_memo
   | Mlink of abbrev_memo ref
 
-and field_kind = Fvar of field_kind option ref | Fpresent | Fabsent
+and field_mutability =
+  | Mutability_value of Asttypes.mutable_flag
+  | Mutability_link of field_mutability ref
 
 module Type_ops = struct
   type t = type_expr
@@ -74,8 +81,7 @@ module Ordered_string = struct
   type t = string
   let compare (x : t) y = compare x y
 end
-module Meths = Map.Make (Ordered_string)
-module Vars = Meths
+module Vars = Map.Make (Ordered_string)
 
 (* Value descriptions *)
 

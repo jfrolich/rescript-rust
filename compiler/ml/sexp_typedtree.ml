@@ -215,18 +215,19 @@ and type_expr_body_inline state te =
   | Tconstr (p, args, _) ->
     let arg_sexps = List.map (type_expr_inline state) args in
     Sexp.list [Sexp.atom "Tconstr"; path p; Sexp.list arg_sexps]
-  | Tobject (ty, _) ->
+  | Tobject ty ->
     let ty_sexp = type_expr_inline state ty in
     Sexp.list [Sexp.atom "Tobject"; ty_sexp]
-  | Tfield (name, kind, ty1, ty2) ->
-    let kind_str = match Btype.field_kind_repr kind with
-      | Fpresent -> "Fpresent"
-      | Fabsent -> "Fabsent"
-      | Fvar _ -> "Fvar"
+  | Tfield {name; mutability; typ = ty1; rest = ty2} ->
+    let mutability_str =
+      match Btype.mutability_repr mutability with
+      | Immutable -> "Immutable"
+      | Mutable -> "Mutable"
     in
     let ty1_sexp = type_expr_inline state ty1 in
     let ty2_sexp = type_expr_inline state ty2 in
-    Sexp.list [Sexp.atom "Tfield"; string name; Sexp.atom kind_str; ty1_sexp; ty2_sexp]
+    Sexp.list
+      [Sexp.atom "Tfield"; string name; Sexp.atom mutability_str; ty1_sexp; ty2_sexp]
   | Tnil -> Sexp.atom "Tnil"
   | Tlink _ -> Sexp.atom "Tlink"  (* Should not happen after Btype.repr *)
   | Tsubst ty ->
@@ -489,10 +490,20 @@ and expression_desc ~with_locs desc =
     let e2_sexp = expression ~with_locs e2 in
     let e3_sexp = expression ~with_locs e3 in
     Sexp.list [Sexp.atom "Texp_for"; ident id; e1_sexp; e2_sexp; direction_flag flag; e3_sexp]
-  | Texp_send (e, Tmeth_name name, arg) ->
+  | Texp_object_get (e, {txt = name; _}) ->
     let e_sexp = expression ~with_locs e in
-    let arg_sexp = opt (expression ~with_locs) arg in
-    Sexp.list [Sexp.atom "Texp_send"; e_sexp; string name; arg_sexp]
+    Sexp.list [Sexp.atom "Texp_object_get"; e_sexp; string name]
+  | Texp_object_set (e1, {txt = name; _}, e2) ->
+    let e1_sexp = expression ~with_locs e1 in
+    let e2_sexp = expression ~with_locs e2 in
+    Sexp.list [Sexp.atom "Texp_object_set"; e1_sexp; string name; e2_sexp]
+  | Texp_object_literal fields ->
+    Sexp.list
+      (Sexp.atom "Texp_object_literal"
+      :: List.map
+           (fun ((s : string Asttypes.loc), e) ->
+             Sexp.list [string s.txt; expression ~with_locs e])
+           fields)
   | Texp_letmodule (id, _, me, e) ->
     let me_sexp = module_expr ~with_locs me in
     let e_sexp = expression ~with_locs e in

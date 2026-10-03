@@ -243,7 +243,7 @@ fn is_simple_expression_with_arena(expr: &Expression, arena: &ParseArena) -> boo
             | ExpressionDesc::Pexp_constraint(_)
             | ExpressionDesc::Pexp_coerce(_)
             | ExpressionDesc::Pexp_pack(_)
-            // NOTE: Pexp_field and Pexp_send are NOT simple in OCaml's pprintast.
+            // NOTE: Pexp_field and Pexp_object_* are NOT simple in OCaml's pprintast.
             // They are in expression2, which means they need parens when nested.
             // OCaml's simple_expr handles these directly (no paren wrapping)
             | ExpressionDesc::Pexp_for(_)
@@ -266,9 +266,10 @@ fn needs_parens_in_semi_context(expr: &Expression) -> bool {
     )
 }
 
-/// Check if expression is "expression2" level - includes Pexp_field and Pexp_send
+/// Check if expression is "expression2" level - includes Pexp_field and the
+/// object get/set/literal nodes
 /// These don't need parens when used as binary operands or function arguments.
-/// OCaml's pprintast.ml: expression2 handles Pexp_field and Pexp_send directly,
+/// OCaml's pprintast.ml: expression2 handles these directly,
 /// then falls through to simple_expr for other cases.
 fn is_expression2(expr: &Expression, arena: &ParseArena) -> bool {
     if !expr.pexp_attributes.is_empty() {
@@ -278,7 +279,10 @@ fn is_expression2(expr: &Expression, arena: &ParseArena) -> bool {
     // Expression2 includes field and send expressions
     if matches!(
         &*expr.pexp_desc,
-        ExpressionDesc::Pexp_field(_, _) | ExpressionDesc::Pexp_send(_)
+        ExpressionDesc::Pexp_field(_, _)
+            | ExpressionDesc::Pexp_object_get(_)
+            | ExpressionDesc::Pexp_object_set(_)
+            | ExpressionDesc::Pexp_object_literal(_)
     ) {
         return true;
     }
@@ -2116,13 +2120,48 @@ fn print_expression_inner<W: Write>(
             print_core_type(f, arena, arena.get_core_type(*t2));
             f.string(")");
         }
-        ExpressionDesc::Pexp_send(inner) => {
-            let (ref e, ref meth) = **inner;
-            // OCaml: pp f "@[<hov2>%a#%s@]" (simple_expr ctxt) e s.txt
-            f.open_box(super::formatter::BoxKind::HOV, 2);
+        ExpressionDesc::Pexp_object_get(inner) => {
+            let (ref e, ref name) = **inner;
+            // OCaml: pp f "@[<hov2>%a[\"%s\"]@]" (simple_expr ctxt) e s.txt
+            f.open_box(BoxKind::HOV, 2);
             print_expression_simple_ctx(f, arena, arena.get_expr(*e), ctx);
-            f.string("#");
-            f.string(&meth.txt);
+            f.string("[\"");
+            f.string(&name.txt);
+            f.string("\"]");
+            f.close_box();
+        }
+        ExpressionDesc::Pexp_object_set(inner) => {
+            let (ref e, ref name, ref v) = **inner;
+            // OCaml: pp f "@[<hov2>%a[\"%s\"] =@ %a@]" (simple_expr ctxt) e s.txt
+            //   (expression ctxt) v
+            f.open_box(BoxKind::HOV, 2);
+            print_expression_simple_ctx(f, arena, arena.get_expr(*e), ctx);
+            f.string("[\"");
+            f.string(&name.txt);
+            f.string("\"] =");
+            f.space();
+            print_expression_with_ctx(f, arena, arena.get_expr(*v), ctx);
+            f.close_box();
+        }
+        ExpressionDesc::Pexp_object_literal(fields) => {
+            // OCaml: pp f "@[<hov2>{%a}@]" (list ~sep:",@ " (fun f (s, e) ->
+            //   pp f "@[<hov2>\"%s\":@ %a@]" s.txt (expression ctxt) e)) fields
+            f.open_box(BoxKind::HOV, 2);
+            f.string("{");
+            for (i, (name, e)) in fields.iter().enumerate() {
+                if i > 0 {
+                    f.string(",");
+                    f.space();
+                }
+                f.open_box(BoxKind::HOV, 2);
+                f.string("\"");
+                f.string(&name.txt);
+                f.string("\":");
+                f.space();
+                print_expression_with_ctx(f, arena, arena.get_expr(*e), ctx);
+                f.close_box();
+            }
+            f.string("}");
             f.close_box();
         }
         ExpressionDesc::Pexp_letmodule(inner) => {

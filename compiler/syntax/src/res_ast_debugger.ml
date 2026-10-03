@@ -725,8 +725,21 @@ module Sexp_ast = struct
           [Sexp.atom "Pexp_constraint"; expression expr; core_type typexpr]
       | Pexp_coerce (expr, (), typexpr) ->
         Sexp.list [Sexp.atom "Pexp_coerce"; expression expr; core_type typexpr]
-      | Pexp_send (expr, {txt = method_name; _}) ->
-        Sexp.list [Sexp.atom "Pexp_send"; string method_name; expression expr]
+      | Pexp_object_get (expr, {txt = name; _}) ->
+        Sexp.list [Sexp.atom "Pexp_object_get"; string name; expression expr]
+      | Pexp_object_set (e1, {txt = name; _}, e2) ->
+        Sexp.list
+          [Sexp.atom "Pexp_object_set"; string name; expression e1; expression e2]
+      | Pexp_object_literal fields ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_object_literal";
+            Sexp.list
+              (map_empty
+                 ~f:(fun ((s : string Asttypes.loc), e) ->
+                   Sexp.list [Sexp.atom s.txt; expression e])
+                 fields);
+          ]
       | Pexp_letmodule (mod_name, mod_expr, expr) ->
         Sexp.list
           [
@@ -1752,8 +1765,25 @@ module SexpAstWithLocs = struct
           [Sexp.atom "Pexp_constraint"; expression expr; core_type typexpr]
       | Pexp_coerce (expr, (), typexpr) ->
         Sexp.list [Sexp.atom "Pexp_coerce"; expression expr; core_type typexpr]
-      | Pexp_send (expr, {txt = method_name; loc}) ->
-        Sexp.list [Sexp.atom "Pexp_send"; string method_name; location loc; expression expr]
+      | Pexp_object_get (expr, {txt = name; loc}) ->
+        Sexp.list
+          [Sexp.atom "Pexp_object_get"; string name; location loc; expression expr]
+      | Pexp_object_set (e1, {txt = name; loc}, e2) ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_object_set";
+            string name;
+            location loc;
+            expression e1;
+            expression e2;
+          ]
+      | Pexp_object_literal fields ->
+        Sexp.list
+          (Sexp.atom "Pexp_object_literal"
+          :: List.map
+               (fun ((s : string Asttypes.loc), e) ->
+                 Sexp.list [string s.txt; location s.loc; expression e])
+               fields)
       | Pexp_letmodule (mod_name, mod_expr, expr) ->
         Sexp.list
           [

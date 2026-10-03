@@ -342,9 +342,13 @@ pub fn walk_expr<I: TastIterator + ?Sized>(sub: &mut I, e: &Expression) {
             sub.expr(e2);
             sub.expr(e3);
         }
-        ExpressionDesc::Texp_send(e, _, eo) => {
+        ExpressionDesc::Texp_object_get(e, _) => sub.expr(e),
+        ExpressionDesc::Texp_object_set(e, _, v) => {
             sub.expr(e);
-            if let Some(e) = eo {
+            sub.expr(v);
+        }
+        ExpressionDesc::Texp_object_literal(fields) => {
+            for (_, e) in fields {
                 sub.expr(e);
             }
         }

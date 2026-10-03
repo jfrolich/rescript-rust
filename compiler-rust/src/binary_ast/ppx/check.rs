@@ -514,13 +514,12 @@ impl<'a> Checker<'a> {
     fn typ(&mut self, idx: CoreTypeIdx) -> PpxResult<()> {
         let typ = self.arena.get_core_type(idx).clone();
         if let CoreTypeDesc::Ptyp_object(inner) = &*typ.ptyp_desc {
-            // Object fields go through `process_getter_setter` from the last
-            // one (`Ext_list.fold_right`); the object's own attributes and
+            // Object fields are mapped from the last one
+            // (`Ext_list.fold_right`); the object's own attributes and
             // inherited types are not mapped.
             let (fields, _closed) = &**inner;
             for field in fields.iter().rev() {
-                if let ObjectField::Otag(_label, attrs, field_type) = field {
-                    validate_object_field_method_attrs(attrs, self.arena, &mut self.warnings)?;
+                if let ObjectField::Otag(_label, _attrs, field_type) = field {
                     self.typ(*field_type)?;
                 }
             }
@@ -816,35 +815,17 @@ impl<'a> Checker<'a> {
         if let Some(error) = app_exp_mapper_error(expr, self.arena) {
             return Err(error);
         }
-        let op = ["->", "#=", "##"]
-            .into_iter()
-            .find(|op| expression_is_lident(apply.funct, op, self.arena));
-        match op {
+        if expression_is_lident(apply.funct, "->", self.arena) {
             // `a |. f`: `let a = self.expr self a_ in let f = self.expr self f_`.
-            Some("->") => {
-                self.expr(apply.args[0].1)?;
-                self.expr(apply.args[1].1)
+            self.expr(apply.args[0].1)?;
+            self.expr(apply.args[1].1)
+        } else {
+            // `default_expr_mapper`: attributes, arguments, function.
+            self.attributes(&expr.pexp_attributes)?;
+            for (_label, arg) in &apply.args {
+                self.expr(*arg)?;
             }
-            // `obj##name`: the object.
-            Some("##") => self.expr(apply.args[0].1),
-            // `obj#=arg` (gen_assignment): the object, then the value.
-            Some("#=") => {
-                let lhs = self.arena.get_expr(apply.args[0].1).clone();
-                match &*lhs.pexp_desc {
-                    ExpressionDesc::Pexp_send(inner) => self.expr(inner.0)?,
-                    ExpressionDesc::Pexp_apply(inner) => self.expr(inner.args[0].1)?,
-                    _ => {}
-                }
-                self.expr(apply.args[1].1)
-            }
-            _ => {
-                // `default_expr_mapper`: attributes, arguments, function.
-                self.attributes(&expr.pexp_attributes)?;
-                for (_label, arg) in &apply.args {
-                    self.expr(*arg)?;
-                }
-                self.expr(apply.funct)
-            }
+            self.expr(apply.funct)
         }
     }
 
@@ -886,12 +867,11 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// `Ast_exp_extension.handle_extension` (ast_exp_extension.ml:26-83): the
-    /// payload is not mapped, except the fields of `%obj`.
+    /// `Ast_exp_extension.handle_extension` (ast_exp_extension.ml:26-67): the
+    /// payload is not mapped.
     fn expression_extension(&mut self, loc: LocIdx, extension: &Extension) -> PpxResult<()> {
         let (ext_name, payload) = extension;
         match self.arena.get_string(ext_name.txt) {
-            "obj" => {}
             "todo" => {
                 self.warnings.push(PpxWarning {
                     loc,
@@ -918,21 +898,8 @@ impl<'a> Checker<'a> {
                 push_raw_re_warning(payload, self.arena, &mut self.warnings);
                 return Ok(());
             }
-            _ => return validate_expression_extension_payload_error(extension, self.arena),
+            _ => validate_expression_extension_payload_error(extension, self.arena),
         }
-        let Some(fields) = payload_single_record_fields_without_spread(payload, self.arena) else {
-            return Err(PpxError::at_loc(ext_name.loc, "Expect a record expression here"));
-        };
-        // `Ast_util.record_as_js_object` folds right over the fields: each
-        // label is checked, then its expression mapped.
-        let fields = fields.clone();
-        for field in fields.iter().rev() {
-            if !matches!(self.arena.get_longident(field.lid.txt), Longident::Lident(_)) {
-                return Err(PpxError::at_loc(field.lid.loc, "invalid js label "));
-            }
-            self.expr(field.expr)?;
-        }
-        Ok(())
     }
 
     /// `E.map` (ast_mapper.ml:282-390).
@@ -1018,7 +985,19 @@ impl<'a> Checker<'a> {
                 }
                 self.expr(*inner_expr)
             }
-            ExpressionDesc::Pexp_send(inner) => self.expr(inner.0),
+            ExpressionDesc::Pexp_object_get(inner) => self.expr(inner.0),
+            // `object_set ~loc ~attrs (sub.expr sub e) (map_loc sub s) (sub.expr sub v)`:
+            // arguments right to left.
+            ExpressionDesc::Pexp_object_set(inner) => {
+                self.expr(inner.2)?;
+                self.expr(inner.0)
+            }
+            ExpressionDesc::Pexp_object_literal(fields) => {
+                for (_, e) in fields.iter() {
+                    self.expr(*e)?;
+                }
+                Ok(())
+            }
             ExpressionDesc::Pexp_letmodule(inner) => {
                 let (_name, mod_expr, body) = &**inner;
                 self.expr(*body)?;

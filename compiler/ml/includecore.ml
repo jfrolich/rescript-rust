@@ -125,8 +125,8 @@ let type_manifest env ty1 params1 ty2 params2 priv2 =
     &&
     let tl1, tl2 = List.split !to_equal in
     Ctype.equal env true tl1 tl2
-  | Tobject (fi1, _), Tobject (fi2, _)
-    when is_absrow env (snd (Ctype.flatten_fields fi2)) ->
+  | Tobject fi1, Tobject fi2 when is_absrow env (snd (Ctype.flatten_fields fi2))
+    ->
     let fields2, rest2 = Ctype.flatten_fields fi2 in
     Ctype.equal env true (ty1 :: params1) (rest2 :: params2)
     &&
@@ -137,9 +137,19 @@ let type_manifest env ty1 params1 ty2 params2 priv2 =
     &&
     let pairs, _miss1, miss2 = Ctype.associate_fields fields1 fields2 in
     miss2 = []
+    (* The signature must not grant write capability the implementation
+          lacks; an implementation's settable field may be abstracted to a
+          read-only one. *)
+    && List.for_all
+         (fun ((f1 : Ctype.field_info), (f2 : Ctype.field_info)) ->
+           match Btype.mutability_repr f2.f_mut with
+           | Mutable -> Btype.mutability_repr f1.f_mut = Asttypes.Mutable
+           | Immutable -> true)
+         pairs
     &&
     let tl1, tl2 =
-      List.split (List.map (fun (_, _, t1, _, t2) -> (t1, t2)) pairs)
+      List.split
+        (List.map (fun (f1, f2) -> (f1.Ctype.f_typ, f2.Ctype.f_typ)) pairs)
     in
     Ctype.equal env true (params1 @ tl1) (params2 @ tl2)
   | _ ->

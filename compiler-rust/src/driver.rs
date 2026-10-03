@@ -120,7 +120,7 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
     use crate::types::path::Path as TypePath;
     use crate::types::typedtree::{
         Case, ConstructorArgument, ExpExtra, Expression, ExpressionDesc, ExtensionConstructor,
-        ExtensionConstructorKind, FunctionParam, IncludeDescription, MethKind, ModuleBinding,
+        ExtensionConstructorKind, FunctionParam, IncludeDescription, ModuleBinding,
         ModuleCoercion, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeConstraint,
         ModuleTypeDeclaration, ModuleTypeDesc, OpenDeclaration, PatExtra, Pattern, PatternDesc,
         RowFieldDesc, Structure, StructureItemDesc, TypedConstructorArguments, TypedCoreType,
@@ -379,13 +379,14 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
                 visit_expression(max_stamp, iterable);
                 visit_expression(max_stamp, body);
             }
-            ExpressionDesc::Texp_send(expr, meth, maybe_arg) => {
+            ExpressionDesc::Texp_object_get(expr, _) => visit_expression(max_stamp, expr),
+            ExpressionDesc::Texp_object_set(expr, _, value) => {
                 visit_expression(max_stamp, expr);
-                if let MethKind::Tmeth_val(id) = meth {
-                    visit_ident(max_stamp, id);
-                }
-                if let Some(arg) = maybe_arg {
-                    visit_expression(max_stamp, arg);
+                visit_expression(max_stamp, value);
+            }
+            ExpressionDesc::Texp_object_literal(fields) => {
+                for (_, field) in fields {
+                    visit_expression(max_stamp, field);
                 }
             }
             ExpressionDesc::Texp_letmodule(id, _, module_expr, body) => {
@@ -886,10 +887,18 @@ fn expression_has_string_literal(
             let (expr, _, _) = &**inner;
             expression_has_string_literal(arena.get_expr(*expr), value, arena)
         }
-        ED::Pexp_send(inner) => {
+        ED::Pexp_object_get(inner) => {
             let (expr, _) = &**inner;
             expression_has_string_literal(arena.get_expr(*expr), value, arena)
         }
+        ED::Pexp_object_set(inner) => {
+            let (lhs, _, rhs) = &**inner;
+            expression_has_string_literal(arena.get_expr(*lhs), value, arena)
+                || expression_has_string_literal(arena.get_expr(*rhs), value, arena)
+        }
+        ED::Pexp_object_literal(fields) => fields
+            .iter()
+            .any(|(_, e)| expression_has_string_literal(arena.get_expr(*e), value, arena)),
         ED::Pexp_setfield(inner) => {
             let (lhs, _, rhs) = &**inner;
             expression_has_string_literal(arena.get_expr(*lhs), value, arena)
@@ -2458,7 +2467,7 @@ fn invalid_enabled_let_unwrap_in_expr(
         | ExpressionDesc::Pexp_comptime_record_field(owner) => {
             invalid_enabled_let_unwrap_in_expr(*owner, arena)
         }
-        ExpressionDesc::Pexp_send(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena),
+        ExpressionDesc::Pexp_object_get(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena),
         ExpressionDesc::Pexp_setfield(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena)
             .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena)),
         ExpressionDesc::Pexp_ifthenelse(inner) => {
@@ -2649,7 +2658,7 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
         | ExpressionDesc::Pexp_comptime_record_field(owner) => {
             disabled_let_unwrap_loc_in_expr(*owner, arena)
         }
-        ExpressionDesc::Pexp_send(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena),
+        ExpressionDesc::Pexp_object_get(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena),
         ExpressionDesc::Pexp_setfield(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena)
             .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena)),
         ExpressionDesc::Pexp_ifthenelse(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena)
@@ -3704,6 +3713,16 @@ fn type_mod_error_to_anyhow_styled(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::ObjectFieldNotMutable { loc, ty, name }) => {
+            let message = type_clash::render_error_message(|ppf| {
+                type_clash::print_object_field_not_mutable(ppf, type_ctx, *ty, name)
+            });
+            UserDiagnostic::new(
+                format_compiler_error_report_formatted(arena, source, filename, *loc, &message),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::UnboundValue {
             loc,
             name,
@@ -5467,10 +5486,7 @@ fn format_unbound_type_declaration_variable_report(
             printer.reset();
             printer.mark_loops(typ_ti);
             if let Some(var) = var {
-                let ty0 = type_ctx.new_generic_type(TypeDesc::Tobject {
-                    fields: var,
-                    name: None,
-                });
+                let ty0 = type_ctx.new_generic_type(TypeDesc::Tobject { fields: var });
                 printer.mark_loops(ty0);
             }
             let args_text = printer.printtyp.constructor_arguments(args);
@@ -5509,7 +5525,7 @@ fn format_unbound_type_declaration_variable_report(
             UnboundTypeVarDetail::Method {
                 name: method_name,
                 ty,
-            } => ("method", format!("{method_name}: "), *ty),
+            } => ("field", format!("{method_name}: "), *ty),
         };
         // `Typedecl.explain_unbound_gen` (typedecl.ml:2080-2090):
         // `reset_and_mark_loops_list [typ ti; ty0]` with
@@ -5519,10 +5535,7 @@ fn format_unbound_type_declaration_variable_report(
         printer.reset();
         printer.mark_loops(ty);
         if let Some(var) = var {
-            let ty0 = type_ctx.new_generic_type(TypeDesc::Tobject {
-                fields: var,
-                name: None,
-            });
+            let ty0 = type_ctx.new_generic_type(TypeDesc::Tobject { fields: var });
             printer.mark_loops(ty0);
         }
         let ty_text = printer.format(ty);

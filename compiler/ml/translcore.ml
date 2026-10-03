@@ -1217,9 +1217,24 @@ and transl_exp0 (e : Typedtree.expression) : Lambda.lambda =
     Lfor_of (param, transl_exp iterable, transl_exp body)
   | Texp_for_await_of (param, _, iterable, body) ->
     Lfor_await_of (param, transl_exp iterable, transl_exp body)
-  | Texp_send (expr, Tmeth_name nm, _) ->
-    let obj = transl_exp expr in
-    Lsend (nm, obj, e.exp_loc)
+  | Texp_object_literal fields ->
+    let labels =
+      List.map
+        (fun ((s : string Asttypes.loc), _) ->
+          {
+            External_arg_spec.obj_arg_label = External_arg_spec.obj_label s.txt;
+            obj_arg_type = External_arg_spec.Nothing;
+          })
+        fields
+    in
+    Lprim
+      ( Pjs_object_create labels,
+        List.map (fun (_, field) -> transl_exp field) fields,
+        e.exp_loc )
+  | Texp_object_get (expr, nm) ->
+    Lprim (Pjs_object_get nm.txt, [transl_exp expr], e.exp_loc)
+  | Texp_object_set (expr, nm, value) ->
+    Lprim (Pjs_object_set nm.txt, [transl_exp expr; transl_exp value], e.exp_loc)
   | Texp_letmodule (id, _loc, modl, body) ->
     let defining_expr = !transl_module Tcoerce_none None modl in
     Llet (Strict, Pgenval, id, defining_expr, transl_exp body)

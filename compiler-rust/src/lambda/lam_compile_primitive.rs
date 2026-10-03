@@ -728,7 +728,10 @@ impl LambdaCompiler {
                 Some(expr) => expr,
                 None => Expression::undefined(false),
             },
-            PjsUnsafeDowngrade { name, setter } => match (*setter, compiled_args.as_slice()) {
+            PjsObjectGet(name) | PjsObjectSet(name) => match (
+                matches!(prim, PjsObjectSet(_)),
+                compiled_args.as_slice(),
+            ) {
                 (false, [receiver]) => self.static_index(receiver.clone(), name),
                 (true, [receiver, value]) => Expression::new(ExpressionDesc::Seq(
                     Box::new(Expression::bin(

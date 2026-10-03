@@ -592,7 +592,31 @@ module E = struct
       coerce ~loc ~attrs (sub.expr sub e) (sub.typ sub t2)
     | Pexp_constraint (e, t) ->
       constraint_ ~loc ~attrs (sub.expr sub e) (sub.typ sub t)
-    | Pexp_send (e, s) -> send ~loc ~attrs (sub.expr sub e) (map_loc sub s)
+    | Pexp_object_get (e, s) ->
+      send ~loc ~attrs (sub.expr sub e) (map_loc sub s)
+    | Pexp_object_set (e, s, v) ->
+      (* v0 encoding: application of the "#=" operator to a send. *)
+      let s = map_loc sub s in
+      apply ~loc ~attrs
+        (Ast_helper0.Exp.ident ~loc {txt = Longident.Lident "#="; loc})
+        [
+          (Asttypes.Noloc.Nolabel, Ast_helper0.Exp.send ~loc (sub.expr sub e) s);
+          (Asttypes.Noloc.Nolabel, sub.expr sub v);
+        ]
+    | Pexp_object_literal fields ->
+      (* v0 encoding: the reserved %obj extension over a record expression. *)
+      let rows =
+        List.map
+          (fun (s, e) ->
+            let s = map_loc sub s in
+            ({s with txt = Longident.Lident s.txt}, sub.expr sub e))
+          fields
+      in
+      extension ~loc ~attrs
+        ( {txt = "obj"; loc},
+          PStr
+            [Ast_helper0.Str.eval ~loc (Ast_helper0.Exp.record ~loc rows None)]
+        )
     | Pexp_letmodule (s, me, e) ->
       letmodule ~loc ~attrs (map_loc sub s) (sub.module_expr sub me)
         (sub.expr sub e)

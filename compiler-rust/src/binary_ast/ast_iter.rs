@@ -508,7 +508,16 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
             v.expr(arena, inner.0);
             v.typ(arena, inner.1);
         }
-        ExpressionDesc::Pexp_send(inner) => v.expr(arena, inner.0),
+        ExpressionDesc::Pexp_object_get(inner) => v.expr(arena, inner.0),
+        ExpressionDesc::Pexp_object_set(inner) => {
+            v.expr(arena, inner.0);
+            v.expr(arena, inner.2);
+        }
+        ExpressionDesc::Pexp_object_literal(fields) => {
+            for (_, e) in fields.iter() {
+                v.expr(arena, *e);
+            }
+        }
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (_, me, body) = &**inner;
             v.module_expr(arena, *me);

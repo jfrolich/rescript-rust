@@ -657,16 +657,6 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
             f.string(")");
             f.close_box();
         }
-        RawLambda::Lsend(name, obj, _) => {
-            f.open_box(BoxKind::Box, 2);
-            f.string("(send");
-            f.string(name);
-            f.space();
-            lam(f, obj, reraise_exn);
-            f.space();
-            f.string(")");
-            f.close_box();
-        }
         RawLambda::Lbreak => f.string("break"),
         RawLambda::Lcontinue => f.string("continue"),
     }

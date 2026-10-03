@@ -153,6 +153,8 @@ pub fn unary_expr_operand(arena: &ParseArena, expr: &Expression) -> ParenKind {
         | ExpressionDesc::Pexp_constraint(_)
         | ExpressionDesc::Pexp_setfield(_)
         | ExpressionDesc::Pexp_extension(_)
+        | ExpressionDesc::Pexp_object_literal(_)
+        | ExpressionDesc::Pexp_object_set(_)
         | ExpressionDesc::Pexp_match(_)
         | ExpressionDesc::Pexp_try(_)
         | ExpressionDesc::Pexp_while(_, _)
@@ -479,6 +481,7 @@ pub fn field_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
         }
         ExpressionDesc::Pexp_assert(_)
         | ExpressionDesc::Pexp_extension(_)
+        | ExpressionDesc::Pexp_object_literal(_)
         | ExpressionDesc::Pexp_fun(_)
         | ExpressionDesc::Pexp_newtype(_)
         | ExpressionDesc::Pexp_constraint(_)
@@ -563,6 +566,7 @@ pub fn jsx_prop_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
                 | ExpressionDesc::Pexp_pack(_)
                 | ExpressionDesc::Pexp_record { .. }
                 | ExpressionDesc::Pexp_extension(_)
+                | ExpressionDesc::Pexp_object_literal(_)
                 | ExpressionDesc::Pexp_letmodule(_)
                 | ExpressionDesc::Pexp_letexception(_)
                 | ExpressionDesc::Pexp_open(_)
@@ -612,6 +616,7 @@ pub fn jsx_child_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
                 | ExpressionDesc::Pexp_pack(_)
                 | ExpressionDesc::Pexp_record { .. }
                 | ExpressionDesc::Pexp_extension(_)
+                | ExpressionDesc::Pexp_object_literal(_)
                 | ExpressionDesc::Pexp_letmodule(_)
                 | ExpressionDesc::Pexp_letexception(_)
                 | ExpressionDesc::Pexp_open(_)

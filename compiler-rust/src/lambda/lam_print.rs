@@ -134,13 +134,8 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::PjsApply => write!(f, "#apply"),
         Primitive::PjsRuntimeApply => write!(f, "#runtime_apply"),
         Primitive::PtaggedTemplate => write!(f, "#tagged_template"),
-        Primitive::PjsUnsafeDowngrade { name, setter } => {
-            if *setter {
-                write!(f, "##{name}#=")
-            } else {
-                write!(f, "##{name}")
-            }
-        }
+        Primitive::PjsObjectGet(name) => write!(f, "js_object_get[{name}]"),
+        Primitive::PjsObjectSet(name) => write!(f, "js_object_set[{name}]"),
         Primitive::PfnArity => write!(f, "fn.length"),
         Primitive::PjsFnMethod => write!(f, "js_fn_method"),
         Primitive::Pdebugger => write!(f, "debugger"),

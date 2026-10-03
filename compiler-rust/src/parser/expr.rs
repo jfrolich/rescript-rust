@@ -2339,7 +2339,7 @@ fn parse_bracket_access(
         let ident_loc = p.mk_loc_idx(string_start_idx, string_end_idx);
         let expr_idx = p.arena_mut().push_expr(expr);
         let send = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_send(Box::new((
+            pexp_desc: Box::new(ExpressionDesc::Pexp_object_get(Box::new((
                 expr_idx,
                 Loc {
                     txt: s,
@@ -2359,15 +2359,39 @@ fn parse_bracket_access(
         let rhs = parse_expr(p);
         let rhs_end_idx = p.loc_end_idx(rhs.pexp_loc);
         let loc = p.mk_loc_idx_full(start_pos_idx, rhs_end_idx);
-        let operator_loc = p.mk_loc_idx(equal_start_idx, equal_end_idx);
-        let op_lid = super::core::make_lident_static(p.arena_mut(), "#=");
-        let operator = ast_helper::make_ident(p, op_lid, operator_loc);
-        return ast_helper::make_apply(
-            p.arena_mut(),
-            operator,
-            vec![(ArgLabel::Nolabel, e), (ArgLabel::Nolabel, rhs)],
-            loc,
-        );
+        let Expression {
+            pexp_desc,
+            pexp_loc: e_loc,
+            pexp_attributes: e_attrs,
+        } = e;
+        match *pexp_desc {
+            ExpressionDesc::Pexp_object_get(inner) => {
+                let (obj, name) = *inner;
+                let rhs_idx = p.arena_mut().push_expr(rhs);
+                return Expression {
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_object_set(Box::new((obj, name, rhs_idx)))),
+                    pexp_loc: loc,
+                    pexp_attributes: Attributes::new(),
+                };
+            }
+            desc => {
+                let start = p.arena().get_position(equal_start_idx).clone();
+                let end = p.arena().get_position(equal_end_idx).clone();
+                p.err_at(
+                    start,
+                    end,
+                    DiagnosticCategory::Message(
+                        "The left-hand side of this assignment is not an object property access."
+                            .to_string(),
+                    ),
+                );
+                return Expression {
+                    pexp_desc: Box::new(desc),
+                    pexp_loc: e_loc,
+                    pexp_attributes: e_attrs,
+                };
+            }
+        }
     }
     let index = parse_constrained_or_coerced_expr(p);
     p.expect(Token::Rbracket);
@@ -3832,21 +3856,24 @@ fn parse_record_expr_with_string_keys(
         parse_record_expr_row_with_string_key,
     ));
     let loc = p.mk_loc_idx_to_end(start_pos_idx);
-    let record = p.arena_mut().push_expr(Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((rows, None)))),
-        pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
-    });
-    let eval = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((record, Attributes::new())))),
-        pstr_loc: loc,
-    };
-    let obj = p.arena_mut().intern("obj");
+    let fields = rows
+        .into_iter()
+        .map(|row| {
+            let name = match p.arena().get_longident(row.lid.txt) {
+                Longident::Lident(name) => p.arena().get_string(*name).to_owned(),
+                _ => unreachable!("string-key record rows are always Lident"),
+            };
+            (
+                Loc {
+                    txt: Label::Owned(name),
+                    loc: row.lid.loc,
+                },
+                row.expr,
+            )
+        })
+        .collect();
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
-            with_loc(obj, loc),
-            Payload::PStr(Box::new(vec![eval])),
-        )))),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_object_literal(Box::new(fields))),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }

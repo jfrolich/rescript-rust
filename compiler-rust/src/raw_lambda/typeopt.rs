@@ -514,7 +514,7 @@ mod tests {
         let id_gen = IdGenerator::new();
         let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let fields = ctx.new_type(TypeDesc::Tnil);
-        let object = ctx.new_type(TypeDesc::Tobject { fields, name: None });
+        let object = ctx.new_type(TypeDesc::Tobject { fields });
 
         assert!(type_is_builtin_object(&ctx, &Env::empty(), object));
     }

@@ -266,7 +266,8 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         | Primitive::PjsCall { .. }
         | Primitive::PinitMod
         | Primitive::PupdateMod
-        | Primitive::PjsUnsafeDowngrade { .. }
+        | Primitive::PjsObjectGet(_)
+        | Primitive::PjsObjectSet(_)
         | Primitive::Pdebugger
         | Primitive::PjsFnMethod
         | Primitive::Pawait

@@ -20,7 +20,7 @@ use crate::types::decl::{
 };
 use crate::types::path::Path;
 use crate::types::type_expr::{
-    FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeArg, TypeDesc, TypeExprRef,
+    FieldMutability, GENERIC_LEVEL, MutabilityRef, RowDesc, RowField, TypeArg, TypeDesc, TypeExprRef,
 };
 use crate::types::variance::Variance;
 
@@ -38,6 +38,9 @@ pub struct SigReadContext<'a> {
     /// OCaml layout refs are shared mutable blocks. Preserve that physical
     /// sharing by mapping their marshal block identity to one TypeContext slot.
     variant_layout_cache: HashMap<usize, crate::types::VariantLayoutRef>,
+    /// Object field mutability cells are shared `ref` blocks; keep their
+    /// sharing by marshal block identity.
+    mutability_cache: HashMap<usize, MutabilityRef>,
 }
 
 impl<'a> SigReadContext<'a> {
@@ -47,6 +50,7 @@ impl<'a> SigReadContext<'a> {
             ctx,
             type_expr_cache: HashMap::new(),
             variant_layout_cache: HashMap::new(),
+            mutability_cache: HashMap::new(),
         }
     }
 
@@ -290,6 +294,30 @@ impl<'a> SigReadContext<'a> {
             }
             _ => RecordRepresentation::RecordRegular, // fallback
         }
+    }
+
+    /// A `field_mutability ref` block (types.mli `field_mutability`).
+    fn read_mutability_ref(&mut self, value: &OcamlValue) -> MutabilityRef {
+        let (_, fields) = value.as_block();
+        let key = fields.as_ptr() as usize;
+        if let Some(r) = self.mutability_cache.get(&key) {
+            return *r;
+        }
+        let r = match &fields[0] {
+            // Mutability_value of mutable_flag
+            OcamlValue::Block(0, flag) => {
+                let flag = match flag[0].as_int() {
+                    0 => crate::types::asttypes::MutableFlag::Immutable,
+                    _ => crate::types::asttypes::MutableFlag::Mutable,
+                };
+                self.ctx.alloc_mutability(FieldMutability::Value(flag))
+            }
+            // Mutability_link of field_mutability ref
+            OcamlValue::Block(1, link) => self.read_mutability_ref(&link[0]),
+            other => panic!("unexpected field_mutability: {other:?}"),
+        };
+        self.mutability_cache.insert(key, r);
+        r
     }
 
     fn read_variant_layout_ref(&mut self, value: &OcamlValue) -> crate::types::VariantLayoutRef {
@@ -750,23 +778,20 @@ impl<'a> SigReadContext<'a> {
                     TypeDesc::Tconstr { path, args: args.into(), abbrev }
                 }
                 4 => {
-                    // Tobject(type_expr, (Path.t * type_expr list) option ref)
-                    let obj_fields = self.read_type_expr(&fields[0]);
-                    let name = None;
+                    // Tobject of type_expr
                     TypeDesc::Tobject {
-                        fields: obj_fields,
-                        name,
+                        fields: self.read_type_expr(&fields[0]),
                     }
                 }
                 5 => {
-                    // Tfield(string, field_kind, type_expr, type_expr)
+                    // Tfield {name; mutability: field_mutability ref; typ; rest}
                     let name = fields[0].as_string().to_string();
-                    let kind = read_field_kind(&fields[1]);
+                    let mutability = self.read_mutability_ref(&fields[1]);
                     let typ = self.read_type_expr(&fields[2]);
                     let rest = self.read_type_expr(&fields[3]);
                     TypeDesc::Tfield {
                         name,
-                        kind,
+                        mutability,
                         typ,
                         rest,
                     }
@@ -1609,10 +1634,6 @@ fn read_alias_presence(value: &OcamlValue) -> AliasPresence {
 }
 
 /// Read field_kind.
-fn read_field_kind(_value: &OcamlValue) -> FieldKind {
-    // For CMI-loaded types, just use Fpresent.
-    FieldKind::Fpresent
-}
 
 #[cfg(test)]
 mod tests {

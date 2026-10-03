@@ -46,7 +46,7 @@ use crate::types::type_expr::{TypeDesc, TypeExprRef};
 use crate::types::typecore::TypeCoreWarning;
 use crate::types::typedtree::{
     ApplyArg, Case, Constant as TConstant, EnvRef, Expression, ExpressionDesc, FunctionParam,
-    MethKind, ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern, PatternDesc,
+    ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern, PatternDesc,
     RecordField, RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, ValueBinding,
 };
 
@@ -256,7 +256,6 @@ fn raw_free_variables(lam: &RawLambda) -> HashSet<Ident> {
                 collect(expr, fv);
                 fv.insert(id.clone());
             }
-            RawLambda::Lsend(_, obj, _) => collect(obj, fv),
             RawLambda::Lbreak | RawLambda::Lcontinue => {}
         }
     }
@@ -397,9 +396,6 @@ fn raw_subst_idents_owned(subst: &HashMap<Ident, Ident>, lam: RawLambda) -> RawL
         ),
         RawLambda::Lassign(id, expr) => {
             RawLambda::Lassign(id, Box::new(raw_subst_idents_owned(subst, *expr)))
-        }
-        RawLambda::Lsend(name, obj, loc) => {
-            RawLambda::Lsend(name, Box::new(raw_subst_idents_owned(subst, *obj)), loc)
         }
         RawLambda::Lbreak => RawLambda::Lbreak,
         RawLambda::Lcontinue => RawLambda::Lcontinue,
@@ -1205,9 +1201,6 @@ impl<'a> RawLambdaConverter<'a> {
             }
             RawLambda::Lassign(_, value) => {
                 self.note_possible_required_modules_in_raw_lambda(value);
-            }
-            RawLambda::Lsend(_, obj, _) => {
-                self.note_possible_required_modules_in_raw_lambda(obj);
             }
             RawLambda::Lbreak | RawLambda::Lcontinue => {}
         }
@@ -2104,11 +2097,6 @@ impl<'a> RawLambdaConverter<'a> {
             RawLambda::Lassign(id, ex) => Some(RawLambda::Lassign(
                 id.clone(),
                 Box::new(Self::normalize_for_key(ex, env, counter)?),
-            )),
-            RawLambda::Lsend(method, obj, loc) => Some(RawLambda::Lsend(
-                method.clone(),
-                Box::new(Self::normalize_for_key(obj, env, counter)?),
-                Location::none(),
             )),
             RawLambda::Lbreak => Some(RawLambda::Lbreak),
             RawLambda::Lcontinue => Some(RawLambda::Lcontinue),
@@ -6936,12 +6924,39 @@ impl<'a> RawLambdaConverter<'a> {
                     Box::new(self.convert_expr_raw(body)),
                 )
             }
-            ExpressionDesc::Texp_send(obj_expr, MethKind::Tmeth_name(name), _) => RawLambda::Lsend(
-                name.clone(),
-                Box::new(self.convert_expr_raw(obj_expr)),
+            // translcore.ml `Texp_object_literal`.
+            ExpressionDesc::Texp_object_literal(fields) => {
+                let labels = fields
+                    .iter()
+                    .map(|(s, _)| crate::types::external_ffi_types::ObjParam {
+                        obj_arg_label: crate::types::external_ffi_types::Label::ObjLabel {
+                            name: s.txt.clone(),
+                        },
+                        obj_arg_type: crate::types::external_ffi_types::Attr::Nothing,
+                    })
+                    .collect();
+                let args = fields
+                    .iter()
+                    .map(|(_, field)| self.convert_expr_raw(field))
+                    .collect();
+                RawLambda::prim(Primitive::PjsObjectCreate(labels), args, self.loc(expr.exp_loc))
+            }
+            ExpressionDesc::Texp_object_get(obj_expr, name) => RawLambda::prim(
+                Primitive::PjsObjectGet(name.txt.clone()),
+                vec![self.convert_expr_raw(obj_expr)],
                 self.loc(expr.exp_loc),
             ),
-            ExpressionDesc::Texp_send(_, MethKind::Tmeth_val(_), _) => RawLambda::unit(),
+            ExpressionDesc::Texp_object_set(obj_expr, name, value) => {
+                // OCaml evaluates the list literal `[transl_exp expr;
+                // transl_exp value]` right to left.
+                let value = self.convert_expr_raw(value);
+                let obj = self.convert_expr_raw(obj_expr);
+                RawLambda::prim(
+                    Primitive::PjsObjectSet(name.txt.clone()),
+                    vec![obj, value],
+                    self.loc(expr.exp_loc),
+                )
+            }
             ExpressionDesc::Texp_letmodule(id, _, modl, body) => RawLambda::let_(
                 LetKind::Strict,
                 id.clone(),
@@ -7214,7 +7229,9 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_for(_, _, _, _, _, _) => "Texp_for",
             ExpressionDesc::Texp_for_of(_, _, _, _) => "Texp_for_of",
             ExpressionDesc::Texp_for_await_of(_, _, _, _) => "Texp_for_await_of",
-            ExpressionDesc::Texp_send(_, _, _) => "Texp_send",
+            ExpressionDesc::Texp_object_get(_, _) => "Texp_object_get",
+            ExpressionDesc::Texp_object_set(_, _, _) => "Texp_object_set",
+            ExpressionDesc::Texp_object_literal(_) => "Texp_object_literal",
             ExpressionDesc::Texp_letmodule(_, _, _, _) => "Texp_letmodule",
             ExpressionDesc::Texp_letexception(_, _) => "Texp_letexception",
             ExpressionDesc::Texp_assert(_) => "Texp_assert",

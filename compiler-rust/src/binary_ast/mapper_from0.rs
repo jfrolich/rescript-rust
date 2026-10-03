@@ -1169,6 +1169,27 @@ impl<'a> Mapper<'a> {
                 };
                 return self.mk_fun(loc, attrs, vec![param], body, false);
             }
+            // ast_mapper_from0.ml: decode the v0 encoding of property
+            // assignment, `#=` applied to a send.
+            pt0::ExpressionDesc::Apply(func, args)
+                if matches!(&func.pexp_desc, pt0::ExpressionDesc::Ident(lid)
+                    if matches!(&lid.txt, Longident::Lident(op) if self.str_eq(*op, "#=")))
+                    && matches!(
+                        args.as_slice(),
+                        [
+                            (pt0::ArgLabel::Nolabel, pt0::Expression { pexp_desc: pt0::ExpressionDesc::Send(..), .. }),
+                            (pt0::ArgLabel::Nolabel, _)
+                        ]
+                    ) =>
+            {
+                let pt0::ExpressionDesc::Send(e, method) = &args[0].1.pexp_desc else {
+                    unreachable!()
+                };
+                let v_idx = self.push_expr(&args[1].1);
+                let name = self.map_label_loc(method);
+                let e_idx = self.push_expr(e);
+                current::ExpressionDesc::Pexp_object_set(Box::new((e_idx, name, v_idx)))
+            }
             pt0::ExpressionDesc::Apply(func, args) => {
                 // Check for JSX attribute - convert back to JSX element
                 if has_jsx_attribute(&expr.pexp_attributes) {
@@ -1470,7 +1491,7 @@ impl<'a> Mapper<'a> {
             }
             pt0::ExpressionDesc::Send(e, method) => {
                 let e_idx = self.push_expr(e);
-                current::ExpressionDesc::Pexp_send(Box::new((e_idx, self.map_label_loc(method))))
+                current::ExpressionDesc::Pexp_object_get(Box::new((e_idx, self.map_label_loc(method))))
             }
             pt0::ExpressionDesc::Letmodule(name, me, body) => {
                 let body_idx = self.push_expr(body);
@@ -1517,6 +1538,27 @@ impl<'a> Mapper<'a> {
                 if items.is_empty() && name.txt == "res.continue" =>
             {
                 current::ExpressionDesc::Pexp_continue
+            }
+            // ast_mapper_from0.ml: decode the reserved v0 `%obj` encoding of
+            // object literals.
+            pt0::ExpressionDesc::Extension((name, pt0::Payload::PStr(items)))
+                if name.txt == "obj" && v0_object_literal_rows(items).is_some() =>
+            {
+                let rows = v0_object_literal_rows(items).expect("checked by the guard");
+                let fields = rows
+                    .iter()
+                    .map(|(lid, e)| {
+                        let Longident::Lident(field) = &lid.txt else {
+                            unreachable!("checked by the guard")
+                        };
+                        let field = Located::new(
+                            Cow::Owned(self.get_str(*field).to_string()),
+                            self.loc(&lid.loc),
+                        );
+                        (field, self.push_expr(e))
+                    })
+                    .collect();
+                current::ExpressionDesc::Pexp_object_literal(Box::new(fields))
             }
             pt0::ExpressionDesc::Extension(ext) => {
                 current::ExpressionDesc::Pexp_extension(Box::new(self.map_extension(ext)))
@@ -2349,4 +2391,27 @@ impl<'a> Mapper<'a> {
             pincl_attributes: self.map_attributes(&id.pincl_attributes).into(),
         }
     }
+}
+
+/// The rows of the v0 `%obj` encoding of an object literal: a single
+/// `Pstr_eval` with no attributes of a record without spread whose labels are
+/// all `Lident` (ast_mapper_from0.ml `Pexp_extension ({txt = "obj"}, ...)`).
+fn v0_object_literal_rows(
+    items: &[pt0::StructureItem],
+) -> Option<&[(OldLocated<Longident>, pt0::Expression)]> {
+    let [item] = items else {
+        return None;
+    };
+    let pt0::StructureItemDesc::Eval(e, eval_attrs) = &item.pstr_desc else {
+        return None;
+    };
+    if !eval_attrs.is_empty() {
+        return None;
+    }
+    let pt0::ExpressionDesc::Record(rows, None) = &e.pexp_desc else {
+        return None;
+    };
+    rows.iter()
+        .all(|(lid, _)| matches!(lid.txt, Longident::Lident(_)))
+        .then_some(rows.as_slice())
 }

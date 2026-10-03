@@ -22,7 +22,8 @@ use crate::types::decl::{
     ValueDescription, ValueKind,
 };
 use crate::types::env::Env;
-use crate::types::type_expr::{FieldKind, RowDesc, RowField, TypeDesc};
+use crate::types::asttypes::MutableFlag as FieldKind;
+use crate::types::type_expr::{RowDesc, RowField, TypeDesc};
 use crate::types::typedtree::ModuleCoercion;
 use crate::types::{TypeContext, TypeExprRef};
 use crate::{parser::code_frame, types::ArgLabel};
@@ -3553,6 +3554,15 @@ fn fixed_private_object_manifest_for_inclusion(
     if !sig_only.is_empty() {
         return false;
     }
+    // The signature must not grant write capability the implementation
+    // lacks; an implementation's settable field may be abstracted to a
+    // read-only one.
+    if !pairs.iter().all(|(_, impl_mut, _, sig_mut, _)| match sig_mut {
+        FieldKind::Mutable => *impl_mut == FieldKind::Mutable,
+        FieldKind::Immutable => true,
+    }) {
+        return false;
+    }
 
     let mut impl_types = impl_params.to_vec();
     let mut sig_types = sig_params.to_vec();
@@ -4235,11 +4245,11 @@ fn flatten_object_fields_for_inclusion(
         match &*desc {
             TypeDesc::Tfield {
                 name,
-                kind,
+                mutability,
                 typ,
                 rest,
             } => {
-                flattened.push((name.clone(), kind.clone(), *typ));
+                flattened.push((name.clone(), type_ctx.mutability_repr(*mutability), *typ));
                 let next = type_ctx.repr(*rest);
                 drop(desc);
                 current = next;
@@ -4302,10 +4312,8 @@ fn associate_object_fields_for_inclusion(
 }
 
 fn object_field_kinds_equal_for_inclusion(left: &FieldKind, right: &FieldKind) -> bool {
-    matches!(
-        (left, right),
-        (FieldKind::Fvar(_), FieldKind::Fvar(_)) | (FieldKind::Fpresent, FieldKind::Fpresent)
-    )
+    // ctype.ml eqtype_fields: the mutabilities must agree.
+    left == right
 }
 
 fn object_fields_equal_for_inclusion(

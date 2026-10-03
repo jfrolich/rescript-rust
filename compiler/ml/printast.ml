@@ -244,6 +244,13 @@ and expression i ppf x =
   let i = i + 1 in
   match x.pexp_desc with
   | Pexp_ident li -> line i ppf "Pexp_ident %a\n" fmt_longident_loc li
+  | Pexp_object_literal fields ->
+    line i ppf "Pexp_object_literal\n";
+    List.iter
+      (fun ((s : string Asttypes.loc), e) ->
+        line i ppf "field \"%s\"\n" s.txt;
+        expression i ppf e)
+      fields
   | Pexp_constant c -> line i ppf "Pexp_constant %a\n" fmt_constant c
   | Pexp_let (rf, l, e) ->
     line i ppf "Pexp_let %a\n" fmt_rec_flag rf;
@@ -344,8 +351,12 @@ and expression i ppf x =
     line i ppf "Pexp_coerce\n";
     expression i ppf e;
     core_type i ppf cto2
-  | Pexp_send (e, s) ->
-    line i ppf "Pexp_send \"%s\"\n" s.txt;
+  | Pexp_object_set (e, s, v) ->
+    line i ppf "Pexp_object_set \"%s\"\n" s.txt;
+    expression i ppf e;
+    expression i ppf v
+  | Pexp_object_get (e, s) ->
+    line i ppf "Pexp_object_get \"%s\"\n" s.txt;
     expression i ppf e
   | Pexp_letmodule (s, me, e) ->
     line i ppf "Pexp_letmodule %a\n" fmt_string_loc s;

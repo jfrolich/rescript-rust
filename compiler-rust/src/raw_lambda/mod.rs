@@ -134,8 +134,6 @@ pub enum RawLambda {
     Lcontinue,
     /// Assignment.
     Lassign(Ident, Box<RawLambda>),
-    /// Method send.
-    Lsend(String, Box<RawLambda>, Location),
     /// A match action placed in a compiled matching without copying it.
     /// Only the pattern-matching compiler creates this, and its entry points
     /// replace every occurrence (see `matching::resolve_shared_actions`), so
@@ -224,7 +222,7 @@ impl RawLambda {
                 f(iterable);
                 f(body);
             }
-            RawLambda::Lassign(_, value) | RawLambda::Lsend(_, value, _) => f(value),
+            RawLambda::Lassign(_, value) => f(value),
             RawLambda::Lshared(_) => {}
         }
     }
@@ -536,14 +534,6 @@ impl RawLambda {
             RawLambda::Lbreak => Lambda::Lbreak,
             RawLambda::Lcontinue => Lambda::Lcontinue,
             RawLambda::Lassign(id, value) => Lambda::Lassign(id, Box::new(value.into_lowered())),
-            RawLambda::Lsend(name, obj, loc) => Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
-                primitive: Primitive::PjsUnsafeDowngrade {
-                    name,
-                    setter: false,
-                },
-                args: vec![obj.into_lowered()],
-                loc,
-            })),
         }
     }
 }

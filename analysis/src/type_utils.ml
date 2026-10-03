@@ -34,8 +34,8 @@ let rec has_tvar (ty : Types.type_expr) : bool =
     List.exists (fun ({typ} : Types.arg) -> has_tvar typ) params || has_tvar ret
   | Ttuple tyl -> List.exists has_tvar tyl
   | Tconstr (_, tyl, _) -> List.exists has_tvar tyl
-  | Tobject (ty, _) -> has_tvar ty
-  | Tfield (_, _, ty1, ty2) -> has_tvar ty1 || has_tvar ty2
+  | Tobject ty -> has_tvar ty
+  | Tfield {typ = ty1; rest = ty2} -> has_tvar ty1 || has_tvar ty2
   | Tnil -> false
   | Tlink ty -> has_tvar ty
   | Tsubst ty -> has_tvar ty
@@ -156,8 +156,9 @@ let instantiate_type ~type_params ~type_args (t : Types.type_expr) =
                 loop ret );
         }
       | Ttuple tl -> {t with desc = Ttuple (tl |> List.map loop)}
-      | Tobject (t, r) -> {t with desc = Tobject (loop t, r)}
-      | Tfield (n, k, t1, t2) -> {t with desc = Tfield (n, k, loop t1, loop t2)}
+      | Tobject t -> {t with desc = Tobject (loop t)}
+      | Tfield f ->
+        {t with desc = Tfield {f with typ = loop f.typ; rest = loop f.rest}}
       | Tpoly (t, []) -> loop t
       | Tpoly (t, tl) -> {t with desc = Tpoly (loop t, tl |> List.map loop)}
       | Tpackage (p, l, tl) ->
@@ -217,8 +218,9 @@ let instantiate_type2 ?(type_arg_context : type_arg_context option)
                 loop ret );
         }
       | Ttuple tl -> {t with desc = Ttuple (tl |> List.map loop)}
-      | Tobject (t, r) -> {t with desc = Tobject (loop t, r)}
-      | Tfield (n, k, t1, t2) -> {t with desc = Tfield (n, k, loop t1, loop t2)}
+      | Tobject t -> {t with desc = Tobject (loop t)}
+      | Tfield f ->
+        {t with desc = Tfield {f with typ = loop f.typ; rest = loop f.rest}}
       | Tpoly (t, []) -> loop t
       | Tpoly (t, tl) -> {t with desc = Tpoly (loop t, tl |> List.map loop)}
       | Tpackage (p, l, tl) ->
@@ -270,7 +272,7 @@ let rec extract_object_type ~state ~env ~package (t : Types.type_expr) =
   match t.desc with
   | Tlink t1 | Tsubst t1 | Tpoly (t1, []) ->
     extract_object_type ~state ~env ~package t1
-  | Tobject (t_obj, _) -> Some (env, t_obj)
+  | Tobject t_obj -> Some (env, t_obj)
   | Tconstr (path, type_args, _) -> (
     match References.dig_constructor ~state ~env ~package path with
     | Some (env, {item = {decl = {type_manifest = Some t1; type_params}}}) ->
@@ -1334,7 +1336,7 @@ let remove_current_module_if_needed ~env_completion_is_made_from completion_path
 
 let rec get_obj_fields (texp : Types.type_expr) =
   match texp.desc with
-  | Tfield (name, _, t1, t2) ->
+  | Tfield {name; typ = t1; rest = t2} ->
     let fields = t2 |> get_obj_fields in
     (name, t1) :: fields
   | Tlink te | Tsubst te | Tpoly (te, []) -> te |> get_obj_fields

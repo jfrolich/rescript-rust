@@ -216,7 +216,7 @@ Source: [typecore.ml:27](../compiler/ml/typecore.ml).
 | `Or_pattern_type_clash` | ✓ | `or_pattern_type_clash.res` | |
 | `Multiply_bound_variable` | ✓ | `multiply_bound_variable.res` | |
 | `Orpat_vars` | ✓ | `orpat_vars_unbalanced.res` | |
-| `Expr_type_clash` | ✓ | many `*.res` | Most-fired expression error. Trace-shape sub-cases covered: `if_return_type_mismatch.res` (IfReturn), `maybe_unwrap_option.res` (MaybeUnwrapOption), `string_concat_non_string.res` (StringConcat), `labeled_fn_argument_type_clash.res` (FunctionArgument with explicit label), `math_operator_*.res` (MathOperator family), `ternary_branch_mismatch.res`, `switch_different_types.res`, `try_catch_same_type.res`, `comparison_operator.res`, `array_item_type_mismatch.res`, `array_literal_passed_to_tuple.res`, `if_condition_mismatch.res`, `while_condition.res`, `for_loop_condition.res`, `assert_condition.res`, `function_call_mismatch.res`, `awaiting_non_promise.res`, multiple `jsx_*` fixtures; `tests/error_output_parity/compiler/fixtures/record_spread_wrong_type.res` (spread source mismatch) and `long_type_clash.res` (long type/alias diagnostic wrapping). |
+| `Expr_type_clash` | ✓ | many `*.res` | Most-fired expression error. Trace-shape sub-cases covered: `if_return_type_mismatch.res` (IfReturn), `maybe_unwrap_option.res` (MaybeUnwrapOption), `string_concat_non_string.res` (StringConcat), `labeled_fn_argument_type_clash.res` (FunctionArgument with explicit label), `math_operator_*.res` (MathOperator family), `ternary_branch_mismatch.res`, `switch_different_types.res`, `try_catch_same_type.res`, `comparison_operator.res`, `array_item_type_mismatch.res`, `array_literal_passed_to_tuple.res`, `if_condition_mismatch.res`, `while_condition.res`, `for_loop_condition.res`, `assert_condition.res`, `function_call_mismatch.res`, `awaiting_non_promise.res`, multiple `jsx_*` fixtures; `tests/error_output_parity/compiler/fixtures/record_spread_wrong_type.res` (spread source mismatch) and `long_type_clash.res` (long type/alias diagnostic wrapping); `object_literal_for_poly_field.res` (object literal against a polymorphic field annotation). |
 | `Apply_non_function` | ✓ | `apply_non_function.res` | |
 | `Apply_wrong_label` | ✓ | `apply_wrong_label.res` | |
 | `Label_multiply_defined` | ✓ | `label_multiply_defined_literal.res` | |
@@ -225,12 +225,14 @@ Source: [typecore.ml:27](../compiler/ml/typecore.ml).
 | `Wrong_name` | ✓ | `wrong_name_record_field.res`, `Cross_record_extra_field` (multi) | |
 | `Name_type_mismatch` | ✓ | `super_errors_multi/Cross_qualified_constructor_mismatch` | Cross-module constructor disambiguation. |
 | `Undefined_method` | ✓ | `super_errors_multi/Cross_module_alias_dot_access`, `undefined_method` | |
+| `Object_field_not_mutable` | ✓ | `object_write_closed_row`, `object_write_alias`, `object_write_after_forgetting`, `object_private_row_write`, `object_private_row_write_through_signature` | Assignment to a field without `@set`. `object_write_alias` pins that promotion is per equivalence class, and `object_write_after_forgetting` pins that a coercion never grants write capability. The private-row fixtures pin that a `Tconstr` row terminator is structurally open but cannot be strengthened: writing through `type t = private {.."x": int}` (directly or via a signature) is rejected, matching `unify_mutability`. |
 | `Private_type` | ✓ | `private_type_construction.res`, `private_record_construction.res`, `private_record_update.res` | |
+| `Private_label` | ✓ | `private_label.res` | |
 | `Not_subtype` | ✓ | `subtype_*.res`, `coercion_arity_mismatch.res`, `dict_show_no_coercion.res`, etc. | |
 | `Abstract_wrong_label` | ✓ | `abstract_wrong_label.res` | Multi-arg function literal where an inner argument label doesn't match the expected arrow's label (e.g. `let f: (~a, ~b) => int = (~a, ~c) => …`). |
 | `Scoping_let_module` | ✓ | `scoping_let_module.res` | |
 | `Not_a_variant_type` | ✓ | `variant_spread_pattern_not_a_variant.res` | Pattern-level variant spread of a non-variant type. |
-| `Less_general` | ✓ | `less_general_universal.res` | |
+| `Less_general` | ✓ | `less_general_universal.res`, `object_write_poly_field_less_general.res` | The latter pins that assigning to a polymorphic object field checks the value against the field's scheme. |
 | `Modules_not_allowed` | ✓ | `super_errors_multi/Modules_not_allowed_toplevel` | Toplevel `let module(M) = …` pattern with `allow_modules=false`. |
 | `Cannot_infer_signature` | ✓ | `cannot_infer_signature.res` | |
 | `Not_a_packed_module` | ✓ | `not_a_packed_module.res` | |
@@ -285,7 +287,7 @@ Type-declaration errors. Source: [typedecl.ml:27](../compiler/ml/typedecl.ml).
 | `Rebind_wrong_type` | ✓ | `extension_rebind_mismatch.res` | Rebinding constructor into a different extensible type fails while unifying the source constructor result with the extension target. |
 | `Rebind_mismatch` | ? | — | The later declaration-shape check after `Rebind_wrong_type`; no source fixture was confirmed in this pass. |
 | `Rebind_private` | ✓ | `extension_rebind_private.res` | Rebinding a private extension constructor as public. |
-| `Bad_variance` | ✓ | `bad_variance.res`, `bad_variance_contra.res` | |
+| `Bad_variance` | ✓ | `bad_variance.res`, `bad_variance_contra.res`, `object_settable_field_covariant_param.res` | The latter pins that a settable object field is an invariant occurrence, like a mutable record label. |
 | `Unavailable_type_constructor` | ☐ (needs build harness) | — | typedecl.ml:778. Requires a type path findable at parse time but missing during constraint enforcement; only cross-unit scenarios where a `.cmi` was found but later removed. |
 | `Bad_fixed_type` | ✓ | `fixed_type_no_row_variable.res` | Fully-bounded closed private polymorphic variant (`type t = private [< #A | #B > #A #B]`) satisfies `is_fixed_type` but has a static (non-`Tvar`) row. |
 | `Unbound_type_var_ext` | ✓ | `unbound_type_var_extension.res` | |
@@ -370,7 +372,7 @@ Wrapper symptoms attached to inclusion failures. Source: [includemod.ml:23](../c
 | Variant | Status | Fixture | Notes |
 |---|---|---|---|
 | `Missing_field` | ✓ | `super_errors_multi/Iface_missing_value` | |
-| `Value_descriptions` | ✓ | `super_errors_multi/Iface_value_descriptions`, `super_errors_multi/Iface_value_arity_mismatch`, `super_errors_multi/Smoke_interface_mismatch`, `super_errors_multi/Cross_external_spec_mismatch`, `super_errors_multi/Cross_external_payload_name`, `super_errors_multi/Cross_external_import_attrs`, `module_sig_value_arity_mismatch*.res` | Arity mismatches print a dedicated hint (implementation vs interface argument counts), including through aliases and nested function types. |
+| `Value_descriptions` | ✓ | `super_errors_multi/Iface_value_descriptions`, `super_errors_multi/Iface_value_arity_mismatch`, `super_errors_multi/Smoke_interface_mismatch`, `super_errors_multi/Cross_external_spec_mismatch`, `super_errors_multi/Cross_external_payload_name`, `super_errors_multi/Cross_external_import_attrs`, `module_sig_value_arity_mismatch*.res`, `object_value_signature_set_mismatch.res` | Arity mismatches print a dedicated hint (implementation vs interface argument counts), including through aliases and nested function types. The object fixture pins that a value signature cannot drop `@set` from an object type (moregeneral requires equal field mutability). |
 | `Type_declarations` | ✓ | `super_errors_multi/Iface_type_decl_record`, `super_errors_multi/Iface_type_decl_variant`, `RecordInclusion.res`, `type_decl_function_arity_mismatch.res` | |
 | `Extension_constructors` | ✓ | `super_errors_multi/Iface_extension_constructors` | |
 | `Module_types` | ✓ | `super_errors_multi/Iface_module_types` | |
@@ -394,7 +396,7 @@ Source: [includecore.ml:159](../compiler/ml/includecore.ml).
 | `Privacy` | ✓ | `super_errors_multi/Iface_privacy_mismatch` | |
 | `Kind` | ✓ | `super_errors_multi/Iface_kind_mismatch` | Record-in-impl vs variant-in-interface. |
 | `Constraint` | ✓ | `super_errors_multi/Iface_constraint_mismatch` | Implementation adds a `constraint 'a = …`; interface has none. |
-| `Manifest` | ✓ | `super_errors_multi/Iface_manifest_mismatch`, `type_decl_function_arity_mismatch.res` | Manifest types differ, including function types with different arities. |
+| `Manifest` | ✓ | `super_errors_multi/Iface_manifest_mismatch`, `type_decl_function_arity_mismatch.res`, `object_private_row_grants_set.res`, `object_manifest_set_mismatch.res` | Manifest types differ, including function types with different arities. The object fixtures pin the `@set` inclusion matrix: a private row's signature cannot grant `@set` its implementation lacks (but may forget it — pinned compiling in `object_mutability_pin.res`), while a transparent manifest is an equation and cannot forget it either. |
 | `Variance` | ✓ | `super_errors_multi/Iface_variance_mismatch` | Interface annotates `+'a`; implementation's inferred variance differs. |
 | `Field_type` | ✓ | `super_errors_multi/Iface_type_decl_record` | |
 | `Field_mutable` | ✓ | `super_errors_multi/Iface_field_mutable_mismatch` | |
@@ -416,7 +418,6 @@ FFI / attribute / experimental-feature errors. Source: [bs_syntaxerr.ml:27](../c
 
 | Variant | Status | Fixture | Notes |
 |---|---|---|---|
-| `Unsupported_predicates` | ✓ | `bs_unsupported_predicates.res` | `@get({weird: true})` on object type field. |
 | `Duplicated_bs_deriving` | ✓ | `duplicated_bs_deriving.res` | |
 | `Conflict_attributes` | ✓ | `bs_conflict_attributes.res` | |
 | `Expect_int_literal` | ✓ | `bs_expect_int_literal.res` | |

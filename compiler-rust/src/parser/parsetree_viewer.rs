@@ -457,7 +457,7 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         {
             true
         }
-        ExpressionDesc::Pexp_extension(ext) if arena.get_string(ext.0.txt) == "obj" => true,
+        ExpressionDesc::Pexp_object_literal(_) => true,
         _ if is_block_expr(expr) => true,
         _ if is_braced_expr(arena, expr) => true,
         ExpressionDesc::Pexp_constant(c) => {
@@ -497,7 +497,7 @@ pub fn is_huggable_rhs(arena: &ParseArena, expr: &Expression) -> bool {
         ExpressionDesc::Pexp_array(_)
         | ExpressionDesc::Pexp_tuple(_)
         | ExpressionDesc::Pexp_record(_) => true,
-        ExpressionDesc::Pexp_extension(ext) if arena.get_string(ext.0.txt) == "obj" => true,
+        ExpressionDesc::Pexp_object_literal(_) => true,
         _ if is_braced_expr(arena, expr) => true,
         _ => false,
     }

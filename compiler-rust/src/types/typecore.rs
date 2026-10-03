@@ -580,6 +580,13 @@ pub enum TypeCoreError {
         alternatives: Option<Vec<String>>,
     },
 
+    /// typecore.ml `Object_field_not_mutable`.
+    ObjectFieldNotMutable {
+        loc: LocIdx,
+        ty: TypeExprRef,
+        name: String,
+    },
+
     /// Unbound value identifier.
     UnboundValue {
         loc: LocIdx,
@@ -2403,31 +2410,6 @@ fn is_incomplete_type_constructor_path(ctx: &TypeContext, env: &Env, path: &Path
             .is_some_and(|decl_path| decl_path.same(path))
 }
 
-fn object_row(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
-    let mut current = ty;
-    let mut seen = HashSet::new();
-    loop {
-        let repr = ctx.repr(current);
-        if !seen.insert(repr) {
-            return repr;
-        }
-        let desc = ctx.get_desc(repr);
-        match &*desc {
-            TypeDesc::Tobject { fields, .. } => current = *fields,
-            TypeDesc::Tfield { rest, .. } => current = *rest,
-            _ => return repr,
-        }
-    }
-}
-
-fn opened_object(ctx: &TypeContext, ty: TypeExprRef) -> bool {
-    let row = object_row(ctx, ty);
-    matches!(
-        &*ctx.borrow_desc(row),
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tconstr { .. }
-    )
-}
-
 /// Translate a parsed CoreType to a TypedCoreType and its corresponding TypeExprRef.
 ///
 /// This function converts the surface syntax type annotations into the internal
@@ -3408,7 +3390,8 @@ fn transl_type_inner(
             let mut typed_fields = Vec::new();
             // Match OCaml Typetexp.transl_fields: collect unique fields in a
             // hashtable, then iterate in Hashtbl.fold order.
-            let mut field_entries: HashMap<String, TypeExprRef> = HashMap::new();
+            let mut field_entries: HashMap<String, (TypeExprRef, crate::types::asttypes::MutableFlag)> =
+                HashMap::new();
             let mut field_insertions: Vec<String> = Vec::new();
 
             // `add_typed_field` (typetexp.ml:571-579): skip equal types,
@@ -3417,12 +3400,22 @@ fn transl_type_inner(
                 tctx: &mut TypeCheckContext<'_>,
                 env: &Env,
                 loc: LocIdx,
-                field_entries: &mut HashMap<String, TypeExprRef>,
+                field_entries: &mut HashMap<String, (TypeExprRef, crate::types::asttypes::MutableFlag)>,
                 field_insertions: &mut Vec<String>,
                 field_name: String,
                 field_type: TypeExprRef,
+                mutability: crate::types::asttypes::MutableFlag,
             ) -> TypeCoreResult<()> {
-                if let Some(existing_type) = field_entries.get(&field_name).copied() {
+                if let Some((existing_type, _)) = field_entries.get(&field_name).copied() {
+                    // When duplicate declarations of a field are collapsed,
+                    // preserve `Mutable` if any declaration has `@set`
+                    // (`Hashtbl.replace` keeps the binding's position).
+                    if mutability == crate::types::asttypes::MutableFlag::Mutable {
+                        field_entries.insert(
+                            field_name.clone(),
+                            (existing_type, crate::types::asttypes::MutableFlag::Mutable),
+                        );
+                    }
                     let ctx = tctx.type_ctx;
                     if crate::types::ctype::equal(ctx, env, false, &[field_type], &[existing_type]) {
                         return Ok(());
@@ -3438,10 +3431,22 @@ fn transl_type_inner(
                         })?;
                 } else {
                     field_insertions.push(field_name.clone());
-                    field_entries.insert(field_name, field_type);
+                    field_entries.insert(field_name, (field_type, mutability));
                 }
                 Ok(())
             }
+
+            // typetexp.ml `field_mutability`: `@set` with an empty payload.
+            let field_mutability = |attrs: &crate::parser::ast::Attributes| {
+                if attrs.iter().any(|(name, payload)| {
+                    tctx.arena.get_string(name.txt) == "set"
+                        && matches!(payload, crate::parser::ast::Payload::PStr(items) if items.is_empty())
+                }) {
+                    crate::types::asttypes::MutableFlag::Mutable
+                } else {
+                    crate::types::asttypes::MutableFlag::Immutable
+                }
+            };
 
             for field in fields.iter() {
                 match field {
@@ -3472,6 +3477,7 @@ fn transl_type_inner(
                         };
 
                         let field_name = tctx.arena.get_string(label.txt).to_string();
+                        let mutability = field_mutability(attrs);
                         add_object_field(
                             tctx,
                             env,
@@ -3480,6 +3486,7 @@ fn transl_type_inner(
                             &mut field_insertions,
                             field_name.clone(),
                             poly_ty,
+                            mutability,
                         )?;
 
                         typed_fields.push(crate::types::typedtree::ObjectField {
@@ -3521,7 +3528,7 @@ fn transl_type_inner(
                             }
                         };
                         if let Some(obj_fields) = inherited_object_fields {
-                            if opened_object(ctx, expanded) {
+                            if crate::types::ctype::object_row_is_structurally_open(ctx, expanded) {
                                 return Err(TypeCoreError::OpenedObject {
                                     loc: inherit_ct.ptyp_loc,
                                     path: inherit_name,
@@ -3533,7 +3540,10 @@ fn transl_type_inner(
                                 let fd = ctx.get_desc(ctx.repr(current_field));
                                 match &*fd {
                                     TypeDesc::Tfield {
-                                        name, typ, rest, ..
+                                        name,
+                                        mutability,
+                                        typ,
+                                        rest,
                                     } => {
                                         add_object_field(
                                             tctx,
@@ -3543,6 +3553,7 @@ fn transl_type_inner(
                                             &mut field_insertions,
                                             name.clone(),
                                             *typ,
+                                            ctx.mutability_repr(*mutability),
                                         )?;
                                         current_field = *rest;
                                     }
@@ -3595,19 +3606,17 @@ fn transl_type_inner(
             // Fold fields into Tfield chain
             let fields_ty = field_entries
                 .iter()
-                .fold(ty_init, |rest, (name, field_ty)| {
+                .fold(ty_init, |rest, (name, (field_ty, mutability))| {
                     ctx.new_type(TypeDesc::Tfield {
                         name: name.clone(),
-                        kind: crate::types::type_expr::FieldKind::Fpresent,
+                        mutability: ctx
+                            .alloc_mutability(crate::types::type_expr::FieldMutability::Value(*mutability)),
                         typ: *field_ty,
                         rest,
                     })
                 });
             // Wrap in Tobject
-            let obj_ty = ctx.new_type(TypeDesc::Tobject {
-                fields: fields_ty,
-                name: None,
-            });
+            let obj_ty = ctx.new_type(TypeDesc::Tobject { fields: fields_ty });
 
             let ctyp = TypedCoreType {
                 ctyp_desc: TypedCoreTypeDesc::Ttyp_object(typed_fields, *closed),
@@ -5126,14 +5135,7 @@ fn type_contains_tunivar(
                     .copied()
                     .any(|ty| type_contains_tunivar(ctx, env, ty, seen))
         }
-        TypeDesc::Tobject { fields, name } => {
-            type_contains_tunivar(ctx, env, *fields, seen)
-                || name.as_ref().is_some_and(|(_, args)| {
-                    args.iter()
-                        .copied()
-                        .any(|ty| type_contains_tunivar(ctx, env, ty, seen))
-                })
-        }
+        TypeDesc::Tobject { fields } => type_contains_tunivar(ctx, env, *fields, seen),
         TypeDesc::Tfield { typ, rest, .. } => {
             type_contains_tunivar(ctx, env, *typ, seen)
                 || type_contains_tunivar(ctx, env, *rest, seen)
@@ -7952,7 +7954,17 @@ fn type_expect_with_recarg_unscoped<'a>(
                 }
             }
 
-            // Normal identifier expression
+            // Normal identifier expression. typetexp.ml `find_value`:
+            // `Env.check_value_name (Longident.last lid) loc` before lookup.
+            {
+                let last = tctx.arena.get_string(longident.last_idx());
+                if crate::types::env::check_value_name(last, tctx.arena.to_location(lid.loc)).is_err() {
+                    return Err(TypeCoreError::IllegalValueName {
+                        loc: lid.loc,
+                        name: last.to_string(),
+                    });
+                }
+            }
             mark_open_lid_use(ctx, env, tctx.arena, longident, crate::types::env::OpenLookupKind::Value, Some(lid.loc));
             let (path, desc) = match env.lookup_value_by_lid(
                 longident,
@@ -8721,11 +8733,11 @@ fn type_expect_with_recarg_unscoped<'a>(
             )
         }
 
-        ED::Pexp_send(inner) => {
+        ED::Pexp_object_get(inner) => {
             let (ref obj_expr_idx, ref method) = **inner;
             // Method send: E#m
             let obj_expr = tctx.arena.get_expr(*obj_expr_idx);
-            type_send(
+            type_object_get(
                 tctx,
                 env,
                 loc,
@@ -8736,6 +8748,33 @@ fn type_expect_with_recarg_unscoped<'a>(
                 &expr.pexp_attributes,
             )
         }
+
+        ED::Pexp_object_set(inner) => {
+            let (ref obj_expr_idx, ref field, ref value_idx) = **inner;
+            let obj_expr = tctx.arena.get_expr(*obj_expr_idx);
+            let value = tctx.arena.get_expr(*value_idx);
+            type_object_set(
+                tctx,
+                env,
+                loc,
+                obj_expr,
+                field,
+                value,
+                expected_ty,
+                context,
+                &expr.pexp_attributes,
+            )
+        }
+
+        ED::Pexp_object_literal(fields) => type_object_literal(
+            tctx,
+            env,
+            loc,
+            fields,
+            expected_ty,
+            context,
+            &expr.pexp_attributes,
+        ),
 
         ED::Pexp_letexception(inner) => {
             let (ref ext_constr, ref body_idx) = **inner;
@@ -9769,16 +9808,10 @@ fn force_lower_args_type_lookup_paths(
                     visit_manifest(tctx, env, item, seen);
                 }
             }
-            TypeDesc::Tobject { fields, name } => {
+            TypeDesc::Tobject { fields } => {
                 let fields = *fields;
-                let name_args = name.as_ref().map(|(_, args)| args.clone());
                 drop(desc);
                 visit_manifest(tctx, env, fields, seen);
-                if let Some(args) = name_args {
-                    for arg in args {
-                        visit_manifest(tctx, env, arg, seen);
-                    }
-                }
             }
             TypeDesc::Tfield { typ, rest, .. } => {
                 let typ = *typ;
@@ -11669,10 +11702,16 @@ fn collect_expression_ident_heads(exp: &Expression, ids: &mut Vec<Ident>) {
             collect_expression_ident_heads(stop, ids);
             collect_expression_ident_heads(body, ids);
         }
-        ExpressionDesc::Texp_send(receiver, _, arg) => {
+        ExpressionDesc::Texp_object_get(receiver, _) => {
             collect_expression_ident_heads(receiver, ids);
-            if let Some(arg) = arg {
-                collect_expression_ident_heads(arg, ids);
+        }
+        ExpressionDesc::Texp_object_set(receiver, _, value) => {
+            collect_expression_ident_heads(receiver, ids);
+            collect_expression_ident_heads(value, ids);
+        }
+        ExpressionDesc::Texp_object_literal(fields) => {
+            for (_, field) in fields {
+                collect_expression_ident_heads(field, ids);
             }
         }
         ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
@@ -12940,8 +12979,17 @@ fn collect_lident_idents_in_expression(
         ED::Pexp_coerce(inner) => {
             collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
         }
-        ED::Pexp_send(inner) => {
+        ED::Pexp_object_get(inner) => {
             collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
+        }
+        ED::Pexp_object_set(inner) => {
+            collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
+            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
+        }
+        ED::Pexp_object_literal(fields) => {
+            for (_, field) in fields.iter() {
+                collect_lident_idents_in_expression(arena, arena.get_expr(*field), out);
+            }
         }
         ED::Pexp_letmodule(inner) => {
             collect_lident_idents_in_module_expr(arena, arena.get_mod_expr(inner.1), out);
@@ -17730,9 +17778,9 @@ fn type_coerce(
     // Translate the target type.
     let (to_typed_ctype, to_ty) = transl_type(tctx, env, to_type)?;
 
-    let typed_inner = if let Some(from_type) = opt_from_type {
+    let (typed_inner, trial_ok) = if let Some(from_type) = opt_from_type {
         let (_from_typed_ctype, from_ty) = transl_type(tctx, env, from_type)?;
-        type_expect(tctx, env, inner_expr, from_ty, None)?
+        (type_expect(tctx, env, inner_expr, from_ty, None)?, false)
     } else {
         // OCaml compiler/ml/typecore.ml:3295-3339 always separates coercion
         // argument typing: begin_def(), type_exp, end_def(), then
@@ -17756,30 +17804,35 @@ fn type_coerce(
                 env: Some(tctx.type_ctx.store_typed_env(env)),
             })?;
 
-        if !is_generalizable {
-            // OCaml compiler/ml/typecore.ml:3317-3330 first tries ordinary
-            // unification for non-generalizable coercions, with
-            // `snapshot ()`/`backtrack` around the failed path at lines
-            // 3321-3329. Keep the mutation on success; restore the original
-            // type graph on failure.
+        // typecore.ml `Pexp_coerce`: for a non-generalizable source, first
+        // try unification with an enlarged approximation of the target
+        // (`Ctype.enlarge_type`) under a snapshot; on failure backtrack and
+        // fall back to subtype constraints.
+        let trial_ok = !is_generalizable && {
             let coerce_snapshot = ctx.snapshot_type_state();
+            let (enlarged, _) = crate::types::ctype::enlarge_type(ctx, env, to_ty);
             let mut coerce_unify_state = UnifyState::new();
             coerce_unify_state.set_env(env);
             let coerce_result =
-                crate::types::unify(ctx, &mut coerce_unify_state, typed_inner.exp_type, to_ty);
+                crate::types::unify(ctx, &mut coerce_unify_state, typed_inner.exp_type, enlarged);
             if coerce_result.is_err() {
                 ctx.restore_type_state(coerce_snapshot);
+                false
+            } else {
+                true
             }
-        }
-        typed_inner
+        };
+        (typed_inner, trial_ok)
     };
 
-    // OCaml typecore.ml:3283-3291: `let force' = subtype env arg.exp_type
-    // ty' in force (); force' ()`.
-    let subtype_cstrs = crate::types::ctype::subtype(ctx, env, typed_inner.exp_type, to_ty)
-        .map_err(|err| not_subtype_error(ctx, env, loc, err, typed_inner.exp_type, to_ty))?;
-    crate::types::ctype::force_subtype(ctx, env, subtype_cstrs)
-        .map_err(|err| not_subtype_error(ctx, env, loc, err, typed_inner.exp_type, to_ty))?;
+    if !trial_ok {
+        // OCaml typecore.ml: `let force' = subtype env arg.exp_type ty' in
+        // force (); force' ()`.
+        let subtype_cstrs = crate::types::ctype::subtype(ctx, env, typed_inner.exp_type, to_ty)
+            .map_err(|err| not_subtype_error(ctx, env, loc, err, typed_inner.exp_type, to_ty))?;
+        crate::types::ctype::force_subtype(ctx, env, subtype_cstrs)
+            .map_err(|err| not_subtype_error(ctx, env, loc, err, typed_inner.exp_type, to_ty))?;
+    }
 
     // OCaml `rue { exp_type = ty'; ... }` (typecore.ml:3295-3305, 2369-2371)
     // after the coercion check: `unify_exp` at the coercion's location
@@ -18107,32 +18160,17 @@ fn type_await(
     ))
 }
 
-/// Type check method send.
-fn collect_public_methods_from_object_type<'a>(
-    ctx: &'a TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-) -> Option<Vec<String>> {
+/// typecore.ml `object_valid_fields`.
+fn object_valid_fields(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Option<Vec<String>> {
     let expanded = crate::types::ctype::expand_head(ctx, env, ty);
-    let fields = {
-        let desc = ctx.get_desc(expanded);
-        match &*desc {
-            TypeDesc::Tobject { fields, .. } => *fields,
-            _ => return None,
-        }
+    let fields = match &*ctx.get_desc(expanded) {
+        TypeDesc::Tobject { fields } => *fields,
+        _ => return None,
     };
-
-    // OCaml typecore.ml:3339-3345: `List.fold_left collect_fields []` over
-    // `Ctype.flatten_fields fields` (sorted by name), prepending each present
-    // method.
+    // `List.fold_left collect_fields []` over `Ctype.flatten_fields fields`
+    // (sorted by name), prepending each field.
     let (fields, _) = crate::types::ctype::flatten_fields(ctx, fields);
-    let methods: Vec<String> = fields
-        .into_iter()
-        .rev()
-        .filter(|(_, kind, _)| matches!(kind, crate::types::type_expr::FieldKind::Fpresent))
-        .map(|(name, _, _)| name)
-        .collect();
-    Some(methods)
+    Some(fields.into_iter().rev().map(|field| field.name).collect())
 }
 
 fn method_name_is_plain_ident(name: &str) -> bool {
@@ -18146,24 +18184,42 @@ fn method_name_is_plain_ident(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn instantiate_poly_body_for_send(
-    ctx: &TypeContext,
-    body: TypeExprRef,
-    vars: &[TypeExprRef],
-) -> TypeExprRef {
-    let mut cache = TypeExprRefMap::new();
-    for var in vars {
-        cache.insert(ctx.repr(*var), ctx.new_var(None));
+/// typecore.ml `object_field_use_type`: eliminate an object-field scheme for
+/// a read. A declared field payload is wrapped in `Tpoly`: an empty binder
+/// list needs ordinary instantiation, a nonempty list polymorphic
+/// instantiation. An inferred field whose scheme is not known yet can still
+/// be a variable; constrain it to the ordinary, empty-binder form.
+fn object_field_use_type(
+    tctx: &mut TypeCheckContext<'_>,
+    typ: TypeExprRef,
+) -> Result<TypeExprRef, TypeError> {
+    let ctx = tctx.type_ctx;
+    let typ = ctx.repr(typ);
+    let desc = (*ctx.get_desc(typ)).clone();
+    match desc {
+        TypeDesc::Tpoly { body, vars } if vars.is_empty() => Ok(crate::types::ctype::instance(ctx, body)),
+        TypeDesc::Tpoly { body, vars } => {
+            Ok(crate::types::ctype::instance_poly(ctx, false, false, &vars, body).1)
+        }
+        TypeDesc::Tvar(_) => {
+            let ty2 = ctx.new_var(None);
+            let poly = ctx.new_poly(ty2, vec![]);
+            let inst = crate::types::ctype::copy_type(ctx, typ);
+            crate::types::unify(ctx, &mut tctx.unify_state, inst, poly)?;
+            Ok(ty2)
+        }
+        _ => unreachable!("object_field_use_type"),
     }
-    copy_lookup_type_expr(ctx, body, &mut cache)
 }
 
-fn type_send(
+/// typecore.ml `Pexp_object_get`.
+#[allow(clippy::too_many_arguments)]
+fn type_object_get(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     loc: LocIdx,
     obj_expr: &ParsedExpression,
-    method: &Located<std::borrow::Cow<'static, str>>,
+    field: &Located<std::borrow::Cow<'static, str>>,
     expected_ty: TypeExprRef,
     context: Option<TypeClashContext>,
     attributes: &[crate::parser::ast::Attribute],
@@ -18178,7 +18234,7 @@ fn type_send(
             let val_ty = ctx.repr(desc.val_type);
             let val_desc = ctx.get_desc(val_ty);
             if method_name_is_plain_ident(&prim.prim_name)
-                && method_name_is_plain_ident(method.txt.as_ref())
+                && method_name_is_plain_ident(field.txt.as_ref())
                 && matches!(&*val_desc, TypeDesc::Tconstr { args, .. } if args.is_empty())
             {
                 typed_obj.exp_type = desc.val_type;
@@ -18186,79 +18242,194 @@ fn type_send(
         }
     }
 
-    // Port OCaml `Pexp_send` + `Ctype.filter_method` behavior:
-    // - constrain object type to contain the requested method
-    // - derive method result type from polymorphic method slot
-    let method_result_ty = (|| -> Result<TypeExprRef, TypeError> {
-        let method_slot_ty =
-            crate::types::ctype::filter_method(ctx, env, &method.txt, typed_obj.exp_type)?;
-        let method_slot_ty = ctx.repr(method_slot_ty);
-
-        enum MethodSlotAction {
-            PolyNoVars(TypeExprRef),
-            PolyWithVars(TypeExprRef, Vec<TypeExprRef>),
-            Var,
-            Other,
-        }
-
-        let action = {
-            let slot_desc = ctx.get_desc(method_slot_ty);
-            match &*slot_desc {
-                TypeDesc::Tpoly { body, vars } if vars.is_empty() => {
-                    MethodSlotAction::PolyNoVars(*body)
-                }
-                TypeDesc::Tpoly { body, vars } => {
-                    MethodSlotAction::PolyWithVars(*body, vars.to_vec())
-                }
-                TypeDesc::Tvar(_) => MethodSlotAction::Var,
-                _ => MethodSlotAction::Other,
-            }
-        };
-
-        let result_ty = match action {
-            MethodSlotAction::PolyNoVars(body) => crate::types::ctype::instance(ctx, body),
-            MethodSlotAction::PolyWithVars(body, vars) => {
-                instantiate_poly_body_for_send(ctx, body, &vars)
-            }
-            MethodSlotAction::Var => {
-                let method_result_ty = ctx.new_var(None);
-                let poly_ty = ctx.new_poly(method_result_ty, vec![]);
-                let method_slot_ty = crate::types::ctype::copy_type(ctx, method_slot_ty);
-                crate::types::unify(ctx, &mut tctx.unify_state, method_slot_ty, poly_ty)?;
-                method_result_ty
-            }
-            MethodSlotAction::Other => method_slot_ty,
-        };
-        Ok(result_ty)
-    })();
-
-    let method_result_ty = match method_result_ty {
+    // Lookup constrains an open object row to contain the field, without
+    // requiring or adding write capability.
+    let field_ty = crate::types::ctype::filter_method(ctx, env, &field.txt, typed_obj.exp_type)
+        .and_then(|typ| object_field_use_type(tctx, typ));
+    let field_ty = match field_ty {
         Ok(ty) => ty,
         Err(_) => {
-            // OCaml `Pexp_send` (compiler/ml/typecore.ml:3304-3350) raises
-            // `Undefined_method` for every method, including `#=` setters.
-            let alternatives =
-                collect_public_methods_from_object_type(ctx, env, typed_obj.exp_type);
             return Err(TypeCoreError::UndefinedMethod {
                 loc: Some(obj_expr.pexp_loc),
                 ty: typed_obj.exp_type,
-                method: method.txt.to_string(),
-                alternatives,
+                method: field.txt.to_string(),
+                alternatives: object_valid_fields(ctx, env, typed_obj.exp_type),
             });
         }
     };
 
-    // OCaml: rue { ... exp_type = method_result_ty; ... } raises on a clash.
-    rue_unify(tctx, loc, method_result_ty, expected_ty, context)?;
+    rue_unify(tctx, loc, field_ty, expected_ty, context)?;
 
     Ok(Expression::new(
-        ExpressionDesc::Texp_send(
+        ExpressionDesc::Texp_object_get(
             Box::new(typed_obj),
-            crate::types::typedtree::MethKind::Tmeth_name(method.txt.to_string()),
-            None,
+            Located {
+                txt: field.txt.to_string(),
+                loc: field.loc,
+            },
         ),
-        loc.clone(),
-        method_result_ty,
+        loc,
+        field_ty,
+        EnvRef(0),
+        attributes.to_vec().into(),
+    ))
+}
+
+/// typecore.ml `Pexp_object_set`.
+#[allow(clippy::too_many_arguments)]
+fn type_object_set(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    obj_expr: &ParsedExpression,
+    field: &Located<std::borrow::Cow<'static, str>>,
+    svalue: &ParsedExpression,
+    expected_ty: TypeExprRef,
+    context: Option<TypeClashContext>,
+    attributes: &[crate::parser::ast::Attribute],
+) -> TypeCoreResult<Expression> {
+    let ctx = tctx.type_ctx;
+    let obj_ty = ctx.new_var(None);
+    let typed_obj = type_expect(tctx, env, obj_expr, obj_ty, None)?;
+    // Assignment can add or promote a field only while its object row is
+    // open. The result distinguishes a missing field from a closed immutable
+    // field so the two cases retain their respective diagnostics.
+    let field_typ =
+        crate::types::ctype::filter_object_field_for_write(ctx, env, &field.txt, typed_obj.exp_type)
+            .unwrap_or(Err(crate::types::ctype::ObjectFieldWriteError::OwriteMissing));
+    let typ = match field_typ {
+        Err(crate::types::ctype::ObjectFieldWriteError::OwriteMissing) => {
+            return Err(TypeCoreError::UndefinedMethod {
+                loc: Some(obj_expr.pexp_loc),
+                ty: typed_obj.exp_type,
+                method: field.txt.to_string(),
+                alternatives: object_valid_fields(ctx, env, typed_obj.exp_type),
+            });
+        }
+        Err(crate::types::ctype::ObjectFieldWriteError::OwriteNotMutable) => {
+            return Err(TypeCoreError::ObjectFieldNotMutable {
+                loc,
+                ty: typed_obj.exp_type,
+                name: field.txt.to_string(),
+            });
+        }
+        Ok(typ) => typ,
+    };
+    let value = type_object_field_value(tctx, env, svalue, typ)?;
+    let unit_ty = env.type_unit(ctx);
+    rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
+    Ok(Expression::new(
+        ExpressionDesc::Texp_object_set(
+            Box::new(typed_obj),
+            Located {
+                txt: field.txt.to_string(),
+                loc: field.loc,
+            },
+            Box::new(value),
+        ),
+        loc,
+        unit_ty,
+        EnvRef(0),
+        attributes.to_vec().into(),
+    ))
+}
+
+/// typecore.ml `type_object_field_value`: introduce the right-hand side of an
+/// object-field assignment at the field's scheme. A polymorphic field accepts
+/// only a value at least as general as the scheme.
+fn type_object_field_value(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    svalue: &ParsedExpression,
+    typ: TypeExprRef,
+) -> TypeCoreResult<Expression> {
+    let ctx = tctx.type_ctx;
+    let typ = ctx.repr(typ);
+    let poly = match &*ctx.get_desc(typ) {
+        TypeDesc::Tpoly { body, vars } if !vars.is_empty() => Some((*body, vars.to_vec())),
+        _ => None,
+    };
+    match poly {
+        Some((body, vars)) => {
+            ctx.begin_def();
+            let (vars, ty2) = crate::types::ctype::instance_poly(ctx, false, true, &vars, body);
+            let value = type_expect(tctx, env, svalue, ty2, None);
+            ctx.end_def();
+            let mut value = value?;
+            check_univars_or_less_general(tctx, env, true, "field value", &value, typ, &vars)?;
+            value.exp_type = crate::types::ctype::instance(ctx, value.exp_type);
+            Ok(value)
+        }
+        None => {
+            let typ = object_field_use_type(tctx, typ).map_err(|err| TypeCoreError::ExprTypeClash {
+                loc: svalue.pexp_loc,
+                trace: match err {
+                    TypeError::Unify(trace) => trace,
+                    _ => vec![],
+                },
+                context: None,
+                env: Some(tctx.type_ctx.store_typed_env(env)),
+            })?;
+            type_expect(tctx, env, svalue, typ, None)
+        }
+    }
+}
+
+/// typecore.ml `Pexp_object_literal`: fields are typed in source order. A
+/// duplicate name is typed against the first occurrence's type and appears
+/// once in the row.
+fn type_object_literal(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    sfields: &[(Located<std::borrow::Cow<'static, str>>, crate::parse_arena::ExprIdx)],
+    expected_ty: TypeExprRef,
+    context: Option<TypeClashContext>,
+    attributes: &[crate::parser::ast::Attribute],
+) -> TypeCoreResult<Expression> {
+    let ctx = tctx.type_ctx;
+    let mut seen: HashMap<String, TypeExprRef> = HashMap::new();
+    let mut fields: Vec<(Located<String>, Expression)> = Vec::with_capacity(sfields.len());
+    for (name, sfield) in sfields {
+        let sfield = tctx.arena.get_expr(*sfield);
+        let field = match seen.get(name.txt.as_ref()).copied() {
+            Some(ty) => type_expect(tctx, env, sfield, ty, None)?,
+            None => {
+                let field = type_exp(tctx, env, sfield, None)?;
+                seen.insert(name.txt.to_string(), field.exp_type);
+                field
+            }
+        };
+        fields.push((
+            Located {
+                txt: name.txt.to_string(),
+                loc: name.loc,
+            },
+            field,
+        ));
+    }
+    let mut emitted: HashSet<&str> = HashSet::new();
+    let mut row = ctx.new_type(TypeDesc::Tnil);
+    for (name, field) in fields.iter().rev() {
+        if !emitted.insert(name.txt.as_str()) {
+            continue;
+        }
+        let typ = ctx.new_poly(field.exp_type, vec![]);
+        row = ctx.new_type(TypeDesc::Tfield {
+            name: name.txt.clone(),
+            mutability: ctx.alloc_mutability(crate::types::type_expr::FieldMutability::Value(
+                crate::types::asttypes::MutableFlag::Immutable,
+            )),
+            typ,
+            rest: row,
+        });
+    }
+    let exp_type = ctx.new_type(TypeDesc::Tobject { fields: row });
+    rue_unify(tctx, loc, exp_type, expected_ty, context)?;
+    Ok(Expression::new(
+        ExpressionDesc::Texp_object_literal(fields),
+        loc,
+        exp_type,
         EnvRef(0),
         attributes.to_vec().into(),
     ))
@@ -19546,16 +19717,9 @@ fn pack_type_contains_local_module_dependency(
         TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
             pack_type_contains_local_module_dependency(ctx, env, pers_env, *target, visited)
         }
-        TypeDesc::Tobject { fields, name } => {
+        TypeDesc::Tobject { fields } => {
             if pack_type_contains_local_module_dependency(ctx, env, pers_env, *fields, visited) {
                 return true;
-            }
-            if let Some((path, args)) = name {
-                return pack_type_path_has_local_module_dependency(
-                    ctx, env, pers_env, path, visited,
-                ) || args.iter().any(|arg| {
-                    pack_type_contains_local_module_dependency(ctx, env, pers_env, *arg, visited)
-                });
             }
             false
         }
@@ -20766,12 +20930,13 @@ pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> 
                 || typed_expression_uses_ident(stop, target)
                 || typed_expression_uses_ident(body, target)
         }
-        ExpressionDesc::Texp_send(receiver, _, arg) => {
-            typed_expression_uses_ident(receiver, target)
-                || arg
-                    .as_deref()
-                    .is_some_and(|expr| typed_expression_uses_ident(expr, target))
+        ExpressionDesc::Texp_object_get(receiver, _) => typed_expression_uses_ident(receiver, target),
+        ExpressionDesc::Texp_object_set(receiver, _, value) => {
+            typed_expression_uses_ident(receiver, target) || typed_expression_uses_ident(value, target)
         }
+        ExpressionDesc::Texp_object_literal(fields) => fields
+            .iter()
+            .any(|(_, field)| typed_expression_uses_ident(field, target)),
         ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
             // OCaml compiler/ml/typecore.ml:4610-4655 records value-use
             // callbacks while typing the RHS, and typecore.ml:3399-3425 /
@@ -21059,6 +21224,7 @@ fn rec_expression_class(expr: &Expression) -> RecExpressionClass {
         | ExpressionDesc::Texp_variant(_, _)
         | ExpressionDesc::Texp_record { .. }
         | ExpressionDesc::Texp_record_sparse { .. }
+        | ExpressionDesc::Texp_object_literal(_)
         | ExpressionDesc::Texp_setfield(_, _, _, _)
         | ExpressionDesc::Texp_while(_, _)
         | ExpressionDesc::Texp_for(_, _, _, _, _, _)
@@ -21079,7 +21245,8 @@ fn rec_expression_class(expr: &Expression) -> RecExpressionClass {
         }
         ExpressionDesc::Texp_match(_, _, _, _)
         | ExpressionDesc::Texp_ifthenelse(_, _, _)
-        | ExpressionDesc::Texp_send(_, _, _)
+        | ExpressionDesc::Texp_object_get(_, _)
+        | ExpressionDesc::Texp_object_set(_, _, _)
         | ExpressionDesc::Texp_field(_, _, _)
         | ExpressionDesc::Texp_assert(_)
         | ExpressionDesc::Texp_try(_, _) => RecExpressionClass::Dynamic,
@@ -21410,10 +21577,18 @@ fn rec_expression(ctx: &TypeContext, env: &RecEnv, expr: &Expression) -> RecUse 
             rec_use_inspect(rec_expression(ctx, env, cond)),
             rec_use_discard(rec_expression(ctx, env, body)),
         ),
-        ExpressionDesc::Texp_send(receiver, _, arg) => rec_use_join(
+        ExpressionDesc::Texp_object_get(receiver, _) => {
+            rec_use_inspect(rec_expression(ctx, env, receiver))
+        }
+        ExpressionDesc::Texp_object_set(receiver, _, value) => rec_use_join(
             rec_use_inspect(rec_expression(ctx, env, receiver)),
-            rec_use_inspect(rec_option_expression(ctx, env, arg.as_deref())),
+            rec_use_inspect(rec_expression(ctx, env, value)),
         ),
+        ExpressionDesc::Texp_object_literal(fields) => {
+            rec_use_inspect(fields.iter().fold(RecUse::default(), |use_, (_, field)| {
+                rec_use_join(use_, rec_expression(ctx, env, field))
+            }))
+        }
         ExpressionDesc::Texp_field(base, _, _) | ExpressionDesc::Texp_assert(base) => {
             rec_use_inspect(rec_expression(ctx, env, base))
         }
@@ -22104,7 +22279,7 @@ where
     TP: Fn(&Path) -> Path,
     MP: Fn(&Path) -> Path,
 {
-    use crate::types::type_expr::{FieldKind, RowDesc, RowField};
+    use crate::types::type_expr::{MutabilityRef, RowDesc, RowField};
 
     enum CopyRowFieldPlan {
         Rpresent(Option<TypeExprRef>),
@@ -22130,11 +22305,10 @@ where
         },
         Tobject {
             fields: TypeExprRef,
-            name: Option<(Path, Vec<TypeExprRef>)>,
         },
         Tfield {
             name: String,
-            kind: FieldKind,
+            mutability: MutabilityRef,
             typ: TypeExprRef,
             rest: TypeExprRef,
         },
@@ -22199,18 +22373,15 @@ where
                 path: type_path(path),
                 args: args.clone(),
             },
-            TypeDesc::Tobject { fields, name } => CopyTypeExprPlan::Tobject {
-                fields: *fields,
-                name: name.clone(),
-            },
+            TypeDesc::Tobject { fields } => CopyTypeExprPlan::Tobject { fields: *fields },
             TypeDesc::Tfield {
                 name,
-                kind,
+                mutability,
                 typ,
                 rest,
             } => CopyTypeExprPlan::Tfield {
                 name: name.clone(),
-                kind: kind.clone(),
+                mutability: *mutability,
                 typ: *typ,
                 rest: *rest,
             },
@@ -22301,43 +22472,28 @@ where
                     abbrev: ctx.alloc_abbrev_nil(),
                 }
             }
-            CopyTypeExprPlan::Tobject { fields, name } => {
-                let copied_fields =
-                    copy_lookup_type_expr_with_paths(ctx, fields, cache, type_path, module_path);
-                let copied_name = name.map(|(path, args)| {
-                    (
-                        path,
-                        args.into_iter()
-                            .map(|t| {
-                                copy_lookup_type_expr_with_paths(
-                                    ctx,
-                                    t,
-                                    cache,
-                                    type_path,
-                                    module_path,
-                                )
-                            })
-                            .collect(),
-                    )
-                });
-                TypeDesc::Tobject {
-                    fields: copied_fields,
-                    name: copied_name,
-                }
-            }
+            CopyTypeExprPlan::Tobject { fields } => TypeDesc::Tobject {
+                fields: copy_lookup_type_expr_with_paths(ctx, fields, cache, type_path, module_path),
+            },
             CopyTypeExprPlan::Tfield {
                 name,
-                kind,
+                mutability,
                 typ,
                 rest,
             } => {
+                // btype.ml copy_type_desc (subst.ml typexp_rec): classify the
+                // row before copying either child.
+                let mutability = {
+                    let cache = &*cache;
+                    ctx.copy_field_mutability(mutability, rest, false, &|t| cache.get(t).copied())
+                };
                 let copied_typ =
                     copy_lookup_type_expr_with_paths(ctx, typ, cache, type_path, module_path);
                 let copied_rest =
                     copy_lookup_type_expr_with_paths(ctx, rest, cache, type_path, module_path);
                 TypeDesc::Tfield {
                     name,
-                    kind,
+                    mutability,
                     typ: copied_typ,
                     rest: copied_rest,
                 }
@@ -22737,7 +22893,7 @@ pub(crate) fn copy_lookup_type_decl_for_subst(
     ctx: &TypeContext,
 ) -> crate::types::decl::TypeDeclaration {
     let mut cache = TypeExprRefMap::new();
-    copy_lookup_type_decl(decl, ctx, &mut cache)
+    ctx.with_copy_session(|| copy_lookup_type_decl(decl, ctx, &mut cache))
 }
 
 fn copy_lookup_value_description_with_paths<TP, MP>(
@@ -22771,13 +22927,15 @@ pub(crate) fn copy_lookup_value_description_for_subst(
     ctx: &TypeContext,
 ) -> crate::types::decl::ValueDescription {
     let mut cache = TypeExprRefMap::new();
-    copy_lookup_value_description_with_paths(
-        desc,
-        ctx,
-        &mut cache,
-        &clone_copy_lookup_path,
-        &clone_copy_lookup_path,
-    )
+    ctx.with_copy_session(|| {
+        copy_lookup_value_description_with_paths(
+            desc,
+            ctx,
+            &mut cache,
+            &clone_copy_lookup_path,
+            &clone_copy_lookup_path,
+        )
+    })
 }
 
 fn copy_lookup_extension_constructor_with_paths<TP, MP>(
@@ -23191,7 +23349,7 @@ pub(crate) fn copy_lookup_signature_for_subst(
         );
     }
     let mut cache = TypeExprRefMap::new();
-    copy_lookup_signature(sig_items, ctx, &mut cache)
+    ctx.with_copy_session(|| copy_lookup_signature(sig_items, ctx, &mut cache))
 }
 
 #[track_caller]
@@ -23212,7 +23370,9 @@ where
         );
     }
     let mut cache = TypeExprRefMap::new();
-    copy_lookup_signature_with_paths(sig_items, ctx, &mut cache, type_path, module_path)
+    ctx.with_copy_session(|| {
+        copy_lookup_signature_with_paths(sig_items, ctx, &mut cache, type_path, module_path)
+    })
 }
 
 #[track_caller]
@@ -23234,14 +23394,16 @@ where
         );
     }
     let mut cache = TypeExprRefMap::new();
-    copy_lookup_signature_with_paths_and_idents(
-        sig_items,
-        ctx,
-        &mut cache,
-        type_path,
-        module_path,
-        Some(new_idents.into_iter()),
-    )
+    ctx.with_copy_session(|| {
+        copy_lookup_signature_with_paths_and_idents(
+            sig_items,
+            ctx,
+            &mut cache,
+            type_path,
+            module_path,
+            Some(new_idents.into_iter()),
+        )
+    })
 }
 
 /// Deep-copy a module type, creating new type expression nodes.
@@ -23253,7 +23415,7 @@ pub(crate) fn copy_lookup_module_type_for_subst(
     ctx: &TypeContext,
 ) -> crate::types::decl::ModuleType {
     let mut cache = TypeExprRefMap::new();
-    copy_lookup_module_type(module_type, ctx, &mut cache)
+    ctx.with_copy_session(|| copy_lookup_module_type(module_type, ctx, &mut cache))
 }
 
 // ============================================================================
@@ -25150,14 +25312,9 @@ fn type_contains_unresolved_local_path<'a>(
         TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
             type_contains_unresolved_local_path(ctx, env, pers_env, *target, visited)
         }
-        TypeDesc::Tobject { fields, name } => {
+        TypeDesc::Tobject { fields } => {
             if type_contains_unresolved_local_path(ctx, env, pers_env, *fields, visited) {
                 return true;
-            }
-            if let Some((_, args)) = name {
-                return args.iter().any(|arg| {
-                    type_contains_unresolved_local_path(ctx, env, pers_env, *arg, visited)
-                });
             }
             false
         }
@@ -25333,7 +25490,7 @@ fn qualify_label_description_paths<'a>(
                     visited,
                 );
             }
-            TypeDesc::Tobject { fields, name } => {
+            TypeDesc::Tobject { fields } => {
                 rewrite_direct_root_type_family_in_place(
                     ctx,
                     fields,
@@ -25341,17 +25498,6 @@ fn qualify_label_description_paths<'a>(
                     new_root_path,
                     visited,
                 );
-                if let Some((_, args)) = name {
-                    for item in &args {
-                        rewrite_direct_root_type_family_in_place(
-                            ctx,
-                            *item,
-                            old_root_path,
-                            new_root_path,
-                            visited,
-                        );
-                    }
-                }
             }
             TypeDesc::Tfield { typ, rest, .. } => {
                 rewrite_direct_root_type_family_in_place(
@@ -26690,13 +26836,8 @@ fn force_type_paths_for_lookup_from_type<'a>(
                 force_type_paths_for_lookup_from_type(ctx, env, pers_env, arg, seen);
             }
         }
-        TypeDesc::Tobject { fields, name } => {
+        TypeDesc::Tobject { fields } => {
             force_type_paths_for_lookup_from_type(ctx, env, pers_env, fields, seen);
-            if let Some((_path, args)) = name {
-                for arg in args {
-                    force_type_paths_for_lookup_from_type(ctx, env, pers_env, arg, seen);
-                }
-            }
         }
         TypeDesc::Tfield { typ, rest, .. } => {
             force_type_paths_for_lookup_from_type(ctx, env, pers_env, typ, seen);
@@ -27370,7 +27511,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                 visited,
             );
         }
-        TypeDesc::Tobject { fields, name } => {
+        TypeDesc::Tobject { fields } => {
             qualify_module_local_type_paths_with_alias_lookup_in_place(
                 ctx,
                 env,
@@ -27380,19 +27521,6 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                 alias_target_lookup,
                 visited,
             );
-            if let Some((_, args)) = name {
-                for item in &args {
-                    qualify_module_local_type_paths_with_alias_lookup_in_place(
-                        ctx,
-                        env,
-                        pers_env,
-                        *item,
-                        module_access_path,
-                        alias_target_lookup,
-                        visited,
-                    );
-                }
-            }
         }
         TypeDesc::Tfield { typ, rest, .. } => {
             qualify_module_local_type_paths_with_alias_lookup_in_place(

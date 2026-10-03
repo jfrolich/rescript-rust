@@ -303,8 +303,8 @@ let primitive ~with_locs (prim : Lam_primitive.t) =
   | Pupdate_mod -> Sexp.atom "Pupdate_mod"
   | Pjs_apply -> Sexp.atom "Pjs_apply"
   | Pjs_runtime_apply -> Sexp.atom "Pjs_runtime_apply"
-  | Pjs_unsafe_downgrade {name; setter} ->
-    Sexp.list [Sexp.atom "Pjs_unsafe_downgrade"; string name; bool setter]
+  | Pjs_object_get name -> Sexp.list [Sexp.atom "Pjs_object_get"; string name]
+  | Pjs_object_set name -> Sexp.list [Sexp.atom "Pjs_object_set"; string name]
   | Pfn_arity -> Sexp.atom "Pfn_arity"
   | Pjs_fn_method -> Sexp.atom "Pjs_fn_method"
   | Pdebugger -> Sexp.atom "Pdebugger"

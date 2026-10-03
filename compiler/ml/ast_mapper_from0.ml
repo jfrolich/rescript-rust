@@ -567,6 +567,14 @@ module E = struct
       fun_ ~loc ~attrs
         [{p_attrs = []; p_lbl = Nolabel; p_default = None; p_pat = pat}]
         body
+    | Pexp_apply
+        ( {pexp_desc = Pexp_ident {txt = Longident.Lident "#="}},
+          [
+            (Asttypes.Noloc.Nolabel, {pexp_desc = Pexp_send (e, s)});
+            (Asttypes.Noloc.Nolabel, v);
+          ] ) ->
+      (* Decode the v0 encoding of property assignment. *)
+      object_set ~loc ~attrs (sub.expr sub e) (map_loc sub s) (sub.expr sub v)
     | Pexp_apply ({pexp_desc = Pexp_ident tag_name}, args)
       when has_jsx_attribute () -> (
       let attrs = attrs |> List.filter (fun ({txt}, _) -> txt <> "JSX") in
@@ -763,7 +771,34 @@ module E = struct
       coerce ~loc ~attrs (sub.expr sub e) (sub.typ sub t2)
     | Pexp_constraint (e, t) ->
       constraint_ ~loc ~attrs (sub.expr sub e) (sub.typ sub t)
-    | Pexp_send (e, s) -> send ~loc ~attrs (sub.expr sub e) (map_loc sub s)
+    | Pexp_send (e, s) ->
+      object_get ~loc ~attrs (sub.expr sub e) (map_loc sub s)
+    | Pexp_extension
+        ( {txt = "obj"},
+          PStr
+            [
+              {
+                pstr_desc =
+                  Pstr_eval ({pexp_desc = Pexp_record (rows, None)}, []);
+              };
+            ] )
+      when List.for_all
+             (fun ((lid : Longident.t Location.loc), _) ->
+               match lid.txt with
+               | Longident.Lident _ -> true
+               | _ -> false)
+             rows ->
+      (* Decode the reserved v0 %obj encoding of object literals. *)
+      object_literal ~loc ~attrs
+        (List.map
+           (fun ((lid : Longident.t Location.loc), e) ->
+             let name =
+               match lid.txt with
+               | Longident.Lident name -> name
+               | _ -> assert false
+             in
+             ({txt = name; loc = lid.loc}, sub.expr sub e))
+           rows)
     | Pexp_new _ -> failwith "Pexp_new is no longer present in ReScript"
     | Pexp_setinstvar _ ->
       failwith "Pexp_setinstvar is no longer present in ReScript"

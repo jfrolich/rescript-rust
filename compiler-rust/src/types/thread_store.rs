@@ -19,7 +19,7 @@ use super::context::TypeArena;
 use super::decl::{Signature, TypeDeclaration};
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, FieldKind, FieldKindRef, RowField, RowFieldRef, TypeDesc, TypeExpr,
+    AbbrevMemo, AbbrevMemoRef, RowField, RowFieldRef, TypeDesc, TypeExpr,
     TypeExprRef,
 };
 use super::variant_runtime::{Layout, LayoutRef};
@@ -137,7 +137,6 @@ pub(crate) struct ThreadTypeStore {
     /// to the reading compilation's overlay.
     abbrevs: RefCell<Vec<AbbrevMemo>>,
     row_fields: RefCell<Vec<Option<RowField>>>,
-    field_kinds: RefCell<Vec<Option<FieldKind>>>,
     variant_layouts: RefCell<Vec<Layout>>,
     next_type_id: Cell<i32>,
     /// Internalized dependency signatures keyed by the identity of the
@@ -194,7 +193,6 @@ impl ThreadTypeStore {
             types: TypeArena::new(),
             abbrevs: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
-            field_kinds: RefCell::new(Vec::new()),
             variant_layouts: RefCell::new(Vec::new()),
             next_type_id: Cell::new(STORE_TYPE_ID_BASE),
             pers: RefCell::new(HashMap::new()),
@@ -424,13 +422,6 @@ impl ThreadTypeStore {
         let idx = row_fields.len();
         row_fields.push(field);
         RowFieldRef::from_store_index(idx)
-    }
-
-    pub(crate) fn alloc_field_kind(&self, kind: Option<FieldKind>) -> FieldKindRef {
-        let mut field_kinds = self.field_kinds.borrow_mut();
-        let idx = field_kinds.len();
-        field_kinds.push(kind);
-        FieldKindRef::from_store_index(idx)
     }
 
     pub(crate) fn with_variant_layout<R>(

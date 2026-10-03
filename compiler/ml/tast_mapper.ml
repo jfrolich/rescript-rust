@@ -253,8 +253,11 @@ let expr sub x =
       Texp_for_of (id, p, sub.expr sub exp1, sub.expr sub exp2)
     | Texp_for_await_of (id, p, exp1, exp2) ->
       Texp_for_await_of (id, p, sub.expr sub exp1, sub.expr sub exp2)
-    | Texp_send (exp, meth, expo) ->
-      Texp_send (sub.expr sub exp, meth, opt (sub.expr sub) expo)
+    | Texp_object_get (exp, name) -> Texp_object_get (sub.expr sub exp, name)
+    | Texp_object_set (exp, name, v) ->
+      Texp_object_set (sub.expr sub exp, name, sub.expr sub v)
+    | Texp_object_literal fields ->
+      Texp_object_literal (List.map (fun (s, e) -> (s, sub.expr sub e)) fields)
     | Texp_letmodule (id, s, mexpr, exp) ->
       Texp_letmodule (id, s, sub.module_expr sub mexpr, sub.expr sub exp)
     | Texp_letexception (cd, exp) ->

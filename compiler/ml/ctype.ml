@@ -190,7 +190,7 @@ let newvar ?name () = newty2 !current_level (Tvar name)
 let newvar2 ?name level = newty2 level (Tvar name)
 let new_global_var ?name () = newty2 !global_level (Tvar name)
 
-let newobj fields = newty (Tobject (fields, ref None))
+let newobj fields = newty (Tobject fields)
 
 let newconstr path tyl = newty (Tconstr (path, tyl, ref Mnil))
 
@@ -261,44 +261,48 @@ let is_datatype decl =
 (*  Miscellaneous operations on object types  *)
 (**********************************************)
 
-(* Note:
-   We need to maintain some invariants:
-   * cty_self must be a Tobject
-   * ...
-*)
-type fields = (string * Types.field_kind * Types.type_expr) list
+type field_info = {
+  f_name: string;
+  f_mut: Types.field_mutability ref;
+      (* the field's cell as stored; read its class value with
+         [Btype.mutability_repr] *)
+  f_typ: Types.type_expr;
+}
+
+type fields = field_info list
 (**** Object field manipulation. ****)
 
 let object_fields ty =
   match (repr ty).desc with
-  | Tobject (fields, _) -> fields
+  | Tobject fields -> fields
   | _ -> assert false
 
 let flatten_fields (ty : Types.type_expr) : fields * _ =
   let rec flatten (l : fields) ty =
     let ty = repr ty in
     match ty.desc with
-    | Tfield (s, k, ty1, ty2) -> flatten ((s, k, ty1) :: l) ty2
+    | Tfield {name; mutability; typ; rest} ->
+      flatten ({f_name = name; f_mut = mutability; f_typ = typ} :: l) rest
     | _ -> (l, ty)
   in
   let l, r = flatten [] ty in
-  (List.sort (fun (n, _, _) (n', _, _) -> compare n n') l, r)
+  (List.sort (fun f f' -> compare f.f_name f'.f_name) l, r)
 
 let build_fields level =
-  List.fold_right (fun (s, k, ty1) ty2 ->
-      newty2 level (Tfield (s, k, ty1, ty2)))
+  List.fold_right (fun {f_name; f_mut; f_typ} rest ->
+      newty2 level
+        (Tfield {name = f_name; mutability = f_mut; typ = f_typ; rest}))
 
 let associate_fields (fields1 : fields) (fields2 : fields) : _ * fields * fields
     =
   let rec associate p s s' : fields * fields -> _ = function
     | l, [] -> (List.rev p, List.rev s @ l, List.rev s')
     | [], l' -> (List.rev p, List.rev s, List.rev s' @ l')
-    | (n, k, t) :: r, (n', k', t') :: r' when n = n' ->
-      associate ((n, k, t, k', t') :: p) s s' (r, r')
-    | (n, k, t) :: r, ((n', _k', _t') :: _ as l') when n < n' ->
-      associate p ((n, k, t) :: s) s' (r, l')
-    | ((_n, _k, _t) :: _ as l), (n', k', t') :: r' (* when n > n' *) ->
-      associate p s ((n', k', t') :: s') (l, r')
+    | f :: r, f' :: r' when f.f_name = f'.f_name ->
+      associate ((f, f') :: p) s s' (r, r')
+    | f :: r, (f' :: _ as l') when f.f_name < f'.f_name ->
+      associate p (f :: s) s' (r, l')
+    | l, f' :: r' (* when name > name' *) -> associate p s (f' :: s') (l, r')
   in
   associate [] [] [] (fields1, fields2)
 
@@ -308,11 +312,11 @@ let associate_fields (fields1 : fields) (fields2 : fields) : _ * fields * fields
 let rec object_row ty =
   let ty = repr ty in
   match ty.desc with
-  | Tobject (t, _) -> object_row t
-  | Tfield (_, _, _, t) -> object_row t
+  | Tobject t -> object_row t
+  | Tfield {rest = t} -> object_row t
   | _ -> ty
 
-let opened_object ty =
+let object_row_is_structurally_open ty =
   match (object_row ty).desc with
   | Tvar _ | Tunivar _ | Tconstr _ -> true
   | _ -> false
@@ -380,12 +384,8 @@ let rec free_vars_rec real ty =
            free_variables := (ty, real) :: !free_variables
        with Not_found -> ());
       List.iter (free_vars_rec true) tl
-    (* Do not count "virtual" free variables
-        | Tobject(ty, {contents = Some (_, p)}) ->
-            free_vars_rec false ty; List.iter (free_vars_rec true) p
-    *)
-    | Tobject (ty, _), _ -> free_vars_rec false ty
-    | Tfield (_, _, ty1, ty2), _ ->
+    | Tobject ty, _ -> free_vars_rec false ty
+    | Tfield {typ = ty1; rest = ty2}, _ ->
       free_vars_rec true ty1;
       free_vars_rec false ty2
     | Tvariant row, _ ->
@@ -469,8 +469,6 @@ let closed_extension_constructor ext =
 
 (* Duplicate a type, preserving only type variables *)
 let duplicate_type ty = Subst.type_expr Subst.identity ty
-
-(* Same, for class types *)
 
 (*****************************)
 (*  Type level manipulation  *)
@@ -589,10 +587,6 @@ let rec update_level env level expand ty =
       log_type ty;
       ty.desc <- Tpackage (p', nl, tl);
       update_level env level expand ty
-    | Tobject (_, ({contents = Some (p, _tl)} as nm))
-      when level < get_level env p ->
-      set_name nm None;
-      update_level env level expand ty
     | Tvariant row ->
       let row = row_repr row in
       (match row.row_name with
@@ -602,9 +596,6 @@ let rec update_level env level expand ty =
       | _ -> ());
       set_level ty level;
       iter_type_expr (update_level env level expand) ty
-    | Tfield (lab, _, ty1, _)
-      when lab = dummy_method && (repr ty1).level > level ->
-      raise (Unify [(ty1, newvar2 level)])
     | _ ->
       set_level ty level;
       (* XXX what about abbreviations in Tconstr ? *)
@@ -708,13 +699,15 @@ let rec find_repr p1 = function
   | Mlink {contents = rem} -> find_repr p1 rem
 
 (*
-   Generic nodes are duplicated, while non-generic nodes are left
-   as-is.
-   During instantiation, the description of a generic node is first
-   replaced by a link to a stub ([Tsubst (newvar ())]). Once the
-   copy is made, it replaces the stub.
-   After instantiation, the description of generic node, which was
-   stored by [save_desc], must be put back, using [cleanup_types].
+   Ordinary instantiation copies generic nodes and reuses non-generic nodes.
+   Pattern typing can pass [partial] to copy selected non-generic nodes as
+   fresh variables as well. [env] does not affect that choice; when local GADT
+   constraints are present, it only records the corresponding fresh instance.
+
+   A copied source node is temporarily marked with [Tsubst]. These marks are
+   visible to nested copy operations, which is intentional: copies made in the
+   same operation can preserve graph sharing. [with_copy_session] restores the
+   marks and the temporary mutability links installed by [copy_type_desc].
 *)
 
 let abbreviations = ref (ref Mnil)
@@ -845,14 +838,7 @@ let rec copy ?env ?partial ?keep_names ty =
               more.desc <- Tsubst (newgenty (Ttuple [more'; t]));
               (* Return a new copy *)
               Tvariant (copy_row copy true row keep more'))
-          | Tfield (_p, k, _ty1, ty2) -> (
-            match field_kind_repr k with
-            | Fabsent -> Tlink (copy ty2)
-            | Fpresent -> copy_type_desc copy desc
-            | Fvar r ->
-              dup_kind r;
-              copy_type_desc copy desc)
-          | Tobject (ty1, _) when partial <> None -> Tobject (copy ty1, ref None)
+          | Tobject ty1 when partial <> None -> Tobject (copy ty1)
           | _ -> copy_type_desc ?keep_names copy desc);
         t
 
@@ -863,26 +849,21 @@ let simple_copy t = copy t
 let gadt_env env = if Env.has_local_constraints env then Some env else None
 
 let instance ?partial env sch =
-  let env = gadt_env env in
-  let partial =
-    match partial with
-    | None -> None
-    | Some keep -> Some (compute_univars sch, keep)
-  in
-  let ty = copy ?env ?partial sch in
-  cleanup_types ();
-  ty
+  with_copy_session (fun () ->
+      let env = gadt_env env in
+      let partial =
+        match partial with
+        | None -> None
+        | Some keep -> Some (compute_univars sch, keep)
+      in
+      copy ?env ?partial sch)
 
-let instance_def sch =
-  let ty = copy sch in
-  cleanup_types ();
-  ty
+let instance_def sch = with_copy_session (fun () -> copy sch)
 
 let instance_list env schl =
-  let env = gadt_env env in
-  let tyl = List.map (fun t -> copy ?env t) schl in
-  cleanup_types ();
-  tyl
+  with_copy_session (fun () ->
+      let env = gadt_env env in
+      List.map (fun t -> copy ?env t) schl)
 
 let reified_var_counter = ref Vars.empty
 let reset_reified_var_counter () = reified_var_counter := Vars.empty
@@ -913,35 +894,35 @@ let new_declaration newtype manifest =
   }
 
 let instance_constructor ?in_pattern cstr =
-  (match in_pattern with
-  | None -> ()
-  | Some (env, newtype_lev) ->
-    let process existential =
-      let decl = new_declaration (Some (newtype_lev, newtype_lev)) None in
-      let name =
-        match repr existential with
-        | {desc = Tvar (Some name)} -> "$" ^ cstr.cstr_name ^ "_'" ^ name
-        | _ -> "$" ^ cstr.cstr_name
-      in
-      let path = Path.Pident (Ident.create (get_new_abstract_name name)) in
-      let new_env = Env.add_local_type path decl !env in
-      env := new_env;
-      let to_unify = newty (Tconstr (path, [], ref Mnil)) in
-      let tv = copy existential in
-      assert (is_Tvar tv);
-      link_type tv to_unify
-    in
-    List.iter process cstr.cstr_existentials);
-  let ty_res = copy cstr.cstr_res in
-  let ty_args = List.map simple_copy cstr.cstr_args in
-  cleanup_types ();
-  (ty_args, ty_res)
+  with_copy_session (fun () ->
+      (match in_pattern with
+      | None -> ()
+      | Some (env, newtype_lev) ->
+        let process existential =
+          let decl = new_declaration (Some (newtype_lev, newtype_lev)) None in
+          let name =
+            match repr existential with
+            | {desc = Tvar (Some name)} -> "$" ^ cstr.cstr_name ^ "_'" ^ name
+            | _ -> "$" ^ cstr.cstr_name
+          in
+          let path = Path.Pident (Ident.create (get_new_abstract_name name)) in
+          let new_env = Env.add_local_type path decl !env in
+          env := new_env;
+          let to_unify = newty (Tconstr (path, [], ref Mnil)) in
+          let tv = copy existential in
+          assert (is_Tvar tv);
+          link_type tv to_unify
+        in
+        List.iter process cstr.cstr_existentials);
+      let ty_res = copy cstr.cstr_res in
+      let ty_args = List.map simple_copy cstr.cstr_args in
+      (ty_args, ty_res))
 
 let instance_parameterized_type ?keep_names sch_args sch =
-  let ty_args = List.map (fun t -> copy ?keep_names t) sch_args in
-  let ty = copy sch in
-  cleanup_types ();
-  (ty_args, ty)
+  with_copy_session (fun () ->
+      let ty_args = List.map (fun t -> copy ?keep_names t) sch_args in
+      let ty = copy sch in
+      (ty_args, ty))
 
 let map_kind f = function
   | Type_abstract -> Type_abstract
@@ -961,16 +942,13 @@ let map_kind f = function
     Type_record (List.map (fun l -> {l with ld_type = f l.ld_type}) fl, rr)
 
 let instance_declaration decl =
-  let decl =
-    {
-      decl with
-      type_params = List.map simple_copy decl.type_params;
-      type_manifest = may_map simple_copy decl.type_manifest;
-      type_kind = map_kind simple_copy decl.type_kind;
-    }
-  in
-  cleanup_types ();
-  decl
+  with_copy_session (fun () ->
+      {
+        decl with
+        type_params = List.map simple_copy decl.type_params;
+        type_manifest = may_map simple_copy decl.type_manifest;
+        type_kind = map_kind simple_copy decl.type_kind;
+      })
 
 (**** Instantiation for types with free universal variables ****)
 
@@ -1038,31 +1016,31 @@ let rec copy_sep fixed free bound visited ty =
         | _ -> copy_type_desc copy_rec ty.desc);
       t
 
-let instance_poly ?(keep_names = false) fixed univars sch =
-  let univars = List.map repr univars in
-  let copy_var ty =
-    match ty.desc with
-    | Tunivar name -> if keep_names then newty (Tvar name) else newvar ()
-    | _ -> assert false
-  in
-  let vars = List.map copy_var univars in
-  let pairs = List.map2 (fun u v -> (u, (v, []))) univars vars in
-  delayed_copy := [];
-  let ty = copy_sep fixed (compute_univars sch) [] pairs sch in
-  List.iter Lazy.force !delayed_copy;
-  delayed_copy := [];
-  cleanup_types ();
-  (vars, ty)
+let instance_poly ?(keep_names = false) ~fixed univars sch =
+  with_copy_session (fun () ->
+      let univars = List.map repr univars in
+      let copy_var ty =
+        match ty.desc with
+        | Tunivar name -> if keep_names then newty (Tvar name) else newvar ()
+        | _ -> assert false
+      in
+      let vars = List.map copy_var univars in
+      let pairs = List.map2 (fun u v -> (u, (v, []))) univars vars in
+      delayed_copy := [];
+      let ty = copy_sep fixed (compute_univars sch) [] pairs sch in
+      List.iter Lazy.force !delayed_copy;
+      delayed_copy := [];
+      (vars, ty))
 
 let instance_label fixed lbl =
-  let ty_res = copy lbl.lbl_res in
-  let vars, ty_arg =
-    match repr lbl.lbl_arg with
-    | {desc = Tpoly (ty, tl)} -> instance_poly fixed tl ty
-    | _ -> ([], copy lbl.lbl_arg)
-  in
-  cleanup_types ();
-  (vars, ty_arg, ty_res)
+  with_copy_session (fun () ->
+      let ty_res = copy lbl.lbl_res in
+      let vars, ty_arg =
+        match repr lbl.lbl_arg with
+        | {desc = Tpoly (ty, tl)} -> instance_poly ~fixed tl ty
+        | _ -> ([], copy lbl.lbl_arg)
+      in
+      (vars, ty_arg, ty_res))
 
 (**** Instantiation with parameter substitution ****)
 
@@ -1302,12 +1280,7 @@ let enforce_constraints env ty =
 
 (* Recursively expand the head of a type.
    Also expand #-types. *)
-let full_expand env ty =
-  let ty = repr (expand_head env ty) in
-  match ty.desc with
-  | Tobject (fi, {contents = Some (_, v :: _)}) when is_Tvar (repr v) ->
-    newty2 ty.level (Tobject (fi, ref None))
-  | _ -> ty
+let full_expand env ty = repr (expand_head env ty)
 
 (*
    Check whether the abbreviation expands to a well-defined type.
@@ -1810,8 +1783,7 @@ let rec mcomp type_pairs env t1 t2 =
         *)
             | Tpackage _, Tpackage _ -> ()
             | Tvariant row1, Tvariant row2 -> mcomp_row type_pairs env row1 row2
-            | Tobject (fi1, _), Tobject (fi2, _) ->
-              mcomp_fields type_pairs env fi1 fi2
+            | Tobject fi1, Tobject fi2 -> mcomp_fields type_pairs env fi1 fi2
             | Tfield _, Tfield _ ->
               (* Actually unused *)
               mcomp_fields type_pairs env t1' t2'
@@ -1831,27 +1803,12 @@ and mcomp_fields type_pairs env ty1 ty2 =
   let fields2, rest2 = flatten_fields ty2 in
   let fields1, rest1 = flatten_fields ty1 in
   let pairs, miss1, miss2 = associate_fields fields1 fields2 in
-  let has_present =
-    List.exists (fun (_, k, _) -> field_kind_repr k = Fpresent)
-  in
   mcomp type_pairs env rest1 rest2;
   if
-    (has_present miss1 && (object_row ty2).desc = Tnil)
-    || (has_present miss2 && (object_row ty1).desc = Tnil)
+    (miss1 <> [] && (object_row ty2).desc = Tnil)
+    || (miss2 <> [] && (object_row ty1).desc = Tnil)
   then raise (Unify []);
-  List.iter
-    (function
-      | _n, k1, t1, k2, t2 ->
-        mcomp_kind k1 k2;
-        mcomp type_pairs env t1 t2)
-    pairs
-
-and mcomp_kind k1 k2 =
-  let k1 = field_kind_repr k1 in
-  let k2 = field_kind_repr k2 in
-  match (k1, k2) with
-  | Fpresent, Fabsent | Fabsent, Fpresent -> raise (Unify [])
-  | _ -> ()
+  List.iter (fun (f1, f2) -> mcomp type_pairs env f1.f_typ f2.f_typ) pairs
 
 and mcomp_row type_pairs env row1 row2 =
   let row1 = row_repr row1 and row2 = row_repr row2 in
@@ -2267,18 +2224,7 @@ and unify3 env t1 t1' t2 t2' =
         reify env t1';
         reify env t2';
         if !generate_equations then mcomp !env t1' t2'
-      | Tobject (fi1, nm1), Tobject (fi2, _) -> (
-        unify_fields env fi1 fi2;
-        (* Type [t2'] may have been instantiated by [unify_fields] *)
-        (* XXX One should do some kind of unification... *)
-        match (repr t2').desc with
-        | Tobject (_, {contents = Some (_, va :: _)})
-          when match (repr va).desc with
-               | Tvar _ | Tunivar _ | Tnil -> true
-               | _ -> false ->
-          ()
-        | Tobject (_, nm2) -> set_name nm2 !nm1
-        | _ -> ())
+      | Tobject fi1, Tobject fi2 -> unify_fields env fi1 fi2
       | Tvariant row1, Tvariant row2 -> (
         if !umode = Expression then unify_row env row1 row2
         else
@@ -2289,13 +2235,6 @@ and unify3 env t1 t1' t2 t2' =
             reify env t1';
             reify env t2';
             if !generate_equations then mcomp !env t1' t2')
-      | Tfield (f, kind, _, rem), Tnil | Tnil, Tfield (f, kind, _, rem) -> (
-        match field_kind_repr kind with
-        | Fvar r when f <> dummy_method ->
-          set_kind r Fabsent;
-          if d2 = Tnil then unify env rem t2'
-          else unify env (newty2 rem.level Tnil) rem
-        | _ -> raise (Unify []))
       | Tnil, Tnil -> ()
       | Tpoly (t1, []), Tpoly (t2, []) -> unify env t1 t2
       | Tpoly (t1, tl1), Tpoly (t2, tl2) ->
@@ -2356,6 +2295,10 @@ and unify_fields env (ty1 : Types.type_expr) (ty2 : Types.type_expr) =
   and fields2, rest2 = flatten_fields ty2 in
   let pairs, miss1, miss2 = associate_fields fields1 fields2 in
   let l1 = (repr ty1).level and l2 = (repr ty2).level in
+  (* Sample openness before unifying the row tails below. [unify_mutability]
+     requires this pre-unification state because tail unification can close an
+     open row before the matching fields are processed. *)
+  let open1 = is_Tvar (repr rest1) and open2 = is_Tvar (repr rest2) in
   let va =
     make_rowvar
       (Ext_pervasives.min_int l1 l2)
@@ -2366,16 +2309,30 @@ and unify_fields env (ty1 : Types.type_expr) (ty2 : Types.type_expr) =
     unify env (build_fields l1 miss1 va) rest2;
     unify env rest1 (build_fields l2 miss2 va);
     List.iter
-      (fun (n, k1, t1, k2, t2) ->
-        unify_kind k1 k2;
+      (fun (f1, f2) ->
+        unify_mutability ~open1 ~open2 f1 f2;
         try
-          if !trace_gadt_instances then update_level !env va.level t1;
-          unify env t1 t2
+          if !trace_gadt_instances then update_level !env va.level f1.f_typ;
+          unify env f1.f_typ f2.f_typ
         with Unify trace ->
           raise
             (Unify
-               (( newty (Tfield (n, k1, t1, newty Tnil)),
-                  newty (Tfield (n, k2, t2, newty Tnil)) )
+               (( newty
+                    (Tfield
+                       {
+                         name = f1.f_name;
+                         mutability = f1.f_mut;
+                         typ = f1.f_typ;
+                         rest = newty Tnil;
+                       }),
+                  newty
+                    (Tfield
+                       {
+                         name = f2.f_name;
+                         mutability = f2.f_mut;
+                         typ = f2.f_typ;
+                         rest = newty Tnil;
+                       }) )
                :: trace)))
       pairs
   with exn ->
@@ -2385,16 +2342,26 @@ and unify_fields env (ty1 : Types.type_expr) (ty2 : Types.type_expr) =
     rest2.desc <- d2;
     raise exn
 
-and unify_kind k1 k2 =
-  let k1 = field_kind_repr k1 in
-  let k2 = field_kind_repr k2 in
-  if k1 == k2 then ()
-  else
-    match (k1, k2) with
-    | Fvar r, (Fvar _ | Fpresent) -> set_kind r k2
-    | Fpresent, Fvar r -> set_kind r k1
-    | Fpresent, Fpresent -> ()
-    | _ -> assert false
+and unify_mutability ~open1 ~open2 f1 f2 =
+  (* [open1] and [open2] describe the rows before their tails were unified.
+     Promotion and class merging operate on representatives, and are recorded
+     on the ordinary type-checker trail. *)
+  let r1 = mutability_ref_repr f1.f_mut and r2 = mutability_ref_repr f2.f_mut in
+  if r1 != r2 then (
+    (match (!r1, !r2) with
+    | Mutability_value Immutable, Mutability_value Immutable
+    | Mutability_value Mutable, Mutability_value Mutable ->
+      ()
+    | Mutability_value Immutable, Mutability_value Mutable ->
+      if open1 then set_mutability r1 (Mutability_value Asttypes.Mutable)
+      else raise (Unify [])
+    | Mutability_value Mutable, Mutability_value Immutable ->
+      if open2 then set_mutability r2 (Mutability_value Asttypes.Mutable)
+      else raise (Unify [])
+    | Mutability_link _, _ | _, Mutability_link _ -> assert false);
+    (* Merge the two equivalence classes: linking the representatives makes
+       every present and future member of either class share one state. *)
+    set_mutability r2 (Mutability_link r1))
 
 and unify_row env row1 row2 =
   let row1 = row_repr row1 and row2 = row_repr row2 in
@@ -2661,7 +2628,7 @@ let filter_arrow_n ~env t (labels : arg_label list) =
   | _ -> raise (Unify [])
 
 (* Used by [filter_method]. *)
-let rec filter_method_field env name priv ty =
+let rec filter_method_field env name ty =
   let ty = expand_head_trace env ty in
   match ty.desc with
   | Tvar _ ->
@@ -2670,25 +2637,65 @@ let rec filter_method_field env name priv ty =
     let ty' =
       newty2 level
         (Tfield
-           ( name,
-             (match priv with
-             | Private -> Fvar (ref None)
-             | Public -> Fpresent),
-             ty1,
-             ty2 ))
+           {
+             name;
+             mutability = ref (Mutability_value Asttypes.Immutable);
+             typ = ty1;
+             rest = ty2;
+           })
     in
     link_type ty ty';
     ty1
-  | Tfield (n, kind, ty1, ty2) ->
-    let kind = field_kind_repr kind in
-    if n = name && kind <> Fabsent then (
-      if priv = Public then unify_kind kind Fpresent;
-      ty1)
-    else filter_method_field env name priv ty2
+  | Tfield {name = n; typ = ty1; rest = ty2} ->
+    if n = name then ty1 else filter_method_field env name ty2
   | _ -> raise (Unify [])
 
-(* Unify [ty] and [< name : 'a; .. >]. Return ['a]. *)
-let filter_method env name priv ty =
+type object_field_write_error = Owrite_missing | Owrite_not_mutable
+
+(* Look up [name] for assignment in the object type [ty].
+   - A [Mutable] field yields its type.
+   - An [Immutable] field is promoted iff the row ends in a [Tvar], the
+     same predicate [unify_mutability] uses.
+     [object_row_is_structurally_open] also holds for rigid [Tunivar] and
+     private-row [Tconstr] terminators. It cannot therefore gate promotion;
+     in particular, ordinary copies of a private row share the declaration's
+     mutability cell, so a write would later be saved as [@set] in the .cmi.
+   - An absent field is added as [Mutable] through a [Tvar] rest; on a
+     closed or private row the write is rejected as missing. *)
+let filter_object_field_for_write env name ty :
+    (type_expr, object_field_write_error) Result.t =
+  let rec write_field ~can_promote ty =
+    let ty = expand_head_trace env ty in
+    match ty.desc with
+    | Tvar _ ->
+      let level = ty.level in
+      let ty1 = newvar2 level and ty2 = newvar2 level in
+      let ty' =
+        newty2 level
+          (Tfield
+             {
+               name;
+               mutability = ref (Mutability_value Asttypes.Mutable);
+               typ = ty1;
+               rest = ty2;
+             })
+      in
+      link_type ty ty';
+      Ok ty1
+    | Tfield ({name = n; mutability; typ} as f) ->
+      if n = name then
+        match mutability_repr mutability with
+        | Asttypes.Mutable -> Ok typ
+        | Immutable ->
+          if can_promote then (
+            set_mutability
+              (mutability_ref_repr mutability)
+              (Mutability_value Asttypes.Mutable);
+            Ok typ)
+          else Error Owrite_not_mutable
+      else write_field ~can_promote f.rest
+    | _ -> Error Owrite_missing
+  in
   let ty = expand_head_trace env ty in
   match ty.desc with
   | Tvar _ ->
@@ -2696,8 +2703,23 @@ let filter_method env name priv ty =
     let ty' = newobj ty1 in
     update_level env ty.level ty';
     link_type ty ty';
-    filter_method_field env name priv ty1
-  | Tobject (f, _) -> filter_method_field env name priv f
+    write_field ~can_promote:true ty1
+  | Tobject f -> write_field ~can_promote:(is_Tvar (object_row ty)) f
+  | _ -> Error Owrite_missing
+
+(* Require a readable [name] field and return its type. If lookup reaches a
+   [Tvar] row terminator, it can acquire the missing field. Rigid and closed
+   rows cannot. This operation does not require or introduce write capability. *)
+let filter_method env name ty =
+  let ty = expand_head_trace env ty in
+  match ty.desc with
+  | Tvar _ ->
+    let ty1 = newvar () in
+    let ty' = newobj ty1 in
+    update_level env ty.level ty';
+    link_type ty ty';
+    filter_method_field env name ty1
+  | Tobject f -> filter_method_field env name f
   | _ -> raise (Unify [])
 
 let moregen_occur env level ty =
@@ -2776,7 +2798,7 @@ let rec moregen inst_nongen type_pairs env t1 t2 =
                 with Not_found -> raise (Unify []))
               | Tvariant row1, Tvariant row2 ->
                 moregen_row inst_nongen type_pairs env row1 row2
-              | Tobject (fi1, _nm1), Tobject (fi2, _nm2) ->
+              | Tobject fi1, Tobject fi2 ->
                 moregen_fields inst_nongen type_pairs env fi1 fi2
               | Tfield _, Tfield _ ->
                 (* Actually unused *)
@@ -2803,26 +2825,31 @@ and moregen_fields inst_nongen type_pairs env ty1 ty2 =
   moregen inst_nongen type_pairs env rest1
     (build_fields (repr ty2).level miss2 rest2);
   List.iter
-    (fun (n, k1, t1, k2, t2) ->
-      moregen_kind k1 k2;
-      try moregen inst_nongen type_pairs env t1 t2
+    (fun (f1, f2) ->
+      if mutability_repr f1.f_mut <> mutability_repr f2.f_mut then
+        raise (Unify []);
+      try moregen inst_nongen type_pairs env f1.f_typ f2.f_typ
       with Unify trace ->
         raise
           (Unify
-             (( newty (Tfield (n, k1, t1, rest2)),
-                newty (Tfield (n, k2, t2, rest2)) )
+             (( newty
+                  (Tfield
+                     {
+                       name = f1.f_name;
+                       mutability = f1.f_mut;
+                       typ = f1.f_typ;
+                       rest = rest2;
+                     }),
+                newty
+                  (Tfield
+                     {
+                       name = f2.f_name;
+                       mutability = f2.f_mut;
+                       typ = f2.f_typ;
+                       rest = rest2;
+                     }) )
              :: trace)))
     pairs
-
-and moregen_kind k1 k2 =
-  let k1 = field_kind_repr k1 in
-  let k2 = field_kind_repr k2 in
-  if k1 == k2 then ()
-  else
-    match (k1, k2) with
-    | Fvar r, (Fvar _ | Fpresent) -> set_kind r k2
-    | Fpresent, Fpresent -> ()
-    | _ -> raise (Unify [])
 
 and moregen_row inst_nongen type_pairs env row1 row2 =
   let row1 = row_repr row1 and row2 = row_repr row2 in
@@ -3053,7 +3080,7 @@ let rec eqtype rename type_pairs subst env t1 t2 =
                 with Not_found -> raise (Unify []))
               | Tvariant row1, Tvariant row2 ->
                 eqtype_row rename type_pairs subst env row1 row2
-              | Tobject (fi1, _nm1), Tobject (fi2, _nm2) ->
+              | Tobject fi1, Tobject fi2 ->
                 eqtype_fields rename type_pairs subst env fi1 fi2
               | Tfield _, Tfield _ ->
                 (* Actually unused *)
@@ -3085,31 +3112,37 @@ and eqtype_fields rename type_pairs subst env ty1 ty2 : unit =
   else
     (* Try expansion, needed when called from Includecore.type_manifest *)
     match expand_head_rigid env rest2 with
-    | {desc = Tobject (ty2, _)} ->
-      eqtype_fields rename type_pairs subst env ty1 ty2
+    | {desc = Tobject ty2} -> eqtype_fields rename type_pairs subst env ty1 ty2
     | _ ->
       let pairs, miss1, miss2 = associate_fields fields1 fields2 in
       eqtype rename type_pairs subst env rest1 rest2;
       if miss1 <> [] || miss2 <> [] then raise (Unify []);
       List.iter
-        (function
-          | n, k1, t1, k2, t2 -> (
-            eqtype_kind k1 k2;
-            try eqtype rename type_pairs subst env t1 t2
-            with Unify trace ->
-              raise
-                (Unify
-                   (( newty (Tfield (n, k1, t1, rest2)),
-                      newty (Tfield (n, k2, t2, rest2)) )
-                   :: trace))))
+        (fun (f1, f2) ->
+          if mutability_repr f1.f_mut <> mutability_repr f2.f_mut then
+            raise (Unify []);
+          try eqtype rename type_pairs subst env f1.f_typ f2.f_typ
+          with Unify trace ->
+            raise
+              (Unify
+                 (( newty
+                      (Tfield
+                         {
+                           name = f1.f_name;
+                           mutability = f1.f_mut;
+                           typ = f1.f_typ;
+                           rest = rest2;
+                         }),
+                    newty
+                      (Tfield
+                         {
+                           name = f2.f_name;
+                           mutability = f2.f_mut;
+                           typ = f2.f_typ;
+                           rest = rest2;
+                         }) )
+                 :: trace)))
         pairs
-
-and eqtype_kind k1 k2 =
-  let k1 = field_kind_repr k1 in
-  let k2 = field_kind_repr k2 in
-  match (k1, k2) with
-  | Fvar _, Fvar _ | Fpresent, Fpresent -> ()
-  | _ -> raise (Unify [])
 
 and eqtype_row rename type_pairs subst env row1 row2 =
   (* Try expansion, needed when called from Includecore.type_manifest *)
@@ -3177,7 +3210,7 @@ let equal env rename tyl1 tyl2 =
 (* build_subtype:
    [visited] traces traversed object and variant types
    [loops] is a mapping from variables to variables, to reproduce
-     positive loops in a class type
+     positive loops
    [posi] true if the current variance is positive
    [level] number of expansions/enlargement allowed on this branch *)
 
@@ -3211,17 +3244,6 @@ let rec lid_of_path ?(hash = "") = function
      application by name (e.g. "F(Arg)") rather than aborting, so any diagnostic
      that reaches here degrades gracefully instead of crashing the compiler. *)
   | Path.Papply _ as p -> Longident.Lident (hash ^ Path.name p)
-
-let find_cltype_for_path env p =
-  let cl_path = Env.lookup_type (lid_of_path ~hash:"#" p) env in
-  let cl_abbr = Env.find_type cl_path env in
-
-  match cl_abbr.type_manifest with
-  | Some ty -> (
-    match (repr ty).desc with
-    | Tobject (_, {contents = Some (p', _)}) when Path.same p p' -> (cl_abbr, ty)
-    | _ -> raise Not_found)
-  | None -> assert false
 
 let has_constr_row' env t = has_constr_row (expand_abbrev env t)
 
@@ -3263,48 +3285,13 @@ let rec build_subtype env visited loops posi level t =
       let c = collect tlist' in
       if c > Unchanged then (newty (Ttuple (List.map fst tlist')), c)
       else (t, Unchanged)
-  | Tconstr (p, tl, abbrev)
+  | Tconstr (p, _, _)
     when level > 0 && generic_abbrev env p && safe_abbrev env t
-         && not (has_constr_row' env t) -> (
+         && not (has_constr_row' env t) ->
     let t' = repr (expand_abbrev env t) in
     let level' = pred_expand level in
-    try
-      match t'.desc with
-      | Tobject _ when posi && not (opened_object t') ->
-        let cl_abbr, body = find_cltype_for_path env p in
-        let ty =
-          subst env !current_level Public abbrev None cl_abbr.type_params tl
-            body
-        in
-        let ty = repr ty in
-        let ty1, tl1 =
-          match ty.desc with
-          | Tobject (ty1, {contents = Some (p', tl1)}) when Path.same p p' ->
-            (ty1, tl1)
-          | _ -> raise Not_found
-        in
-        (* Fix PR#4505: do not set ty to Tvar when it appears in tl1,
-           as this occurrence might break the occur check.
-           XXX not clear whether this correct anyway... *)
-        if List.exists (deep_occur ty) tl1 then raise Not_found;
-        ty.desc <- Tvar None;
-        let t'' = newvar () in
-        let loops = (ty, t'') :: loops in
-        (* May discard [visited] as level is going down *)
-        let ty1', c =
-          build_subtype env [t'] loops posi (pred_enlarge level') ty1
-        in
-        assert (is_Tvar t'');
-        let nm =
-          if c > Equiv || deep_occur ty ty1' then None else Some (p, tl1)
-        in
-        t''.desc <- Tobject (ty1', ref nm);
-        (try unify_var env ty t with Unify _ -> assert false);
-        (t'', Changed)
-      | _ -> raise Not_found
-    with Not_found ->
-      let t'', c = build_subtype env visited loops posi level' t' in
-      if c > Unchanged then (t'', c) else (t, Unchanged))
+    let t'', c = build_subtype env visited loops posi level' t' in
+    if c > Unchanged then (t'', c) else (t, Unchanged)
   | Tconstr (p, tl, _abbrev) -> (
     if
       (* Must check recursion on constructors, since we do not always
@@ -3371,21 +3358,43 @@ let rec build_subtype env visited loops posi level t =
         }
       in
       (newty (Tvariant row), Changed)
-  | Tobject (t1, _) ->
-    if memq_warn t visited || opened_object t1 then (t, Unchanged)
+  | Tobject t1 ->
+    if memq_warn t visited || object_row_is_structurally_open t1 then
+      (t, Unchanged)
     else
       let level' = pred_enlarge level in
       let visited =
         t :: (if level' < level then [] else filter_visited visited)
       in
       let t1', c = build_subtype env visited loops posi level' t1 in
-      if c > Unchanged then (newty (Tobject (t1', ref None)), c)
-      else (t, Unchanged)
-  | Tfield (s, _, t1, t2) (* Always present *) ->
-    let t1', c1 = build_subtype env visited loops posi level t1 in
+      if c > Unchanged then (newty (Tobject t1'), c) else (t, Unchanged)
+  | Tfield ({typ = t1; rest = t2} as f) ->
+    let t1', c1 =
+      match mutability_repr f.mutability with
+      | Asttypes.Mutable ->
+        (* Do not enlarge a mutable field's type. The unification performed
+           after enlargement will then require the source and target field
+           types to be equivalent. *)
+        (t1, Unchanged)
+      | Immutable -> build_subtype env visited loops posi level t1
+    in
     let t2', c2 = build_subtype env visited loops posi level t2 in
     let c = max c1 c2 in
-    if c > Unchanged then (newty (Tfield (s, Fpresent, t1', t2')), c)
+    if c > Unchanged then
+      ( newty
+          (Tfield
+             {
+               f with
+               (* The enlarged type is an approximation, not a view of the
+                  declared type: it gets its own unlinked cell, so trial
+                  unification can never promote the declared target or the
+                  coercion result through it. *)
+               mutability =
+                 ref (Mutability_value (mutability_repr f.mutability));
+               typ = t1';
+               rest = t2';
+             }),
+        c )
     else (t, Unchanged)
   | Tnil ->
     if posi then
@@ -3756,11 +3765,11 @@ let rec subtype_rec env trace t1 t2 cstrs =
         | exception Not_found -> (trace, t1, t2, !univar_pairs, None) :: cstrs)
       (* | (_, Tconstr(p2, _, _)) when generic_private_abbrev false env p2 ->
          subtype_rec env trace t1 (expand_abbrev_opt env t2) cstrs *)
-      | Tobject (f1, _), Tobject (f2, _)
+      | Tobject f1, Tobject f2
         when is_Tvar (object_row f1) && is_Tvar (object_row f2) ->
         (* Same row variable implies same object. *)
         (trace, t1, t2, !univar_pairs, None) :: cstrs
-      | Tobject (f1, _), Tobject (f2, _) -> subtype_fields env trace f1 f2 cstrs
+      | Tobject f1, Tobject f2 -> subtype_fields env trace f1 f2 cstrs
       | Tvariant row1, Tvariant row2 -> (
         try subtype_row env trace row1 row2 cstrs
         with Exit -> (trace, t1, t2, !univar_pairs, None) :: cstrs)
@@ -3789,7 +3798,7 @@ let rec subtype_rec env trace t1 t2 cstrs =
       | Tvariant v, _ when !variant_is_subtype env (row_repr v) t2 -> cstrs
       | Tpoly (u1, []), Tpoly (u2, []) -> subtype_rec env trace u1 u2 cstrs
       | Tpoly (u1, tl1), Tpoly (u2, []) ->
-        let _, u1' = instance_poly false tl1 u1 in
+        let _, u1' = instance_poly ~fixed:false tl1 u1 in
         subtype_rec env trace u1' u2 cstrs
       | Tpoly (u1, tl1), Tpoly (u2, tl2) -> (
         try
@@ -3859,9 +3868,42 @@ and subtype_fields env trace ty1 ty2 cstrs =
       :: cstrs
   in
   List.fold_left
-    (fun cstrs (_, _k1, t1, _k2, t2) ->
+    (fun cstrs (f1, f2) ->
       (* These fields are always present *)
-      subtype_rec env ((t1, t2) :: trace) t1 t2 cstrs)
+      match mutability_repr f2.f_mut with
+      | Asttypes.Immutable ->
+        (* Read-only target: covariant; a mutable source just forgets its
+           write permission. *)
+        subtype_rec env ((f1.f_typ, f2.f_typ) :: trace) f1.f_typ f2.f_typ cstrs
+      | Mutable ->
+        (* A writable target requires equivalent field types. Add a deferred
+           unification constraint over transient one-field fragments. The
+           source fragment retains [rest1], allowing [unify_fields] to observe
+           whether the source row was open before it unifies the tails and, if
+           so, promote the field. These fragments borrow the existing cells;
+           they are consumed by deferred constraint enforcement and must not
+           be copied, generalized, or persisted. *)
+        let src =
+          newty
+            (Tfield
+               {
+                 name = f1.f_name;
+                 mutability = f1.f_mut;
+                 typ = f1.f_typ;
+                 rest = rest1;
+               })
+        in
+        let tgt =
+          newty
+            (Tfield
+               {
+                 name = f2.f_name;
+                 mutability = f2.f_mut;
+                 typ = f2.f_typ;
+                 rest = newvar ();
+               })
+        in
+        (trace, src, tgt, !univar_pairs, None) :: cstrs)
     cstrs pairs
 
 and subtype_row env trace row1 row2 cstrs =
@@ -3930,8 +3972,7 @@ let subtype env ty1 ty2 =
 let rec unalias_object ty =
   let ty = repr ty in
   match ty.desc with
-  | Tfield (s, k, t1, t2) ->
-    newty2 ty.level (Tfield (s, k, t1, unalias_object t2))
+  | Tfield f -> newty2 ty.level (Tfield {f with rest = unalias_object f.rest})
   | Tvar _ | Tnil -> newty2 ty.level ty.desc
   | Tunivar _ -> ty
   | Tconstr _ -> newvar2 ty.level
@@ -3945,7 +3986,7 @@ let unalias ty =
     let row = row_repr row in
     let more = row.row_more in
     newty2 ty.level (Tvariant {row with row_more = newty2 more.level more.desc})
-  | Tobject (ty, nm) -> newty2 ty.level (Tobject (unalias_object ty, nm))
+  | Tobject ty -> newty2 ty.level (Tobject (unalias_object ty))
   | _ -> newty2 ty.level ty.desc
 
 (* Check whether an abbreviation expands to itself. *)
@@ -3985,8 +4026,8 @@ let rec closed_schema_rec env ty =
           visited := old;
           closed_schema_rec env (try_expand_head try_expand_safe env ty)
         with Cannot_expand -> raise Non_closed0))
-    | Tfield (_, kind, t1, t2) ->
-      if field_kind_repr kind = Fpresent then closed_schema_rec env t1;
+    | Tfield {typ = t1; rest = t2} ->
+      closed_schema_rec env t1;
       closed_schema_rec env t2
     | Tvariant row ->
       let row = row_repr row in
@@ -4055,23 +4096,7 @@ let rec normalize_type_rec env visited ty =
          in
          log_type ty;
          ty.desc <- Tvariant {row with row_fields = fields}
-       | Tobject (fi, nm) ->
-         (match !nm with
-         | None -> ()
-         | Some (n, v :: l) -> (
-           if deep_occur ty (newgenty (Ttuple l)) then
-             (* The abbreviation may be hiding something, so remove it *)
-             set_name nm None
-           else
-             let v' = repr v in
-             match v'.desc with
-             | Tvar _ | Tunivar _ ->
-               if v' != v then set_name nm (Some (n, v' :: l))
-             | Tnil ->
-               log_type ty;
-               ty.desc <- Tconstr (n, l, ref Mnil)
-             | _ -> set_name nm None)
-         | _ -> fatal_error "Ctype.normalize_type_rec");
+       | Tobject fi ->
          let fi = repr fi in
          if fi.level < lowest_level then ()
          else
@@ -4100,6 +4125,21 @@ let nondep_variants = Type_hash.create 17
 let clear_hash () =
   Type_hash.clear nondep_hash;
   Type_hash.clear nondep_variants
+
+let with_nondep_copy_session f =
+  (* [nondep_type_rec] cannot use [Tsubst] because abbreviation expansion can
+     unify while the copy is in progress. Mutability cells may nevertheless be
+     temporarily linked by [copy_type_desc]. Semantic operations follow their
+     representatives, so any such unification updates the copy under
+     construction; the source link is restored when this session ends. *)
+  with_copy_session (fun () ->
+      match f () with
+      | result ->
+        clear_hash ();
+        result
+      | exception exn ->
+        clear_hash ();
+        raise exn)
 
 let rec nondep_type_rec env id ty =
   match ty.desc with
@@ -4131,15 +4171,7 @@ let rec nondep_type_rec env id ty =
           let p' = normalize_package_path env p in
           if Path.isfree id p' then raise Not_found;
           Tpackage (p', nl, List.map (nondep_type_rec env id) tl)
-        | Tobject (t1, name) ->
-          Tobject
-            ( nondep_type_rec env id t1,
-              ref
-                (match !name with
-                | None -> None
-                | Some (p, tl) ->
-                  if Path.isfree id p then None
-                  else Some (p, List.map (nondep_type_rec env id) tl)) )
+        | Tobject t1 -> Tobject (nondep_type_rec env id t1)
         | Tvariant row -> (
           let row = row_repr row in
           let more = repr row.row_more in
@@ -4164,13 +4196,7 @@ let rec nondep_type_rec env id ty =
       ty')
 
 let nondep_type env id ty =
-  try
-    let ty' = nondep_type_rec env id ty in
-    clear_hash ();
-    ty'
-  with Not_found ->
-    clear_hash ();
-    raise Not_found
+  with_nondep_copy_session (fun () -> nondep_type_rec env id ty)
 
 let () = nondep_type' := nondep_type
 
@@ -4184,76 +4210,72 @@ let unroll_abbrev id tl ty =
 
 (* Preserve sharing inside type declarations. *)
 let nondep_type_decl env mid id is_covariant decl =
-  try
-    let params = List.map (nondep_type_rec env mid) decl.type_params in
-    let tk =
-      try map_kind (nondep_type_rec env mid) decl.type_kind
-      with Not_found when is_covariant -> Type_abstract
-    and tm =
-      try
-        match decl.type_manifest with
-        | None -> None
-        | Some ty -> Some (unroll_abbrev id params (nondep_type_rec env mid ty))
-      with Not_found when is_covariant -> None
-    in
-    clear_hash ();
-    let priv =
-      match tm with
-      | Some ty when Btype.has_constr_row ty -> Private
-      | _ -> decl.type_private
-    in
-    {
-      type_params = params;
-      type_arity = decl.type_arity;
-      type_kind = tk;
-      type_manifest = tm;
-      type_private = priv;
-      type_variance = decl.type_variance;
-      type_newtype_level = None;
-      type_loc = decl.type_loc;
-      type_attributes = decl.type_attributes;
-      type_immediate = decl.type_immediate;
-      type_representation = decl.type_representation;
-      type_inlined_types = decl.type_inlined_types;
-    }
-  with Not_found ->
-    clear_hash ();
-    raise Not_found
+  with_nondep_copy_session (fun () ->
+      let params = List.map (nondep_type_rec env mid) decl.type_params in
+      let tk =
+        try map_kind (nondep_type_rec env mid) decl.type_kind
+        with Not_found when is_covariant -> Type_abstract
+      and tm =
+        try
+          match decl.type_manifest with
+          | None -> None
+          | Some ty ->
+            Some (unroll_abbrev id params (nondep_type_rec env mid ty))
+        with Not_found when is_covariant -> None
+      in
+      let priv =
+        match tm with
+        | Some ty when Btype.has_constr_row ty -> Private
+        | _ -> decl.type_private
+      in
+      {
+        type_params = params;
+        type_arity = decl.type_arity;
+        type_kind = tk;
+        type_manifest = tm;
+        type_private = priv;
+        type_variance = decl.type_variance;
+        type_newtype_level = None;
+        type_loc = decl.type_loc;
+        type_attributes = decl.type_attributes;
+        type_immediate = decl.type_immediate;
+        type_representation = decl.type_representation;
+        type_inlined_types = decl.type_inlined_types;
+      })
 
 (* Preserve sharing inside extension constructors. *)
 let nondep_extension_constructor env mid ext =
-  try
-    let type_path, type_params =
-      if Path.isfree mid ext.ext_type_path then
-        let ty =
-          newgenty (Tconstr (ext.ext_type_path, ext.ext_type_params, ref Mnil))
-        in
-        let ty' = nondep_type_rec env mid ty in
-        match (repr ty').desc with
-        | Tconstr (p, tl, _) -> (p, tl)
-        | _ -> raise Not_found
-      else
-        let type_params =
-          List.map (nondep_type_rec env mid) ext.ext_type_params
-        in
-        (ext.ext_type_path, type_params)
-    in
-    let args = map_type_expr_cstr_args (nondep_type_rec env mid) ext.ext_args in
-    let ret_type = may_map (nondep_type_rec env mid) ext.ext_ret_type in
-    clear_hash ();
-    {
-      ext_type_path = type_path;
-      ext_type_params = type_params;
-      ext_args = args;
-      ext_ret_type = ret_type;
-      ext_private = ext.ext_private;
-      ext_attributes = ext.ext_attributes;
-      ext_loc = ext.ext_loc;
-      ext_is_exception = ext.ext_is_exception;
-    }
-  with Not_found ->
-    clear_hash ();
-    raise Not_found
+  with_nondep_copy_session (fun () ->
+      let type_path, type_params =
+        if Path.isfree mid ext.ext_type_path then
+          let ty =
+            newgenty
+              (Tconstr (ext.ext_type_path, ext.ext_type_params, ref Mnil))
+          in
+          let ty' = nondep_type_rec env mid ty in
+          match (repr ty').desc with
+          | Tconstr (p, tl, _) -> (p, tl)
+          | _ -> raise Not_found
+        else
+          let type_params =
+            List.map (nondep_type_rec env mid) ext.ext_type_params
+          in
+          (ext.ext_type_path, type_params)
+      in
+      let args =
+        map_type_expr_cstr_args (nondep_type_rec env mid) ext.ext_args
+      in
+      let ret_type = may_map (nondep_type_rec env mid) ext.ext_ret_type in
+      {
+        ext_type_path = type_path;
+        ext_type_params = type_params;
+        ext_args = args;
+        ext_ret_type = ret_type;
+        ext_private = ext.ext_private;
+        ext_attributes = ext.ext_attributes;
+        ext_loc = ext.ext_loc;
+        ext_is_exception = ext.ext_is_exception;
+      })
 
 let same_constr env t1 t2 =
   let t1 = expand_head env t1 in

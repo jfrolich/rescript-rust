@@ -3360,41 +3360,21 @@ fn expand_record_spread_label(
                     ty
                 }
             }
-            crate::types::TypeDesc::Tobject { fields, name } => {
+            crate::types::TypeDesc::Tobject { fields } => {
                 let new_fields = substitute_type_params(ctx, *fields, params, args, cache);
-                let mut name_changed = false;
-                let new_name = name.as_ref().map(|(path, type_args)| {
-                    (
-                        path.clone(),
-                        type_args
-                            .iter()
-                            .map(|arg| {
-                                let new_arg =
-                                    substitute_type_params(ctx, *arg, params, args, cache);
-                                if new_arg != *arg {
-                                    name_changed = true;
-                                }
-                                new_arg
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                });
-                if new_fields == *fields && !name_changed {
+                if new_fields == *fields {
                     ty
                 } else {
                     with_original_level(
                         ctx,
                         ty,
-                        ctx.new_type(crate::types::TypeDesc::Tobject {
-                            fields: new_fields,
-                            name: new_name,
-                        }),
+                        ctx.new_type(crate::types::TypeDesc::Tobject { fields: new_fields }),
                     )
                 }
             }
             crate::types::TypeDesc::Tfield {
                 name,
-                kind,
+                mutability,
                 typ,
                 rest,
             } => {
@@ -3408,7 +3388,7 @@ fn expand_record_spread_label(
                         ty,
                         ctx.new_type(crate::types::TypeDesc::Tfield {
                             name: name.clone(),
-                            kind: kind.clone(),
+                            mutability: ctx.mutability_ref_repr(*mutability),
                             typ: new_typ,
                             rest: new_rest,
                         }),
@@ -8097,12 +8077,16 @@ fn expression_uses_unqualified_value_path(
                 || expression_uses_unqualified_value_path(arena, stop, name, target)
                 || expression_uses_unqualified_value_path(arena, body, name, target)
         }
-        crate::types::typedtree::ExpressionDesc::Texp_send(receiver, _, arg) => {
+        crate::types::typedtree::ExpressionDesc::Texp_object_get(receiver, _) => {
             expression_uses_unqualified_value_path(arena, receiver, name, target)
-                || arg.as_deref().is_some_and(|expr| {
-                    expression_uses_unqualified_value_path(arena, expr, name, target)
-                })
         }
+        crate::types::typedtree::ExpressionDesc::Texp_object_set(receiver, _, value) => {
+            expression_uses_unqualified_value_path(arena, receiver, name, target)
+                || expression_uses_unqualified_value_path(arena, value, name, target)
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_object_literal(fields) => fields
+            .iter()
+            .any(|(_, field)| expression_uses_unqualified_value_path(arena, field, name, target)),
         crate::types::typedtree::ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
             module_expr_uses_unqualified_value_path(arena, module_expr, name, target)
                 || expression_uses_unqualified_value_path(arena, body, name, target)
@@ -8287,12 +8271,16 @@ fn expression_uses_unqualified_module_path(
                 || expression_uses_unqualified_module_path(arena, stop, name, target)
                 || expression_uses_unqualified_module_path(arena, body, name, target)
         }
-        crate::types::typedtree::ExpressionDesc::Texp_send(receiver, _, arg) => {
+        crate::types::typedtree::ExpressionDesc::Texp_object_get(receiver, _) => {
             expression_uses_unqualified_module_path(arena, receiver, name, target)
-                || arg.as_deref().is_some_and(|expr| {
-                    expression_uses_unqualified_module_path(arena, expr, name, target)
-                })
         }
+        crate::types::typedtree::ExpressionDesc::Texp_object_set(receiver, _, value) => {
+            expression_uses_unqualified_module_path(arena, receiver, name, target)
+                || expression_uses_unqualified_module_path(arena, value, name, target)
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_object_literal(fields) => fields
+            .iter()
+            .any(|(_, field)| expression_uses_unqualified_module_path(arena, field, name, target)),
         crate::types::typedtree::ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
             module_expr_uses_unqualified_module_path(arena, module_expr, name, target)
                 || expression_uses_unqualified_module_path(arena, body, name, target)
@@ -10184,13 +10172,8 @@ fn apply_with_type_constraints_to_module_type<'b>(
                     rewrite_type_with_substs(ctx, inner, substs, cache, visited);
                 }
             }
-            TypeDesc::Tobject { fields, name } => {
+            TypeDesc::Tobject { fields } => {
                 rewrite_type_with_substs(ctx, fields, substs, cache, visited);
-                if let Some((_path, args)) = name {
-                    for arg in args {
-                        rewrite_type_with_substs(ctx, arg, substs, cache, visited);
-                    }
-                }
             }
             TypeDesc::Tfield { typ, rest, .. } => {
                 rewrite_type_with_substs(ctx, typ, substs, cache, visited);
@@ -11018,7 +11001,7 @@ fn check_usage_of_path_of_substituted_item(
 
         enum TypeAction {
             Path(Path, Vec<TypeExprRef>),
-            Object(TypeExprRef, Option<(Path, Vec<TypeExprRef>)>),
+            Object(TypeExprRef),
             Variant(crate::types::type_expr::RowDesc),
             Children(Vec<TypeExprRef>),
         }
@@ -11032,7 +11015,7 @@ fn check_usage_of_path_of_substituted_item(
                 TypeDesc::Tpackage { path, args, .. } => {
                     TypeAction::Path(path.clone(), args.to_vec())
                 }
-                TypeDesc::Tobject { fields, name } => TypeAction::Object(*fields, name.clone()),
+                TypeDesc::Tobject { fields } => TypeAction::Object(*fields),
                 TypeDesc::Tvariant(row) => TypeAction::Variant(*row.clone()),
                 _ => {
                     let mut children = Vec::new();
@@ -11051,14 +11034,8 @@ fn check_usage_of_path_of_substituted_item(
                     check_type_expr(tctx, env, paths, arg, loc, lid, visited)?;
                 }
             }
-            TypeAction::Object(fields, name) => {
+            TypeAction::Object(fields) => {
                 check_type_expr(tctx, env, paths, fields, loc, lid, visited)?;
-                if let Some((path, args)) = name {
-                    check_path(tctx, env, paths, &path, loc, lid)?;
-                    for arg in args {
-                        check_type_expr(tctx, env, paths, arg, loc, lid, visited)?;
-                    }
-                }
             }
             TypeAction::Variant(row) => {
                 if let Some((path, args)) = &row.row_name {
@@ -16089,9 +16066,13 @@ fn find_unbound_type_var_detail_in_single_type(
             if rest == ctx.repr(unbound) {
                 return trivial();
             }
-            fields.into_iter().find_map(|(name, _, field_ty)| {
-                crate::types::ctype::deep_occur(ctx, unbound, field_ty)
-                    .then_some(UnboundTypeVarDetail::Method { name, ty: field_ty })
+            fields.into_iter().find_map(|field| {
+                crate::types::ctype::deep_occur(ctx, unbound, field.typ).then_some(
+                    UnboundTypeVarDetail::Method {
+                        name: field.name,
+                        ty: field.typ,
+                    },
+                )
             })
         }
         TypeDesc::Tvariant(row) => {

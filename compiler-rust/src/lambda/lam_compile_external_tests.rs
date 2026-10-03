@@ -201,15 +201,12 @@ fn translates_external_module_values_to_qualified_members_like_ocaml() {
 }
 
 #[test]
-fn lowers_pjs_unsafe_downgrade_getters_to_method_calls() {
+fn lowers_pjs_object_get_to_method_calls() {
     let mut compiler = LambdaCompiler::new();
     let john = Ident::create_persistent("john");
     let lam = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::prim(
-            Primitive::PjsUnsafeDowngrade {
-                name: "say".to_string(),
-                setter: false,
-            },
+            Primitive::PjsObjectGet("say".to_string()),
             vec![Lambda::var(john.clone())],
             Location::none(),
         )),
@@ -237,14 +234,11 @@ fn lowers_pjs_unsafe_downgrade_getters_to_method_calls() {
 }
 
 #[test]
-fn lowers_pjs_unsafe_downgrade_setters_to_property_assignments() {
+fn lowers_pjs_object_set_to_property_assignments() {
     let mut compiler = LambdaCompiler::new();
     let student = Ident::create_persistent("student1");
     let lam = Lambda::prim(
-        Primitive::PjsUnsafeDowngrade {
-            name: "name".to_string(),
-            setter: true,
-        },
+        Primitive::PjsObjectSet("name".to_string()),
         vec![
             Lambda::var(student),
             Lambda::const_(Constant::String {

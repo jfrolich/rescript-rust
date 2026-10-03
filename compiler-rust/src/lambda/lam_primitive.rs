@@ -301,8 +301,10 @@ pub enum Primitive {
     PjsRuntimeApply,
     /// Debugger statement
     Pdebugger,
-    /// Unsafe downgrade (method call)
-    PjsUnsafeDowngrade { name: String, setter: bool },
+    /// Object property read: `obj["name"]`.
+    PjsObjectGet(String),
+    /// Object property write: `obj["name"] = v`.
+    PjsObjectSet(String),
     /// Initialize module
     PinitMod,
     /// Update module
@@ -561,12 +563,12 @@ impl Primitive {
                 Poffsetref(i1) => i0 == i1,
                 _ => false,
             },
-            // lam_primitive.ml:293-296
-            PjsUnsafeDowngrade { name, setter } => match other {
-                PjsUnsafeDowngrade {
-                    name: n1,
-                    setter: s1,
-                } => name == n1 && setter == s1,
+            PjsObjectGet(name) => match other {
+                PjsObjectGet(rhs_name) => name == rhs_name,
+                _ => false,
+            },
+            PjsObjectSet(name) => match other {
+                PjsObjectSet(rhs_name) => name == rhs_name,
                 _ => false,
             },
             // lam_primitive.ml:298

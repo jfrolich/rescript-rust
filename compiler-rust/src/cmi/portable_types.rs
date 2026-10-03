@@ -30,7 +30,7 @@ use crate::types::decl::{
 use crate::types::path::Path;
 use crate::types::thread_store::ThreadTypeStore;
 use crate::types::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, RowFieldRef, TypeArg,
+    AbbrevMemo, AbbrevMemoRef, GENERIC_LEVEL, MutabilityRef, RowDesc, RowField, RowFieldRef, TypeArg,
     TypeDesc, TypeExprRef,
 };
 
@@ -48,6 +48,9 @@ pub struct PortableTypeGraph {
     pub entries: Vec<PortableTypeEntry>,
     /// Canonical variant layouts referenced by declarations in the signature.
     pub variant_layouts: Vec<crate::types::VariantLayout>,
+    /// Object field mutability cells (subst.ml `for_saving` gives the saved
+    /// graph its own cells; fields sharing a cell share an index here).
+    pub mutabilities: Vec<crate::types::asttypes::MutableFlag>,
 }
 
 /// One type expression in portable form.
@@ -72,10 +75,11 @@ pub enum PortableTypeDesc {
     },
     Tobject {
         fields: usize,
-        name: Option<(Path, Vec<usize>)>,
     },
     Tfield {
         name: String,
+        /// Index into `PortableTypeGraph.mutabilities`.
+        mutability: usize,
         typ: usize,
         rest: usize,
     },
@@ -270,18 +274,17 @@ fn hash_portable_desc(
             hash_path_by_name(hasher, path);
             hash_type_refs(hasher, args, entries, visiting);
         }
-        PortableTypeDesc::Tobject { fields, name } => {
+        PortableTypeDesc::Tobject { fields } => {
             hash_type_ref(hasher, *fields, entries, visiting);
-            if let Some((p, args)) = name {
-                true.hash(hasher);
-                hash_path_by_name(hasher, p);
-                hash_type_refs(hasher, args, entries, visiting);
-            } else {
-                false.hash(hasher);
-            }
         }
-        PortableTypeDesc::Tfield { name, typ, rest } => {
+        PortableTypeDesc::Tfield {
+            name,
+            mutability,
+            typ,
+            rest,
+        } => {
             name.hash(hasher);
+            mutability.hash(hasher);
             hash_type_ref(hasher, *typ, entries, visiting);
             hash_type_ref(hasher, *rest, entries, visiting);
         }
@@ -607,6 +610,8 @@ fn serialize_signature(
         variant_layouts: Vec::new(),
         variant_layout_cache: HashMap::new(),
         file_name_cache: HashMap::new(),
+        mutabilities: Vec::new(),
+        mutability_cache: HashMap::new(),
     };
     let mut sig = sig.clone();
     ser.remap_signature(&mut sig);
@@ -614,6 +619,7 @@ fn serialize_signature(
     let type_graph = PortableTypeGraph {
         entries: ser.entries,
         variant_layouts: ser.variant_layouts,
+        mutabilities: ser.mutabilities,
     };
     (sig, type_graph)
 }
@@ -627,6 +633,8 @@ struct TypeGraphSerializer<'a> {
     variant_layout_cache: HashMap<crate::types::VariantLayoutRef, usize>,
     /// Source-arena file names re-interned as synthetic CMI names.
     file_name_cache: HashMap<crate::intern::StrIdx, crate::intern::StrIdx>,
+    mutabilities: Vec<crate::types::asttypes::MutableFlag>,
+    mutability_cache: HashMap<MutabilityRef, usize>,
 }
 
 impl<'a> TypeGraphSerializer<'a> {
@@ -658,6 +666,19 @@ impl<'a> TypeGraphSerializer<'a> {
                 .entry(idx)
                 .or_insert_with(|| ctx.intern_cmi_longident_name(arena.get_string(idx)));
         }
+    }
+
+    /// Serialize a mutability cell, returning its portable index. Fields
+    /// sharing a cell class share the index.
+    fn serialize_mutability(&mut self, m: MutabilityRef) -> usize {
+        let m = self.ctx.mutability_ref_repr(m);
+        if let Some(&idx) = self.mutability_cache.get(&m) {
+            return idx;
+        }
+        let idx = self.mutabilities.len();
+        self.mutabilities.push(self.ctx.mutability_repr(m));
+        self.mutability_cache.insert(m, idx);
+        idx
     }
 
     /// Serialize a TypeExprRef, returning the portable index.
@@ -701,19 +722,17 @@ impl<'a> TypeGraphSerializer<'a> {
                 path: path.clone(),
                 args: args.iter().map(|t| self.serialize_type(*t)).collect(),
             },
-            TypeDesc::Tobject { fields, name } => PortableTypeDesc::Tobject {
+            TypeDesc::Tobject { fields } => PortableTypeDesc::Tobject {
                 fields: self.serialize_type(*fields),
-                name: name.as_ref().map(|(p, args)| {
-                    (
-                        p.clone(),
-                        args.iter().map(|t| self.serialize_type(*t)).collect(),
-                    )
-                }),
             },
             TypeDesc::Tfield {
-                name, typ, rest, ..
+                name,
+                mutability,
+                typ,
+                rest,
             } => PortableTypeDesc::Tfield {
                 name: name.clone(),
+                mutability: self.serialize_mutability(*mutability),
                 typ: self.serialize_type(*typ),
                 rest: self.serialize_type(*rest),
             },
@@ -960,11 +979,25 @@ impl<'a> TypeGraphSerializer<'a> {
 pub(crate) trait TypeNodeSink {
     fn abbrev_nil(&self) -> AbbrevMemoRef;
     fn longident_name(&self, name: &str) -> crate::intern::StrIdx;
+    /// A cell for an internalized graph. Store and shared graphs outlive any
+    /// one compilation, so they get persistent cells.
+    fn new_mutability(&self, flag: crate::types::asttypes::MutableFlag) -> MutabilityRef {
+        MutabilityRef::new_persistent(flag)
+    }
+}
+
+/// The cells of an internalized graph, one per saved cell class.
+fn internalize_mutabilities<S: TypeNodeSink>(graph: &PortableTypeGraph, sink: &S) -> Vec<MutabilityRef> {
+    graph.mutabilities.iter().map(|flag| sink.new_mutability(*flag)).collect()
 }
 
 impl TypeNodeSink for TypeContext {
     fn abbrev_nil(&self) -> AbbrevMemoRef {
         self.alloc_abbrev_nil()
+    }
+
+    fn new_mutability(&self, flag: crate::types::asttypes::MutableFlag) -> MutabilityRef {
+        self.alloc_mutability(crate::types::type_expr::FieldMutability::Value(flag))
     }
 
     fn longident_name(&self, name: &str) -> crate::intern::StrIdx {
@@ -1132,8 +1165,9 @@ fn internalize_signature_into_store(
     let remap: Vec<TypeExprRef> = (0..graph.entries.len())
         .map(|i| TypeExprRef::from_store_index(base + i))
         .collect();
+    let mremap = internalize_mutabilities(graph, store);
     for (i, entry) in graph.entries.iter().enumerate() {
-        let desc = internalize_desc(&entry.desc, &remap, store);
+        let desc = internalize_desc(&entry.desc, &remap, &mremap, store);
         let level = match entry.desc {
             PortableTypeDesc::Tlink(_) => GENERIC_LEVEL,
             _ => entry.level,
@@ -1189,13 +1223,14 @@ fn internalize_signature_into_shared(
             pool,
             current: std::cell::Cell::new(base),
         };
+        let mremap = internalize_mutabilities(graph, &sink);
         let nodes = graph
             .entries
             .iter()
             .enumerate()
             .map(|(i, entry)| {
                 sink.current.set(base + i as u32);
-                let desc = internalize_desc(&entry.desc, &remap, &sink);
+                let desc = internalize_desc(&entry.desc, &remap, &mremap, &sink);
                 let level = match entry.desc {
                     PortableTypeDesc::Tlink(_) => GENERIC_LEVEL,
                     _ => entry.level,
@@ -1270,8 +1305,9 @@ fn internalize_signature(
         .collect();
 
     // Phase 2: set descriptors using remapped refs.
+    let mremap = internalize_mutabilities(graph, ctx);
     for (i, entry) in graph.entries.iter().enumerate() {
-        let desc = internalize_desc(&entry.desc, &remap, ctx);
+        let desc = internalize_desc(&entry.desc, &remap, &mremap, ctx);
         ctx.set_desc(remap[i], desc);
     }
 
@@ -1291,6 +1327,7 @@ fn internalize_signature(
 fn internalize_desc<S: TypeNodeSink>(
     desc: &PortableTypeDesc,
     remap: &[TypeExprRef],
+    mremap: &[MutabilityRef],
     ctx: &S,
 ) -> TypeDesc {
     match desc {
@@ -1310,15 +1347,17 @@ fn internalize_desc<S: TypeNodeSink>(
             args: args.iter().map(|&i| remap[i]).collect(),
             abbrev: ctx.abbrev_nil(),
         },
-        PortableTypeDesc::Tobject { fields, name } => TypeDesc::Tobject {
+        PortableTypeDesc::Tobject { fields } => TypeDesc::Tobject {
             fields: remap[*fields],
-            name: name
-                .as_ref()
-                .map(|(p, args)| (p.clone(), args.iter().map(|&i| remap[i]).collect())),
         },
-        PortableTypeDesc::Tfield { name, typ, rest } => TypeDesc::Tfield {
+        PortableTypeDesc::Tfield {
+            name,
+            mutability,
+            typ,
+            rest,
+        } => TypeDesc::Tfield {
             name: name.clone(),
-            kind: FieldKind::Fpresent,
+            mutability: mremap[*mutability],
             typ: remap[*typ],
             rest: remap[*rest],
         },
@@ -1589,7 +1628,7 @@ mod type_arg_tests {
         });
         let mut ser = TypeGraphSerializer { ctx: &ctx, arena: None, entries: Vec::new(),
             cache: HashMap::new(), variant_layouts: Vec::new(), variant_layout_cache: HashMap::new(),
-            file_name_cache: HashMap::new() };
+            file_name_cache: HashMap::new(), mutabilities: Vec::new(), mutability_cache: HashMap::new() };
         let index = ser.serialize_type(arrow);
         let PortableTypeDesc::Tarrow { args, ret } = &ser.entries[index].desc else {
             panic!("not arrow")
@@ -1599,7 +1638,7 @@ mod type_arg_tests {
         assert_eq!(args[1].1, *ret);
         assert_ne!(args[2].1, *ret);
         let remap: Vec<_> = ser.entries.iter().map(|_| ctx.new_var(None)).collect();
-        let restored = internalize_desc(&ser.entries[index].desc, &remap, &ctx);
+        let restored = internalize_desc(&ser.entries[index].desc, &remap, &[], &ctx);
         let TypeDesc::Tarrow { args, ret } = restored else {
             panic!("not arrow")
         };

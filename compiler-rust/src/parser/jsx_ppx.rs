@@ -4186,6 +4186,31 @@ fn transform_expression(
                 arena.push_expr(transformed_value),
             )))
         }
+        ExpressionDesc::Pexp_object_get(inner) => {
+            let (obj, name) = *inner;
+            let obj_expr = arena.get_expr(obj).clone();
+            let transformed_obj = transform_expression(obj_expr, config, arena);
+            ExpressionDesc::Pexp_object_get(Box::new((arena.push_expr(transformed_obj), name)))
+        }
+        ExpressionDesc::Pexp_object_set(inner) => {
+            let (obj, name, value) = *inner;
+            let value_expr = arena.get_expr(value).clone();
+            let transformed_value = transform_expression(value_expr, config, arena);
+            let value = arena.push_expr(transformed_value);
+            let obj_expr = arena.get_expr(obj).clone();
+            let transformed_obj = transform_expression(obj_expr, config, arena);
+            ExpressionDesc::Pexp_object_set(Box::new((arena.push_expr(transformed_obj), name, value)))
+        }
+        ExpressionDesc::Pexp_object_literal(fields) => ExpressionDesc::Pexp_object_literal(Box::new(
+            fields
+                .into_iter()
+                .map(|(name, e)| {
+                    let e_expr = arena.get_expr(e).clone();
+                    let transformed = transform_expression(e_expr, config, arena);
+                    (name, arena.push_expr(transformed))
+                })
+                .collect(),
+        )),
         ExpressionDesc::Pexp_array(elems) => ExpressionDesc::Pexp_array(Box::new(
             elems
                 .into_iter()
@@ -5142,6 +5167,9 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
         }
         ExpressionDesc::Pexp_field(target, _) => child(*target, memo),
         ExpressionDesc::Pexp_setfield(inner) => child(inner.0, memo) || child(inner.2, memo),
+        ExpressionDesc::Pexp_object_get(inner) => child(inner.0, memo),
+        ExpressionDesc::Pexp_object_set(inner) => child(inner.0, memo) || child(inner.2, memo),
+        ExpressionDesc::Pexp_object_literal(fields) => fields.iter().any(|(_, e)| child(*e, memo)),
         ExpressionDesc::Pexp_ifthenelse(inner) => {
             child(inner.0, memo)
                 || child(inner.1, memo)
@@ -5166,7 +5194,6 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
         ExpressionDesc::Pexp_jsx_element(_)
         | ExpressionDesc::Pexp_letmodule(_)
         | ExpressionDesc::Pexp_pack(_)
-        | ExpressionDesc::Pexp_send(_)
         | ExpressionDesc::Pexp_extension(_)
         | ExpressionDesc::Pexp_inline_for(_)
         | ExpressionDesc::Pexp_comptime_typeinfo(_)

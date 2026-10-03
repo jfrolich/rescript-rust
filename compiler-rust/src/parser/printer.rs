@@ -1460,11 +1460,11 @@ pub fn print_expression(
             ])
         }
         // Extension
+        ExpressionDesc::Pexp_object_literal(fields) => {
+            print_object_literal(state, fields, e.pexp_loc, cmt_tbl, arena)
+        }
         ExpressionDesc::Pexp_extension(ext) => {
-            // Special case for %obj extension - print as JS object literal
-            if let Some(obj_doc) = try_print_obj_extension(state, ext, e.pexp_loc, cmt_tbl, arena) {
-                obj_doc
-            } else if let Some(re_doc) = try_print_re_extension(ext, arena) {
+            if let Some(re_doc) = try_print_re_extension(ext, arena) {
                 re_doc
             } else {
                 print_extension(state, ext, false, cmt_tbl, arena)
@@ -1675,27 +1675,20 @@ pub fn print_expression(
         ExpressionDesc::Pexp_comptime_variant_case(_) => Doc::text("@variantCase(...)"),
         ExpressionDesc::Pexp_comptime_build_record(_) => Doc::text("@buildRecord(...)"),
         ExpressionDesc::Pexp_comptime_record_field(_) => Doc::text("@recordField(...)"),
-        // Send (method call): expr#method -> expr["method"]
-        ExpressionDesc::Pexp_send(inner) => {
+        ExpressionDesc::Pexp_object_get(inner) => {
             let (ref parent_expr_idx, ref label) = **inner;
-            let parent_expr = arena.get_expr(*parent_expr_idx);
-            let parent_doc = print_expression_with_comments(state, parent_expr, cmt_tbl, arena);
-            // Apply parenthesization if needed (like unary_expr_operand)
-            let parent_doc = match parens::unary_expr_operand(arena, parent_expr) {
-                parens::ParenKind::Parenthesized => add_parens(parent_doc),
-                parens::ParenKind::Braced(braces) => {
-                    print_braces(parent_doc, parent_expr, braces, arena)
-                }
-                parens::ParenKind::Nothing => parent_doc,
-            };
-            let member_doc = print_comments(Doc::text(&*label.txt), cmt_tbl, label.loc, arena);
-            let member = Doc::concat(vec![Doc::text("\""), member_doc, Doc::text("\"")]);
-            Doc::group(Doc::concat(vec![
-                parent_doc,
-                Doc::lbracket(),
+            print_object_get_doc(state, arena.get_expr(*parent_expr_idx), label, cmt_tbl, arena)
+        }
+        ExpressionDesc::Pexp_object_set(inner) => {
+            let (ref obj, ref member, ref rhs) = **inner;
+            print_object_set_expr(
+                state,
+                arena.get_expr(*obj),
                 member,
-                Doc::rbracket(),
-            ]))
+                arena.get_expr(*rhs),
+                cmt_tbl,
+                arena,
+            )
         }
     };
 
@@ -2262,80 +2255,50 @@ fn add_async(doc: Doc) -> Doc {
     Doc::concat(vec![Doc::text("async "), doc])
 }
 
-/// Try to print %obj extension as JS object literal: {"key": value}
-/// Returns None if this is not an %obj extension with a record payload.
-fn try_print_obj_extension(
+/// res_printer.ml `Pexp_object_literal`: a JS object literal `{"key": value}`.
+fn print_object_literal(
     state: &PrinterState,
-    ext: &Extension,
-    _loc: LocIdx,
+    fields: &[(Loc<Label>, ExprIdx)],
+    loc: LocIdx,
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
-) -> Option<Doc> {
-    let (name, payload) = ext;
-    if arena.get_string(name.txt) != "obj" {
-        return None;
-    }
-
-    // Match the pattern: %obj with PStr containing a single Pstr_eval of a Pexp_record
-    if let Payload::PStr(items) = payload {
-        if let [single] = &items[..] {
-            if let StructureItemDesc::Pstr_eval(eval_inner) = &*single.pstr_desc {
-                let (ref expr_idx, ref attrs) = **eval_inner;
-                if attrs.is_empty() {
-                    let expr = arena.get_expr(*expr_idx);
-                    if let ExpressionDesc::Pexp_record(rec_inner) = &*expr.pexp_desc {
-                        let (ref fields, ref spread) = **rec_inner;
-                        if spread.is_none() {
-                            // Check if object is written over multiple lines
-                            // Use the structure item's location (pstr_loc)
-                            let pstr_loc = arena.get_location(single.pstr_loc);
-                            let start_pos = arena.get_position(pstr_loc.loc_start);
-                            let end_pos = arena.get_position(pstr_loc.loc_end);
-                            let force_break = start_pos.line < end_pos.line;
-
-                            let rows_doc = Doc::join(
-                                Doc::concat(vec![Doc::text(","), Doc::line()]),
-                                fields
-                                    .iter()
-                                    .map(|field| print_bs_object_row(state, field, cmt_tbl, arena))
-                                    .collect(),
-                            );
-
-                            return Some(Doc::breakable_group(
-                                Doc::concat(vec![
-                                    Doc::lbrace(),
-                                    Doc::indent(Doc::concat(vec![Doc::soft_line(), rows_doc])),
-                                    Doc::trailing_comma(),
-                                    Doc::soft_line(),
-                                    Doc::rbrace(),
-                                ]),
-                                force_break,
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
+) -> Doc {
+    // If the object is written over multiple lines, break automatically.
+    let loc = arena.get_location(loc);
+    let force_break =
+        arena.get_position(loc.loc_start).line < arena.get_position(loc.loc_end).line;
+    let rows_doc = Doc::join(
+        Doc::concat(vec![Doc::text(","), Doc::line()]),
+        fields
+            .iter()
+            .map(|(name, e)| print_bs_object_row(state, &name.txt, name.loc, *e, cmt_tbl, arena))
+            .collect(),
+    );
+    Doc::breakable_group(
+        Doc::concat(vec![
+            Doc::lbrace(),
+            Doc::indent(Doc::concat(vec![Doc::soft_line(), rows_doc])),
+            Doc::trailing_comma(),
+            Doc::soft_line(),
+            Doc::rbrace(),
+        ]),
+        force_break,
+    )
 }
 
 /// Print a row of a BS/JS object with string key: "key": value
 fn print_bs_object_row(
     state: &PrinterState,
-    field: &ExpressionRecordField,
+    name: &str,
+    name_loc: LocIdx,
+    expr_idx: ExprIdx,
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    let longident = arena.get_longident(field.lid.txt);
-    let lbl_doc = Doc::concat(vec![
-        Doc::text("\""),
-        print_longident(arena, longident),
-        Doc::text("\""),
-    ]);
-    let lbl_doc = print_comments(lbl_doc, cmt_tbl, field.lid.loc, arena);
+    let lbl_doc = Doc::concat(vec![Doc::text("\""), Doc::text(name), Doc::text("\"")]);
+    let lbl_doc = print_comments(lbl_doc, cmt_tbl, name_loc, arena);
 
-    let expr = arena.get_expr(field.expr);
+    let expr = arena.get_expr(expr_idx);
     let expr_doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
     let expr_doc = match parens::expr(arena, expr) {
         ParenKind::Parenthesized => add_parens(expr_doc),
@@ -2345,7 +2308,7 @@ fn print_bs_object_row(
 
     let doc = Doc::concat(vec![lbl_doc, Doc::text(": "), expr_doc]);
     // cmt_loc spans from label start to expression end, matching OCaml
-    let (pos_range, full_loc) = make_combined_pos_range(field.lid.loc, expr.pexp_loc, arena);
+    let (pos_range, full_loc) = make_combined_pos_range(name_loc, expr.pexp_loc, arena);
     print_comments_by_pos(doc, cmt_tbl, pos_range, &full_loc)
 }
 
@@ -4174,10 +4137,11 @@ fn print_send_apply(
 }
 
 /// `#=(lhs, rhs)` printed as `lhs = rhs` (res_printer.ml:4583-4614).
-fn print_send_set_apply(
+/// res_printer.ml `print_object_set_expr`: `obj["member"] = rhs`.
+fn print_object_set_expr(
     state: &PrinterState,
-    expr: &Expression,
-    lhs: &Expression,
+    obj: &Expression,
+    member: &Loc<Label>,
     rhs: &Expression,
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
@@ -4185,23 +4149,39 @@ fn print_send_set_apply(
     let rhs_doc = print_expr_with_parens(state, rhs, cmt_tbl, arena);
     let should_indent = !parsetree_viewer::is_braced_expr(arena, rhs)
         && parsetree_viewer::is_binary_expression(arena, rhs);
-    let doc = Doc::group(Doc::concat(vec![
-        print_expression_with_comments(state, lhs, cmt_tbl, arena),
+    Doc::group(Doc::concat(vec![
+        print_object_get_doc(state, obj, member, cmt_tbl, arena),
         Doc::text(" ="),
         if should_indent {
             Doc::group(Doc::indent(Doc::concat(vec![Doc::line(), rhs_doc])))
         } else {
             Doc::concat(vec![Doc::space(), rhs_doc])
         },
-    ]));
-    if expr.pexp_attributes.is_empty() {
-        doc
-    } else {
-        Doc::group(Doc::concat(vec![
-            print_attributes(state, &expr.pexp_attributes, cmt_tbl, arena),
-            doc,
-        ]))
-    }
+    ]))
+}
+
+/// res_printer.ml `print_object_get_doc`: `parent["member"]`.
+fn print_object_get_doc(
+    state: &PrinterState,
+    parent_expr: &Expression,
+    label: &Loc<Label>,
+    cmt_tbl: &mut CommentTable,
+    arena: &ParseArena,
+) -> Doc {
+    let parent_doc = print_expression_with_comments(state, parent_expr, cmt_tbl, arena);
+    let parent_doc = match parens::unary_expr_operand(arena, parent_expr) {
+        ParenKind::Parenthesized => add_parens(parent_doc),
+        ParenKind::Braced(braces) => print_braces(parent_doc, parent_expr, braces, arena),
+        ParenKind::Nothing => parent_doc,
+    };
+    let member_doc = print_comments(Doc::text(&*label.txt), cmt_tbl, label.loc, arena);
+    let member = Doc::concat(vec![Doc::text("\""), member_doc, Doc::text("\"")]);
+    Doc::group(Doc::concat(vec![
+        parent_doc,
+        Doc::lbracket(),
+        member,
+        Doc::rbracket(),
+    ]))
 }
 
 fn print_pexp_apply(
@@ -4240,9 +4220,6 @@ fn print_pexp_apply(
         let (a0, a1) = (arena.get_expr(*a0), arena.get_expr(*a1));
         if arena.is_lident(ident.txt, "##") {
             return print_send_apply(state, expr, a0, a1, cmt_tbl, arena);
-        }
-        if arena.is_lident(ident.txt, "#=") {
-            return print_send_set_apply(state, expr, a0, a1, cmt_tbl, arena);
         }
     }
     if let Some(parts) = parsetree_viewer::collect_spread_dict_expr_parts(arena, expr) {
@@ -4483,13 +4460,12 @@ fn print_binary_operand(
                 );
                 if is_lhs { add_parens(doc) } else { doc }
             }
-            ExpressionDesc::Pexp_apply(_)
-                if matches!(binary_expression_parts(arena, expr), Some(("#=", _, _, _)))
-                    && is_nolabel_pair_apply(expr) =>
-            {
-                let (_, _, lhs, rhs) = binary_expression_parts(arena, expr).unwrap();
+            ExpressionDesc::Pexp_object_set(inner) => {
+                let (ref obj, ref member, ref rhs) = **inner;
+                let rhs = arena.get_expr(*rhs);
                 let rhs_doc = print_expression_with_comments(state, rhs, cmt_tbl, arena);
-                let lhs_doc = print_expression_with_comments(state, lhs, cmt_tbl, arena);
+                let lhs_doc =
+                    print_object_get_doc(state, arena.get_expr(*obj), member, cmt_tbl, arena);
                 let should_indent = parsetree_viewer::is_binary_expression(arena, rhs);
                 let doc = Doc::group(Doc::concat(vec![
                     lhs_doc,

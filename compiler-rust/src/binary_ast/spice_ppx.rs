@@ -4754,10 +4754,22 @@ impl<'a> LocCloner<'a> {
                 }
                 self.core_type_idx(to);
             }
-            ExpressionDesc::Pexp_send(inner) => {
+            ExpressionDesc::Pexp_object_get(inner) => {
                 let (ref mut expr, ref mut method) = **inner;
                 self.expression_idx(expr);
                 self.located(method);
+            }
+            ExpressionDesc::Pexp_object_set(inner) => {
+                let (ref mut expr, ref mut name, ref mut value) = **inner;
+                self.expression_idx(expr);
+                self.located(name);
+                self.expression_idx(value);
+            }
+            ExpressionDesc::Pexp_object_literal(fields) => {
+                for (name, expr) in fields.iter_mut() {
+                    self.located(name);
+                    self.expression_idx(expr);
+                }
             }
             ExpressionDesc::Pexp_letmodule(inner) => {
                 let (ref mut name, ref mut module_expr, ref mut body) = **inner;

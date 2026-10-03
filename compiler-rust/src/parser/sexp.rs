@@ -966,14 +966,36 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
                 core_type(arena, arena.get_core_type(*t2)),
             ])
         }
-        ExpressionDesc::Pexp_send(inner) => {
+        ExpressionDesc::Pexp_object_get(inner) => {
             let (ref obj, ref method_name) = **inner;
             Sexp::list(vec![
-                Sexp::atom("Pexp_send"),
+                Sexp::atom("Pexp_object_get"),
                 Sexp::atom(&quote_string(&method_name.txt)),
                 expression(arena, arena.get_expr(*obj)),
             ])
         }
+        ExpressionDesc::Pexp_object_set(inner) => {
+            let (ref obj, ref name, ref value) = **inner;
+            Sexp::list(vec![
+                Sexp::atom("Pexp_object_set"),
+                Sexp::atom(&quote_string(&name.txt)),
+                expression(arena, arena.get_expr(*obj)),
+                expression(arena, arena.get_expr(*value)),
+            ])
+        }
+        ExpressionDesc::Pexp_object_literal(fields) => Sexp::list(vec![
+            Sexp::atom("Pexp_object_literal"),
+            Sexp::list(if fields.is_empty() {
+                vec![Sexp::list(vec![])]
+            } else {
+                fields
+                    .iter()
+                    .map(|(name, e)| {
+                        Sexp::list(vec![Sexp::atom(&name.txt), expression(arena, arena.get_expr(*e))])
+                    })
+                    .collect()
+            }),
+        ]),
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (ref name, ref me, ref body) = **inner;
             Sexp::list(vec![

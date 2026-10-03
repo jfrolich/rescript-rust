@@ -24,22 +24,12 @@ let rec path_to_list path =
 let translate_obj_type closed_flag fields_translations =
   let dependencies =
     fields_translations
-    |> List.map (fun (_, {dependencies}) -> dependencies)
+    |> List.map (fun (_, _, {dependencies}) -> dependencies)
     |> List.concat
   in
-  let rec check_mutable_field ?(acc = []) fields =
-    match fields with
-    | (previous_name, {type_ = _}) :: (name, {type_}) :: rest
-      when Runtime.check_mutable_object_field ~previous_name ~name ->
-      (* The field was annotated "@set" *)
-      rest |> check_mutable_field ~acc:((name, type_, Mutable) :: acc)
-    | (name, {type_}) :: rest ->
-      rest |> check_mutable_field ~acc:((name, type_, Immutable) :: acc)
-    | [] -> acc |> List.rev
-  in
   let fields =
-    fields_translations |> check_mutable_field
-    |> List.map (fun (name, t, mutable_) ->
+    fields_translations
+    |> List.map (fun (name, mutable_, {type_ = t}) ->
         let optional, type_ =
           match t with
           | Option t -> (Optional, t)
@@ -508,17 +498,17 @@ and translateTypeExprFromTypes_ ~config ~type_vars_gen ~type_env
     in
     {dependencies = []; type_ = TypeVar type_name}
   | Tvar (Some s) -> {dependencies = []; type_ = TypeVar s}
-  | Tobject (t_obj, _) ->
+  | Tobject t_obj ->
     let rec get_field_types (texp : Types.type_expr) =
       match texp.desc with
-      | Tfield (name, _, t1, t2) ->
+      | Tfield {name; mutability; typ = t1; rest = t2} ->
         let closed_flafg, fields = t2 |> get_field_types in
         ( closed_flafg,
           ( name,
-            match name |> Runtime.is_mutable_object_field with
-            | true -> {dependencies = []; type_ = ident ""}
-            | false ->
-              t1 |> translateTypeExprFromTypes_ ~config ~type_vars_gen ~type_env
+            (match Btype.mutability_repr mutability with
+            | Asttypes.Mutable -> Mutable
+            | Immutable -> Immutable),
+            t1 |> translateTypeExprFromTypes_ ~config ~type_vars_gen ~type_env
           )
           :: fields )
       | Tlink te -> te |> get_field_types

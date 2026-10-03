@@ -543,6 +543,7 @@ impl ModuleRegistry {
             type_graph: portable_types::PortableTypeGraph {
                 entries: Vec::new(),
                 variant_layouts: Vec::new(),
+                mutabilities: Vec::new(),
             },
             raw_type_graph: None,
             fingerprint,
@@ -4962,11 +4963,7 @@ pub fn type_expr_mentions_path_prefixes(
                 walk(*body, prefixes, ctx, visited)
                     || vars.iter().any(|v| walk(*v, prefixes, ctx, visited))
             }
-            TypeDesc::Tobject { fields, name } => {
-                name.as_ref().is_some_and(|(p, args)| {
-                    hit(p) || args.iter().any(|a| walk(*a, prefixes, ctx, visited))
-                }) || walk(*fields, prefixes, ctx, visited)
-            }
+            TypeDesc::Tobject { fields } => walk(*fields, prefixes, ctx, visited),
             TypeDesc::Tfield { typ, rest, .. } => {
                 walk(*typ, prefixes, ctx, visited) || walk(*rest, prefixes, ctx, visited)
             }
@@ -6618,13 +6615,8 @@ fn add_signature_to_env_with_options_inner(
                         work_stack.push(*item);
                     }
                 }
-                TypeDesc::Tobject { fields, name } => {
+                TypeDesc::Tobject { fields } => {
                     work_stack.push(*fields);
-                    if let Some((_path, args)) = name {
-                        for arg in args {
-                            work_stack.push(*arg);
-                        }
-                    }
                 }
                 TypeDesc::Tfield { typ, rest, .. } => {
                     work_stack.push(*typ);
@@ -7275,6 +7267,7 @@ mod resolution_view_tests {
             type_graph: portable_types::PortableTypeGraph {
                 entries: vec![],
                 variant_layouts: vec![],
+                mutabilities: vec![],
             },
             raw_type_graph: None,
             fingerprint: 0,

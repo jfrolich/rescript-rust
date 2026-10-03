@@ -1600,30 +1600,21 @@ fn walk_expression(
                 t.attach_trailing(body.pexp_loc, trailing, arena);
             }
         }
-        ExpressionDesc::Pexp_extension(ext) => {
-            // Check for %obj extension
-            if arena.get_string(ext.0.txt) == "obj" {
-                if let PStr(items) = &ext.1 {
-                    if items.len() == 1 {
-                        if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
-                            let (ref inner_idx, _) = **eval_inner;
-                            let inner = arena.get_expr(*inner_idx);
-                            if let ExpressionDesc::Pexp_record(rec_inner) = &*inner.pexp_desc {
-                                let (ref fields, _) = **rec_inner;
-                                let record_fields = fields.clone();
-                                let nodes: Vec<Node<'_>> = record_fields
-                                    .iter()
-                                    .map(|f| Node::ExprRecordRow(&f.lid, f.expr))
-                                    .collect();
-                                walk_list(&nodes, t, comments, arena);
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-            walk_extension(ext, t, comments, arena);
+        ExpressionDesc::Pexp_object_literal(fields) => {
+            // `ExprRecordRow (Location.mkloc (Longident.Lident s.txt) s.loc, e)`
+            let rows: Vec<(Loc<LidentIdx>, ExprIdx)> = fields
+                .iter()
+                .map(|(name, e)| {
+                    let name_idx = arena.intern(&name.txt);
+                    let lid = arena.push_longident(Longident::Lident(name_idx));
+                    (Loc { txt: lid, loc: name.loc }, *e)
+                })
+                .collect();
+            let nodes: Vec<Node<'_>> =
+                rows.iter().map(|(lid, e)| Node::ExprRecordRow(lid, *e)).collect();
+            walk_list(&nodes, t, comments, arena);
         }
+        ExpressionDesc::Pexp_extension(ext) => walk_extension(ext, t, comments, arena),
         ExpressionDesc::Pexp_letexception(inner) => {
             let (ref ext, ref body_idx) = **inner;
             // Safety: arena is append-only, expression won't be invalidated
@@ -2526,10 +2517,23 @@ fn walk_expression(
                 }
             }
         }
-        ExpressionDesc::Pexp_send(inner) => {
+        ExpressionDesc::Pexp_object_get(inner) => {
             // Safety: arena is append-only, expression won't be invalidated
             let send_expr = arena.get_expr(inner.0).clone();
             walk_expression(&send_expr, t, comments, arena);
+        }
+        ExpressionDesc::Pexp_object_set(inner) => {
+            let e1 = arena.get_expr(inner.0).clone();
+            let e2 = arena.get_expr(inner.2).clone();
+            let (leading, inside, trailing) = partition_by_loc(comments, e1.pexp_loc, arena);
+            t.attach_leading(e1.pexp_loc, leading, arena);
+            walk_expression(&e1, t, inside, arena);
+            let (after_lhs, rest) = partition_adjacent_trailing(e1.pexp_loc, trailing, arena);
+            t.attach_trailing(e1.pexp_loc, after_lhs, arena);
+            let (before, inside, after) = partition_by_loc(rest, e2.pexp_loc, arena);
+            t.attach_leading(e2.pexp_loc, before, arena);
+            walk_expression(&e2, t, inside, arena);
+            t.attach_trailing(e2.pexp_loc, after, arena);
         }
         ExpressionDesc::Pexp_await(inner_idx) => {
             // Safety: arena is append-only, expression won't be invalidated

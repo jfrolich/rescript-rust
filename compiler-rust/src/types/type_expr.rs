@@ -392,20 +392,21 @@ pub enum TypeDesc {
         abbrev: AbbrevMemoRef,
     },
 
-    /// Object type: `< method1: t1; method2: t2; ... >`
+    /// Object type: `{"f1": t1, ..., "fn": tn}` (types.ml `Tobject`). The
+    /// fields are a linked list of `Tfield`/`Tnil`, terminated by a row
+    /// variable when the row is open.
     Tobject {
         /// Fields as a linked list of Tfield/Tnil
         fields: TypeExprRef,
-        /// Optional class path
-        name: ObjectName,
     },
 
-    /// Object field: `method: type; rest`
+    /// Object field (types.ml `Tfield {name; mutability; typ; rest}`).
     Tfield {
         /// Field name
         name: String,
-        /// Field kind (present, absent, etc.)
-        kind: FieldKind,
+        /// The field's shared mutability cell; read its semantic value with
+        /// `TypeContext::mutability_repr`.
+        mutability: MutabilityRef,
         /// Field type
         typ: TypeExprRef,
         /// Rest of the fields
@@ -1030,48 +1031,72 @@ impl AbbrevMemoRef {
     }
 }
 
-/// Object name (path and type arguments).
-pub type ObjectName = Option<(Path, Vec<TypeExprRef>)>;
-
-/// Object name reference.
+/// Assignment capability of an object field (types.ml `field_mutability`).
+///
+/// The semantic value is `Immutable` or `Mutable`; `Link` is an internal edge
+/// between cells of the same class, not a third value. Code making a semantic
+/// decision must use `TypeContext::mutability_repr`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ObjectNameRef(pub u32);
-
-/// Field kind for object fields.
-#[derive(Debug, Clone)]
-pub enum FieldKind {
-    /// Variable field kind
-    Fvar(FieldKindRef),
-    /// Present field
-    Fpresent,
-    /// Absent field
-    Fabsent,
+pub enum FieldMutability {
+    Value(super::asttypes::MutableFlag),
+    Link(MutabilityRef),
 }
 
-/// Reference to a field kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FieldKindRef(pub u32);
+/// A `field_mutability ref` cell.
+///
+/// Cells of the compilation's own graph index its cell arena. Cells of
+/// dependency graphs (worker store and shared pool) are persistent: they are
+/// never written in place, carry a process-unique identity, and encode their
+/// initial value (saved graphs only hold `Mutability_value` cells,
+/// subst.ml `for_saving`); a compilation's writes to them go to its overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MutabilityRef(pub u32);
 
-impl FieldKindRef {
+/// Next persistent cell identity, process-wide.
+static NEXT_PERSISTENT_MUTABILITY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+impl MutabilityRef {
     #[inline]
     pub(crate) fn from_usize(idx: usize) -> Self {
-        let raw = u32::try_from(idx).expect("field kind arena index exceeds u32::MAX");
+        let raw = u32::try_from(idx).expect("mutability cell index exceeds u32::MAX");
         assert!(
             raw & STORE_REF_TAG == 0,
-            "local field kind index collides with the store tag"
+            "local mutability cell index collides with the persistent tag"
         );
         Self(raw)
     }
 
-    /// Reference to the `idx`-th field kind cell of the per-thread store.
+    /// A fresh persistent cell holding `flag`.
+    pub(crate) fn new_persistent(flag: super::asttypes::MutableFlag) -> Self {
+        let id = NEXT_PERSISTENT_MUTABILITY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(id < (1 << 30), "persistent mutability cells exhausted");
+        let bit = match flag {
+            super::asttypes::MutableFlag::Immutable => 0,
+            super::asttypes::MutableFlag::Mutable => 1,
+        };
+        Self(STORE_REF_TAG | (id << 1) | bit)
+    }
+
     #[inline]
-    pub(crate) fn from_store_index(idx: usize) -> Self {
-        let raw = u32::try_from(idx).expect("field kind store index exceeds u32::MAX");
-        assert!(
-            raw & STORE_REF_TAG == 0,
-            "field kind store index exceeds the tag range"
-        );
-        Self(raw | STORE_REF_TAG)
+    pub fn is_persistent(self) -> bool {
+        self.0 & STORE_REF_TAG != 0
+    }
+
+    #[inline]
+    pub(crate) fn index(self) -> usize {
+        debug_assert!(!self.is_persistent());
+        self.0 as usize
+    }
+
+    /// The initial value of a persistent cell.
+    #[inline]
+    pub(crate) fn persistent_value(self) -> super::asttypes::MutableFlag {
+        debug_assert!(self.is_persistent());
+        if self.0 & 1 != 0 {
+            super::asttypes::MutableFlag::Mutable
+        } else {
+            super::asttypes::MutableFlag::Immutable
+        }
     }
 }
 
@@ -1223,10 +1248,6 @@ mod tests {
             assert_ne!(local, store);
             assert_eq!(AbbrevMemoRef::from_store_index(index).store_index(), index);
             assert_eq!(RowFieldRef::from_store_index(index).store_index(), index);
-            assert_eq!(
-                FieldKindRef::from_store_index(index).0,
-                STORE_REF_TAG | index as u32
-            );
         }
         assert!(!RowFieldRef::null().is_store());
         assert!(!RowFieldRef::from_store_index(0).is_null());

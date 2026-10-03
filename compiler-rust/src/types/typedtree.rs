@@ -432,8 +432,14 @@ pub enum ExpressionDesc {
         Box<Expression>,
     ),
 
-    /// Send: `E#m` (object method call).
-    Texp_send(Box<Expression>, MethKind, Option<Box<Expression>>),
+    /// Object property read: `E["name"]`.
+    Texp_object_get(Box<Expression>, Loc<String>),
+
+    /// Object property write: `E["name"] = V`.
+    Texp_object_set(Box<Expression>, Loc<String>, Box<Expression>),
+
+    /// Object literal: `{"a": E, ...}`, fields in source order.
+    Texp_object_literal(Vec<(Loc<String>, Expression)>),
 
     /// Let module: `let module M = ME in E`.
     Texp_letmodule(Ident, Loc<String>, Box<ModuleExpr>, Box<Expression>),
@@ -452,15 +458,6 @@ pub enum ExpressionDesc {
 }
 
 // DirectionFlag and Arity are re-exported from parser::ast
-
-/// Method kind for object method calls.
-#[derive(Debug, Clone)]
-pub enum MethKind {
-    /// Direct method with known type.
-    Tmeth_name(String),
-    /// Virtual method (looked up at runtime).
-    Tmeth_val(Ident),
-}
 
 /// Record label definition in a record expression.
 #[derive(Debug, Clone)]

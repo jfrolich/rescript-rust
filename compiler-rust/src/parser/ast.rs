@@ -673,8 +673,12 @@ pub enum ExpressionDesc {
     Pexp_constraint(Box<(ExprIdx, CoreTypeIdx)>),
     /// Coercion: `(E :> T)`.
     Pexp_coerce(Box<(ExprIdx, Option<CoreTypeIdx>, CoreTypeIdx)>),
-    /// Send: `E#m`.
-    Pexp_send(Box<(ExprIdx, Loc<Label>)>),
+    /// Object property read: `obj["x"]`.
+    Pexp_object_get(Box<(ExprIdx, Loc<Label>)>),
+    /// Object property write: `obj["x"] = v`.
+    Pexp_object_set(Box<(ExprIdx, Loc<Label>, ExprIdx)>),
+    /// Object literal: `{"a": 1, "b": true}`.
+    Pexp_object_literal(Box<Vec<(Loc<Label>, ExprIdx)>>),
     /// Let module: `{ module M = ME; E }`.
     Pexp_letmodule(Box<(StringLoc, ModExprIdx, ExprIdx)>),
     /// Let exception: `{ exception C; E }`.

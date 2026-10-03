@@ -22,7 +22,7 @@ use super::asttypes::{ArgLabel, PrivateFlag};
 use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, FieldKind, FieldKindRef, GENERIC_LEVEL, RowDesc, RowField,
+    AbbrevMemo, AbbrevMemoRef, FieldMutability, GENERIC_LEVEL, MutabilityRef, RowDesc, RowField,
     RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
 };
 use super::typedtree::EnvRef;
@@ -175,6 +175,16 @@ impl ActiveTypeSnapshot {
     }
 }
 
+/// btype.ml `type_copy_session`: temporary writes a graph copy makes to the
+/// source mutability cells, restored when the session ends. (`Tsubst` marks
+/// are kept in the Rust copiers' caches instead of on the source nodes.)
+#[derive(Default)]
+struct CopySession {
+    saved_mutabilities: Vec<(MutabilityRef, FieldMutability)>,
+    new_mutabilities: Vec<MutabilityRef>,
+    copy_policy_memo: crate::fast_hash::AHashMap<TypeExprRef, bool>,
+}
+
 enum TypeMutation {
     TypeDesc(TypeExprRef, TypeDesc),
     /// btype.ml `Ccompress (ty, old_desc, Tlink target)`: path compression by
@@ -182,6 +192,8 @@ enum TypeMutation {
     Compress(TypeExprRef, TypeDesc, TypeExprRef),
     TypeLevel(TypeExprRef, i32),
     RowField(RowFieldRef, Option<RowField>),
+    /// btype.ml `Cmutability (r, old)`.
+    Mutability(MutabilityRef, FieldMutability),
     AbbrevMemo(AbbrevMemoRef, AbbrevMemo),
     MemoizedAbbrevRefs(Vec<AbbrevMemoRef>),
     CurrentAbbreviations(AbbrevMemoRef),
@@ -546,8 +558,13 @@ pub struct TypeContext {
     /// Row field storage
     row_fields: RefCell<Vec<RefCell<Option<RowField>>>>,
 
-    /// Field kind storage
-    field_kinds: RefCell<Vec<RefCell<Option<FieldKind>>>>,
+    /// Object-field mutability cells of this compilation's graph.
+    mutabilities: RefCell<Vec<Cell<FieldMutability>>>,
+    /// This compilation's writes to persistent (dependency) mutability cells.
+    mutability_overlay: RefCell<crate::fast_hash::AHashMap<MutabilityRef, FieldMutability>>,
+    /// btype.ml `type_copy_sessions`: the active graph-copy sessions,
+    /// innermost last.
+    copy_sessions: RefCell<Vec<CopySession>>,
 
     /// Global type declaration store, indexed by type name.
     /// Populated when loading CMI module signatures so that type alias
@@ -1035,7 +1052,9 @@ impl TypeContext {
             report_warning_config: RefCell::new(None),
             variant_layouts: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
-            field_kinds: RefCell::new(Vec::new()),
+            mutabilities: RefCell::new(Vec::new()),
+            mutability_overlay: RefCell::new(crate::fast_hash::AHashMap::new()),
+            copy_sessions: RefCell::new(Vec::new()),
             type_decl_store: RefCell::new(crate::fast_hash::AHashMap::new()),
             type_decl_by_stamp: RefCell::new(crate::fast_hash::AHashMap::new()),
             type_decl_by_path: RefCell::new(crate::fast_hash::AHashMap::new()),
@@ -2981,6 +3000,7 @@ impl TypeContext {
                     | TypeMutation::Compress(..)
                     | TypeMutation::TypeLevel(..)
                     | TypeMutation::RowField(..)
+                    | TypeMutation::Mutability(..)
             )
         });
         if has_changes {
@@ -3002,6 +3022,10 @@ impl TypeContext {
                 }
                 TypeMutation::RowField(row, field) => {
                     self.write_row_field_raw(row, field);
+                    restored += 1;
+                }
+                TypeMutation::Mutability(cell, value) => {
+                    self.write_mutability_raw(cell, value);
                     restored += 1;
                 }
                 TypeMutation::AbbrevMemo(..) | TypeMutation::MemoizedAbbrevRefs(..) => {}
@@ -3650,27 +3674,209 @@ impl TypeContext {
     }
 
     // ========================================================================
-    // Field Kinds
+    // Object-field mutability cells
     // ========================================================================
 
-    /// Read the value stored in a field kind reference (`Fvar` contents).
-    pub fn get_field_kind(&self, r: FieldKindRef) -> Option<FieldKind> {
-        self.field_kinds
-            .borrow()
-            .get(r.0 as usize)
-            .and_then(|cell| cell.borrow().clone())
+    /// Allocate a mutability cell holding `value` (OCaml `ref value`).
+    pub fn alloc_mutability(&self, value: FieldMutability) -> MutabilityRef {
+        if self.in_store_build() {
+            // Store graphs only hold persistent value cells.
+            match value {
+                FieldMutability::Value(flag) => return MutabilityRef::new_persistent(flag),
+                FieldMutability::Link(_) => self.poison_store_build(),
+            }
+        }
+        let mut cells = self.mutabilities.borrow_mut();
+        let idx = cells.len();
+        cells.push(Cell::new(value));
+        MutabilityRef::from_usize(idx)
     }
 
-    /// Allocate a field kind reference.
-    fn alloc_field_kind(&self, kind: Option<FieldKind>) -> FieldKindRef {
-        if self.in_store_build() {
-            // Field-kind cells are never read back; `Fvar` links stay unchecked.
-            return self.store.alloc_field_kind(kind);
+    /// The contents of a mutability cell (OCaml `!r`).
+    pub fn get_mutability(&self, r: MutabilityRef) -> FieldMutability {
+        if r.is_persistent() {
+            if let Some(value) = self.mutability_overlay.borrow().get(&r) {
+                return *value;
+            }
+            return FieldMutability::Value(r.persistent_value());
         }
-        let mut field_kinds = self.field_kinds.borrow_mut();
-        let idx = field_kinds.len();
-        field_kinds.push(RefCell::new(kind));
-        FieldKindRef::from_usize(idx)
+        self.mutabilities.borrow()[r.index()].get()
+    }
+
+    /// btype.ml `mutability_ref_repr`: chase links to the terminal cell.
+    pub fn mutability_ref_repr(&self, mut r: MutabilityRef) -> MutabilityRef {
+        loop {
+            match self.get_mutability(r) {
+                FieldMutability::Link(next) => r = next,
+                FieldMutability::Value(_) => return r,
+            }
+        }
+    }
+
+    /// btype.ml `mutability_repr`: the semantic value of a cell's class.
+    pub fn mutability_repr(&self, r: MutabilityRef) -> super::asttypes::MutableFlag {
+        match self.get_mutability(self.mutability_ref_repr(r)) {
+            FieldMutability::Value(flag) => flag,
+            FieldMutability::Link(_) => unreachable!("mutability_ref_repr returns a value cell"),
+        }
+    }
+
+    /// btype.ml `set_mutability`: logged (backtrackable) update of a terminal
+    /// cell. Link compression and separately allocated references cannot use
+    /// the node-age test, so the change is logged whenever a trail is active.
+    pub fn set_mutability(&self, r: MutabilityRef, value: FieldMutability) {
+        if r.is_persistent() && self.in_store_build() {
+            // A semantic change to a dependency cell would not travel with the
+            // shared result.
+            self.poison_store_build();
+        }
+        if self.mutation_logging.get() {
+            let old = self.get_mutability(r);
+            self.mutation_journal
+                .borrow_mut()
+                .entries
+                .push(TypeMutation::Mutability(r, old));
+        }
+        self.write_mutability_raw(r, value);
+    }
+
+    /// Unlogged cell write (copy-session links and their restoration, undo).
+    fn write_mutability_raw(&self, r: MutabilityRef, value: FieldMutability) {
+        if r.is_persistent() {
+            self.mutability_overlay.borrow_mut().insert(r, value);
+            return;
+        }
+        self.mutabilities.borrow()[r.index()].set(value);
+    }
+
+    // ========================================================================
+    // Graph-copy sessions (btype.ml `type_copy_session`)
+    // ========================================================================
+
+    /// btype.ml `with_copy_session`: run a graph-copy operation with scoped
+    /// temporary state. The scope is nestable and restores its own temporary
+    /// mutability links on return (and on unwinding).
+    pub fn with_copy_session<R>(&self, f: impl FnOnce() -> R) -> R {
+        struct Guard<'a>(&'a TypeContext);
+        impl Drop for Guard<'_> {
+            fn drop(&mut self) {
+                self.0.end_copy_session();
+            }
+        }
+        self.begin_copy_session();
+        let _guard = Guard(self);
+        f()
+    }
+
+    /// btype.ml `begin_type_copy_session`.
+    pub(crate) fn begin_copy_session(&self) {
+        self.copy_sessions.borrow_mut().push(CopySession::default());
+    }
+
+    /// btype.ml `end_type_copy_session`.
+    pub(crate) fn end_copy_session(&self) {
+        let session = self
+            .copy_sessions
+            .borrow_mut()
+            .pop()
+            .expect("copy session stack underflow");
+        for (r, value) in session.saved_mutabilities {
+            self.write_mutability_raw(r, value);
+        }
+    }
+
+    /// btype.ml `dup_mutability`: duplicate a mutability class for the
+    /// current copy session. The source representative temporarily links to
+    /// the duplicate, so all fields in this session which shared the source
+    /// class reach the same duplicate.
+    pub fn dup_mutability(&self, r: MutabilityRef) -> MutabilityRef {
+        let r = self.mutability_ref_repr(r);
+        let in_session = match self.copy_sessions.borrow().last() {
+            Some(session) => {
+                if session.new_mutabilities.contains(&r) {
+                    return r;
+                }
+                true
+            }
+            None => false,
+        };
+        if !in_session {
+            // A copy outside any session (a Rust-only structural copy) gets
+            // an independent cell.
+            return self.alloc_mutability(self.get_mutability(r));
+        }
+        let old = self.get_mutability(r);
+        let r2 = self.alloc_mutability(old);
+        {
+            let mut sessions = self.copy_sessions.borrow_mut();
+            let session = sessions.last_mut().expect("dup_mutability outside a copy session");
+            session.new_mutabilities.push(r2);
+            session.saved_mutabilities.push((r, old));
+        }
+        self.write_mutability_raw(r, FieldMutability::Link(r2));
+        r2
+    }
+
+    /// btype.ml `row_terminator_generic`: whether an object row being copied
+    /// ends in a generic variable (a scheme instantiation), memoized per node
+    /// for the session. `copied` follows a node already copied in this
+    /// session to its copy (OCaml's `Tsubst` mark).
+    pub fn row_terminator_generic(
+        &self,
+        rest: TypeExprRef,
+        copied: &dyn Fn(TypeExprRef) -> Option<TypeExprRef>,
+    ) -> bool {
+        let t = self.repr(rest);
+        if let Some(b) = self
+            .copy_sessions
+            .borrow()
+            .last()
+            .and_then(|session| session.copy_policy_memo.get(&t).copied())
+        {
+            return b;
+        }
+        enum Next {
+            Follow(TypeExprRef),
+            Done(bool),
+        }
+        let next = if let Some(copy) = copied(t) {
+            Next::Follow(copy)
+        } else {
+            match &*self.get_desc(t) {
+                TypeDesc::Tfield { rest, .. } => Next::Follow(*rest),
+                TypeDesc::Tvar(_) => Next::Done(self.get_level(t) == GENERIC_LEVEL),
+                // Already copied in this session: follow the copy.
+                TypeDesc::Tsubst(t2) => Next::Follow(*t2),
+                _ => Next::Done(false),
+            }
+        };
+        let b = match next {
+            Next::Follow(next) => self.row_terminator_generic(next, copied),
+            Next::Done(b) => b,
+        };
+        if let Some(session) = self.copy_sessions.borrow_mut().last_mut() {
+            session.copy_policy_memo.insert(t, b);
+        }
+        b
+    }
+
+    /// The mutability cell of a copied `Tfield` (btype.ml `copy_type_desc`):
+    /// unless an independent graph is requested, instantiating a generalized
+    /// row duplicates each cell once per session, while other copies hold
+    /// the shared representative. The policy is determined before either
+    /// child is copied.
+    pub fn copy_field_mutability(
+        &self,
+        mutability: MutabilityRef,
+        rest: TypeExprRef,
+        fresh_mutability: bool,
+        copied: &dyn Fn(TypeExprRef) -> Option<TypeExprRef>,
+    ) -> MutabilityRef {
+        if fresh_mutability || self.row_terminator_generic(rest, copied) {
+            self.dup_mutability(mutability)
+        } else {
+            self.mutability_ref_repr(mutability)
+        }
     }
 
     // ========================================================================
@@ -4144,15 +4350,16 @@ impl TypeContext {
                 }
                 self.check_store_memo(*abbrev);
             }
-            TypeDesc::Tobject { fields, name } => {
-                self.check_store_ref(*fields);
-                if let Some((_, args)) = name {
-                    for ty in args.iter() {
-                        self.check_store_ref(*ty);
-                    }
+            TypeDesc::Tobject { fields } => self.check_store_ref(*fields),
+            TypeDesc::Tfield {
+                mutability,
+                typ,
+                rest,
+                ..
+            } => {
+                if !mutability.is_persistent() {
+                    self.poison_store_build();
                 }
-            }
-            TypeDesc::Tfield { typ, rest, .. } => {
                 self.check_store_ref(*typ);
                 self.check_store_ref(*rest);
             }
@@ -4544,11 +4751,6 @@ impl TypeContext {
         // Fast path, inlined into callers: `t` is already a representative.
         let next = self.with_desc(t, |desc| match desc {
             TypeDesc::Tlink(next) => Some(*next),
-            TypeDesc::Tfield {
-                kind: FieldKind::Fabsent,
-                rest,
-                ..
-            } => Some(*rest),
             _ => None,
         });
         let Some(first_next) = next else {
@@ -4573,11 +4775,6 @@ impl TypeContext {
         for _ in 0..10_000 {
             let next = self.with_desc(current, |desc| match desc {
                 TypeDesc::Tlink(next) => Some(*next),
-                TypeDesc::Tfield {
-                    kind: FieldKind::Fabsent,
-                    rest,
-                    ..
-                } => Some(*rest),
                 _ => None,
             });
             match next {

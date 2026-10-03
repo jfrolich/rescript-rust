@@ -658,11 +658,21 @@ impl<'a> DependencyCollector<'a> {
                 }
                 self.add_core_type_idx(*ty2);
             }
-            ExpressionDesc::Pexp_send(inner) => {
+            ExpressionDesc::Pexp_object_get(inner) => {
                 let (ref expr, ref _label) = **inner;
                 // expr is ExprIdx
                 let expr = *expr;
                 self.add_expr_idx(expr);
+            }
+            ExpressionDesc::Pexp_object_set(inner) => {
+                let (ref expr, _, ref value) = **inner;
+                self.add_expr_idx(*expr);
+                self.add_expr_idx(*value);
+            }
+            ExpressionDesc::Pexp_object_literal(fields) => {
+                for (_, e) in fields.iter() {
+                    self.add_expr_idx(*e);
+                }
             }
             ExpressionDesc::Pexp_letmodule(inner) => {
                 let (ref name, ref me, ref body) = **inner;

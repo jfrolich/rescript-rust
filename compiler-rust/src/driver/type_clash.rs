@@ -549,6 +549,17 @@ fn print_extra_type_clash_help(
         Some(TypeClashContext::ComparisonOperator) => {
             raw(ppf, "\n\n  You can only compare things of the same type.");
         }
+        // | Some ArrayValue, Some ({desc = Tobject _}, ({desc = Tconstr _} as t1))
+        //   when is_record_type t1 -> print_object_vs_record_hint
+        Some(TypeClashContext::ArrayLiteral)
+            if bottom.is_some_and(|(b1, b2)| {
+                matches!(desc(b1), TypeDesc::Tobject { .. })
+                    && head_path(ctx, b2).is_some()
+                    && is_record_type(ctx, env, b2)
+            }) =>
+        {
+            print_object_vs_record_hint(ppf, ctx, arena, source, loc);
+        }
         Some(TypeClashContext::ArrayLiteral) => {
             raw(ppf, "\n\n  Arrays can only contain items of the same type.\n\n  Possible solutions:\n  - Convert all values in the array to the same type.\n  - Use a tuple, if your array is of fixed length. Tuples can mix types freely, and compiles to a JavaScript array. Example of a tuple: `let myTuple = (10, \"hello\", 15.5, true)");
         }
@@ -647,6 +658,55 @@ fn is_record_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
         .is_some_and(|d| matches!(d.type_kind, crate::types::decl::TypeKind::TypeRecord(..)))
 }
 
+/// error_message_utils.ml `print_object_vs_record_hint`.
+fn print_object_vs_record_hint(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+) {
+    ppf.cut();
+    ppf.cut();
+    ppf.str("You're passing a ");
+    tagged(ppf, TAG_ERROR, "ReScript object");
+    ppf.str(" where a ");
+    tagged(ppf, TAG_INFO, "record");
+    ppf.str(" is expected. Objects are written with quoted keys, and records with unquoted keys.");
+    let suggested = reprint_expr_at_loc(ctx, arena, source, loc, |a, exp| {
+        let crate::parser::ast::ExpressionDesc::Pexp_object_literal(fields) = &*exp.pexp_desc else {
+            return None;
+        };
+        let rows = fields
+            .iter()
+            .map(|(name, e)| {
+                let name_idx = a.intern(&name.txt);
+                let lid = a.push_longident(crate::parser::longident::Longident::Lident(name_idx));
+                crate::parser::ast::ExpressionRecordField {
+                    lid: crate::parser::ast::Loc { txt: lid, loc: name.loc },
+                    expr: *e,
+                    opt: false,
+                }
+            })
+            .collect();
+        Some(crate::parser::ast::Expression {
+            pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_record(Box::new((rows, None)))),
+            pexp_loc: exp.pexp_loc,
+            pexp_attributes: crate::parser::ast::Attributes::new(),
+        })
+    });
+    ppf.cut();
+    ppf.cut();
+    ppf.str("Possible solutions: ");
+    ppf.cut();
+    ppf.str("- Rewrite the object to a record");
+    if suggested.is_some() {
+        ppf.str(", like: ");
+    }
+    tagged(ppf, TAG_INFO, suggested.as_deref().unwrap_or(""));
+    ppf.cut();
+}
+
 fn is_variant_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
     extract_concrete_typedecl(ctx, env, ty)
         .is_some_and(|d| matches!(d.type_kind, crate::types::decl::TypeKind::TypeVariant(..)))
@@ -718,44 +778,7 @@ fn print_extra_type_clash_help_by_types(
     }
     // | _, Some ({desc = Tobject _}, ({desc = Tconstr _} as t1)) when is_record_type t1
     if matches!(d1, TypeDesc::Tobject { .. }) && p2.is_some() && is_record_type(ctx, env, b2) {
-        ppf.cut();
-        ppf.cut();
-        ppf.str("You're passing a ");
-        tagged(ppf, TAG_ERROR, "ReScript object");
-        ppf.str(" where a ");
-        tagged(ppf, TAG_INFO, "record");
-        ppf.str(" is expected. Objects are written with quoted keys, and records with unquoted keys.");
-        let suggested = reprint_expr_at_loc(ctx, arena, source, loc, |a, exp| {
-            let crate::parser::ast::ExpressionDesc::Pexp_extension(ext) = &*exp.pexp_desc else {
-                return None;
-            };
-            let (name, payload) = &**ext;
-            if a.get_string(name.txt) != "obj" {
-                return None;
-            }
-            let crate::parser::ast::Payload::PStr(items) = payload else {
-                return None;
-            };
-            let [item] = items.as_slice() else {
-                return None;
-            };
-            let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
-                return None;
-            };
-            let record = a.get_expr(eval.0).clone();
-            matches!(&*record.pexp_desc, crate::parser::ast::ExpressionDesc::Pexp_record(..))
-                .then_some(record)
-        });
-        ppf.cut();
-        ppf.cut();
-        ppf.str("Possible solutions: ");
-        ppf.cut();
-        ppf.str("- Rewrite the object to a record");
-        if suggested.is_some() {
-            ppf.str(", like: ");
-        }
-        tagged(ppf, TAG_INFO, suggested.as_deref().unwrap_or(""));
-        ppf.cut();
+        print_object_vs_record_hint(ppf, ctx, arena, source, loc);
         return;
     }
     // | _, Some ({desc = Tconstr (p1, _, _)}, _) when p1 = promise
@@ -1883,6 +1906,27 @@ pub(super) fn print_undefined_method(
     }
 }
 
+/// `Typecore.report_error`'s `Object_field_not_mutable (ty, name)`.
+pub(super) fn print_object_field_not_mutable(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    ty: TypeExprRef,
+    name: &str,
+) {
+    let mut printer = Printtyp::new(ctx);
+    ppf.open_box(BoxKind::V, 0);
+    ppf.open_box(BoxKind::Box, 0);
+    ppf.str("This expression has type");
+    ppf.break_(1, 2);
+    typecore_type_expr(ppf, &mut printer, ty);
+    ppf.close_box();
+    ppf.cut();
+    ppf.str(&format!(
+        "The field {name} is not settable. Only fields annotated with @set, e.g. {{@set \"{name}\": int}}, can be assigned."
+    ));
+    ppf.close_box();
+}
+
 /// `Typedecl.report_error`'s `Definition_mismatch (ty, errs)`
 /// (typedecl.ml:2153-2159); `detail` is the rendered
 /// `Includecore.report_type_mismatch` sentence, if any.
@@ -1924,10 +1968,7 @@ pub(super) fn print_explain_unbound_type(
     ti: TypeExprRef,
 ) {
     let mut printer = Printtyp::new(ctx);
-    let ty0 = ctx.new_generic_type(TypeDesc::Tobject {
-        fields: tv,
-        name: None,
-    });
+    let ty0 = ctx.new_generic_type(TypeDesc::Tobject { fields: tv });
     printer.reset_and_mark_loops_list(&[ti, ty0]);
     ppf.open_box(BoxKind::HOV, 2);
     ppf.str("In type");

@@ -447,10 +447,23 @@ fn rewrite_expression(
             let rewritten_subject = rewrite_expr_idx(*subject, arena, let_unwrap_enabled)?;
             ExpressionDesc::Pexp_coerce(Box::new((rewritten_subject, *from, *to)))
         }
-        ExpressionDesc::Pexp_send(inner) => {
+        ExpressionDesc::Pexp_object_get(inner) => {
             let (subject, method) = &**inner;
             let rewritten_subject = rewrite_expr_idx(*subject, arena, let_unwrap_enabled)?;
-            ExpressionDesc::Pexp_send(Box::new((rewritten_subject, method.clone())))
+            ExpressionDesc::Pexp_object_get(Box::new((rewritten_subject, method.clone())))
+        }
+        ExpressionDesc::Pexp_object_set(inner) => {
+            let (subject, name, value) = &**inner;
+            let rewritten_subject = rewrite_expr_idx(*subject, arena, let_unwrap_enabled)?;
+            let rewritten_value = rewrite_expr_idx(*value, arena, let_unwrap_enabled)?;
+            ExpressionDesc::Pexp_object_set(Box::new((rewritten_subject, name.clone(), rewritten_value)))
+        }
+        ExpressionDesc::Pexp_object_literal(fields) => {
+            let mut rewritten = Vec::with_capacity(fields.len());
+            for (name, value) in fields.iter() {
+                rewritten.push((name.clone(), rewrite_expr_idx(*value, arena, let_unwrap_enabled)?));
+            }
+            ExpressionDesc::Pexp_object_literal(Box::new(rewritten))
         }
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (name, mod_expr, body) = &**inner;

@@ -469,11 +469,8 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::PupdateMod => Sexp::atom("Pupdate_mod"),
         Primitive::PjsApply => Sexp::atom("Pjs_apply"),
         Primitive::PjsRuntimeApply => Sexp::atom("Pjs_runtime_apply"),
-        Primitive::PjsUnsafeDowngrade { name, setter } => Sexp::list(vec![
-            Sexp::atom("Pjs_unsafe_downgrade"),
-            string(name),
-            bool_sexp(*setter),
-        ]),
+        Primitive::PjsObjectGet(name) => Sexp::list(vec![Sexp::atom("Pjs_object_get"), string(name)]),
+        Primitive::PjsObjectSet(name) => Sexp::list(vec![Sexp::atom("Pjs_object_set"), string(name)]),
         Primitive::PfnArity => Sexp::atom("Pfn_arity"),
         Primitive::PjsFnMethod => Sexp::atom("Pjs_fn_method"),
         Primitive::Pdebugger => Sexp::atom("Pdebugger"),

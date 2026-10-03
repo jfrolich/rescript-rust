@@ -17,7 +17,7 @@ the change to `compiler-rust/`, reruns the gates and commits the merge.
 |------|----------------|---------|--------|
 | 1 | 98e4a6613..0f66af5fa (commits 1-20) | structural optional defaults, structured FFI (`primitive_repr`, `external_decl`), externals expanded at translation, dynamic import resolved at translation | done |
 | 2 | ..84bed4dda (21-28) | vendored Flow parser, OCamlformat 0.29, OCaml 5.5 | done |
-| 3 | ..49 | object representation cleanup (field mutability, Stage 0-E) | |
+| 3 | ..055e9e091 (29-49) | object representation cleanup (field mutability, Stage 0-E) | done |
 | 4 | ..110 | Lambda/Lam merge, curried application removal | |
 | 5 | ..117 | string literal normalization, formatter | |
 | 6 | ..148 | scalar replacement, @as in the AST, sharing passes | |
@@ -79,3 +79,49 @@ Rust keeps its OXC-based `%raw` checker with Flow-style messages.
 Gates (release): JS output parity 626/626, typedtree parity 626/626, error
 output parity green (including the new `warning_103_flow_parser` fixture),
 syntax tests 572/572.
+
+### Step 3 (`055e9e091`)
+
+Upstream removed the object-method remnants (`Pexp_send`, `##`/`#=`,
+`%obj`, `@get`/`@set` getter-setter rewriting, `Lsend`,
+`Pjs_unsafe_downgrade`) and typed objects directly: `Pexp_object_get`,
+`Pexp_object_set` and `Pexp_object_literal` in the parsetree, the matching
+`Texp_object_*` typedtree forms, and `Pjs_object_get`/`Pjs_object_set`
+primitives. `Tobject` lost its name and `Tfield` carries a
+`field_mutability ref` instead of a `field_kind`; `@set` on an object field
+type makes it settable.
+
+Ported to Rust:
+
+- Parse tree, parser, printers, comment table, PPX passes and the v0
+  mappers use the three object forms; the binary AST tags shifted.
+- `Tfield { name, mutability, typ, rest }` with `MutabilityRef` cells
+  (`TypeContext` arena, persistent cells for shared/store graphs, journaled
+  `set_mutability`), copy sessions (`with_copy_session`,
+  `dup_mutability`, `row_terminator_generic`) in every graph copier,
+  unification/moregen/eqtype/variance/inclusion on mutability, and
+  `filter_method`/`filter_object_field_for_write`.
+- Typecore: object literal, get and set typing with
+  `object_field_use_type`/`type_object_field_value` and the
+  `Object_field_not_mutable` error; `@set` read from object type
+  annotations; `Typetexp.find_value`'s `check_value_name` before value
+  lookup.
+- Coercion now follows OCaml's two paths: `enlarge_type`
+  (`build_subtype`, newly ported) under a snapshot, then subtyping.
+- Unification and subtyping use `enter_poly`/`unify_univar` with
+  `univar_pairs` (constraints carry their pairs into `force_subtype`)
+  instead of pairwise binder unification.
+- Interface graphs serialize mutability classes; the `.cmi` reader decodes
+  `field_mutability ref` blocks. Magic numbers: `Caml1999I029`,
+  `ResImpl01303`/`ResIntf01303`.
+- Printtyp prints `@set` fields; gentype reads mutability from the type.
+
+Gates (release): JS output parity 628/628, typedtree parity 628/628, error
+output parity 1881/1881, syntax tests green, compiler tests 1366/1367
+(`parse_inline_for`, independent), rewatch unit tests 147/147 and
+`rewatch/tests/suite.sh` green.
+
+`make test-analysis` rebuilds the runtime and belt in-process, which writes
+no interfaces and cleans the reference-built `lib/ocaml`; rebuild them with
+the reference compiler afterwards. The analysis test projects still fail
+until the editor tooling commands are ported into the watcher.

@@ -56,6 +56,7 @@ type error =
   | Name_type_mismatch of
       string * Longident.t * (Path.t * Path.t) * (Path.t * Path.t) list
   | Undefined_method of type_expr * string * string list option
+  | Object_field_not_mutable of type_expr * string
   | Private_type of type_expr
   | Not_subtype of
       Ctype.type_pairs * Ctype.type_pairs * Ctype.subtype_context option
@@ -183,12 +184,16 @@ let iter_expression f e =
       List.iter (fun {x = e} -> expr e) iel
     | Pexp_open (_, _, e)
     | Pexp_assert e
-    | Pexp_send (e, _)
     | Pexp_constraint (e, _)
     | Pexp_coerce (e, _, _)
     | Pexp_letexception (_, e)
+    | Pexp_object_get (e, _)
     | Pexp_field (e, _) ->
       expr e
+    | Pexp_object_set (e1, _, e2) ->
+      expr e1;
+      expr e2
+    | Pexp_object_literal fields -> List.iter (fun (_, e) -> expr e) fields
     | Pexp_while (e1, e2) | Pexp_sequence (e1, e2) | Pexp_setfield (e1, _, e2)
       ->
       expr e1;
@@ -1275,7 +1280,7 @@ and type_pat_aux ~constrs ~labels ~no_existentials ~mode ~explode ~env sp
     match ty.desc with
     | Tpoly (body, tyl) ->
       begin_def ();
-      let _, ty' = instance_poly ~keep_names:true false tyl body in
+      let _, ty' = instance_poly ~keep_names:true ~fixed:false tyl body in
       end_def ();
       generalize ty';
       let id = enter_variable lloc name ty' in
@@ -2331,6 +2336,31 @@ let should_unify_expected_result_before_typing_lowered_apply funct sargs =
   | _ -> false
 
 type targs = (Asttypes.arg_label * Typedtree.expression option) list
+
+(* Eliminate an object-field scheme for a read. A declared field payload is
+   wrapped in [Tpoly]: an empty binder list needs ordinary instantiation, while
+   a nonempty list needs polymorphic instantiation. An inferred field whose
+   scheme is not known yet can still be a variable; constrain it to the
+   ordinary, empty-binder form. Assignment uses [type_object_field_value] to
+   introduce rather than eliminate a scheme. *)
+let object_field_use_type env typ =
+  match Ctype.repr typ with
+  | {desc = Tpoly (ty, [])} -> instance env ty
+  | {desc = Tpoly (ty, tl)} -> snd (instance_poly ~fixed:false tl ty)
+  | {desc = Tvar _} as ty ->
+    let ty' = newvar () in
+    unify env (instance_def ty) (newty (Tpoly (ty', [])));
+    ty'
+  | _ -> assert false
+
+let object_valid_fields env ty =
+  match (expand_head env ty).desc with
+  | Tobject fields ->
+    let fields, _ = Ctype.flatten_fields fields in
+    let collect_fields li (f : Ctype.field_info) = f.f_name :: li in
+    Some (List.fold_left collect_fields [] fields)
+  | _ -> None
+
 let rec type_exp ?deprecated_context ~context ?recarg env sexp =
   (* We now delegate everything to type_expect *)
   type_expect ?deprecated_context ~context ?recarg env sexp (newvar ())
@@ -3266,10 +3296,15 @@ and type_expect_ ?deprecated_context ~context ?(recarg = Rejected) env sexp
           gen)
         else true
       in
+      (* Coercion has two checking paths. For a suitable non-generalizable
+         source, first try unification with an enlarged approximation of the
+         target under a snapshot. Otherwise, or if that trial fails, generate
+         and enforce subtype constraints. A type constructor whose variance or
+         capabilities affect coercion must therefore be represented correctly
+         both by [Ctype.enlarge_type] and by [Ctype.subtype]. *)
       (if
          (not gen)
          &&
-         (* first try a single coercion *)
          let snap = snapshot () in
          let ty, _b = enlarge_type env ty' in
          try
@@ -3300,29 +3335,58 @@ and type_expect_ ?deprecated_context ~context ?(recarg = Rejected) env sexp
         exp_extra =
           (Texp_coerce cty', loc, sexp.pexp_attributes) :: arg.exp_extra;
       }
-  | Pexp_send (e, {txt = met}) -> (
+  | Pexp_object_literal sfields ->
+    (* Fields are typed in source order. A duplicate name is typed against the
+       first occurrence's type and appears once in the row (the runtime object
+       still writes every field, in order; JavaScript keeps the last value). *)
+    let seen : (string, type_expr) Hashtbl.t = Hashtbl.create 8 in
+    let fields =
+      List.map
+        (fun ((s : string loc), sfield) ->
+          match Hashtbl.find_opt seen s.txt with
+          | Some ty -> (s, type_expect ~context:None env sfield ty)
+          | None ->
+            let field = type_exp ~context:None env sfield in
+            Hashtbl.add seen s.txt field.exp_type;
+            (s, field))
+        sfields
+    in
+    let emitted : (string, unit) Hashtbl.t = Hashtbl.create 8 in
+    let row =
+      List.fold_right
+        (fun ((s : string loc), (field : Typedtree.expression)) rest ->
+          if Hashtbl.mem emitted s.txt then rest
+          else (
+            Hashtbl.add emitted s.txt ();
+            newty
+              (Tfield
+                 {
+                   name = s.txt;
+                   mutability = ref (Mutability_value Asttypes.Immutable);
+                   typ = newty (Tpoly (field.exp_type, []));
+                   rest;
+                 })))
+        fields (newty Tnil)
+    in
+    rue
+      {
+        exp_desc = Texp_object_literal fields;
+        exp_loc = loc;
+        exp_extra = [];
+        exp_type = newty (Tobject row);
+        exp_attributes = sexp.pexp_attributes;
+        exp_env = env;
+      }
+  | Pexp_object_get (e, ({txt = met} as met_loc)) -> (
     let obj = type_exp ~context:None env e in
-    let obj_meths = ref None in
     try
-      let meth, exp, typ =
-        match obj.exp_desc with
-        | _ -> (Tmeth_name met, None, filter_method env met Public obj.exp_type)
-      in
-      let typ =
-        match repr typ with
-        | {desc = Tpoly (ty, [])} -> instance env ty
-        | {desc = Tpoly (ty, tl); level = _} -> snd (instance_poly false tl ty)
-        | {desc = Tvar _} as ty ->
-          let ty' = newvar () in
-          unify env (instance_def ty) (newty (Tpoly (ty', [])));
-          (* if not !Clflags.nolabels then
-             Location.prerr_warning loc (Warnings.Unknown_method met); *)
-          ty'
-        | _ -> assert false
-      in
+      (* Lookup constrains an open object row to contain the field, without
+         requiring or adding write capability. *)
+      let typ = filter_method env met obj.exp_type in
+      let typ = object_field_use_type env typ in
       rue
         {
-          exp_desc = Texp_send (obj, meth, exp);
+          exp_desc = Texp_object_get (obj, met_loc);
           exp_loc = loc;
           exp_extra = [];
           exp_type = typ;
@@ -3330,24 +3394,42 @@ and type_expect_ ?deprecated_context ~context ?(recarg = Rejected) env sexp
           exp_env = env;
         }
     with Unify _ ->
-      let valid_methods =
-        match !obj_meths with
-        | Some meths ->
-          Some (Meths.fold (fun meth _meth_ty li -> meth :: li) !meths [])
-        | None -> (
-          match (expand_head env obj.exp_type).desc with
-          | Tobject (fields, _) ->
-            let fields, _ = Ctype.flatten_fields fields in
-            let collect_fields li (meth, meth_kind, _meth_ty) =
-              if meth_kind = Fpresent then meth :: li else li
-            in
-            Some (List.fold_left collect_fields [] fields)
-          | _ -> None)
-      in
       raise
         (Error
-           (e.pexp_loc, env, Undefined_method (obj.exp_type, met, valid_methods)))
-    )
+           ( e.pexp_loc,
+             env,
+             Undefined_method
+               (obj.exp_type, met, object_valid_fields env obj.exp_type) )))
+  | Pexp_object_set (e, ({txt = name} as name_loc), svalue) -> (
+    let obj = type_exp ~context:None env e in
+    (* Assignment can add or promote a field only while its object row is
+       open. The result distinguishes a missing field from a closed immutable
+       field so the two cases retain their respective diagnostics. *)
+    let field_typ =
+      try Ctype.filter_object_field_for_write env name obj.exp_type
+      with Unify _ -> Error Ctype.Owrite_missing
+    in
+    match field_typ with
+    | Error Owrite_missing ->
+      raise
+        (Error
+           ( e.pexp_loc,
+             env,
+             Undefined_method
+               (obj.exp_type, name, object_valid_fields env obj.exp_type) ))
+    | Error Owrite_not_mutable ->
+      raise (Error (loc, env, Object_field_not_mutable (obj.exp_type, name)))
+    | Ok typ ->
+      let value = type_object_field_value env svalue typ in
+      rue
+        {
+          exp_desc = Texp_object_set (obj, name_loc, value);
+          exp_loc = loc;
+          exp_extra = [];
+          exp_type = instance_def Predef.type_unit;
+          exp_attributes = sexp.pexp_attributes;
+          exp_env = env;
+        })
   | Pexp_letmodule (name, smodl, sbody) ->
     let ty = newvar () in
     (* remember original level *)
@@ -3914,6 +3996,28 @@ and type_label_access env srecord lid =
       labels
   in
   (record, label, opath)
+
+(* Introduce the right-hand side of an object-field assignment at the field's
+   scheme. A polymorphic field accepts only a value at least as general as the
+   scheme: type the value at a fixed instance, verify generality with
+   [check_univars], then replace the expression type with an ordinary instance.
+   [type_label_exp] for record labels and [type_let] for polymorphic annotations
+   use the same discipline. With no quantified variables, introduction and
+   elimination coincide. [type_label_exp] also retries an expansive value
+   without type propagation (PR#4862); that label-specific completeness
+   recovery is not part of scheme introduction and is not used here. *)
+and type_object_field_value env svalue typ =
+  match (Ctype.repr typ).desc with
+  | Tpoly (ty, (_ :: _ as tl)) ->
+    begin_def ();
+    let vars, ty' = instance_poly ~fixed:true tl ty in
+    let value = type_expect ~context:None env svalue ty' in
+    end_def ();
+    check_univars env true "field value" value typ vars;
+    {value with exp_type = instance env value.exp_type}
+  | _ ->
+    let typ = object_field_use_type env typ in
+    type_expect ~context:None env svalue typ
 
 (* Typing format strings for printing or reading.
    These formats are used by functions in modules Printf, Format, and Scanf.
@@ -4609,7 +4713,7 @@ and type_let ~context ?(check = fun s -> Warnings.Unused_var s)
           | Tpoly (ty, tl) ->
             {
               pat with
-              pat_type = snd (instance_poly ~keep_names:true false tl ty);
+              pat_type = snd (instance_poly ~keep_names:true ~fixed:false tl ty);
             }
           | _ -> pat
         in
@@ -4717,7 +4821,7 @@ and type_let ~context ?(check = fun s -> Warnings.Unused_var s)
         match pat.pat_type.desc with
         | Tpoly (ty, tl) ->
           begin_def ();
-          let vars, ty' = instance_poly ~keep_names:true true tl ty in
+          let vars, ty' = instance_poly ~keep_names:true ~fixed:true tl ty in
           let exp = type_expression ty' in
           end_def ();
           check_univars env true "definition" exp pat.pat_type vars;
@@ -5041,6 +5145,13 @@ let report_error env loc ppf error =
       (function
         | ppf ->
         fprintf ppf "but a %s was expected belonging to the %s type" name kind)
+  | Object_field_not_mutable (ty, name) ->
+    fprintf ppf
+      "@[<v>@[This expression has type@;\
+       <1 2>%a@]@,\
+       The field %s is not settable. Only fields annotated with @set, e.g. \
+       {@set \"%s\": int}, can be assigned.@]"
+      type_expr ty name name
   | Undefined_method (ty, me, valid_methods) -> (
     fprintf ppf
       "@[<v>@[This expression has type@;<1 2>%a@]@,It has no field %s@]"

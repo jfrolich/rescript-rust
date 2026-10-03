@@ -1969,14 +1969,6 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                 let e_norm = tr_rec(env, e, count, next_id)?;
                 Some(RawLambda::Lassign(x.clone(), Box::new(e_norm)))
             }
-            RawLambda::Lsend(m, e1, _loc) => {
-                let e1_norm = tr_rec(env, e1, count, next_id)?;
-                Some(RawLambda::Lsend(
-                    m.clone(),
-                    Box::new(e1_norm),
-                    Location::none(),
-                ))
-            }
             // OCaml `Lambda.make_key` after #8348:
             // `Lbreak -> Lbreak | Lcontinue -> Lcontinue`.
             RawLambda::Lbreak => Some(RawLambda::Lbreak),
@@ -2275,12 +2267,6 @@ impl MakeKeyWriter {
                 write_ident_key(out, x);
                 out.push(',');
                 self.write_raw(e, out)?;
-                out.push(')');
-                Some(())
-            }
-            RawLambda::Lsend(m, e1, _loc) => {
-                write!(out, "Lsend({m:?},").ok()?;
-                self.write_raw(e1, out)?;
                 out.push(')');
                 Some(())
             }
@@ -3407,9 +3393,6 @@ fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
             RawLambda::Lassign(id, expr) => {
                 fv.insert(id.clone());
                 collect(expr, fv);
-            }
-            RawLambda::Lsend(_, obj, _) => {
-                collect(obj, fv);
             }
             RawLambda::Lbreak | RawLambda::Lcontinue => {}
         }

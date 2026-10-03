@@ -17,7 +17,6 @@ use crate::lambda::{ApInfo, Apply, ApplyStatus, LFunction, Lambda, LambdaSwitch,
 use crate::location::Location;
 use crate::raw_lambda::{RawApply, RawLambda, RawLambdaSwitch};
 
-const SETTER_SUFFIX: &str = "#=";
 const EXCEPTION_ID_FIELD: &str = "RE_EXN_ID";
 
 struct LoweringContext<'a> {
@@ -135,14 +134,6 @@ impl<'a> LoweringContext<'a> {
             RawLambda::Lbreak => Lambda::break_(),
             RawLambda::Lcontinue => Lambda::continue_(),
             RawLambda::Lassign(id, value) => Lambda::assign(id, self.lower_lambda(*value)),
-            RawLambda::Lsend(name, obj, loc) => Lambda::prim(
-                Primitive::PjsUnsafeDowngrade {
-                    name,
-                    setter: false,
-                },
-                vec![self.lower_lambda(*obj)],
-                loc,
-            ),
         }
     }
 
@@ -163,37 +154,6 @@ impl<'a> LoweringContext<'a> {
         } = apply;
 
         let func = *ap_func;
-        if let RawLambda::Lsend(name, obj, loc) = func {
-            if let Some(property) = name.strip_suffix(SETTER_SUFFIX) {
-                let mut args = vec![self.lower_lambda(*obj)];
-                args.extend(ap_args.into_iter().map(|arg| self.lower_lambda(arg)));
-                return Lambda::prim(
-                    Primitive::PjsUnsafeDowngrade {
-                        name: property.to_string(),
-                        setter: true,
-                    },
-                    args,
-                    loc,
-                );
-            }
-
-            let lowered_args = ap_args
-                .into_iter()
-                .map(|arg| self.lower_lambda(arg))
-                .collect();
-            let lowered_func = self.lower_lambda(RawLambda::Lsend(name, obj, loc));
-            return make_apply(
-                lowered_func,
-                lowered_args,
-                ApInfo {
-                    loc: ap_info.loc,
-                    inlined: ap_info.inlined,
-                    status: ApplyStatus::Uncurry,
-                },
-                ap_transformed_jsx,
-            );
-        }
-
         let lowered_args = ap_args
             .into_iter()
             .map(|arg| self.lower_lambda(arg))
@@ -525,7 +485,7 @@ fn collect_exported_idents(raw: &RawLambda, exports: &mut HashSet<Ident>) {
             collect_exported_idents(body, exports);
         }
         RawLambda::Lbreak | RawLambda::Lcontinue => {}
-        RawLambda::Lassign(_, value) | RawLambda::Lsend(_, value, _) => {
+        RawLambda::Lassign(_, value) => {
             collect_exported_idents(value, exports);
         }
     }
@@ -1654,7 +1614,6 @@ fn max_ident_stamp(raw: &RawLambda) -> i32 {
                 visit_ident(max_stamp, id);
                 visit_raw(max_stamp, value);
             }
-            RawLambda::Lsend(_, obj, _) => visit_raw(max_stamp, obj),
             RawLambda::Lbreak | RawLambda::Lcontinue => {}
         }
     }

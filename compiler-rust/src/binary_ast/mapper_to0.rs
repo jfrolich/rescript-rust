@@ -1402,12 +1402,67 @@ impl<'a> Mapper<'a> {
                     Box::new(self.map_core_type_idx(*ty_idx)),
                 )
             }
-            current::ExpressionDesc::Pexp_send(inner) => {
+            current::ExpressionDesc::Pexp_object_get(inner) => {
                 let (ref e_idx, ref label) = **inner;
                 pt0::ExpressionDesc::Send(
                     Box::new(self.map_expr_idx(*e_idx)),
                     self.map_label_loc(label),
                 )
+            }
+            // ast_mapper_to0.ml: v0 encoding of property assignment, the
+            // `#=` operator applied to a send.
+            current::ExpressionDesc::Pexp_object_set(inner) => {
+                let (ref e_idx, ref label, ref v_idx) = **inner;
+                let name = self.map_label_loc(label);
+                let full_loc = self.loc(loc);
+                let v = self.map_expr_idx(*v_idx);
+                let e = self.map_expr_idx(*e_idx);
+                let send = pt0::Expression {
+                    pexp_desc: pt0::ExpressionDesc::Send(Box::new(e), name),
+                    pexp_loc: full_loc.clone(),
+                    pexp_attributes: vec![],
+                };
+                let op = self.intern("#=");
+                let op = pt0::Expression {
+                    pexp_desc: pt0::ExpressionDesc::Ident(OldLocated::new(
+                        Longident::Lident(op),
+                        full_loc.clone(),
+                    )),
+                    pexp_loc: full_loc,
+                    pexp_attributes: vec![],
+                };
+                pt0::ExpressionDesc::Apply(
+                    Box::new(op),
+                    vec![(pt0::ArgLabel::Nolabel, send), (pt0::ArgLabel::Nolabel, v)],
+                )
+            }
+            // ast_mapper_to0.ml: v0 encoding of an object literal, the
+            // reserved `%obj` extension over a record expression.
+            current::ExpressionDesc::Pexp_object_literal(fields) => {
+                let rows = fields
+                    .iter()
+                    .map(|(name, e_idx)| {
+                        let name_loc = self.loc(name.loc);
+                        let field = self.intern(&name.txt);
+                        (
+                            OldLocated::new(Longident::Lident(field), name_loc),
+                            self.map_expr_idx(*e_idx),
+                        )
+                    })
+                    .collect();
+                let full_loc = self.loc(loc);
+                let record = pt0::Expression {
+                    pexp_desc: pt0::ExpressionDesc::Record(rows, None),
+                    pexp_loc: full_loc.clone(),
+                    pexp_attributes: vec![],
+                };
+                pt0::ExpressionDesc::Extension((
+                    OldLocated::new("obj".to_string(), full_loc.clone()),
+                    pt0::Payload::PStr(vec![pt0::StructureItem {
+                        pstr_desc: pt0::StructureItemDesc::Eval(record, vec![]),
+                        pstr_loc: full_loc,
+                    }]),
+                ))
             }
             current::ExpressionDesc::Pexp_letmodule(inner) => {
                 let (ref name, ref me_idx, ref body_idx) = **inner;
