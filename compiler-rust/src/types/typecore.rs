@@ -24628,7 +24628,7 @@ fn extract_type_path_from_expected_inner<'a>(
     if !visited_types.insert(ty.key()) {
         return None; // Already visited this type expression — break the cycle
     }
-    let desc = ctx.get_desc(ty);
+    let desc = ctx.borrow_desc(ty);
     match &*desc {
         TypeDesc::Tconstr { path, .. } => {
             // Track visited paths to detect cycles through type declaration manifests.
@@ -24992,8 +24992,7 @@ fn label_result_path<'a>(
     label: &crate::types::LabelDescription,
 ) -> Option<Path> {
     let res = ctx.repr(label.lbl_res);
-    let desc = ctx.get_desc(res);
-    match &*desc {
+    match &*ctx.borrow_desc(res) {
         TypeDesc::Tconstr { path, .. } => Some(path.clone()),
         _ => None,
     }
@@ -25135,7 +25134,7 @@ fn type_contains_unresolved_local_path<'a>(
     }
     visited.push(repr);
 
-    let desc = ctx.get_desc(repr);
+    let desc = ctx.borrow_desc(repr);
     match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
             let has_local_head =
@@ -25848,7 +25847,7 @@ pub(crate) fn mark_type_path_of(
     env: &Env,
     ty: TypeExprRef,
 ) {
-    let path = match &*ctx.get_desc(ctx.repr(ty)) {
+    let path = match &*ctx.borrow_desc(ctx.repr(ty)) {
         TypeDesc::Tconstr { path, .. } => path.clone(),
         _ => return,
     };
