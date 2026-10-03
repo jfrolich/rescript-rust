@@ -643,6 +643,20 @@ fn normalize_absolute_path(path: &FsPath) -> PathBuf {
 }
 
 fn normalize_lexical_path(path: PathBuf) -> PathBuf {
+    // An absolute Unix path without `.`/`..` components, doubled or trailing
+    // separators is already normal; skip rebuilding it component by component.
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = path.as_os_str().as_bytes();
+        if bytes.first() == Some(&b'/')
+            && bytes.len() > 1
+            && !bytes.ends_with(b"/")
+            && !bytes.windows(2).any(|pair| pair == b"//" || pair == b"/.")
+        {
+            return path;
+        }
+    }
     let mut prefix: Option<OsString> = None;
     let mut has_root = false;
     let mut parts: Vec<OsString> = Vec::new();
