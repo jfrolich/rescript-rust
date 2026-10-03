@@ -9,6 +9,9 @@
 pub mod document_symbol;
 pub mod hashtbl;
 pub mod json;
+pub mod process_attributes;
+pub mod process_cmt;
+pub mod shared_types;
 
 use json::Json;
 use std::path::{Path, PathBuf};
