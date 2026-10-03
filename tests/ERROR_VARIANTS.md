@@ -35,6 +35,11 @@ here because there's no constructor to track. If someone wants to add
 coverage for one of those messages, the first step is refactoring it
 into a named variant.
 
+Diagnostic types in vendored third-party sources are also excluded. In
+particular, Flow parser `Parse_error.t` values cross into the ReScript compiler
+as warning 103 (`Bs_ffi_warning`), whose integration boundary is covered by
+[`warning_103_flow_parser.res`](build_tests/super_errors/fixtures/warning_103_flow_parser.res).
+
 ## Forwarded extension errors
 
 Module-type extension errors are forwarded through `Builtin_attributes.error_of_extension`

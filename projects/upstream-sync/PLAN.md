@@ -16,7 +16,7 @@ the change to `compiler-rust/`, reruns the gates and commits the merge.
 | Step | Upstream range | Content | Status |
 |------|----------------|---------|--------|
 | 1 | 98e4a6613..0f66af5fa (commits 1-20) | structural optional defaults, structured FFI (`primitive_repr`, `external_decl`), externals expanded at translation, dynamic import resolved at translation | done |
-| 2 | ..84bed4dda (21-28) | vendored Flow parser, OCamlformat 0.29, OCaml 5.5 | |
+| 2 | ..84bed4dda (21-28) | vendored Flow parser, OCamlformat 0.29, OCaml 5.5 | done |
 | 3 | ..49 | object representation cleanup (field mutability, Stage 0-E) | |
 | 4 | ..110 | Lambda/Lam merge, curried application removal | |
 | 5 | ..117 | string literal normalization, formatter | |
@@ -66,3 +66,16 @@ After a `.cmi` format change, rebuild the runtime, `tests/dependencies/rescript-
 and `tests/tests` with the reference compiler, and delete stale ignored
 `.cmi`/`.cmj`/`.cmt` artifacts under `tests/build_tests` and
 `tests/error_output_parity`, before running the gates.
+
+### Step 2 (`84bed4dda`)
+
+Upstream vendored and upgraded the Flow parser (used for `%raw` checks and
+warning 103), reformatted the OCaml sources with OCamlformat 0.29 and moved
+the development toolchain to OCaml 5.5 (5.0 stays the minimum; the local
+5.3 switch builds it). The only output change is `Pprintast`'s object-field
+layout without attributes (`@;<2 0>`), ported to `parser/ml_printer.rs`.
+Rust keeps its OXC-based `%raw` checker with Flow-style messages.
+
+Gates (release): JS output parity 626/626, typedtree parity 626/626, error
+output parity green (including the new `warning_103_flow_parser` fixture),
+syntax tests 572/572.

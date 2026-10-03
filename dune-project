@@ -21,10 +21,15 @@
   (ocaml
    (>= 5.0.0))
   dune
-  (flow_parser
-   (= 0.267.0))
+  (base
+   (>= v0.16.3))
+  (ppxlib
+   (>= 0.38.0))
+  (ppx_deriving :build)
+  (ppx_gen_rec :build)
+  wtf8
   (ocamlformat
-   (and :with-test (= 0.27.0)))
+   (and :with-test (= 0.29.0)))
   (yojson
    (= 3.0.0))
   (ounit2
@@ -32,18 +37,16 @@
   (odoc :with-doc)
   (ocaml-lsp-server
    (and :with-dev-setup (>= 1.23.0)))
-  (bisect_ppx
-   (and :with-dev-setup (>= 2.8.0)))
   (js_of_ocaml
    (and
     (<> :os "win32")
     :with-test
-    (= 6.0.1)))
+    (= 6.4.1)))
   (wasm_of_ocaml-compiler
    (and
     (<> :os "win32")
     :with-test
-    (= 6.0.1)))))
+    (= 6.4.1)))))
 
 (package
  (name analysis)

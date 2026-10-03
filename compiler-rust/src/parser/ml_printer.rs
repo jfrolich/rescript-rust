@@ -2918,6 +2918,15 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
                     f.string(";");
                 }
                 match field {
+                    ObjectField::Otag(name, attrs, typ_idx) if attrs.is_empty() => {
+                        // OCaml: pp f "@[<hov2>%s: %a@;<2 0>@]"
+                        f.open_box(BoxKind::HOV, 2);
+                        f.string(arena.get_string(name.txt));
+                        f.string(": ");
+                        print_core_type(f, arena, arena.get_core_type(*typ_idx));
+                        f.break_(2, 0);
+                        f.close_box();
+                    }
                     ObjectField::Otag(name, attrs, typ_idx) => {
                         // OCaml: pp f "@[<hov2>%s: %a@ %a@ @]"
                         f.open_box(BoxKind::HOV, 2);
