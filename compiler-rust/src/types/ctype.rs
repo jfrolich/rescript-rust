@@ -6269,7 +6269,8 @@ pub fn unify<'a>(
     }
     // OCaml's outer `unify` (ctype.ml:2589-2594) takes a snapshot so a
     // failure can `undo_compress` before expanding the trace.
-    let top_snapshot = (state.recursion_depth == 1).then(|| ctx.snapshot_type_state());
+    let top_snapshot =
+        (state.recursion_depth == 1).then(|| ctx.snapshot_type_state_for_undo_compress());
 
     // Fast path: same reference
     let t1 = ctx.repr(t1);

@@ -132,7 +132,7 @@ impl Deref for TypeDescSnapshot {
 /// Cursor into the OCaml-style type mutation trail.
 pub(crate) struct TypeMutationSnapshot<'a> {
     journal: &'a RefCell<TypeMutationJournal>,
-    logging: &'a Cell<bool>,
+    logging: &'a TrailLogging,
     cursor: usize,
     id: u64,
     restored: bool,
@@ -147,13 +147,31 @@ impl Drop for TypeMutationSnapshot<'_> {
         }
         let mut journal = self.journal.borrow_mut();
         journal.finish(self.id);
-        self.logging.set(!journal.active.is_empty());
+        self.logging.update(&journal);
+    }
+}
+
+/// Which mutations the trail logs, from the live snapshots: every change
+/// while a full snapshot lives, path compressions while any snapshot lives.
+#[derive(Default)]
+struct TrailLogging {
+    full: Cell<bool>,
+    compress: Cell<bool>,
+}
+
+impl TrailLogging {
+    fn update(&self, journal: &TypeMutationJournal) {
+        self.full.set(journal.active.iter().any(|snapshot| snapshot.full));
+        self.compress.set(!journal.active.is_empty());
     }
 }
 
 #[derive(Clone, Copy)]
 struct ActiveTypeSnapshot {
     id: u64,
+    /// `false` for a snapshot only used by `undo_compress`, which reads the
+    /// path compressions logged since it.
+    full: bool,
     type_len: usize,
     row_field_len: usize,
     abbrev_len: usize,
@@ -501,7 +519,7 @@ pub struct TypeContext {
         RefCell<crate::fast_hash::AHashMap<u64, Arc<super::env_lazy::QualifiedModuleComponents>>>,
     /// OCaml-shaped mutation trail. Logging is dormant unless a snapshot lives.
     mutation_journal: RefCell<TypeMutationJournal>,
-    mutation_logging: Cell<bool>,
+    mutation_logging: TrailLogging,
 
     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
     compiler_counters_enabled: bool,
@@ -1018,7 +1036,7 @@ impl TypeContext {
             touched_store_pieces: RefCell::new(crate::fast_hash::AHashSet::new()),
             local_stored_components: RefCell::new(crate::fast_hash::AHashMap::new()),
             mutation_journal: RefCell::new(TypeMutationJournal::default()),
-            mutation_logging: Cell::new(false),
+            mutation_logging: TrailLogging::default(),
             compiler_counters_enabled: crate::perf_counters::enabled(),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
@@ -2601,7 +2619,7 @@ impl TypeContext {
         ty: TypeExprRef,
         kind: crate::perf_counters::TypeMutationKind,
     ) {
-        if !self.mutation_logging.get() || self.store_build_owns(ty) {
+        if !self.mutation_logging.full.get() || self.store_build_owns(ty) {
             return;
         }
         let mut journal = self.mutation_journal.borrow_mut();
@@ -2619,7 +2637,7 @@ impl TypeContext {
         mutation: impl FnOnce() -> TypeMutation,
         kind: crate::perf_counters::TypeMutationKind,
     ) {
-        if !self.mutation_logging.get() {
+        if !self.mutation_logging.full.get() {
             return;
         }
         self.mutation_journal.borrow_mut().entries.push(mutation());
@@ -2630,7 +2648,7 @@ impl TypeContext {
 
     #[inline]
     fn record_row_field_mutation(&self, mutation: impl FnOnce() -> TypeMutation, row: RowFieldRef) {
-        if !self.mutation_logging.get() || self.store_build_owns_row_field(row) {
+        if !self.mutation_logging.full.get() || self.store_build_owns_row_field(row) {
             return;
         }
         let mut journal = self.mutation_journal.borrow_mut();
@@ -2646,7 +2664,7 @@ impl TypeContext {
 
     #[inline]
     fn record_abbrev_mutation(&self, mutation: impl FnOnce() -> TypeMutation, memo: AbbrevMemoRef) {
-        if !self.mutation_logging.get() {
+        if !self.mutation_logging.full.get() {
             return;
         }
         let mut journal = self.mutation_journal.borrow_mut();
@@ -2899,18 +2917,30 @@ impl TypeContext {
     /// frontier. Backtracking replays mutations in reverse. Allocations and
     /// unrelated lazy caches intentionally remain alive, matching Btype.
     pub(crate) fn snapshot_type_state(&self) -> TypeMutationSnapshot<'_> {
+        self.snapshot_type_state_with(true)
+    }
+
+    /// A snapshot that is only passed to [`Self::undo_compress`] (OCaml's
+    /// outer `unify`, ctype.ml:2589-2594), never restored: it needs the path
+    /// compressions logged since it, not every change.
+    pub(crate) fn snapshot_type_state_for_undo_compress(&self) -> TypeMutationSnapshot<'_> {
+        self.snapshot_type_state_with(false)
+    }
+
+    fn snapshot_type_state_with(&self, full: bool) -> TypeMutationSnapshot<'_> {
         let mut journal = self.mutation_journal.borrow_mut();
         let id = journal.next_id;
         journal.next_id += 1;
         let cursor = journal.entries.len();
         journal.active.push(ActiveTypeSnapshot {
             id,
+            full,
             type_len: self.types.len(),
             row_field_len: self.row_fields.borrow().len(),
             abbrev_len: self.abbrevs.borrow().len(),
         });
         let depth = journal.active.len();
-        self.mutation_logging.set(true);
+        self.mutation_logging.update(&journal);
         if self.compiler_counters_enabled {
             crate::perf_counters::record_type_mutation_snapshot(depth);
         }
@@ -2963,11 +2993,15 @@ impl TypeContext {
                 return;
             };
             let mutations = journal.entries.split_off(snapshot.cursor);
+            debug_assert!(
+                journal.active[active_index].full,
+                "a compress-only snapshot is never restored"
+            );
             journal.active.truncate(active_index);
             if journal.active.is_empty() {
                 journal.entries.clear();
             }
-            self.mutation_logging.set(!journal.active.is_empty());
+            self.mutation_logging.update(&journal);
             mutations
         };
         // btype.ml:692-700 `backtrack`: when anything was trailed it first
@@ -4604,7 +4638,7 @@ impl TypeContext {
                 let direct =
                     matches!(*self.borrow_desc(node), TypeDesc::Tlink(target) if target == current);
                 if !direct {
-                    if self.mutation_logging.get() && !self.store_build_owns(node) {
+                    if self.mutation_logging.compress.get() && !self.store_build_owns(node) {
                         let old = self.get_desc(node).0;
                         self.mutation_journal
                             .borrow_mut()
@@ -5263,7 +5297,7 @@ mod tests {
         );
         assert_eq!(ctx.current_def_level_state(), initial_levels);
         assert!(ctx.memoized_abbrev_refs.borrow().is_empty());
-        assert!(!ctx.mutation_logging.get());
+        assert!(!ctx.mutation_logging.full.get() && !ctx.mutation_logging.compress.get());
     }
 
     #[test]
@@ -5279,7 +5313,7 @@ mod tests {
         ctx.restore_type_state(inner);
 
         assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "original"));
-        assert!(!ctx.mutation_logging.get());
+        assert!(!ctx.mutation_logging.full.get() && !ctx.mutation_logging.compress.get());
     }
 
     #[test]
