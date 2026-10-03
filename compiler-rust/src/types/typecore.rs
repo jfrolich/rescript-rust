@@ -3194,6 +3194,16 @@ fn transl_type_inner(
             }
 
             let constr_ty = ctx.new_constr(path.clone(), arg_refs);
+            // typetexp.ml:369-371: `Ctype.enforce_constraints env constr`.
+            if let Err(err) = crate::types::ctype::try_enforce_constraints(ctx, env, constr_ty, &decl) {
+                return Err(TypeCoreError::TypeMismatch {
+                    loc,
+                    trace: match err {
+                        TypeError::Unify(trace) => trace,
+                        _ => vec![],
+                    },
+                });
+            }
 
             let ctyp = TypedCoreType {
                 ctyp_desc: TypedCoreTypeDesc::Ttyp_constr(path, lid.clone(), typed_args),

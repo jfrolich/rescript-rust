@@ -6235,23 +6235,36 @@ pub fn unify<'a>(
 /// OCaml `Ctype.enforce_constraints` (ctype.ml:1292-1301) for a constructor
 /// whose declaration `decl` was found: `subst` the declaration against the
 /// constructor's arguments, unifying them with the constrained parameters.
+/// Callers where OCaml treats a failure as impossible (typedecl.ml:769).
 pub(crate) fn enforce_constraints(
     ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
     decl: &crate::types::TypeDeclaration,
 ) {
+    let unified = try_enforce_constraints(ctx, env, ty, decl);
+    debug_assert!(unified.is_ok(), "enforce_constraints failed to unify");
+}
+
+/// OCaml `Ctype.enforce_constraints` (ctype.ml:1292-1301), raising `Unify`
+/// as typetexp.ml:369-371 expects.
+pub(crate) fn try_enforce_constraints(
+    ctx: &TypeContext,
+    env: &Env,
+    ty: TypeExprRef,
+    decl: &crate::types::TypeDeclaration,
+) -> TypeResult<()> {
     let ty = ctx.repr(ty);
     let args = match &*ctx.get_desc(ty) {
         TypeDesc::Tconstr { args, .. } => args.clone(),
         _ => unreachable!("enforce_constraints expects a type constructor"),
     };
     let level = ctx.get_level(ty);
-    if decl.type_params.len() != args.len() {
-        return;
-    }
     // `subst env level Public (ref Mnil) None decl.type_params args
     // (newvar2 level)` (ctype.ml:1127-1149).
+    if decl.type_params.len() != args.len() {
+        return Err(TypeError::Unify(vec![]));
+    }
     let body = new_var_at_level(ctx, level);
     let old_level = ctx.current_level();
     ctx.set_current_level(level);
@@ -6266,8 +6279,7 @@ pub(crate) fn enforce_constraints(
             .try_for_each(|(param, arg)| unify(ctx, &mut state, *param, *arg))
     });
     ctx.set_current_level(old_level);
-    // typedecl.ml:769 treats a failure here as impossible.
-    debug_assert!(unified.is_ok(), "enforce_constraints failed to unify");
+    unified
 }
 
 /// OCaml `Ctype.rigidify` (ctype.ml:2926-2950): the variables of `ty`, with
