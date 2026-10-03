@@ -934,21 +934,37 @@ impl<T: Clone> TycompTbl<T> {
     /// data of its opened layer, `(slot, first hidden candidate)`.
     pub fn find_all_marking(&self, name: &str) -> Vec<(&T, Option<(u32, Option<&T>)>)> {
         let mut items: Vec<(&T, Option<(u32, Option<&T>)>)> = Vec::new();
-        let key = Name::lookup(name);
-        if let Some(entries) = key.and_then(|key| self.current.get(&key)) {
-            items.extend(entries.iter().rev().map(|(_, value)| (value, None)));
-        }
-        if let Some(opened) = &self.opened {
-            let rest = opened.next.find_all_marking(name);
-            if let Some(entries) = key.and_then(|key| opened.components.get(&key)) {
-                let hidden = rest.first().map(|(value, _)| *value);
-                items.extend(
-                    entries
-                        .iter()
-                        .map(|(_, value)| (value, opened.slot.map(|slot| (slot, hidden)))),
-                );
+        let Some(key) = Name::lookup(name) else {
+            return items;
+        };
+        // Each layer's own entries, then its opened components, then the
+        // layers below. An opened component's `hidden` value is the first
+        // entry of the layers below it: the item emitted right after its
+        // block, filled in once the walk is done.
+        let mut opened_blocks: smallvec::SmallVec<[(usize, usize, u32); 4]> =
+            smallvec::SmallVec::new();
+        let mut table = self;
+        loop {
+            if let Some(entries) = table.current.get(&key) {
+                items.extend(entries.iter().rev().map(|(_, value)| (value, None)));
             }
-            items.extend(rest);
+            let Some(opened) = &table.opened else {
+                break;
+            };
+            if let Some(entries) = opened.components.get(&key) {
+                let start = items.len();
+                items.extend(entries.iter().map(|(_, value)| (value, None)));
+                if let Some(slot) = opened.slot {
+                    opened_blocks.push((start, items.len(), slot));
+                }
+            }
+            table = opened.next.as_ref();
+        }
+        for (start, end, slot) in opened_blocks {
+            let hidden = items.get(end).map(|(value, _)| *value);
+            for item in &mut items[start..end] {
+                item.1 = Some((slot, hidden));
+            }
         }
         items
     }
