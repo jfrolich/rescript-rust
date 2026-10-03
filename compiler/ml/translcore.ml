@@ -32,7 +32,7 @@ exception Error of Location.t * error
 let transl_module =
   ref
     (fun _cc _rootpath _modl -> assert false
-      : module_coercion -> Path.t option -> module_expr -> lambda)
+      : module_coercion -> Path.t option -> module_expr -> Lambda.t)
 
 (* Number of payload-carrying constructors of the variant declaring
    [cstr]; part of the runtime representation of its blocks *)
@@ -49,37 +49,45 @@ let transl_extension_constructor env path ext =
   in
   let loc = ext.ext_loc in
   match ext.ext_kind with
-  | Text_decl _ -> Lprim (Pcreate_extension name, [], loc)
+  | Text_decl _ -> prim ~primitive:(Pcreate_extension name) ~args:[] loc
   | Text_rebind (path, _lid) -> transl_extension_path ~loc env path
 
 (* Translation of primitives *)
+
+let builtin_of_lowering (l : Unified_ops.lowering) : Lambda.builtin =
+  match l with
+  | Lower p -> Primitive p
+  | Pass_through -> Eliminated Identity
 
 (** This is ad-hoc translation for unifying specific primitive operations
      See [Unified_ops] module for detailed explanation.
   *)
 let translate_unified_ops (prim : Primitive.description) (env : Env.t)
-    (lhs_type : type_expr) : Lambda.primitive option =
+    (lhs_type : type_expr) : Lambda.builtin option =
   (* lhs_type is already unified in type-level *)
   let entry = Hashtbl.find_opt Unified_ops.index_by_name prim.prim_name in
-  match entry with
-  | Some {specialization} -> (
-    match specialization with
-    | {int}
-      when is_base_type env lhs_type Predef.path_int
-           || maybe_pointer_type env lhs_type = Immediate ->
-      Some int
-    | {float = Some float} when is_base_type env lhs_type Predef.path_float ->
-      Some float
-    | {bigint = Some bigint} when is_base_type env lhs_type Predef.path_bigint
-      ->
-      Some bigint
-    | {string = Some string} when is_base_type env lhs_type Predef.path_string
-      ->
-      Some string
-    | {bool = Some bool} when is_base_type env lhs_type Predef.path_bool ->
-      Some bool
-    | {int} -> Some int)
-  | _ -> None
+  let lowering =
+    match entry with
+    | Some {specialization} -> (
+      match specialization with
+      | {int}
+        when is_base_type env lhs_type Predef.path_int
+             || maybe_pointer_type env lhs_type = Immediate ->
+        Some int
+      | {float = Some float} when is_base_type env lhs_type Predef.path_float ->
+        Some float
+      | {bigint = Some bigint} when is_base_type env lhs_type Predef.path_bigint
+        ->
+        Some bigint
+      | {string = Some string} when is_base_type env lhs_type Predef.path_string
+        ->
+        Some string
+      | {bool = Some bool} when is_base_type env lhs_type Predef.path_bool ->
+        Some bool
+      | {int} -> Some int)
+    | _ -> None
+  in
+  Option.map builtin_of_lowering lowering
 
 type specialized = {
   objcomp: Lambda.primitive;
@@ -237,25 +245,30 @@ let comparisons_table =
         } );
     |]
 
-let primitives_table =
-  create_hashtable
+(* Builtins with no primitive form: [Lambda.mk_builtin] erases them at
+   translation. *)
+let erased_builtins : (string * Lambda.builtin) array =
+  [|
+    ("%identity", Eliminated Identity);
+    ("%component_identity", Eliminated Identity);
+    ("%ignore", Eliminated Ignore);
+    ("%incr", Offset_ref 1);
+    ("%decr", Offset_ref (-1));
+    ("%null", Constant Const_js_null);
+    ("%undefined", Constant (Const_js_undefined {is_unit = false}));
+    (* FIXME: Core compatibility *)
+    ("#null", Constant Const_js_null);
+    ("#undefined", Constant (Const_js_undefined {is_unit = false}));
+  |]
+
+let primitive_builtins : (string * Lambda.builtin) array =
+  Array.map
+    (fun (name, p) -> (name, Lambda.Primitive p))
     [|
-      ("%identity", Pidentity);
-      ("%component_identity", Pidentity);
-      ("%ignore", Pignore);
-      ("%revapply", Prevapply);
-      ("%apply", Pdirapply);
-      ("%loc_LOC", Ploc Loc_LOC);
-      ("%loc_FILE", Ploc Loc_FILE);
-      ("%loc_LINE", Ploc Loc_LINE);
-      ("%loc_POS", Ploc Loc_POS);
-      ("%loc_MODULE", Ploc Loc_MODULE);
       (* BEGIN Triples for  ref data type *)
       ("%makeref", Pmakeblock Lambda.ref_tag_info);
       ("%refset", Psetfield (0, Lambda.ref_field_set_info));
       ("%refget", Pfield (0, Lambda.ref_field_info));
-      ("%incr", Poffsetref 1);
-      ("%decr", Poffsetref (-1));
       (* Finish Triples for  ref data type *)
       ("%field0", Pfield (0, Fld_tuple));
       ("%field1", Pfield (1, Fld_tuple));
@@ -264,7 +277,7 @@ let primitives_table =
       ("%obj_size", Pobjsize);
       ("%obj_get_field", Parrayrefu);
       ("%obj_set_field", Parraysetu);
-      ("%raise", Praise Raise_regular);
+      ("%raise", Praise);
       (* bool primitives *)
       ("%sequand", Psequand);
       ("%sequor", Psequor);
@@ -275,8 +288,6 @@ let primitives_table =
       (* int primitives *)
       ("%obj_is_int", Pisint);
       ("%negint", Pnegint);
-      ("%succint", Poffsetint 1);
-      ("%predint", Poffsetint (-1));
       ("%addint", Paddint);
       ("%subint", Psubint);
       ("%mulint", Pmulint);
@@ -373,37 +384,26 @@ let primitives_table =
       ("%unsafe_le", Pjscomp Cle);
       ("%unsafe_gt", Pjscomp Cgt);
       ("%unsafe_ge", Pjscomp Cge);
-      ("%null", Pnull);
-      ("%undefined", Pundefined);
-      ("%is_nullable", Pisnullable);
+      ("%is_nullable", Pis_null_undefined);
       ("%null_to_opt", Pnull_to_opt);
-      ("%nullable_to_opt", Pnullable_to_opt);
-      ("%function_arity", Pfn_arity);
-      ("%wrap_exn", Pwrap_exn);
-      ("%curry_apply1", Pcurry_apply 1);
-      ("%curry_apply2", Pcurry_apply 2);
-      ("%curry_apply3", Pcurry_apply 3);
-      ("%curry_apply4", Pcurry_apply 4);
-      ("%curry_apply5", Pcurry_apply 5);
-      ("%curry_apply6", Pcurry_apply 6);
-      ("%curry_apply7", Pcurry_apply 7);
-      ("%curry_apply8", Pcurry_apply 8);
+      ("%nullable_to_opt", Pnull_undefined_to_opt);
       ("%makemutablelist", Pmakelist);
       ("%unsafe_to_method", Pjs_fn_method);
       (* Compiler internals, never expose to ReScript files *)
       (* FIXME: Core compatibility *)
-      ("#null", Pnull);
-      ("#undefined", Pundefined);
       ("#typeof", Ptypeof);
-      ("#is_nullable", Pisnullable);
+      ("#is_nullable", Pis_null_undefined);
       ("#null_to_opt", Pnull_to_opt);
-      ("#nullable_to_opt", Pnullable_to_opt);
+      ("#nullable_to_opt", Pnull_undefined_to_opt);
       ("#makemutablelist", Pmakelist);
       (* FIXME: Deprecated *)
       ("%obj_field", Parrayrefu);
     |]
 
-let find_primitive prim_name = Hashtbl.find primitives_table prim_name
+let builtins_table : (string, Lambda.builtin) Hashtbl.t =
+  create_hashtable (Array.append erased_builtins primitive_builtins)
+
+let find_builtin prim_name = Hashtbl.find builtins_table prim_name
 
 let specialize_comparison
     ({objcomp; intcomp; floatcomp; stringcomp; bigintcomp; boolcomp} :
@@ -431,25 +431,28 @@ let specialize_primitive p env ty (* ~has_constant_constructor *) =
     | None -> None
   in
   match unified with
-  | Some primitive -> primitive
+  | Some builtin -> builtin
   | None -> (
     try
       let table = Hashtbl.find comparisons_table p.prim_name in
       match fn_expr with
-      | Some (lhs, _rhs) -> specialize_comparison table env lhs
-      | None -> table.objcomp
-    with Not_found -> find_primitive p.prim_name)
+      | Some (lhs, _rhs) -> Primitive (specialize_comparison table env lhs)
+      | None -> Primitive table.objcomp
+    with Not_found -> find_builtin p.prim_name)
 
+(* [is_unit] excluded: unit shares the undefined constant but is not a
+   [%null] / [%undefined] literal, and comparing it never suppressed the
+   warning. *)
 let is_null_undefined_constant = function
-  | Lprim ((Pnull | Pundefined), [], _) -> true
+  | Lconst (Const_js_null | Const_js_undefined {is_unit = false}) -> true
   | _ -> false
 
-let warn_polymorphic_comparison loc prim args =
-  match (prim, args) with
-  | Pobjcomp (Ceq | Cneq), [arg1; arg2]
+let warn_polymorphic_comparison loc (builtin : Lambda.builtin) args =
+  match (builtin, args) with
+  | Primitive (Pobjcomp (Ceq | Cneq)), [arg1; arg2]
     when is_null_undefined_constant arg1 || is_null_undefined_constant arg2 ->
     ()
-  | (Pobjcomp _ | Pobjorder | Pobjmin | Pobjmax), _ ->
+  | Primitive (Pobjcomp _ | Pobjorder | Pobjmin | Pobjmax), _ ->
     Location.prerr_warning loc Warnings.Bs_polymorphic_comparison
   | _ -> ()
 
@@ -459,26 +462,12 @@ let warn_polymorphic_comparison loc prim args =
 let lambda_of_inline_const (c : External_ffi_types.inline_const) :
     Lambda.structured_constant =
   match c with
-  | Const_str {s; delim} ->
-    (* [Lam_constant_convert] re-parses the delimiter with
-       [Ast_utf8_string_interp.parse_processed_delim]; pick its exact
-       preimage. A parsed [None] (unrecognized delimiter) round-trips
-       through "js", which the processed-delimiter parser does not accept. *)
-    let raw_delim =
-      match delim with
-      | Some DNone -> None
-      | Some DNoQuotes -> Some "json"
-      | Some DStarJ -> Some "*j"
-      | Some DBackQuotes -> Some "bq"
-      | None -> Some "js"
-    in
-    Const_base (Const_string (s, raw_delim))
-  | Const_bool true -> Const_true
-  | Const_bool false -> Const_false
-  | Const_int i -> Const_base (Const_int32 i)
-  | Const_bigint {negative; digits} ->
-    Const_base (Const_bigint (negative, digits))
-  | Const_float f -> Const_base (Const_float f)
+  | Const_str {s; delim} -> Const_string {s; delim}
+  | Const_bool true -> Const_js_true
+  | Const_bool false -> Const_js_false
+  | Const_int i -> Const_int i
+  | Const_bigint {negative; digits} -> Const_bigint (negative, digits)
+  | Const_float f -> Const_float f
 
 (* The argument of the dynamic-import primitive is a module reference,
    never an expression: resolve it here, at translation, from the typedtree.
@@ -567,9 +556,10 @@ let external_returns_unit env (p : Primitive.description) (val_type : type_expr)
 let external_result_wrap loc (result_type : External_ffi_types.return_wrapper)
     ~returns_unit result =
   match result_type with
-  | Return_unset when returns_unit -> Lsequence (result, Lconst const_unit)
-  | Return_null_to_opt -> Lprim (Pnull_to_opt, [result], loc)
-  | Return_null_undefined_to_opt -> Lprim (Pnullable_to_opt, [result], loc)
+  | Return_unset when returns_unit -> seq result (const const_unit)
+  | Return_null_to_opt -> prim ~primitive:Pnull_to_opt ~args:[result] loc
+  | Return_null_undefined_to_opt ->
+    prim ~primitive:Pnull_undefined_to_opt ~args:[result] loc
   | Return_unset | Return_identity -> result
 
 (* Does importing this external as a value require the FFI adaptation a
@@ -605,80 +595,74 @@ let external_import_needs_adaptation (arg_types : External_arg_spec.params)
 let transl_adapted_external_import loc env
     ~(emn : External_ffi_types.external_module_name) ~name ~scopes ~variadic
     ~(arg_types : External_arg_spec.params) ~return_wrapper
-    (p : Primitive.description) (val_type : type_expr) : Lambda.lambda =
+    (p : Primitive.description) (val_type : type_expr) : Lambda.t =
   let returns_unit = external_returns_unit env p val_type in
   let send_call receiver args (kind : External_ffi_types.decl_kind) =
-    Lprim
-      ( Pjs_call
-          {
-            prim_name = name;
-            arg_types = External_arg_spec.dummy :: arg_types;
-            ffi =
-              {
-                kind;
-                module_ = None;
-                scopes;
-                variadic;
-                effective_arity = List.length arg_types + 1;
-              };
-            transformed_jsx = false;
-          },
-        receiver :: args,
-        loc )
+    prim
+      ~primitive:
+        (Pjs_call
+           {
+             prim_name = name;
+             arg_types = External_arg_spec.dummy :: arg_types;
+             ffi =
+               {
+                 kind;
+                 module_ = None;
+                 scopes;
+                 variadic;
+                 effective_arity = List.length arg_types + 1;
+               };
+             transformed_jsx = false;
+           })
+      ~args:(receiver :: args) loc
   in
   let m = Ident.create "m" in
   let adapted_value =
     if p.prim_arity = 0 then
       external_result_wrap loc return_wrapper ~returns_unit
-        (send_call (Lvar m) [] (Decl_get {name}))
+        (send_call (var m) [] (Decl_get {name}))
     else
       let params =
         List.init p.prim_arity (fun i ->
             Ident.create ("prim" ^ string_of_int i))
       in
-      Lfunction
-        {
-          params;
-          attr = default_function_attribute;
-          loc;
-          body =
-            external_result_wrap loc return_wrapper ~returns_unit
-              (send_call (Lvar m)
-                 (List.map (fun i -> Lvar i) params)
-                 (Decl_send {name}));
-        }
+      function_ ~loc ~attr:default_function_attribute ~params
+        ~body:
+          (external_result_wrap loc return_wrapper ~returns_unit
+             (send_call (var m)
+                (List.map (fun i -> var i) params)
+                (Decl_send {name})))
   in
   let callback =
-    Lfunction
-      {
-        params = [m];
-        attr = default_function_attribute;
-        loc;
-        body = adapted_value;
-      }
+    function_ ~loc ~attr:default_function_attribute ~params:[m]
+      ~body:adapted_value
   in
-  Lprim
-    ( Pjs_call
-        {
-          prim_name = "then";
-          arg_types = [External_arg_spec.dummy; External_arg_spec.dummy];
-          ffi =
-            {
-              kind = Decl_send {name = "then"};
-              module_ = None;
-              scopes = [];
-              variadic = false;
-              effective_arity = 2;
-            };
-          transformed_jsx = false;
-        },
+  prim
+    ~primitive:
+      (Pjs_call
+         {
+           prim_name = "then";
+           arg_types = [External_arg_spec.dummy; External_arg_spec.dummy];
+           ffi =
+             {
+               kind = Decl_send {name = "then"};
+               module_ = None;
+               scopes = [];
+               variadic = false;
+               effective_arity = 2;
+             };
+           transformed_jsx = false;
+         })
+    ~args:
       [
-        Lprim (Pimport (Import_external {module_ = emn; path = []}), [], loc);
+        prim
+          ~primitive:(Pimport (Import_external {module_ = emn; path = []}))
+          ~args:[] loc;
         callback;
-      ],
-      loc )
+      ]
+    loc
 
-let transl_dynamic_import loc (arg : Typedtree.expression) : Lambda.lambda =
+let transl_dynamic_import loc (arg : Typedtree.expression) : Lambda.t =
   match arg.exp_desc with
   | Texp_ident
       ( _,
@@ -705,79 +689,113 @@ let transl_dynamic_import loc (arg : Typedtree.expression) : Lambda.lambda =
     when external_import_needs_adaptation arg_types decl return_wrapper ->
     transl_adapted_external_import loc arg.exp_env ~emn ~name ~scopes ~variadic
       ~arg_types ~return_wrapper p val_type
-  | _ -> Lprim (Pimport (import_source_of_arg arg), [], loc)
+  | _ -> prim ~primitive:(Pimport (import_source_of_arg arg)) ~args:[] loc
 
 let transl_external_application loc env (p : Primitive.description)
-    ~(val_type : type_expr) argl ~transformed_jsx : Lambda.lambda =
+    ~(val_type : type_expr) argl ~transformed_jsx : Lambda.t =
   match p.prim_kind with
-  | Kind_inline_const c -> Lconst (lambda_of_inline_const c)
+  | Kind_inline_const c -> const (lambda_of_inline_const c)
   | Kind_external (Ffi_obj_create labels) ->
-    Lprim (Pjs_object_create labels, argl, loc)
+    prim ~primitive:(Pjs_object_create labels) ~args:argl loc
   | Kind_external (Ffi_bs (arg_types, result_type, decl)) ->
     external_result_wrap loc result_type
       ~returns_unit:(external_returns_unit env p val_type)
-      (Lprim
-         ( Pjs_call
-             {prim_name = p.prim_name; arg_types; ffi = decl; transformed_jsx},
-           argl,
-           loc ))
+      (prim
+         ~primitive:
+           (Pjs_call
+              {prim_name = p.prim_name; arg_types; ffi = decl; transformed_jsx})
+         ~args:argl loc)
   | Kind_intrinsic ->
     Location.raise_errorf ~loc
       "@{<error>Error:@} internal error, using unrecognized primitive %s"
       p.prim_name
 
+(* Compile-time source location (`__LOC__` / `%loc_*`). Lowered here so
+   Lambda never carries a location primitive. *)
+type loc_kind = Loc_FILE | Loc_LINE | Loc_MODULE | Loc_LOC | Loc_POS
+
+let loc_kind_of_prim_name = function
+  | "%loc_LOC" -> Some Loc_LOC
+  | "%loc_FILE" -> Some Loc_FILE
+  | "%loc_LINE" -> Some Loc_LINE
+  | "%loc_POS" -> Some Loc_POS
+  | "%loc_MODULE" -> Some Loc_MODULE
+  | _ -> None
+
+let lam_of_loc kind loc =
+  let loc_start = loc.Location.loc_start in
+  let file, lnum, cnum = Location.get_pos_info loc_start in
+  let file = Filename.basename file in
+  let enum =
+    loc.Location.loc_end.Lexing.pos_cnum - loc_start.Lexing.pos_cnum + cnum
+  in
+  match kind with
+  | Loc_POS ->
+    const
+      (Const_block
+         ( Blk_tuple,
+           [
+             const_string file None;
+             const_int lnum;
+             const_int cnum;
+             const_int enum;
+           ] ))
+  | Loc_FILE -> const (const_string file None)
+  | Loc_MODULE ->
+    let filename = Filename.basename file in
+    let name = Env.get_unit_name () in
+    let module_name = if name = "" then "//" ^ filename ^ "//" else name in
+    const (const_string module_name None)
+  | Loc_LOC ->
+    let loc =
+      Printf.sprintf "File %S, line %d, characters %d-%d" file lnum cnum enum
+    in
+    const (const_string loc None)
+  | Loc_LINE -> const (const_int lnum)
+
 (* Eta-expand a primitive *)
 
 let transl_primitive loc p env ty ~val_type =
   (* Printf.eprintf "----transl_primitive %s----\n" p.prim_name; *)
-  let prim =
-    try Some (specialize_primitive p env ty) with Not_found -> None
-  in
-  match prim with
-  | None when p.prim_name = "%import" || p.prim_name = "#import" ->
-    Location.raise_errorf ~loc
-      "Dynamic import must be applied directly to a module or a value from \
-       another module; it cannot be used as a first-class value."
-  | None ->
-    (* an external: expand its FFI spec, eta-expanded to its arity *)
-    if p.prim_from_constructor || p.prim_arity = 0 then
-      transl_external_application loc env p ~val_type [] ~transformed_jsx:false
-    else
-      let params =
-        if p.prim_arity = 1 then [Ident.create "prim"]
-        else
-          List.init p.prim_arity (fun i ->
-              Ident.create ("prim" ^ string_of_int i))
-      in
-      Lfunction
-        {
-          params;
-          attr = default_function_attribute;
-          loc;
-          body =
-            transl_external_application loc env p ~val_type
-              (List.map (fun id -> Lvar id) params)
-              ~transformed_jsx:false;
-        }
-  | Some prim -> (
-    warn_polymorphic_comparison loc prim [];
+  match loc_kind_of_prim_name p.prim_name with
+  | Some kind -> (
+    let lam = lam_of_loc kind loc in
+    match p.prim_arity with
+    | 0 -> lam
+    | 1 ->
+      let param = Ident.create "prim" in
+      function_ ~loc ~attr:default_function_attribute ~params:[param]
+        ~body:
+          (prim ~primitive:(Pmakeblock Blk_tuple) ~args:[lam; var param] loc)
+    | _ -> assert false)
+  | None -> (
+    let prim =
+      try Some (specialize_primitive p env ty) with Not_found -> None
+    in
     match prim with
-    | Ploc kind -> (
-      let lam = lam_of_loc kind loc in
-      match p.prim_arity with
-      | 0 -> lam
-      | 1 ->
-        (* TODO: we should issue a warning ? *)
-        let param = Ident.create "prim" in
-        Lfunction
-          {
-            params = [param];
-            attr = default_function_attribute;
-            loc;
-            body = Lprim (Pmakeblock Blk_tuple, [lam; Lvar param], loc);
-          }
-      | _ -> assert false)
-    | _ ->
+    | None when p.prim_name = "%import" || p.prim_name = "#import" ->
+      Location.raise_errorf ~loc
+        "Dynamic import must be applied directly to a module or a value from \
+         another module; it cannot be used as a first-class value."
+    | None ->
+      (* an external: expand its FFI spec, eta-expanded to its arity *)
+      if p.prim_from_constructor || p.prim_arity = 0 then
+        transl_external_application loc env p ~val_type []
+          ~transformed_jsx:false
+      else
+        let params =
+          if p.prim_arity = 1 then [Ident.create "prim"]
+          else
+            List.init p.prim_arity (fun i ->
+                Ident.create ("prim" ^ string_of_int i))
+        in
+        function_ ~loc ~attr:default_function_attribute ~params
+          ~body:
+            (transl_external_application loc env p ~val_type
+               (List.map (fun id -> var id) params)
+               ~transformed_jsx:false)
+    | Some builtin ->
+      warn_polymorphic_comparison loc builtin [];
       let rec make_params n total =
         if n <= 0 then []
         else
@@ -785,24 +803,19 @@ let transl_primitive loc p env ty ~val_type =
           :: make_params (n - 1) total
       in
       let prim_arity = p.prim_arity in
-      if p.prim_from_constructor || prim_arity = 0 then Lprim (prim, [], loc)
+      if p.prim_from_constructor || prim_arity = 0 then
+        mk_builtin builtin [] loc
       else
         let params =
           if prim_arity = 1 then [Ident.create "prim"]
           else make_params prim_arity prim_arity
         in
-        Lfunction
-          {
-            params;
-            attr = default_function_attribute;
-            loc;
-            body = Lprim (prim, List.map (fun id -> Lvar id) params, loc);
-          })
+        function_ ~loc ~attr:default_function_attribute ~params
+          ~body:(mk_builtin builtin (List.map (fun id -> var id) params) loc))
 
 (* [None] means the primitive is an external whose application must be
    expanded from its FFI spec *)
-let transl_primitive_application loc prim env ty args : Lambda.primitive option
-    =
+let transl_primitive_application loc prim env ty args : Lambda.builtin option =
   let prim_name = prim.prim_name in
   let unified =
     match args with
@@ -810,14 +823,14 @@ let transl_primitive_application loc prim env ty args : Lambda.primitive option
     | _ -> None
   in
   match unified with
-  | Some primitive -> Some primitive
+  | Some builtin -> Some builtin
   | None -> (
     try
       match args with
       | [arg1; _]
         when is_base_type env arg1.exp_type Predef.path_bool
              && Hashtbl.mem comparisons_table prim_name ->
-        Some (Hashtbl.find comparisons_table prim_name).boolcomp
+        Some (Primitive (Hashtbl.find comparisons_table prim_name).boolcomp)
       | _ ->
         let has_constant_constructor =
           match args with
@@ -845,7 +858,7 @@ let transl_primitive_application loc prim env ty args : Lambda.primitive option
         if has_constant_constructor then
           match Hashtbl.find_opt comparisons_table prim_name with
           | Some table when table.simplify_constant_constructor ->
-            Some table.intcomp
+            Some (Primitive table.intcomp)
           | Some _ | None -> Some (specialize_primitive prim env ty)
           (* ~has_constant_constructor*)
         else Some (specialize_primitive prim env ty)
@@ -872,25 +885,22 @@ let assert_failed exp =
     Location.get_pos_info exp.exp_loc.Location.loc_start
   in
   let fname = Filename.basename fname in
-  Lprim
-    ( Praise Raise_regular,
+  prim ~primitive:Praise
+    ~args:
       [
-        Lprim
-          ( Pmakeblock Blk_extension,
+        prim ~primitive:(Pmakeblock Blk_extension)
+          ~args:
             [
               transl_normal_path Predef.path_assert_failure;
-              Lconst
+              const
                 (Const_block
                    ( Blk_tuple,
-                     [
-                       Const_base (Const_string (fname, None));
-                       Const_base (Const_int line);
-                       Const_base (Const_int char);
-                     ] ));
-            ],
-            exp.exp_loc );
-      ],
-      exp.exp_loc )
+                     [const_string fname None; const_int line; const_int char]
+                   ));
+            ]
+          exp.exp_loc;
+      ]
+    exp.exp_loc
 
 let rec cut n l =
   if n = 0 then ([], l)
@@ -903,7 +913,59 @@ let rec cut n l =
 
 (* Translation of expressions *)
 
-let try_ids = Hashtbl.create 8
+(* JS catch can receive a ReScript exception or a raw throw. If the handler
+   inspects [fv], bind [fv] to [Primitive_exceptions.internalToException raw]
+   so matching sees a ReScript value. Pure [throw v] is not an inspect:
+   rethrow the raw JS value. *)
+let wrap_exn loc arg =
+  apply ~ap_transformed_jsx:false
+    (prim
+       ~primitive:(Pfield (0, Fld_module {name = "internalToException"}))
+       ~args:
+         [global_module (Ident.create_persistent Primitive_modules.exceptions)]
+       loc)
+    [arg]
+    {ap_loc = loc; ap_inlined = Default_inline}
+let exception_id_destructed (l : Lambda.t) (fv : Ident.t) : bool =
+  let rec hit_opt = function
+    | None -> false
+    | Some a -> hit a
+  and hit_list_snd : 'a. ('a * _) list -> bool =
+   fun x -> Ext_list.exists_snd x hit
+  and hit_list xs = Ext_list.exists xs hit
+  and hit (l : Lambda.t) =
+    match l with
+    | Lprim {primitive = Praise; args = [Lvar _]; loc = _} -> false
+    | Lprim {primitive = _; args; loc = _} -> hit_list args
+    | Lvar id -> Ident.same id fv
+    | Lassign (id, e) -> Ident.same id fv || hit e
+    | Lstaticcatch (e1, _, e2) -> hit e1 || hit e2
+    | Ltrywith (e1, _, e2) -> hit e1 || hit e2
+    | Lfunction {body} -> hit body
+    | Llet (_, _, arg, body) -> hit arg || hit body
+    | Lletrec (decl, body) -> hit body || hit_list_snd decl
+    | Lfor (_, e1, e2, _, e3) -> hit e1 || hit e2 || hit e3
+    | Lfor_of (_, e1, e2) | Lfor_await_of (_, e1, e2) -> hit e1 || hit e2
+    | Lglobal_module _ | Lconst _ -> false
+    | Lapply {ap_func; ap_args} -> hit ap_func || hit_list ap_args
+    | Lswitch (arg, sw) ->
+      hit arg || hit_list_snd sw.sw_consts || hit_list_snd sw.sw_blocks
+      || hit_opt sw.sw_failaction
+    | Lstringswitch (arg, cases, default) ->
+      hit arg || hit_list_snd cases || hit_opt default
+    | Lstaticraise (_, args) -> hit_list args
+    | Lifthenelse (e1, e2, e3) -> hit e1 || hit e2 || hit e3
+    | Lsequence (e1, e2) -> hit e1 || hit e2
+    | Lbreak | Lcontinue -> false
+    | Lwhile (e1, e2) -> hit e1 || hit e2
+  in
+  hit l
+
+let pack_trywith_exn id handler =
+  if exception_id_destructed handler id then
+    let raw_id = Ident.create ("raw_" ^ id.name) in
+    (raw_id, let_ StrictOpt id (wrap_exn Location.none (var raw_id)) handler)
+  else (id, handler)
 
 let extract_directive_for_fn exp =
   exp.exp_attributes
@@ -943,13 +1005,13 @@ let rec transl_exp e =
       List.iter (Translattribute.check_attribute e) e.exp_attributes;
       transl_exp0 e)
 
-and transl_exp0 (e : Typedtree.expression) : Lambda.lambda =
+and transl_exp0 (e : Typedtree.expression) : Lambda.t =
   match e.exp_desc with
   | Texp_ident (_, _, ({val_kind = Val_prim p} as vd)) ->
     transl_primitive e.exp_loc p e.exp_env e.exp_type ~val_type:vd.val_type
   | Texp_ident (path, _, {val_kind = Val_reg}) ->
     transl_value_path ~loc:e.exp_loc e.exp_env path
-  | Texp_constant cst -> Lconst (Const_base cst)
+  | Texp_constant cst -> const (const_of_typed cst)
   | Texp_let (rec_flag, pat_expr_list, body) ->
     transl_let ~js_hoist:None rec_flag pat_expr_list (transl_exp body)
   | Texp_function {params = fparams; body; async} ->
@@ -979,7 +1041,7 @@ and transl_exp0 (e : Typedtree.expression) : Lambda.lambda =
       }
     in
     let loc = e.exp_loc in
-    Lfunction {params; body = lbody; attr; loc}
+    function_ ~loc ~attr ~params ~body:lbody
   | Texp_apply {funct; args = oargs}
     when List.exists
            (fun (attr, _) -> attr.txt = "res.taggedTemplate")
@@ -994,10 +1056,9 @@ and transl_exp0 (e : Typedtree.expression) : Lambda.lambda =
       | [(_, Some strings); (_, Some values)] -> (strings, values)
       | _ -> assert false
     in
-    Lprim
-      ( Ptagged_template,
-        [transl_exp funct; transl_exp strings; transl_exp values],
-        e.exp_loc )
+    prim ~primitive:Ptagged_template
+      ~args:[transl_exp funct; transl_exp strings; transl_exp values]
+      e.exp_loc
   | Texp_apply
       {
         funct =
@@ -1031,44 +1092,44 @@ and transl_exp0 (e : Typedtree.expression) : Lambda.lambda =
       wrap (transl_dynamic_import e.exp_loc arg)
     | _ -> (
       let argl = transl_list args in
-      match
-        transl_primitive_application e.exp_loc p e.exp_env prim_type args
-      with
-      | None -> (
-        (* an external: expand its FFI spec here; %raw parses and classifies
-         its snippet *)
-        match (p.prim_name, argl) with
-        | "#raw_expr", [Lconst (Const_base (Const_string (code, _)))] ->
-          let kind = Classify_function.classify code in
-          wrap
-            (Lprim (Praw_js_code {code; code_info = Exp kind}, [], e.exp_loc))
-        | "#raw_stmt", [Lconst (Const_base (Const_string (code, _)))] ->
-          let kind = Classify_function.classify_stmt code in
-          wrap
-            (Lprim (Praw_js_code {code; code_info = Stmt kind}, [], e.exp_loc))
-        | ("#raw_expr" | "#raw_stmt"), _ -> assert false
-        | _ ->
-          wrap
-            (transl_external_application e.exp_loc e.exp_env p
-               ~val_type:prim_vd.val_type argl ~transformed_jsx))
-      | Some prim -> (
-        warn_polymorphic_comparison e.exp_loc prim argl;
-        match (prim, args) with
-        | Praise k, [_] ->
-          let targ = List.hd argl in
-          let k =
-            match (k, targ) with
-            | Raise_regular, Lvar id when Hashtbl.mem try_ids id ->
-              Raise_reraise
-            | _ -> k
-          in
-          wrap (Lprim (Praise k, [targ], e.exp_loc))
-        | Ploc kind, [] -> lam_of_loc kind e.exp_loc
-        | Ploc kind, [arg1] ->
+      match loc_kind_of_prim_name p.prim_name with
+      | Some kind -> (
+        match args with
+        | [] -> wrap (lam_of_loc kind e.exp_loc)
+        | [arg1] ->
           let lam = lam_of_loc kind arg1.exp_loc in
-          Lprim (Pmakeblock Blk_tuple, lam :: argl, e.exp_loc)
-        | Ploc _, _ -> assert false
-        | _, _ -> wrap (Lprim (prim, argl, e.exp_loc)))))
+          wrap
+            (prim ~primitive:(Pmakeblock Blk_tuple) ~args:(lam :: argl)
+               e.exp_loc)
+        | _ -> assert false)
+      | None -> (
+        match
+          transl_primitive_application e.exp_loc p e.exp_env prim_type args
+        with
+        | None -> (
+          (* an external: expand its FFI spec here; %raw parses and classifies
+         its snippet *)
+          match (p.prim_name, argl) with
+          | "#raw_expr", [Lconst (Const_string {s = code})] ->
+            let kind = Classify_function.classify code in
+            wrap
+              (prim
+                 ~primitive:(Praw_js_code {code; code_info = Exp kind})
+                 ~args:[] e.exp_loc)
+          | "#raw_stmt", [Lconst (Const_string {s = code})] ->
+            let kind = Classify_function.classify_stmt code in
+            wrap
+              (prim
+                 ~primitive:(Praw_js_code {code; code_info = Stmt kind})
+                 ~args:[] e.exp_loc)
+          | ("#raw_expr" | "#raw_stmt"), _ -> assert false
+          | _ ->
+            wrap
+              (transl_external_application e.exp_loc e.exp_env p
+                 ~val_type:prim_vd.val_type argl ~transformed_jsx))
+        | Some builtin ->
+          warn_polymorphic_comparison e.exp_loc builtin argl;
+          wrap (mk_builtin builtin argl e.exp_loc))))
   | Texp_apply {funct; args = oargs; partial; transformed_jsx} ->
     let inlined, funct =
       Translattribute.get_and_remove_inlined_attribute funct
@@ -1091,16 +1152,16 @@ and transl_exp0 (e : Typedtree.expression) : Lambda.lambda =
     transl_match e arg pat_expr_list exn_pat_expr_list partial
   | Texp_try (body, pat_expr_list) ->
     let id = Typecore.name_pattern "exn" pat_expr_list in
-    Ltrywith
-      ( transl_exp body,
-        id,
-        Matching.for_trywith (Lvar id) (transl_cases_try pat_expr_list) )
+    let handler = Matching.for_trywith (var id) (transl_cases pat_expr_list) in
+    let id, handler = pack_trywith_exn id handler in
+    try_ (transl_exp body) id handler
   | Texp_tuple el -> (
     let ll = transl_list el in
-    try Lconst (Const_block (Blk_tuple, List.map extract_constant ll))
-    with Not_constant -> Lprim (Pmakeblock Blk_tuple, ll, e.exp_loc))
-  | Texp_construct ({txt = Lident "false"}, _, []) -> Lconst Const_false
-  | Texp_construct ({txt = Lident "true"}, _, []) -> Lconst Const_true
+    try const (Const_block (Blk_tuple, List.map extract_constant ll))
+    with Not_constant ->
+      prim ~primitive:(Pmakeblock Blk_tuple) ~args:ll e.exp_loc)
+  | Texp_construct ({txt = Lident "false"}, _, []) -> const Const_js_false
+  | Texp_construct ({txt = Lident "true"}, _, []) -> const Const_js_true
   | Texp_construct (_, cstr, args) -> (
     let ll = transl_list args in
     if cstr.cstr_inlined <> None then
@@ -1110,14 +1171,13 @@ and transl_exp0 (e : Typedtree.expression) : Lambda.lambda =
     else
       match cstr.cstr_kind with
       | Ordinary_constructor _ when cstr.cstr_args = [] ->
-        Lconst
-          (Const_pointer
-             (if Datarepr.constructor_has_optional_shape cstr then Pt_shape_none
-              else
-                Pt_constructor
-                  (match Datarepr.constructor_case cstr with
-                  | Constant tag -> tag
-                  | Block _ -> assert false)))
+        const
+          (if Datarepr.constructor_has_optional_shape cstr then const_shape_none
+           else
+             const_constructor
+               (match Datarepr.constructor_case cstr with
+               | Constant tag -> tag
+               | Block _ -> assert false))
       | Ordinary_constructor _ -> (
         let runtime =
           match Datarepr.constructor_case cstr with
@@ -1128,48 +1188,50 @@ and transl_exp0 (e : Typedtree.expression) : Lambda.lambda =
           match ll with
           | [value] -> value
           | _ -> assert false
+        else if Datarepr.constructor_has_optional_shape cstr then
+          let value =
+            match ll with
+            | [value] -> value
+            | _ -> assert false
+          in
+          let primitive : Lambda.primitive =
+            match args with
+            | [arg]
+              when Typeopt.type_cannot_contain_undefined arg.exp_type
+                     arg.exp_env ->
+              Psome_not_nest
+            | _ -> Psome
+          in
+          try const (Const_some (extract_constant value))
+          with Not_constant -> prim ~primitive ~args:ll e.exp_loc
         else
           let tag_info : Lambda.tag_info =
-            if Datarepr.constructor_has_optional_shape cstr then
-              match args with
-              | [arg]
-                when Typeopt.type_cannot_contain_undefined arg.exp_type
-                       arg.exp_env ->
-                (* Format.fprintf Format.err_formatter "@[special boxingl@]@."; *)
-                Blk_some_not_nested
-              | _ -> Blk_some
-            else
-              Blk_constructor
-                {
-                  name = cstr.cstr_name;
-                  num_nonconst = num_nonconst_constructors cstr;
-                  runtime;
-                }
+            Blk_constructor
+              {
+                name = cstr.cstr_name;
+                num_nonconst = num_nonconst_constructors cstr;
+                runtime;
+              }
           in
-          try Lconst (Const_block (tag_info, List.map extract_constant ll))
-          with Not_constant -> Lprim (Pmakeblock tag_info, ll, e.exp_loc))
+          try const (Const_block (tag_info, List.map extract_constant ll))
+          with Not_constant ->
+            prim ~primitive:(Pmakeblock tag_info) ~args:ll e.exp_loc)
       | Extension_constructor path ->
-        Lprim
-          ( Pmakeblock Blk_extension,
-            transl_extension_path e.exp_env path :: ll,
-            e.exp_loc ))
+        prim ~primitive:(Pmakeblock Blk_extension)
+          ~args:(transl_extension_path e.exp_env path :: ll)
+          e.exp_loc)
   | Texp_extension_constructor (_, path) -> transl_extension_path e.exp_env path
   | Texp_variant (l, arg) -> (
-    let tag = Btype.hash_variant l in
     match arg with
-    | None -> Lconst (Const_pointer (Pt_variant {name = l}))
+    | None -> const (const_polyvar l)
     | Some arg -> (
       let lam = transl_exp arg in
-      let tag_info = Blk_poly_var l in
-      try
-        Lconst
-          (Const_block
-             (tag_info, [Const_base (Const_int tag); extract_constant lam]))
+      let name = const_polyvar_name l in
+      try const (Const_block (Blk_poly_var, [name; extract_constant lam]))
       with Not_constant ->
-        Lprim
-          ( Pmakeblock tag_info,
-            [Lconst (Const_base (Const_int tag)); lam],
-            e.exp_loc )))
+        prim ~primitive:(Pmakeblock Blk_poly_var)
+          ~args:[const name; lam]
+          e.exp_loc))
   | Texp_record {fields; representation; extended_expression} ->
     transl_record e.exp_loc e.exp_env fields representation extended_expression
   | Texp_field (arg, _, lbl) -> (
@@ -1177,16 +1239,18 @@ and transl_exp0 (e : Typedtree.expression) : Lambda.lambda =
     match lbl.lbl_repres with
     | Record_float_unused -> assert false
     | Record_regular ->
-      Lprim (Pfield (lbl.lbl_pos, Lambda.fld_record lbl), [targ], e.exp_loc)
+      prim
+        ~primitive:(Pfield (lbl.lbl_pos, Lambda.fld_record lbl))
+        ~args:[targ] e.exp_loc
     | Record_inlined _ ->
-      Lprim
-        (Pfield (lbl.lbl_pos, Lambda.fld_record_inline lbl), [targ], e.exp_loc)
+      prim
+        ~primitive:(Pfield (lbl.lbl_pos, Lambda.fld_record_inline lbl))
+        ~args:[targ] e.exp_loc
     | Record_unboxed _ -> targ
     | Record_extension ->
-      Lprim
-        ( Pfield (lbl.lbl_pos + 1, Lambda.fld_record_extension lbl),
-          [targ],
-          e.exp_loc ))
+      prim
+        ~primitive:(Pfield (lbl.lbl_pos + 1, Lambda.fld_record_extension lbl))
+        ~args:[targ] e.exp_loc)
   | Texp_setfield (arg, _, lbl, newval) ->
     let access =
       match lbl.lbl_repres with
@@ -1198,25 +1262,24 @@ and transl_exp0 (e : Typedtree.expression) : Lambda.lambda =
       | Record_extension ->
         Psetfield (lbl.lbl_pos + 1, Lambda.fld_record_extension_set lbl)
     in
-    Lprim (access, [transl_exp arg; transl_exp newval], e.exp_loc)
+    prim ~primitive:access ~args:[transl_exp arg; transl_exp newval] e.exp_loc
   | Texp_array expr_list ->
     let ll = transl_list expr_list in
-    Lprim (Pmakearray, ll, e.exp_loc)
+    prim ~primitive:Pmakearray ~args:ll e.exp_loc
   | Texp_ifthenelse (cond, ifso, Some ifnot) ->
-    Lifthenelse (transl_exp cond, transl_exp ifso, transl_exp ifnot)
+    if_ (transl_exp cond) (transl_exp ifso) (transl_exp ifnot)
   | Texp_ifthenelse (cond, ifso, None) ->
-    Lifthenelse (transl_exp cond, transl_exp ifso, lambda_unit)
-  | Texp_sequence (expr1, expr2) ->
-    Lsequence (transl_exp expr1, transl_exp expr2)
-  | Texp_break -> Lbreak
-  | Texp_continue -> Lcontinue
-  | Texp_while (cond, body) -> Lwhile (transl_exp cond, transl_exp body)
+    if_ (transl_exp cond) (transl_exp ifso) lambda_unit
+  | Texp_sequence (expr1, expr2) -> seq (transl_exp expr1) (transl_exp expr2)
+  | Texp_break -> break
+  | Texp_continue -> continue
+  | Texp_while (cond, body) -> while_ (transl_exp cond) (transl_exp body)
   | Texp_for (param, _, low, high, dir, body) ->
-    Lfor (param, transl_exp low, transl_exp high, dir, transl_exp body)
+    for_ param (transl_exp low) (transl_exp high) dir (transl_exp body)
   | Texp_for_of (param, _, iterable, body) ->
-    Lfor_of (param, transl_exp iterable, transl_exp body)
+    for_of param (transl_exp iterable) (transl_exp body)
   | Texp_for_await_of (param, _, iterable, body) ->
-    Lfor_await_of (param, transl_exp iterable, transl_exp body)
+    for_await_of param (transl_exp iterable) (transl_exp body)
   | Texp_object_literal fields ->
     let labels =
       List.map
@@ -1227,31 +1290,29 @@ and transl_exp0 (e : Typedtree.expression) : Lambda.lambda =
           })
         fields
     in
-    Lprim
-      ( Pjs_object_create labels,
-        List.map (fun (_, field) -> transl_exp field) fields,
-        e.exp_loc )
+    prim ~primitive:(Pjs_object_create labels)
+      ~args:(List.map (fun (_, field) -> transl_exp field) fields)
+      e.exp_loc
   | Texp_object_get (expr, nm) ->
-    Lprim (Pjs_object_get nm.txt, [transl_exp expr], e.exp_loc)
+    prim ~primitive:(Pjs_object_get nm.txt) ~args:[transl_exp expr] e.exp_loc
   | Texp_object_set (expr, nm, value) ->
-    Lprim (Pjs_object_set nm.txt, [transl_exp expr; transl_exp value], e.exp_loc)
+    prim ~primitive:(Pjs_object_set nm.txt)
+      ~args:[transl_exp expr; transl_exp value]
+      e.exp_loc
   | Texp_letmodule (id, _loc, modl, body) ->
     let defining_expr = !transl_module Tcoerce_none None modl in
-    Llet (Strict, Pgenval, id, defining_expr, transl_exp body)
+    let_ Strict id defining_expr (transl_exp body)
   | Texp_letexception (cd, body) ->
-    Llet
-      ( Strict,
-        Pgenval,
-        cd.ext_id,
-        transl_extension_constructor e.exp_env None cd,
-        transl_exp body )
+    let_ Strict cd.ext_id
+      (transl_extension_constructor e.exp_env None cd)
+      (transl_exp body)
   | Texp_pack modl -> !transl_module Tcoerce_none None modl
   | Texp_assert {exp_desc = Texp_construct (_, {cstr_name = "false"}, _)} ->
     if !Clflags.no_assert_false then Lambda.lambda_assert_false
     else assert_failed e
   | Texp_assert cond ->
     if !Clflags.noassert then lambda_unit
-    else Lifthenelse (transl_exp cond, lambda_unit, assert_failed e)
+    else if_ (transl_exp cond) lambda_unit (assert_failed e)
 
 and transl_list expr_list = List.map transl_exp expr_list
 
@@ -1259,35 +1320,18 @@ and transl_guard guard rhs =
   let expr = transl_exp rhs in
   match guard with
   | None -> expr
-  | Some cond -> Lifthenelse (transl_exp cond, expr, staticfail)
+  | Some cond -> if_ (transl_exp cond) expr staticfail
 
 and transl_case {c_lhs; c_guard; c_rhs} = (c_lhs, transl_guard c_guard c_rhs)
 
 and transl_cases cases = List.map transl_case cases
 
-and transl_case_try {c_lhs; c_guard; c_rhs} =
-  match c_lhs.pat_desc with
-  | Tpat_var (id, _) | Tpat_alias (_, id, _) ->
-    Hashtbl.replace try_ids id ();
-    Misc.try_finally
-      (fun () -> (c_lhs, transl_guard c_guard c_rhs))
-      (fun () -> Hashtbl.remove try_ids id)
-  | _ -> (c_lhs, transl_guard c_guard c_rhs)
-
-and transl_cases_try cases = List.map transl_case_try cases
-
 and transl_apply ?(inlined = Default_inline)
     ?(uncurried_partial_application = None) ?(transformed_jsx = false) lam sargs
     loc =
   let lapply ap_func ap_args =
-    Lapply
-      {
-        ap_loc = loc;
-        ap_func;
-        ap_args;
-        ap_inlined = inlined;
-        ap_transformed_jsx = transformed_jsx;
-      }
+    apply ~ap_transformed_jsx:transformed_jsx ap_func ap_args
+      {ap_loc = loc; ap_inlined = inlined}
   in
   let rec build_apply lam args = function
     | (None, optional) :: l ->
@@ -1298,7 +1342,7 @@ and transl_apply ?(inlined = Default_inline)
         | _ ->
           let id = Ident.create name in
           defs := (id, lam) :: !defs;
-          Lvar id
+          var id
       in
       let args, args' =
         if List.for_all (fun (_, opt) -> opt) args then ([], args)
@@ -1309,21 +1353,14 @@ and transl_apply ?(inlined = Default_inline)
       and l = List.map (fun (arg, opt) -> (may_map (protect "arg") arg, opt)) l
       and id_arg = Ident.create "param" in
       let body =
-        match build_apply handle ((Lvar id_arg, optional) :: args') l with
+        match build_apply handle ((var id_arg, optional) :: args') l with
         | Lfunction {params = ids; body = lam; attr; loc} ->
-          Lfunction {params = id_arg :: ids; body = lam; attr; loc}
+          function_ ~loc ~attr ~params:(id_arg :: ids) ~body:lam
         | lam ->
-          Lfunction
-            {
-              params = [id_arg];
-              body = lam;
-              attr = default_function_attribute;
-              loc;
-            }
+          function_ ~loc ~attr:default_function_attribute ~params:[id_arg]
+            ~body:lam
       in
-      List.fold_left
-        (fun body (id, lam) -> Llet (Strict, Pgenval, id, lam, body))
-        body !defs
+      List.fold_left (fun body (id, lam) -> let_ Strict id lam body) body !defs
     | (Some arg, optional) :: l -> build_apply lam ((arg, optional) :: args) l
     | [] -> lapply lam (List.rev_map fst args)
   in
@@ -1337,52 +1374,40 @@ and transl_apply ?(inlined = Default_inline)
         | _, None ->
           let id_arg = Ident.create "none" in
           none_ids := id_arg :: !none_ids;
-          Some (Lvar id_arg))
+          Some (var id_arg))
     in
     let extra_ids =
       Array.init extra_arity (fun _ -> Ident.create "extra") |> Array.to_list
     in
-    let extra_args = Ext_list.map extra_ids (fun id -> Lvar id) in
+    let extra_args = Ext_list.map extra_ids (fun id -> var id) in
     let ap_args = args @ extra_args in
     let l0 =
-      Lapply
-        {
-          ap_func = lam;
-          ap_args;
-          ap_inlined = inlined;
-          ap_loc = loc;
-          ap_transformed_jsx = transformed_jsx;
-        }
+      apply ~ap_transformed_jsx:transformed_jsx lam ap_args
+        {ap_loc = loc; ap_inlined = inlined}
     in
-    Lfunction
-      {
-        params = List.rev_append !none_ids extra_ids;
-        body = l0;
-        attr = default_function_attribute;
-        loc;
-      }
+    function_ ~loc ~attr:default_function_attribute
+      ~params:(List.rev_append !none_ids extra_ids)
+      ~body:l0
   | _ ->
     (build_apply lam []
        (List.map
           (fun (l, x) -> (may_map transl_exp x, Btype.is_optional l))
           sargs)
-      : Lambda.lambda)
+      : Lambda.t)
 
 and transl_function loc (params : function_param list) body =
   match params with
   | [] -> assert false
   | [{fp_param; fp_pat; fp_partial}] ->
     ( [fp_param],
-      Matching.for_function loc None (Lvar fp_param)
+      Matching.for_function loc None (var fp_param)
         [(fp_pat, transl_exp body)]
         fp_partial,
       is_base_type body.exp_env body.exp_type Predef.path_unit )
   | {fp_param; fp_pat; fp_partial} :: rest ->
     let lparams, lbody, return_unit = transl_function loc rest body in
     ( fp_param :: lparams,
-      Matching.for_function loc None (Lvar fp_param)
-        [(fp_pat, lbody)]
-        fp_partial,
+      Matching.for_function loc None (var fp_param) [(fp_pat, lbody)] fp_partial,
       return_unit )
 
 and transl_let ~js_hoist rec_flag pat_expr_list body =
@@ -1419,7 +1444,7 @@ and transl_let ~js_hoist rec_flag pat_expr_list body =
       mark_js_hoisted_pattern ~js_hoist vb_attributes pat lam;
       (id, lam)
     in
-    Lletrec (Ext_list.map pat_expr_list transl_case, body)
+    Lambda_scc.bind_rec (Ext_list.map pat_expr_list transl_case) body
 
 and transl_record loc env fields repres opt_init_expr =
   match (opt_init_expr, repres, fields) with
@@ -1458,7 +1483,7 @@ and transl_record loc env fields repres opt_init_expr =
                 | Record_extension ->
                   Pfield (i + 1, Lambda.fld_record_extension lbl)
               in
-              Lprim (access, [Lvar init_id], loc)
+              prim ~primitive:access ~args:[var init_id] loc
             | Overridden (_lid, expr) -> transl_exp expr)
           fields
       in
@@ -1475,7 +1500,7 @@ and transl_record loc env fields repres opt_init_expr =
           match repres with
           | Record_float_unused -> assert false
           | Record_regular ->
-            Lconst (Const_block (Lambda.blk_record fields mut, cl))
+            const (Const_block (Lambda.blk_record fields mut, cl))
           | Record_inlined {name; representation} ->
             let runtime =
               match Variant_runtime.representation representation with
@@ -1486,13 +1511,13 @@ and transl_record loc env fields repres opt_init_expr =
               Variant_runtime.num_blocks
                 (Variant_runtime.get_layout representation.variant)
             in
-            Lconst
+            const
               (Const_block
                  ( Lambda.blk_record_inlined fields name num_nonconsts ~runtime
                      mut,
                    cl ))
           | Record_unboxed _ ->
-            Lconst
+            const
               (match cl with
               | [v] -> v
               | _ -> assert false)
@@ -1500,7 +1525,9 @@ and transl_record loc env fields repres opt_init_expr =
         with Not_constant -> (
           match repres with
           | Record_regular ->
-            Lprim (Pmakeblock (Lambda.blk_record fields mut), ll, loc)
+            prim
+              ~primitive:(Pmakeblock (Lambda.blk_record fields mut))
+              ~args:ll loc
           | Record_float_unused -> assert false
           | Record_inlined {name; representation} ->
             let runtime =
@@ -1512,12 +1539,12 @@ and transl_record loc env fields repres opt_init_expr =
               Variant_runtime.num_blocks
                 (Variant_runtime.get_layout representation.variant)
             in
-            Lprim
-              ( Pmakeblock
-                  (Lambda.blk_record_inlined fields name num_nonconsts ~runtime
-                     mut),
-                ll,
-                loc )
+            prim
+              ~primitive:
+                (Pmakeblock
+                   (Lambda.blk_record_inlined fields name num_nonconsts ~runtime
+                      mut))
+              ~args:ll loc
           | Record_unboxed _ -> (
             match ll with
             | [v] -> v
@@ -1530,13 +1557,13 @@ and transl_record loc env fields repres opt_init_expr =
               | _ -> assert false
             in
             let slot = transl_extension_path env path in
-            Lprim
-              (Pmakeblock (Lambda.blk_record_ext fields mut), slot :: ll, loc))
+            prim
+              ~primitive:(Pmakeblock (Lambda.blk_record_ext fields mut))
+              ~args:(slot :: ll) loc)
       in
       match opt_init_expr with
       | None -> lam
-      | Some init_expr ->
-        Llet (Strict, Pgenval, init_id, transl_exp init_expr, lam)
+      | Some init_expr -> let_ Strict init_id (transl_exp init_expr) lam
     else
       (* Take a shallow copy of the init record, then mutate the fields
          of the copy *)
@@ -1556,38 +1583,36 @@ and transl_record loc env fields repres opt_init_expr =
             | Record_extension ->
               Psetfield (lbl.lbl_pos + 1, Lambda.fld_record_extension_set lbl)
           in
-          Lsequence (Lprim (upd, [Lvar copy_id; transl_exp expr], loc), cont)
+          seq
+            (prim ~primitive:upd ~args:[var copy_id; transl_exp expr] loc)
+            cont
       in
       match opt_init_expr with
       | None -> assert false
       | Some init_expr ->
-        Llet
-          ( Strict,
-            Pgenval,
-            copy_id,
-            Lprim (Pduprecord, [transl_exp init_expr], loc),
-            Array.fold_left update_field (Lvar copy_id) fields ))
+        let_ Strict copy_id
+          (prim ~primitive:Pduprecord ~args:[transl_exp init_expr] loc)
+          (Array.fold_left update_field (var copy_id) fields))
 
 and transl_match e arg pat_expr_list exn_pat_expr_list partial =
   let id = Typecore.name_pattern "exn" exn_pat_expr_list
   and cases = transl_cases pat_expr_list
-  and exn_cases = transl_cases_try exn_pat_expr_list in
+  and exn_cases = transl_cases exn_pat_expr_list in
   let static_catch body val_ids handler =
     let static_exception_id = next_negative_raise_count () in
-    Lstaticcatch
-      ( Ltrywith
-          ( Lstaticraise (static_exception_id, body),
-            id,
-            Matching.for_trywith (Lvar id) exn_cases ),
-        (static_exception_id, val_ids),
-        handler )
+    let exn_handler = Matching.for_trywith (var id) exn_cases in
+    let id, exn_handler = pack_trywith_exn id exn_handler in
+    staticcatch
+      (try_ (staticraise static_exception_id body) id exn_handler)
+      (static_exception_id, val_ids)
+      handler
   in
   match (arg, exn_cases) with
   | {exp_desc = Texp_tuple argl}, [] ->
     Matching.for_multiple_match e.exp_loc (transl_list argl) cases partial
   | {exp_desc = Texp_tuple argl}, _ :: _ ->
     let val_ids = List.map (fun _ -> Typecore.name_pattern "val" []) argl in
-    let lvars = List.map (fun id -> Lvar id) val_ids in
+    let lvars = List.map (fun id -> var id) val_ids in
     static_catch (transl_list argl) val_ids
       (Matching.for_multiple_match e.exp_loc lvars cases partial)
   | arg, [] ->
@@ -1597,7 +1622,7 @@ and transl_match e arg pat_expr_list exn_pat_expr_list partial =
     static_catch
       [transl_exp arg]
       [val_id]
-      (Matching.for_function e.exp_loc None (Lvar val_id) cases partial)
+      (Matching.for_function e.exp_loc None (var val_id) cases partial)
 
 open Format
 

@@ -835,46 +835,6 @@ impl Lambda {
                 match cond {
                     Lambda::Lprim(prim_info) => match *prim_info {
                         PrimInfo {
-                            primitive: Primitive::Pisout(offset),
-                            args,
-                            loc,
-                        } => {
-                            if let [
-                                Lambda::Lconst(Constant::Int { i: range, .. }),
-                                Lambda::Lvar(xx),
-                            ] = args.as_slice()
-                            {
-                                if let Lambda::Lswitch(switch_arg, body) = &else_ {
-                                    if let Lambda::Lvar(yy) = switch_arg.as_ref() {
-                                        if body.sw_blocks.is_empty()
-                                            && body.sw_blocks_full
-                                            && body.sw_failaction.is_none()
-                                            && xx.same(yy)
-                                            && complete_range(
-                                                &body.sw_consts,
-                                                -offset,
-                                                *range - offset,
-                                            )
-                                        {
-                                            let mut body = body.clone();
-                                            body.sw_failaction = Some(Box::new(then_));
-                                            body.sw_consts_full = false;
-                                            return Lambda::Lswitch(switch_arg.clone(), body);
-                                        }
-                                    }
-                                }
-                            }
-                            make_if(
-                                Lambda::Lprim(Box::new(PrimInfo {
-                                    primitive: Primitive::Pisout(offset),
-                                    args,
-                                    loc,
-                                })),
-                                then_,
-                                else_,
-                            )
-                        }
-                        PrimInfo {
                             primitive: Primitive::Pisint,
                             args,
                             loc,
@@ -1341,7 +1301,6 @@ fn has_boolean_type(lam: &Lambda) -> Option<Location> {
                 Primitive::Pnot
                 | Primitive::Psequand
                 | Primitive::Psequor
-                | Primitive::Pisout(_)
                 | Primitive::PisNotNone
                 | Primitive::Pobjcomp(_)
                 | Primitive::Pboolcomp(_)
@@ -1357,7 +1316,6 @@ fn has_boolean_type(lam: &Lambda) -> Option<Location> {
                 Primitive::Pnot
                 | Primitive::Psequand
                 | Primitive::Psequor
-                | Primitive::Pisout(_)
                 | Primitive::PisNotNone
                 | Primitive::Pobjcomp(_)
                 | Primitive::Pboolcomp(_)
@@ -1373,16 +1331,6 @@ fn has_boolean_type(lam: &Lambda) -> Option<Location> {
             Some(loc.clone())
         },
         _ => None,
-    }
-}
-
-fn complete_range(sw_consts: &[(SwitchKey, Lambda)], start: i32, finish: i32) -> bool {
-    match sw_consts.split_first() {
-        None => finish < start,
-        Some(((SwitchKey::Int(value), _), rest)) => {
-            start <= finish && *value == start && complete_range(rest, start + 1, finish)
-        }
-        Some(((SwitchKey::Constructor(_), _), _)) => false,
     }
 }
 

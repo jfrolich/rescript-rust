@@ -151,8 +151,6 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::PvalFromOptionNotNest => write!(f, "[?unbox-not-nest]"),
         Primitive::PisUndefined => write!(f, "[?undefined]"),
         Primitive::PisNullUndefined => write!(f, "[?null?undefined]"),
-        Primitive::Pnull => write!(f, "null"),
-        Primitive::Pundefined => write!(f, "undefined"),
         Primitive::Pimport(_) => write!(f, "import"),
         Primitive::Pmakeblock(tag_info, Mutable::Immutable) => {
             write!(f, "makeblock {}", tag_info.tag_label())
@@ -207,7 +205,6 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::Pintorder => write!(f, "compare"),
         Primitive::Pintmin => write!(f, "min"),
         Primitive::Pintmax => write!(f, "max"),
-        Primitive::Poffsetint(n) => write!(f, "{n}+"),
         Primitive::Poffsetref(n) => write!(f, "+:={n}"),
         Primitive::Pintoffloat => write!(f, "int_of_float"),
         Primitive::Pfloatofint => write!(f, "float_of_int"),
@@ -258,7 +255,6 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::Parraysets => write!(f, "array.set"),
         Primitive::Pisint => write!(f, "isint"),
         Primitive::PisPolyVarBlock => write!(f, "#is_poly_var_block"),
-        Primitive::Pisout(i) => write!(f, "isout {i}"),
         Primitive::Pawait => write!(f, "await"),
         Primitive::Phash => write!(f, "hash"),
         Primitive::PhashMixint => write!(f, "hash_mix_int"),
@@ -630,8 +626,6 @@ fn format_raw_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::PextensionSlotEq => write!(f, "#extension_slot_eq"),
         Primitive::PinitMod => write!(f, "#init_mod"),
         Primitive::PupdateMod => write!(f, "#update_mod"),
-        Primitive::Pnull => write!(f, "null"),
-        Primitive::Pundefined => write!(f, "undefined"),
         Primitive::PnullToOpt => write!(f, "null_to_opt"),
         Primitive::PnullUndefinedToOpt => write!(f, "nullable_to_opt"),
         Primitive::PisNotNone => write!(f, "#is_not_none"),

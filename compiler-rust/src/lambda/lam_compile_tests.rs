@@ -535,30 +535,6 @@ fn lowers_upto_subint_one_finish_to_ocaml_exclusive_for_range() {
 
 #[test]
 #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn lowers_upto_predint_finish_to_ocaml_exclusive_for_range() {
-    let mut compiler = LambdaCompiler::new();
-    let i = Ident::create_local("i");
-    let xs = Ident::create_local("xs");
-    let lam = Lambda::for_(
-        i,
-        Lambda::const_(Constant::int(0)),
-        Lambda::prim(
-            Primitive::Poffsetint(-1),
-            vec![Lambda::var(xs)],
-            Location::none(),
-        ),
-        crate::lambda::DirectionFlag::Upto,
-        Lambda::unit(),
-    );
-
-    let compiled = compiler.compile_expr(&lam);
-    let rendered = print_block(&compiled.prelude);
-
-    assert_eq!(rendered.trim(), "for (let i = 0; i < xs; ++i) {}");
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
 fn lowers_for_bounds_preludes_in_ocaml_order_when_start_expr_is_pure() {
     let mut compiler = LambdaCompiler::new();
     let i = Ident::create_local("i");
@@ -8451,93 +8427,14 @@ fn lowers_paddint_with_int32_coercion() {
 }
 
 #[test]
-fn lowers_poffsetref_to_ref_contents_update() {
-    let mut compiler = LambdaCompiler::new();
-    let cell = Ident::create_local("cell");
-    let program = compiler.compile_program(&Lambda::prim(
-        Primitive::Poffsetref(1),
-        vec![Lambda::var(cell.clone())],
-        Location::none(),
-    ));
-
-    let [stmt] = program.block.as_slice() else {
-        panic!("expected a single effect statement");
-    };
-    match &stmt.desc {
-        StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::Bin(BinOp::Eq, left, right),
-            ..
-        }) => {
-            assert!(matches!(
-                left.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::StaticIndex(target, field, Some(index)),
-                    ..
-                } if field == "contents"
-                    && *index == 0
-                    && matches!(
-                        target.as_ref(),
-                        Expression {
-                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                            ..
-                        } if id.same(&cell)
-                    )
-            ));
-            assert!(matches!(
-                right.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Bin(BinOp::Bor, offset_inner, truncation),
-                    ..
-                }
-                if matches!(
-                    truncation.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Number(Number::Int { i: 0, .. }),
-                        ..
-                    }
-                ) && matches!(
-                    offset_inner.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Bin(BinOp::Plus, read_back, delta),
-                        ..
-                    }
-                    if matches!(
-                        read_back.as_ref(),
-                        Expression {
-                            desc: ExpressionDesc::StaticIndex(target, field, Some(index)),
-                            ..
-                        } if field == "contents"
-                            && *index == 0
-                            && matches!(
-                                target.as_ref(),
-                                Expression {
-                                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                                    ..
-                                } if id.same(&cell)
-                            )
-                    ) && matches!(
-                        delta.as_ref(),
-                        Expression {
-                            desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
-                            ..
-                        }
-                    )
-                )
-            ));
-        }
-        other => panic!("expected `cell.contents = cell.contents + 1 | 0`, got {other:?}"),
-    }
-}
-
-#[test]
 fn lassign_expression_lowers_to_statement_prelude_and_unit_value() {
     let mut compiler = LambdaCompiler::new();
     let cell = Ident::create_local("cell");
     let compiled = compiler.compile_expr(&Lambda::Lassign(
         cell.clone(),
         Box::new(Lambda::prim(
-            Primitive::Poffsetint(1),
-            vec![Lambda::var(cell.clone())],
+            Primitive::Paddint,
+            vec![Lambda::var(cell.clone()), Lambda::const_(Constant::int(1))],
             Location::none(),
         )),
     ));
@@ -8563,8 +8460,8 @@ fn let_bindings_of_unit_lassigns_emit_effects_before_undefined_declarations() {
         &Lambda::Lassign(
             u.clone(),
             Box::new(Lambda::prim(
-                Primitive::Poffsetint(1),
-                vec![Lambda::var(u.clone())],
+                Primitive::Paddint,
+                vec![Lambda::var(u.clone()), Lambda::const_(Constant::int(1))],
                 Location::none(),
             )),
         ),
@@ -8657,43 +8554,6 @@ fn typeof_literal_comparisons_fold_like_ocaml_string_equal() {
             "object",
         )),
         "false"
-    );
-}
-
-#[test]
-fn lowers_pisout_to_ocaml_range_check_shapes() {
-    let mut compiler = LambdaCompiler::new();
-    let value = Ident::create_local("value");
-    let zero_offset = compiler.compile_expr(&Lambda::prim(
-        Primitive::Pisout(0),
-        vec![Lambda::const_(Constant::int(1)), Lambda::var(value.clone())],
-        Location::none(),
-    ));
-    let one_offset = compiler.compile_expr(&Lambda::prim(
-        Primitive::Pisout(1),
-        vec![Lambda::const_(Constant::int(1)), Lambda::var(value)],
-        Location::none(),
-    ));
-
-    assert!(
-        zero_offset.prelude.is_empty(),
-        "unexpected prelude:\n{}",
-        print_block(&zero_offset.prelude)
-    );
-    assert!(
-        one_offset.prelude.is_empty(),
-        "unexpected prelude:\n{}",
-        print_block(&one_offset.prelude)
-    );
-    assert!(
-        print_expression(&zero_offset.expr) == "value !== 0 && value !== 1",
-        "rendered expression was:\n{}",
-        print_expression(&zero_offset.expr)
-    );
-    assert!(
-        print_expression(&one_offset.expr) == "value !== -1 && value !== 0",
-        "rendered expression was:\n{}",
-        print_expression(&one_offset.expr)
     );
 }
 

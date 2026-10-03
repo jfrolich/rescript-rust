@@ -68,12 +68,6 @@ let nil : t = {expression_desc = Null; comment = None; source_loc = None}
 let call ?comment ~info e0 args : t =
   {expression_desc = Call (e0, args, info); comment; source_loc = None}
 
-(* TODO: optimization when es is known at compile time
-    to be an array
-*)
-let flat_call ?comment e0 es : t =
-  {expression_desc = FlatCall (e0, es); comment; source_loc = None}
-
 let tagged_template ?comment call_expr string_args value_args : t =
   {
     expression_desc = Tagged_template (call_expr, string_args, value_args);
@@ -314,18 +308,17 @@ let method_ ?comment ?immutable_mask ~async ~return_unit params body : t =
   }
 
 (** ATTENTION: This is coupuled with {!Caml_obj.caml_update_dummy} *)
-let dummy_obj ?comment (info : Lam_tag_info.t) : t =
+let dummy_obj ?comment (info : Lambda.tag_info) : t =
   (* TODO:
      for record it is [{}]
      for other it is [[]]
   *)
   match info with
   | Blk_record _ | Blk_module _ | Blk_constructor _ | Blk_record_inlined _
-  | Blk_poly_var _ | Blk_extension | Blk_record_ext _ ->
+  | Blk_poly_var | Blk_extension | Blk_record_ext _ ->
     {comment; source_loc = None; expression_desc = Object (None, [])}
   | Blk_tuple | Blk_module_export _ ->
     {comment; source_loc = None; expression_desc = Array []}
-  | Blk_some | Blk_some_not_nested -> assert false
 
 (* TODO: complete
     pure ...
@@ -644,14 +637,6 @@ let string_length ?comment (e : t) : t =
   match e.expression_desc with
   | Str {txt; delim = DNone} -> int ?comment (Int32.of_int (String.length txt))
   (* No optimization for {j||j}*)
-  | _ -> {expression_desc = Length e; comment; source_loc = None}
-
-let function_length ?comment (e : t) : t =
-  match e.expression_desc with
-  | Fun {is_method; params} ->
-    let params_length = List.length params in
-    int ?comment
-      (Int32.of_int (if is_method then params_length - 1 else params_length))
   | _ -> {expression_desc = Length e; comment; source_loc = None}
 
 let rec string_append ?comment (e : t) (el : t) : t =
@@ -1458,7 +1443,7 @@ let to_int32 ?comment (e : J.expression) : J.expression =
   int32_bor ?comment e zero_int_literal
 (* TODO: if we already know the input is int32, [x|0] can be reduced into [x] *)
 
-let string_comp (cmp : Lam_compat.comparison) ?comment (e0 : t) (e1 : t) =
+let string_comp (cmp : Lambda.comparison) ?comment (e0 : t) (e1 : t) =
   match (e0.expression_desc, e1.expression_desc) with
   | Str {txt = a0; delim = d0}, Str {txt = a1; delim = d1} -> (
     match (cmp, str_equal a0 d0 a1 d1) with
@@ -1477,7 +1462,7 @@ let is_type_object (e : t) : t = string_equal (typeof e) (str "object")
 let obj_length ?comment e : t =
   to_int32 {expression_desc = Length e; comment; source_loc = None}
 
-let compare_int_aux (cmp : Lam_compat.comparison) (l : int) r =
+let compare_int_aux (cmp : Lambda.comparison) (l : int) r =
   match cmp with
   | Ceq -> l = r
   | Cneq -> l <> r
@@ -1486,7 +1471,7 @@ let compare_int_aux (cmp : Lam_compat.comparison) (l : int) r =
   | Cle -> l <= r
   | Cge -> l >= r
 
-let rec int_comp (cmp : Lam_compat.comparison) ?comment (e0 : t) (e1 : t) =
+let rec int_comp (cmp : Lambda.comparison) ?comment (e0 : t) (e1 : t) =
   match (cmp, e0.expression_desc, e1.expression_desc) with
   | _, Number (Int {i = l}), Number (Int {i = r}) ->
     let l = Ext_int.int32_unsigned_to_int l in
@@ -1514,7 +1499,7 @@ let rec int_comp (cmp : Lam_compat.comparison) ?comment (e0 : t) (e1 : t) =
     true_
   | _ -> bin ?comment (Lam_compile_util.jsop_of_comp cmp) e0 e1
 
-let bool_comp (cmp : Lam_compat.comparison) ?comment (e0 : t) (e1 : t) =
+let bool_comp (cmp : Lambda.comparison) ?comment (e0 : t) (e1 : t) =
   match (e0, e1) with
   | {expression_desc = Bool l}, {expression_desc = Bool r} ->
     bool
@@ -1560,60 +1545,6 @@ let rec int32_lsr ?comment (e1 : J.expression) (e2 : J.expression) :
    we can apply a more general optimization here,
    do some algebraic rewerite rules to rewrite [triple_equal]
 *)
-let rec is_out ?comment (e : t) (range : t) : t =
-  match (range.expression_desc, e.expression_desc) with
-  | Number (Int {i = 1l}), Var _ ->
-    not (or_ (triple_equal e zero_int_literal) (triple_equal e one_int_literal))
-  | ( Number (Int {i = 1l}),
-      ( Bin
-          ( Plus,
-            {expression_desc = Number (Int {i; _})},
-            ({expression_desc = Var _; _} as x) )
-      | Bin
-          ( Plus,
-            ({expression_desc = Var _; _} as x),
-            {expression_desc = Number (Int {i; _})} ) ) ) ->
-    not
-      (or_
-         (triple_equal x (int (Int32.neg i)))
-         (triple_equal x (int (Int32.sub Int32.one i))))
-  | ( Number (Int {i = 1l}),
-      Bin
-        ( Minus,
-          ({expression_desc = Var _; _} as x),
-          {expression_desc = Number (Int {i; _})} ) ) ->
-    not (or_ (triple_equal x (int (Int32.add i 1l))) (triple_equal x (int i)))
-  (* (x - i >>> 0 ) > k *)
-  | ( Number (Int {i = k}),
-      Bin
-        ( Minus,
-          ({expression_desc = Var _; _} as x),
-          {expression_desc = Number (Int {i; _})} ) ) ->
-    or_ (int_comp Cgt x (int (Int32.add i k))) (int_comp Clt x (int i))
-  | Number (Int {i = k}), Var _ ->
-    (* Note that js support [ 1 < x < 3],
-       we can optimize it into [ not ( 0<= x <=  k)]
-    *)
-    or_ (int_comp Cgt e (int k)) (int_comp Clt e zero_int_literal)
-  | ( _,
-      Bin
-        ( Bor,
-          ({
-             expression_desc =
-               ( Bin
-                   ( (Plus | Minus),
-                     {expression_desc = Number (Int {i = _; _})},
-                     {expression_desc = Var _; _} )
-               | Bin
-                   ( (Plus | Minus),
-                     {expression_desc = Var _; _},
-                     {expression_desc = Number (Int {i = _; _})} ) );
-           } as e),
-          {expression_desc = Number (Int {i = 0l}); _} ) ) ->
-    (* TODO: check correctness *)
-    is_out ?comment e range
-  | _, _ -> int_comp ?comment Cgt e range
-
 let rec float_add ?comment (e1 : t) (e2 : t) =
   match (e1.expression_desc, e2.expression_desc) with
   | Number (Int {i; _}), Number (Int {i = j; _}) -> int ?comment (Int32.add i j)
@@ -1738,7 +1669,7 @@ let rec int32_band ?comment (e1 : J.expression) (e2 : J.expression) :
 
 let bigint_op ?comment op (e1 : t) (e2 : t) = bin ?comment op e1 e2
 
-let bigint_comp (cmp : Lam_compat.comparison) ?comment (e0 : t) (e1 : t) =
+let bigint_comp (cmp : Lambda.comparison) ?comment (e0 : t) (e1 : t) =
   let normalize s =
     let len = String.length s in
     let buf = Buffer.create len in

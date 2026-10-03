@@ -124,7 +124,6 @@ fn boolean_location(store: &IndexedLambda, node: NodeId) -> Option<crate::locati
             Primitive::Pnot
             | Primitive::Psequand
             | Primitive::Psequor
-            | Primitive::Pisout(_)
             | Primitive::PisNotNone
             | Primitive::Pobjcomp(_)
             | Primitive::Pboolcomp(_)
@@ -164,16 +163,6 @@ fn append_not(store: &mut IndexedLambda, loc: crate::location::Location, node: N
         ))
     } else {
         append_rebuilt(store, NodeSnapshot::Prim(Primitive::Pnot, vec![node], loc))
-    }
-}
-
-fn complete_range(cases: &[(crate::lambda::SwitchKey, NodeId)], start: i32, finish: i32) -> bool {
-    match cases.split_first() {
-        None => finish < start,
-        Some(((crate::lambda::SwitchKey::Int(value), _), rest)) => {
-            start <= finish && *value == start && complete_range(rest, start + 1, finish)
-        }
-        Some(_) => false,
     }
 }
 
@@ -292,39 +281,6 @@ fn append_if(
         };
     }
     match store.snapshot(condition) {
-        NodeSnapshot::Prim(Primitive::Pisout(offset), args, loc) => {
-            if let [range_node, variable_node] = args.as_slice()
-                && let NodeView::Const(Constant::Int { i: range, .. }) = store.view(*range_node)
-                && let NodeView::Var(variable) = store.view(*variable_node)
-                && let NodeSnapshot::Switch {
-                    scrutinee,
-                    consts_full: _,
-                    consts,
-                    blocks_full,
-                    blocks,
-                    fail_action,
-                    dispatch,
-                } = store.snapshot(else_node)
-                && let NodeView::Var(other) = store.view(scrutinee)
-                && blocks.is_empty()
-                && blocks_full
-                && fail_action.is_none()
-                && variable.same(other)
-                && complete_range(&consts, -offset, *range - offset)
-            {
-                return store.append(NodeSnapshot::Switch {
-                    scrutinee,
-                    consts_full: false,
-                    consts,
-                    blocks_full,
-                    blocks,
-                    fail_action: Some(then_node),
-                    dispatch,
-                });
-            }
-            let condition = store.append(NodeSnapshot::Prim(Primitive::Pisout(offset), args, loc));
-            store.append(NodeSnapshot::IfThenElse(condition, then_node, else_node))
-        }
         NodeSnapshot::Prim(Primitive::Pisint, args, loc) => {
             append_pisint_if(store, args, loc, then_node, else_node)
         }

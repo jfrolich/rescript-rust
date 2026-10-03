@@ -98,7 +98,7 @@ let ocaml_to_js_eff ~(arg_label : External_arg_spec.label_noname)
   in
   match arg_type with
   | Arg_cst _ -> assert false
-  (* has to be preprocessed by {!Lam} module first *)
+  (* has to be preprocessed by {!Lambda} first *)
   | Extern_unit ->
     ( (if arg_label = Arg_empty then Splice0 else Splice1 E.unit),
       if Js_analyzer.no_side_effect_expression arg then [] else [arg] )
@@ -335,12 +335,7 @@ let translate_ffi ?(transformed_jsx = false) (cxt : Lam_compile_context.t)
       let args, eff = assemble_args_no_splice arg_types args in
       add_eff eff
       @@ E.call
-           ~info:
-             {
-               arity = Full;
-               call_info = Call_na;
-               call_transformed_jsx = transformed_jsx;
-             }
+           ~info:{call_info = Call_na; call_transformed_jsx = transformed_jsx}
            fn args
   | Decl_new {name = fn}, _ ->
     if splice then
@@ -368,12 +363,7 @@ let translate_ffi ?(transformed_jsx = false) (cxt : Lam_compile_context.t)
         add_eff eff
           (let self = translate_scoped_access scopes self in
            E.call
-             ~info:
-               {
-                 arity = Full;
-                 call_info = Call_na;
-                 call_transformed_jsx = transformed_jsx;
-               }
+             ~info:{call_info = Call_na; call_transformed_jsx = transformed_jsx}
              (E.dot self name) args)
       else
         let args, eff = assemble_args_no_splice arg_types args in

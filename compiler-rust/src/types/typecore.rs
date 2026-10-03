@@ -812,6 +812,9 @@ pub enum TypeCoreError {
     /// Literal overflow.
     LiteralOverflow { loc: LocIdx, ty: String },
 
+    /// A numeric polymorphic variant name outside the int32 range.
+    PolyvarLiteralOverflow { loc: LocIdx },
+
     /// Unknown literal.
     UnknownLiteral {
         loc: LocIdx,
@@ -2201,6 +2204,26 @@ fn wrap_to_ocaml_int(n: i64) -> i64 {
     let shifted = (n as i128) + (half as i128);
     let wrapped = shifted.rem_euclid(modulus);
     (wrapped - half as i128) as i64
+}
+
+/// OCaml `Ext_string.is_valid_hash_number`.
+fn is_valid_hash_number(value: &str) -> bool {
+    match value.as_bytes() {
+        [] => false,
+        [b'0'..=b'9'] => true,
+        [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
+        _ => false,
+    }
+}
+
+/// OCaml `Typecore.check_polyvar_name` (typecore.ml:290-297): a numeric
+/// polymorphic variant name is its own runtime value, so it has to fit the
+/// int32 range it is emitted in.
+fn check_polyvar_name(loc: LocIdx, name: &str) -> TypeCoreResult<()> {
+    if is_valid_hash_number(name) && !int32_literal_fits_ocaml(name) {
+        return Err(TypeCoreError::PolyvarLiteralOverflow { loc });
+    }
+    Ok(())
 }
 
 pub(crate) fn int32_literal_fits_ocaml(s: &str) -> bool {
@@ -4836,6 +4859,7 @@ fn type_pattern_inner(
 
         PD::Ppat_variant(inner) => {
             let (ref label, ref arg) = **inner;
+            check_polyvar_name(loc, label)?;
             // Polymorphic variant pattern: #Red, #Blue(x)
             type_pattern_variant(
                 tctx,
@@ -8546,6 +8570,7 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_variant(inner) => {
             let (ref label, ref arg) = **inner;
+            check_polyvar_name(loc, label)?;
             // Polymorphic variant
             type_variant(
                 tctx,

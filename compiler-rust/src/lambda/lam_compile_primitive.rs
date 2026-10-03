@@ -10,9 +10,9 @@ use super::js_exp_make::{
     compile_int_equality, compile_nullish_strict_comparison, compile_raw_comparison, int_bnot,
     int_expr, int_literal, int32_add, int32_band, int32_bor, int32_bxor, int32_lsl, int32_lsr,
     int32_minus, int32_mul, int32_offset, int32_pow, is_nullish_literal, is_optional_block,
-    is_out_expr, is_type_number_expr, is_type_object_expr, is_zero_int, js_expr_no_side_effects,
-    js_seq, ocaml_typeof_expr, poly_var_tag_access, poly_var_value_access, range_exclusion_or,
-    runtime_compare_call_args, runtime_member_for_eta_wrapped_primitive, strict_eq_int, to_int32,
+    is_type_number_expr, is_type_object_expr, is_zero_int, js_expr_no_side_effects,
+    js_seq, ocaml_typeof_expr, poly_var_tag_access, poly_var_value_access,
+    runtime_compare_call_args, runtime_member_for_eta_wrapped_primitive, to_int32,
 };
 use super::lam_compile::{Compiled, LambdaCompiler, call_info_of_apply_status};
 use super::lam_compile_input::{LambdaInputView, LambdaInputs};
@@ -496,34 +496,9 @@ impl LambdaCompiler {
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
             ),
-            Poffsetint(offset) => int32_offset(take_arg(&mut compiled_args, 0), *offset),
-            Poffsetref(offset) => {
-                // OCaml lowers through `Js_of_lam_block.field
-                // Lambda.ref_field_info`, so the `contents` access keeps
-                // record field position metadata
-                // (compiler/core/lam_compile_primitive.ml:342-348).
-                let field = self.compile_field_access(
-                    0,
-                    &FieldDbgInfo::Record {
-                        name: "contents".to_string(),
-                    },
-                    &compiled_args[0],
-                );
-                Expression::new(ExpressionDesc::Seq(
-                    Box::new(Expression::bin(
-                        BinOp::Eq,
-                        field.clone(),
-                        int32_offset(field, *offset),
-                    )),
-                    Box::new(Expression::undefined(false)),
-                ))
-            }
+            Poffsetref(_) => unreachable!("%incr/%decr are expanded when raw lambda is lowered"),
             Pisint => is_type_number_expr(take_arg(&mut compiled_args, 0)),
             PisPolyVarBlock => is_type_object_expr(take_arg(&mut compiled_args, 0)),
-            Pisout(offset) => match compiled_args.as_slice() {
-                [range, value] => is_out_expr(int32_offset(value.clone(), *offset), range.clone()),
-                _ => Expression::undefined(false),
-            },
             Pmakearray => Expression::array(compiled_args, MutableFlag::Mutable),
             Pmakedict => match compiled_args.as_slice() {
                 [
@@ -750,8 +725,6 @@ impl LambdaCompiler {
                 ffi,
                 transformed_jsx,
             } => self.compile_js_call(prim_name, arg_types, ffi, *transformed_jsx, compiled_args),
-            Pnull => Expression::null(),
-            Pundefined => Expression::undefined(false),
             _ => Expression::undefined(false),
         };
 

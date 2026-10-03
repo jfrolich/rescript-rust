@@ -25,8 +25,8 @@ pub struct RealReference;
 /// Direct port of `eliminate_ref id lam` (lam_pass_eliminate_ref.ml:16-102).
 ///
 /// Returns `Ok(rewritten)` when every reference to `id` corresponds to a plain
-/// `!id` (Pfield 0) read, an `id := e` write (Psetfield 0), or an `incr`/`decr`
-/// (Poffsetref). Returns `Err(RealReference)` when `id` is read/passed
+/// `!id` (Pfield 0) read or an `id := e` write (Psetfield 0); `incr`/`decr`
+/// arrive already expanded to those. Returns `Err(RealReference)` when `id` is read/passed
 /// directly anywhere else, including being captured by a closure.
 pub fn eliminate_ref(id: &Ident, lam: &Lambda) -> Result<Lambda, RealReference> {
     match lam {
@@ -88,31 +88,6 @@ pub fn eliminate_ref(id: &Ident, lam: &Lambda) -> Result<Lambda, RealReference> 
 
             let new_value = eliminate_ref(id, &args[1])?;
             Ok(Lambda::Lassign(id.clone(), Box::new(new_value)))
-        }
-
-        // `incr`/`decr` via `Poffsetref delta` (lam_pass_eliminate_ref.ml:50-53).
-        Lambda::Lprim(__prim0)
-            if matches!(__prim0.as_ref(), PrimInfo {
-            primitive: Primitive::Poffsetref(delta),
-            args,
-            loc,
-        } if args.len() == 1 && matches!(&args[0], Lambda::Lvar(v) if v == id)) =>
-        {
-            let PrimInfo {
-                primitive: Primitive::Poffsetref(delta),
-                args,
-                loc,
-            } = __prim0.as_ref()
-            else {
-                unreachable!()
-            };
-
-            let inc = Lambda::prim(
-                Primitive::Poffsetint(*delta),
-                vec![Lambda::Lvar(id.clone())],
-                loc.clone(),
-            );
-            Ok(Lambda::Lassign(id.clone(), Box::new(inc)))
         }
 
         // Lconst (lam_pass_eliminate_ref.ml:54).

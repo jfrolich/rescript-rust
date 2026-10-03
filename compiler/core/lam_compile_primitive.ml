@@ -48,8 +48,7 @@ let get_module_system () =
   | [module_system] -> module_system
   | _ -> Commonjs
 
-let call_info =
-  {Js_call_info.arity = Full; call_info = Call_na; call_transformed_jsx = false}
+let call_info = {Js_call_info.call_info = Call_na; call_transformed_jsx = false}
 
 let import_of_path path =
   E.call ~info:call_info (E.js_global "import") [E.str path]
@@ -72,25 +71,15 @@ let wrap_then_path import (path : string list) =
 let wrap_then import value = wrap_then_path import [value]
 
 let translate output_prefix loc (cxt : Lam_compile_context.t)
-    (prim : Lam_primitive.t) (args : J.expression list) : J.expression =
+    (prim : Lambda.primitive) (args : J.expression list) : J.expression =
   match prim with
   | Pis_not_none -> Js_of_lam_option.is_not_none (Ext_list.singleton_exn args)
   | Pcreate_extension s -> E.make_exception s
-  | Pwrap_exn ->
-    E.runtime_call Primitive_modules.exceptions "internalToException" args
   | Praw_js_code {code; code_info} -> E.raw_js_code code_info code
   (* FIXME: save one allocation
      trim can not be done before syntax checking
      otherwise location is incorrect
   *)
-  | Pjs_runtime_apply -> (
-    match args with
-    | [f; args] -> E.flat_call f args
-    | _ -> assert false)
-  | Pjs_apply -> (
-    match args with
-    | fn :: rest -> E.call ~info:call_info fn rest
-    | _ -> assert false)
   | Ptagged_template -> (
     (* [tag; strings_array; values_array] -> tag`...` *)
     match args with
@@ -170,7 +159,6 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
       match path with
       | [] -> import
       | _ :: _ -> wrap_then_path import path))
-  | Pfn_arity -> E.function_length (Ext_list.singleton_exn args)
   | Pobjsize -> E.obj_length (Ext_list.singleton_exn args)
   | Pis_null -> E.is_null (Ext_list.singleton_exn args)
   | Pis_undefined -> E.is_undef (Ext_list.singleton_exn args)
@@ -195,7 +183,8 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
       E.optional_not_nest_block arg
     | _ -> E.optional_block arg)
   | Psome_not_nest -> E.optional_not_nest_block (Ext_list.singleton_exn args)
-  | Pmakeblock (tag_info, mutable_flag) ->
+  | Pmakeblock tag_info ->
+    let mutable_flag = Lambda.mutable_flag_of_tag_info tag_info in
     (* RUNTIME *)
     Js_of_lam_block.make_block
       (Js_op_util.of_lam_mutable_flag mutable_flag)
@@ -374,14 +363,6 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
     | _ -> assert false)
   | Pfloatofint -> Ext_list.singleton_exn args
   | Pnot -> E.not (Ext_list.singleton_exn args)
-  | Poffsetint n -> E.offset (Ext_list.singleton_exn args) n
-  | Poffsetref n ->
-    let v =
-      Js_of_lam_block.field Lambda.ref_field_info
-        (Ext_list.singleton_exn args)
-        0l
-    in
-    E.seq (E.assign v (E.offset v n)) E.unit
   | Psequand -> (
     (* TODO: rhs is possibly a tail call *)
     match args with
@@ -391,20 +372,6 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
     (* TODO: rhs is possibly a tail call *)
     match args with
     | [e1; e2] -> E.or_ e1 e2
-    | _ -> assert false)
-  | Pisout off -> (
-    match args with
-    (* predicate: [x > range  or x < 0 ]
-       can be simplified if x is positive , x > range
-       if x is negative, fine, its uint is for sure larger than range,
-       the output is not readable, we might change it back.
-
-       Note that if range is small like [1], then the negative of
-       it can be more precise (given integer)
-       a normal case of the compiler is  that it will do a shift
-       in the first step [ (x - 1) > 1 or ( x - 1 ) < 0 ]
-    *)
-    | [range; e] -> E.is_out (E.offset e off) range
     | _ -> assert false)
   | Pstringlength -> E.string_length (Ext_list.singleton_exn args)
   | Pstringrefs | Pstringrefu -> (

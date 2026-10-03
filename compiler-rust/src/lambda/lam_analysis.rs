@@ -145,9 +145,7 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         | Primitive::PnullToOpt
         | Primitive::PnullUndefinedToOpt
         | Primitive::PjsObjectCreate(_)
-        | Primitive::Pimport(_)
-        | Primitive::Pnull
-        | Primitive::Pundefined => true,
+        | Primitive::Pimport(_) => true,
 
         // Block operations
         Primitive::Pmakeblock(_, _)
@@ -244,11 +242,10 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         Primitive::Pmakelist | Primitive::Pmakedict | Primitive::PdictHas => true,
 
         // Type testing primitives
-        Primitive::Pisint | Primitive::PisPolyVarBlock | Primitive::Pisout(_) => true,
+        Primitive::Pisint | Primitive::PisPolyVarBlock => true,
 
         // Offset and misc
-        Primitive::Poffsetint(_)
-        | Primitive::Pstringadd
+        Primitive::Pstringadd
         | Primitive::PfnArity
         | Primitive::PwrapExn
         | Primitive::Phash

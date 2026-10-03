@@ -7,11 +7,6 @@ let invalid_arg = s => throw(Invalid_argument(s))
 
 exception Exit
 
-/* Composition operators */
-
-external \"|>": ('a, 'a => 'b) => 'b = "%revapply"
-external \"@@": ('a => 'b, 'a) => 'b = "%apply"
-
 /* Debugging */
 
 external __LOC__: string = "%loc_LOC"
@@ -62,8 +57,6 @@ external \"||": (bool, bool) => bool = "%sequor"
 
 external \"~-": int => int = "%negint"
 external \"~+": int => int = "%identity"
-external succ: int => int = "%succint"
-external pred: int => int = "%predint"
 external \"+": (int, int) => int = "%addint"
 external \"-": (int, int) => int = "%subint"
 external \"*": (int, int) => int = "%mulint"

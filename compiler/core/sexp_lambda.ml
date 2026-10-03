@@ -62,7 +62,7 @@ let direction_flag = function
   | Downto -> Sexp.atom "Downto"
 
 (* Comparison *)
-let comparison (cmp : Lam_compat.comparison) =
+let comparison (cmp : Lambda.comparison) =
   match cmp with
   | Ceq -> Sexp.atom "Ceq"
   | Cneq -> Sexp.atom "Cneq"
@@ -72,19 +72,12 @@ let comparison (cmp : Lam_compat.comparison) =
   | Cge -> Sexp.atom "Cge"
 
 (* Let kind *)
-let let_kind (k : Lam_compat.let_kind) =
+let let_kind (k : Lambda.let_kind) =
   match k with
   | Alias -> Sexp.atom "Alias"
   | Strict -> Sexp.atom "Strict"
   | StrictOpt -> Sexp.atom "StrictOpt"
   | Variable -> Sexp.atom "Variable"
-
-(* Apply status *)
-let apply_status (s : Lam.apply_status) =
-  match s with
-  | App_na -> Sexp.atom "App_na"
-  | App_infer_full -> Sexp.atom "App_infer_full"
-  | App_uncurry -> Sexp.atom "App_uncurry"
 
 (* Inline attribute *)
 let inline_attribute (attr : Lambda.inline_attribute) =
@@ -195,7 +188,7 @@ let tag_info (info : Lambda.tag_info) =
         variant_block_runtime runtime;
       ]
   | Blk_tuple -> Sexp.atom "Blk_tuple"
-  | Blk_poly_var s -> Sexp.list [Sexp.atom "Blk_poly_var"; string s]
+  | Blk_poly_var -> Sexp.atom "Blk_poly_var"
   | Blk_record {fields; mutable_flag} ->
     Sexp.list [
       Sexp.atom "Blk_record";
@@ -218,8 +211,6 @@ let tag_info (info : Lambda.tag_info) =
   | Blk_module_export _ ->
     Sexp.atom "Blk_module_export"
   | Blk_extension -> Sexp.atom "Blk_extension"
-  | Blk_some -> Sexp.atom "Blk_some"
-  | Blk_some_not_nested -> Sexp.atom "Blk_some_not_nested"
   | Blk_record_ext {fields; mutable_flag} ->
     Sexp.list [
       Sexp.atom "Blk_record_ext";
@@ -228,7 +219,7 @@ let tag_info (info : Lambda.tag_info) =
     ]
 
 (* Field debug info *)
-let field_dbg_info (info : Lam_compat.field_dbg_info) =
+let field_dbg_info (info : Lambda.field_dbg_info) =
   match info with
   | Fld_record {name} ->
     Sexp.list [Sexp.atom "Fld_record"; string name]
@@ -243,18 +234,11 @@ let field_dbg_info (info : Lam_compat.field_dbg_info) =
   | Fld_cons -> Sexp.atom "Fld_cons"
 
 (* Set field debug info *)
-let set_field_dbg_info (info : Lam_compat.set_field_dbg_info) =
+let set_field_dbg_info (info : Lambda.set_field_dbg_info) =
   match info with
   | Fld_record_set s -> Sexp.list [Sexp.atom "Fld_record_set"; string s]
   | Fld_record_inline_set s -> Sexp.list [Sexp.atom "Fld_record_inline_set"; string s]
   | Fld_record_extension_set s -> Sexp.list [Sexp.atom "Fld_record_extension_set"; string s]
-
-(* Pointer info *)
-let pointer_info (info : Lam_constant.pointer_info) =
-  match info with
-  | None -> Sexp.atom "None"
-  | Pt_assertfalse -> Sexp.atom "Pt_assertfalse"
-  | Some s -> Sexp.list [Sexp.atom "Some"; string s]
 
 (* String delimiter *)
 let string_delim (delim : External_arg_spec.delim option) =
@@ -266,15 +250,16 @@ let string_delim (delim : External_arg_spec.delim option) =
   | Some DBackQuotes -> Sexp.list [Sexp.atom "Some"; Sexp.atom "DBackQuotes"]
 
 (* Constant *)
-let rec constant (c : Lam_constant.t) =
+let rec constant (c : Lambda.structured_constant) =
   match c with
   | Const_js_null -> Sexp.atom "Const_js_null"
   | Const_js_undefined {is_unit} ->
     Sexp.list [Sexp.atom "Const_js_undefined"; bool is_unit]
   | Const_js_true -> Sexp.atom "Const_js_true"
   | Const_js_false -> Sexp.atom "Const_js_false"
-  | Const_int {i; comment} ->
-    Sexp.list [Sexp.atom "Const_int"; int32 i; pointer_info comment]
+  | Const_int i -> Sexp.list [Sexp.atom "Const_int"; int32 i]
+  | Const_polyvar s -> Sexp.list [Sexp.atom "Const_polyvar"; string s]
+  | Const_assertfalse -> Sexp.atom "Const_assertfalse"
   | Const_constructor tag ->
     Sexp.list [Sexp.atom "Const_constructor"; variant_tag tag]
   | Const_char c -> Sexp.list [Sexp.atom "Const_char"; int c]
@@ -283,7 +268,6 @@ let rec constant (c : Lam_constant.t) =
   | Const_float f -> Sexp.list [Sexp.atom "Const_float"; string f]
   | Const_bigint (sign, s) ->
     Sexp.list [Sexp.atom "Const_bigint"; bool sign; string s]
-  | Const_pointer s -> Sexp.list [Sexp.atom "Const_pointer"; string s]
   | Const_block (info, elements) ->
     Sexp.list
       [
@@ -295,17 +279,13 @@ let rec constant (c : Lam_constant.t) =
   | Const_module_alias -> Sexp.atom "Const_module_alias"
 
 (* Primitive *)
-let primitive ~with_locs (prim : Lam_primitive.t) =
+let primitive ~with_locs (prim : Lambda.primitive) =
   match prim with
   | Pcreate_extension s -> Sexp.list [Sexp.atom "Pcreate_extension"; string s]
-  | Pwrap_exn -> Sexp.atom "Pwrap_exn"
   | Pinit_mod -> Sexp.atom "Pinit_mod"
   | Pupdate_mod -> Sexp.atom "Pupdate_mod"
-  | Pjs_apply -> Sexp.atom "Pjs_apply"
-  | Pjs_runtime_apply -> Sexp.atom "Pjs_runtime_apply"
   | Pjs_object_get name -> Sexp.list [Sexp.atom "Pjs_object_get"; string name]
   | Pjs_object_set name -> Sexp.list [Sexp.atom "Pjs_object_set"; string name]
-  | Pfn_arity -> Sexp.atom "Pfn_arity"
   | Pjs_fn_method -> Sexp.atom "Pjs_fn_method"
   | Pdebugger -> Sexp.atom "Pdebugger"
   | Praw_js_code {code; code_info = Exp _} ->
@@ -325,8 +305,13 @@ let primitive ~with_locs (prim : Lam_primitive.t) =
   | Pis_null_undefined -> Sexp.atom "Pis_null_undefined"
   | Pimport src ->
     Sexp.list [Sexp.atom "Pimport"; string (Ffi_debug.import_source src)]
-  | Pmakeblock (info, mut) ->
-    Sexp.list [Sexp.atom "Pmakeblock"; tag_info info; mutable_flag_sexp mut]
+  | Pmakeblock info ->
+    Sexp.list
+      [
+        Sexp.atom "Pmakeblock";
+        tag_info info;
+        mutable_flag_sexp (Lambda.mutable_flag_of_tag_info info);
+      ]
   | Pfield (n, info) ->
     Sexp.list [Sexp.atom "Pfield"; int n; field_dbg_info info]
   | Psetfield (n, info) ->
@@ -373,8 +358,6 @@ let primitive ~with_locs (prim : Lam_primitive.t) =
   | Pintorder -> Sexp.atom "Pintorder"
   | Pintmin -> Sexp.atom "Pintmin"
   | Pintmax -> Sexp.atom "Pintmax"
-  | Poffsetint n -> Sexp.list [Sexp.atom "Poffsetint"; int n]
-  | Poffsetref n -> Sexp.list [Sexp.atom "Poffsetref"; int n]
   | Pintoffloat -> Sexp.atom "Pintoffloat"
   | Pfloatofint -> Sexp.atom "Pfloatofint"
   | Pnegfloat -> Sexp.atom "Pnegfloat"
@@ -424,7 +407,6 @@ let primitive ~with_locs (prim : Lam_primitive.t) =
   | Parraysets -> Sexp.atom "Parraysets"
   | Pisint -> Sexp.atom "Pisint"
   | Pis_poly_var_block -> Sexp.atom "Pis_poly_var_block"
-  | Pisout n -> Sexp.list [Sexp.atom "Pisout"; int n]
   | Pawait -> Sexp.atom "Pawait"
   | Ptagged_template -> Sexp.atom "Ptagged_template"
   | Precord_rest excluded ->
@@ -447,7 +429,7 @@ let function_attribute (attr : Lambda.function_attribute) =
   ]
 
 (* Lambda *)
-let rec lambda ~with_locs (lam : Lam.t) =
+let rec lambda ~with_locs (lam : Lambda.t) =
   match lam with
   | Lvar id ->
     Sexp.list [Sexp.atom "Lvar"; ident id]
@@ -462,10 +444,9 @@ let rec lambda ~with_locs (lam : Lam.t) =
       ap_info_sexp ~with_locs ap_info;
       bool ap_transformed_jsx;
     ]
-  | Lfunction {arity; params; body; attr} ->
+  | Lfunction {params; body; attr} ->
     Sexp.list [
       Sexp.atom "Lfunction";
-      int arity;
       Sexp.list (List.map ident params);
       lambda ~with_locs body;
       function_attribute attr;
@@ -568,12 +549,11 @@ let rec lambda ~with_locs (lam : Lam.t) =
   | Lfor_of _ -> Sexp.list [Sexp.atom "Lfor_of"]
   | Lfor_await_of _ -> Sexp.list [Sexp.atom "Lfor_await_of"]
 
-and ap_info_sexp ~with_locs (info : Lam.ap_info) =
+and ap_info_sexp ~with_locs (info : Lambda.ap_info) =
   let loc_sexp = if with_locs then [location ~with_locs info.ap_loc] else [] in
   Sexp.list ([
     Sexp.atom "ap_info";
     inline_attribute info.ap_inlined;
-    apply_status info.ap_status;
   ] @ loc_sexp)
 
 and switch_key_sexp = function
@@ -586,7 +566,7 @@ and switch_dispatch_sexp = function
   | Switch_variant facts ->
     Sexp.list [Sexp.atom "Switch_variant"; variant_matching_facts facts]
 
-and lambda_switch ~with_locs (sw : Lam.lambda_switch) =
+and lambda_switch ~with_locs (sw : Lambda.lambda_switch) =
   Sexp.list
     [
       Sexp.atom "lambda_switch";

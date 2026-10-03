@@ -27,38 +27,27 @@
     how about guarantee that [Lassign] only check the local ref
     and we track which ids are [Lassign]ed
 *)
-(**
-   might not be the same due to refinement
-   assert (old.arity = v) 
-*)
+(* An update, not a new binding: the arity is refined on each collect round,
+   and the recorded lambda has to be replaced because an older one may mention
+   identifiers that later passes removed (see #3609). [add] would leave the
+   stale row underneath - invisible to [find_opt], which reads the newest, but
+   never reclaimed, since nothing removes from this table. *)
 let annotate (meta : Lam_stats.t) rec_flag (k : Ident.t) (arity : Lam_arity.t)
     lambda =
-  Hash_ident.add meta.ident_tbl k
+  Hash_ident.replace meta.ident_tbl k
     (FunctionId {arity; lambda = Some (lambda, rec_flag)})
-(* see #3609
-   we have to update since bounded function lambda
-   may contain stale unbounded varaibles
-*)
-(* match Hash_ident.find_opt  meta.ident_tbl k  with
-   | None -> (** FIXME: need do a sanity check of arity is NA or Determin(_,[],_) *)
-
-   |  Some (FunctionId old)  ->
-   Hash_ident.add meta.ident_tbl k
-    (FunctionId {arity; lambda = Some (lambda, rec_flag) })
-   (* old.arity <- arity   *)
-   (* due to we keep refining arity analysis after each round*)
-   | _ -> assert false *)
 (* TODO -- avoid exception *)
 
 (** it only make senses recording arities for 
     function definition,
     alias propgation - and toplevel identifiers, this needs to be exported
 *)
-let collect_info (meta : Lam_stats.t) (lam : Lam.t) =
-  let rec collect_bind rec_flag (ident : Ident.t) (lam : Lam.t) =
+let collect_info (meta : Lam_stats.t) (lam : Lambda.t) =
+  let rec collect_bind rec_flag (ident : Ident.t) (lam : Lambda.t) =
     match lam with
     | Lconst v -> Hash_ident.replace meta.ident_tbl ident (Constant v)
-    | Lprim {primitive = Pmakeblock (_, Immutable); args = ls} ->
+    | Lprim {primitive = Pmakeblock info; args = ls}
+      when Lambda.is_immutable_block info ->
       Hash_ident.replace meta.ident_tbl ident (Lam_util.kind_of_lambda_block ls);
       List.iter collect ls
     | Lprim {primitive = Psome | Psome_not_nest; args = [v]} ->
@@ -90,7 +79,7 @@ let collect_info (meta : Lam_stats.t) (lam : Lam.t) =
       collect x;
       if Set_ident.mem meta.export_idents ident then
         annotate meta rec_flag ident (Lam_arity_analysis.get_arity meta x) lam
-  and collect (lam : Lam.t) =
+  and collect (lam : Lambda.t) =
     match lam with
     | Lconst _ -> ()
     | Lvar _ -> ()

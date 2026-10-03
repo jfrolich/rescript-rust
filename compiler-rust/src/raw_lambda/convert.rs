@@ -189,7 +189,7 @@ fn raw_free_variables(lam: &RawLambda) -> HashSet<Ident> {
                     collect(arg, fv);
                 }
             }
-            RawLambda::Lswitch(arg, sw, _) => {
+            RawLambda::Lswitch(arg, sw) => {
                 collect(arg, fv);
                 for (_, lam) in &sw.sw_consts {
                     collect(lam, fv);
@@ -316,17 +316,15 @@ fn raw_subst_idents_owned(subst: &HashMap<Ident, Ident>, lam: RawLambda) -> RawL
                 .collect(),
             loc: info.loc,
         })),
-        RawLambda::Lswitch(arg, sw, loc) => RawLambda::Lswitch(
+        RawLambda::Lswitch(arg, sw) => RawLambda::Lswitch(
             Box::new(raw_subst_idents_owned(subst, *arg)),
             Box::new(crate::raw_lambda::RawLambdaSwitch {
-                sw_numconsts: sw.sw_numconsts,
                 sw_consts_full: sw.sw_consts_full,
                 sw_consts: sw
                     .sw_consts
                     .into_iter()
                     .map(|(tag, lam)| (tag, raw_subst_idents_owned(subst, lam)))
                     .collect(),
-                sw_numblocks: sw.sw_numblocks,
                 sw_blocks_full: sw.sw_blocks_full,
                 sw_blocks: sw
                     .sw_blocks
@@ -338,7 +336,6 @@ fn raw_subst_idents_owned(subst: &HashMap<Ident, Ident>, lam: RawLambda) -> RawL
                     .map(|lam| Box::new(raw_subst_idents_owned(subst, *lam))),
                 sw_dispatch: sw.sw_dispatch,
             }),
-            loc,
         ),
         RawLambda::LstringSwitch(arg, cases, default) => RawLambda::LstringSwitch(
             Box::new(raw_subst_idents_owned(subst, *arg)),
@@ -1147,7 +1144,7 @@ impl<'a> RawLambdaConverter<'a> {
                     self.note_possible_required_modules_in_raw_lambda(arg);
                 }
             }
-            RawLambda::Lswitch(scrutinee, switch, _) => {
+            RawLambda::Lswitch(scrutinee, switch) => {
                 self.note_possible_required_modules_in_raw_lambda(scrutinee);
                 for (_, branch) in &switch.sw_consts {
                     self.note_possible_required_modules_in_raw_lambda(branch);
@@ -2040,7 +2037,7 @@ impl<'a> RawLambdaConverter<'a> {
             | RawLambda::Lfor(_, _, _, _, _)
             | RawLambda::Lfor_of(_, _, _)
             | RawLambda::Lfor_await_of(_, _, _) => None,
-            RawLambda::Lswitch(scrut, sw, loc) => {
+            RawLambda::Lswitch(scrut, sw) => {
                 let scrut_norm = Self::normalize_for_key(scrut, env, counter)?;
                 let mut consts = Vec::new();
                 for (tag, act) in &sw.sw_consts {
@@ -2057,16 +2054,13 @@ impl<'a> RawLambdaConverter<'a> {
                 Some(RawLambda::Lswitch(
                     Box::new(scrut_norm),
                     Box::new(crate::raw_lambda::RawLambdaSwitch {
-                        sw_numconsts: sw.sw_numconsts,
                         sw_consts_full: sw.sw_consts_full,
                         sw_consts: consts,
-                        sw_numblocks: sw.sw_numblocks,
                         sw_blocks_full: sw.sw_blocks_full,
                         sw_blocks: blocks,
                         sw_failaction: fail,
                         sw_dispatch: sw.sw_dispatch.clone(),
                     }),
-                    loc.clone(),
                 ))
             }
             RawLambda::LtryWith(body, id, handler) => {
@@ -2273,26 +2267,21 @@ impl<'a> RawLambdaConverter<'a> {
                 let switch = RawLambda::Lswitch(
                     Box::new(scrut),
                     Box::new(crate::raw_lambda::RawLambdaSwitch {
-                        sw_numconsts: const_cases.len(),
-                        sw_consts_full: false,
+                        sw_consts_full: true,
                         sw_consts: const_cases,
-                        sw_numblocks: block_cases.len(),
-                        sw_blocks_full: false,
+                        sw_blocks_full: true,
                         sw_blocks: block_cases,
                         sw_failaction: Some(Box::new(RawLambda::LstaticRaise(exit_id, Vec::new()))),
                         sw_dispatch: dispatch.clone(),
                     }),
-                    Location::none(),
                 );
                 RawLambda::LstaticCatch(Box::new(switch), (exit_id, Vec::new()), default)
             }
             None => {
                 let mut sw = crate::raw_lambda::RawLambdaSwitch {
-                    sw_numconsts: const_cases.len(),
-                    sw_consts_full: false,
+                    sw_consts_full: true,
                     sw_consts: const_cases,
-                    sw_numblocks: block_cases.len(),
-                    sw_blocks_full: false,
+                    sw_blocks_full: true,
                     sw_blocks: block_cases,
                     sw_failaction: None,
                     sw_dispatch: dispatch,
@@ -2300,7 +2289,7 @@ impl<'a> RawLambdaConverter<'a> {
                 // OCaml: share_actions_sw then reintroduce_fail
                 let share_handlers = self.share_actions_sw(&mut sw);
                 Self::reintroduce_fail(&mut sw);
-                let mut result = RawLambda::Lswitch(Box::new(scrut), Box::new(sw), Location::none());
+                let mut result = RawLambda::Lswitch(Box::new(scrut), Box::new(sw));
                 // Wrap with catch handlers from share_actions_sw.
                 // OCaml's handle_shared composes handlers as h(ohs(x)),
                 // so the first shared action is innermost. We iterate forward
@@ -3156,8 +3145,6 @@ impl<'a> RawLambdaConverter<'a> {
             "%stringmax" => Some(Primitive::Pstringmax),
             // Other specialized primitives
             "%obj_is_int" => Some(Primitive::Pisint),
-            "%succint" => Some(Primitive::Poffsetint(1)),
-            "%predint" => Some(Primitive::Poffsetint(-1)),
             "%boolnot" => Some(Primitive::Pnot),
             "%sequand" => Some(Primitive::Psequand),
             "%sequor" => Some(Primitive::Psequor),
@@ -3206,8 +3193,6 @@ impl<'a> RawLambdaConverter<'a> {
             "%curry_apply8" => Some(Primitive::PjsApply),
             "%makemutablelist" => Some(Primitive::Pmakelist),
             // #-prefixed primitives (from OCaml's translcore.ml prim_table)
-            "#null" => Some(Primitive::Pnull),
-            "#undefined" => Some(Primitive::Pundefined),
             "#typeof" => Some(Primitive::Ptypeof),
             "#is_nullable" => Some(Primitive::PisNullUndefined),
             "#null_to_opt" => Some(Primitive::PnullToOpt),
@@ -3711,14 +3696,12 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    /// translcore.ml `is_null_undefined_constant`: unit shares the
+    /// undefined constant but is not a `%null` / `%undefined` literal.
     fn raw_lambda_is_nullish_constant(lam: &RawLambda) -> bool {
         matches!(
             lam,
-            RawLambda::Lconst(Constant::JsNull | Constant::JsUndefined { .. })
-        ) || matches!(
-            lam,
-            RawLambda::Lprim(prim)
-                if matches!(prim.primitive, Primitive::Pnull | Primitive::Pundefined)
+            RawLambda::Lconst(Constant::JsNull | Constant::JsUndefined { is_unit: false })
         )
     }
 
@@ -6205,14 +6188,17 @@ impl<'a> RawLambdaConverter<'a> {
                 .into_iter()
                 .map(|binding| (binding.id, binding.rhs))
                 .collect();
-            return RawLambda::Lletrec(rec_bindings, Box::new(cont));
+            // transl_recmodule.ml `eval_rec_bindings`: `Lambda_scc.bind_rec`.
+            return crate::raw_lambda::lambda_scc::bind_rec(rec_bindings, cont);
         }
 
         // Phase 3: patch_forwards - update_mod for each shaped binding
         let mut result = cont;
         for binding in bindings.iter().rev() {
             if let Some((_loc, shape)) = &binding.init {
-                result = RawLambda::seq(
+                let patch = if Self::shape_is_empty(shape) {
+                    binding.rhs.clone()
+                } else {
                     RawLambda::prim(
                         Primitive::PupdateMod,
                         vec![
@@ -6221,9 +6207,9 @@ impl<'a> RawLambdaConverter<'a> {
                             binding.rhs.clone(),
                         ],
                         Location::none(),
-                    ),
-                    result,
-                );
+                    )
+                };
+                result = RawLambda::seq(patch, result);
             }
         }
 
@@ -6242,20 +6228,34 @@ impl<'a> RawLambdaConverter<'a> {
         // Phase 1: bind_inits - init_mod for modules with shapes
         for binding in bindings.iter().rev() {
             if let Some((loc, shape)) = &binding.init {
-                result = RawLambda::let_(
-                    LetKind::Strict,
-                    binding.id.clone(),
+                let init = if Self::shape_is_empty(shape) {
+                    RawLambda::unit()
+                } else {
                     RawLambda::prim(
                         Primitive::PinitMod,
                         vec![loc.clone(), shape.clone()],
                         Location::none(),
-                    ),
-                    result,
-                );
+                    )
+                };
+                result = RawLambda::let_(LetKind::Strict, binding.id.clone(), init, result);
             }
         }
 
         result
+    }
+
+    /// OCaml `Transl_recmodule.shape_is_empty`: a shape with no fields has
+    /// nothing to initialize and nothing to patch, but the right hand side
+    /// still runs for its effects.
+    fn shape_is_empty(shape: &RawLambda) -> bool {
+        matches!(
+            shape,
+            RawLambda::Lconst(Constant::Block { elements, .. })
+                if matches!(
+                    elements.as_slice(),
+                    [Constant::Block { elements: inner, .. }] if inner.is_empty()
+                )
+        )
     }
 
     /// Compile recursive module bindings.
@@ -9054,12 +9054,7 @@ impl<'a> RawLambdaConverter<'a> {
                         loc,
                     )
                 } else {
-                    let offset_arg = if first == 0 {
-                        scrut_var.clone()
-                    } else {
-                        RawLambda::prim(Primitive::Poffsetint(-first), vec![scrut_var.clone()], loc)
-                    };
-                    RawLambda::prim(Primitive::Pisout(last - first), vec![offset_arg], loc)
+                    crate::raw_lambda::switch::out_of_range(&scrut_var, first, last)
                 };
 
                 // If all cases map to the same static raise, use it directly
@@ -9078,19 +9073,16 @@ impl<'a> RawLambdaConverter<'a> {
                     RawLambda::Lswitch(
                         Box::new(scrut_var.clone()),
                         Box::new(crate::raw_lambda::RawLambdaSwitch {
-                            sw_numconsts: sorted_consts.len(),
-                            sw_consts_full: false,
+                            sw_consts_full: true,
                             sw_consts: sorted_consts
                                 .into_iter()
                                 .map(|(key, action)| (crate::lambda::SwitchKey::Int(key), action))
                                 .collect(),
-                            sw_numblocks: 0,
-                            sw_blocks_full: false,
+                            sw_blocks_full: true,
                             sw_blocks: Vec::new(),
                             sw_failaction: None,
                             sw_dispatch: crate::lambda::SwitchDispatch::Direct,
                         }),
-                        Location::none(),
                     )
                 };
 
@@ -10830,16 +10822,13 @@ impl<'a> RawLambdaConverter<'a> {
         Some(RawLambda::Lswitch(
             Box::new(RawLambda::var(ids[idx].clone())),
             Box::new(crate::raw_lambda::RawLambdaSwitch {
-                sw_numconsts: sw_consts.len(),
-                sw_consts_full: false,
+                sw_consts_full: true,
                 sw_consts,
-                sw_numblocks: sw_blocks.len(),
-                sw_blocks_full: false,
+                sw_blocks_full: true,
                 sw_blocks,
                 sw_failaction: failaction,
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             }),
-            Location::none(),
         ))
     }
 
@@ -11232,7 +11221,8 @@ impl<'a> RawLambdaConverter<'a> {
                             )
                         })
                         .collect();
-                    RawLambda::letrec(lam_bindings, body)
+                    // translcore.ml `transl_let`: `Lambda_scc.bind_rec`.
+                    crate::raw_lambda::lambda_scc::bind_rec(lam_bindings, body)
                 } else {
                     bindings.iter().rev().fold(body, |acc, binding| {
                         let mut value = self.with_warning_scope(&binding.vb_attributes, |this| {
@@ -11444,7 +11434,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 self.report_polymorphic_comparison_warning(
                                     loc_idx, &primitive, &arg_lams,
                                 );
-                                RawLambda::prim(primitive, arg_lams, loc.clone())
+                                self.mk_builtin(primitive, arg_lams, loc.clone())
                             }
                         }
                     };
@@ -11980,13 +11970,13 @@ impl<'a> RawLambdaConverter<'a> {
                 _ => RawLambda::unit(),
             };
         }
-        if raw_name == "%null" && prim.prim_arity == 0 {
-            // OCaml uses Lprim(Pnull, []), not Lconst(JsNull)
-            return RawLambda::prim(Primitive::Pnull, vec![], loc);
+        // translcore.ml `erased_builtins`: `Constant` entries become
+        // constants at translation.
+        if matches!(raw_name, "%null" | "#null") && prim.prim_arity == 0 {
+            return RawLambda::const_(Constant::JsNull);
         }
-        if raw_name == "%undefined" && prim.prim_arity == 0 {
-            // OCaml uses Lprim(Pundefined, []), not Lconst(JsUndefined)
-            return RawLambda::prim(Primitive::Pundefined, vec![], loc);
+        if matches!(raw_name, "%undefined" | "#undefined") && prim.prim_arity == 0 {
+            return RawLambda::const_(Constant::JsUndefined { is_unit: false });
         }
         let Some(primitive) = self.specialize_primitive_raw_with_env(prim, ty, env) else {
             if raw_name == "%import" || raw_name == "#import" {
@@ -12016,7 +12006,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         if prim.prim_from_constructor || prim.prim_arity == 0 {
-            RawLambda::prim(primitive, vec![], loc)
+            self.mk_builtin(primitive, vec![], loc)
         } else {
             let params = if prim.prim_arity == 1 {
                 vec![self.fresh_ident("prim")]
@@ -12033,12 +12023,63 @@ impl<'a> RawLambdaConverter<'a> {
                 .cloned()
                 .map(RawLambda::var)
                 .collect::<Vec<_>>();
-            RawLambda::function_(
-                prim.prim_arity,
-                params,
-                RawLambda::prim(primitive, args, loc),
-                FunctionAttribute::default(),
-            )
+            let body = self.mk_builtin(primitive, args, loc);
+            RawLambda::function_(prim.prim_arity, params, body, FunctionAttribute::default())
+        }
+    }
+
+    /// OCaml `Lambda.mk_builtin` (lambda.ml): builtins with no primitive form
+    /// are erased at translation. `%identity` is its argument, `%ignore`
+    /// sequences its argument with unit, and `%incr` / `%decr` expand to the
+    /// field write (`Lambda.offset_ref`), binding the reference unless it is
+    /// already a variable.
+    fn mk_builtin(&mut self, primitive: Primitive, args: Vec<RawLambda>, loc: Location) -> RawLambda {
+        match primitive {
+            Primitive::Pidentity => {
+                let [arg] = <[RawLambda; 1]>::try_from(args).expect("%identity takes one argument");
+                arg
+            }
+            Primitive::Pignore => {
+                let [arg] = <[RawLambda; 1]>::try_from(args).expect("%ignore takes one argument");
+                RawLambda::seq(arg, RawLambda::unit())
+            }
+            Primitive::Poffsetref(delta) => {
+                let [r] = <[RawLambda; 1]>::try_from(args).expect("%incr/%decr take one argument");
+                let assign = |r: RawLambda| {
+                    RawLambda::prim(
+                        Primitive::Psetfield(0, SetFieldDbgInfo::RecordSet("contents".to_string())),
+                        vec![
+                            r.clone(),
+                            RawLambda::prim(
+                                Primitive::Paddint,
+                                vec![
+                                    RawLambda::prim(
+                                        Primitive::Pfield(
+                                            0,
+                                            FieldDbgInfo::Record {
+                                                name: "contents".to_string(),
+                                            },
+                                        ),
+                                        vec![r],
+                                        loc.clone(),
+                                    ),
+                                    RawLambda::const_(Constant::int(delta)),
+                                ],
+                                loc.clone(),
+                            ),
+                        ],
+                        loc.clone(),
+                    )
+                };
+                match r {
+                    RawLambda::Lvar(_) => assign(r),
+                    _ => {
+                        let id = self.fresh_ident("ref");
+                        RawLambda::let_(LetKind::Strict, id.clone(), r, assign(RawLambda::var(id)))
+                    }
+                }
+            }
+            primitive => RawLambda::prim(primitive, args, loc),
         }
     }
 
@@ -12498,7 +12539,7 @@ mod tests {
         let primitive_type = ctx.new_var(None);
         let converted = converter.transl_primitive_raw(
             &crate::types::PrimitiveDescription {
-                prim_name: "%identity".into(),
+                prim_name: "%addint".into(),
                 prim_arity: 2,
                 prim_kind: crate::types::decl::PrimKind::KindIntrinsic,
                 prim_native_float: false,

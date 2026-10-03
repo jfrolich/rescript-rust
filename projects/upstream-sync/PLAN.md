@@ -18,7 +18,7 @@ the change to `compiler-rust/`, reruns the gates and commits the merge.
 | 1 | 98e4a6613..0f66af5fa (commits 1-20) | structural optional defaults, structured FFI (`primitive_repr`, `external_decl`), externals expanded at translation, dynamic import resolved at translation | done |
 | 2 | ..84bed4dda (21-28) | vendored Flow parser, OCamlformat 0.29, OCaml 5.5 | done |
 | 3 | ..055e9e091 (29-49) | object representation cleanup (field mutability, Stage 0-E) | done |
-| 4 | ..110 | Lambda/Lam merge, curried application removal | |
+| 4 | ..ebc61dd5b (50-110) | Lambda/Lam merge, curried application removal | done |
 | 5 | ..117 | string literal normalization, formatter | |
 | 6 | ..148 | scalar replacement, @as in the AST, sharing passes | |
 | 7 | ..162 | parser modes removed, coercions, reanalyze | |
@@ -125,3 +125,44 @@ output parity 1881/1881, syntax tests green, compiler tests 1366/1367
 no interfaces and cleans the reference-built `lib/ocaml`; rebuild them with
 the reference compiler afterwards. The analysis test projects still fail
 until the editor tooling commands are ported into the watcher.
+
+### Step 4 (`ebc61dd5b`)
+
+Upstream merged the `Lam` IR into `Lambda` (one private, normalized
+representation built through smart constructors), deleted the
+curried-application machinery and moved several rewrites from Lambda-to-Lam
+conversion to where the terms are produced. Rust keeps its raw-lambda and Lam
+layers; the port reproduces the producer-side behavior and the removed
+primitives.
+
+Ported to Rust:
+
+- `Typecore.check_polyvar_name`: a numeric polymorphic variant name outside
+  the int32 range is a type error in expressions and patterns (the frontend
+  check is gone).
+- Match-action sharing treats string constants as immutable (`make_key`), and
+  switch locations no longer take part in action keys (the raw `Lswitch`
+  carries no location). The raw switch records `sw_consts_full` /
+  `sw_blocks_full` like OCaml instead of case counts.
+- `Pisout`, `Poffsetint` and `%succint`/`%predint` are gone. The switcher
+  emits range tests directly (`Switch.out_of_range`/`emit_if_out`/
+  `emit_if_in`) and folds a guard whose table covers the range into the
+  switch's failaction; `Lam.if_` lost that arm.
+- Translation-time builtins (`Lambda.mk_builtin`): `%identity`/`%ignore` are
+  erased, `%null`/`%undefined` are constants, and `%incr`/`%decr` expand to
+  the field write, binding the reference unless it is a variable.
+- Recursive modules with an empty signature keep their right-hand side
+  (`Transl_recmodule.shape_is_empty`).
+- `Lambda_scc.bind_rec` splits `let rec` groups at translation
+  (`raw_lambda/lambda_scc.rs`, with one dependency row per binding); lowering
+  no longer reorders recursive bindings.
+- The `.cmj` reader decodes `Lambda.t` (lfunction without arity, `ap_info`
+  without status, the new constant, tag and primitive layouts).
+- The OCaml debug printers follow `Lambda.t`
+  (`compiler/core/sexp_lambda.ml`).
+
+Gates (release): JS output parity 628/628, typedtree parity 628/628, error
+output parity 1884/1884, syntax tests green, compiler tests 1346/1347
+(`parse_inline_for`, independent), rewatch unit tests 147/147 and
+`rewatch/tests/suite.sh` green. The runtime and Belt built by the Rust
+compiler match the checked-in JavaScript.

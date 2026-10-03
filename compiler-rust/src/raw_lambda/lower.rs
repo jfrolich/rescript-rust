@@ -63,7 +63,7 @@ impl<'a> LoweringContext<'a> {
             RawLambda::Lprim(info) => {
                 self.lower_primitive(info.primitive, info.args, info.loc)
             }
-            RawLambda::Lswitch(scrutinee, switch, _) => self.lower_switch(*scrutinee, *switch),
+            RawLambda::Lswitch(scrutinee, switch) => self.lower_switch(*scrutinee, *switch),
             RawLambda::LstringSwitch(scrutinee, cases, default) => {
                 // `Lam.stringswitch (convert_aux e) ... (convert_aux default)` depends on
                 // OCaml's right-to-left argument evaluation, so lower the tail before
@@ -187,12 +187,6 @@ impl<'a> LoweringContext<'a> {
         let lowered_value = self.lower_lambda(value);
         let lowered_body = self.lower_lambda(body);
 
-        if kind == LetKind::Alias {
-            if let Some(rewritten) = fold_offset_switch_alias(&id, &lowered_value, &lowered_body) {
-                return rewritten;
-            }
-        }
-
         Lambda::let_(kind, id, lowered_value, lowered_body)
     }
 
@@ -202,7 +196,9 @@ impl<'a> LoweringContext<'a> {
             .map(|(id, lam)| (id, self.lower_lambda(lam)))
             .collect::<Vec<_>>();
         let lowered_body = self.lower_lambda(body);
-        rebuild_recursive_bindings(lowered_bindings, lowered_body)
+        // `Lambda_scc.bind_rec` already split the group at translation
+        // (compiler/ml/lambda_scc.ml); conversion is the identity.
+        Lambda::letrec(lowered_bindings, lowered_body)
     }
 
     fn lower_primitive(
@@ -231,8 +227,6 @@ impl<'a> LoweringContext<'a> {
 
         match primitive {
             Primitive::Pidentity => args.into_iter().next().unwrap_or_else(Lambda::unit),
-            Primitive::Pnull => Lambda::const_(Constant::JsNull),
-            Primitive::Pundefined => Lambda::const_(Constant::JsUndefined { is_unit: false }),
             Primitive::PextensionSlotEq => match args.as_slice() {
                 [lhs, rhs] => Lambda::prim(
                     Primitive::Pstringcomp(Comparison::Eq),
@@ -272,47 +266,7 @@ impl<'a> LoweringContext<'a> {
                 Lambda::prim(Primitive::PsomeNotNest, args, loc)
             }
             Primitive::Pmakeblock(TagInfo::Some, _) => Lambda::prim(Primitive::Psome, args, loc),
-            Primitive::Pisout(range) => match args.as_slice() {
-                [Lambda::Lprim(inner)]
-                    if inner.args.len() == 1
-                        && matches!(inner.primitive, Primitive::Poffsetint(_)) =>
-                {
-                    let Primitive::Poffsetint(offset) = inner.primitive.clone() else {
-                        unreachable!();
-                    };
-                    Lambda::prim(
-                        Primitive::Pisout(offset),
-                        vec![
-                            Lambda::const_(Constant::Int {
-                                i: range,
-                                comment: None,
-                            }),
-                            inner.args[0].clone(),
-                        ],
-                        loc,
-                    )
-                }
-                [arg] => Lambda::prim(
-                    Primitive::Pisout(0),
-                    vec![
-                        Lambda::const_(Constant::Int {
-                            i: range,
-                            comment: None,
-                        }),
-                        arg.clone(),
-                    ],
-                    loc,
-                ),
-                _ => Lambda::prim(Primitive::Pisout(range), args, loc),
-            },
-            primitive @ Primitive::PinitMod => match args.as_slice() {
-                [_, shape] if is_empty_module_shape_constant(shape) => Lambda::unit(),
-                _ => Lambda::prim(primitive, args, loc),
-            },
-            primitive @ Primitive::PupdateMod => match args.as_slice() {
-                [shape, _, _] if is_empty_module_shape_constant(shape) => Lambda::unit(),
-                _ => lower_primitive_default(primitive, args, loc),
-            },
+            primitive @ Primitive::PinitMod => Lambda::prim(primitive, args, loc),
             other => lower_primitive_default(other, args, loc),
         }
     }
@@ -324,7 +278,7 @@ impl<'a> LoweringContext<'a> {
         // other way around.
         let const_only_switch = switch.sw_failaction.is_none()
             && switch.sw_blocks.is_empty()
-            && switch.sw_numblocks == 0;
+            && switch.sw_blocks_full;
         let lowered_consts = switch
             .sw_consts
             .into_iter()
@@ -363,7 +317,7 @@ impl<'a> LoweringContext<'a> {
             Lambda::Lswitch(
                 Box::new(lowered_scrutinee),
                 Box::new(LambdaSwitch {
-                    sw_consts_full: lowered_consts.len() >= switch.sw_numconsts,
+                    sw_consts_full: switch.sw_consts_full,
                     sw_consts: lowered_consts,
                     sw_blocks_full: true,
                     sw_blocks: lowered_blocks,
@@ -375,9 +329,9 @@ impl<'a> LoweringContext<'a> {
             Lambda::Lswitch(
                 Box::new(lowered_scrutinee),
                 Box::new(LambdaSwitch {
-                    sw_consts_full: lowered_consts.len() >= switch.sw_numconsts,
+                    sw_consts_full: switch.sw_consts_full,
                     sw_consts: lowered_consts,
-                    sw_blocks_full: lowered_blocks.len() >= switch.sw_numblocks,
+                    sw_blocks_full: switch.sw_blocks_full,
                     sw_blocks: lowered_blocks,
                     sw_failaction: lowered_failaction,
                     sw_dispatch: switch.sw_dispatch,
@@ -437,7 +391,7 @@ fn collect_exported_idents(raw: &RawLambda, exports: &mut HashSet<Ident>) {
                 collect_exported_idents(arg, exports);
             }
         }
-        RawLambda::Lswitch(scrutinee, switch, _) => {
+        RawLambda::Lswitch(scrutinee, switch) => {
             collect_exported_idents(scrutinee, exports);
             for (_, lam) in &switch.sw_consts {
                 collect_exported_idents(lam, exports);
@@ -945,17 +899,6 @@ fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: Locatio
     Lambda::prim(primitive, args, loc)
 }
 
-fn is_empty_module_shape_constant(lam: &Lambda) -> bool {
-    matches!(
-        lam,
-        Lambda::Lconst(Constant::Block { elements, .. })
-            if matches!(
-                elements.as_slice(),
-                [Constant::Block { elements: inner, .. }] if inner.is_empty()
-            )
-    )
-}
-
 fn int_constant_value(lam: &Lambda) -> Option<i32> {
     match lam {
         Lambda::Lconst(Constant::Int { i, comment: None }) => Some(*i),
@@ -1131,377 +1074,6 @@ fn exception_id_destructed(lam: &Lambda, exn: &Ident) -> bool {
     }
 }
 
-fn hit_variable(target: &Ident, lam: &Lambda) -> bool {
-    match lam {
-        Lambda::Lvar(id) => id.same(target),
-        Lambda::LglobalModule(_) | Lambda::Lconst(_) => false,
-        Lambda::Lapply(apply) => {
-            hit_variable(target, &apply.ap_func)
-                || apply.ap_args.iter().any(|arg| hit_variable(target, arg))
-        }
-        Lambda::Lfunction(func) => hit_variable(target, &func.body),
-        Lambda::Llet(_, _, value, body) => {
-            hit_variable(target, value) || hit_variable(target, body)
-        }
-        Lambda::Lletrec(bindings, body) => {
-            hit_variable(target, body) || bindings.iter().any(|(_, lam)| hit_variable(target, lam))
-        }
-        Lambda::Lprim(info) => info.args.iter().any(|arg| hit_variable(target, arg)),
-        Lambda::Lswitch(arg, switch) => {
-            hit_variable(target, arg)
-                || switch
-                    .sw_consts
-                    .iter()
-                    .any(|(_, lam)| hit_variable(target, lam))
-                || switch
-                    .sw_blocks
-                    .iter()
-                    .any(|(_, lam)| hit_variable(target, lam))
-                || switch
-                    .sw_failaction
-                    .as_deref()
-                    .is_some_and(|lam| hit_variable(target, lam))
-        }
-        Lambda::LstringSwitch(arg, cases, default) => {
-            hit_variable(target, arg)
-                || cases.iter().any(|(_, lam)| hit_variable(target, lam))
-                || default
-                    .as_deref()
-                    .is_some_and(|lam| hit_variable(target, lam))
-        }
-        Lambda::LstaticRaise(_, args) => args.iter().any(|arg| hit_variable(target, arg)),
-        Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
-            hit_variable(target, body) || hit_variable(target, handler)
-        }
-        Lambda::LifThenElse(cond, then_, else_) => {
-            hit_variable(target, cond) || hit_variable(target, then_) || hit_variable(target, else_)
-        }
-        Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
-            hit_variable(target, first) || hit_variable(target, second)
-        }
-        Lambda::Lfor(_, start, end, _, body) => {
-            hit_variable(target, start) || hit_variable(target, end) || hit_variable(target, body)
-        }
-        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
-            hit_variable(target, iterable) || hit_variable(target, body)
-        }
-        Lambda::Lbreak | Lambda::Lcontinue => false,
-        Lambda::Lassign(id, value) => id.same(target) || hit_variable(target, value),
-    }
-}
-
-fn fold_offset_switch_alias(id: &Ident, value: &Lambda, body: &Lambda) -> Option<Lambda> {
-    let Lambda::Lprim(info) = value else {
-        return None;
-    };
-    let Primitive::Poffsetint(offset) = info.primitive else {
-        return None;
-    };
-    let [matcher] = info.args.as_slice() else {
-        return None;
-    };
-    let Lambda::Lswitch(scrutinee, switch) = body else {
-        return None;
-    };
-    let Lambda::Lvar(switch_id) = scrutinee.as_ref() else {
-        return None;
-    };
-    if !switch_id.same(id) {
-        return None;
-    }
-    if !switch.sw_blocks.is_empty() {
-        return None;
-    }
-    if switch
-        .sw_failaction
-        .as_deref()
-        .is_some_and(|lam| hit_variable(id, lam))
-    {
-        return None;
-    }
-    if switch
-        .sw_consts
-        .iter()
-        .any(|(_, lam)| hit_variable(id, lam))
-    {
-        return None;
-    }
-
-    Some(Lambda::Lswitch(
-        Box::new(matcher.clone()),
-        Box::new(LambdaSwitch {
-            sw_consts_full: switch.sw_consts_full,
-            sw_consts: switch
-                .sw_consts
-                .iter()
-                .map(|(key, lam)| match key {
-                    crate::lambda::SwitchKey::Int(value) => {
-                        (crate::lambda::SwitchKey::Int(*value - offset), lam.clone())
-                    }
-                    crate::lambda::SwitchKey::Constructor(_) => {
-                        unreachable!("offset constructor switch")
-                    }
-                })
-                .collect(),
-            sw_blocks_full: switch.sw_blocks_full,
-            sw_blocks: Vec::new(),
-            sw_failaction: switch.sw_failaction.clone(),
-            sw_dispatch: switch.sw_dispatch.clone(),
-        }),
-    ))
-}
-
-fn rebuild_recursive_bindings(bindings: Vec<(Ident, Lambda)>, body: Lambda) -> Lambda {
-    match bindings.as_slice() {
-        [] => body,
-        [(id, bind)] => {
-            if hit_variable(id, bind) {
-                Lambda::letrec(bindings, body)
-            } else {
-                Lambda::let_(LetKind::Strict, id.clone(), bind.clone(), body)
-            }
-        }
-        _ => {
-            if bindings.iter().all(|(id, bind)| hit_variable(id, bind)) {
-                return Lambda::letrec(bindings, body);
-            }
-            let deps = binding_dependencies(&bindings);
-            let components = strongly_connected_binding_components(&deps);
-            if components.len() <= 1 {
-                Lambda::letrec(bindings, body)
-            } else {
-                rebuild_component_groups(&bindings, &deps, components, body)
-            }
-        }
-    }
-}
-
-enum RecursiveComponentGroup {
-    Strict(usize),
-    Recursive(Vec<usize>),
-}
-
-fn rebuild_component_groups(
-    bindings: &[(Ident, Lambda)],
-    deps: &[Vec<usize>],
-    components: Vec<Vec<usize>>,
-    body: Lambda,
-) -> Lambda {
-    let mut groups: Vec<RecursiveComponentGroup> = Vec::new();
-
-    for component in components {
-        if let [index] = component.as_slice() {
-            if !deps[*index].contains(index) && !has_incoming_dependency(*index, deps) {
-                groups.push(RecursiveComponentGroup::Strict(*index));
-                continue;
-            }
-        }
-
-        match groups.last_mut() {
-            Some(RecursiveComponentGroup::Recursive(indices)) => indices.extend(component),
-            _ => groups.push(RecursiveComponentGroup::Recursive(component)),
-        }
-    }
-
-    groups
-        .into_iter()
-        .rev()
-        .fold(body, |acc, group| match group {
-            RecursiveComponentGroup::Strict(index) => {
-                let (id, bind) = bindings[index].clone();
-                Lambda::let_(LetKind::Strict, id, bind, acc)
-            }
-            RecursiveComponentGroup::Recursive(indices) => {
-                let group = indices
-                    .into_iter()
-                    .map(|index| bindings[index].clone())
-                    .collect::<Vec<_>>();
-                Lambda::letrec(group, acc)
-            }
-        })
-}
-
-fn has_incoming_dependency(target: usize, deps: &[Vec<usize>]) -> bool {
-    deps.iter()
-        .enumerate()
-        .any(|(source, outgoing)| source != target && outgoing.contains(&target))
-}
-
-fn binding_dependencies(bindings: &[(Ident, Lambda)]) -> Vec<Vec<usize>> {
-    let len = bindings.len();
-    if len == 0 {
-        return Vec::new();
-    }
-
-    // OCaml's Lam_scc.preprocess_deps accidentally shares one Vec_int across
-    // every row (`Array.make ... (Vec_int.empty ())`) at lam_scc.ml:80-88.
-    // Preserve that exact dependency graph: each row receives the union of all
-    // group-local hits, appended in Ordered_hash_map_local_ident.iter order.
-    let domain_order = ocaml_local_ident_hash_iteration_order(bindings);
-    let mask_order = ocaml_ident_mask_iteration_order(bindings);
-    let mut shared = Vec::new();
-
-    for binding_index in domain_order {
-        let lam = &bindings[binding_index].1;
-        for dep_index in &mask_order {
-            if hit_variable(&bindings[*dep_index].0, lam) {
-                shared.push(*dep_index);
-            }
-        }
-    }
-
-    vec![shared; len]
-}
-
-fn ocaml_local_ident_hash_iteration_order(bindings: &[(Ident, Lambda)]) -> Vec<usize> {
-    let bucket_len = ocaml_hashtbl_power_2_above(16, bindings.len());
-    let mut buckets = vec![Vec::<usize>::new(); bucket_len];
-    for (index, (id, _)) in bindings.iter().enumerate() {
-        let bucket = (ocaml_hash_int(id.stamp()) as usize) & (bucket_len - 1);
-        buckets[bucket].insert(0, index);
-    }
-    buckets.into_iter().flatten().collect()
-}
-
-fn ocaml_ident_mask_iteration_order(bindings: &[(Ident, Lambda)]) -> Vec<usize> {
-    let bucket_len = ocaml_hashtbl_power_2_above(8, bindings.len());
-    let mut buckets = vec![Vec::<usize>::new(); bucket_len];
-    for (index, (id, _)) in bindings.iter().enumerate() {
-        let bucket = (ocaml_hash_string_int(id.name(), id.stamp()) as usize) & (bucket_len - 1);
-        buckets[bucket].insert(0, index);
-    }
-    buckets.into_iter().flatten().collect()
-}
-
-fn ocaml_hashtbl_power_2_above(mut x: usize, n: usize) -> usize {
-    while x < n {
-        x <<= 1;
-    }
-    x
-}
-
-fn ocaml_hash_int(i: i32) -> u32 {
-    ocaml_hash_final_mix(ocaml_hash_mix_uint32(0, ocaml_tagged_int_bits(i))) & 0x3fff_ffff
-}
-
-fn ocaml_hash_string_int(s: &str, i: i32) -> u32 {
-    let h = ocaml_hash_mix_string(0, s);
-    ocaml_hash_final_mix(ocaml_hash_mix_uint32(h, ocaml_tagged_int_bits(i))) & 0x3fff_ffff
-}
-
-fn ocaml_tagged_int_bits(i: i32) -> u32 {
-    ((i as u32) << 1) | 1
-}
-
-fn ocaml_hash_mix_string(mut h: u32, s: &str) -> u32 {
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let mut i = 0usize;
-
-    while i + 4 <= len {
-        let word = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
-        h = ocaml_hash_mix_uint32(h, word);
-        i += 4;
-    }
-
-    let rem = len & 3;
-    if rem != 0 {
-        let mut word = 0u32;
-        if rem >= 3 {
-            word |= (bytes[i + 2] as u32) << 16;
-        }
-        if rem >= 2 {
-            word |= (bytes[i + 1] as u32) << 8;
-        }
-        word |= bytes[i] as u32;
-        h = ocaml_hash_mix_uint32(h, word);
-    }
-
-    h ^ (len as u32)
-}
-
-fn ocaml_hash_mix_uint32(mut h: u32, mut d: u32) -> u32 {
-    d = d.wrapping_mul(0xcc9e2d51);
-    d = d.rotate_left(15);
-    d = d.wrapping_mul(0x1b873593);
-    h ^= d;
-    h = h.rotate_left(13);
-    h = h.wrapping_mul(5).wrapping_add(0xe6546b64);
-    h
-}
-
-fn ocaml_hash_final_mix(mut h: u32) -> u32 {
-    h ^= h >> 16;
-    h = h.wrapping_mul(0x85ebca6b);
-    h ^= h >> 13;
-    h = h.wrapping_mul(0xc2b2ae35);
-    h ^= h >> 16;
-    h
-}
-
-fn strongly_connected_binding_components(deps: &[Vec<usize>]) -> Vec<Vec<usize>> {
-    struct TarjanState {
-        index: usize,
-        stack: Vec<usize>,
-        on_stack: Vec<bool>,
-        indices: Vec<Option<usize>>,
-        lowlink: Vec<usize>,
-        components: Vec<Vec<usize>>,
-    }
-
-    fn strong_connect(node: usize, deps: &[Vec<usize>], state: &mut TarjanState) {
-        state.indices[node] = Some(state.index);
-        state.lowlink[node] = state.index;
-        state.index += 1;
-        state.stack.push(node);
-        state.on_stack[node] = true;
-
-        for &dep in &deps[node] {
-            if state.indices[dep].is_none() {
-                strong_connect(dep, deps, state);
-                state.lowlink[node] = state.lowlink[node].min(state.lowlink[dep]);
-            } else if state.on_stack[dep] {
-                state.lowlink[node] =
-                    state.lowlink[node].min(state.indices[dep].expect("visited node"));
-            }
-        }
-
-        if state.lowlink[node] == state.indices[node].expect("visited node") {
-            let mut component = Vec::new();
-            loop {
-                let current = state.stack.pop().expect("tarjan stack");
-                state.on_stack[current] = false;
-                component.push(current);
-                if current == node {
-                    break;
-                }
-            }
-            // OCaml's Ext_scc.graph returns the contiguous stack range in stack
-            // order (`Vec_int.get_and_delete_range`) at ext_scc.ml:80-91.
-            component.reverse();
-            state.components.push(component);
-        }
-    }
-
-    let len = deps.len();
-    let mut state = TarjanState {
-        index: 0,
-        stack: Vec::new(),
-        on_stack: vec![false; len],
-        indices: vec![None; len],
-        lowlink: vec![0; len],
-        components: Vec::new(),
-    };
-
-    for node in 0..len {
-        if state.indices[node].is_none() {
-            strong_connect(node, &deps, &mut state);
-        }
-    }
-
-    state.components
-}
-
 /// Lower raw lambda into the existing JS-facing Lambda IR.
 fn max_ident_stamp(raw: &RawLambda) -> i32 {
     fn visit_ident(max_stamp: &mut i32, id: &Ident) {
@@ -1547,7 +1119,7 @@ fn max_ident_stamp(raw: &RawLambda) -> i32 {
                     visit_raw(max_stamp, arg);
                 }
             }
-            RawLambda::Lswitch(scrutinee, switch, _) => {
+            RawLambda::Lswitch(scrutinee, switch) => {
                 visit_raw(max_stamp, scrutinee);
                 for (_, lam) in &switch.sw_consts {
                     visit_raw(max_stamp, lam);
@@ -2084,8 +1656,7 @@ mod tests {
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(RawLambda::var(Ident::create_local("v"))),
             Box::new(RawLambdaSwitch {
-                sw_numconsts: 1,
-                sw_consts_full: false,
+                sw_consts_full: true,
                 sw_consts: vec![(
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
@@ -2095,8 +1666,7 @@ mod tests {
                     ),
                     RawLambda::const_(Constant::int(0)),
                 )],
-                sw_numblocks: 0,
-                sw_blocks_full: false,
+                sw_blocks_full: true,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
                 sw_dispatch: crate::lambda::SwitchDispatch::Variant(
@@ -2112,7 +1682,6 @@ mod tests {
                     },
                 ),
             }),
-            Location::none(),
         ));
 
         let Lambda::Lswitch(_, switch) = lowered else {
@@ -2127,7 +1696,6 @@ mod tests {
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(RawLambda::var(Ident::create_local("v"))),
             Box::new(RawLambdaSwitch {
-                sw_numconsts: 3,
                 sw_consts_full: false,
                 sw_consts: vec![
                     (
@@ -2139,13 +1707,11 @@ mod tests {
                         RawLambda::const_(Constant::int(9)),
                     ),
                 ],
-                sw_numblocks: 0,
-                sw_blocks_full: false,
+                sw_blocks_full: true,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             }),
-            Location::none(),
         ));
 
         let Lambda::Lswitch(_, switch) = lowered else {
@@ -2258,19 +1824,16 @@ mod tests {
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(raw_exit_alias(7, 8)),
             Box::new(RawLambdaSwitch {
-                sw_numconsts: 1,
                 sw_consts_full: true,
                 sw_consts: vec![(
                     crate::lambda::SwitchKey::Int(0),
                     RawLambda::LstaticRaise(7, Vec::new()),
                 )],
-                sw_numblocks: 0,
-                sw_blocks_full: false,
+                sw_blocks_full: true,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             }),
-            Location::none(),
         ));
 
         let Lambda::Lswitch(scrutinee, switch) = lowered else {
@@ -2291,16 +1854,13 @@ mod tests {
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(RawLambda::LstaticRaise(7, Vec::new())),
             Box::new(RawLambdaSwitch {
-                sw_numconsts: 0,
-                sw_consts_full: false,
+                sw_consts_full: true,
                 sw_consts: Vec::new(),
-                sw_numblocks: 0,
-                sw_blocks_full: false,
+                sw_blocks_full: true,
                 sw_blocks: Vec::new(),
                 sw_failaction: Some(Box::new(raw_exit_alias(7, 8))),
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             }),
-            Location::none(),
         ));
 
         let Lambda::Lswitch(scrutinee, switch) = lowered else {
@@ -2322,7 +1882,6 @@ mod tests {
         let lowered = lower_to_lambda(RawLambda::Lswitch(
             Box::new(RawLambda::var(scrutinee.clone())),
             Box::new(RawLambdaSwitch {
-                sw_numconsts: 2,
                 sw_consts_full: true,
                 sw_consts: vec![
                     (
@@ -2348,8 +1907,7 @@ mod tests {
                         RawLambda::const_(Constant::int(1)),
                     ),
                 ],
-                sw_numblocks: 0,
-                sw_blocks_full: false,
+                sw_blocks_full: true,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
                 sw_dispatch: crate::lambda::SwitchDispatch::Variant(
@@ -2366,7 +1924,6 @@ mod tests {
                     },
                 ),
             }),
-            Location::none(),
         ));
 
         let Lambda::Lswitch(arg, switch) = lowered else {
@@ -2377,147 +1934,6 @@ mod tests {
         };
         assert!(id.same(&scrutinee));
         assert_eq!(switch.sw_consts.len(), 2);
-    }
-
-    #[test]
-    fn lowers_const_only_switch_with_full_blocks_for_if_rewrite() {
-        let loc = Location::none();
-        let scrutinee = Ident::create_local("x");
-        let exit = 1;
-        let lowered = lower_to_lambda(RawLambda::LifThenElse(
-            Box::new(RawLambda::prim(
-                Primitive::Pisout(2),
-                vec![RawLambda::prim(
-                    Primitive::Poffsetint(-1),
-                    vec![RawLambda::var(scrutinee.clone())],
-                    loc.clone(),
-                )],
-                loc.clone(),
-            )),
-            Box::new(RawLambda::LstaticRaise(exit, Vec::new())),
-            Box::new(RawLambda::Lswitch(
-                Box::new(RawLambda::var(scrutinee.clone())),
-                Box::new(RawLambdaSwitch {
-                    sw_numconsts: 3,
-                    sw_consts_full: false,
-                    sw_consts: vec![
-                        (
-                            crate::lambda::SwitchKey::Int(1),
-                            RawLambda::const_(Constant::Char(97)),
-                        ),
-                        (
-                            crate::lambda::SwitchKey::Int(2),
-                            RawLambda::const_(Constant::Char(98)),
-                        ),
-                        (
-                            crate::lambda::SwitchKey::Int(3),
-                            RawLambda::const_(Constant::Char(99)),
-                        ),
-                    ],
-                    sw_numblocks: 0,
-                    sw_blocks_full: false,
-                    sw_blocks: Vec::new(),
-                    sw_failaction: None,
-                    sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-                }),
-                loc,
-            )),
-        ));
-
-        let Lambda::Lswitch(switch_arg, switch) = lowered else {
-            panic!("expected if/switch lowering to rewrite into a switch");
-        };
-        let Lambda::Lvar(id) = switch_arg.as_ref() else {
-            panic!("expected switch scrutinee to remain a variable");
-        };
-        assert!(id.same(&scrutinee));
-        assert!(switch.sw_blocks_full);
-        assert!(matches!(
-            switch.sw_failaction.as_deref(),
-            Some(Lambda::LstaticRaise(id, args)) if *id == exit && args.is_empty()
-        ));
-    }
-
-    #[test]
-    fn splits_non_recursive_binding_out_of_letrec() {
-        let fake_y = Ident::create_local("fake_y");
-        let fake_z = Ident::create_local("fake_z");
-        let raw = RawLambda::letrec(
-            vec![
-                (
-                    fake_y.clone(),
-                    RawLambda::prim(
-                        Primitive::Pmakeblock(
-                            TagInfo::Tuple,
-                            crate::lambda::lam_primitive::Mutable::Immutable,
-                        ),
-                        vec![RawLambda::var(fake_y.clone())],
-                        Location::none(),
-                    ),
-                ),
-                (
-                    fake_z.clone(),
-                    RawLambda::prim(
-                        Primitive::Pmakeblock(
-                            TagInfo::Tuple,
-                            crate::lambda::lam_primitive::Mutable::Immutable,
-                        ),
-                        vec![RawLambda::var(fake_y.clone())],
-                        Location::none(),
-                    ),
-                ),
-            ],
-            RawLambda::var(fake_z.clone()),
-        );
-
-        let lowered = lower_to_lambda(raw);
-        let Lambda::Lletrec(bindings, body) = lowered else {
-            panic!("expected outer letrec");
-        };
-        assert_eq!(bindings.len(), 1);
-        assert!(bindings[0].0.same(&fake_y));
-        let Lambda::Llet(LetKind::Strict, id, _, _) = *body else {
-            panic!("expected strict let after letrec");
-        };
-        assert!(id.same(&fake_z));
-    }
-
-    #[test]
-    fn keeps_fully_recursive_function_groups_in_single_letrec() {
-        let find_end = Ident::create_local("find_end");
-        let find_beg = Ident::create_local("find_beg");
-        let end_param = Ident::create_local("n");
-        let beg_param = Ident::create_local("p");
-
-        let function_attr = FunctionAttribute::default();
-        let find_end_binding = Lambda::function_(
-            1,
-            vec![end_param],
-            Lambda::seq(Lambda::var(find_end.clone()), Lambda::var(find_beg.clone())),
-            function_attr.clone(),
-        );
-        let find_beg_binding = Lambda::function_(
-            1,
-            vec![beg_param],
-            Lambda::var(find_beg.clone()),
-            function_attr,
-        );
-
-        let lowered = rebuild_recursive_bindings(
-            vec![
-                (find_end.clone(), find_end_binding),
-                (find_beg.clone(), find_beg_binding),
-            ],
-            Lambda::var(find_end.clone()),
-        );
-
-        let Lambda::Lletrec(bindings, body) = lowered else {
-            panic!("expected a single letrec");
-        };
-        assert_eq!(bindings.len(), 2);
-        assert!(bindings[0].0.same(&find_end));
-        assert!(bindings[1].0.same(&find_beg));
-        assert!(matches!(body.as_ref(), Lambda::Lvar(id) if id.same(&find_end)));
     }
 
     #[test]

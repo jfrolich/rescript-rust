@@ -1194,16 +1194,6 @@ fn is_valid_tag_as_payload(payload: &Payload, arena: &ParseArena) -> bool {
     }
 }
 
-/// OCaml `Ext_string.is_valid_hash_number`.
-fn is_valid_hash_number(value: &str) -> bool {
-    match value.as_bytes() {
-        [] => false,
-        [b'0'..=b'9'] => true,
-        [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
-        _ => false,
-    }
-}
-
 /// OCaml `Bs_ast_invariant.check_constant` (bs_ast_invariant.ml:54-64): an
 /// integer literal without suffix that `Int32.of_string` rejects warns.
 fn check_constant(loc: LocIdx, constant: &Constant, warnings: &mut Vec<PpxWarning>) {
@@ -1339,16 +1329,6 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
             ExpressionDesc::Pexp_constant(constant) => {
                 if !self.stopped {
                     check_constant(expr.pexp_loc, constant, self.warnings);
-                }
-            }
-            ExpressionDesc::Pexp_variant(inner)
-                if inner.1.is_none() && is_valid_hash_number(&inner.0) =>
-            {
-                if inner.0.parse::<i32>().is_err() {
-                    self.raise(
-                        expr.pexp_loc,
-                        "Integer literal exceeds int32 range. Use float or BigInt if larger values are required.",
-                    );
                 }
             }
             _ => super::ast_iter::walk_expr(self, arena, idx),

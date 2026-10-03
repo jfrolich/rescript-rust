@@ -161,9 +161,9 @@ pub enum Primitive {
     Plsrint,
     /// Arithmetic right shift
     Pasrint,
-    /// Add offset to integer
-    Poffsetint(i32),
-    /// Add offset to reference
+    /// `%incr` / `%decr`: OCaml `Lambda.Offset_ref`, a builtin expanded to
+    /// `r := r.contents + delta` when raw lambda is lowered; it never reaches
+    /// Lam.
     Poffsetref(i32),
     /// Integer comparison
     Pintcomp(Comparison),
@@ -291,8 +291,6 @@ pub enum Primitive {
     Pignore,
     /// Check if polyvar block
     PisPolyVarBlock,
-    /// Check if out of range
-    Pisout(i32),
     /// JavaScript comparison
     Pjscomp(Comparison),
     /// Apply function
@@ -323,10 +321,6 @@ pub enum Primitive {
     PisUndefined,
     /// Is null or undefined
     PisNullUndefined,
-    /// Null constant (raw lambda only, 0 args)
-    Pnull,
-    /// Undefined constant (raw lambda only, 0 args)
-    Pundefined,
     /// Dynamic import of a translation-resolved source
     Pimport(Box<ImportSource>),
     /// Typeof
@@ -489,7 +483,7 @@ impl Primitive {
             // them like the simple list — `self == other` matches when both
             // are the same constructor. This is the safe and consistent
             // generalization (no payload to compare differently).
-            Pidentity | Pignore | PextensionSlotEq | Pnull | Pundefined => self == other,
+            Pidentity | Pignore | PextensionSlotEq => self == other,
 
             // lam_primitive.ml:233-236
             PcreateExtension(a) => match other {
@@ -497,10 +491,6 @@ impl Primitive {
                 _ => false,
             },
             // lam_primitive.ml:237-240
-            Pisout(l) => match other {
-                Pisout(r) => l == r,
-                _ => false,
-            },
             // lam_primitive.ml:242-245
             Pfield(n0, info0) => match other {
                 Pfield(n1, info1) => n0 == n1 && info0 == info1,
@@ -554,15 +544,7 @@ impl Primitive {
             Pstringcomp(c) => matches!(other, Pstringcomp(c2) if c == c2),
             Pboolcomp(c) => matches!(other, Pboolcomp(c2) if c == c2),
             // lam_primitive.ml:285-288
-            Poffsetint(i0) => match other {
-                Poffsetint(i1) => i0 == i1,
-                _ => false,
-            },
             // lam_primitive.ml:289-292
-            Poffsetref(i0) => match other {
-                Poffsetref(i1) => i0 == i1,
-                _ => false,
-            },
             PjsObjectGet(name) => match other {
                 PjsObjectGet(rhs_name) => name == rhs_name,
                 _ => false,
@@ -571,6 +553,8 @@ impl Primitive {
                 PjsObjectSet(rhs_name) => name == rhs_name,
                 _ => false,
             },
+            // Expanded when raw lambda is lowered; never compared in Lam.
+            Poffsetref(i0) => matches!(other, Poffsetref(i1) if i0 == i1),
             // lam_primitive.ml:298
             PrawJsCode(_) => false,
         }
@@ -593,8 +577,6 @@ mod tests {
             !Primitive::Pintcomp(Comparison::Eq).eq_approx(&Primitive::Pintcomp(Comparison::Neq))
         );
 
-        assert!(Primitive::Poffsetint(5).eq_approx(&Primitive::Poffsetint(5)));
-        assert!(!Primitive::Poffsetint(5).eq_approx(&Primitive::Poffsetint(10)));
     }
 
     #[test]

@@ -3371,6 +3371,17 @@ fn type_mod_error_to_anyhow_styled(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::PolyvarLiteralOverflow { loc }) => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "Integer literal exceeds int32 range. Use float or BigInt if larger values are required.",
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::UnknownLiteral {
             loc,
             literal,

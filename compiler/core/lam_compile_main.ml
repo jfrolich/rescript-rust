@@ -128,28 +128,26 @@ let js_hoisted_aliases (export_ids : Ident.t list)
       | [] -> base
       | (pos, name) :: fields ->
         access loc
-          (Lam.prim
-             ~primitive:
-               (Lam_primitive.Pfield (pos, Lam_compat.Fld_module {name}))
+          (Lambda.prim
+             ~primitive:(Lambda.Pfield (pos, Lambda.Fld_module {name}))
              ~args:[base] loc)
           fields
     in
     let rec resolve_binding seen = function
-      | Lam.Lvar id as lam -> (
+      | Lambda.Lvar id as lam -> (
         if Set_ident.mem seen id then (lam, Some id)
         else
           match Map_ident.find_opt group_map id with
           | Some
-              ((Lam.Lvar _ | Lam.Lprim {primitive = Lam_primitive.Pfield _; _})
+              ((Lambda.Lvar _ | Lambda.Lprim {primitive = Lambda.Pfield _; _})
                as alias) ->
             resolve_binding (Set_ident.add seen id) alias
           | Some resolved -> (resolved, Some id)
           | None -> (lam, Some id))
-      | Lam.Lprim {primitive = Lam_primitive.Pfield (pos, _); args = [base]} as
-        lam -> (
+      | Lambda.Lprim {primitive = Lambda.Pfield (pos, _); args = [base]} as lam
+        -> (
         match fst (resolve_binding seen base) with
-        | Lam.Lprim
-            {primitive = Lam_primitive.Pmakeblock (Blk_module _, _); args} -> (
+        | Lambda.Lprim {primitive = Lambda.Pmakeblock (Blk_module _); args} -> (
           match List.nth_opt args pos with
           | Some field -> resolve_binding seen field
           | None -> (lam, None))
@@ -171,8 +169,7 @@ let js_hoisted_aliases (export_ids : Ident.t list)
         Some (List.rev positions, binding_id, target)
       | field :: fields -> (
         match resolve Set_ident.empty lam with
-        | Lam.Lprim
-            {primitive = Lam_primitive.Pmakeblock (Blk_module names, _); args}
+        | Lambda.Lprim {primitive = Lambda.Pmakeblock (Blk_module names); args}
           -> (
           match find_field field 0 names args with
           | Some (pos, arg) -> find_path arg fields ((pos, field) :: positions)
@@ -220,7 +217,7 @@ let js_hoisted_aliases (export_ids : Ident.t list)
                    if Set_string.mem occupied_names js_name then
                      let error_loc =
                        match target with
-                       | Lam.Lfunction {loc} -> loc
+                       | Lambda.Lfunction {loc} -> loc
                        | _ -> loc
                      in
                      Location.raise_errorf ~loc:error_loc
@@ -229,7 +226,7 @@ let js_hoisted_aliases (export_ids : Ident.t list)
                        name
                    else
                      let alias_id = Ident.create name in
-                     let alias = access loc (Lam.var top_id) access_path in
+                     let alias = access loc (Lambda.var top_id) access_path in
                      ( ( Lam_group.Single (Alias, alias_id, alias),
                          alias_id,
                          alias,
@@ -242,11 +239,28 @@ let js_hoisted_aliases (export_ids : Ident.t list)
              | None -> missing_path ())
            | [] -> missing_path ()))
 
+(* The other compilation units this one refers to. Conversion used to drop
+   [Lglobal_module] references and have module analysis add them back (see
+   #3852); they are read off the Lambda term instead. A reference the
+   optimizer deletes still has to be imported when the module it names is
+   impure. *)
+
 (** Actually simplify_lets is kind of global optimization since it requires you to know whether
     it's used or not
 *)
-let compile (output_prefix : string) export_idents hoisted (lam : Lambda.lambda)
-    =
+let required_modules (lam : Lambda.t) : Lam_module_ident.Hash_set.t =
+  let required = Lam_module_ident.Hash_set.create 0 in
+  let rec collect (lam : Lambda.t) =
+    (match lam with
+    | Lglobal_module id ->
+      Lam_module_ident.Hash_set.add required (Lam_module_ident.of_ml id)
+    | _ -> ());
+    Lambda.iter collect lam
+  in
+  collect lam;
+  required
+
+let compile (output_prefix : string) export_idents hoisted (lam : Lambda.t) =
   let debug_ir = !Js_config.debug_ir in
   let diagnostics =
     if debug_ir then Some (Ir_diagnostics.create ~output_prefix) else None
@@ -275,7 +289,10 @@ let compile (output_prefix : string) export_idents hoisted (lam : Lambda.lambda)
           Ext_log.dwarn ~__POS__ "export idents: %s/%d" id.name id.stamp);
     Lam_compile_env.reset ()
   in
-  let lam, may_required_modules = Lam_convert.convert export_ident_sets lam in
+  let may_required_modules = required_modules lam in
+  let lam =
+    Lam_pass_collapse_var_aliases.collapse ~exports:export_ident_sets lam
+  in
 
   (* Print Lambda sexp for parity testing with Rust compiler *)
   let () =
@@ -289,7 +306,6 @@ let compile (output_prefix : string) export_idents hoisted (lam : Lambda.lambda)
   let lam = Lam_pass_deep_flatten.deep_flatten lam in
   let lam = d "flatten0" lam in
   let meta : Lam_stats.t = Lam_stats.make ~export_idents ~export_ident_sets in
-  let () = Lam_pass_collect.collect_info meta lam in
   let lam =
     let lam =
       lam |> d "flatten1" |> Lam_pass_exits.simplify_exits |> d "simplify_exits"
@@ -308,18 +324,11 @@ let compile (output_prefix : string) export_idents hoisted (lam : Lambda.lambda)
     let () = Lam_pass_collect.collect_info meta lam in
     let lam = Lam_pass_remove_alias.simplify_alias meta lam in
     let lam = Lam_pass_deep_flatten.deep_flatten lam in
-    let () = Lam_pass_collect.collect_info meta lam in
-    let lam =
-      lam |> d "alpha_before"
-      |> Lam_pass_alpha_conversion.alpha_conversion meta
-      |> d "alpha_after" |> Lam_pass_exits.simplify_exits
-    in
+    let lam = lam |> Lam_pass_exits.simplify_exits in
     let () = Lam_pass_collect.collect_info meta lam in
 
     lam |> d "simplify_alias_before"
     |> Lam_pass_remove_alias.simplify_alias meta
-    |> d "alpha_conversion"
-    |> Lam_pass_alpha_conversion.alpha_conversion meta
     |> d "before-simplify_lets"
     (* we should investigate a better way to put different passes : )*)
     |> Lam_pass_lets_dce.simplify_lets
@@ -329,7 +338,7 @@ let compile (output_prefix : string) export_idents hoisted (lam : Lambda.lambda)
     (* |> Lam_group_pass.scc_pass
        |> d "scc" *)
     |> Lam_pass_exits.simplify_exits
-    |> d "simplify_lets"
+    |> Lam_pass_guard_raises.guard_raises |> d "simplify_lets"
     |> fun lam ->
     if debug_ir then
       Ext_log.dwarn ~__POS__ "Before coercion: %a@." Lam_stats.print meta;

@@ -26,7 +26,7 @@
 
 let single_na = Js_cmj_format.single_na
 
-let values_of_export (meta : Lam_stats.t) (export_map : Lam.t Map_ident.t) :
+let values_of_export (meta : Lam_stats.t) (export_map : Lambda.t Map_ident.t) :
     Js_cmj_format.cmj_value Map_string.t =
   Ext_list.fold_left meta.exports Map_string.empty (fun acc x ->
       let arity : Js_cmj_format.arity =
@@ -41,7 +41,8 @@ let values_of_export (meta : Lam_stats.t) (export_map : Lam.t Map_ident.t) :
                  | SimpleForm lam -> Lam_arity_analysis.get_arity meta lam))
         | Some _ | None -> (
           match Map_ident.find_opt export_map x with
-          | Some (Lprim {primitive = Pmakeblock (_, Immutable); args}) ->
+          | Some (Lprim {primitive = Pmakeblock info; args})
+            when Lambda.is_immutable_block info ->
             Submodule
               (Ext_array.of_list_map args (fun lam ->
                    Lam_arity_analysis.get_arity meta lam))

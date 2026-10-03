@@ -492,8 +492,6 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::PvalFromOptionNotNest => Sexp::atom("Pval_from_option_not_nest"),
         Primitive::PisUndefined => Sexp::atom("Pis_undefined"),
         Primitive::PisNullUndefined => Sexp::atom("Pis_null_undefined"),
-        Primitive::Pnull => Sexp::atom("Pnull"),
-        Primitive::Pundefined => Sexp::atom("Pundefined"),
         Primitive::Pimport(src) => {
             Sexp::list(vec![Sexp::atom("Pimport"), string(&src.debug_string())])
         }
@@ -559,7 +557,6 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::Pintorder => Sexp::atom("Pintorder"),
         Primitive::Pintmin => Sexp::atom("Pintmin"),
         Primitive::Pintmax => Sexp::atom("Pintmax"),
-        Primitive::Poffsetint(n) => Sexp::list(vec![Sexp::atom("Poffsetint"), int(*n)]),
         Primitive::Poffsetref(n) => Sexp::list(vec![Sexp::atom("Poffsetref"), int(*n)]),
         Primitive::Pintoffloat => Sexp::atom("Pintoffloat"),
         Primitive::Pfloatofint => Sexp::atom("Pfloatofint"),
@@ -610,7 +607,6 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::Parraysets => Sexp::atom("Parraysets"),
         Primitive::Pisint => Sexp::atom("Pisint"),
         Primitive::PisPolyVarBlock => Sexp::atom("Pis_poly_var_block"),
-        Primitive::Pisout(n) => Sexp::list(vec![Sexp::atom("Pisout"), int(*n)]),
         Primitive::Pawait => Sexp::atom("Pawait"),
         Primitive::PtaggedTemplate => Sexp::atom("Ptagged_template"),
         Primitive::Phash => Sexp::atom("Phash"),

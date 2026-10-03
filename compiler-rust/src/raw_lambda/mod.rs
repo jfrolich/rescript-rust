@@ -8,6 +8,7 @@
 //! can evolve independently without perturbing JS generation.
 
 pub mod convert;
+pub(crate) mod lambda_scc;
 pub mod lower;
 pub mod matching;
 pub mod print;
@@ -22,14 +23,10 @@ use crate::location::Location;
 /// Raw-lambda switch construct.
 #[derive(Debug, Clone)]
 pub struct RawLambdaSwitch {
-    /// Number of integer cases in the source switch table.
-    pub sw_numconsts: usize,
     /// Are all constant cases covered?
     pub sw_consts_full: bool,
     /// Constant case branches.
     pub sw_consts: Vec<(crate::lambda::SwitchKey, RawLambda)>,
-    /// Number of block-tag cases in the source switch table.
-    pub sw_numblocks: usize,
     /// Are all block cases covered?
     pub sw_blocks_full: bool,
     /// Block case branches.
@@ -97,7 +94,7 @@ pub enum RawLambda {
     /// Primitive operation.
     Lprim(Box<RawPrimInfo>),
     /// Switch on integer/block tag.
-    Lswitch(Box<RawLambda>, Box<RawLambdaSwitch>, Location),
+    Lswitch(Box<RawLambda>, Box<RawLambdaSwitch>),
     /// Switch on string value.
     LstringSwitch(
         Box<RawLambda>,
@@ -184,7 +181,7 @@ impl RawLambda {
                 f(body);
             }
             RawLambda::Lprim(info) => info.args.iter_mut().for_each(|arg| f(arg)),
-            RawLambda::Lswitch(arg, sw, _) => {
+            RawLambda::Lswitch(arg, sw) => {
                 f(arg);
                 sw.sw_consts.iter_mut().for_each(|(_, act)| f(act));
                 sw.sw_blocks.iter_mut().for_each(|(_, act)| f(act));
@@ -339,14 +336,12 @@ impl RawLambda {
             Lambda::Lswitch(arg, sw) => RawLambda::Lswitch(
                 Box::new(RawLambda::from_lowered(*arg)),
                 Box::new(RawLambdaSwitch {
-                    sw_numconsts: sw.sw_consts.len(),
                     sw_consts_full: sw.sw_consts_full,
                     sw_consts: sw
                         .sw_consts
                         .into_iter()
                         .map(|(tag, lam)| (tag, RawLambda::from_lowered(lam)))
                         .collect(),
-                    sw_numblocks: sw.sw_blocks.len(),
                     sw_blocks_full: sw.sw_blocks_full,
                     sw_blocks: sw
                         .sw_blocks
@@ -358,7 +353,6 @@ impl RawLambda {
                         .map(|lam| Box::new(RawLambda::from_lowered(*lam))),
                     sw_dispatch: sw.sw_dispatch,
                 }),
-                Location::none(),
             ),
             Lambda::LstringSwitch(arg, cases, default) => RawLambda::LstringSwitch(
                 Box::new(RawLambda::from_lowered(*arg)),
@@ -462,7 +456,7 @@ impl RawLambda {
                 args: info.args.into_iter().map(RawLambda::into_lowered).collect(),
                 loc: info.loc,
             })),
-            RawLambda::Lswitch(arg, sw, _) => Lambda::Lswitch(
+            RawLambda::Lswitch(arg, sw) => Lambda::Lswitch(
                 Box::new(arg.into_lowered()),
                 Box::new(crate::lambda::LambdaSwitch {
                     sw_consts_full: sw.sw_consts_full,

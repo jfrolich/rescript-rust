@@ -6719,26 +6719,6 @@ fn lower_ocaml_for_range_direction<'a>(
             _ => (finish, ForDirection::Upto),
         }
         },
-        (
-            crate::lambda::DirectionFlag::Upto,
-            Lambda::Lprim(__prim2),
-        ) if matches!(__prim2.as_ref(), crate::lambda::PrimInfo {
-                primitive: Primitive::Poffsetint(-1),
-                args,
-                ..
-            }) => {
-            let crate::lambda::PrimInfo {
-                primitive: Primitive::Poffsetint(-1),
-                args,
-                ..
-            } = __prim2.as_ref() else {
-                unreachable!()
-            };
-            match args.as_slice() {
-            [new_finish] => (new_finish, ForDirection::Up),
-            _ => (finish, ForDirection::Upto),
-        }
-        },
         (crate::lambda::DirectionFlag::Upto, _) => (finish, ForDirection::Upto),
         (crate::lambda::DirectionFlag::Downto, _) => (finish, ForDirection::Downto),
     }

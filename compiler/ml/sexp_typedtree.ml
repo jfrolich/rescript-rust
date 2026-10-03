@@ -71,8 +71,6 @@ let constant c =
   | Const_string (s, delim) ->
     Sexp.list [Sexp.atom "Const_string"; string s; opt string delim]
   | Const_float s -> Sexp.list [Sexp.atom "Const_float"; string s]
-  | Const_int32 i -> Sexp.list [Sexp.atom "Const_int32"; Sexp.atom (Int32.to_string i)]
-  | Const_int64 i -> Sexp.list [Sexp.atom "Const_int64"; Sexp.atom (Int64.to_string i)]
   | Const_bigint (positive, s) ->
     let sign_str = if positive then "+" else "-" in
     Sexp.list [Sexp.atom "Const_bigint"; Sexp.atom sign_str; string s]

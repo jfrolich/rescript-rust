@@ -119,11 +119,6 @@ val zero_float_lit : t
 
 val zero_bigint_literal : t
 
-val is_out : ?comment:string -> t -> t -> t
-(** [is_out e range] is equivalent to [e > range or e <0]
-
-*)
-
 val dot : ?comment:string -> t -> string -> t
 
 val module_access : t -> string -> int32 -> t
@@ -131,8 +126,6 @@ val module_access : t -> string -> int32 -> t
 val array_length : ?comment:string -> t -> t
 
 val string_length : ?comment:string -> t -> t
-
-val function_length : ?comment:string -> t -> t
 
 val string_append : ?comment:string -> t -> t -> t
 (**
@@ -237,27 +230,25 @@ val float_mod : ?comment:string -> t -> t -> t
 
 val float_pow : ?comment:string -> t -> t -> t
 
-val int_comp : Lam_compat.comparison -> ?comment:string -> t -> t -> t
+val int_comp : Lambda.comparison -> ?comment:string -> t -> t -> t
 
-val bool_comp : Lam_compat.comparison -> ?comment:string -> t -> t -> t
+val bool_comp : Lambda.comparison -> ?comment:string -> t -> t -> t
 
-val string_comp : Lam_compat.comparison -> ?comment:string -> t -> t -> t
+val string_comp : Lambda.comparison -> ?comment:string -> t -> t -> t
 
 val bigint_op : ?comment:string -> Js_op.binop -> t -> t -> t
 
-val bigint_comp : Lam_compat.comparison -> ?comment:string -> t -> t -> t
+val bigint_comp : Lambda.comparison -> ?comment:string -> t -> t -> t
 
 val bigint_div : checked:bool -> ?comment:string -> t -> t -> t
 
 val bigint_mod : checked:bool -> ?comment:string -> t -> t -> t
 
-val js_comp : Lam_compat.comparison -> ?comment:string -> t -> t -> t
+val js_comp : Lambda.comparison -> ?comment:string -> t -> t -> t
 
 val not : t -> t
 
 val call : ?comment:string -> info:Js_call_info.t -> t -> t list -> t
-
-val flat_call : ?comment:string -> t -> t -> t
 
 val tagged_template : ?comment:string -> t -> t list -> t list -> t
 
@@ -311,7 +302,7 @@ val in_ : t -> t -> t
 
 (** we don't expose a general interface, since a general interface is generally not safe *)
 
-val dummy_obj : ?comment:string -> Lam_tag_info.t -> t
+val dummy_obj : ?comment:string -> Lambda.tag_info -> t
 (** used combined with [caml_update_dummy]*)
 
 val of_block : ?comment:string -> ?e:J.expression -> J.statement list -> t

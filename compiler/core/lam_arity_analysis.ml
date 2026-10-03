@@ -35,7 +35,7 @@ let arity_of_var (meta : Lam_stats.t) (v : Ident.t) =
    We will keep iterating such environment
    If not found, we will return [NA]
 *)
-let rec get_arity (meta : Lam_stats.t) (lam : Lam.t) : Lam_arity.t =
+let rec get_arity (meta : Lam_stats.t) (lam : Lambda.t) : Lam_arity.t =
   match lam with
   | Lvar v -> arity_of_var meta v
   | Lconst _ -> Lam_arity.non_function_arity_info
@@ -96,7 +96,8 @@ let rec get_arity (meta : Lam_stats.t) (lam : Lam.t) : Lam_arity.t =
         *)
       in
       take xs (List.length args))
-  | Lfunction {arity; body} -> Lam_arity.merge arity (get_arity meta body)
+  | Lfunction {params; body} ->
+    Lam_arity.merge (List.length params) (get_arity meta body)
   | Lswitch
       ( _,
         {
@@ -126,7 +127,7 @@ let rec get_arity (meta : Lam_stats.t) (lam : Lam.t) : Lam_arity.t =
   | Lwhile _ | Lfor _ | Lfor_of _ | Lfor_await_of _ | Lassign _ ->
     Lam_arity.non_function_arity_info
 
-and all_lambdas meta (xs : Lam.t list) =
+and all_lambdas meta (xs : Lambda.t list) =
   match xs with
   | y :: ys ->
     let arity = get_arity meta y in
