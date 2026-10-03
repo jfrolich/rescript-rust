@@ -5,7 +5,7 @@ build:
 
 # In-process builds write no .cmt files: analysis reads them from a watcher.
 test: build
-	../with-watcher.sh ./simulate-incremental-and-test.sh
+	../with-watcher.sh ./test.sh
 
 clean:
 	yarn clean

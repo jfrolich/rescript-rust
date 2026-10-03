@@ -565,6 +565,28 @@ fn make_parse_file_span(
     )
 }
 
+/// Parse one source file of `package` as the in-process build does, for an
+/// on-demand compile (editor tooling). Reads the file's current contents.
+pub(crate) fn parse_for_tooling(
+    package: &Package,
+    filename: &Path,
+    build_state: &BuildCommandState,
+) -> anyhow::Result<super::build_types::StoredAst> {
+    let generated = generate_ast(
+        package,
+        filename,
+        build_state,
+        build_state.get_warn_error_override(),
+        true,
+        true,
+        true,
+        &tracing::Span::none(),
+    )?;
+    generated
+        .stored_ast
+        .ok_or_else(|| anyhow!("no AST for {}", filename.display()))
+}
+
 fn generate_ast(
     package: &Package,
     filename: &Path,

@@ -1201,9 +1201,6 @@ pub struct CompilerOptions {
     pub nopervasives: bool,
     /// The module name being compiled. Used to filter self-opens.
     pub module_name: Option<String>,
-    /// `Clflags.dont_record_crc_unit` (js_packages_state.ml:38-42): the
-    /// package namespace, left out of the saved import lists.
-    pub dont_record_crc_unit: Option<String>,
     /// Current npm package name from `-bs-package-name`.
     pub package_name: Option<String>,
     /// Compile the runtime package (`-make-runtime`).
@@ -1233,235 +1230,12 @@ pub struct CompilerOptions {
     /// so frontend warnings were reported by the `-bs-ast` run and are not
     /// repeated. Rust re-runs the frontend from source, silently.
     pub frontend_already_reported: bool,
-    /// Write OCaml-compatible `.cmi`/`.cmt`/`.cmti` files for editor tooling
-    /// (compiler/ml/typemod.ml:1761-1796; js_implementation.ml:66-70).
-    pub typed_artifacts: Option<std::sync::Arc<TypedArtifactOutput>>,
     /// Package roots whose in-process units are on the load path (the `-I`
     /// directories of a file build). `None` makes every registered unit visible.
     pub visible_package_roots: Option<Vec<PathBuf>>,
-    /// `Clflags.binary_annotations` (off with `-bs-no-bin-annot`): whether
-    /// `.cmt`/`.cmti` files are saved (cmt_format.ml:20).
-    pub binary_annotations: bool,
     /// `Clflags.keep_locs` (`-keep-locs`/`-no-keep-locs`): whether saved
     /// signatures keep source locations (subst.ml:57-67 `Subst.for_saving`).
     pub keep_locs: bool,
-}
-
-/// Where and how to save the typed artifacts of one compilation unit.
-#[derive(Debug, Clone)]
-pub struct TypedArtifactOutput {
-    /// `outputprefix`: artifact path without extension (e.g. `lib/bs/src/Foo`).
-    pub output_prefix: PathBuf,
-    /// Extra directories that receive copies of the artifacts (`lib/ocaml`).
-    pub copy_dirs: Vec<PathBuf>,
-    /// `cmt_builddir`.
-    pub builddir: String,
-    /// `cmt_args`.
-    pub args: Vec<String>,
-    /// Where the `.cmi`/`.cmt`/`.cmti` files go.
-    pub sink: TypedArtifactSink,
-}
-
-/// Destination of the typed artifacts of a compilation unit.
-#[derive(Clone, Default)]
-pub enum TypedArtifactSink {
-    /// Write them to disk.
-    #[default]
-    Disk,
-    /// Hand them to the build system, keyed by the path each file would have
-    /// on disk: a watcher keeps them in memory and serves them to editor
-    /// tooling instead of writing files.
-    Memory(std::sync::Arc<dyn Fn(PathBuf, Vec<u8>) + Send + Sync>),
-}
-
-impl std::fmt::Debug for TypedArtifactSink {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            TypedArtifactSink::Disk => "Disk",
-            TypedArtifactSink::Memory(_) => "Memory",
-        })
-    }
-}
-
-/// Which typed annotations are being saved.
-enum TypedArtifactKind<'t> {
-    Implementation {
-        structure: &'t crate::types::typedtree::Structure,
-        /// The inferred signature to save as `.cmi` (no `.resi`).
-        cmi: Option<(&'t [crate::types::decl::SignatureItem], Option<String>)>,
-    },
-    Interface {
-        signature: &'t crate::types::typedtree::TypedSignature,
-        sig_type: &'t [crate::types::decl::SignatureItem],
-        deprecated: Option<String>,
-    },
-}
-
-fn write_artifact_if_changed(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    if std::fs::read(path).ok().as_deref() == Some(bytes) {
-        return Ok(());
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
-}
-
-fn save_typed_artifacts(
-    options: &CompilerOptions,
-    arena: &crate::parse_arena::ParseArena,
-    type_ctx: &TypeContext,
-    filename: &str,
-    module_name: &str,
-    kind: TypedArtifactKind<'_>,
-    binary_annotations: bool,
-    imports: &[(String, Option<[u8; 16]>)],
-) -> Result<Option<[u8; 16]>> {
-    use crate::cmi::cmt_writer;
-    let Some(out) = options.typed_artifacts.as_deref() else {
-        return Ok(None);
-    };
-
-    let _phase = info_span!("compiler.save_typed_artifacts").entered();
-    let (load_path, _) = build_load_path_with_display(options);
-    let load_path: Vec<String> = load_path
-        .iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
-    let source_digest = std::fs::read(filename).ok().map(|s| cmt_writer::md5(&s));
-    // typemod.ml:1761-1788 saves under `modulename`, the unit name.
-    let unit_name = options.current_unit_name();
-    let module_name = unit_name.as_deref().unwrap_or(module_name);
-    let info = cmt_writer::CmtInfo {
-        modname: module_name,
-        sourcefile: Some(filename),
-        builddir: &out.builddir,
-        loadpath: &load_path,
-        args: &out.args,
-        source_digest,
-        imports: &[],
-        cmi_imports: imports,
-    };
-    // The `.cmi` holds the `Subst.for_saving` copy of the signature.
-    let stripped: Option<Vec<crate::types::decl::SignatureItem>> = Some({
-        let mut sig = match &kind {
-            TypedArtifactKind::Implementation { cmi, .. } => {
-                cmi.as_ref().map(|(sign, _)| sign.to_vec()).unwrap_or_default()
-            }
-            TypedArtifactKind::Interface { sig_type, .. } => sig_type.to_vec(),
-        };
-        if !options.keep_locs {
-            strip_saved_signature_locations(&mut sig);
-        }
-        strip_saved_extension_locations(&mut sig);
-        sig
-    });
-    let kind = match (kind, stripped.as_deref()) {
-        (TypedArtifactKind::Implementation { structure, cmi: Some((_, dep)) }, Some(sig)) => {
-            TypedArtifactKind::Implementation {
-                structure,
-                cmi: Some((sig, dep)),
-            }
-        }
-        (kind, _) => kind,
-    };
-    // The `.cmi` CRC: `Env.save_signature` (env.ml:1924-1940) then records
-    // the unit as an import, so the `.cmt` lists it too, sorted
-    // (cmt_format_persistence.ml:46).
-    let cmi_file = match &kind {
-        TypedArtifactKind::Implementation { cmi, .. } => cmi.as_ref().map(|(sign, deprecated)| {
-            cmt_writer::cmi_bytes(arena, type_ctx, module_name, sign, imports, deprecated.as_deref())
-        }),
-        TypedArtifactKind::Interface {
-            sig_type,
-            deprecated,
-            ..
-        } => Some(cmt_writer::cmi_bytes(
-            arena,
-            type_ctx,
-            module_name,
-            stripped.as_deref().unwrap_or(sig_type),
-            imports,
-            deprecated.as_deref(),
-        )),
-    };
-    let saved_crc = cmi_file.as_ref().map(|(_, crc)| *crc);
-    let mut cmt_imports = imports.to_vec();
-    if let Some(crc) = saved_crc {
-        cmt_imports.retain(|(name, _)| name != module_name);
-        cmt_imports.push((module_name.to_string(), Some(crc)));
-    }
-    cmt_imports.sort();
-    let info = cmt_writer::CmtInfo {
-        imports: &cmt_imports,
-        ..info
-    };
-    let mut files: Vec<(&str, Vec<u8>)> = Vec::new();
-    let mut cmi_crc = None;
-    match kind {
-        TypedArtifactKind::Implementation { structure, cmi } => {
-            if let Some((bytes, crc)) = cmi_file {
-                cmi_crc = Some(crc);
-                files.push(("cmi", bytes));
-            }
-            files.push((
-                "cmt",
-                cmt_writer::cmt_bytes(
-                    arena,
-                    type_ctx,
-                    cmt_writer::BinaryAnnots::Implementation(structure),
-                    &info,
-                    cmi.as_ref().map(|(sign, deprecated)| (*sign, deprecated.as_deref())),
-                ),
-            ));
-        }
-        TypedArtifactKind::Interface {
-            signature,
-            sig_type,
-            deprecated,
-        } => {
-            let cmi_sign = stripped.as_deref().unwrap_or(sig_type);
-            if let Some((bytes, crc)) = cmi_file {
-                cmi_crc = Some(crc);
-                files.push(("cmi", bytes));
-            }
-            files.push((
-                "cmti",
-                cmt_writer::cmt_bytes(
-                    arena,
-                    type_ctx,
-                    cmt_writer::BinaryAnnots::Interface(signature, sig_type),
-                    &info,
-                    Some((cmi_sign, deprecated.as_deref())),
-                ),
-            ));
-        }
-    }
-    // cmt_format.ml:20: without binary annotations only the `.cmi` is saved.
-    if !(binary_annotations && options.binary_annotations) {
-        files.retain(|(ext, _)| *ext == "cmi");
-    }
-    for (ext, bytes) in files {
-        let with_ext = |path: &std::path::Path| {
-            let mut path = path.as_os_str().to_owned();
-            path.push(".");
-            path.push(ext);
-            PathBuf::from(path)
-        };
-        let primary = with_ext(&out.output_prefix);
-        match &out.sink {
-            TypedArtifactSink::Disk => {
-                write_artifact_if_changed(&primary, &bytes)?;
-                if let Some(file_name) = out.output_prefix.file_name() {
-                    for dir in &out.copy_dirs {
-                        write_artifact_if_changed(&with_ext(&dir.join(file_name)), &bytes)?;
-                    }
-                }
-            }
-            TypedArtifactSink::Memory(sink) => sink(primary, bytes),
-        }
-    }
-    Ok(cmi_crc)
 }
 
 /// `Subst.signature (Subst.for_saving ...)` with `Clflags.keep_locs = false`
@@ -1516,37 +1290,6 @@ fn strip_saved_extension_locations(sig: &mut [crate::types::decl::SignatureItem]
             _ => {}
         }
     }
-}
-
-/// The CRC list a saved unit carries (env.ml:1924-1930: itself first, then
-/// its imports), which importers record (env.ml:627-638). A unit typed here
-/// without writing its `.cmi` (the runtime, whose `.cmi` is prebuilt) reads
-/// the list from the `.cmi` beside its source, as OCaml loads it.
-fn unit_crcs(
-    options: &CompilerOptions,
-    module_name: &str,
-    filename: &str,
-    saved_crc: Option<[u8; 16]>,
-    imports: &[(String, Option<[u8; 16]>)],
-) -> Vec<(String, Option<[u8; 16]>)> {
-    // CRC lists only feed written `.cmi`/`.cmt` files; a compile that writes
-    // none has nothing to check them against.
-    if options.typed_artifacts.is_none() {
-        return Vec::new();
-    }
-    if saved_crc.is_none()
-        && let Some(crcs) = crate::cmi::cmi_format::read_cmi_crcs(
-            &std::path::Path::new(filename).with_extension("cmi").to_string_lossy(),
-        )
-    {
-        return crcs;
-    }
-    let unit = options
-        .current_unit_name()
-        .unwrap_or_else(|| module_name.to_string());
-    std::iter::once((unit, saved_crc))
-        .chain(imports.iter().cloned())
-        .collect()
 }
 
 /// `bsc -format` (rescript_compiler_main.ml:168-182 via
@@ -1628,127 +1371,6 @@ fn parse_diagnostics_report(parser: &Parser<'_>, source: &str, filename: &str) -
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// Save the `.cmi`/`.cmt` of a namespace module: js_implementation.ml:207-226
-/// `implementation_map` types `module A = A-Ns` for every member listed in the
-/// `.mlmap` (sorted) and saves the unit like any implementation.
-///
-/// Returns the unit's CRC list (`(namespace, crc) :: imports`, env.ml:
-/// 1924-1930), which importers record (env.ml:627-638).
-pub fn save_namespace_typed_artifacts(
-    namespace: &str,
-    module_aliases: &[(String, String)],
-    out: &TypedArtifactOutput,
-    runtime_path: Option<&std::path::Path>,
-) -> Result<Vec<(String, Option<[u8; 16]>)>> {
-    use crate::types::decl::{AliasPresence, ModuleDeclaration, ModuleType, RecStatus, SignatureItem};
-    use crate::types::typedtree as tt;
-
-    let mut arena = crate::parse_arena::ParseArena::new();
-    let none_loc = arena.none_loc();
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    // `Parmatch.extra_pat` takes stamp 1000 at initialization, as in every
-    // compile (see `compile_source_to_js_with_options_inner`).
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-
-    // The map is typed like any implementation (js_implementation.ml:207-226)
-    // in `Res_compmisc.initial_env`, which opens Pervasives and Stdlib
-    // (res_compmisc.ml:56-62), with `-no-alias-deps` (namespaces.rs): each
-    // member is a weak `check_pers_struct` import (env.ml:741-748, 1044-1045).
-    let options = CompilerOptions {
-        module_name: Some(namespace.to_string()),
-        typed_artifacts: Some(std::sync::Arc::new(out.clone())),
-        runtime_path: runtime_path.map(std::path::Path::to_path_buf),
-        transparent_modules: true,
-        ..Default::default()
-    };
-    let mut pers_env = PersistentEnv::new();
-    let (load_path, load_path_display) = build_load_path_with_display(&options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path_with_display(load_path, load_path_display);
-    pers_env.set_compiling_module(Some(namespace.to_string()));
-    let mut env = initial_env(&type_ctx);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &[], false, Some(namespace));
-    for (_, internal_name) in module_aliases {
-        pers_env.check_pers_struct(internal_name);
-    }
-
-    let mut items = Vec::with_capacity(module_aliases.len());
-    let mut signature = Vec::with_capacity(module_aliases.len());
-    for (short_name, internal_name) in module_aliases {
-        let target = crate::types::Path::Pident(crate::ident::Ident::create_persistent(
-            internal_name.as_str(),
-        ));
-        let internal_idx = arena.intern(internal_name);
-        let lid = arena.push_longident(crate::parser::longident::Longident::Lident(internal_idx));
-        let id = type_ctx.create_ident(short_name);
-        // typemod.ml `type_module_aux` types an alias as
-        // `Mty_alias (Mta_absent, path)`.
-        let mty = ModuleType::MtyAlias(AliasPresence::MtaAbsent, target.clone());
-        items.push(tt::StructureItem {
-            str_desc: tt::StructureItemDesc::Tstr_module(tt::ModuleBinding {
-                mb_id: id.clone(),
-                mb_name: crate::parse_arena::Located {
-                    txt: short_name.clone(),
-                    loc: none_loc,
-                },
-                mb_expr: tt::ModuleExpr {
-                    mod_desc: tt::ModuleExprDesc::Tmod_ident(
-                        target,
-                        crate::parse_arena::Located { txt: lid, loc: none_loc },
-                    ),
-                    mod_loc: none_loc,
-                    mod_type: mty.clone(),
-                    mod_env: tt::EnvRef(0),
-                    mod_attributes: crate::parser::ast::Attributes::new(),
-                },
-                mb_attributes: crate::parser::ast::Attributes::new(),
-                mb_loc: none_loc,
-            }),
-            str_loc: none_loc,
-            str_env: tt::EnvRef(0),
-        });
-        signature.push(SignatureItem::SigModule(
-            id,
-            ModuleDeclaration {
-                md_type: mty,
-                md_attributes: vec![],
-                md_loc: crate::location::Location::none(),
-                md_path: None,
-            },
-            RecStatus::TrecNot,
-        ));
-    }
-    let structure = tt::Structure {
-        str_items: items,
-        str_type: signature.clone(),
-        str_final_env: tt::EnvRef(0),
-    };
-    let imports = pers_env.imports(None);
-    // `Env.save_signature` writes the `Subst.for_saving` copy (env.ml:1886-1892).
-    let saved_signature = saved_signature_copy(&type_ctx, &signature);
-    // bsc compiles the map from lib/bs as `<Ns>.mlmap` (namespaces.rs).
-    let mlmap = format!("{namespace}.mlmap");
-    let crc = save_typed_artifacts(
-        &options,
-        &arena,
-        &type_ctx,
-        &mlmap,
-        namespace,
-        TypedArtifactKind::Implementation {
-            structure: &structure,
-            cmi: Some((saved_signature.as_slice(), None)),
-        },
-        true,
-        &imports,
-    )?;
-    let mut crcs = Vec::with_capacity(imports.len() + 1);
-    crcs.push((namespace.to_string(), crc));
-    crcs.extend(imports);
-    Ok(crcs)
-}
-
 impl Default for CompilerOptions {
     fn default() -> Self {
         Self {
@@ -1785,7 +1407,6 @@ impl Default for CompilerOptions {
             external_ppxs: Vec::new(),
             nopervasives: false,
             module_name: None,
-            dont_record_crc_unit: None,
             package_name: None,
             make_runtime: false,
             assume_compiled_interface: false,
@@ -1795,9 +1416,7 @@ impl Default for CompilerOptions {
             skip_js_render: false,
             publish_in_process_signature: true,
             frontend_already_reported: false,
-            typed_artifacts: None,
             visible_package_roots: None,
-            binary_annotations: true,
             keep_locs: true,
         }
     }
@@ -12335,8 +11954,12 @@ fn compile_source_to_js_with_options_inner(
         );
     }
 
-    if let Some(simple_signature) = inferred_simple_signature.as_deref() {
-        drop(prepare_inferred_signature_for_saving(&type_ctx, simple_signature, has_resi));
+    // `Env.save_signature` renames the bound identifiers of a copy of the
+    // inferred signature (env.ml:1886-1892), taking stamps; no file is written.
+    if let Some(simple_signature) = inferred_simple_signature.as_deref()
+        && !has_resi
+    {
+        saved_signature_copy(&type_ctx, simple_signature);
     }
 
     // `process_with_gentype` runs after the JS is emitted
@@ -14434,8 +14057,6 @@ fn moregen_link_impl(
 #[derive(Debug, Default, Clone)]
 pub struct FileConfigOverrides {
     pub let_unwrap: bool,
-    /// `-bs-no-bin-annot` (`Clflags.binary_annotations := false`).
-    pub no_bin_annot: bool,
     pub jsx_version: Option<i32>,
     /// `-bs-jsx-module`.
     pub jsx_module: Option<String>,
@@ -14498,10 +14119,6 @@ fn run_file_level_flags(
             return false;
         };
         let BscFlagArity::String = arity else {
-            // rescript_compiler_main.ml:476-477.
-            if flag == "-bs-no-bin-annot" {
-                overrides.no_bin_annot = true;
-            }
             continue;
         };
         let Some(arg) = flags.get(i) else {
@@ -15280,20 +14897,7 @@ fn rename_saved_signature_idents(
 
 /// `Env.save_signature` (env.ml:1886-1892) writes `Subst.signature
 /// (Subst.for_saving Subst.identity) sg`: a copy whose bound identifiers are
-/// renamed (subst.ml:322-364). Returns that copy for the `.cmi`, made at the
-/// point where OCaml saves it so the renaming takes the same stamps.
-fn prepare_inferred_signature_for_saving(
-    type_ctx: &TypeContext,
-    simple_sig: &[crate::types::decl::SignatureItem],
-    has_resi: bool,
-) -> Option<crate::types::decl::Signature> {
-    if has_resi {
-        return None;
-    }
-
-    Some(saved_signature_copy(type_ctx, simple_sig))
-}
-
+/// renamed (subst.ml:322-364), taking fresh stamps.
 fn saved_signature_copy(
     type_ctx: &TypeContext,
     sig: &[crate::types::decl::SignatureItem],
@@ -15795,6 +15399,109 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     finish_preprocessed_structure_in_process_from_js_boundary(pre_js, options, js_registry)
 }
 
+/// The type-checking context and initial environment an in-process
+/// implementation is typed in: the registry's units are the persistent
+/// environment, Pervasives (and `-open`s) opened as `Res_compmisc.initial_env`
+/// does (res_compmisc.ml:56-62).
+fn in_process_structure_type_check_context<'a>(
+    type_ctx: &'a TypeContext,
+    arena: &'a crate::parse_arena::ParseArena,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+    module_name: &str,
+    file_config: &FileConfigOverrides,
+    frontend_warning_specs: &[ppx::WarningAttributeSpec],
+) -> (TypeCheckContext<'a>, Env) {
+    let mut tctx = TypeCheckContext::new(type_ctx, arena);
+    tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
+    tctx.transparent_modules = options.transparent_modules;
+    apply_warning_options(&mut tctx, options);
+    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
+    // attributes; compiling a preprocessed `.ast` does not run it again.
+    if !options.frontend_already_reported {
+        apply_leading_warning_attribute_options(&mut tctx, frontend_warning_specs);
+    }
+    apply_file_config_warning_options(&mut tctx, file_config);
+    let mut env = initial_env(type_ctx);
+
+    let mut pers_env = PersistentEnv::from_registry(registry);
+    pers_env.set_visible_package_roots(options.visible_package_roots.clone());
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    type_ctx.set_load_paths_shared(load_path.clone());
+    pers_env.set_load_path_shared(load_path, load_path_display);
+    pers_env.set_open_modules(options.open_modules.clone());
+    pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_jsx_module(options.jsx_module.clone());
+    pers_env.set_nopervasives(options.nopervasives);
+    pers_env.set_compiling_module(Some(module_name.to_string()));
+    load_pervasives(
+        &mut pers_env,
+        &mut env,
+        type_ctx,
+        &options.open_modules,
+        options.nopervasives,
+        Some(module_name),
+    );
+    tctx.set_persistent_env(pers_env);
+    (tctx, env)
+}
+
+/// The typed tree of one module, type-checked on demand for editor tooling,
+/// which works on it in memory.
+pub struct ToolingTypedModule {
+    pub type_ctx: TypeContext,
+    pub typed: ToolingTyped,
+}
+
+/// What type-checking a module for editor tooling produced.
+pub enum ToolingTyped {
+    Implementation(crate::types::typedtree::Structure),
+    /// The compiler's report of a module that does not type-check.
+    Failed(String),
+}
+
+/// Type-check an implementation for editor tooling, as the in-process build
+/// does (`compile_preprocessed_structure_in_process_until_js`), keeping the
+/// typed tree instead of compiling it further.
+pub fn typecheck_structure_for_tooling(
+    arena: &crate::parse_arena::ParseArena,
+    structure: &Structure,
+    filename: &str,
+    module_name: &str,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+) -> ToolingTypedModule {
+    let file_config = extract_file_config_from_structure(structure, arena);
+    let frontend_warning_specs = ppx::collect_leading_builtin_warning_attribute_specs(structure, arena);
+    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
+    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    let _ = id_gen.next_stamp();
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    let typed = {
+        let (mut tctx, env) = in_process_structure_type_check_context(
+            &type_ctx,
+            arena,
+            options,
+            registry,
+            module_name,
+            &file_config,
+            &frontend_warning_specs,
+        );
+        match type_structure(&mut tctx, &env, arena, structure) {
+            Ok((typed_structure, _final_env)) => ToolingTyped::Implementation(typed_structure),
+            Err(e) => {
+                let source = read_in_process_source(filename);
+                let report = match tctx.persistent_env.as_ref().and_then(|env| env.last_error()) {
+                    Some(error) => persistent_env_error_to_anyhow(error, filename),
+                    None => type_mod_error_to_anyhow(e, &type_ctx, arena, &source, filename, false),
+                };
+                ToolingTyped::Failed(format!("{report:#}"))
+            }
+        }
+    };
+    ToolingTypedModule { type_ctx, typed }
+}
+
 pub fn compile_preprocessed_structure_in_process_until_js(
     arena: &crate::parse_arena::ParseArena,
     structure: &Structure,
@@ -15838,38 +15545,15 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    let mut tctx = TypeCheckContext::new(&type_ctx, arena);
-    tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
-    tctx.transparent_modules = options.transparent_modules;
-    apply_warning_options(&mut tctx, options);
-    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
-    // attributes; compiling a preprocessed `.ast` does not run it again.
-    if !options.frontend_already_reported {
-        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
-    }
-    apply_file_config_warning_options(&mut tctx, &file_config);
-    let mut env = initial_env(&type_ctx);
-
-    let mut pers_env = PersistentEnv::from_registry(registry);
-    pers_env.set_visible_package_roots(options.visible_package_roots.clone());
-    let (load_path, load_path_display) = shared_load_path_with_display(options);
-    type_ctx.set_load_paths_shared(load_path.clone());
-    pers_env.set_load_path_shared(load_path.clone(), load_path_display);
-    pers_env.set_open_modules(options.open_modules.clone());
-    pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_jsx_module(options.jsx_module.clone());
-    pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(Some(module_name.to_string()));
-    load_pervasives(
-        &mut pers_env,
-        &mut env,
+    let (mut tctx, env) = in_process_structure_type_check_context(
         &type_ctx,
-        &options.open_modules,
-        options.nopervasives,
-        Some(module_name),
+        arena,
+        options,
+        registry,
+        module_name,
+        &file_config,
+        &frontend_warning_specs,
     );
-
-    tctx.set_persistent_env(pers_env);
     drop(env_setup_span);
     if let Some(start) = env_setup_start {
         crate::timing::record(crate::timing::Phase::EnvSetup, start.elapsed());
@@ -15921,7 +15605,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // normalization are part of OCaml's `type_implementation`
     // (compiler/ml/typemod.ml:1740-1788); account for them as typecheck.
     let signature_prepare_start = crate::timing::enabled().then(std::time::Instant::now);
-    let mut saved_cmi_signature = None;
     let mut published_signature = {
         let _phase = info_span!("compiler.signature_prepare").entered();
         if has_interface {
@@ -15971,8 +15654,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             normalize_signature(&type_ctx, &simple_signature);
         }
 
-        saved_cmi_signature =
-            prepare_inferred_signature_for_saving(&type_ctx, &simple_signature, has_interface);
+        // `Env.save_signature` (typemod.ml:1779-1788) renames the bound
+        // identifiers of a copy of the signature (env.ml:1886-1892). In-process
+        // builds write no `.cmi`, but the copy still takes its stamps.
+        if !has_interface {
+            saved_signature_copy(&type_ctx, &simple_signature);
+        }
 
         simple_signature
     };
@@ -16003,38 +15690,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // translation, as the file compile does.
     tctx.flush_value_usage_checks();
     let post_type_warning_start = tctx.warnings.len();
-
-    // typemod.ml:1761-1788: save the `.cmt` (and, without an interface, the
-    // inferred `.cmi`) before Lambda translation.
-    let imports = tctx
-        .persistent_env
-        .as_ref()
-        .filter(|_| options.typed_artifacts.is_some())
-        .map(|pers| pers.imports(options.dont_record_crc_unit.as_deref()))
-        .unwrap_or_default();
-    let saved_cmi_crc = save_typed_artifacts(
-        options,
-        arena,
-        &type_ctx,
-        filename,
-        module_name,
-        TypedArtifactKind::Implementation {
-            structure: &typed_structure,
-            cmi: (!has_interface).then(|| {
-                (
-                    saved_cmi_signature.as_deref().unwrap_or(published_signature.as_slice()),
-                    crate::types::typemod::deprecated_of_str(arena, structure),
-                )
-            }),
-        },
-        !file_config.no_bin_annot,
-        &imports,
-    )?;
-    // env.ml:1924-1930 saves `(modname, Some crc) :: imports` as the unit's
-    // CRC list, which importers record (env.ml:627-638).
-    let saved_cmi_crcs = |crc: Option<[u8; 16]>| -> Vec<(String, Option<[u8; 16]>)> {
-        unit_crcs(options, module_name, filename, crc, &imports)
-    };
 
     // OCaml saves the inferred `.cmi` only in the no-interface branch before
     // Lambda translation mutates any shared type nodes
@@ -16085,7 +15740,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             signature_for_save,
             filename,
             crate::types::typemod::deprecated_of_str(arena, structure),
-            saved_cmi_crcs(saved_cmi_crc),
+            Vec::new(),
             &type_ctx,
         );
         // OCaml saves the current unit into the persistent table before
@@ -16567,7 +16222,6 @@ pub fn typecheck_interface_in_process(
     if let Some(err) = config_processing.error {
         return Err(config_payload_error_to_anyhow(err, parser.arena(), source, filename));
     }
-    let file_config = config_processing.overrides;
     let signature = preprocess_signature_for_typecheck_with_source(
         signature,
         options,
@@ -16735,34 +16389,12 @@ pub fn typecheck_preprocessed_signature_in_process(
             }
         };
 
-    let imports = tctx
-        .persistent_env
-        .as_ref()
-        .filter(|_| options.typed_artifacts.is_some())
-        .map(|pers| pers.imports(options.dont_record_crc_unit.as_deref()))
-        .unwrap_or_default();
-    let mut saved_cmi_crc = None;
-    // js_implementation.ml:66-70: save the `.cmi` and the `.cmti`.
-    if let crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature) =
-        &typed_module_type.mty_desc
-    {
-        // `Env.save_signature` writes the `Subst.for_saving` copy
-        // (env.ml:1886-1892).
-        let saved_signature = saved_signature_copy(&type_ctx, &published_signature);
-        saved_cmi_crc = save_typed_artifacts(
-            options,
-            arena,
-            &type_ctx,
-            filename,
-            module_name,
-            TypedArtifactKind::Interface {
-                signature: typed_signature,
-                sig_type: &saved_signature,
-                deprecated: crate::types::typemod::deprecated_of_sig(arena, signature),
-            },
-            !file_config.no_bin_annot,
-            &imports,
-        )?;
+    // js_implementation.ml:66-70 saves the interface through
+    // `Env.save_signature`, whose `Subst.for_saving` copy renames the bound
+    // identifiers (env.ml:1886-1892). In-process builds write no `.cmi`, but
+    // the copy still takes its stamps, as in OCaml.
+    if let crate::types::typedtree::ModuleTypeDesc::Tmty_signature(_) = &typed_module_type.mty_desc {
+        saved_signature_copy(&type_ctx, &published_signature);
     }
 
     let mut internal_env = tctx
@@ -16791,7 +16423,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         strip_saved_signature_locations(&mut saved_signature);
     }
     strip_saved_extension_locations(&mut saved_signature);
-    let crcs = unit_crcs(options, module_name, filename, saved_cmi_crc, &imports);
+    let crcs = Vec::new();
     internal_env.register_in_memory_signature(
         module_name,
         saved_signature,

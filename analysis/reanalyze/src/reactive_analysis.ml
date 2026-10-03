@@ -78,7 +78,7 @@ let process_cmt_infos ~config ~cmt_file_path cmt_infos : cmt_file_result option
 
 (** Create a new reactive collection *)
 let create ~config : t =
-  Reactive_file_collection.create ~read_file:Watch_client.read_cmt_or_file
+  Reactive_file_collection.create ~read_file:Cmt_format.read_cmt
     ~process:(fun path cmt_infos ->
       process_cmt_infos ~config ~cmt_file_path:path cmt_infos)
 

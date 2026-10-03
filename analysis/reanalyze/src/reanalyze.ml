@@ -9,7 +9,7 @@ type cmt_file_result = {
 (** Process a cmt file and return its results.
     Conceptually: map over files, then merge results. *)
 let load_cmt_file ~config cmt_file_path : cmt_file_result option =
-  let cmt_infos = Watch_client.read_cmt_or_file cmt_file_path in
+  let cmt_infos = Cmt_format.read_cmt cmt_file_path in
   let exclude_path source_file =
     config.Dce_config.cli.exclude_paths
     |> List.exists (fun prefix_ ->
@@ -78,26 +78,6 @@ type all_files_result = {
 let collect_cmt_file_paths ~cmt_root : string list =
   let ( +++ ) = Filename.concat in
   let paths = ref [] in
-  (* A watcher serves the `.cmt`/`.cmti` files in-process builds do not
-     write; scanned directories include the ones it holds. *)
-  let served =
-    lazy
-      (let dir =
-         match cmt_root with
-         | Some root -> root
-         | None -> run_config.project_root
-       in
-       Watch_client.list ~dir:(Watch_client.canonical dir)
-       |> List.filter (fun p ->
-              Filename.check_suffix p ".cmt" || Filename.check_suffix p ".cmti"))
-  in
-  let served_under ~prefix =
-    let prefix = Watch_client.canonical prefix ^ Filename.dir_sep in
-    Lazy.force served
-    |> List.filter (fun p ->
-           String.length p > String.length prefix
-           && String.sub p 0 (String.length prefix) = prefix)
-  in
   (match cmt_root with
   | Some root ->
     Cli.cmt_command := true;
@@ -120,10 +100,7 @@ let collect_cmt_file_paths ~cmt_root : string list =
           || Filename.check_suffix abs_dir ".cmti"
         then paths := abs_dir :: !paths
     in
-    walk_sub_dirs "";
-    served_under ~prefix:root
-    |> List.iter (fun p ->
-           if not (List.mem p !paths) then paths := p :: !paths)
+    walk_sub_dirs ""
   | None ->
     Lazy.force Paths.set_rescript_project_root;
     (* Prefer explicit scan plan emitted by rewatch (v2 `.sourcedirs.json`).
@@ -136,21 +113,12 @@ let collect_cmt_file_paths ~cmt_root : string list =
         | files -> files
         | exception Sys_error _ -> []
       in
-      let on_disk =
-        files
-        |> List.filter (fun x ->
-               Filename.check_suffix x ".cmt" || Filename.check_suffix x ".cmti")
-        |> List.map (Filename.concat abs_dir)
-      in
-      let served =
-        let dir = Watch_client.canonical abs_dir in
-        served_under ~prefix:abs_dir
-        |> List.filter (fun p -> Filename.dirname p = dir)
-      in
-      on_disk @ served
-      |> List.sort_uniq (fun a b ->
-             String.compare (Filename.basename a) (Filename.basename b))
-      |> List.iter (fun p ->
+      files
+      |> List.filter (fun x ->
+             Filename.check_suffix x ".cmt" || Filename.check_suffix x ".cmti")
+      |> List.sort String.compare
+      |> List.iter (fun f ->
+             let p = Filename.concat abs_dir f in
              if not (Hashtbl.mem seen p) then (
                Hashtbl.add seen p ();
                paths := p :: !paths))
@@ -822,4 +790,3 @@ module Run_config = Run_config
 module Dce_config = Dce_config
 module Log_ = Log_
 module Yojson_helpers = Yojson_helpers
-module Watch_client = Watch_client

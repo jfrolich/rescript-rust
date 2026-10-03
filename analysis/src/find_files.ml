@@ -221,8 +221,8 @@ let find_project_files ~public ~namespace ~path ~source_directories ~lib_bs =
              | Some resi ->
                let cmti = (lib_bs /+ base) ^ ".cmti" in
                let cmt = (lib_bs /+ base) ^ ".cmt" in
-               if Reanalyze.Watch_client.exists cmti then
-                 if Reanalyze.Watch_client.exists cmt then
+               if Files.exists cmti then
+                 if Files.exists cmt then
                    (* Log.log("Intf and impl " ++ cmti ++ " " ++ cmt) *)
                    Some
                      ( module_name,
@@ -235,7 +235,7 @@ let find_project_files ~public ~namespace ~path ~source_directories ~lib_bs =
                  None)
              | None ->
                let cmt = (lib_bs /+ base) ^ ".cmt" in
-               if Reanalyze.Watch_client.exists cmt then
+               if Files.exists cmt then
                  Some (module_name, Impl {cmt; res = file})
                else (
                  Log.log ("Bad source file (no cmt/cmi) " ^ (lib_bs /+ base));

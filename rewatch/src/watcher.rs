@@ -1,5 +1,5 @@
 use crate::build;
-use crate::build::build_types::{BuildCommandState, BuildMode, SourceType, TypedArtifactStore};
+use crate::build::build_types::{BuildCommandState, BuildMode, SourceType};
 use crate::build::clean;
 use crate::cmd;
 use crate::config::{self, SourceMapCommand};
@@ -259,6 +259,33 @@ struct AsyncWatchArgs<'a> {
     clear_screen: bool,
     prod: bool,
     features: Option<Vec<String>>,
+    tooling_requests: Option<std::sync::mpsc::Receiver<crate::tooling_server::ToolingRequest>>,
+}
+
+/// Answer one editor tooling request from the current build state.
+fn serve_tooling_request(
+    build_state: &BuildCommandState,
+    crate::tooling_server::ToolingRequest { request, reply }: crate::tooling_server::ToolingRequest,
+) {
+    use crate::tooling_server::{Reply, Request};
+    let Request::Run(args) = request;
+    let answer = match crate::build::tooling::run_command(build_state, &args) {
+        Ok(output) => Reply::Output(output),
+        Err(err) => Reply::Error(format!("{err:#}")),
+    };
+    let _ = reply.send(answer);
+}
+
+/// Answer editor tooling's pending requests from the current build state.
+fn serve_tooling_requests(
+    build_state: &BuildCommandState,
+    requests: Option<&std::sync::mpsc::Receiver<crate::tooling_server::ToolingRequest>>,
+) {
+    if let Some(requests) = requests {
+        while let Ok(request) = requests.try_recv() {
+            serve_tooling_request(build_state, request);
+        }
+    }
 }
 
 async fn async_watch(
@@ -277,11 +304,13 @@ async fn async_watch(
         clear_screen,
         prod,
         features,
+        tooling_requests,
     }: AsyncWatchArgs<'_>,
 ) -> Result<()> {
     let mut build_state = initial_build_state;
     let mut needs_compile_type = CompileType::None;
     loop {
+        serve_tooling_requests(&build_state, tooling_requests.as_ref());
         if ctrlc_pressed.load(Ordering::SeqCst) {
             cleanup_before_watch_exit(path, &build_state, show_progress, "\nExiting...");
             break Ok(());
@@ -515,11 +544,6 @@ async fn async_watch(
                         // Preserve warning state for unchanged modules so their warnings are re-emitted after the
                         // fresh build state replaces the previous one.
                         carry_forward_compile_warnings(&build_state, &mut next_build_state);
-                        // The fresh build compiles every module again.
-                        if let Some(store) = &build_state.typed_artifacts {
-                            store.clear();
-                        }
-                        next_build_state.typed_artifacts = build_state.typed_artifacts.clone();
                         build_state = next_build_state;
 
                         // Re-register watches based on the new build state
@@ -562,8 +586,15 @@ async fn async_watch(
             }
             CompileType::None => {
                 // We want to sleep for a little while so the CPU can schedule other work. That way we end
-                // up not burning CPU cycles.
-                Delay::new(Duration::from_millis(50)).await;
+                // up not burning CPU cycles. Editor tooling requests end the wait early.
+                match &tooling_requests {
+                    Some(requests) => {
+                        if let Ok(request) = requests.recv_timeout(Duration::from_millis(50)) {
+                            serve_tooling_request(&build_state, request);
+                        }
+                    }
+                    None => Delay::new(Duration::from_millis(50)).await,
+                }
             }
         }
     }
@@ -601,14 +632,18 @@ pub fn start(
         })
         .expect("Error setting Ctrl-C handler");
 
-        // In-process builds write no typed artifacts: keep them in memory and
-        // serve them to editor tooling while watching.
-        let typed_artifacts = build_mode.is_in_process().then(TypedArtifactStore::default);
-        let tooling_server = typed_artifacts.as_ref().and_then(|store| {
-            crate::tooling_server::start(path, store.clone())
-                .map_err(|err| log::warn!("Could not start the editor tooling server: {err}"))
-                .ok()
-        });
+        // In-process builds write no typed artifacts: editor tooling asks the
+        // watcher, which compiles them on demand.
+        let (tooling_server, tooling_requests) = match build_mode.is_in_process() {
+            true => match crate::tooling_server::start(path) {
+                Ok((server, requests)) => (Some(server), Some(requests)),
+                Err(err) => {
+                    log::warn!("Could not start the editor tooling server: {err}");
+                    (None, None)
+                }
+            },
+            false => (None, None),
+        };
 
         // Initialization can clean previous build artifacts, so it has to be serialized
         // with the initial compile too.
@@ -628,7 +663,6 @@ pub fn start(
                     SourceMapCommand::Watch,
                 )
                 .with_context(|| "Could not initialize build")?;
-                build_state.typed_artifacts = typed_artifacts.clone();
 
                 // Compute and register targeted watches based on source folders.
                 let current_watch_paths = compute_watch_paths(&build_state, path);
@@ -659,8 +693,8 @@ pub fn start(
             return Ok(());
         }
 
-        // The initial build has produced the typed artifacts: announce the
-        // tooling server.
+        // The initial build has published the interfaces typed artifacts are
+        // compiled against: announce the tooling server.
         if let Some(server) = &tooling_server
             && let Err(err) = server.publish()
         {
@@ -694,6 +728,7 @@ pub fn start(
             clear_screen,
             prod,
             features,
+            tooling_requests,
         })
         .await
     })

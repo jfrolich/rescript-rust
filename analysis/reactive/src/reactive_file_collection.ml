@@ -6,11 +6,8 @@ type file_id = {mtime: float; size: int; ino: int}
 (** File identity for change detection *)
 
 let get_file_id path : file_id =
-  match Unix.stat path with
-  | st -> {mtime = st.Unix.st_mtime; size = st.Unix.st_size; ino = st.Unix.st_ino}
-  | exception Unix.Unix_error _ ->
-    (* Not on disk (e.g. served by a watcher): treat it as changed. *)
-    {mtime = Unix.gettimeofday (); size = -1; ino = -1}
+  let st = Unix.stat path in
+  {mtime = st.Unix.st_mtime; size = st.Unix.st_size; ino = st.Unix.st_ino}
 
 let file_changed ~old_id ~new_id =
   old_id.mtime <> new_id.mtime

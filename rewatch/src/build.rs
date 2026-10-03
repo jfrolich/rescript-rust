@@ -9,6 +9,7 @@ pub mod packages;
 pub mod parse;
 pub mod qos;
 pub mod read_compile_state;
+pub mod tooling;
 
 use self::parse::parser_args;
 use crate::build::compile::{mark_modules_with_deleted_deps_dirty, mark_modules_with_expired_deps_dirty};

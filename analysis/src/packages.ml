@@ -34,7 +34,6 @@ let get_rescript_version () =
     with Not_found -> default_version)
 
 let new_bs_package ~root_path =
-  Reanalyze.Watch_client.add_project_root root_path;
   let rescript_json = Filename.concat root_path "rescript.json" in
 
   let parse_raw raw =
