@@ -159,7 +159,8 @@ pub(crate) enum Desc<'a> {
     Tuple(Vec<P>),
     Construct {
         lid: Option<crate::parse_arena::Located<LidentIdx>>,
-        cstr: Cow<'a, ConstructorDescription>,
+        /// Shared with the typed tree, so cloning a node stays cheap.
+        cstr: std::sync::Arc<ConstructorDescription>,
         args: Vec<P>,
     },
     Variant {
@@ -300,7 +301,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             }
             PatternDesc::Tpat_construct(lid, cstr, args) => Desc::Construct {
                 lid: Some(*lid),
-                cstr: Cow::Borrowed(cstr),
+                cstr: std::sync::Arc::clone(cstr),
                 args: args.iter().map(|arg| self.import(arg)).collect(),
             },
             PatternDesc::Tpat_variant(label, arg, _) => Desc::Variant {
@@ -1128,7 +1129,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             ex_pat,
             Desc::Construct {
                 lid: None,
-                cstr: Cow::Owned(cstr),
+                cstr: std::sync::Arc::new(cstr),
                 args,
             },
         )
@@ -2147,7 +2148,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             }
             PatternDesc::Tpat_construct(lid, cstr, args) => Desc::Construct {
                 lid: Some(*lid),
-                cstr: Cow::Owned((**cstr).clone()),
+                cstr: std::sync::Arc::clone(cstr),
                 args: args.iter().map(|arg| self.import_owned(arg)).collect(),
             },
             PatternDesc::Tpat_variant(label, arg, _) => Desc::Variant {
@@ -2217,7 +2218,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 });
                 PatternDesc::Tpat_construct(
                     lid,
-                    std::sync::Arc::new(cstr.into_owned()),
+                    cstr,
                     args.into_iter().map(|p| self.export(p)).collect(),
                 )
             }
@@ -2546,6 +2547,24 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         self.with_desc(p, desc)
     }
 
+    /// Whether retyping counter-example `p` can fail: it contains a
+    /// constructor with type equations or existentials.
+    fn may_refute(&self, p: P) -> bool {
+        match self.desc(p) {
+            Desc::Any | Desc::Var(_) | Desc::Constant(_) => false,
+            Desc::Alias(p) => self.may_refute(*p),
+            Desc::Tuple(ps) | Desc::Array(ps) => ps.iter().any(|p| self.may_refute(*p)),
+            Desc::Construct { cstr, args, .. } => {
+                cstr.cstr_generalized
+                    || !cstr.cstr_existentials.is_empty()
+                    || args.iter().any(|p| self.may_refute(*p))
+            }
+            Desc::Variant { arg, .. } => arg.is_some_and(|p| self.may_refute(p)),
+            Desc::Record { fields, .. } => fields.iter().any(|field| self.may_refute(field.pat)),
+            Desc::Or(p1, p2) => self.may_refute(*p1) || self.may_refute(*p2),
+        }
+    }
+
     /// `check_unused pred casel` (parmatch.ml:2159-2232).
     pub fn check_unused(&mut self, casel: &[CaseRef<'a>]) {
         if !self.oracle.is_active(&ParmatchWarning::UnusedMatch) {
@@ -2592,12 +2611,15 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                         })
                         .collect();
                     let u = self.orify_many(&sfs);
-                    let u = self.export(u);
-                    if self
-                        .oracle
-                        .pred(PredKind::Unused, u, Some(case.lhs.pat_loc))
-                        .is_none()
-                    {
+                    // The counter-example is built from constructors of
+                    // patterns that already typed against this type, so only
+                    // a GADT constructor (type equations or existentials) can
+                    // make it fail to type; skip exporting and retyping it
+                    // otherwise.
+                    if self.may_refute(u) && {
+                        let u = self.export(u);
+                        self.oracle.pred(PredKind::Unused, u, Some(case.lhs.pat_loc)).is_none()
+                    } {
                         self.oracle.warn(case.lhs.pat_loc, ParmatchWarning::UnreachableCase);
                         r = Answer::Used;
                     }
