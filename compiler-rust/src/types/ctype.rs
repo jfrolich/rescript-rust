@@ -1731,6 +1731,65 @@ fn surely_univar_free(ctx: &TypeContext, ty: TypeExprRef, budget: &mut u32) -> b
 /// abbreviations such as `type t<'a> = int` do not count as recursion. In
 /// pattern mode, recursion through contractive (datatype) constructors and
 /// through structural nodes is allowed (`allow_recursive`).
+#[derive(PartialEq, Eq)]
+enum OccurMark {
+    Unseen,
+    OnPath,
+    Done,
+}
+
+/// Visit marks of the occurs pre-pass: local nodes in an epoch-stamped
+/// array indexed by node, store nodes in a set (`epoch * 2` = on the
+/// current path, `epoch * 2 + 1` = fully visited).
+#[derive(Default)]
+struct OccurMarks {
+    epoch: u32,
+    local: Vec<u32>,
+    store: crate::fast_hash::AHashMap<TypeExprRef, bool>,
+}
+
+impl OccurMarks {
+    fn begin(&mut self) {
+        self.epoch += 1;
+        if self.epoch >= u32::MAX / 2 {
+            self.epoch = 1;
+            self.local.iter_mut().for_each(|m| *m = 0);
+        }
+        self.store.clear();
+    }
+
+    fn get(&self, ty: TypeExprRef) -> OccurMark {
+        if ty.is_store() {
+            return match self.store.get(&ty) {
+                None => OccurMark::Unseen,
+                Some(false) => OccurMark::OnPath,
+                Some(true) => OccurMark::Done,
+            };
+        }
+        match self.local.get(ty.index()).copied() {
+            Some(m) if m == self.epoch * 2 => OccurMark::OnPath,
+            Some(m) if m == self.epoch * 2 + 1 => OccurMark::Done,
+            _ => OccurMark::Unseen,
+        }
+    }
+
+    fn set(&mut self, ty: TypeExprRef, mark: OccurMark) {
+        if ty.is_store() {
+            self.store.insert(ty, mark == OccurMark::Done);
+            return;
+        }
+        let idx = ty.index();
+        if idx >= self.local.len() {
+            self.local.resize((idx + 1).next_power_of_two(), 0);
+        }
+        self.local[idx] = self.epoch * 2 + u32::from(mark == OccurMark::Done);
+    }
+}
+
+thread_local! {
+    static OCCUR_MARKS: std::cell::RefCell<OccurMarks> = std::cell::RefCell::new(OccurMarks::default());
+}
+
 pub(crate) fn occur_check(
     ctx: &TypeContext,
     env: Option<&Env>,
@@ -1810,8 +1869,7 @@ pub(crate) fn occur_check(
         ctx: &TypeContext,
         ty0: TypeExprRef,
         ty: TypeExprRef,
-        seen: &mut TypeExprRefSet,
-        on_path: &mut Vec<TypeExprRef>,
+        marks: &mut OccurMarks,
     ) -> bool {
         let ty = ctx.repr(ty);
         if ty == ty0 {
@@ -1852,22 +1910,29 @@ pub(crate) fn occur_check(
                 }
             }
         }
-        if !seen.insert(ty) {
-            return !on_path.contains(&ty);
+        match marks.get(ty) {
+            OccurMark::Done => return true,
+            OccurMark::OnPath => return false,
+            OccurMark::Unseen => {}
         }
-        on_path.push(ty);
+        marks.set(ty, OccurMark::OnPath);
         for child in children {
-            if !surely_occur_free(ctx, ty0, child, seen, on_path) {
+            if !surely_occur_free(ctx, ty0, child, marks) {
                 return false;
             }
         }
-        on_path.pop();
+        marks.set(ty, OccurMark::Done);
         true
     }
 
     let allow_recursive = mode == UnifyMode::Pattern;
     let ty0 = ctx.repr(ty0);
-    if surely_occur_free(ctx, ty0, ty, &mut TypeExprRefSet::new(), &mut Vec::new()) {
+    let free = OCCUR_MARKS.with(|marks| {
+        let mut marks = marks.borrow_mut();
+        marks.begin();
+        surely_occur_free(ctx, ty0, ty, &mut marks)
+    });
+    if free {
         return Ok(());
     }
     let mut visited = Vec::new();
@@ -2382,7 +2447,7 @@ fn update_level_children(
     pending_type_lookup_paths: &mut Option<&mut Vec<Path>>,
     pending_type_expansion_paths: &mut Option<&mut Vec<Path>>,
 ) -> Result<(), TypeExprRef> {
-    let mut children = Vec::new();
+    let mut children: smallvec::SmallVec<[TypeExprRef; 8]> = smallvec::SmallVec::new();
     iter_type_expr(ctx, ty, |child| children.push(child));
     for child in children {
         update_level_expand_with_lookup_capture(

@@ -11516,6 +11516,49 @@ fn report_unused_match_cases(
             }),
         })
         .collect();
+    register_unused_match_check(tctx, env, parmatch_cases, delayed, level, ty_arg_check, check_ambiguous);
+}
+
+/// [`report_unused_match_cases`] for a single unguarded pattern, such as a
+/// function parameter, without building a `Case` around it.
+fn report_unused_match_pattern(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    lhs: &Pattern,
+    delayed: bool,
+    level: i32,
+    ty_arg_check: TypeExprRef,
+) {
+    if !tctx.warning_config.is_active(&Warning::UnusedMatch) {
+        return;
+    }
+    let case = ParmatchCase {
+        lhs: lhs.clone(),
+        guarded: false,
+        guard_idents: None,
+    };
+    register_unused_match_check(tctx, env, vec![case], delayed, level, ty_arg_check, false);
+}
+
+fn register_unused_match_check(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    parmatch_cases: Vec<ParmatchCase>,
+    delayed: bool,
+    level: i32,
+    ty_arg_check: TypeExprRef,
+    check_ambiguous: bool,
+) {
+    // `check_unused` of one unguarded case without or-patterns: with no
+    // earlier rows `every_satisfiables` answers `Used`, the refinement is
+    // skipped (`pref = []`) and `check_ambiguous_bindings` only looks at
+    // guarded or-patterns, so nothing can be reported.
+    if let [case] = parmatch_cases.as_slice()
+        && !case.guarded
+        && !pattern_contains_or(&case.lhs)
+    {
+        return;
+    }
     let check = DelayedUnusedCheck {
         env: env.clone(),
         level,
@@ -14019,11 +14062,7 @@ fn type_function_nary(
             } else {
                 ty_arg_c
             };
-            let case = crate::types::typedtree::Case {
-                c_lhs: typed.clone(),
-                c_guard: None,
-                c_rhs: typed_body.clone(),
-            };
+            // The checks read only the pattern side of the case.
             let partial = parmatch_check_partial(
                 tctx,
                 env,
@@ -14031,16 +14070,18 @@ fn type_function_nary(
                 None,
                 ty_arg_check,
                 loc,
-                &case_refs(std::slice::from_ref(&case)),
+                &[crate::types::parmatch::CaseRef {
+                    lhs: &typed,
+                    guarded: false,
+                }],
             );
-            report_unused_match_cases(
+            report_unused_match_pattern(
                 tctx,
                 env,
-                std::slice::from_ref(&case),
+                &typed,
                 needs_exhaust_check || contains_polyvars,
                 check_level,
                 ty_arg_check,
-                false,
             );
             partial
         };
@@ -33539,6 +33580,29 @@ pub(crate) fn parmatch_irrefutable(
     pm.irrefutable(pat)
 }
 
+/// Patterns that match every value of their type: wildcards, variables,
+/// and aliases and tuples of those.
+fn pattern_surely_irrefutable(p: &Pattern) -> bool {
+    match &p.pat_desc {
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) => true,
+        PatternDesc::Tpat_alias(p, _, _) => pattern_surely_irrefutable(p),
+        PatternDesc::Tpat_tuple(ps) => ps.iter().all(pattern_surely_irrefutable),
+        _ => false,
+    }
+}
+
+fn pattern_contains_or(p: &Pattern) -> bool {
+    match &p.pat_desc {
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) | PatternDesc::Tpat_constant(_) => false,
+        PatternDesc::Tpat_or(..) => true,
+        PatternDesc::Tpat_alias(p, _, _) => pattern_contains_or(p),
+        PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => ps.iter().any(pattern_contains_or),
+        PatternDesc::Tpat_construct(_, _, ps) => ps.iter().any(pattern_contains_or),
+        PatternDesc::Tpat_variant(_, arg, _) => arg.as_deref().is_some_and(pattern_contains_or),
+        PatternDesc::Tpat_record(fields, _, _) => fields.iter().any(|(_, _, p, _)| pattern_contains_or(p)),
+    }
+}
+
 /// Whether typing counter-example `u` can fail: only through a GADT
 /// constructor, whose result type or existentials constrain the match.
 fn counter_example_may_refute(u: &Pattern) -> bool {
@@ -33943,6 +34007,18 @@ fn parmatch_check_partial(
     loc: LocIdx,
     cases: &[crate::types::parmatch::CaseRef<'_>],
 ) -> crate::types::typedtree::Partial {
+    // An unguarded irrefutable case makes `exhaust` answer `Rnone` without
+    // consulting the oracle, so the match is total and nothing is reported;
+    // only the fragile-match check still needs the full analysis.
+    if cases
+        .iter()
+        .any(|case| !case.guarded && pattern_surely_irrefutable(case.lhs))
+        && !tctx
+            .warning_config
+            .is_active(&Warning::FragileMatch { typ: String::new() })
+    {
+        return crate::types::typedtree::Partial::Total;
+    }
     let oracle = TypecoreParmatchOracle {
         tctx,
         env,

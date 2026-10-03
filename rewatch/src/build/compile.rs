@@ -161,8 +161,6 @@ struct SignatureReadyMsg {
     module_name: String,
     fingerprint: u64,
     is_pure: bool,
-    previous_cmi_hash: Option<blake3::Hash>,
-    cmi_path: PathBuf,
     registry_updates: Vec<PendingRegistryUpdate>,
 }
 
@@ -343,17 +341,13 @@ fn apply_pending_registry_updates(
 }
 
 fn apply_signature_ready(build_command_state: &BuildCommandState, msg: SignatureReadyMsg) -> bool {
-    let previous_cmi_hash = msg.previous_cmi_hash;
-    let cmi_path = msg.cmi_path.clone();
     apply_pending_registry_updates(build_command_state, msg.registry_updates);
     let generation_before = build_command_state.get_interface_generation(&msg.module_name);
     let generation_after =
         build_command_state.register_in_memory_interface(msg.module_name, msg.fingerprint, msg.is_pure);
-    if generation_before.is_some() {
-        generation_before == Some(generation_after)
-    } else {
-        previous_cmi_hash.is_some() && previous_cmi_hash == helpers::compute_file_hash(&cmi_path)
-    }
+    // A first registration in this process is a changed interface:
+    // in-process builds keep no `.cmi` to compare against.
+    generation_before == Some(generation_after)
 }
 
 fn unblock_dependents(
@@ -3389,8 +3383,6 @@ fn compile_module_in_process_to_js_boundary(
     let root_config = build_state.get_root_config();
 
     let source_abs = helpers::ocaml_absname(&Path::new(&package.path).join(implementation_path));
-    let cmi_path = helpers::get_compiler_asset(package, &package.namespace, implementation_path, "cmi");
-    let previous_cmi_hash = helpers::compute_file_hash(&cmi_path);
     let is_runtime = package.name == "@rescript/runtime";
     let provisional_is_pure = false;
     let provisional_module_info = in_memory_module_info_for_package(
@@ -3503,8 +3495,6 @@ fn compile_module_in_process_to_js_boundary(
                     module_name: module_name.to_string(),
                     fingerprint: intf_fingerprint,
                     is_pure: provisional_is_pure,
-                    previous_cmi_hash,
-                    cmi_path: cmi_path.clone(),
                     registry_updates: interface_registry_update.iter().cloned().collect::<Vec<_>>(),
                 }))
                 .map_err(|err| anyhow!("failed to publish interface signature for {module_name}: {err}"))?;
@@ -3525,7 +3515,6 @@ fn compile_module_in_process_to_js_boundary(
     let signature_hooks = scheduler_hooks.cloned();
     let signature_module_name = module_name.to_string();
     let signature_module_info = provisional_module_info.clone();
-    let signature_cmi_path = cmi_path.clone();
     let mut signature_hook =
         move |ready: rescript_compiler::driver::InProcessSignatureReady| -> Result<Option<ModuleRegistry>> {
             let Some(hooks) = signature_hooks.as_ref() else {
@@ -3554,8 +3543,6 @@ fn compile_module_in_process_to_js_boundary(
                     module_name: signature_module_name.clone(),
                     fingerprint,
                     is_pure: provisional_is_pure,
-                    previous_cmi_hash,
-                    cmi_path: signature_cmi_path.clone(),
                     registry_updates,
                 }))
                 .map_err(|err| {

@@ -7258,6 +7258,46 @@ fn check_well_founded(
         }
     }
 
+    /// `check` only fails on reaching a node already on its path or through
+    /// expanding a constructor (it expands only `to_check` paths before a
+    /// failure). A graph walk that sees neither proves the check passes.
+    fn surely_well_founded(
+        ctx: &crate::types::context::TypeContext,
+        to_check: &dyn Fn(&Path) -> bool,
+        ty: TypeExprRef,
+        seen: &mut crate::types::type_expr::TypeExprRefSet,
+        on_path: &mut Vec<TypeExprRef>,
+    ) -> bool {
+        let ty = ctx.repr(ty);
+        if !seen.insert(ty) {
+            return !on_path.contains(&ty);
+        }
+        if let TypeDesc::Tconstr { path, .. } = &*ctx.borrow_desc(ty)
+            && to_check(path)
+        {
+            return false;
+        }
+        on_path.push(ty);
+        let mut children: smallvec::SmallVec<[TypeExprRef; 8]> = smallvec::SmallVec::new();
+        crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
+        for child in children {
+            if !surely_well_founded(ctx, to_check, child, seen, on_path) {
+                return false;
+            }
+        }
+        on_path.pop();
+        true
+    }
+    if surely_well_founded(
+        ctx,
+        to_check,
+        ty,
+        &mut crate::types::type_expr::TypeExprRefSet::new(),
+        &mut Vec::new(),
+    ) {
+        return Ok(());
+    }
+
     let mut checker = WellFounded {
         ctx,
         env,

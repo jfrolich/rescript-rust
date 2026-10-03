@@ -526,20 +526,22 @@ impl<T: Clone> IdTbl<T> {
     /// the slot of the opened layer the name resolves to, and whether that
     /// layer hides an earlier binding (`find_name ~mark:false name next`).
     pub fn open_slot_use(&self, name: &str) -> Option<OpenSlotUse> {
-        if Name::lookup(name)
-            .and_then(|key| self.current.get(&key))
-            .is_some_and(|entries| !entries.is_empty())
-        {
+        // A name never interned is in no table.
+        self.open_slot_use_by_key(Name::lookup(name)?)
+    }
+
+    fn open_slot_use_by_key(&self, key: Name) -> Option<OpenSlotUse> {
+        if self.current.get(&key).is_some_and(|entries| !entries.is_empty()) {
             return None;
         }
         let opened = self.opened.as_ref()?;
-        if Name::lookup(name).is_some_and(|key| opened.components.contains_key(&key)) {
+        if opened.components.contains_key(&key) {
             return opened.slot.map(|slot| OpenSlotUse {
                 slot,
-                shadowed: opened.next.find_by_name(name).is_some(),
+                shadowed: opened.next.find_name_entry_key(key).is_some(),
             });
         }
-        opened.next.open_slot_use(name)
+        opened.next.open_slot_use_by_key(key)
     }
 
     fn find_current_by_ident(&self, id: &Ident) -> Option<&T> {
