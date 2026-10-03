@@ -553,7 +553,9 @@ fn collect_bind(
                     Some(resolver) => get_arity_external(arena, meta, node, resolver),
                     None => get_arity(arena, meta, node),
                 };
-                annotate(meta, rec_flag, id.clone(), arity, Some(node));
+                // Like the tree collect: the payload is only read for
+                // function nodes (remove-alias inlining), and this is not one.
+                annotate(meta, rec_flag, id.clone(), arity, None);
             }
         }
     }
