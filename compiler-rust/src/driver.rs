@@ -15880,8 +15880,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             normalize_signature(&type_ctx, &simple_signature);
         }
 
-        saved_cmi_signature =
-            prepare_inferred_signature_for_saving(&type_ctx, &simple_signature, has_interface);
+        // The saved copy only feeds the `.cmi` written below; in-process
+        // builds write no artifacts.
+        if options.typed_artifacts.is_some() {
+            saved_cmi_signature =
+                prepare_inferred_signature_for_saving(&type_ctx, &simple_signature, has_interface);
+        }
 
         simple_signature
     };
@@ -16661,8 +16665,9 @@ pub fn typecheck_preprocessed_signature_in_process(
         .unwrap_or_default();
     let mut saved_cmi_crc = None;
     // js_implementation.ml:66-70: save the `.cmi` and the `.cmti`.
-    if let crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature) =
-        &typed_module_type.mty_desc
+    if options.typed_artifacts.is_some()
+        && let crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature) =
+            &typed_module_type.mty_desc
     {
         // `Env.save_signature` writes the `Subst.for_saving` copy
         // (env.ml:1886-1892).
