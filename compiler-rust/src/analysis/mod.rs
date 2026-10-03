@@ -7,6 +7,7 @@
 //! analysis/bin/main.ml) and returns what that binary prints.
 
 pub mod document_symbol;
+pub mod hashtbl;
 pub mod json;
 
 use json::Json;
