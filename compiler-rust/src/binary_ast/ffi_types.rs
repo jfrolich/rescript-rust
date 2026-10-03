@@ -10,7 +10,7 @@
 
 use super::marshal::MarshalWriter;
 use crate::types::external_ffi_types::{
-    Attr, Cst, DeclKind, Delim, ExternalDecl, ExternalFfi, ExternalModuleName, InlineConst, Label,
+    Attr, Cst, DeclKind, ExternalDecl, ExternalFfi, ExternalModuleName, InlineConst, Label,
     LabelNoname, ModuleBindName, ModuleSource, ObjParam, Param, ReturnWrapper,
 };
 
@@ -45,15 +45,6 @@ fn string_pairs(w: &mut MarshalWriter<'_>, pairs: &[(String, String)]) {
     });
 }
 
-fn delim(w: &mut MarshalWriter<'_>, d: &Delim) {
-    w.write_int(match d {
-        Delim::DNone => 0,
-        Delim::DStarJ => 1,
-        Delim::DNoQuotes => 2,
-        Delim::DBackQuotes => 3,
-    });
-}
-
 fn attr(w: &mut MarshalWriter<'_>, a: &Attr) {
     match a {
         Attr::ExternUnit => w.write_int(0),
@@ -83,10 +74,13 @@ fn attr(w: &mut MarshalWriter<'_>, a: &Attr) {
                     w.write_block_header(0, 1);
                     w.write_int(*i);
                 }
-                Cst::ArgStringLit(s, d) => {
-                    w.write_block_header(1, 2);
+                Cst::ArgStringLit(s) => {
+                    w.write_block_header(1, 1);
                     w.write_str(s);
-                    delim(w, d);
+                }
+                Cst::ArgJsonLit(s) => {
+                    w.write_block_header(2, 1);
+                    w.write_str(s);
                 }
             }
         }
@@ -205,10 +199,9 @@ pub fn marshal_external_ffi(w: &mut MarshalWriter<'_>, ffi: &ExternalFfi) {
 /// `External_ffi_types.inline_const`.
 pub fn marshal_inline_const(w: &mut MarshalWriter<'_>, c: &InlineConst) {
     match c {
-        InlineConst::ConstStr { s, delim: d } => {
-            w.write_block_header(0, 2);
+        InlineConst::ConstString(s) => {
+            w.write_block_header(0, 1);
             w.write_str(s);
-            option(w, d, delim);
         }
         InlineConst::ConstBool(b) => {
             w.write_block_header(1, 1);

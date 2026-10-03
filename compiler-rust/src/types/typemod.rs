@@ -622,8 +622,8 @@ fn parser_attr_to_decl_attr(
                         expr.pexp_desc.as_ref()
                     {
                         match c.as_ref() {
-                            crate::parser::ast::Constant::String(value, _) => {
-                                crate::types::decl::AttributePayload::Str(value.to_string())
+                            crate::parser::ast::Constant::String(value) => {
+                                crate::types::decl::AttributePayload::Str(value.semantic().to_string())
                             }
                             crate::parser::ast::Constant::Integer(value, suffix) => match suffix {
                                 Some('n') => {
@@ -695,7 +695,7 @@ fn parser_attrs_to_decl_attrs(
 fn parser_warning_attribute_payload<'a>(
     arena: &'a ParseArena,
     payload: &'a ParsedPayload,
-) -> Option<(&'a str, LocIdx)> {
+) -> Option<(String, LocIdx)> {
     let ParsedPayload::PStr(items) = payload else {
         return None;
     };
@@ -706,16 +706,10 @@ fn parser_warning_attribute_payload<'a>(
         return None;
     };
     let (expr_idx, _attrs) = eval_box.as_ref();
-    let expr = arena.get_expr(*expr_idx);
-    let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = expr.pexp_desc.as_ref() else {
-        return None;
-    };
-    let crate::parser::ast::Constant::String(spec, _) = c.as_ref() else {
-        return None;
-    };
-    // builtin_attributes.ml:202-212 reports `@ppwarning` at the payload
-    // item's `pstr_loc`.
-    Some((spec.as_ref(), item.pstr_loc))
+    // builtin_attributes.ml `string_of_payload`: the payload's semantic
+    // string. `@ppwarning` is reported at the payload item's `pstr_loc`.
+    let spec = crate::ast_payload::semantic_string_of_expression(arena, arena.get_expr(*expr_idx)).ok()??;
+    Some((spec, item.pstr_loc))
 }
 
 fn apply_warning_attribute(
@@ -750,9 +744,9 @@ fn apply_warning_attribute_with_ppwarning(
 
             let mut config = WarningConfig::new();
             let parsed = if errflag {
-                config.parse_as_error(spec)
+                config.parse_as_error(&spec)
             } else {
-                config.parse(spec)
+                config.parse(&spec)
             };
             if parsed.is_err() {
                 tctx.report_warning(
@@ -766,9 +760,9 @@ fn apply_warning_attribute_with_ppwarning(
             }
 
             if errflag {
-                tctx.apply_warning_error_spec(spec);
+                tctx.apply_warning_error_spec(&spec);
             } else {
-                tctx.apply_warning_spec(spec);
+                tctx.apply_warning_spec(&spec);
             }
         }
         "ppwarning" | "ocaml.ppwarning" if ppwarning => {
@@ -852,8 +846,8 @@ fn parser_deprecated_of_attr(arena: &ParseArena, attr: &ParsedAttribute) -> Opti
                 ParsedStructureItemDesc::Pstr_eval(eval_box) => {
                     match arena.get_expr(eval_box.0).pexp_desc.as_ref() {
                         crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match c.as_ref() {
-                            crate::parser::ast::Constant::String(value, _) => {
-                                Some(value.to_string())
+                            crate::parser::ast::Constant::String(value) => {
+                                Some(value.semantic().to_string())
                             }
                             _ => None,
                         },
@@ -918,15 +912,13 @@ fn parser_deprecated_payload_to_decl_payload(
     let (expr_idx, _attrs) = eval_box.as_ref();
     let expr = arena.get_expr(*expr_idx);
 
+    // The plain `string_of_payload` form (builtin_attributes.ml
+    // `string_of_payload`); `Deprecated` is kept for the record form.
+    if let Some(reason) = crate::ast_payload::semantic_string_of_expression(arena, expr).ok().flatten() {
+        return Some(crate::types::decl::AttributePayload::Str(reason));
+    }
     match expr.pexp_desc.as_ref() {
-        crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match c.as_ref() {
-            // The plain `string_of_payload` form (builtin_attributes.ml:23-26);
-            // `Deprecated` is kept for the record form.
-            crate::parser::ast::Constant::String(reason, _) => {
-                Some(crate::types::decl::AttributePayload::Str(reason.to_string()))
-            }
-            _ => None,
-        },
+        crate::parser::ast::ExpressionDesc::Pexp_constant(_) => None,
         crate::parser::ast::ExpressionDesc::Pexp_record(record) => {
             let (fields, _base) = record.as_ref();
             let mut reason = None;
@@ -945,12 +937,10 @@ fn parser_deprecated_payload_to_decl_payload(
                 let field_name = arena.lident_last(field.lid.txt);
                 if field_name == "reason" {
                     let field_expr = arena.get_expr(field.expr);
-                    if let crate::parser::ast::ExpressionDesc::Pexp_constant(c) =
-                        field_expr.pexp_desc.as_ref()
+                    if let Some(value) =
+                        crate::ast_payload::semantic_string_of_expression(arena, field_expr).ok().flatten()
                     {
-                        if let crate::parser::ast::Constant::String(value, _) = c.as_ref() {
-                            reason = Some(value.to_string());
-                        }
+                        reason = Some(value);
                     }
                 } else if field_name == "migrate" {
                     can_be_automigrated = true;
@@ -5870,7 +5860,7 @@ fn label_as_name_with_loc(
     };
     match &*arena.get_expr(eval.0).pexp_desc {
         crate::parser::ast::ExpressionDesc::Pexp_constant(constant) => match &**constant {
-            crate::parser::ast::Constant::String(s, _) => Some((s.to_string(), attr.0.loc)),
+            crate::parser::ast::Constant::String(s) => Some((s.semantic().to_string(), attr.0.loc)),
             _ => None,
         },
         _ => None,
@@ -8072,6 +8062,13 @@ fn expression_uses_unqualified_value_path(
             expression_uses_unqualified_value_path(arena, first, name, target)
                 || expression_uses_unqualified_value_path(arena, second, name, target)
         }
+        crate::types::typedtree::ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
+            expression_uses_unqualified_value_path(arena, tag, name, target)
+                || values.iter().any(|value| expression_uses_unqualified_value_path(arena, value, name, target))
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_template { values, .. } => {
+            values.iter().any(|value| expression_uses_unqualified_value_path(arena, value, name, target))
+        }
         crate::types::typedtree::ExpressionDesc::Texp_for(_, _, start, stop, _, body) => {
             expression_uses_unqualified_value_path(arena, start, name, target)
                 || expression_uses_unqualified_value_path(arena, stop, name, target)
@@ -8265,6 +8262,13 @@ fn expression_uses_unqualified_module_path(
         | crate::types::typedtree::ExpressionDesc::Texp_for_await_of(_, _, first, second) => {
             expression_uses_unqualified_module_path(arena, first, name, target)
                 || expression_uses_unqualified_module_path(arena, second, name, target)
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
+            expression_uses_unqualified_module_path(arena, tag, name, target)
+                || values.iter().any(|value| expression_uses_unqualified_module_path(arena, value, name, target))
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_template { values, .. } => {
+            values.iter().any(|value| expression_uses_unqualified_module_path(arena, value, name, target))
         }
         crate::types::typedtree::ExpressionDesc::Texp_for(_, _, start, stop, _, body) => {
             expression_uses_unqualified_module_path(arena, start, name, target)
@@ -18643,8 +18647,8 @@ fn type_structure_item<'a>(
                                             let (expr_idx, _) = &**inner;
                                             let expr = arena.get_expr(*expr_idx);
                                             if let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc {
-                                                if let crate::parser::ast::Constant::String(s, _) = &**c {
-                                                    return Some(s.to_string());
+                                                if let crate::parser::ast::Constant::String(s) = &**c {
+                                                    return Some(s.semantic().to_string());
                                                 }
                                             }
                                         }

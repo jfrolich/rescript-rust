@@ -240,15 +240,6 @@ let set_field_dbg_info (info : Lambda.set_field_dbg_info) =
   | Fld_record_inline_set s -> Sexp.list [Sexp.atom "Fld_record_inline_set"; string s]
   | Fld_record_extension_set s -> Sexp.list [Sexp.atom "Fld_record_extension_set"; string s]
 
-(* String delimiter *)
-let string_delim (delim : External_arg_spec.delim option) =
-  match delim with
-  | None -> Sexp.atom "None"
-  | Some DNone -> Sexp.list [Sexp.atom "Some"; Sexp.atom "DNone"]
-  | Some DNoQuotes -> Sexp.list [Sexp.atom "Some"; Sexp.atom "DNoQuotes"]
-  | Some DStarJ -> Sexp.list [Sexp.atom "Some"; Sexp.atom "DStarJ"]
-  | Some DBackQuotes -> Sexp.list [Sexp.atom "Some"; Sexp.atom "DBackQuotes"]
-
 (* Constant *)
 let rec constant (c : Lambda.structured_constant) =
   match c with
@@ -263,8 +254,7 @@ let rec constant (c : Lambda.structured_constant) =
   | Const_constructor tag ->
     Sexp.list [Sexp.atom "Const_constructor"; variant_tag tag]
   | Const_char c -> Sexp.list [Sexp.atom "Const_char"; int c]
-  | Const_string {s; delim} ->
-    Sexp.list [Sexp.atom "Const_string"; string s; string_delim delim]
+  | Const_string s -> Sexp.list [Sexp.atom "Const_string"; string s]
   | Const_float f -> Sexp.list [Sexp.atom "Const_float"; string f]
   | Const_bigint (sign, s) ->
     Sexp.list [Sexp.atom "Const_bigint"; bool sign; string s]
@@ -408,7 +398,19 @@ let primitive ~with_locs (prim : Lambda.primitive) =
   | Pisint -> Sexp.atom "Pisint"
   | Pis_poly_var_block -> Sexp.atom "Pis_poly_var_block"
   | Pawait -> Sexp.atom "Pawait"
-  | Ptagged_template -> Sexp.atom "Ptagged_template"
+  | Ptagged_template raw_sources ->
+    Sexp.list (Sexp.atom "Ptagged_template" :: List.map string raw_sources)
+  | Ptemplate segments ->
+    Sexp.list
+      (Sexp.atom "Ptemplate"
+      :: List.map
+           (fun segment ->
+             Sexp.list
+               [
+                 string (String_literal.template_source segment);
+                 string (String_literal.template_semantic segment);
+               ])
+           segments)
   | Precord_rest excluded ->
     Sexp.list (Sexp.atom "Precord_rest" :: List.map string excluded)
   | Phash -> Sexp.atom "Phash"

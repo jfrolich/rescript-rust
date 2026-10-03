@@ -28,7 +28,7 @@ impl Lets<'_> {
 
 fn string_value(store: &IndexedLambda, state: &Lets<'_>, node: NodeId) -> Option<String> {
     match store.view(node) {
-        NodeView::Const(Constant::String { s, delim: None }) => Some(s.clone()),
+        NodeView::Const(Constant::String(s)) => Some(s.clone()),
         NodeView::Var(id) => state.strings.get(id).cloned(),
         _ => None,
     }
@@ -97,7 +97,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
                 state.substitutions.insert(id, value);
                 return simplify(store, state, body);
             }
-            if let NodeView::Const(Constant::String { s, delim: None }) = store.view(value) {
+            if let NodeView::Const(Constant::String(s)) = store.view(value) {
                 state.strings.insert(id.clone(), s.clone());
                 let body = simplify(store, state, body);
                 return append_rebuilt(store, NodeSnapshot::Let(LetKind::Alias, id, value, body));
@@ -126,7 +126,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
                 };
             }
             let value = simplify(store, state, value);
-            if let NodeView::Const(Constant::String { s, delim: None }) = store.view(value) {
+            if let NodeView::Const(Constant::String(s)) = store.view(value) {
                 state.strings.insert(id.clone(), s.clone());
                 let body = simplify(store, state, body);
                 return append_rebuilt(store, NodeSnapshot::Let(LetKind::Alias, id, value, body));
@@ -146,7 +146,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
             }
             let value = simplify(store, state, value);
             if kind == LetKind::Strict
-                && let NodeView::Const(Constant::String { s, delim: None }) = store.view(value)
+                && let NodeView::Const(Constant::String(s)) = store.view(value)
             {
                 state.strings.insert(id.clone(), s.clone());
                 let body = simplify(store, state, body);
@@ -184,10 +184,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
                 string_value(store, state, left),
                 string_value(store, state, right),
             ) {
-                (Some(left), Some(right)) => store.append(NodeSnapshot::Const(Constant::String {
-                    s: left + &right,
-                    delim: None,
-                })),
+                (Some(left), Some(right)) => store.append(NodeSnapshot::Const(Constant::String(left + &right))),
                 _ => append_rebuilt(
                     store,
                     NodeSnapshot::Prim(Primitive::Pstringadd, vec![left, right], loc),

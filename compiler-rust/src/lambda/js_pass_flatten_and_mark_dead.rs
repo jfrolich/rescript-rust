@@ -595,12 +595,7 @@ fn flatten_and_mark_dead_expression(
                 substitution,
                 jsx_preserve,
             )),
-            strings
-                .into_iter()
-                .map(|value| {
-                    flatten_and_mark_dead_expression(value, id_gen, substitution, jsx_preserve)
-                })
-                .collect(),
+            strings,
             values
                 .into_iter()
                 .map(|value| {
@@ -608,6 +603,15 @@ fn flatten_and_mark_dead_expression(
                 })
                 .collect(),
         ),
+        ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
+            segments,
+            values: values
+                .into_iter()
+                .map(|value| {
+                    flatten_and_mark_dead_expression(value, id_gen, substitution, jsx_preserve)
+                })
+                .collect(),
+        },
         ExpressionDesc::StaticIndex(target, field, pos) => {
             let target =
                 flatten_and_mark_dead_expression(*target, id_gen, substitution, jsx_preserve);
@@ -651,7 +655,9 @@ fn flatten_and_mark_dead_expression(
             async_,
             directive,
         },
-        ExpressionDesc::Str { delim, txt } => ExpressionDesc::Str { delim, txt },
+        ExpressionDesc::Str(txt) => ExpressionDesc::Str(txt),
+        ExpressionDesc::TemplateLiteral(segment) => ExpressionDesc::TemplateLiteral(segment),
+        ExpressionDesc::JsonLiteral(source) => ExpressionDesc::JsonLiteral(source),
         ExpressionDesc::RawJsCode(info) => ExpressionDesc::RawJsCode(info),
         ExpressionDesc::Array(items, mutable_flag) => ExpressionDesc::Array(
             items
@@ -854,7 +860,8 @@ fn should_materialize_block_binding_items(
 fn is_deep_constant_block_binding_item(expr: &Expression) -> bool {
     match &expr.desc {
         ExpressionDesc::Number(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
         | ExpressionDesc::Bool(_)
         | ExpressionDesc::Undefined { .. } => true,
         ExpressionDesc::OptionalBlock(inner, _) => is_deep_constant_block_binding_item(inner),
@@ -877,7 +884,8 @@ fn is_simple_block_binding_item(expr: &Expression) -> bool {
     match &expr.desc {
         ExpressionDesc::Var(_)
         | ExpressionDesc::Number(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
         | ExpressionDesc::Bool(_)
         | ExpressionDesc::Undefined { .. } => true,
         _ => false,
@@ -888,7 +896,8 @@ fn is_simple_substituted_index_value(expr: &Expression) -> bool {
     match &expr.desc {
         ExpressionDesc::Var(_)
         | ExpressionDesc::Number(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
         | ExpressionDesc::Undefined { .. } => true,
         ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, tag)
             if matches!(**tag, TagInfo::Constructor { .. }) =>
@@ -1071,7 +1080,9 @@ fn collect_mark_dead_states_expression(
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Number(_) => {}
         ExpressionDesc::Length(inner, _)
@@ -1107,11 +1118,13 @@ fn collect_mark_dead_states_expression(
                 collect_mark_dead_states_expression(arg, states);
             }
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             collect_mark_dead_states_expression(tag, states);
-            for string in strings {
-                collect_mark_dead_states_expression(string, states);
+            for value in values {
+                collect_mark_dead_states_expression(value, states);
             }
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
             for value in values {
                 collect_mark_dead_states_expression(value, states);
             }
@@ -1279,11 +1292,13 @@ fn apply_mark_dead_states_expression(expr: &mut Expression, states: &HashMap<Ide
                 apply_mark_dead_states_expression(arg, states);
             }
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             apply_mark_dead_states_expression(tag, states);
-            for string in strings {
-                apply_mark_dead_states_expression(string, states);
+            for value in values {
+                apply_mark_dead_states_expression(value, states);
             }
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
             for value in values {
                 apply_mark_dead_states_expression(value, states);
             }
@@ -1322,7 +1337,9 @@ fn apply_mark_dead_states_expression(expr: &mut Expression, states: &HashMap<Ide
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Number(_) => {}
     }
@@ -1699,9 +1716,13 @@ fn flatten_expression(expr: Expression) -> Expression {
         ),
         ExpressionDesc::TaggedTemplate(tag, strings, values) => ExpressionDesc::TaggedTemplate(
             Box::new(flatten_expression(*tag)),
-            strings.into_iter().map(flatten_expression).collect(),
+            strings,
             values.into_iter().map(flatten_expression).collect(),
         ),
+        ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
+            segments,
+            values: values.into_iter().map(flatten_expression).collect(),
+        },
         ExpressionDesc::StaticIndex(target, field, pos) => {
             ExpressionDesc::StaticIndex(Box::new(flatten_expression(*target)), field, pos)
         }
@@ -1727,7 +1748,9 @@ fn flatten_expression(expr: Expression) -> Expression {
             async_,
             directive,
         },
-        ExpressionDesc::Str { delim, txt } => ExpressionDesc::Str { delim, txt },
+        ExpressionDesc::Str(txt) => ExpressionDesc::Str(txt),
+        ExpressionDesc::TemplateLiteral(segment) => ExpressionDesc::TemplateLiteral(segment),
+        ExpressionDesc::JsonLiteral(source) => ExpressionDesc::JsonLiteral(source),
         ExpressionDesc::RawJsCode(info) => ExpressionDesc::RawJsCode(info),
         ExpressionDesc::Array(items, mutable_flag) => ExpressionDesc::Array(
             items.into_iter().map(flatten_expression).collect(),

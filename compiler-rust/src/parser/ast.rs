@@ -17,6 +17,8 @@ use crate::parse_arena::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::string_literal::StringLiteral;
+
 /// Convert any `Cow<'_, str>` into `Cow<'static, str>` without unsafe.
 ///
 /// Borrowed values are copied into owned strings; owned values are moved through.
@@ -176,12 +178,38 @@ pub type Label = Cow<'static, str>;
 pub enum Constant {
     /// Integer constant with optional suffix (l, L, n).
     Integer(Cow<'static, str>, Option<char>),
-    /// Character constant (Unicode codepoint).
-    Char(i32),
-    /// String constant with optional delimiter.
-    String(Cow<'static, str>, Option<Cow<'static, str>>),
+    /// An ordinary character literal (OCaml `Pconst_char {source; semantic}`):
+    /// `source` is the text between the single quotes as scanned, kept for
+    /// printing; `semantic` is the decoded Unicode code point.
+    Char {
+        source: Cow<'static, str>,
+        semantic: i32,
+    },
+    /// An ordinary double-quoted string literal (OCaml `Pconst_string`).
+    String(StringLiteral),
+    /// The JavaScript source inside a non-interpolated ``json`...` `` literal.
+    Json(Cow<'static, str>),
+    /// JavaScript source carried by a compiler extension such as `raw`,
+    /// `ffi` or `re`.
+    RawSource(Cow<'static, str>),
     /// Float constant with optional suffix.
     Float(Cow<'static, str>, Option<char>),
+}
+
+impl Constant {
+    /// OCaml `Ast_helper.Const.string`: a string constant with canonical
+    /// source spelling for a semantic value.
+    pub fn string(semantic: &str) -> Constant {
+        Constant::String(crate::string_literal::string_from_semantic(semantic))
+    }
+
+    /// OCaml `Ast_helper.Const.char`.
+    pub fn char(semantic: i32) -> Constant {
+        Constant::Char {
+            source: Cow::Owned(crate::string_literal::encode_char_source(semantic)),
+            semantic,
+        }
+    }
 }
 
 // ============================================================================
@@ -621,6 +649,22 @@ pub struct PexpApply {
     pub transformed_jsx: bool,
 }
 
+/// OCaml `Pexp_template {source_segments; values}`: an ordinary backquoted
+/// expression. There is always one more source segment than value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PexpTemplate {
+    pub source_segments: Vec<StringLoc>,
+    pub values: Vec<ExprIdx>,
+}
+
+/// OCaml `Pexp_tagged_template {tag; raw_sources; values}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PexpTaggedTemplate {
+    pub tag: ExprIdx,
+    pub raw_sources: Vec<StringLoc>,
+    pub values: Vec<ExprIdx>,
+}
+
 /// Expression descriptions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExpressionDesc {
@@ -695,6 +739,10 @@ pub enum ExpressionDesc {
     Pexp_extension(Box<Extension>),
     /// Await: `await E`.
     Pexp_await(ExprIdx),
+    /// An ordinary backquoted template: `` `a ${b}` ``.
+    Pexp_template(Box<PexpTemplate>),
+    /// A JavaScript tagged template: ``sql`id = ${id}` ``.
+    Pexp_tagged_template(Box<PexpTaggedTemplate>),
     /// JSX element.
     Pexp_jsx_element(Box<JsxElement>),
     /// Inline for: `inline for pat in collection { body }` (comptime loop unrolling).
@@ -1289,7 +1337,7 @@ mod tests {
         let c = Constant::Integer(Cow::Borrowed("42"), None);
         assert!(matches!(c, Constant::Integer(..)));
 
-        let c = Constant::String(Cow::Borrowed("hello"), None);
+        let c = Constant::string("hello");
         assert!(matches!(c, Constant::String(..)));
     }
 

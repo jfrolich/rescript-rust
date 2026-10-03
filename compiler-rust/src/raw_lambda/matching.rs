@@ -337,7 +337,7 @@ fn const_compare(c1: &Constant, c2: &Constant) -> std::cmp::Ordering {
             v1.partial_cmp(&v2).unwrap_or(Ordering::Equal)
         }
         (Constant::BigInt(s1, b1), Constant::BigInt(s2, b2)) => compare_bigint(*s1, b1, *s2, b2),
-        (Constant::String(s1, _), Constant::String(s2, _)) => s1.cmp(s2),
+        (Constant::String(s1), Constant::String(s2)) => s1.cmp(s2),
         (Constant::Int(i1), Constant::Int(i2)) => i1.cmp(i2),
         (Constant::Char(c1), Constant::Char(c2)) => c1.cmp(c2),
         _ => {
@@ -6101,10 +6101,7 @@ fn typed_const_to_lambda_const(c: &Constant) -> RawLambda {
     let lc = match c {
         Constant::Int(i) => crate::lambda::Constant::int(*i as i32),
         Constant::Char(c) => crate::lambda::Constant::Char(*c),
-        Constant::String(s, _) => crate::lambda::Constant::String {
-            s: s.clone(),
-            delim: None,
-        },
+        Constant::String(s) => crate::lambda::Constant::String(s.clone()),
         Constant::Float(f) => crate::lambda::Constant::Float(f.clone()),
         Constant::BigInt(positive, v) => crate::lambda::Constant::BigInt {
             negative: !*positive,
@@ -7085,12 +7082,12 @@ fn combine_constant<'p>(
                 next_raise_count,
             )
         }
-        Constant::String(_, _) => {
+        Constant::String(_) => {
             let const_lambda_list = sort_lambda_list(const_lambda_list);
             let sw: Vec<(String, RawLambda)> = const_lambda_list
                 .into_iter()
                 .map(|(c, act)| match c {
-                    Constant::String(s, _) => (s, act),
+                    Constant::String(s) => (s, act),
                     _ => panic!("combine_constant: expected Const_string"),
                 })
                 .collect();
@@ -8008,9 +8005,12 @@ fn compile_test<'p, K: Clone>(
 
 /// Check if v approximately appears in lam.
 /// Equivalent to OCaml's `approx_present`.
+/// matching.ml `approx_present`: anything but a constant, a static raise,
+/// a primitive, an alias let or a variable (including `Lglobal_module`)
+/// counts as present.
 fn approx_present(v: &Ident, lam: &RawLambda) -> bool {
     match lam.peel() {
-        RawLambda::Lconst(_) | RawLambda::LglobalModule(_) => false,
+        RawLambda::Lconst(_) => false,
         RawLambda::LstaticRaise(_, args) => args.iter().any(|a| approx_present(v, a)),
         RawLambda::Lprim(info) => info.args.iter().any(|a| approx_present(v, a)),
         RawLambda::Llet(LetKind::Alias, _, l1, l2) => {

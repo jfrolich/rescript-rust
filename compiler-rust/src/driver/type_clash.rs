@@ -340,7 +340,7 @@ fn extract_string_constant(ctx: &TypeContext, text: &str) -> Option<String> {
     };
     match &*arena.get_expr(eval.0).pexp_desc {
         crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match &**c {
-            crate::parser::ast::Constant::String(s, _) => Some(s.to_string()),
+            crate::parser::ast::Constant::String(payload) => Some(payload.semantic().to_string()),
             _ => None,
         },
         _ => None,
@@ -970,10 +970,10 @@ fn print_extra_type_clash_help_by_types(
                 let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = &*exp.pexp_desc else {
                     return None;
                 };
-                let crate::parser::ast::Constant::String(s, _) = &**c else {
+                let crate::parser::ast::Constant::String(payload) = &**c else {
                     return None;
                 };
-                let s = s.to_string();
+                let s = payload.semantic().to_string();
                 Some(crate::parser::ast::Expression {
                     pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_variant(Box::new((
                         std::borrow::Cow::Owned(s),

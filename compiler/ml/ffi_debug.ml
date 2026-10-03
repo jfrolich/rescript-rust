@@ -9,12 +9,6 @@ let list f xs = "[" ^ String.concat ";" (List.map f xs) ^ "]"
 let quote s = Printf.sprintf "%S" s
 let bool b = if b then "true" else "false"
 
-let delim = function
-  | DNone -> "DNone"
-  | DStarJ -> "DStarJ"
-  | DNoQuotes -> "DNoQuotes"
-  | DBackQuotes -> "DBackQuotes"
-
 let pairs xs = list (fun (a, b) -> "(" ^ quote a ^ "," ^ quote b ^ ")") xs
 
 let attr = function
@@ -23,8 +17,8 @@ let attr = function
   | Poly_var {descr = Some d} -> "Poly_var" ^ pairs d
   | Int xs -> "Int" ^ list (fun (a, i) -> "(" ^ quote a ^ "," ^ string_of_int i ^ ")") xs
   | Arg_cst (Arg_int_lit i) -> "Arg_int_lit(" ^ string_of_int i ^ ")"
-  | Arg_cst (Arg_string_lit (s, d)) ->
-    "Arg_string_lit(" ^ quote s ^ "," ^ delim d ^ ")"
+  | Arg_cst (Arg_string_lit s) -> "Arg_string_lit(" ^ quote s ^ ")"
+  | Arg_cst (Arg_json_lit s) -> "Arg_json_lit(" ^ quote s ^ ")"
   | Extern_unit -> "Extern_unit"
   | Nothing -> "Nothing"
   | Ignore -> "Ignore"
@@ -85,8 +79,7 @@ let spec = function
   | Ffi_obj_create params -> "Ffi_obj_create" ^ list obj_param params
 
 let inline_const = function
-  | Const_str {s; delim = None} -> "Const_str(" ^ quote s ^ ")"
-  | Const_str {s; delim = Some d} -> "Const_str(" ^ quote s ^ "," ^ delim d ^ ")"
+  | Const_string s -> "Const_string(" ^ quote s ^ ")"
   | Const_bool b -> "Const_bool(" ^ bool b ^ ")"
   | Const_int i -> "Const_int(" ^ Int32.to_string i ^ ")"
   | Const_bigint {negative; digits} ->

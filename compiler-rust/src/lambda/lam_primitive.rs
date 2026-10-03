@@ -17,7 +17,7 @@ pub struct JsRawInfo {
 }
 
 pub use crate::types::external_ffi_types::{
-    Attr, Cst, DeclKind, Delim, ExternalDecl, ExternalModuleName, ImportAttributes, Label,
+    Attr, Cst, DeclKind, ExternalDecl, ExternalModuleName, ImportAttributes, Label,
     LabelNoname, ModuleBindName, ModuleSource, ObjParam, Param,
 };
 
@@ -80,8 +80,14 @@ pub enum Primitive {
     /// Copy an object while excluding the listed runtime field names.
     PrecordRest(Vec<String>),
 
-    /// Tagged template literal: `[tag, strings_array, values_array]`.
-    PtaggedTemplate,
+    /// A JavaScript tagged template operation. For `sql`id = ${id}``, the
+    /// payload is `["id = "; ""]` and the arguments are `[sql; id]`. Segment
+    /// text remains raw and may contain invalid escapes.
+    PtaggedTemplate(Vec<String>),
+
+    /// An ordinary backquoted-template operation: the source and semantic
+    /// forms of each segment; the arguments are the interpolated values.
+    Ptemplate(Vec<crate::string_literal::TemplateSegment>),
 
     // ==================== External Call ====================
     /// JavaScript FFI call
@@ -465,7 +471,8 @@ impl Primitive {
             | PupdateMod
             | Pduprecord
             | PrecordRest(_)
-            | PtaggedTemplate
+            | PtaggedTemplate(_)
+            | Ptemplate(_)
             | Pmakearray
             | Parraylength
             | Parrayrefu

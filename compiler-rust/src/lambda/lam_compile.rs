@@ -14,7 +14,7 @@ use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, Kind, MutableFlag, Number, PropertyName, UsedStats};
 use crate::js_ir::{
-    BinOp, Block, CallArity, CallInfo, CallKind, CaseClause, Delim, DepsProgram, Expression,
+    BinOp, Block, CallArity, CallInfo, CallKind, CaseClause, DepsProgram, Expression,
     ExpressionDesc, ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc,
     StringClause, VIdent, VariableDeclaration, block_last_is_terminal, unnest_block,
 };
@@ -45,7 +45,7 @@ use crate::lambda::lam_constant::{Constant, PointerInfo};
 use crate::lambda::lam_exit_code::has_exit_code;
 use crate::lambda::lam_free_variables::free_variables;
 use crate::lambda::lam_pass_collect::get_arity;
-use crate::lambda::lam_primitive::{Cst, Delim as FfiDelim, Primitive};
+use crate::lambda::lam_primitive::{Cst, Primitive};
 use crate::lambda::lam_subst;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda,
@@ -5492,18 +5492,9 @@ impl LambdaCompiler {
                 i: *i as i32,
                 c: None,
             }),
-            Cst::ArgStringLit(s, delim) => {
-                let delim = match delim {
-                    FfiDelim::DNone => Delim::None,
-                    FfiDelim::DStarJ => Delim::StarJ,
-                    FfiDelim::DNoQuotes => Delim::NoQuotes,
-                    FfiDelim::DBackQuotes => Delim::BackQuotes,
-                };
-                Expression::new(ExpressionDesc::Str {
-                    delim,
-                    txt: s.clone(),
-                })
-            }
+            // lam_compile_const.ml `translate_arg_cst`.
+            Cst::ArgStringLit(s) => Expression::string(s.clone()),
+            Cst::ArgJsonLit(s) => Expression::new(ExpressionDesc::JsonLiteral(s.clone())),
         }
     }
 
@@ -8343,11 +8334,13 @@ fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleS
                 collect_modules_from_expression(arg, modules);
             }
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             collect_modules_from_expression(tag, modules);
-            for string in strings {
-                collect_modules_from_expression(string, modules);
+            for value in values {
+                collect_modules_from_expression(value, modules);
             }
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
             for value in values {
                 collect_modules_from_expression(value, modules);
             }
@@ -8384,7 +8377,9 @@ fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleS
         }
         ExpressionDesc::Bool(_)
         | ExpressionDesc::Var(crate::js_ir::VIdent::Id(_))
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Undefined { .. }

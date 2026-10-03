@@ -172,7 +172,7 @@ fn make_lambda_key(lam: &RawLambda) -> Option<u64> {
                         1u8.hash(h);
                         c.hash(h);
                     }
-                    Constant::String { s, .. } => {
+                    Constant::String(s) => {
                         2u8.hash(h);
                         s.hash(h);
                     }

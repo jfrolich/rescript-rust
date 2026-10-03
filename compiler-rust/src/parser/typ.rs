@@ -2260,6 +2260,7 @@ fn parse_extension(p: &mut Parser<'_>) -> Extension {
     let id = super::module::parse_extension_id(p, id_start_idx);
 
     let payload = super::module::parse_payload_region(p);
+    let payload = super::module::raw_source_extension_payload(p, &id, payload);
 
     (id, payload)
 }

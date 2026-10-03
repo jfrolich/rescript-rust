@@ -2390,6 +2390,28 @@ fn write_compiled_js_outputs(
 
 /// Mirror in-source JS (and its source map) into `lib/bs`, as a file-backed
 /// build does after each compile.
+/// Copy a module's `.res`/`.resi` sources next to its build artifacts in
+/// `lib/bs` and into the flat `lib/ocaml` directory, as the subprocess build
+/// does after each compile. Installed packages (the runtime precompile reads
+/// `lib/ocaml/*.res`) depend on these copies.
+fn copy_sources_to_build_dirs(package: &packages::Package, module: &Module) {
+    let SourceType::SourceFile(source_file) = &module.source_type else {
+        return;
+    };
+    let interface_path = source_file.interface.as_ref().map(|interface| &interface.path);
+    for path in interface_path.into_iter().chain([&source_file.implementation.path]) {
+        let source = Path::new(&package.path).join(path);
+        let build_copy = package.get_build_path().join(path);
+        if let Some(parent) = build_copy.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::copy(&source, &build_copy);
+        if let Some(file_name) = path.file_name() {
+            let _ = std::fs::copy(&source, package.get_ocaml_build_path().join(file_name));
+        }
+    }
+}
+
 fn copy_in_source_js_to_build_dir(
     package: &packages::Package,
     source_file_path: &Path,
@@ -3852,6 +3874,8 @@ fn finish_in_process_js_inner(
         );
         send_js_metadata_ready(metadata_tx, module_name.clone(), registry_updates)
     });
+
+    copy_sources_to_build_dirs(package, module);
 
     let mut write_duration = Duration::default();
     {

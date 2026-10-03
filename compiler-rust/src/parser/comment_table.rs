@@ -2535,6 +2535,22 @@ fn walk_expression(
             walk_expression(&e2, t, inside, arena);
             t.attach_trailing(e2.pexp_loc, after, arena);
         }
+        // res_comments_table.ml: template values (after the tag of a
+        // tagged template) are walked as a list.
+        ExpressionDesc::Pexp_tagged_template(template) => {
+            let exprs: Vec<Expression> = std::iter::once(template.tag)
+                .chain(template.values.iter().copied())
+                .map(|idx| arena.get_expr(idx).clone())
+                .collect();
+            let nodes: Vec<Node<'_>> = exprs.iter().map(Node::Expression).collect();
+            walk_list(&nodes, t, comments, arena);
+        }
+        ExpressionDesc::Pexp_template(template) => {
+            let exprs: Vec<Expression> =
+                template.values.iter().map(|idx| arena.get_expr(*idx).clone()).collect();
+            let nodes: Vec<Node<'_>> = exprs.iter().map(Node::Expression).collect();
+            walk_list(&nodes, t, comments, arena);
+        }
         ExpressionDesc::Pexp_await(inner_idx) => {
             // Safety: arena is append-only, expression won't be invalidated
             let inner = arena.get_expr(*inner_idx).clone();

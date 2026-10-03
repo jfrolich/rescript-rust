@@ -289,9 +289,13 @@ fn rewrite_expr_children(
         }
         ExpressionDesc::TaggedTemplate(func, strings, values) => ExpressionDesc::TaggedTemplate(
             Box::new(rewrite(*func)),
-            strings.into_iter().map(&mut *rewrite).collect(),
+            strings,
             values.into_iter().map(&mut *rewrite).collect(),
         ),
+        ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
+            segments,
+            values: values.into_iter().map(&mut *rewrite).collect(),
+        },
         ExpressionDesc::StaticIndex(obj, field, pos) => {
             ExpressionDesc::StaticIndex(Box::new(rewrite(*obj)), field, pos)
         }
@@ -322,7 +326,9 @@ fn rewrite_expr_children(
             async_,
             directive,
         },
-        ExpressionDesc::Str { delim, txt } => ExpressionDesc::Str { delim, txt },
+        ExpressionDesc::Str(txt) => ExpressionDesc::Str(txt),
+        ExpressionDesc::TemplateLiteral(segment) => ExpressionDesc::TemplateLiteral(segment),
+        ExpressionDesc::JsonLiteral(source) => ExpressionDesc::JsonLiteral(source),
         ExpressionDesc::RawJsCode(info) => ExpressionDesc::RawJsCode(info),
         ExpressionDesc::Array(items, mutable_flag) => {
             ExpressionDesc::Array(items.into_iter().map(rewrite).collect(), mutable_flag)

@@ -119,25 +119,20 @@ impl LambdaCompiler {
             Parraylength => {
                 Expression::length(take_arg(&mut compiled_args, 0), LengthObject::Array)
             }
-            // Upstream compiler/core/lam_compile_primitive.ml:91-101.
-            PtaggedTemplate => match compiled_args.as_slice() {
-                [
-                    tag,
-                    Expression {
-                        desc: ExpressionDesc::Array(strings, _),
-                        ..
-                    },
-                    Expression {
-                        desc: ExpressionDesc::Array(values, _),
-                        ..
-                    },
-                ] => Expression::new(ExpressionDesc::TaggedTemplate(
-                    Box::new(tag.clone()),
-                    strings.clone(),
-                    values.clone(),
-                )),
-                _ => unreachable!("tagged-template primitive operands are two arrays"),
-            },
+            // lam_compile_primitive.ml `Ptagged_template strings`:
+            // `[tag; value0; ...]` plus raw source segments -> tag`...`.
+            PtaggedTemplate(strings) => {
+                let mut args = std::mem::take(&mut compiled_args).into_iter();
+                let tag = args.next().expect("a tagged template has a tag");
+                Expression::new(ExpressionDesc::TaggedTemplate(Box::new(tag), strings.clone(), args.collect()))
+            }
+            // `Ptemplate [segment] when args = []` / `Ptemplate segments`.
+            Ptemplate(segments) if segments.len() == 1 && compiled_args.is_empty() => {
+                Expression::new(ExpressionDesc::TemplateLiteral(segments[0].clone()))
+            }
+            Ptemplate(segments) => {
+                crate::lambda::js_exp_make::interpolated_template(segments.clone(), std::mem::take(&mut compiled_args))
+            }
             // OCaml lam_compile_primitive.ml:87-90 lowers Pjs_apply to a
             // direct call of the first argument with the remaining arguments.
             PjsApply => match compiled_args.split_first() {
@@ -515,7 +510,7 @@ impl LambdaCompiler {
                                     fields.as_slice(),
                                     [
                                         Expression {
-                                            desc: ExpressionDesc::Str { .. },
+                                            desc: ExpressionDesc::Str(_),
                                             ..
                                         },
                                         _
@@ -524,7 +519,7 @@ impl LambdaCompiler {
                             {
                                 let [
                                     Expression {
-                                        desc: ExpressionDesc::Str { txt, .. },
+                                        desc: ExpressionDesc::Str(txt),
                                         ..
                                     },
                                     value,

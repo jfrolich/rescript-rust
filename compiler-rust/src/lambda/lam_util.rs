@@ -27,6 +27,14 @@ fn is_block_constructor(primitive: &Primitive) -> bool {
 fn is_safe_to_alias(lam: &Lambda) -> bool {
     match lam {
         Lambda::Lvar(_) | Lambda::Lconst(_) => true,
+        // A template without interpolations is a JavaScript literal;
+        // repeating it preserves its value and source spelling.
+        Lambda::Lprim(prim)
+            if matches!(&prim.primitive, Primitive::Ptemplate(segments) if segments.len() == 1)
+                && prim.args.is_empty() =>
+        {
+            true
+        }
         Lambda::Lprim(__prim2)
             if matches!(__prim2.as_ref(), PrimInfo {
             primitive: Primitive::Pfield(_, dbg_info),

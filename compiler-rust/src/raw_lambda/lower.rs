@@ -42,10 +42,7 @@ impl<'a> LoweringContext<'a> {
             RawLambda::Lvar(id) => Lambda::var(self.alias_target(id)),
             RawLambda::LglobalModule(id) => {
                 if id.is_predef_exn() {
-                    Lambda::const_(Constant::String {
-                        s: id.name().to_string(),
-                        delim: None,
-                    })
+                    Lambda::const_(Constant::String(id.name().to_string()))
                 } else {
                     Lambda::global_module(id)
                 }
@@ -210,7 +207,7 @@ impl<'a> LoweringContext<'a> {
         if let Primitive::PrawJsCode(info) = &primitive {
             let mut info = info.clone();
             match args.as_slice() {
-                [RawLambda::Lconst(Constant::String { s, .. })]
+                [RawLambda::Lconst(Constant::String(s))]
                 | [RawLambda::Lconst(Constant::ImmString(s))] => {
                     info.code = s.clone();
                     return Lambda::prim(Primitive::PrawJsCode(info), Vec::new(), loc);
@@ -502,8 +499,8 @@ fn lower_constant(constant: Constant) -> Constant {
                 .map(|i| Constant::Int { i, comment: None })
                 .unwrap_or_else(|_| Constant::Pointer(name))
         }
-        Constant::String { s, delim } => Constant::String { s, delim },
-        Constant::ImmString(s) => Constant::String { s, delim: None },
+        Constant::String(s) => Constant::String(s),
+        Constant::ImmString(s) => Constant::String(s),
         Constant::Pointer(name) => match name.strip_suffix('a') {
             Some(raw_int) => raw_int
                 .parse::<i32>()
@@ -550,10 +547,7 @@ fn polyvar_block_tag_constant(name: &str) -> Constant {
             comment: None,
         }
     } else {
-        Constant::String {
-            s: name.to_string(),
-            delim: None,
-        }
+        Constant::String(name.to_string())
     }
 }
 
@@ -739,9 +733,9 @@ fn int_const_value_any(lam: &Lambda) -> Option<i32> {
     }
 }
 
-fn string_constant_value(constant: &Constant) -> Option<(&str, bool)> {
+fn string_constant_value(constant: &Constant) -> Option<&str> {
     match constant {
-        Constant::String { s, delim } => Some((s.as_str(), delim.is_none())),
+        Constant::String(s) => Some(s.as_str()),
         _ => None,
     }
 }
@@ -778,9 +772,11 @@ fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: Locatio
                 }
             }
             (Primitive::Pstringlength, constant) => {
-                if let Some((value, true)) = string_constant_value(constant) {
+                // lambda.ml `Lambda.prim`: `String_literal.utf16_length`.
+                if let Some(value) = string_constant_value(constant) {
                     return Lambda::const_(Constant::Int {
-                        i: value.len() as i32,
+                        i: crate::string_literal::utf16_length(value)
+                            .expect("String_literal.utf16_length: Invalid_utf8") as i32,
                         comment: None,
                     });
                 }
@@ -867,22 +863,18 @@ fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: Locatio
                 return Lambda::true_();
             }
             (Primitive::Pstringadd, lhs, rhs) => {
-                if let (Some((lhs, true)), Some((rhs, true))) =
+                if let (Some(lhs), Some(rhs)) =
                     (string_constant_value(lhs), string_constant_value(rhs))
                 {
-                    return Lambda::const_(Constant::String {
-                        s: format!("{lhs}{rhs}"),
-                        delim: None,
-                    });
+                    return Lambda::const_(Constant::String(format!("{lhs}{rhs}")));
                 }
             }
             (Primitive::Pstringrefs | Primitive::Pstringrefu, lhs, Constant::Int { i, .. }) => {
-                if let Some((value, true)) = string_constant_value(lhs) {
-                    if let Ok(index) = usize::try_from(*i) {
-                        if let Some(byte) = value.as_bytes().get(index) {
-                            return Lambda::const_(Constant::Char((*byte).into()));
-                        }
-                    }
+                // lambda.ml `Lambda.prim`: `String_literal.code_point_at_utf16_index`.
+                if let Some(value) = string_constant_value(lhs)
+                    && let Ok(Some(codepoint)) = crate::string_literal::code_point_at_utf16_index(value, *i as i64)
+                {
+                    return Lambda::const_(Constant::Char(codepoint as i32));
                 }
             }
             _ => {}
@@ -1226,7 +1218,7 @@ mod tests {
     use crate::lambda::FunctionAttribute;
     use crate::lambda::InlineAttribute;
     use crate::lambda::lam_compat::LetKind;
-    use crate::lambda::lam_constant::{ConstructorRuntimeTag, ConstructorTag, StringDelim};
+    use crate::lambda::lam_constant::{ConstructorRuntimeTag, ConstructorTag};
     use crate::lambda::lam_primitive::{JsRawInfo, Mutable};
 
     #[test]
@@ -1424,7 +1416,7 @@ mod tests {
 
         assert!(matches!(
             lowered,
-            Lambda::Lconst(Constant::String { ref s, delim: None }) if s == "Assert_failure"
+            Lambda::Lconst(Constant::String(ref s)) if s == "Assert_failure"
         ));
     }
 
@@ -1484,17 +1476,11 @@ mod tests {
 
     #[test]
     fn lowers_plain_string_delim_for_typed_constants() {
-        let lowered = lower_to_lambda(RawLambda::const_(Constant::String {
-            s: "hello".to_string(),
-            delim: Some(StringDelim::Plain),
-        }));
+        let lowered = lower_to_lambda(RawLambda::const_(Constant::String("hello".to_string())));
 
         assert!(matches!(
             lowered,
-            Lambda::Lconst(Constant::String {
-                s,
-                delim: Some(StringDelim::Plain)
-            }) if s == "hello"
+            Lambda::Lconst(Constant::String(s)) if s == "hello"
         ));
     }
 
@@ -1547,7 +1533,7 @@ mod tests {
         assert!(matches!(
             info.args.as_slice(),
             [
-                Lambda::Lconst(Constant::String { s, delim: None }),
+                Lambda::Lconst(Constant::String(s)),
                 Lambda::Lconst(Constant::Int { i: 1, comment: None }),
             ] if s == "V"
         ));
@@ -1584,7 +1570,7 @@ mod tests {
                 if matches!(
                     elements.as_slice(),
                     [
-                        Constant::String { s, delim: None },
+                        Constant::String(s),
                         Constant::Block { tag_info, elements }
                     ] if s == "Pair"
                         && matches!(**tag_info, TagInfo::Tuple)
@@ -1984,10 +1970,7 @@ mod tests {
                 code: String::new(),
                 is_stmt: false,
             }),
-            vec![RawLambda::const_(Constant::String {
-                s: "__DEV__".to_string(),
-                delim: Some(StringDelim::Plain),
-            })],
+            vec![RawLambda::const_(Constant::String("__DEV__".to_string()))],
             Location::none(),
         ));
 

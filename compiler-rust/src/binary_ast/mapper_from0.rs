@@ -243,22 +243,16 @@ fn map_variance(v: pt0::Variance) -> current::Variance {
 
 // ========== Constant conversion ==========
 
-fn map_constant(c: &pt0::Constant) -> current::Constant {
-    match c {
-        pt0::Constant::Integer(s, suffix) => {
-            current::Constant::Integer(Cow::Owned(s.clone()), suffix.clone())
-        }
-        pt0::Constant::Char(c) => current::Constant::Char(*c),
-        pt0::Constant::String(s, delim) => {
-            // ast_mapper_from0.ml map_constant keeps the delimiter.
-            current::Constant::String(
-                Cow::Owned(s.clone()),
-                delim.as_ref().map(|d| Cow::Owned(d.clone())),
-            )
-        }
-        pt0::Constant::Float(s, suffix) => {
-            current::Constant::Float(Cow::Owned(s.clone()), suffix.clone())
-        }
+fn has_template_attr0(attrs: &[pt0::Attribute]) -> bool {
+    attrs.iter().any(|(name, _)| name.txt == "res.template")
+}
+
+/// ast_mapper_from0.ml `template_source_from0`: `js`/`*j` strings are source
+/// text; anything else is a semantic value given canonical template spelling.
+fn template_source_from0(text: &str, delimiter: Option<&str>) -> String {
+    match delimiter {
+        Some("js" | "*j") => text.to_string(),
+        _ => crate::string_literal::template_from_semantic(text).source().to_string(),
     }
 }
 
@@ -458,6 +452,59 @@ impl<'a> Mapper<'a> {
     /// Check if a StrIdx matches a string literal
     fn str_eq(&self, idx: StrIdx, s: &str) -> bool {
         self.arena.get_string(idx) == s
+    }
+
+    /// Record the first `Location.raise_errorf` of the OCaml mapper.
+    fn raise(&mut self, loc: LocIdx, message: &str) {
+        if self.error.is_none() {
+            self.error = Some(crate::binary_ast::ppx::PpxError::at_loc(loc, message));
+        }
+    }
+
+    /// `remove_template_attr` on mapped attributes.
+    fn remove_template_attr(&self, attrs: Attributes) -> Attributes {
+        let kept: Vec<current::Attribute> = attrs
+            .iter()
+            .filter(|(name, _)| self.arena.get_string(name.txt) != "res.template")
+            .cloned()
+            .collect();
+        kept.into()
+    }
+
+    /// ast_mapper_from0.ml `map_constant ~loc`.
+    fn map_constant(&mut self, c: &pt0::Constant, loc: LocIdx) -> current::Constant {
+        match c {
+            pt0::Constant::Integer(s, suffix) => current::Constant::Integer(Cow::Owned(s.clone()), *suffix),
+            // Ast0 stores only the code point; reconstruct a canonical spelling.
+            pt0::Constant::Char(semantic) => current::Constant::char(*semantic),
+            pt0::Constant::String(s, Some(delim)) if delim == "js" || delim == "*j" => {
+                match crate::string_literal::string_from_source(s) {
+                    Some(payload) => current::Constant::String(payload),
+                    None => {
+                        self.raise(loc, "Invalid string escape sequence");
+                        current::Constant::string("")
+                    }
+                }
+            }
+            pt0::Constant::String(s, None) => current::Constant::string(s),
+            pt0::Constant::String(s, Some(delim)) if delim == "json" => {
+                current::Constant::Json(Cow::Owned(s.clone()))
+            }
+            // Other v0 quotation delimiters are syntax, not part of the value.
+            pt0::Constant::String(semantic, Some(_)) => current::Constant::string(semantic),
+            pt0::Constant::Float(s, suffix) => current::Constant::Float(Cow::Owned(s.clone()), *suffix),
+        }
+    }
+
+    /// ast_mapper_from0.ml `map_pattern_constant ~loc`.
+    fn map_pattern_constant(&mut self, c: &pt0::Constant, loc: LocIdx) -> current::Constant {
+        if let pt0::Constant::String(_, Some(tag)) = c
+            && tag != "js"
+            && tag != "*j"
+        {
+            self.raise(loc, "Tagged template literals are not supported in patterns");
+        }
+        self.map_constant(c, loc)
     }
 
     /// Create a Located<StrIdx> with an interned string and location
@@ -733,7 +780,11 @@ impl<'a> Mapper<'a> {
             .filter(|(name, _)| name.txt != "_res.record_rest")
             .cloned()
             .collect();
-        let attrs = self.map_attributes(&attrs);
+        let mut attrs = self.map_attributes(&attrs);
+        // ast_mapper_from0.ml Ppat_constant drops the template marker.
+        if matches!(pat.ppat_desc, pt0::PatternDesc::Constant(_)) && has_template_attr0(&pat.ppat_attributes) {
+            attrs = self.remove_template_attr(attrs);
+        }
 
         let desc = match &pat.ppat_desc {
             pt0::PatternDesc::Any => current::PatternDesc::Ppat_any,
@@ -742,10 +793,12 @@ impl<'a> Mapper<'a> {
                 current::PatternDesc::Ppat_alias(self.push_pat(p), self.map_string_loc(s))
             }
             pt0::PatternDesc::Constant(c) => {
-                current::PatternDesc::Ppat_constant(Box::new(map_constant(c)))
+                current::PatternDesc::Ppat_constant(Box::new(self.map_pattern_constant(c, loc)))
             }
             pt0::PatternDesc::Interval(c1, c2) => {
-                current::PatternDesc::Ppat_interval(Box::new((map_constant(c1), map_constant(c2))))
+                let c1 = self.map_pattern_constant(c1, loc);
+                let c2 = self.map_pattern_constant(c2, loc);
+                current::PatternDesc::Ppat_interval(Box::new((c1, c2)))
             }
             pt0::PatternDesc::Tuple(pl) => current::PatternDesc::Ppat_tuple(Box::new(
                 pl.iter().map(|p| self.push_pat(p)).collect(),
@@ -1088,8 +1141,22 @@ impl<'a> Mapper<'a> {
             pt0::ExpressionDesc::Ident(lid) => {
                 current::ExpressionDesc::Pexp_ident(self.map_longident_loc(lid))
             }
+            pt0::ExpressionDesc::Constant(pt0::Constant::String(text, delimiter))
+                if has_template_attr0(&expr.pexp_attributes) && delimiter.as_deref() != Some("json") =>
+            {
+                attrs = self.remove_template_attr(attrs);
+                let source = template_source_from0(text, delimiter.as_deref());
+                let segment = self.mk_string_loc(&source, &expr.pexp_loc);
+                current::ExpressionDesc::Pexp_template(Box::new(current::PexpTemplate {
+                    source_segments: vec![segment],
+                    values: vec![],
+                }))
+            }
             pt0::ExpressionDesc::Constant(c) => {
-                current::ExpressionDesc::Pexp_constant(Box::new(map_constant(c)))
+                if has_template_attr0(&expr.pexp_attributes) {
+                    attrs = self.remove_template_attr(attrs);
+                }
+                current::ExpressionDesc::Pexp_constant(Box::new(self.map_constant(c, loc)))
             }
             pt0::ExpressionDesc::Let(rec_flag, bindings, body) => {
                 let body_idx = self.push_expr(body);
@@ -1189,6 +1256,147 @@ impl<'a> Mapper<'a> {
                 let name = self.map_label_loc(method);
                 let e_idx = self.push_expr(e);
                 current::ExpressionDesc::Pexp_object_set(Box::new((e_idx, name, v_idx)))
+            }
+            // ast_mapper_from0.ml: a v0 tagged template is `tag([segments],
+            // [values])` marked `res.taggedTemplate`.
+            pt0::ExpressionDesc::Apply(func, args)
+                if !(has_jsx_attribute(&expr.pexp_attributes)
+                    && matches!(func.pexp_desc, pt0::ExpressionDesc::Ident(_)))
+                    && expr.pexp_attributes.iter().any(|(name, _)| name.txt == "res.taggedTemplate")
+                    && matches!(
+                        args.as_slice(),
+                        [
+                            (pt0::ArgLabel::Nolabel, pt0::Expression { pexp_desc: pt0::ExpressionDesc::Array(_), .. }),
+                            (pt0::ArgLabel::Nolabel, pt0::Expression { pexp_desc: pt0::ExpressionDesc::Array(_), .. })
+                        ]
+                    ) =>
+            {
+                let (pt0::ExpressionDesc::Array(segments), pt0::ExpressionDesc::Array(values)) =
+                    (&args[0].1.pexp_desc, &args[1].1.pexp_desc)
+                else {
+                    unreachable!()
+                };
+                let mut raw_sources = Vec::with_capacity(segments.len());
+                for segment in segments {
+                    let txt = match &segment.pexp_desc {
+                        pt0::ExpressionDesc::Constant(pt0::Constant::String(txt, Some(delim)))
+                            if delim == "js" || delim == "*j" =>
+                        {
+                            txt.clone()
+                        }
+                        pt0::ExpressionDesc::Constant(pt0::Constant::String(semantic, _)) => {
+                            template_source_from0(semantic, None)
+                        }
+                        _ => unreachable!("a v0 tagged template segment is a string"),
+                    };
+                    raw_sources.push(self.mk_string_loc(&txt, &segment.pexp_loc));
+                }
+                let kept: Vec<current::Attribute> = attrs
+                    .iter()
+                    .filter(|(name, _)| self.arena.get_string(name.txt) != "res.taggedTemplate")
+                    .cloned()
+                    .collect();
+                attrs = kept.into();
+                let values = values.iter().map(|value| self.push_expr(value)).collect();
+                let tag = self.push_expr(func);
+                current::ExpressionDesc::Pexp_tagged_template(Box::new(current::PexpTaggedTemplate {
+                    tag,
+                    raw_sources,
+                    values,
+                }))
+            }
+            // ast_mapper_from0.ml: a `^` chain marked `res.template`
+            // alternating string segments and values becomes a template.
+            pt0::ExpressionDesc::Apply(func, _)
+                if !(has_jsx_attribute(&expr.pexp_attributes)
+                    && matches!(func.pexp_desc, pt0::ExpressionDesc::Ident(_)))
+                    && has_template_attr0(&expr.pexp_attributes) =>
+            {
+                fn flatten<'e>(
+                    arena: &ParseArena,
+                    acc: &mut Vec<&'e pt0::Expression>,
+                    expression: &'e pt0::Expression,
+                ) {
+                    if let pt0::ExpressionDesc::Apply(op, args) = &expression.pexp_desc
+                        && let pt0::ExpressionDesc::Ident(lid) = &op.pexp_desc
+                        && matches!(&lid.txt, Longident::Lident(name) if arena.get_string(*name) == "^")
+                        && let [(pt0::ArgLabel::Nolabel, lhs), (pt0::ArgLabel::Nolabel, rhs)] = args.as_slice()
+                        && has_template_attr0(&expression.pexp_attributes)
+                    {
+                        flatten(arena, acc, lhs);
+                        acc.push(rhs);
+                    } else {
+                        acc.push(expression);
+                    }
+                }
+                let mut parts = Vec::new();
+                flatten(self.arena, &mut parts, expr);
+                // `collect`
+                let mut sources = Vec::new();
+                let mut values = Vec::new();
+                let mut collected = None;
+                let mut index = 0;
+                loop {
+                    let Some(part) = parts.get(index) else {
+                        break;
+                    };
+                    let pt0::ExpressionDesc::Constant(pt0::Constant::String(text, delimiter)) = &part.pexp_desc else {
+                        break;
+                    };
+                    if delimiter.as_deref() == Some("json") {
+                        self.raise(loc, "`json` literals do not support interpolation");
+                        collected = Some(());
+                        break;
+                    }
+                    let txt = template_source_from0(text, delimiter.as_deref());
+                    sources.push(self.mk_string_loc(&txt, &part.pexp_loc));
+                    if index + 1 == parts.len() {
+                        collected = Some(());
+                        break;
+                    }
+                    values.push(parts[index + 1]);
+                    index += 2;
+                }
+                match collected {
+                    Some(()) => {
+                        attrs = self.remove_template_attr(attrs);
+                        let values = values.iter().map(|value| self.push_expr(value)).collect();
+                        current::ExpressionDesc::Pexp_template(Box::new(current::PexpTemplate {
+                            source_segments: sources,
+                            values,
+                        }))
+                    }
+                    None => {
+                        // Not a template shape: an ordinary application, with
+                        // `^` renamed to `++`.
+                        attrs = self.remove_template_attr(attrs);
+                        let pt0::ExpressionDesc::Apply(func, args) = &expr.pexp_desc else {
+                            unreachable!()
+                        };
+                        let binary = matches!(
+                            args.as_slice(),
+                            [(pt0::ArgLabel::Nolabel, _), (pt0::ArgLabel::Nolabel, _)]
+                        );
+                        let mut func = (**func).clone();
+                        if binary
+                            && let pt0::ExpressionDesc::Ident(lid) = &mut func.pexp_desc
+                            && matches!(&lid.txt, Longident::Lident(name) if self.str_eq(*name, "^"))
+                        {
+                            lid.txt = Longident::Lident(self.arena.intern("++"));
+                        }
+                        let funct = self.push_expr(&func);
+                        let args = args
+                            .iter()
+                            .map(|(label, arg)| (self.map_arg_label(label), self.push_expr(arg)))
+                            .collect();
+                        current::ExpressionDesc::Pexp_apply(Box::new(current::PexpApply {
+                            funct,
+                            args,
+                            partial: false,
+                            transformed_jsx: false,
+                        }))
+                    }
+                }
             }
             pt0::ExpressionDesc::Apply(func, args) => {
                 // Check for JSX attribute - convert back to JSX element
@@ -1781,7 +1989,7 @@ impl<'a> Mapper<'a> {
         let str_item = |mapper: &mut Self, s: &str| {
             let expr = mapper.arena.push_expr(current::Expression {
                 pexp_desc: Box::new(current::ExpressionDesc::Pexp_constant(Box::new(
-                    current::Constant::String(Cow::Owned(s.to_string()), None),
+                    current::Constant::string(s),
                 ))),
                 pexp_loc: loc_idx,
                 pexp_attributes: Attributes::new(),

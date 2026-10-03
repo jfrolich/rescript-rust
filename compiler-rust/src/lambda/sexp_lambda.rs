@@ -6,7 +6,7 @@
 use std::io::Write;
 
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
-use crate::lambda::lam_constant::{Constant, PointerInfo, StringDelim};
+use crate::lambda::lam_constant::{Constant, PointerInfo};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{
@@ -282,21 +282,6 @@ fn pointer_info(info: &Option<PointerInfo>) -> Sexp {
     }
 }
 
-// String delimiter
-fn string_delim(delim: &Option<StringDelim>) -> Sexp {
-    match delim {
-        None => Sexp::atom("None"),
-        Some(StringDelim::Plain) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom("DNone")]),
-        Some(StringDelim::StarJ) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom("DStarJ")]),
-        Some(StringDelim::NoQuotes) => {
-            Sexp::list(vec![Sexp::atom("Some"), Sexp::atom("DNoQuotes")])
-        }
-        Some(StringDelim::Backtick) => {
-            Sexp::list(vec![Sexp::atom("Some"), Sexp::atom("DBackQuotes")])
-        }
-    }
-}
-
 fn variant_block_type(block: &crate::types::VariantBlockType) -> Sexp {
     use crate::types::VariantBlockType as B;
     match block {
@@ -428,11 +413,7 @@ fn constant(c: &Constant) -> Sexp {
             Sexp::list(vec![Sexp::atom("Const_constructor"), variant_tag(tag)])
         }
         Constant::Char(c) => Sexp::list(vec![Sexp::atom("Const_char"), int(*c)]),
-        Constant::String { s, delim } => Sexp::list(vec![
-            Sexp::atom("Const_string"),
-            string(s),
-            string_delim(delim),
-        ]),
+        Constant::String(s) => Sexp::list(vec![Sexp::atom("Const_string"), string(s)]),
         Constant::ImmString(s) => Sexp::list(vec![Sexp::atom("Const_immstring"), string(s)]),
         Constant::Float(f) => Sexp::list(vec![Sexp::atom("Const_float"), string(f)]),
         Constant::BigInt { negative, value } => Sexp::list(vec![
@@ -608,7 +589,20 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::Pisint => Sexp::atom("Pisint"),
         Primitive::PisPolyVarBlock => Sexp::atom("Pis_poly_var_block"),
         Primitive::Pawait => Sexp::atom("Pawait"),
-        Primitive::PtaggedTemplate => Sexp::atom("Ptagged_template"),
+        Primitive::PtaggedTemplate(raw_sources) => {
+            let mut items = vec![Sexp::atom("Ptagged_template")];
+            items.extend(raw_sources.iter().map(|source| string(source)));
+            Sexp::list(items)
+        }
+        Primitive::Ptemplate(segments) => {
+            let mut items = vec![Sexp::atom("Ptemplate")];
+            items.extend(
+                segments
+                    .iter()
+                    .map(|segment| Sexp::list(vec![string(segment.source()), string(segment.semantic())])),
+            );
+            Sexp::list(items)
+        }
         Primitive::Phash => Sexp::atom("Phash"),
         Primitive::PhashMixint => Sexp::atom("Phash_mixint"),
         Primitive::PhashMixstring => Sexp::atom("Phash_mixstring"),
@@ -833,7 +827,7 @@ fn lambda_switch(sw: &LambdaSwitch, with_locs: bool) -> Sexp {
 #[cfg(test)]
 mod tests {
     use super::{constant, escape_ocaml_string, switch_key};
-    use crate::lambda::lam_constant::{Constant, StringDelim};
+    use crate::lambda::lam_constant::Constant;
 
     #[test]
     fn indexed_printer_matches_recursive_output_without_materializing_for_print() {
@@ -883,14 +877,11 @@ mod tests {
     }
 
     #[test]
-    fn prints_plain_string_delim_as_dnone() {
-        let printed = constant(&Constant::String {
-            s: "hello".to_string(),
-            delim: Some(StringDelim::Plain),
-        })
-        .to_string();
+    fn prints_const_string_without_delimiter() {
+        let printed = constant(&Constant::String("hello".to_string())).to_string();
 
-        assert!(printed.contains("DNone"));
+        assert!(printed.contains("\"hello\""));
+        assert!(!printed.contains("DNone"));
     }
 
     #[test]

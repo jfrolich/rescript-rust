@@ -942,10 +942,7 @@ mod tests {
                 FunctionAttribute::default(),
             ),
         );
-        let args = vec![Lambda::const_(Constant::String {
-            s: "".to_string(),
-            delim: None,
-        })];
+        let args = vec![Lambda::const_(Constant::String("".to_string()))];
 
         let reduced = propagate_beta_reduce(&params, &body, &args);
         let Lambda::Llet(kind, id, value, body) = reduced else {

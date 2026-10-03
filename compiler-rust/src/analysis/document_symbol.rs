@@ -95,10 +95,11 @@ fn expr_kind(arena: &ParseArena, idx: ExprIdx) -> SymbolKind {
         ExpressionDesc::Pexp_fun(_) => SymbolKind::Function,
         ExpressionDesc::Pexp_constraint(inner) => expr_kind(arena, inner.0),
         ExpressionDesc::Pexp_constant(constant) => match **constant {
-            Constant::String(..) => SymbolKind::String,
+            Constant::String(_) | Constant::Json(_) | Constant::RawSource(_) => SymbolKind::String,
             Constant::Float(..) | Constant::Integer(..) => SymbolKind::Number,
-            Constant::Char(_) => SymbolKind::Constant,
+            Constant::Char { .. } => SymbolKind::Constant,
         },
+        ExpressionDesc::Pexp_template(_) => SymbolKind::String,
         _ => SymbolKind::Variable,
     }
 }

@@ -19,7 +19,7 @@ use crate::js_ir::op::{
 };
 use crate::js_ir::printer::{convert_ident_name, is_js_keyword_or_global};
 use crate::js_ir::{
-    BinOp, Block, CallInfo, Delim, Expression, ExpressionDesc, ModuleId, Statement, StatementDesc,
+    BinOp, Block, CallInfo, Expression, ExpressionDesc, ModuleId, Statement, StatementDesc,
     VIdent, VariableDeclaration, expression_has_no_side_effects,
 };
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
@@ -154,7 +154,7 @@ impl LambdaCompiler {
     ) -> Expression {
         match &arg.desc {
             ExpressionDesc::Undefined { .. } => Expression::undefined(false),
-            ExpressionDesc::Str { txt, .. } => {
+            ExpressionDesc::Str(txt) => {
                 Expression::string(external_polyvar_string_dispatch(dispatches, txt))
             }
             _ => string_switch_iife(
@@ -179,7 +179,7 @@ impl LambdaCompiler {
                     items.as_slice(),
                     [
                         Expression {
-                            desc: ExpressionDesc::Str { .. },
+                            desc: ExpressionDesc::Str(_),
                             ..
                         },
                         value,
@@ -188,7 +188,7 @@ impl LambdaCompiler {
             {
                 let [
                     Expression {
-                        desc: ExpressionDesc::Str { txt, .. },
+                        desc: ExpressionDesc::Str(txt),
                         ..
                     },
                     value,
@@ -223,7 +223,7 @@ impl LambdaCompiler {
     ) -> Expression {
         match &arg.desc {
             ExpressionDesc::Undefined { .. } => Expression::undefined(false),
-            ExpressionDesc::Str { txt, .. } => {
+            ExpressionDesc::Str(txt) => {
                 int_expr(external_polyvar_int_dispatch(dispatches, txt) as i32)
             }
             _ => string_switch_iife(
@@ -561,7 +561,8 @@ impl LambdaCompiler {
                 | ExpressionDesc::Number(_)
                 | ExpressionDesc::CamlBlock(_, _, _)
                 | ExpressionDesc::Array(_, _)
-                | ExpressionDesc::Str { .. }
+                | ExpressionDesc::Str(_)
+                | ExpressionDesc::TemplateLiteral(_)
         );
         self.optional_block(value, identity)
     }
@@ -973,7 +974,7 @@ impl LambdaCompiler {
                 | ExpressionDesc::Null
                 | ExpressionDesc::Bool(_)
                 | ExpressionDesc::Number(_)
-                | ExpressionDesc::Str { .. }
+                | ExpressionDesc::Str(_)
         )
     }
 

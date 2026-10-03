@@ -202,7 +202,7 @@ fn named_variant_constant_return_switch_skips_redundant_match_temp() {
     };
     match &stmt.desc {
         StatementDesc::Return(Expression {
-            desc: ExpressionDesc::Str { txt, .. },
+            desc: ExpressionDesc::Str(txt),
             ..
         }) => assert_eq!(txt, "b"),
         StatementDesc::Block(inner) => {
@@ -212,7 +212,7 @@ fn named_variant_constant_return_switch_skips_redundant_match_temp() {
             assert!(matches!(
                 &inner_stmt.desc,
                 StatementDesc::Return(Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 }) if txt == "b"
             ));
@@ -652,7 +652,7 @@ fn named_variant_return_switches_keep_default_only_const_side_inside_outer_else_
                     (&left.as_ref().desc, &right.as_ref().desc),
                     (
                         ExpressionDesc::Typeof(inner),
-                        ExpressionDesc::Str { txt, .. }
+                        ExpressionDesc::Str(txt)
                     ) if matches!(
                         inner.as_ref(),
                         Expression {

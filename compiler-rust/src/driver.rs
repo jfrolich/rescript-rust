@@ -379,6 +379,17 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
                 visit_expression(max_stamp, iterable);
                 visit_expression(max_stamp, body);
             }
+            ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
+                visit_expression(max_stamp, tag);
+                for value in values {
+                    visit_expression(max_stamp, value);
+                }
+            }
+            ExpressionDesc::Texp_template { values, .. } => {
+                for value in values {
+                    visit_expression(max_stamp, value);
+                }
+            }
             ExpressionDesc::Texp_object_get(expr, _) => visit_expression(max_stamp, expr),
             ExpressionDesc::Texp_object_set(expr, _, value) => {
                 visit_expression(max_stamp, expr);
@@ -821,7 +832,18 @@ fn expression_has_string_literal(
     use crate::parser::ast::ExpressionDesc as ED;
 
     match &*expr.pexp_desc {
-        ED::Pexp_constant(c) => matches!(&**c, Constant::String(s, _) if s == value),
+        ED::Pexp_constant(c) => matches!(&**c, Constant::String(s) if s.semantic() == value),
+        ED::Pexp_template(template) => template
+            .values
+            .iter()
+            .any(|e| expression_has_string_literal(arena.get_expr(*e), value, arena)),
+        ED::Pexp_tagged_template(template) => {
+            expression_has_string_literal(arena.get_expr(template.tag), value, arena)
+                || template
+                    .values
+                    .iter()
+                    .any(|e| expression_has_string_literal(arena.get_expr(*e), value, arena))
+        }
         ED::Pexp_let(inner) => {
             let (_, bindings, body) = &**inner;
             bindings
@@ -1000,7 +1022,7 @@ fn pattern_has_string_literal(
     use crate::parser::ast::PatternDesc as PD;
 
     match &*pat.ppat_desc {
-        PD::Ppat_constant(c) => matches!(&**c, Constant::String(s, _) if s == value),
+        PD::Ppat_constant(c) => matches!(&**c, Constant::String(s) if s.semantic() == value),
         PD::Ppat_alias(inner, _) | PD::Ppat_exception(inner) | PD::Ppat_open(_, inner) => {
             pattern_has_string_literal(arena.get_pat(*inner), value, arena)
         }
@@ -1708,7 +1730,10 @@ fn ppx_context_attribute(
         OldLocated::new(Longident::Lident(arena.intern(name)), none.clone())
     };
     let string = |s: &str| {
-        mk(pt0::ExpressionDesc::Constant(pt0::Constant::String(s.to_string(), None)))
+        mk(pt0::ExpressionDesc::Constant(pt0::Constant::String(
+            crate::string_literal::normalize_semantic(s).into_owned(),
+            None,
+        )))
     };
     let list = |arena: &mut ParseArena, items: Vec<pt0::Expression>| {
         let mut tail = mk(pt0::ExpressionDesc::Construct(lid(arena, "[]"), None));
@@ -2202,7 +2227,7 @@ fn directive_payload_error_to_anyhow(
             source,
             filename,
             err.loc,
-            "Expected a string literal.",
+            err.message,
         ),
         2,
     )
@@ -3378,6 +3403,22 @@ fn type_mod_error_to_anyhow_styled(
                 filename,
                 *loc,
                 "Integer literal exceeds int32 range. Use float or BigInt if larger values are required.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::InvalidStringEscapeSequence { loc }) => UserDiagnostic::new(
+            format_compiler_error_report(arena, source, filename, *loc, "Invalid string escape sequence"),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::JsonLiteralOutsideExternal { loc }) => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                crate::ast_payload::JSON_LITERAL_OUTSIDE_EXTERNAL_MESSAGE,
             ),
             2,
         )
@@ -14203,26 +14244,7 @@ fn extract_single_string_payload(
     payload: &Payload,
     arena: &crate::parse_arena::ParseArena,
 ) -> Option<String> {
-    use crate::parser::ast::ExpressionDesc as ED;
-
-    let Payload::PStr(items) = payload else {
-        return None;
-    };
-    if items.len() != 1 {
-        return None;
-    }
-    let StructureItemDesc::Pstr_eval(inner) = &*items[0].pstr_desc else {
-        return None;
-    };
-    let (expr_idx, _attrs) = &**inner;
-    let expr = arena.get_expr(*expr_idx);
-    match &*expr.pexp_desc {
-        ED::Pexp_constant(c) => match &**c {
-            Constant::String(s, _) => Some(s.to_string()),
-            _ => None,
-        },
-        _ => None,
-    }
+    crate::ast_payload::semantic_string_of_payload(arena, payload).ok().flatten()
 }
 
 fn extract_file_directives_from_structure(
@@ -14238,8 +14260,13 @@ fn extract_file_directives_from_structure(
         if arena.get_string(attr.0.txt) != "directive" {
             continue;
         }
+        // ast_config.ml process_directives: reject a json payload, then read
+        // the payload's semantic string.
+        if let Err(err) = crate::ast_payload::reject_json_literal_payload(arena, &attr.1) {
+            return Err(DirectivePayloadError { loc: err.loc, message: err.message });
+        }
         let Some(directive) = extract_single_string_payload(&attr.1, arena) else {
-            return Err(DirectivePayloadError { loc: item.pstr_loc });
+            return Err(DirectivePayloadError { loc: item.pstr_loc, message: "Expected a string literal." });
         };
         directives.push(directive);
     }
@@ -14250,6 +14277,7 @@ fn extract_file_directives_from_structure(
 #[derive(Debug, Clone, Copy)]
 struct DirectivePayloadError {
     loc: LocIdx,
+    message: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -14260,7 +14288,7 @@ struct ConfigPayloadError {
 
 impl std::fmt::Display for DirectivePayloadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Expected a string literal.")
+        f.write_str(self.message)
     }
 }
 
@@ -14474,12 +14502,13 @@ fn config_flags_strings(
     let mut flags = Vec::with_capacity(elements.len());
     for elem_idx in elements.iter() {
         let elem = arena.get_expr(*elem_idx);
-        let value = match &*elem.pexp_desc {
-            ExpressionDesc::Pexp_constant(constant) => match &**constant {
-                Constant::String(value, _) => Some(value.to_string()),
-                _ => None,
-            },
-            _ => None,
+        // rescript_compiler_main.ml file_level_flags_handler:
+        // `Ast_payload.semantic_string_of_expression`.
+        let value = match crate::ast_payload::semantic_string_of_expression(arena, elem) {
+            Ok(value) => value,
+            Err(err) => {
+                return Err(ConfigPayloadError { loc: err.loc, message: err.message.to_string() });
+            }
         };
         let Some(value) = value else {
             return Err(ConfigPayloadError {

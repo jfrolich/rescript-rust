@@ -498,19 +498,6 @@ pub fn field_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
     }
 }
 
-/// Check if set field expression RHS needs parentheses/braces.
-pub fn set_field_expr_rhs(arena: &ParseArena, expr: &Expression) -> ParenKind {
-    if let Some(kind) = braces_from_attr(arena, expr) {
-        return kind;
-    }
-
-    match &*expr.pexp_desc {
-        _ if is_module_pack_constraint(arena, expr) => ParenKind::Nothing,
-        ExpressionDesc::Pexp_constraint(_) => ParenKind::Parenthesized,
-        _ => ParenKind::Nothing,
-    }
-}
-
 /// Check if ternary operand needs parentheses/braces.
 pub fn ternary_operand(arena: &ParseArena, expr: &Expression) -> ParenKind {
     if let Some(kind) = braces_from_attr(arena, expr) {

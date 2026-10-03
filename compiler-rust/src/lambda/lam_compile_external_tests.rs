@@ -211,14 +211,8 @@ fn lowers_pjs_object_get_to_method_calls() {
             Location::none(),
         )),
         ap_args: vec![
-            Lambda::const_(Constant::String {
-                s: "hey".to_string(),
-                delim: None,
-            }),
-            Lambda::const_(Constant::String {
-                s: "jude".to_string(),
-                delim: None,
-            }),
+            Lambda::const_(Constant::String("hey".to_string())),
+            Lambda::const_(Constant::String("jude".to_string())),
         ],
         ap_info: ApInfo {
             loc: Location::none(),
@@ -241,10 +235,7 @@ fn lowers_pjs_object_set_to_property_assignments() {
         Primitive::PjsObjectSet("name".to_string()),
         vec![
             Lambda::var(student),
-            Lambda::const_(Constant::String {
-                s: "Mary".to_string(),
-                delim: None,
-            }),
+            Lambda::const_(Constant::String("Mary".to_string())),
         ],
         Location::none(),
     );
@@ -273,14 +264,8 @@ fn lowers_spliced_js_calls_by_flattening_literal_variadic_arrays() {
         vec![Lambda::prim(
             Primitive::Pmakearray,
             vec![
-                Lambda::const_(Constant::String {
-                    s: ".".to_string(),
-                    delim: None,
-                }),
-                Lambda::const_(Constant::String {
-                    s: "Node_path_test".to_string(),
-                    delim: None,
-                }),
+                Lambda::const_(Constant::String(".".to_string())),
+                Lambda::const_(Constant::String("Node_path_test".to_string())),
             ],
             Location::none(),
         )],
@@ -465,10 +450,7 @@ fn lowers_js_new_omits_trailing_optional_undefined_args_like_ocaml() {
             transformed_jsx: false,
         },
         vec![
-            Lambda::const_(Constant::String {
-                s: "ab+c".to_string(),
-                delim: None,
-            }),
+            Lambda::const_(Constant::String("ab+c".to_string())),
             Lambda::const_(Constant::JsUndefined { is_unit: false }),
         ],
         Location::none(),
@@ -601,10 +583,7 @@ fn lowers_marshaled_constant_args_in_js_call() {
         Primitive::PjsCall {
             prim_name: "somefn".to_string(),
             arg_types: vec![Param {
-                arg_type: Attr::ArgCst(Cst::ArgStringLit(
-                    "{foo:true}".to_string(),
-                    FfiDelim::DNoQuotes,
-                )),
+                arg_type: Attr::ArgCst(Cst::ArgJsonLit("{foo:true}".to_string())),
                 arg_label: LabelNoname::ArgEmpty,
             }],
             ffi: Box::new(ExternalDecl {
@@ -637,10 +616,7 @@ fn lowers_marshaled_constant_args_in_js_call() {
             assert!(matches!(
                 args.as_slice(),
                 [Expression {
-                    desc: ExpressionDesc::Str {
-                        delim: Delim::NoQuotes,
-                        txt,
-                    },
+                    desc: ExpressionDesc::JsonLiteral(txt),
                     ..
                 }] if txt == "{foo:true}"
             ));
@@ -656,10 +632,7 @@ fn lowers_js_object_create_with_marshaled_fields() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::PjsObjectCreate(vec![
             ObjParam {
-                obj_arg_type: Attr::ArgCst(Cst::ArgStringLit(
-                    "false".to_string(),
-                    FfiDelim::DNoQuotes,
-                )),
+                obj_arg_type: Attr::ArgCst(Cst::ArgJsonLit("false".to_string())),
                 obj_arg_label: Label::ObjLabel {
                     name: "objectMode".to_string(),
                 },
@@ -671,10 +644,7 @@ fn lowers_js_object_create_with_marshaled_fields() {
                 },
             },
             ObjParam {
-                obj_arg_type: Attr::ArgCst(Cst::ArgStringLit(
-                    "true".to_string(),
-                    FfiDelim::DNoQuotes,
-                )),
+                obj_arg_type: Attr::ArgCst(Cst::ArgJsonLit("true".to_string())),
                 obj_arg_label: Label::ObjLabel {
                     name: "someOther".to_string(),
                 },
@@ -700,10 +670,7 @@ fn lowers_js_object_create_with_marshaled_fields() {
                 (
                     PropertyName::Lit(name),
                     Expression {
-                        desc: ExpressionDesc::Str {
-                            delim: Delim::NoQuotes,
-                            txt,
-                        },
+                        desc: ExpressionDesc::JsonLiteral(txt),
                         ..
                     },
                 ) if name == "objectMode" && txt == "false"
@@ -723,10 +690,7 @@ fn lowers_js_object_create_with_marshaled_fields() {
                 (
                     PropertyName::Lit(name),
                     Expression {
-                        desc: ExpressionDesc::Str {
-                            delim: Delim::NoQuotes,
-                            txt,
-                        },
+                        desc: ExpressionDesc::JsonLiteral(txt),
                         ..
                     },
                 ) if name == "someOther" && txt == "true"
@@ -764,7 +728,7 @@ fn lowers_js_object_create_with_polyvar_string_field_like_ocaml() {
                 (
                     PropertyName::Lit(name),
                     Expression {
-                        desc: ExpressionDesc::Str { txt, .. },
+                        desc: ExpressionDesc::Str(txt),
                         ..
                     },
                 ) if name == "localeMatcher" && txt == "best fit"
@@ -807,7 +771,7 @@ fn lowers_js_object_create_with_optional_polyvar_string_field_inline_like_ocaml(
                 (
                     PropertyName::Lit(name),
                     Expression {
-                        desc: ExpressionDesc::Str { txt, .. },
+                        desc: ExpressionDesc::Str(txt),
                         ..
                     },
                 ) if name == "day" && txt == "2-digit"
@@ -880,7 +844,7 @@ fn lowers_js_object_create_with_statically_present_optional_field_inline_like_oc
                 (
                     PropertyName::Lit(name),
                     Expression {
-                        desc: ExpressionDesc::Str { txt, .. },
+                        desc: ExpressionDesc::Str(txt),
                         ..
                     },
                 ) if name == "alt" && txt == "pic"
@@ -1181,7 +1145,7 @@ fn lowers_ignored_js_call_args_to_ocaml_sequence_effects() {
     assert!(matches!(
         kind.as_ref(),
         Expression {
-            desc: ExpressionDesc::Str { txt, .. },
+            desc: ExpressionDesc::Str(txt),
             ..
         } if txt == "Float"
     ));
@@ -1262,7 +1226,7 @@ fn lowers_ignored_js_object_fields_to_ocaml_sequence_effects() {
         ) && matches!(
             kind.as_ref(),
             Expression {
-                desc: ExpressionDesc::Str { txt, .. },
+                desc: ExpressionDesc::Str(txt),
                 ..
             } if txt == "Float"
         )
@@ -1341,7 +1305,7 @@ fn compile_deps_program_keeps_exported_dict_initializer_object_literals() {
                 (
                     PropertyName::Lit(name),
                     Expression {
-                        desc: ExpressionDesc::Str { txt, .. },
+                        desc: ExpressionDesc::Str(txt),
                         ..
                     },
                 ) if name == "first" && txt == "hello"
@@ -1803,7 +1767,7 @@ fn resolves_runtime_dynamic_import_to_string_path() {
             assert!(matches!(
                 args.as_slice(),
                 [Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 }] if txt == "@rescript/runtime/lib/es6/Belt_List.js"
             ));

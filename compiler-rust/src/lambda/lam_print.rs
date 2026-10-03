@@ -65,7 +65,7 @@ pub fn format_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
                 write!(f, "'\\x{c:02x}'")
             }
         }
-        Constant::String { s, .. } => write!(f, "{s:?}"),
+        Constant::String(s) => write!(f, "{s:?}"),
         Constant::ImmString(s) => write!(f, "#{s:?}"),
         Constant::Float(s) => write!(f, "{s}"),
         Constant::BigInt { negative, value } => {
@@ -133,7 +133,8 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::PupdateMod => write!(f, "update_mod!"),
         Primitive::PjsApply => write!(f, "#apply"),
         Primitive::PjsRuntimeApply => write!(f, "#runtime_apply"),
-        Primitive::PtaggedTemplate => write!(f, "#tagged_template"),
+        Primitive::PtaggedTemplate(_) => write!(f, "#tagged_template"),
+        Primitive::Ptemplate(_) => write!(f, "#template"),
         Primitive::PjsObjectGet(name) => write!(f, "js_object_get[{name}]"),
         Primitive::PjsObjectSet(name) => write!(f, "js_object_set[{name}]"),
         Primitive::PfnArity => write!(f, "fn.length"),
@@ -673,7 +674,7 @@ fn format_raw_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
                 write!(f, "'\\x{c:02x}'")
             }
         }
-        Constant::String { s, .. } => write!(f, "{s:?}"),
+        Constant::String(s) => write!(f, "{s:?}"),
         Constant::ImmString(s) => write!(f, "#{s:?}"),
         Constant::Float(s) => write!(f, "{s}"),
         Constant::BigInt { negative, value } => {

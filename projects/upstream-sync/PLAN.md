@@ -19,7 +19,7 @@ the change to `compiler-rust/`, reruns the gates and commits the merge.
 | 2 | ..84bed4dda (21-28) | vendored Flow parser, OCamlformat 0.29, OCaml 5.5 | done |
 | 3 | ..055e9e091 (29-49) | object representation cleanup (field mutability, Stage 0-E) | done |
 | 4 | ..ebc61dd5b (50-110) | Lambda/Lam merge, curried application removal | done |
-| 5 | ..117 | string literal normalization, formatter | |
+| 5 | ..7875e74f9 (111-117) | string literal normalization, formatter | done |
 | 6 | ..148 | scalar replacement, @as in the AST, sharing passes | |
 | 7 | ..162 | parser modes removed, coercions, reanalyze | |
 | 8 | ..204 | parser token inspection, regexp/ternary/braces nodes, cleanup | |
@@ -166,3 +166,46 @@ output parity 1884/1884, syntax tests green, compiler tests 1346/1347
 (`parse_inline_for`, independent), rewatch unit tests 147/147 and
 `rewatch/tests/suite.sh` green. The runtime and Belt built by the Rust
 compiler match the checked-in JavaScript.
+
+### Step 5 (`7875e74f9`)
+
+Upstream replaced string delimiters with `String_literal`: a string constant
+keeps its source spelling and its decoded (semantic) value, `json` literals
+and raw sources are separate constants, and backquoted templates are their
+own parsetree, typedtree and lambda nodes (`Pexp_template`,
+`Pexp_tagged_template`, `Ptemplate`, `Ptagged_template`). The JS printer
+escapes semantic strings itself.
+
+Ported to Rust:
+
+- `string_literal.rs` and `ast_payload.rs` (semantic payload readers); the
+  scanner, parser, printers, JSX ppx and FFI attribute readers use them.
+- `ast_mapper_to0`/`ast_mapper_from0`: templates round-trip through the v0
+  `^` chain and `res.template`/`res.taggedTemplate` attributes, with the
+  upstream errors for invalid escapes, interpolated `json` literals and tagged
+  templates in patterns.
+- Typing of the template nodes, the `InvalidStringEscapeSequence` and
+  `JsonLiteralOutsideExternal` errors, and UTF-16 lengths in `parmatch`.
+- Lambda: `Const_string` without a delimiter, the template primitives, and
+  UTF-16 based `String.length`/`String.get` folding. The `.cmj` reader decodes
+  the new layouts.
+- JS IR: `Str`, `TemplateLiteral`, `JsonLiteral` and `InterpolatedTemplate`
+  replace the delimiter-carrying string node; the printer ports
+  `Js_dump_string.escape_to_buffer`.
+- `.cmi` attribute strings are read through `String_literal.payload`.
+- `matching.ml`'s `approx_present` treats `Lglobal_module` as present, as
+  OCaml does (it is not a constant), so an alias binding is not sunk into a
+  branch past a global module access.
+
+Rewatch: in-process builds now copy `.res`/`.resi` sources into `lib/bs` and
+`lib/ocaml` like the subprocess build. The runtime precompile reads
+`lib/ocaml/*.res`, so before this a clean runtime build left Belt unable to
+find `Stdlib`.
+
+Gates (release): JS output parity 631/631 and Tella 3205/3205, typedtree
+parity 630/630 (`string_unicode_test` takes longer than the 10s limit in both
+compilers; its 138 MB sexp matches byte for byte), error output parity
+1893/1893, syntax tests 580/580, compiler tests green except
+`parse_inline_for` (independent), rewatch unit tests and `tests/suite.sh`
+green. `make test-analysis` stops at `no-watcher.sh` (editor-tooling port in
+progress).

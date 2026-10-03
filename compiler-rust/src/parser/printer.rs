@@ -943,58 +943,68 @@ fn print_string_contents(txt: &str) -> Doc {
     Doc::join(Doc::literal_line(), docs)
 }
 
-/// Print a constant value.
-pub fn print_constant(template_literal: bool, c: &Constant) -> Doc {
+/// OCaml `interleave_template_parts`.
+fn interleave_template_parts(sources: Vec<Doc>, values: Vec<Doc>) -> Doc {
+    assert_eq!(sources.len(), values.len() + 1);
+    let mut parts = Vec::with_capacity(sources.len() + values.len());
+    let mut values = values.into_iter();
+    for source in sources {
+        parts.push(source);
+        if let Some(value) = values.next() {
+            parts.push(value);
+        }
+    }
+    Doc::concat(parts)
+}
+
+/// OCaml `raw_source_fits_double_quotes`.
+fn raw_source_fits_double_quotes(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => return false,
+            b'\\' => {
+                if index + 1 >= bytes.len() {
+                    return false;
+                }
+                index += 2;
+            }
+            _ => index += 1,
+        }
+    }
+    true
+}
+
+/// OCaml `print_constant`.
+pub fn print_constant(c: &Constant) -> Doc {
     match c {
         Constant::Integer(s, suffix) => match suffix {
             Some(c) => Doc::text(format!("{}{}", s, c)),
             None => Doc::text(s.clone()),
         },
-        Constant::String(txt, None) => Doc::concat(vec![
+        Constant::String(payload) => Doc::concat(vec![
             Doc::text("\""),
-            print_string_contents(txt),
+            print_string_contents(payload.source()),
             Doc::text("\""),
         ]),
-        Constant::String(txt, Some(prefix)) => {
-            if prefix == "INTERNAL_RES_CHAR_CONTENTS" {
-                Doc::concat(vec![Doc::text("'"), Doc::text(txt.clone()), Doc::text("'")])
-            } else {
-                let (lquote, rquote) = if template_literal {
-                    ("`", "`")
-                } else {
-                    ("\"", "\"")
-                };
-                Doc::concat(vec![
-                    if prefix == "js" {
-                        Doc::nil()
-                    } else {
-                        Doc::text(prefix.clone())
-                    },
-                    Doc::text(lquote),
-                    print_string_contents(txt),
-                    Doc::text(rquote),
-                ])
-            }
+        Constant::Json(source) => Doc::concat(vec![
+            Doc::text("json`"),
+            print_string_contents(source),
+            Doc::text("`"),
+        ]),
+        Constant::RawSource(source) => {
+            let delimiter = if raw_source_fits_double_quotes(source) { "\"" } else { "`" };
+            Doc::concat(vec![
+                Doc::text(delimiter),
+                print_string_contents(source),
+                Doc::text(delimiter),
+            ])
+        }
+        Constant::Char { source, .. } => {
+            Doc::concat(vec![Doc::text("'"), Doc::text(source.clone()), Doc::text("'")])
         }
         Constant::Float(s, _) => Doc::text(s.clone()),
-        Constant::Char(c) => {
-            let ch = char::from_u32(*c as u32).unwrap_or('?');
-            let s = match ch {
-                '\'' => "\\'".to_string(),
-                '\\' => "\\\\".to_string(),
-                '\n' => "\\n".to_string(),
-                '\t' => "\\t".to_string(),
-                '\r' => "\\r".to_string(),
-                '\x08' => "\\b".to_string(),
-                ' '..='~' => ch.to_string(),
-                // `Res_utf8.encode_code_point c` (res_printer.ml:603).
-                _ => match char::from_u32(*c as u32) {
-                    Some(ch) => ch.to_string(),
-                    None => format!("\\u{{{:x}}}", c),
-                },
-            };
-            Doc::text(format!("'{}'", s))
-        }
     }
 }
 
@@ -1049,9 +1059,18 @@ pub fn print_expression(
             print_arrow_expression(state, e, cmt_tbl, arena)
         }
         // Constants
-        ExpressionDesc::Pexp_constant(c) => {
-            print_constant(parsetree_viewer::is_template_literal(arena, e), c)
+        ExpressionDesc::Pexp_constant(c) => print_constant(c),
+        ExpressionDesc::Pexp_template(template) => {
+            print_template_literal(state, &template.source_segments, &template.values, cmt_tbl, arena)
         }
+        ExpressionDesc::Pexp_tagged_template(template) => print_tagged_template_literal(
+            state,
+            arena.get_expr(template.tag),
+            &template.raw_sources,
+            &template.values,
+            cmt_tbl,
+            arena,
+        ),
         // break / continue (leaf nodes)
         ExpressionDesc::Pexp_break => Doc::text("break"),
         ExpressionDesc::Pexp_continue => Doc::text("continue"),
@@ -1859,17 +1878,8 @@ fn print_arrow_expression(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    // OCaml's print_arrow wraps in Doc.group, but print_pexp_fun (for callbacks) does not.
-    // This distinction is important: the group allows Doc.line in attributes to become
-    // space when the expression fits on one line, but for callbacks the custom_layout
-    // handles the fitting logic differently.
-    Doc::group(print_pexp_fun(
-        state,
-        InCallback::NoCallback,
-        e,
-        cmt_tbl,
-        arena,
-    ))
+    // OCaml `print_expression`: `Pexp_fun _ -> print_pexp_fun ~in_callback:NoCallback`.
+    print_pexp_fun(state, InCallback::NoCallback, e, cmt_tbl, arena)
 }
 
 /// Print a function expression (Pexp_fun/Pexp_newtype) with callback mode.
@@ -1930,18 +1940,13 @@ fn print_pexp_fun(
             ) => true,
             _ => false,
         };
-        let should_indent = match (&*return_expr.pexp_desc, in_callback) {
-            (
-                ExpressionDesc::Pexp_sequence(_, _)
-                | ExpressionDesc::Pexp_let(_)
-                | ExpressionDesc::Pexp_letmodule(_)
-                | ExpressionDesc::Pexp_letexception(_)
-                | ExpressionDesc::Pexp_open(_),
-                _,
-            ) => false,
-            (ExpressionDesc::Pexp_jsx_element(element), InCallback::NoCallback) => {
-                !matches!(&**element, JsxElement::Fragment(_))
-            }
+        let should_indent = match &*return_expr.pexp_desc {
+            ExpressionDesc::Pexp_sequence(_, _)
+            | ExpressionDesc::Pexp_let(_)
+            | ExpressionDesc::Pexp_letmodule(_)
+            | ExpressionDesc::Pexp_letexception(_)
+            | ExpressionDesc::Pexp_open(_) => false,
+            ExpressionDesc::Pexp_jsx_element(element) => !matches!(&**element, JsxElement::Fragment(_)),
             _ => true,
         };
 
@@ -1989,15 +1994,19 @@ fn print_pexp_fun(
         None => Doc::nil(),
     };
 
-    let attrs = print_attributes(state, attrs_on_arrow, cmt_tbl, arena);
+    let attrs = print_attributes_with_loc(state, attrs_on_arrow, None, cmt_tbl, arena, true);
 
-    Doc::concat(vec![
+    let doc = Doc::concat(vec![
         attrs,
         parameters_doc,
         typ_constraint_doc,
         Doc::text(" =>"),
         return_expr_doc,
-    ])
+    ]);
+    match in_callback {
+        InCallback::NoCallback => Doc::group(doc),
+        InCallback::FitsOnOneLine | InCallback::ArgumentsFitOnOneLine => doc,
+    }
 }
 
 /// Print function parameters.
@@ -2328,7 +2337,7 @@ fn try_print_re_extension(ext: &Extension, arena: &ParseArena) -> Option<Doc> {
                 if attrs.is_empty() {
                     let expr = arena.get_expr(*expr_idx);
                     if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc {
-                        if let Constant::String(s, _) = &**c {
+                        if let Constant::RawSource(s) = &**c {
                             return Some(Doc::text(s.clone()));
                         }
                     }
@@ -3138,7 +3147,8 @@ fn print_dict_rows(
                         let value_expr = arena.get_expr(tuple_items[1]);
                         // Key should be a string constant
                         if let ExpressionDesc::Pexp_constant(c) = &*key_expr.pexp_desc {
-                            if let Constant::String(txt, _) = &**c {
+                            if let Constant::String(payload) = &**c {
+                                let txt = payload.semantic();
                                 // Create combined location from key to value (for row comments)
                                 let (cmt_pos_range, cmt_full_loc) = make_combined_pos_range(
                                     key_expr.pexp_loc,
@@ -3288,64 +3298,32 @@ fn print_spread_dict_expr(
 }
 
 /// Check if expression has res.taggedTemplate attribute
-fn is_tagged_template_literal(arena: &ParseArena, expr: &Expression) -> bool {
-    expr.pexp_attributes
-        .iter()
-        .any(|(name, _)| arena.get_string(name.txt) == "res.taggedTemplate")
-}
-
-/// Print tagged template literal: tag`string ${expr} string`
+/// OCaml `print_tagged_template_literal`.
 fn print_tagged_template_literal(
     state: &PrinterState,
-    funct: &Expression,
-    args: &[(ArgLabel, ExprIdx)],
+    tag: &Expression,
+    raw_sources: &[StringLoc],
+    values: &[ExprIdx],
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    // args should be [strings_array, values_array]
-    if args.len() != 2 {
-        return Doc::nil();
-    }
-
-    let strings = match &*arena.get_expr(args[0].1).pexp_desc {
-        ExpressionDesc::Pexp_array(items) => items,
-        _ => return Doc::nil(),
-    };
-
-    let values = match &*arena.get_expr(args[1].1).pexp_desc {
-        ExpressionDesc::Pexp_array(items) => items,
-        _ => return Doc::nil(),
-    };
-
-    // Build the template content by interleaving strings and ${values}
-    let mut parts: Vec<Doc> = Vec::new();
-
-    for (i, s) in strings.iter().enumerate() {
-        let s = arena.get_expr(*s);
-        // Extract string content
-        if let ExpressionDesc::Pexp_constant(c) = &*s.pexp_desc {
-            if let Constant::String(txt, _) = &**c {
-                parts.push(print_string_contents(txt));
-            }
-        }
-
-        // Add interpolation if there's a corresponding value
-        if i < values.len() {
-            let value = arena.get_expr(values[i]);
-            parts.push(Doc::text("${"));
-            parts.push(print_expression_with_comments(state, value, cmt_tbl, arena));
-            parts.push(Doc::text("}"));
-        }
-    }
-
-    let tag_doc = print_expression_with_comments(state, funct, cmt_tbl, arena);
-
-    Doc::concat(vec![
-        tag_doc,
-        Doc::text("`"),
-        Doc::concat(parts),
-        Doc::text("`"),
-    ])
+    let strings: Vec<Doc> = raw_sources
+        .iter()
+        .map(|source| print_string_contents(arena.get_string(source.txt)))
+        .collect();
+    let values: Vec<Doc> = values
+        .iter()
+        .map(|value| {
+            Doc::concat(vec![
+                Doc::text("${"),
+                print_expression_with_comments(state, arena.get_expr(*value), cmt_tbl, arena),
+                Doc::text("}"),
+            ])
+        })
+        .collect();
+    let content = interleave_template_parts(strings, values);
+    let tag_doc = print_expression_with_comments(state, tag, cmt_tbl, arena);
+    Doc::concat(vec![tag_doc, Doc::text("`"), content, Doc::text("`")])
 }
 
 /// Print spread array syntax: Primitive_array.spread([xs, [a, b]]) -> [...xs, a, b]
@@ -3481,77 +3459,30 @@ fn print_belt_list_concat_apply(
 /// OCaml desugars `foo ${bar}` to `"foo " ++ bar ++ ""` with @res.template attribute.
 fn print_template_literal(
     state: &PrinterState,
-    expr: &Expression,
+    source_segments: &[StringLoc],
+    values: &[ExprIdx],
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    let mut tag = "js".to_string();
-
-    // Recursively walk the expression to build the template content
-    fn walk_expr(
-        state: &PrinterState,
-        expr: &Expression,
-        tag: &mut String,
-        cmt_tbl: &mut CommentTable,
-        arena: &ParseArena,
-    ) -> Doc {
-        match &*expr.pexp_desc {
-            // String concatenation: arg1 ++ arg2
-            // res_printer.ml:4055-4065
-            ExpressionDesc::Pexp_apply(apply_inner)
-                if matches!(
-                    apply_inner.args.as_slice(),
-                    [(ArgLabel::Nolabel, _), (ArgLabel::Nolabel, _)]
-                ) && matches!(&*arena.get_expr(apply_inner.funct).pexp_desc, ExpressionDesc::Pexp_ident(lid)
-                        if matches!(arena.get_longident(lid.txt), Longident::Lident(op_idx)
-                            if arena.get_string(*op_idx) == "++")) =>
-            {
-                let PexpApply { ref args, .. } = **apply_inner;
-                let lhs = walk_expr(state, arena.get_expr(args[0].1), tag, cmt_tbl, arena);
-                let rhs = walk_expr(state, arena.get_expr(args[1].1), tag, cmt_tbl, arena);
-                Doc::concat(vec![lhs, rhs])
-            }
-            // A template string part (a delimited string constant); a plain
-            // string constant is an interpolated `${"..."}` expression.
-            ExpressionDesc::Pexp_constant(c)
-                if matches!(&**c, Constant::String(_, Some(_))) =>
-            {
-                let Constant::String(txt, Some(prefix)) = &**c else {
-                    unreachable!()
-                };
-                *tag = prefix.to_string();
-                print_string_contents(txt)
-            }
-            // Any other expression: wrap in ${...}
-            // Match OCaml: Doc.group (Doc.concat [Doc.text "${"; Doc.indent doc; Doc.rbrace])
-            _ => {
-                let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
-                let doc = match parens::expr(arena, expr) {
-                    ParenKind::Parenthesized => add_parens(doc),
-                    ParenKind::Braced(braces) => print_braces(doc, expr, braces, arena),
-                    ParenKind::Nothing => doc,
-                };
-                Doc::group(Doc::concat(vec![
-                    Doc::text("${"),
-                    Doc::indent(doc),
-                    Doc::rbrace(),
-                ]))
-            }
-        }
-    }
-
-    let content = walk_expr(state, expr, &mut tag, cmt_tbl, arena);
-
-    Doc::concat(vec![
-        if tag == "js" {
-            Doc::nil()
-        } else {
-            Doc::text(&tag)
-        },
-        Doc::text("`"),
-        content,
-        Doc::text("`"),
-    ])
+    let strings: Vec<Doc> = source_segments
+        .iter()
+        .map(|source| print_string_contents(arena.get_string(source.txt)))
+        .collect();
+    let values: Vec<Doc> = values
+        .iter()
+        .map(|value| {
+            let expr = arena.get_expr(*value);
+            let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
+            let doc = match parens::expr(arena, expr) {
+                ParenKind::Parenthesized => add_parens(doc),
+                ParenKind::Braced(braces) => print_braces(doc, expr, braces, arena),
+                ParenKind::Nothing => doc,
+            };
+            Doc::group(Doc::concat(vec![Doc::text("${"), Doc::indent(doc), Doc::rbrace()]))
+        })
+        .collect();
+    let content = interleave_template_parts(strings, values);
+    Doc::concat(vec![Doc::text("`"), content, Doc::text("`")])
 }
 
 /// Get the body of an underscore apply sugar expression.
@@ -4147,17 +4078,30 @@ fn print_object_set_expr(
     arena: &ParseArena,
 ) -> Doc {
     let rhs_doc = print_expr_with_parens(state, rhs, cmt_tbl, arena);
-    let should_indent = !parsetree_viewer::is_braced_expr(arena, rhs)
-        && parsetree_viewer::is_binary_expression(arena, rhs);
     Doc::group(Doc::concat(vec![
         print_object_get_doc(state, obj, member, cmt_tbl, arena),
-        Doc::text(" ="),
+        print_assignment_rhs(arena, " =", rhs, rhs_doc),
+    ]))
+}
+
+/// OCaml `print_assignment_rhs`: delimited expressions handle their own
+/// indentation; binary expressions and switches can break after the
+/// assignment operator.
+fn print_assignment_rhs(arena: &ParseArena, operator: &str, rhs: &Expression, rhs_doc: Doc) -> Doc {
+    let should_indent = !parsetree_viewer::is_braced_expr(arena, rhs)
+        && (parsetree_viewer::is_binary_expression(arena, rhs)
+            || match &*rhs.pexp_desc {
+                ExpressionDesc::Pexp_match(_) => !parsetree_viewer::is_if_let_expr(arena, rhs),
+                _ => false,
+            });
+    Doc::concat(vec![
+        Doc::text(operator),
         if should_indent {
             Doc::group(Doc::indent(Doc::concat(vec![Doc::line(), rhs_doc])))
         } else {
             Doc::concat(vec![Doc::space(), rhs_doc])
         },
-    ]))
+    ])
 }
 
 /// res_printer.ml `print_object_get_doc`: `parent["member"]`.
@@ -4202,12 +4146,6 @@ fn print_pexp_apply(
             unreachable!()
         };
         return print_unary_expression(state, arena.get_string(*op), args, cmt_tbl, arena);
-    }
-    if parsetree_viewer::is_template_literal(arena, expr) {
-        return print_template_literal(state, expr, cmt_tbl, arena);
-    }
-    if is_tagged_template_literal(arena, expr) {
-        return print_tagged_template_literal(state, funct, args, cmt_tbl, arena);
     }
     if parsetree_viewer::is_binary_expression(arena, expr) {
         return print_binary_expression(state, expr, cmt_tbl, arena);
@@ -4348,7 +4286,30 @@ fn binary_expression_parts<'a>(
 }
 
 /// `print_operand` / `flatten` of res_printer.ml:4174-4334.
+/// OCaml `print_operand` in `print_binary_expression`: a braced right-hand
+/// side of `:=` keeps its braces; everything else goes through `flatten`.
 fn print_binary_operand(
+    state: &PrinterState,
+    is_lhs: bool,
+    is_multiline: bool,
+    expr: &Expression,
+    parent_operator: &str,
+    cmt_tbl: &mut CommentTable,
+    arena: &ParseArena,
+) -> Doc {
+    if parent_operator == ":=" && !is_lhs && parsetree_viewer::is_braced_expr(arena, expr) {
+        let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
+        match parens::expr(arena, expr) {
+            ParenKind::Braced(braces) => print_braces(doc, expr, braces, arena),
+            ParenKind::Parenthesized => add_parens(doc),
+            ParenKind::Nothing => doc,
+        }
+    } else {
+        print_binary_operand_flatten(state, is_lhs, is_multiline, expr, parent_operator, cmt_tbl, arena)
+    }
+}
+
+fn print_binary_operand_flatten(
     state: &PrinterState,
     is_lhs: bool,
     is_multiline: bool,
@@ -4364,7 +4325,7 @@ fn print_binary_operand(
             && !parsetree_viewer::has_attributes(arena, &expr.pexp_attributes)
         {
             let left_printed =
-                print_binary_operand(state, true, is_multiline, left, operator, cmt_tbl, arena);
+                print_binary_operand_flatten(state, true, is_multiline, left, operator, cmt_tbl, arena);
             let right_printed = {
                 let (right_printeable_attrs, right_internal) =
                     with_internal_attributes(arena, right);
@@ -4437,15 +4398,6 @@ fn print_binary_operand(
         }
     } else {
         match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_apply(_)
-                if matches!(
-                    binary_expression_parts(arena, expr),
-                    Some(("++", loc, _, _)) if arena.loc_ghost(loc)
-                ) && is_nolabel_pair_apply(expr) =>
-            {
-                let doc = print_template_literal(state, expr, cmt_tbl, arena);
-                print_comments(doc, cmt_tbl, expr.pexp_loc, arena)
-            }
             ExpressionDesc::Pexp_setfield(inner) => {
                 let (lhs, ref field, rhs) = **inner;
                 let doc = print_set_field_expr(
@@ -4462,20 +4414,14 @@ fn print_binary_operand(
             }
             ExpressionDesc::Pexp_object_set(inner) => {
                 let (ref obj, ref member, ref rhs) = **inner;
-                let rhs = arena.get_expr(*rhs);
-                let rhs_doc = print_expression_with_comments(state, rhs, cmt_tbl, arena);
-                let lhs_doc =
-                    print_object_get_doc(state, arena.get_expr(*obj), member, cmt_tbl, arena);
-                let should_indent = parsetree_viewer::is_binary_expression(arena, rhs);
-                let doc = Doc::group(Doc::concat(vec![
-                    lhs_doc,
-                    Doc::text(" ="),
-                    if should_indent {
-                        Doc::group(Doc::indent(Doc::concat(vec![Doc::line(), rhs_doc])))
-                    } else {
-                        Doc::concat(vec![Doc::space(), rhs_doc])
-                    },
-                ]));
+                let doc = print_object_set_expr(
+                    state,
+                    arena.get_expr(*obj),
+                    member,
+                    arena.get_expr(*rhs),
+                    cmt_tbl,
+                    arena,
+                );
                 let doc = if expr.pexp_attributes.is_empty() {
                     doc
                 } else {
@@ -4488,7 +4434,13 @@ fn print_binary_operand(
             }
             _ => {
                 let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
-                match parens::binary_expr_operand(arena, is_lhs, expr) {
+                let parens = match &*expr.pexp_desc {
+                    ExpressionDesc::Pexp_fun(_) if parent_operator == ":=" && !is_lhs => {
+                        parens::expr(arena, expr)
+                    }
+                    _ => parens::binary_expr_operand(arena, is_lhs, expr),
+                };
+                match parens {
                     ParenKind::Parenthesized => add_parens(doc),
                     ParenKind::Braced(loc) => print_braces(doc, expr, loc, arena),
                     ParenKind::Nothing => doc,
@@ -4520,7 +4472,7 @@ fn print_set_field_expr(
 ) -> Doc {
     let rhs_doc = {
         let doc = print_expression_with_comments(state, rhs, cmt_tbl, arena);
-        match parens::set_field_expr_rhs(arena, rhs) {
+        match parens::expr(arena, rhs) {
             ParenKind::Parenthesized => add_parens(doc),
             ParenKind::Braced(braces) => print_braces(doc, rhs, braces, arena),
             ParenKind::Nothing => doc,
@@ -4534,17 +4486,11 @@ fn print_set_field_expr(
             ParenKind::Nothing => doc,
         }
     };
-    let should_indent = parsetree_viewer::is_binary_expression(arena, rhs);
     let doc = Doc::group(Doc::concat(vec![
         lhs_doc,
         Doc::dot(),
         print_lident_path(longident_loc, cmt_tbl, arena),
-        Doc::text(" ="),
-        if should_indent {
-            Doc::group(Doc::indent(Doc::concat(vec![Doc::line(), rhs_doc])))
-        } else {
-            Doc::concat(vec![Doc::space(), rhs_doc])
-        },
+        print_assignment_rhs(arena, " =", rhs, rhs_doc),
     ]));
     let doc = if attrs.is_empty() {
         doc
@@ -4600,17 +4546,21 @@ fn print_binary_expression(
     let right = {
         let rhs_doc =
             print_binary_operand(state, is_rhs_op, is_multiline, rhs, operator, cmt_tbl, arena);
-        let operator_with_rhs = Doc::concat(vec![
-            print_binary_operator_with_spacing(
-                operator,
-                parsetree_viewer::should_inline_rhs_binary_expr(rhs),
-            ),
-            rhs_doc,
-        ]);
-        if parsetree_viewer::should_indent_binary_expr(arena, expr) {
-            Doc::group(Doc::indent(operator_with_rhs))
+        if operator == ":=" {
+            print_assignment_rhs(arena, " :=", rhs, rhs_doc)
         } else {
-            operator_with_rhs
+            let operator_with_rhs = Doc::concat(vec![
+                print_binary_operator_with_spacing(
+                    operator,
+                    parsetree_viewer::should_inline_rhs_binary_expr(rhs),
+                ),
+                rhs_doc,
+            ]);
+            if parsetree_viewer::should_indent_binary_expr(arena, expr) {
+                Doc::group(Doc::indent(operator_with_rhs))
+            } else {
+                operator_with_rhs
+            }
         }
     };
     let doc = Doc::group(Doc::concat(vec![
@@ -5229,11 +5179,7 @@ pub fn print_pattern(
         // x
         PatternDesc::Ppat_var(var) => print_ident_like(arena.get_string(var.txt), false, false),
         // 42, "hello", 'a', etc.
-        PatternDesc::Ppat_constant(c) => {
-            let template_literal =
-                parsetree_viewer::has_template_literal_attr(arena, &pat.ppat_attributes);
-            print_constant(template_literal, c)
-        }
+        PatternDesc::Ppat_constant(c) => print_constant(c),
         // (p1, p2, ...)
         PatternDesc::Ppat_tuple(patterns) => Doc::group(Doc::concat(vec![
             Doc::lparen(),
@@ -5561,9 +5507,9 @@ pub fn print_pattern(
         PatternDesc::Ppat_interval(inner) => {
             let (ref c1, ref c2) = **inner;
             Doc::concat(vec![
-                print_constant(false, c1),
+                print_constant(c1),
                 Doc::text(" .. "),
-                print_constant(false, c2),
+                print_constant(c2),
             ])
         }
         // open M.(pat)
@@ -7992,9 +7938,7 @@ fn print_value_binding(
             // Pexp_newtype: don't indent
             ExpressionDesc::Pexp_newtype { .. } => false,
             // Tagged template: don't indent
-            _ if parsetree_viewer::has_tagged_template_attr(arena, &vb_expr.pexp_attributes) => {
-                false
-            }
+            ExpressionDesc::Pexp_tagged_template(_) => false,
             // JSX: indent
             ExpressionDesc::Pexp_jsx_element(_) => true,
             // Default: check attributes or array access or binary expression
@@ -8112,10 +8056,10 @@ fn print_attribute(
                     let (ref expr_idx, _) = **eval_inner;
                     let expr = arena.get_expr(*expr_idx);
                     if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc {
-                        if let Constant::String(txt, _) = &**c {
+                        if let Constant::String(payload) = &**c {
                             return Doc::concat(vec![
                                 Doc::text(if standalone { "/***" } else { "/**" }),
-                                Doc::text(txt.clone()),
+                                Doc::text(payload.semantic()),
                                 Doc::text("*/"),
                             ]);
                         }

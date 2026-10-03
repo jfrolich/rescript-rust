@@ -68,8 +68,7 @@ let constant c =
   match c with
   | Const_int i -> Sexp.list [Sexp.atom "Const_int"; Sexp.atom (string_of_int i)]
   | Const_char c -> Sexp.list [Sexp.atom "Const_char"; Sexp.atom (Printf.sprintf "%d" c)]
-  | Const_string (s, delim) ->
-    Sexp.list [Sexp.atom "Const_string"; string s; opt string delim]
+  | Const_string s -> Sexp.list [Sexp.atom "Const_string"; string s]
   | Const_float s -> Sexp.list [Sexp.atom "Const_float"; string s]
   | Const_bigint (positive, s) ->
     let sign_str = if positive then "+" else "-" in
@@ -522,6 +521,32 @@ and expression_desc ~with_locs desc =
   | Texp_continue -> Sexp.list [Sexp.atom "Texp_continue"]
   | Texp_for_of _ -> Sexp.list [Sexp.atom "Texp_for_of"]
   | Texp_for_await_of _ -> Sexp.list [Sexp.atom "Texp_for_await_of"]
+  | Texp_tagged_template {tag; raw_sources; values} ->
+    let tag_sexp = expression ~with_locs tag in
+    let values_sexp = List.map (expression ~with_locs) values in
+    Sexp.list
+      [
+        Sexp.atom "Texp_tagged_template";
+        tag_sexp;
+        Sexp.list (List.map string raw_sources);
+        Sexp.list values_sexp;
+      ]
+  | Texp_template {segments; values} ->
+    let values_sexp = List.map (expression ~with_locs) values in
+    Sexp.list
+      [
+        Sexp.atom "Texp_template";
+        Sexp.list
+          (List.map
+             (fun segment ->
+               Sexp.list
+                 [
+                   string (String_literal.template_source segment);
+                   string (String_literal.template_semantic segment);
+                 ])
+             segments);
+        Sexp.list values_sexp;
+      ]
 
 and case ~with_locs c =
   let lhs_sexp = pattern ~with_locs c.c_lhs in

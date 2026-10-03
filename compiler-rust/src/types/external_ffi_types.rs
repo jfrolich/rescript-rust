@@ -12,20 +12,12 @@ use serde::{Deserialize, Serialize};
 // External_arg_spec
 // ============================================================================
 
-/// `External_arg_spec.delim`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Delim {
-    DNone,
-    DStarJ,
-    DNoQuotes,
-    DBackQuotes,
-}
-
 /// `External_arg_spec.cst`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Cst {
     ArgIntLit(i64),
-    ArgStringLit(String, Delim),
+    ArgStringLit(String),
+    ArgJsonLit(String),
 }
 
 /// `External_arg_spec.attr`.
@@ -148,7 +140,8 @@ pub enum ReturnWrapper {
 /// `External_ffi_types.inline_const`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InlineConst {
-    ConstStr { s: String, delim: Option<Delim> },
+    /// A decoded runtime string value.
+    ConstString(String),
     ConstBool(bool),
     ConstInt(i32),
     ConstBigint { negative: bool, digits: String },
@@ -247,15 +240,6 @@ pub mod debug {
         if b { "true" } else { "false" }
     }
 
-    fn delim(d: Delim) -> &'static str {
-        match d {
-            Delim::DNone => "DNone",
-            Delim::DStarJ => "DStarJ",
-            Delim::DNoQuotes => "DNoQuotes",
-            Delim::DBackQuotes => "DBackQuotes",
-        }
-    }
-
     fn pairs(xs: &[(String, String)]) -> String {
         list(xs, |(a, b)| format!("({},{})", quote(a), quote(b)))
     }
@@ -267,9 +251,8 @@ pub mod debug {
             Attr::PolyVar { descr: Some(d) } => format!("Poly_var{}", pairs(d)),
             Attr::Int(xs) => format!("Int{}", list(xs, |(a, i)| format!("({},{})", quote(a), i))),
             Attr::ArgCst(Cst::ArgIntLit(i)) => format!("Arg_int_lit({i})"),
-            Attr::ArgCst(Cst::ArgStringLit(s, d)) => {
-                format!("Arg_string_lit({},{})", quote(s), delim(*d))
-            }
+            Attr::ArgCst(Cst::ArgStringLit(s)) => format!("Arg_string_lit({})", quote(s)),
+            Attr::ArgCst(Cst::ArgJsonLit(s)) => format!("Arg_json_lit({})", quote(s)),
             Attr::ExternUnit => "Extern_unit".to_string(),
             Attr::Nothing => "Nothing".to_string(),
             Attr::Ignore => "Ignore".to_string(),
@@ -366,10 +349,7 @@ pub mod debug {
 
     pub fn inline_const(c: &InlineConst) -> String {
         match c {
-            InlineConst::ConstStr { s, delim: None } => format!("Const_str({})", quote(s)),
-            InlineConst::ConstStr { s, delim: Some(d) } => {
-                format!("Const_str({},{})", quote(s), delim(*d))
-            }
+            InlineConst::ConstString(s) => format!("Const_string({})", quote(s)),
             InlineConst::ConstBool(b) => format!("Const_bool({})", bool_(*b)),
             InlineConst::ConstInt(i) => format!("Const_int({i})"),
             InlineConst::ConstBigint { negative, digits } => {

@@ -14,9 +14,9 @@ use crate::cmi::persistent_env::CmjExportConstant;
 use crate::ident::Ident;
 use crate::js_ir::op::{Kind, MutableFlag, Number};
 use crate::js_ir::printer::convert_ident_name;
-use crate::js_ir::{BinOp, Block, Delim, Expression, ExpressionDesc, ModuleId};
+use crate::js_ir::{BinOp, Block, Expression, ExpressionDesc, ModuleId};
 use crate::lambda::lam_compat::{FieldDbgInfo, SetFieldDbgInfo};
-use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo, StringDelim};
+use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo};
 use crate::lambda::lam_primitive::Primitive;
 
 impl LambdaCompiler {
@@ -77,12 +77,8 @@ impl LambdaCompiler {
                 };
                 match &tag.runtime_tag {
                 Some(ConstructorRuntimeTag::Int(value)) => Self::compile_runtime_int(*value),
-                // OCaml `Js_exp_make.tag_type` (js_exp_make.ml:1361) emits `@as`
-                // strings with `~delim:DStarJ`, printing the payload verbatim.
-                Some(ConstructorRuntimeTag::String(value)) => Expression::new(ExpressionDesc::Str {
-                    delim: Delim::StarJ,
-                    txt: value.clone(),
-                }),
+                // OCaml `Js_exp_make.tag_type`: `String s -> str s`.
+                Some(ConstructorRuntimeTag::String(value)) => Expression::new(ExpressionDesc::Str(value.clone())),
                 Some(ConstructorRuntimeTag::Float(value)) => {
                     Expression::number(Number::float(value.clone()))
                 }
@@ -109,13 +105,9 @@ impl LambdaCompiler {
                 Some(crate::types::VariantTagType::Int(value)) => {
                     Expression::number(Number::int(*value))
                 }
-                // lam_compile_const.ml:57 `E.tag_type t`, which is
-                // `str s ~delim:DStarJ` for strings (js_exp_make.ml:1360-1361).
+                // lam_compile_const.ml `E.tag_type t`: `String s -> str s`.
                 Some(crate::types::VariantTagType::String(value)) => {
-                    Expression::new(ExpressionDesc::Str {
-                        delim: Delim::StarJ,
-                        txt: value.clone(),
-                    })
+                    Expression::new(ExpressionDesc::Str(value.clone()))
                 }
                 Some(crate::types::VariantTagType::Float(value)) => {
                     Expression::number(Number::float(value.clone()))
@@ -145,24 +137,8 @@ impl LambdaCompiler {
                 }
             }
             Constant::Char(c) => Expression::number(Number::Int { i: *c, c: Some(*c) }),
-            Constant::String { s, delim } => {
-                let delim = match delim {
-                    Some(StringDelim::StarJ) => Delim::StarJ,
-                    // OCaml's lam_compile_const.ml lowers lambda string constants with
-                    // DNoQuotes through E.str, so they stay ordinary quoted JS strings.
-                    Some(StringDelim::NoQuotes) => Delim::None,
-                    Some(StringDelim::Backtick) => Delim::BackQuotes,
-                    Some(StringDelim::Plain) | None => Delim::None,
-                };
-                Expression::new(ExpressionDesc::Str {
-                    delim,
-                    txt: s.clone(),
-                })
-            }
-            Constant::ImmString(s) => Expression::new(ExpressionDesc::Str {
-                delim: Delim::None,
-                txt: s.clone(),
-            }),
+            Constant::String(s) => Expression::string(s.clone()),
+            Constant::ImmString(s) => Expression::new(ExpressionDesc::Str(s.clone())),
             Constant::Float(f) => Expression::number(Number::float(f.clone())),
             Constant::BigInt { negative, value } => {
                 Expression::number(Number::bigint(!negative, value.clone()))

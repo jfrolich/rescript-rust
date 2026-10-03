@@ -184,7 +184,7 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
                 f.print(format_args!("'\\x{i:02x}'"));
             }
         }
-        Constant::String { s, .. } => print_ocaml_string(f, s),
+        Constant::String(s) => print_ocaml_string(f, s),
         Constant::ImmString(s) => {
             f.string("#");
             print_ocaml_string(f, s);

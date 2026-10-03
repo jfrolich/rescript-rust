@@ -501,6 +501,30 @@ fn rewrite_expression(
             let rewritten = rewrite_expr_idx(*subject, arena, let_unwrap_enabled)?;
             ExpressionDesc::Pexp_await(rewritten)
         }
+        ExpressionDesc::Pexp_template(template) => {
+            let values = template
+                .values
+                .iter()
+                .map(|idx| rewrite_expr_idx(*idx, arena, let_unwrap_enabled))
+                .collect::<Result<Vec<_>, _>>()?;
+            ExpressionDesc::Pexp_template(Box::new(crate::parser::ast::PexpTemplate {
+                source_segments: template.source_segments.clone(),
+                values,
+            }))
+        }
+        ExpressionDesc::Pexp_tagged_template(template) => {
+            let tag = rewrite_expr_idx(template.tag, arena, let_unwrap_enabled)?;
+            let values = template
+                .values
+                .iter()
+                .map(|idx| rewrite_expr_idx(*idx, arena, let_unwrap_enabled))
+                .collect::<Result<Vec<_>, _>>()?;
+            ExpressionDesc::Pexp_tagged_template(Box::new(crate::parser::ast::PexpTaggedTemplate {
+                tag,
+                raw_sources: template.raw_sources.clone(),
+                values,
+            }))
+        }
         ExpressionDesc::Pexp_jsx_element(element) => ExpressionDesc::Pexp_jsx_element(Box::new(
             rewrite_jsx_element(element, arena, let_unwrap_enabled)?,
         )),

@@ -601,12 +601,11 @@ impl<'a> Checker<'a> {
         let pat = self.arena.get_pat(idx).clone();
         if let PatternDesc::Ppat_constant(constant) = &*pat.ppat_desc {
             match &**constant {
-                // `Ast_utf8_string_interp.transform_pat`.
-                Constant::String(s, Some(delim)) => {
-                    if delim == "js" {
-                        validate_js_string_literal(s, pat.ppat_loc)?;
-                    }
-                    return Ok(());
+                Constant::Json(_) => {
+                    return Err(PpxError::at_loc(
+                        pat.ppat_loc,
+                        "Tagged template literals are not supported in patterns",
+                    ));
                 }
                 Constant::Integer(_, Some('l')) => return Ok(()),
                 _ => {}
@@ -701,16 +700,6 @@ impl<'a> Checker<'a> {
                 self.expression_extension(expr.pexp_loc, extension)
             }
             ExpressionDesc::Pexp_constant(constant) => match &**constant {
-                // `Ast_utf8_string_interp.transform_exp`.
-                Constant::String(s, Some(delim)) => {
-                    if delim == "js"
-                        && !attributes_have_template_marker(&expr.pexp_attributes, self.arena)
-                        && !is_js_regex_like_literal(s)
-                    {
-                        validate_js_string_literal(s, expr.pexp_loc)?;
-                    }
-                    Ok(())
-                }
                 Constant::Integer(_, Some('l')) => Ok(()),
                 _ => self.attributes(&expr.pexp_attributes),
             },
@@ -873,10 +862,11 @@ impl<'a> Checker<'a> {
         let (ext_name, payload) = extension;
         match self.arena.get_string(ext_name.txt) {
             "todo" => {
+                reject_json_literal_payload(payload, self.arena)?;
                 self.warnings.push(PpxWarning {
                     loc,
                     warning: Warning::BsTodo {
-                        message: todo_payload_message(payload, self.arena),
+                        message: payload_semantic_string(payload, self.arena),
                     },
                 });
                 return Ok(());
@@ -920,6 +910,20 @@ impl<'a> Checker<'a> {
                     self.expr(*item)?;
                 }
                 Ok(())
+            }
+            ExpressionDesc::Pexp_template(template) => {
+                for value in &template.values {
+                    self.expr(*value)?;
+                }
+                Ok(())
+            }
+            // The tag is the first constructor argument, so it is mapped after
+            // the values.
+            ExpressionDesc::Pexp_tagged_template(template) => {
+                for value in &template.values {
+                    self.expr(*value)?;
+                }
+                self.expr(template.tag)
             }
             ExpressionDesc::Pexp_construct(_, arg) => match arg {
                 Some(arg) => self.expr(*arg),

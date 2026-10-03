@@ -68,11 +68,6 @@ fn quote_string_literal(s: &str) -> String {
     result
 }
 
-fn quote_string_tagged(s: &str) -> String {
-    // Template literal strings - don't apply identifier transformations
-    quote_string_literal(s)
-}
-
 fn map_empty<T, F>(items: &[T], f: F) -> Vec<Sexp>
 where
     F: Fn(&T) -> Sexp,
@@ -244,29 +239,19 @@ fn constant_inner(c: &Constant) -> Sexp {
             Sexp::atom(&quote_string(txt)),
             opt_char(tag),
         ]),
-        Constant::Char(_) => Sexp::list(vec![Sexp::atom("Pconst_char")]),
-        Constant::String(txt, tag) => {
-            if tag.as_ref().map(|t| &**t) == Some("INTERNAL_RES_CHAR_CONTENTS") {
-                Sexp::list(vec![Sexp::atom("Pconst_char")])
-            } else {
-                // String constants use string_literal (no unwrap_uppercase_exotic)
-                let quoted = if tag.is_some() {
-                    quote_string_tagged(txt)
-                } else {
-                    quote_string_literal(txt)
-                };
-                Sexp::list(vec![
-                    Sexp::atom("Pconst_string"),
-                    Sexp::atom(&quoted),
-                    match tag {
-                        Some(t) => Sexp::list(vec![
-                            Sexp::atom("Some"),
-                            Sexp::atom(&quote_string_literal(t)),
-                        ]),
-                        None => Sexp::atom("None"),
-                    },
-                ])
-            }
+        Constant::Char { source, semantic } => Sexp::list(vec![
+            Sexp::atom("Pconst_char"),
+            Sexp::atom(&quote_string_literal(source)),
+            Sexp::atom(&semantic.to_string()),
+        ]),
+        Constant::String(payload) => Sexp::list(vec![
+            Sexp::atom("Pconst_string"),
+            Sexp::atom(&quote_string_literal(payload.source())),
+            Sexp::atom(&quote_string_literal(payload.semantic())),
+        ]),
+        Constant::Json(source) => Sexp::list(vec![Sexp::atom("Pconst_json"), Sexp::atom(&quote_string_literal(source))]),
+        Constant::RawSource(source) => {
+            Sexp::list(vec![Sexp::atom("Pconst_raw_source"), Sexp::atom(&quote_string_literal(source))])
         }
         Constant::Float(txt, tag) => Sexp::list(vec![
             Sexp::atom("Pconst_float"),
@@ -1012,6 +997,39 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
         ExpressionDesc::Pexp_extension(ext) => {
             Sexp::list(vec![Sexp::atom("Pexp_extension"), extension(ext, arena)])
         }
+        ExpressionDesc::Pexp_template(template) => Sexp::list(vec![
+            Sexp::atom("Pexp_template"),
+            Sexp::list(
+                template
+                    .source_segments
+                    .iter()
+                    .map(|seg| {
+                        Sexp::list(vec![
+                            Sexp::atom(&quote_string_literal(arena.get_string(seg.txt))),
+                            location(seg.loc, arena),
+                        ])
+                    })
+                    .collect(),
+            ),
+            Sexp::list(template.values.iter().map(|v| expression(arena.get_expr(*v), arena)).collect()),
+        ]),
+        ExpressionDesc::Pexp_tagged_template(template) => Sexp::list(vec![
+            Sexp::atom("Pexp_tagged_template"),
+            expression(arena.get_expr(template.tag), arena),
+            Sexp::list(
+                template
+                    .raw_sources
+                    .iter()
+                    .map(|seg| {
+                        Sexp::list(vec![
+                            Sexp::atom(&quote_string_literal(arena.get_string(seg.txt))),
+                            location(seg.loc, arena),
+                        ])
+                    })
+                    .collect(),
+            ),
+            Sexp::list(template.values.iter().map(|v| expression(arena.get_expr(*v), arena)).collect()),
+        ]),
         ExpressionDesc::Pexp_await(e) => Sexp::list(vec![
             Sexp::atom("Pexp_await"),
             expression(arena.get_expr(*e), arena),

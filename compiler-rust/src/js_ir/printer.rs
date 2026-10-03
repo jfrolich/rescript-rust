@@ -5,7 +5,7 @@
 
 use super::op::{BinOp, Kind, Number, PropertyName, UsedStats};
 use super::{
-    Block, CallArity, CallInfo, CallKind, CaseClause, Delim, Expression, ExpressionDesc,
+    Block, CallArity, CallInfo, CallKind, CaseClause, Expression, ExpressionDesc,
     ForDirection, JsRawInfo, ModulePathResolver, Statement, StatementDesc, StringClause, VIdent,
     VariableDeclaration, ocaml_eq_block, ocaml_eq_expression,
 };
@@ -1240,7 +1240,8 @@ impl JsPrinter {
 
     fn print_switch_case_tag(&mut self, tag: &SwitchCaseTag) {
         match tag {
-            SwitchCaseTag::String(value) => self.print_string_with_delim(value, Delim::StarJ),
+            // js_exp_make.ml `tag_type`: `String s -> str s`.
+            SwitchCaseTag::String(value) => self.print_string(value),
             SwitchCaseTag::Int(value) => self.write(&value.to_string()),
             SwitchCaseTag::Float(value) => self.write(value),
             SwitchCaseTag::BigInt(value) => {
@@ -1283,14 +1284,14 @@ impl JsPrinter {
         match &expr.desc {
             ExpressionDesc::Call(func, _, _) => matches!(func.desc, ExpressionDesc::RawJsCode(_)),
             ExpressionDesc::RawJsCode(info) => !info.is_stmt,
-            ExpressionDesc::Fun { .. } | ExpressionDesc::Object(_, _) => true,
+            ExpressionDesc::Fun { .. } | ExpressionDesc::Object(_, _) | ExpressionDesc::JsonLiteral(_) => true,
             _ => false,
         }
     }
 
     fn arrow_expr_needs_paren(&self, expr: &Expression) -> bool {
         match &expr.desc {
-            ExpressionDesc::Fun { .. } | ExpressionDesc::Object(_, _) => true,
+            ExpressionDesc::Fun { .. } | ExpressionDesc::Object(_, _) | ExpressionDesc::JsonLiteral(_) => true,
             ExpressionDesc::RawJsCode(info) => !info.is_stmt,
             ExpressionDesc::CamlBlock(_, _, tag_info) => matches!(
                 &**tag_info,
@@ -1461,7 +1462,7 @@ impl JsPrinter {
 
     fn print_transformed_jsx_tag(&mut self, tag: &Expression, level: u8, is_fragment: bool) {
         match &tag.desc {
-            ExpressionDesc::Str { txt, .. } => self.write(txt),
+            ExpressionDesc::Str(txt) => self.write(txt),
             _ if is_fragment => {}
             _ => self.print_expression(tag, level),
         }
@@ -1682,8 +1683,31 @@ impl JsPrinter {
                 self.print_number(n, level);
             }
 
-            ExpressionDesc::Str { delim, txt } => {
-                self.print_string_with_delim(txt, *delim);
+            ExpressionDesc::Str(txt) => {
+                self.print_string(txt);
+            }
+
+            ExpressionDesc::TemplateLiteral(segment) => {
+                self.write_char('`');
+                self.write_decoded_internal_string(segment.source());
+                self.write_char('`');
+            }
+
+            ExpressionDesc::JsonLiteral(source) => {
+                self.write_decoded_internal_string(source);
+            }
+
+            ExpressionDesc::InterpolatedTemplate { segments, values } => {
+                self.write_char('`');
+                for (i, segment) in segments.iter().enumerate() {
+                    self.write_decoded_internal_string(segment.source());
+                    if let Some(value) = values.get(i) {
+                        self.write("${");
+                        self.print_expression(value, 0);
+                        self.write_char('}');
+                    }
+                }
+                self.write_char('`');
             }
 
             ExpressionDesc::Array(elements, _) => {
@@ -2085,10 +2109,8 @@ impl JsPrinter {
             ExpressionDesc::TaggedTemplate(tag, strings, values) => {
                 self.print_expression(tag, level);
                 self.write_char('`');
-                for (i, s) in strings.iter().enumerate() {
-                    if let ExpressionDesc::Str { txt, .. } = &s.desc {
-                        self.write_decoded_internal_string(txt);
-                    }
+                for (i, source) in strings.iter().enumerate() {
+                    self.write_decoded_internal_string(source);
                     if i < values.len() {
                         self.write("${");
                         self.print_expression(&values[i], 0);
@@ -2598,80 +2620,47 @@ impl JsPrinter {
         }
     }
 
-    /// Print a string literal
+    /// Print a string literal: `Js_dump_string.pp_string`
+    /// (js_dump_string.ml `escape_to_buffer`). Valid UTF-8 sequences are
+    /// emitted as-is; other non-ASCII bytes are `\x` escaped.
     pub(super) fn print_string(&mut self, s: &str) {
-        if s.is_ascii() {
-            self.write_char('"');
-            let bytes = s.as_bytes();
-            let mut chunk_start = 0;
-            for (index, byte) in bytes.iter().copied().enumerate() {
-                let escaped = match byte {
-                    b'"' => Some("\\\""),
-                    b'\\' => Some("\\\\"),
-                    b'\n' => Some("\\n"),
-                    b'\r' => Some("\\r"),
-                    b'\t' => Some("\\t"),
-                    0..=31 => {
-                        if chunk_start < index {
-                            self.write(&s[chunk_start..index]);
-                        }
-                        write!(self.output, "\\x{byte:02x}").unwrap();
-                        self.last_new_line = false;
-                        chunk_start = index + 1;
+        let bytes = crate::string_literal::bytes_of(s);
+        let len = bytes.len();
+        let mut out = String::with_capacity(len + 2);
+        out.push('"');
+        let mut i = 0;
+        let hex = |out: &mut String, byte: u8| {
+            out.push_str("\\x");
+            out.push(char::from_digit((byte >> 4) as u32, 16).expect("hex digit"));
+            out.push(char::from_digit((byte & 0xf) as u32, 16).expect("hex digit"));
+        };
+        while i < len {
+            let c = bytes[i];
+            match c {
+                8 => out.push_str("\\b"),
+                12 => out.push_str("\\f"),
+                b'\n' => out.push_str("\\n"),
+                b'\r' => out.push_str("\\r"),
+                b'\t' => out.push_str("\\t"),
+                0 if i == len - 1 || !bytes[i + 1].is_ascii_digit() => out.push_str("\\0"),
+                b'\\' => out.push_str("\\\\"),
+                0..=31 | 127 => hex(&mut out, c),
+                128..=255 => {
+                    let (valid, _, length) = crate::string_literal::get_utf_8_uchar(&bytes, i);
+                    if valid {
+                        out.push_str(std::str::from_utf8(&bytes[i..i + length]).expect("valid UTF-8"));
+                        i += length;
                         continue;
                     }
-                    _ => None,
-                };
-                if let Some(escaped) = escaped {
-                    if chunk_start < index {
-                        self.write(&s[chunk_start..index]);
-                    }
-                    self.write(escaped);
-                    chunk_start = index + 1;
+                    hex(&mut out, c);
                 }
+                b'"' => out.push_str("\\\""),
+                _ => out.push(c as char),
             }
-            if chunk_start < s.len() {
-                self.write(&s[chunk_start..]);
-            }
-            self.write_char('"');
-            return;
+            i += 1;
         }
-
-        let decoded = decode_internal_utf8_string(s);
-        self.write_char('"');
-        for c in decoded.chars() {
-            match c {
-                '"' => self.write("\\\""),
-                '\\' => self.write("\\\\"),
-                '\n' => self.write("\\n"),
-                '\r' => self.write("\\r"),
-                '\t' => self.write("\\t"),
-                c if c < ' ' => {
-                    write!(self.output, "\\x{:02x}", c as u32).unwrap();
-                    self.last_new_line = false;
-                }
-                c => self.write_char(c),
-            }
-        }
-        self.write_char('"');
-    }
-
-    /// Print a string with specific delimiter
-    fn print_string_with_delim(&mut self, s: &str, delim: Delim) {
-        match delim {
-            Delim::None => self.print_string(s),
-            Delim::NoQuotes => self.write_decoded_internal_string(s),
-            Delim::BackQuotes => {
-                self.write_char('`');
-                self.write_decoded_internal_string(s);
-                self.write_char('`');
-            }
-            Delim::StarJ => {
-                self.write_char('"');
-                self.write_decoded_internal_string(s);
-                self.write_char('"');
-            }
-        }
+        out.push('"');
+        self.write(&out);
     }
 
     pub(super) fn write_decoded_internal_string(&mut self, s: &str) {
@@ -2845,7 +2834,10 @@ enum RawJsExpressionStatement {
 
 fn classify_raw_js_expression_statement(expr: &Expression) -> RawJsExpressionStatement {
     match &expr.desc {
-        ExpressionDesc::Var(_) | ExpressionDesc::Str { .. } => RawJsExpressionStatement::Omit,
+        ExpressionDesc::Var(_)
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_) => RawJsExpressionStatement::Omit,
         ExpressionDesc::RawJsCode(info) if info.is_stmt => {
             if matches!(
                 classify_js_stmt(&info.code),
@@ -3404,7 +3396,9 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
         ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Number(_) => {}
         ExpressionDesc::Length(inner, _)
@@ -3438,10 +3432,12 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
                 collect_expression_idents(arg, stats);
             }
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
-            for string in strings {
-                collect_expression_idents(string, stats);
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
+            for value in values {
+                collect_expression_idents(value, stats);
             }
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
             for value in values {
                 collect_expression_idents(value, stats);
             }
@@ -3889,15 +3885,12 @@ mod tests {
     }
 
     #[test]
-    fn test_print_noquote_string_decodes_internal_utf8_bytes() {
+    fn test_print_json_literal_decodes_internal_utf8_bytes() {
         let regex = format!(
             "/Bucklescript{}/",
             "\u{662f}\u{4e00}\u{4e2a}\u{7a0b}\u{5e8f}\u{8bed}\u{8a00}"
         );
-        let expr = Expression::new(ExpressionDesc::Str {
-            txt: latin1_encoded_utf8(&regex),
-            delim: Delim::NoQuotes,
-        });
+        let expr = Expression::new(ExpressionDesc::JsonLiteral(latin1_encoded_utf8(&regex)));
         assert_eq!(print_expression(&expr), regex);
     }
 
@@ -3905,10 +3898,7 @@ mod tests {
     fn test_print_tagged_template_decodes_internal_utf8_bytes() {
         let expr = Expression::new(ExpressionDesc::TaggedTemplate(
             Box::new(Expression::var(Ident::create_local("tag"))),
-            vec![Expression::new(ExpressionDesc::Str {
-                txt: latin1_encoded_utf8("\u{4f60}\u{597d}\u{ff0c}\n\u{4e16}\u{754c}"),
-                delim: Delim::NoQuotes,
-            })],
+            vec![latin1_encoded_utf8("\u{4f60}\u{597d}\u{ff0c}\n\u{4e16}\u{754c}")],
             vec![],
         ));
 
@@ -6260,7 +6250,7 @@ mod tests {
     }
 
     #[test]
-    fn test_print_string_switch_cases_preserve_marshaled_string_tags() {
+    fn test_print_string_switch_cases_escape_string_tags() {
         let rendered = print_block(&vec![Statement::new(StatementDesc::StringSwitch(
             Expression::var(Ident::create_local("tag")),
             vec![
@@ -6288,7 +6278,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "switch (tag) {\n  case \"\\\"\" :\n    return 1;\n  case \"\\\\\" :\n    return 2;\n  default:\n    return 3;\n}"
+            "switch (tag) {\n  case \"\\\\\\\"\" :\n    return 1;\n  case \"\\\\\\\\\" :\n    return 2;\n  default:\n    return 3;\n}"
         );
     }
 

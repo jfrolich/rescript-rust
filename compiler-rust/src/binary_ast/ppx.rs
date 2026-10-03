@@ -37,7 +37,7 @@ use crate::parser::longident::Longident;
 
 use crate::parser::ast::PrimitiveRepr;
 use crate::types::external_ffi_types::{
-    Attr, Cst, DeclKind, Delim, ExternalDecl, ExternalFfi, ExternalModuleName, ImportAttributes,
+    Attr, Cst, DeclKind, ExternalDecl, ExternalFfi, ExternalModuleName, ImportAttributes,
     InlineConst, Label, LabelNoname, ModuleBindName, ModuleSource, ObjParam, Param, ReturnWrapper,
 };
 use super::spice_ppx;
@@ -909,8 +909,7 @@ fn push_raw_js_expression_warning(
     arena: &mut ParseArena,
     warnings: &mut Vec<PpxWarning>,
 ) {
-    let payload_info = payload_single_string_literal_info(payload, arena)
-        .map(|(code, loc, offset)| (code.to_string(), loc, offset));
+    let payload_info = payload_raw_source_info(payload, arena);
     if let Some((code, loc, offset)) = payload_info {
         if let Some(warning) = raw_js_expression_parse_warning(&code, loc, offset, arena) {
             warnings.push(PpxWarning {
@@ -924,8 +923,7 @@ fn push_raw_js_expression_warning(
 }
 
 fn push_raw_re_warning(payload: &Payload, arena: &mut ParseArena, warnings: &mut Vec<PpxWarning>) {
-    let payload_info = payload_single_string_literal_info(payload, arena)
-        .map(|(code, loc, offset)| (code.to_string(), loc, offset));
+    let payload_info = payload_raw_source_info(payload, arena);
     if let Some((code, loc, offset)) = payload_info {
         if is_js_regex_like_literal(&code) {
             if let Some(warning) = raw_js_expression_parse_warning(&code, loc, offset, arena) {
@@ -945,8 +943,7 @@ fn push_raw_js_program_warning(
     arena: &mut ParseArena,
     warnings: &mut Vec<PpxWarning>,
 ) {
-    let payload_info = payload_single_string_literal_info(payload, arena)
-        .map(|(code, loc, offset)| (code.to_string(), loc, offset));
+    let payload_info = payload_raw_source_info(payload, arena);
     if let Some((code, loc, offset)) = payload_info {
         if let Some(warning) = raw_js_program_parse_warning(&code, loc, offset, arena) {
             warnings.push(PpxWarning {
@@ -978,8 +975,8 @@ fn collect_builtin_warning_attribute(
     match attr_name {
         "warning" | "ocaml.warning" | "warnerror" | "ocaml.warnerror" => {
             let errflag = matches!(attr_name, "warnerror" | "ocaml.warnerror");
-            if let Some(spec) = payload_single_string_literal(payload, arena) {
-                if !warning_spec_parse_ok(spec, errflag) {
+            if let Some(spec) = payload_semantic_string(payload, arena) {
+                if !warning_spec_parse_ok(&spec, errflag) {
                     warnings.push(PpxWarning {
                         loc: name.loc,
                         warning: Warning::AttributePayload {
@@ -999,16 +996,14 @@ fn collect_builtin_warning_attribute(
             }
         }
         "ppwarning" | "ocaml.ppwarning" => {
-            if let Some((message, _)) = payload_single_string_literal_with_loc(payload, arena) {
+            if let Some(message) = payload_semantic_string(payload, arena) {
                 // builtin_attributes.ml:202-212 reports at the item's `pstr_loc`.
                 let Payload::PStr(items) = payload else {
                     unreachable!("a single string literal payload is a structure");
                 };
                 warnings.push(PpxWarning {
                     loc: items[0].pstr_loc,
-                    warning: Warning::Preprocessor {
-                        message: message.to_string(),
-                    },
+                    warning: Warning::Preprocessor { message },
                 });
             }
         }
@@ -1024,9 +1019,9 @@ fn builtin_warning_attribute_spec(
     let attr_name = arena.get_string(name.txt);
     match attr_name {
         "warning" | "ocaml.warning" | "warnerror" | "ocaml.warnerror" => {
-            let spec = payload_single_string_literal(payload, arena)?;
+            let spec = payload_semantic_string(payload, arena)?;
             Some(WarningAttributeSpec {
-                spec: spec.to_string(),
+                spec,
                 as_error: matches!(attr_name, "warnerror" | "ocaml.warnerror"),
             })
         }
@@ -1178,7 +1173,14 @@ fn is_valid_tag_as_payload(payload: &Payload, arena: &ParseArena) -> bool {
     match &*expr.pexp_desc {
         // `is_single_string`/`int`/`float`/`bigint`; a character is none of
         // them.
-        ExpressionDesc::Pexp_constant(constant) => !matches!(&**constant, Constant::Char(_)),
+        ExpressionDesc::Pexp_constant(constant) => matches!(
+            &**constant,
+            Constant::Integer(..) | Constant::Float(..) | Constant::String(_)
+        ),
+        // `semantic_string_of_payload` accepts a non-interpolated template.
+        ExpressionDesc::Pexp_template(template) => {
+            template.source_segments.len() == 1 && template.values.is_empty()
+        }
         // `is_single_bool` accepts `true`/`false` with any argument.
         ExpressionDesc::Pexp_construct(lid, _) => matches!(
             arena.get_longident(lid.txt),
@@ -1866,10 +1868,13 @@ fn validate_external_attribute_payload_errors(
                 ));
             }
             "val" | "send" | "set" | "get" | "new" => {
-                if !payload_is_empty_str(payload)
-                    && !payload_is_single_string_literal(payload, arena)
-                {
-                    return Err(PpxError::at_loc(attr_name.loc, "Invalid payload"));
+                // ast_external_process.ml: an empty payload is fine; otherwise
+                // reject a `json` literal, then require a semantic string.
+                if !payload_is_empty_str(payload) {
+                    reject_json_literal_payload(payload, arena)?;
+                    if payload_semantic_string(payload, arena).is_none() {
+                        return Err(PpxError::at_loc(attr_name.loc, "Invalid payload"));
+                    }
                 }
             }
             "module" => {
@@ -2276,9 +2281,13 @@ fn refine_arg_type(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
                 if let Some(i) = get_payload_int(payload, arena) {
                     return Attr::ArgCst(Cst::ArgIntLit(i as i64));
                 }
-                // Then try string with proper delimiter handling
-                if let Some((s, delim)) = get_payload_string_with_delim(payload, arena) {
-                    return Attr::ArgCst(Cst::ArgStringLit(s, delim));
+                // Then a semantic string, then a `json` literal.
+                match get_payload_string_or_json(payload, arena) {
+                    Some(AsStringPayload::Str(s)) => return Attr::ArgCst(Cst::ArgStringLit(s)),
+                    Some(AsStringPayload::Json { source, .. }) => {
+                        return Attr::ArgCst(Cst::ArgJsonLit(source));
+                    }
+                    None => {}
                 }
             }
         }
@@ -2341,45 +2350,55 @@ fn payload_is_empty_str(payload: &Payload) -> bool {
     matches!(payload, Payload::PStr(items) if items.is_empty())
 }
 
-fn payload_is_single_string_literal(payload: &Payload, arena: &ParseArena) -> bool {
-    payload_single_string_literal(payload, arena).is_some()
+/// OCaml `Ast_payload.semantic_string_of_payload`; an invalid template escape
+/// (which OCaml raises) yields `None`.
+fn payload_semantic_string(payload: &Payload, arena: &ParseArena) -> Option<String> {
+    crate::ast_payload::semantic_string_of_payload(arena, payload).ok().flatten()
 }
 
-fn payload_single_string_literal<'a>(
-    payload: &'a Payload,
-    arena: &'a ParseArena,
-) -> Option<&'a str> {
-    payload_single_string_literal_with_loc(payload, arena).map(|(s, _loc)| s)
+/// OCaml `Ast_payload.semantic_string_of_expression`; an invalid template
+/// escape (which OCaml raises) yields `None`.
+fn expr_semantic_string(expr: &Expression, arena: &ParseArena) -> Option<String> {
+    crate::ast_payload::semantic_string_of_expression(arena, expr).ok().flatten()
 }
 
-fn payload_single_string_literal_with_loc<'a>(
-    payload: &'a Payload,
-    arena: &'a ParseArena,
-) -> Option<(&'a str, LocIdx)> {
-    payload_single_string_literal_info(payload, arena).map(|(s, loc, _offset)| (s, loc))
+fn payload_error(error: crate::ast_payload::PayloadError) -> PpxError {
+    PpxError::at_loc(error.loc, error.message)
 }
 
-fn payload_single_string_literal_info<'a>(
-    payload: &'a Payload,
-    arena: &'a ParseArena,
-) -> Option<(&'a str, LocIdx, i32)> {
-    match payload {
-        Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
-                let (expr, _) = &**eval_inner;
-                let expr = arena.get_expr(*expr);
-                if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc {
-                    if let Constant::String(s, delim) = &**c {
-                        let flow_offset = match delim {
-                            None => 1,
-                            Some(delim) => delim.len() as i32 + 2,
-                        };
-                        return Some((s.as_ref(), expr.pexp_loc, flow_offset));
-                    }
-                }
-            }
-            None
+/// OCaml `Ast_payload.reject_json_literal_payload`.
+fn reject_json_literal_payload(payload: &Payload, arena: &ParseArena) -> PpxResult<()> {
+    crate::ast_payload::reject_json_literal_payload(arena, payload).map_err(payload_error)
+}
+
+/// The string payload matched by OCaml `Ast_payload.raw_as_string_exp_exn`:
+/// the JavaScript code, the expression location, and the offset Flow errors
+/// are shifted by.
+fn payload_raw_source_info(payload: &Payload, arena: &ParseArena) -> Option<(String, LocIdx, i32)> {
+    let Payload::PStr(items) = payload else {
+        return None;
+    };
+    let [item] = items.as_slice() else {
+        return None;
+    };
+    let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc else {
+        return None;
+    };
+    let expr = arena.get_expr(eval_inner.0);
+    // `Bs_flow_ast_utils.flow_deli_offset (Some "js")`.
+    let js_offset = 4;
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_template(template)
+            if template.source_segments.len() == 1 && template.values.is_empty() =>
+        {
+            let source = arena.get_string(template.source_segments[0].txt).to_string();
+            Some((source, expr.pexp_loc, js_offset))
         }
+        ExpressionDesc::Pexp_constant(c) => match &**c {
+            Constant::RawSource(source) => Some((source.to_string(), expr.pexp_loc, js_offset)),
+            Constant::String(payload) => Some((payload.semantic().to_string(), expr.pexp_loc, 0)),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -2413,25 +2432,14 @@ fn payload_string_literals(payload: &Payload, arena: &ParseArena) -> Option<Vec<
             };
             let (expr, _) = &**eval_inner;
             match &*arena.get_expr(*expr).pexp_desc {
-                ExpressionDesc::Pexp_constant(c) => match &**c {
-                    Constant::String(s, _) => Some(vec![s.to_string()]),
-                    _ => None,
-                },
                 ExpressionDesc::Pexp_tuple(exprs) => {
                     let mut result = Vec::with_capacity(exprs.len());
                     for expr in exprs.iter() {
-                        let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*expr).pexp_desc
-                        else {
-                            return None;
-                        };
-                        let Constant::String(s, _) = &**c else {
-                            return None;
-                        };
-                        result.push(s.to_string());
+                        result.push(expr_semantic_string(arena.get_expr(*expr), arena)?);
                     }
                     Some(result)
                 }
-                _ => None,
+                _ => Some(vec![expr_semantic_string(arena.get_expr(*expr), arena)?]),
             }
         }
         _ => None,
@@ -2451,25 +2459,20 @@ fn payload_string_literals_or_error_loc(
             };
             let (expr, _) = &**eval_inner;
             match &*arena.get_expr(*expr).pexp_desc {
-                ExpressionDesc::Pexp_constant(c) => match &**c {
-                    Constant::String(s, _) => Ok(vec![s.to_string()]),
-                    _ => Err(default_loc),
-                },
                 ExpressionDesc::Pexp_tuple(exprs) => {
                     let mut result = Vec::with_capacity(exprs.len());
                     for expr in exprs.iter() {
-                        let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*expr).pexp_desc
-                        else {
-                            return Err(items[0].pstr_loc);
-                        };
-                        let Constant::String(s, _) = &**c else {
-                            return Err(items[0].pstr_loc);
-                        };
-                        result.push(s.to_string());
+                        match expr_semantic_string(arena.get_expr(*expr), arena) {
+                            Some(s) => result.push(s),
+                            None => return Err(items[0].pstr_loc),
+                        }
                     }
                     Ok(result)
                 }
-                _ => Err(default_loc),
+                _ => match expr_semantic_string(arena.get_expr(*expr), arena) {
+                    Some(s) => Ok(vec![s]),
+                    None => Err(default_loc),
+                },
             }
         }
         _ => Err(default_loc),
@@ -2484,19 +2487,9 @@ fn get_as_string_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<String>
         let name = arena.get_string(attr_name.txt);
         if name == "as" {
             // Try to get string payload
-            if let Some(items) = payload_str_items(payload) {
-                if items.len() == 1 {
-                    if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
-                        let (ref expr, _) = **eval_inner;
-                        if let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*expr).pexp_desc
-                        {
-                            if let Constant::String(s, _) = &**c {
-                                arena.mark_used_attribute(attr);
-                                return Some(s.to_string());
-                            }
-                        }
-                    }
-                }
+            if let Some(s) = payload_semantic_string(payload, arena) {
+                arena.mark_used_attribute(attr);
+                return Some(s);
             }
         }
     }
@@ -2599,21 +2592,21 @@ fn validate_string_or_int_as_attrs(attrs: &[Attribute], arena: &mut ParseArena) 
             seen_as = true;
             continue;
         }
-        let Some((payload, delim, loc, flow_offset)) =
-            get_payload_string_with_delim_info(payload, arena)
-        else {
+        let Some(as_payload) = get_payload_string_or_json(payload, arena) else {
             return Err(PpxError::at_loc(
                 attr_name.loc,
                 "The @as payload must be an integer, string, or JSON literal.",
             ));
         };
-        if matches!(delim, Delim::DNoQuotes)
+        if let AsStringPayload::Json { source: payload, loc } = as_payload
             && !matches!(
                 classify_js_exp(&payload),
                 JsExpClassification::JsLiteral { .. }
             )
         {
             let err = PpxError::at_loc(loc, "an object literal expected");
+            // `Bs_flow_ast_utils.flow_deli_offset (Some "json")`.
+            let flow_offset = 6;
             return if let Some(warning) =
                 raw_js_expression_parse_warning(&payload, loc, flow_offset, arena)
             {
@@ -3594,25 +3587,9 @@ fn parse_external_attrs(
     desc
 }
 
-/// Extract string from attribute payload (simplified)
+/// OCaml `Ast_payload.semantic_string_of_payload`.
 fn get_payload_string(payload: &current::Payload, arena: &ParseArena) -> Option<String> {
-    match payload {
-        current::Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
-                let (ref expr, _) = **eval_inner;
-                match &*arena.get_expr(*expr).pexp_desc {
-                    ExpressionDesc::Pexp_constant(c) => {
-                        if let current::Constant::String(s, _) = &**c {
-                            return Some(s.to_string());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            None
-        }
-        _ => None,
-    }
+    payload_semantic_string(payload, arena)
 }
 
 /// Extract return-wrapper config from payload.
@@ -3767,54 +3744,35 @@ fn get_payload_int(payload: &current::Payload, arena: &ParseArena) -> Option<i32
     get_payload_int_result(payload, arena).ok().flatten()
 }
 
-/// Extract string with delimiter from attribute payload.
-/// Mirrors OCaml's string extraction in iter_process_bs_string_or_int_as,
-/// including the parse_processed_delim logic that converts raw string delimiters
-/// to FFI Delim values.
-///
-/// The OCaml PPX pipeline rewrites all plain string delimiters (None → Some "*j")
-/// before external processing, so we need to apply the same transformation here.
-fn get_payload_string_with_delim(
-    payload: &current::Payload,
-    arena: &ParseArena,
-) -> Option<(String, Delim)> {
-    get_payload_string_with_delim_info(payload, arena).map(|(s, delim, _loc, _offset)| (s, delim))
+/// The string forms OCaml `Ast_attributes.iter_process_bs_string_or_int_as`
+/// accepts after `is_single_int`: a semantic string, or a `json` literal.
+enum AsStringPayload {
+    Str(String),
+    Json { source: String, loc: LocIdx },
 }
 
-fn get_payload_string_with_delim_info(
-    payload: &current::Payload,
-    arena: &ParseArena,
-) -> Option<(String, Delim, LocIdx, i32)> {
-    match payload {
-        current::Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
-                let (ref expr, _) = **eval_inner;
-                let expr = arena.get_expr(*expr);
-                if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc {
-                    if let current::Constant::String(s, raw_delim) = &**c {
-                        // Apply parse_processed_delim logic:
-                        // In OCaml, strings get rewritten: None → "*j", then
-                        // parse_processed_delim maps: None→DNone, "*j"→DStarJ, "json"→DNoQuotes, "bq"→DBackQuotes
-                        // Rust parser uses "js" for plain strings (equivalent to OCaml's None → "*j" rewrite)
-                        let delim = match raw_delim.as_deref() {
-                            None => Delim::DStarJ,       // None → rewritten to "*j" → DStarJ
-                            Some("js") => Delim::DStarJ, // Rust parser's plain string delimiter
-                            Some("*j") => Delim::DStarJ, // Already rewritten (OCaml format)
-                            Some("json") => Delim::DNoQuotes,
-                            Some("bq") => Delim::DBackQuotes,
-                            Some("j") => Delim::DStarJ, // "j" delimiter → DStarJ
-                            _ => return None,           // Unrecognized delimiter
-                        };
-                        let flow_offset = match raw_delim {
-                            None => 1,
-                            Some(delim) => delim.len() as i32 + 2,
-                        };
-                        return Some((s.to_string(), delim, expr.pexp_loc, flow_offset));
-                    }
-                }
-            }
-            None
-        }
+fn get_payload_string_or_json(payload: &current::Payload, arena: &ParseArena) -> Option<AsStringPayload> {
+    if let Some(s) = payload_semantic_string(payload, arena) {
+        return Some(AsStringPayload::Str(s));
+    }
+    let current::Payload::PStr(items) = payload else {
+        return None;
+    };
+    let [item] = items.as_slice() else {
+        return None;
+    };
+    let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc else {
+        return None;
+    };
+    let expr = arena.get_expr(eval_inner.0);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_constant(c) => match &**c {
+            current::Constant::Json(source) => Some(AsStringPayload::Json {
+                source: source.to_string(),
+                loc: expr.pexp_loc,
+            }),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -3854,11 +3812,8 @@ fn validate_module_import_attributes_payload(
         };
         match arena.get_string(*field_name_idx) {
             "from" => {
-                let field_expr = arena.get_expr(field.expr);
-                if let ExpressionDesc::Pexp_constant(c) = &*field_expr.pexp_desc {
-                    if matches!(&**c, current::Constant::String(_, _)) {
-                        from_name = true;
-                    }
+                if expr_semantic_string(arena.get_expr(field.expr), arena).is_some() {
+                    from_name = true;
                 }
             }
             "with" => {
@@ -3889,10 +3844,7 @@ fn validate_module_import_attributes_payload(
     for field in with_fields {
         // OCaml checks the value shape before the key (ast_external_process.ml:283-293).
         let field_expr = arena.get_expr(field.expr);
-        let is_string = matches!(
-            &*field_expr.pexp_desc,
-            ExpressionDesc::Pexp_constant(c) if matches!(&**c, current::Constant::String(_, _))
-        );
+        let is_string = expr_semantic_string(field_expr, arena).is_some();
         if !is_string {
             return Err(PpxError::at_loc(
                 field_expr.pexp_loc,
@@ -3941,11 +3893,8 @@ fn get_module_import_attributes(
         };
         match arena.get_string(*field_name_idx) {
             "from" => {
-                let field_expr = arena.get_expr(field.expr);
-                if let ExpressionDesc::Pexp_constant(c) = &*field_expr.pexp_desc {
-                    if let current::Constant::String(s, _) = &**c {
-                        from_name = Some(s.to_string());
-                    }
+                if let Some(name) = expr_semantic_string(arena.get_expr(field.expr), arena) {
+                    from_name = Some(name);
                 }
             }
             "with" => {
@@ -3961,18 +3910,15 @@ fn get_module_import_attributes(
                     else {
                         continue;
                     };
-                    let import_field_expr = arena.get_expr(import_field.expr);
-                    let ExpressionDesc::Pexp_constant(c) = &*import_field_expr.pexp_desc else {
-                        continue;
-                    };
-                    let current::Constant::String(value, _) = &**c else {
+                    let Some(value) = expr_semantic_string(arena.get_expr(import_field.expr), arena)
+                    else {
                         continue;
                     };
                     let key = match arena.get_string(*key_idx) {
                         "type_" => "type".to_string(),
                         key => key.to_string(),
                     };
-                    import_attributes.push((key, value.to_string()));
+                    import_attributes.push((key, value));
                 }
                 with_fields = Some(import_attributes);
             }
@@ -4377,18 +4323,8 @@ fn build_obj_ffi_type(typ: &CoreType, arena: &mut ParseArena) -> ExternalFfi {
 }
 
 /// `Ast_external_mk.inline_string`.
-pub fn inline_string_primitive(s: &str, delim: Option<&str>) -> PrimitiveRepr {
-    let delim = match delim {
-        None => Some(Delim::DNone),
-        Some("json") => Some(Delim::DNoQuotes),
-        Some("*j") | Some("js") => Some(Delim::DStarJ), // "js" is transformed to "*j" by PPX, both map to DStarJ
-        Some("bq") => Some(Delim::DBackQuotes),
-        _ => None,
-    };
-    PrimitiveRepr::PrimInlineConst(Box::new(InlineConst::ConstStr {
-        s: s.to_string(),
-        delim,
-    }))
+pub fn inline_string_primitive(semantic: &str) -> PrimitiveRepr {
+    PrimitiveRepr::PrimInlineConst(Box::new(InlineConst::ConstString(semantic.to_string())))
 }
 
 /// `Ast_external_mk.inline_bool`.
@@ -4455,26 +4391,21 @@ fn transform_inline_sig_value(
 ) -> Option<ValueDescription> {
     let expr = find_inline_payload_expr(&vd.pval_attributes, arena)?.clone();
 
+    // bs_builtin_ppx.ml `signature_item_mapper`: an ordinary string or a
+    // non-interpolated template becomes an inline string of its semantic value.
+    if let Some(semantic) = inline_string_semantic(&expr, arena) {
+        let prim = inline_string_primitive(&semantic);
+        return Some(ValueDescription {
+            pval_name: vd.pval_name.clone(),
+            pval_type: vd.pval_type.clone(),
+            pval_prim: Some(prim),
+            pval_attributes: Attributes::new(), // Clear attributes
+            pval_loc: vd.pval_loc,
+        });
+    }
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_constant(c) => match &**c {
-            // @inline("string") or @inline(`template`) let x: t
-            Constant::String(s, delim) => {
-                // OCaml's PPX transforms template literal delimiters ("js" → "bq")
-                // before extracting @inline payloads. We must match that behavior here
-                // since the payload expression isn't run through rewrite_expression.
-                let effective_delim = match delim.as_deref() {
-                    Some("js") if has_template_attr(&expr, arena) => Some("bq"),
-                    other => other,
-                };
-                let prim = inline_string_primitive(s, effective_delim);
-                Some(ValueDescription {
-                    pval_name: vd.pval_name.clone(),
-                    pval_type: vd.pval_type.clone(),
-                    pval_prim: Some(prim),
-                    pval_attributes: Attributes::new(), // Clear attributes
-                    pval_loc: vd.pval_loc,
-                })
-            }
+            Constant::String(_) => None,
             // @inline(42) let x: t
             Constant::Integer(s, None) => {
                 let i = s.parse::<i32>().ok()?;
@@ -4533,6 +4464,23 @@ fn transform_inline_sig_value(
     }
 }
 
+/// The `Pexp_constant (Pconst_string _) | Pexp_template {source_segments =
+/// [_]; values = []}` case of OCaml's `@inline` handling: the expression's
+/// semantic string.
+fn inline_string_semantic(expr: &Expression, arena: &ParseArena) -> Option<String> {
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(_)) => {
+            expr_semantic_string(expr, arena)
+        }
+        ExpressionDesc::Pexp_template(template)
+            if template.source_segments.len() == 1 && template.values.is_empty() =>
+        {
+            expr_semantic_string(expr, arena)
+        }
+        _ => None,
+    }
+}
+
 /// Create a type for a simple builtin type (string, int, float, bool)
 fn make_simple_type(type_name: &'static str, arena: &mut ParseArena) -> CoreType {
     let none_loc = arena.none_loc();
@@ -4563,27 +4511,26 @@ fn transform_inline_binding(
     pstr_loc: LocIdx,
     arena: &mut ParseArena,
 ) -> Option<StructureItem> {
+    // @inline let x = "string" (or a non-interpolated template)
+    if let Some(semantic) = inline_string_semantic(expr, arena) {
+        let prim = inline_string_primitive(&semantic);
+        return Some(StructureItem {
+            pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
+                pval_name: Located {
+                    txt: pval_name.txt,
+                    loc: pval_name.loc,
+                },
+                pval_type: arena.ast_literal_type_string(),
+                pval_prim: Some(prim),
+                pval_attributes: Attributes::new(),
+                pval_loc: pvb_loc,
+            }))),
+            pstr_loc,
+        });
+    }
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_constant(c) => match &**c {
-            // @inline let x = "string"
-            Constant::String(s, delim) => {
-                let prim = inline_string_primitive(s, delim.as_deref());
-                Some(StructureItem {
-                    pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(
-                        ValueDescription {
-                            pval_name: Located {
-                                txt: pval_name.txt,
-                                loc: pval_name.loc,
-                            },
-                            pval_type: arena.ast_literal_type_string(),
-                            pval_prim: Some(prim),
-                            pval_attributes: Attributes::new(),
-                            pval_loc: pvb_loc,
-                        },
-                    ))),
-                    pstr_loc,
-                })
-            }
+            Constant::String(_) => None,
             // @inline let x = 42
             Constant::Integer(s, None) => {
                 let i = s.parse::<i32>().ok()?;
@@ -4686,32 +4633,14 @@ fn handle_extension(
     }
 }
 
-/// `Ast_payload.is_single_string`: the text of a single string-literal
-/// payload.
-fn todo_payload_message(payload: &Payload, arena: &ParseArena) -> Option<String> {
-    let Payload::PStr(items) = payload else {
-        return None;
-    };
-    let [item] = items.as_slice() else {
-        return None;
-    };
-    let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
-        return None;
-    };
-    let ExpressionDesc::Pexp_constant(constant) = &*arena.get_expr(eval.0).pexp_desc else {
-        return None;
-    };
-    let Constant::String(message, _) = &**constant else {
-        return None;
-    };
-    Some(message.to_string())
-}
-
 /// `%todo` (ast_exp_extension.ml:29-58): `JsError.throwWithMessage` applied
 /// to `"<file>:<line>:<start>-<end> - Todo[: message]"`, located at the
 /// extension name. The warning is emitted by the warning pre-pass.
 fn handle_todo(payload: &Payload, arena: &mut ParseArena, loc: LocIdx) -> Expression {
-    let todo_message = todo_payload_message(payload, arena);
+    if let Err(error) = reject_json_literal_payload(payload, arena) {
+        arena.defer_ppx_error(error);
+    }
+    let todo_message = payload_semantic_string(payload, arena);
     let start = arena.loc_start(loc);
     let end = arena.loc_end(loc);
     let mut text = format!(
@@ -4739,10 +4668,7 @@ fn handle_todo(payload: &Payload, arena: &mut ParseArena, loc: LocIdx) -> Expres
         pexp_attributes: Attributes::new(),
     };
     let argument = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
-            Cow::Owned(text),
-            None,
-        )))),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(&text)))),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     };
@@ -4992,39 +4918,28 @@ fn handle_raw(
     // where e is the original expression from the payload.
     // The returned expression uses e.pexp_loc (the payload string's location).
     // Also detect if the JS string contains a function (for internal.expansive attribute).
-    let (str_exp, payload_loc, is_function) = match payload {
-        Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
-                let (ref e, _) = **eval_inner;
-                if let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*e).pexp_desc {
-                    if let Constant::String(s, _) = &**c {
-                        // Check if the JS string contains a function
-                        let is_func = is_js_function(&s);
-
-                        // Create a new string expression with delimiter stripped
-                        // (OCaml strips the delimiter when transforming %raw)
-                        let exp = Expression {
-                            pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
-                                Constant::String(
-                                    s.clone(),
-                                    None, // Strip delimiter
-                                ),
-                            ))),
-                            pexp_loc: arena.get_expr(*e).pexp_loc,
-                            pexp_attributes: arena.get_expr(*e).pexp_attributes.clone(),
-                        };
-                        (exp, arena.get_expr(*e).pexp_loc, is_func)
-                    } else {
-                        return expr.clone();
-                    }
-                } else {
-                    return expr.clone();
-                }
-            } else {
-                return expr.clone();
-            }
-        }
-        _ => return expr.clone(),
+    let Some((code, payload_loc, _)) = payload_raw_source_info(payload, arena) else {
+        return expr.clone();
+    };
+    let (str_exp, payload_loc, is_function) = {
+        let Payload::PStr(items) = payload else {
+            unreachable!("payload_raw_source_info matched a structure payload")
+        };
+        let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc else {
+            unreachable!("payload_raw_source_info matched an eval item")
+        };
+        let e = arena.get_expr(eval_inner.0);
+        // Check if the JS string contains a function
+        let is_func = is_js_function(&code);
+        // `{expression with pexp_desc = Pexp_constant (Pconst_raw_source str)}`
+        let exp = Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::RawSource(
+                Cow::Owned(code),
+            )))),
+            pexp_loc: e.pexp_loc,
+            pexp_attributes: e.pexp_attributes.clone(),
+        };
+        (exp, payload_loc, is_func)
     };
 
     // OCaml's local_external_apply uses `loc` from the extension identifier's location
@@ -5199,26 +5114,7 @@ fn handle_ffi(
     ext_loc: LocIdx,
 ) -> Expression {
     // Extract the string from the payload to detect arity
-    let code_str = match payload {
-        Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
-                let (e_idx, _) = &**eval_inner;
-                let e = arena.get_expr(*e_idx);
-                if let ExpressionDesc::Pexp_constant(c) = &*e.pexp_desc {
-                    if let Constant::String(s, _) = &**c {
-                        Some(s.to_string())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
-        _ => None,
-    };
+    let code_str = payload_raw_source_info(payload, arena).map(|(code, _, _)| code);
 
     let arity = code_str.as_ref().and_then(|s| detect_js_function_arity(s));
 
@@ -5297,39 +5193,29 @@ fn handle_raw_structure(
     ext_loc: LocIdx,
 ) -> StructureItem {
     // Extract the string expression from the payload
-    let (str_exp, str_loc, payload_attrs) = match payload {
-        Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
-                let (ref e, _) = **eval_inner;
-                let expr = arena.get_expr(*e);
-                if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc {
-                    if let Constant::String(s, _) = &**c {
-                        // Create a new string expression with delimiter stripped
-                        (
-                            Expression {
-                                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
-                                    Constant::String(
-                                        s.clone(),
-                                        None, // Strip delimiter
-                                    ),
-                                ))),
-                                pexp_loc: expr.pexp_loc,
-                                pexp_attributes: expr.pexp_attributes.clone(),
-                            },
-                            expr.pexp_loc,
-                            expr.pexp_attributes.clone(),
-                        )
-                    } else {
-                        return item.clone();
-                    }
-                } else {
-                    return item.clone();
-                }
-            } else {
-                return item.clone();
-            }
-        }
-        _ => return item.clone(),
+    // (`Ast_payload.raw_as_string_exp_exn ~kind:Raw_program`).
+    let Some((code, str_loc, _)) = payload_raw_source_info(payload, arena) else {
+        return item.clone();
+    };
+    let (str_exp, str_loc, payload_attrs) = {
+        let Payload::PStr(items) = payload else {
+            unreachable!("payload_raw_source_info matched a structure payload")
+        };
+        let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc else {
+            unreachable!("payload_raw_source_info matched an eval item")
+        };
+        let expr = arena.get_expr(eval_inner.0);
+        (
+            Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::RawSource(
+                    Cow::Owned(code),
+                )))),
+                pexp_loc: expr.pexp_loc,
+                pexp_attributes: expr.pexp_attributes.clone(),
+            },
+            str_loc,
+            expr.pexp_attributes.clone(),
+        )
     };
 
     // OCaml: loc comes from the extension identifier's location ({txt = "raw"; loc})
@@ -6208,187 +6094,6 @@ fn is_pipe_application(expr: &Expression, arena: &mut ParseArena) -> bool {
     false
 }
 
-/// Check if expression has a template attribute (@res.template or @res.taggedTemplate)
-fn has_template_attr(expr: &Expression, arena: &mut ParseArena) -> bool {
-    expr.pexp_attributes.iter().any(|(attr_name, _)| {
-        let name = arena.get_string(attr_name.txt);
-        name == "res.template" || name == "res.taggedTemplate"
-    })
-}
-
-/// Transform a JavaScript string to escape special characters.
-/// This matches OCaml's Ast_utf8_string.transform function.
-fn transform_js_string(s: &str) -> String {
-    let mut buf = String::with_capacity(s.len() * 2);
-    let bytes = s.as_bytes();
-    let mut i = 0;
-
-    while i < bytes.len() {
-        let b = bytes[i];
-        match b {
-            b'\\' => {
-                // Escape sequence - copy verbatim
-                buf.push('\\');
-                i += 1;
-                if i < bytes.len() {
-                    let next = bytes[i];
-                    buf.push(next as char);
-                    i += 1;
-                    // Handle unicode escapes
-                    match next {
-                        b'u' => {
-                            if i < bytes.len() && bytes[i] == b'{' {
-                                // Unicode codepoint escape \u{...}
-                                while i < bytes.len() {
-                                    let c = bytes[i];
-                                    buf.push(c as char);
-                                    i += 1;
-                                    if c == b'}' {
-                                        break;
-                                    }
-                                }
-                            } else {
-                                // Standard \uXXXX
-                                for _ in 0..4 {
-                                    if i < bytes.len() {
-                                        buf.push(bytes[i] as char);
-                                        i += 1;
-                                    }
-                                }
-                            }
-                        }
-                        b'x' => {
-                            // Hex escape \xXX
-                            for _ in 0..2 {
-                                if i < bytes.len() {
-                                    buf.push(bytes[i] as char);
-                                    i += 1;
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            b'"' => {
-                buf.push_str("\\\"");
-                i += 1;
-            }
-            b'\n' => {
-                buf.push_str("\\n");
-                i += 1;
-            }
-            b'\r' => {
-                buf.push_str("\\r");
-                i += 1;
-            }
-            _ if b < 128 => {
-                // ASCII character
-                buf.push(b as char);
-                i += 1;
-            }
-            _ => {
-                // UTF-8 multi-byte character - copy all bytes as raw bytes
-                // We need to push the raw bytes, not convert to char
-                let start = i;
-                // Determine number of continuation bytes
-                let width = if b & 0b1111_0000 == 0b1111_0000 {
-                    4
-                } else if b & 0b1110_0000 == 0b1110_0000 {
-                    3
-                } else if b & 0b1100_0000 == 0b1100_0000 {
-                    2
-                } else {
-                    1 // Invalid UTF-8, just copy the byte
-                };
-                let end = std::cmp::min(start + width, bytes.len());
-                // Use from_utf8_lossy to properly preserve the UTF-8 bytes
-                if let Ok(utf8_str) = std::str::from_utf8(&bytes[start..end]) {
-                    buf.push_str(utf8_str);
-                } else {
-                    // Invalid UTF-8 - just push bytes as-is (shouldn't happen in valid source)
-                    for j in start..end {
-                        buf.push(bytes[j] as char);
-                    }
-                }
-                i = end;
-            }
-        }
-    }
-
-    buf
-}
-
-/// Transform string constant expression with delimiter.
-/// Implements OCaml's Ast_utf8_string_interp.transform_exp.
-/// Note: In OCaml, this is an early-return case in expr_mapper that uses
-/// `{ e with pexp_desc = ... }`, preserving the original expression's attributes
-/// without running them through the default mapper's attribute remapping.
-/// We match this behavior by cloning attributes directly instead of calling
-/// rewrite_attributes.
-fn transform_string_exp(
-    expr: &Expression,
-    s: &str,
-    delim: &str,
-    arena: &mut ParseArena,
-) -> Expression {
-    // Check if this is a template string (has @res.template or @res.taggedTemplate)
-    let is_template = has_template_attr(expr, arena);
-
-    if delim == "js" {
-        if is_template {
-            // Template string: just change delimiter to "bq" (back quotes)
-            Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
-                    Cow::Owned(s.to_string()),
-                    Some(Cow::Borrowed("bq")),
-                )))),
-                pexp_loc: expr.pexp_loc,
-                pexp_attributes: expr.pexp_attributes.clone(),
-            }
-        } else {
-            // JS string: transform the string and change delimiter to "*j"
-            let transformed = transform_js_string(s);
-            Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
-                    Cow::Owned(transformed),
-                    Some(Cow::Borrowed("*j")),
-                )))),
-                pexp_loc: expr.pexp_loc,
-                pexp_attributes: expr.pexp_attributes.clone(),
-            }
-        }
-    } else {
-        // Unrecognized delimiter - preserve attributes (matching OCaml's { e with ... })
-        Expression {
-            pexp_desc: expr.pexp_desc.clone(),
-            pexp_loc: expr.pexp_loc,
-            pexp_attributes: expr.pexp_attributes.clone(),
-        }
-    }
-}
-
-/// Transform string constant pattern with delimiter.
-/// Implements OCaml's Ast_utf8_string_interp.transform_pat.
-fn transform_string_pat(pat: &Pattern, s: &str, delim: &str) -> Pattern {
-    // Note: patterns don't have template attribute check, since templates are only for expressions
-    if delim == "js" {
-        // JS string: transform the string and change delimiter to "*j"
-        let transformed = transform_js_string(s);
-        Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::String(
-                Cow::Owned(transformed),
-                Some(Cow::Borrowed("*j")),
-            )))),
-            ppat_loc: pat.ppat_loc,
-            ppat_attributes: pat.ppat_attributes.clone(),
-        }
-    } else {
-        // Unrecognized delimiter - return unchanged
-        pat.clone()
-    }
-}
-
 /// Rewrite a single attribute, transforming strings in its payload
 fn rewrite_attribute(attr: &Attribute, arena: &mut ParseArena) -> Attribute {
     let (name, payload) = attr;
@@ -7014,13 +6719,14 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
 
     let desc = match &*pat.ppat_desc {
         PatternDesc::Ppat_constant(c) => match &**c {
-            // String constant with delimiter: transform js -> *j
-            Constant::String(s, Some(delim)) => {
-                let base = transform_string_pat(pat, s, delim);
-                return Pattern {
-                    ppat_attributes: attrs.into(),
-                    ..base
-                };
+            // bs_builtin_ppx.ml `pat_mapper`: a `json` literal pattern is a
+            // tagged template in pattern position.
+            Constant::Json(_) => {
+                arena.defer_ppx_error(PpxError::at_loc(
+                    pat.ppat_loc,
+                    "Tagged template literals are not supported in patterns",
+                ));
+                PatternDesc::Ppat_constant(c.clone())
             }
             // Strip 'l' suffix from integer literals
             Constant::Integer(s, Some('l')) => {
@@ -7335,13 +7041,6 @@ fn rewrite_method_callback_expression(
 
 /// Rewrite an expression, desugaring pipe operators
 fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
-    // Handle string constant transformations first
-    if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc {
-        if let Constant::String(s, Some(delim)) = &**c {
-            return transform_string_exp(expr, s, delim, arena);
-        }
-    }
-
     // Handle integer literal suffix stripping ('l' suffix)
     // OCaml: {e with pexp_desc = Pexp_constant (Pconst_integer (s, None))}
     // This is an early-return case that preserves attributes without remapping.
@@ -7984,6 +7683,45 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                 })
                 .collect(),
         )),
+
+        // Ast_mapper: `Exp.template (List.map map_loc source_segments)
+        // (List.map (sub.expr sub) values)`.
+        ExpressionDesc::Pexp_template(template) => {
+            let values = template
+                .values
+                .iter()
+                .map(|e| {
+                    let value = arena.get_expr(*e).clone();
+                    let rw = rewrite_expression(&value, arena);
+                    arena.push_expr(rw)
+                })
+                .collect();
+            ExpressionDesc::Pexp_template(Box::new(current::PexpTemplate {
+                source_segments: template.source_segments.clone(),
+                values,
+            }))
+        }
+        // Ast_mapper: `Exp.tagged_template (sub.expr sub tag) raw_sources
+        // (List.map (sub.expr sub) values)`; OCaml evaluates the arguments
+        // right to left, so the values are mapped before the tag.
+        ExpressionDesc::Pexp_tagged_template(template) => {
+            let values = template
+                .values
+                .iter()
+                .map(|e| {
+                    let value = arena.get_expr(*e).clone();
+                    let rw = rewrite_expression(&value, arena);
+                    arena.push_expr(rw)
+                })
+                .collect();
+            let tag_expr = arena.get_expr(template.tag).clone();
+            let tag = rewrite_expression(&tag_expr, arena);
+            ExpressionDesc::Pexp_tagged_template(Box::new(current::PexpTaggedTemplate {
+                tag: arena.push_expr(tag),
+                raw_sources: template.raw_sources.clone(),
+                values,
+            }))
+        }
 
         ExpressionDesc::Pexp_construct(ctor, arg) => {
             let rw_arg = arg.map(|e| {
@@ -8939,25 +8677,14 @@ fn is_enum_polyvar<'a>(tdcl: &'a TypeDeclaration, arena: &'a ParseArena) -> Opti
 
 /// Get @as value from attributes (used for polyvariant tag string mapping)
 fn get_as_string_value(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
+    // OCaml `Ast_attributes.iter_process_bs_string_as`.
     for attr in attrs {
         let (attr_name, payload) = attr;
-        let name = arena.get_string(attr_name.txt);
-        if name == "as" {
-            if let Some(items) = payload_str_items(payload) {
-                if let Some(item) = items.first() {
-                    if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc {
-                        let (ref expr, _) = **eval_inner;
-                        // Constant::String(txt_str, delim)
-                        if let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*expr).pexp_desc
-                        {
-                            if let Constant::String(txt_str, _delim) = &**c {
-                                arena.mark_used_attribute(attr);
-                                return Some(txt_str.to_string());
-                            }
-                        }
-                    }
-                }
-            }
+        if arena.get_string(attr_name.txt) == "as"
+            && let Some(txt) = payload_semantic_string(payload, arena)
+        {
+            arena.mark_used_attribute(attr);
+            return Some(txt);
         }
     }
     None
@@ -9193,12 +8920,13 @@ fn create_map_binding(
         pexp_attributes: Attributes::new(),
     };
 
-    // Constant::String(txt_string, delim_option)
+    // ast_derive_js_mapper.ml builds `%raw(Const.string data)`; expanding it
+    // with `raw_as_string_exp_exn` yields `Pconst_raw_source` of the semantic
+    // string.
     let json_const = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
-            Cow::Owned(json_str.to_string()),
-            None,
-        )))),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::RawSource(Cow::Owned(
+            crate::string_literal::normalize_semantic(json_str).into_owned(),
+        ))))),
         pexp_loc: none_loc,
         pexp_attributes: Attributes::new(),
     };
@@ -10899,16 +10627,16 @@ fn validate_expression_extension_payload_error(
             ext_name.loc,
             "%debugger extension doesn't accept arguments",
         )),
-        "raw" if payload_single_string_literal(payload, arena).is_none() => Err(PpxError::at_loc(
+        "raw" if payload_raw_source_info(payload, arena).is_none() => Err(PpxError::at_loc(
             ext_name.loc,
             "%raw extension can only be applied to a string",
         )),
-        "re" => match payload_single_string_literal_with_loc(payload, arena) {
+        "re" => match payload_raw_source_info(payload, arena) {
             None => Err(PpxError::at_loc(
                 ext_name.loc,
                 "%re extension can only be applied to a string",
             )),
-            Some((code, loc)) if !is_js_regex_literal(code) && !is_js_regex_like_literal(code) => {
+            Some((code, loc, _)) if !is_js_regex_literal(&code) && !is_js_regex_like_literal(&code) => {
                 Err(PpxError::at_loc(
                     loc,
                     "Syntax error: a valid JS regex literal expected",
@@ -10916,8 +10644,8 @@ fn validate_expression_extension_payload_error(
             }
             Some(_) => Ok(()),
         },
-        "ffi" => match payload_single_string_literal_info(payload, arena) {
-            Some((code, _, _)) if is_js_function(code) => Ok(()),
+        "ffi" => match payload_raw_source_info(payload, arena) {
+            Some((code, _, _)) if is_js_function(&code) => Ok(()),
             _ => Err(PpxError::at_loc(
                 ext_name.loc,
                 "%ffi extension can only be applied to a string containing a JavaScript function such as \"(x) => ...\"",
@@ -10933,7 +10661,7 @@ fn validate_structure_extension_payload_error(
 ) -> PpxResult<()> {
     let (ext_name, payload) = extension;
     let name = arena.get_string(ext_name.txt);
-    if name == "raw" && payload_single_string_literal(payload, arena).is_none() {
+    if name == "raw" && payload_raw_source_info(payload, arena).is_none() {
         Err(PpxError::at_loc(
             ext_name.loc,
             "%%raw extension can only be applied to a string",
@@ -10943,175 +10671,6 @@ fn validate_structure_extension_payload_error(
     }
 }
 
-fn validate_js_string_literal(s: &str, loc: LocIdx) -> PpxResult<()> {
-    let bytes = js_string_source_bytes(s);
-    let bytes = bytes.as_ref();
-    let mut byte_offset = 0;
-    let mut char_offset = 0;
-
-    while byte_offset < bytes.len() {
-        match bytes[byte_offset] {
-            b'\\' => {
-                (byte_offset, char_offset) =
-                    validate_js_string_escape(bytes, loc, byte_offset + 1, char_offset + 1)?;
-            }
-            byte if byte < 0x80 => {
-                byte_offset += 1;
-                char_offset += 1;
-            }
-            _ => {
-                let width = if bytes[byte_offset] & 0b1111_1000 == 0b1111_0000 {
-                    4
-                } else if bytes[byte_offset] & 0b1111_0000 == 0b1110_0000 {
-                    3
-                } else if bytes[byte_offset] & 0b1110_0000 == 0b1100_0000 {
-                    2
-                } else {
-                    return Err(PpxError::at_loc(
-                        loc,
-                        format!("Offset: {char_offset}, Invalid code point"),
-                    ));
-                };
-                if byte_offset + width > bytes.len()
-                    || std::str::from_utf8(&bytes[byte_offset..byte_offset + width]).is_err()
-                {
-                    return Err(PpxError::at_loc(
-                        loc,
-                        format!("Offset: {char_offset}, Invalid code point"),
-                    ));
-                }
-                byte_offset += width;
-                char_offset += 1;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn js_string_source_bytes(s: &str) -> Cow<'_, [u8]> {
-    // Source strings use the compiler's Latin-1 view: one Rust char stores one
-    // original source byte, matching the byte string OCaml validates.
-    if s.is_ascii() {
-        Cow::Borrowed(s.as_bytes())
-    } else {
-        Cow::Owned(s.chars().map(|c| c as u8).collect())
-    }
-}
-
-fn validate_js_string_escape(
-    bytes: &[u8],
-    loc: LocIdx,
-    byte_offset: usize,
-    char_offset: usize,
-) -> PpxResult<(usize, usize)> {
-    if byte_offset >= bytes.len() {
-        return Err(PpxError::at_loc(
-            loc,
-            format!("Offset: {char_offset}, \\ ended unexpectedly"),
-        ));
-    }
-
-    match bytes[byte_offset] {
-        b'\\' | b'b' | b't' | b'n' | b'v' | b'f' | b'r' | b'0' | b'$' => {
-            Ok((byte_offset + 1, char_offset + 1))
-        }
-        b'u' => {
-            if byte_offset + 1 >= bytes.len() {
-                return Err(PpxError::at_loc(
-                    loc,
-                    format!("Offset: {char_offset}, Invalid \\u escape"),
-                ));
-            }
-            if bytes[byte_offset + 1] == b'{' {
-                validate_js_string_codepoint_escape(bytes, loc, byte_offset + 2, char_offset + 2)
-            } else {
-                validate_js_string_fixed_escape_digits(
-                    bytes,
-                    loc,
-                    byte_offset + 1,
-                    char_offset + 1,
-                    4,
-                    "Invalid \\u escape",
-                )?;
-                Ok((byte_offset + 5, char_offset + 5))
-            }
-        }
-        b'x' => {
-            validate_js_string_fixed_escape_digits(
-                bytes,
-                loc,
-                byte_offset + 1,
-                char_offset + 1,
-                2,
-                "Invalid \\x escape",
-            )?;
-            Ok((byte_offset + 3, char_offset + 3))
-        }
-        _ => Ok((byte_offset + 1, char_offset + 1)),
-    }
-}
-
-fn validate_js_string_fixed_escape_digits(
-    bytes: &[u8],
-    loc: LocIdx,
-    byte_offset: usize,
-    char_offset: usize,
-    digits: usize,
-    message: &str,
-) -> PpxResult<()> {
-    for i in 0..digits {
-        if byte_offset + i >= bytes.len() || !bytes[byte_offset + i].is_ascii_hexdigit() {
-            return Err(PpxError::at_loc(
-                loc,
-                format!("Offset: {char_offset}, {message}"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_js_string_codepoint_escape(
-    bytes: &[u8],
-    loc: LocIdx,
-    mut byte_offset: usize,
-    char_offset: usize,
-) -> PpxResult<(usize, usize)> {
-    let mut value: u32 = 0;
-
-    while byte_offset < bytes.len() && bytes[byte_offset].is_ascii_hexdigit() {
-        let digit = (bytes[byte_offset] as char).to_digit(16).unwrap_or(16);
-        if value > 0x10FFFF {
-            return Err(PpxError::at_loc(
-                loc,
-                format!("Offset: {char_offset}, Invalid \\u{{…}} codepoint escape sequence"),
-            ));
-        }
-        value = value.saturating_mul(16).saturating_add(digit);
-        byte_offset += 1;
-    }
-
-    if byte_offset < bytes.len()
-        && bytes[byte_offset] == b'}'
-        && value <= 0x10FFFF
-        && !(0xD800..0xE000).contains(&value)
-    {
-        let next_offset = byte_offset + 1;
-        Ok((next_offset, next_offset))
-    } else {
-        Err(PpxError::at_loc(
-            loc,
-            format!("Offset: {char_offset}, Invalid \\u{{…}} codepoint escape sequence"),
-        ))
-    }
-}
-
-fn attributes_have_template_marker(attrs: &[Attribute], arena: &ParseArena) -> bool {
-    attrs.iter().any(|(attr_name, _)| {
-        let name = arena.get_string(attr_name.txt);
-        name == "res.template" || name == "res.taggedTemplate"
-    })
-}
 
 fn validate_module_record_pattern_binding_error(
     vb: &ValueBinding,
@@ -11763,24 +11322,14 @@ fn make_set_attr(loc: LocIdx, arena: &mut ParseArena) -> Attribute {
 
 /// Get the @as("...") attribute value
 fn get_bs_as_string(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
+    // OCaml `Ast_attributes.iter_process_bs_string_as`.
     for attr in attrs {
         let (attr_name, payload) = attr;
-        let name = arena.get_string(attr_name.txt);
-        if name == "as" {
-            if let Some(items) = payload_str_items(payload) {
-                if let Some(item) = items.first() {
-                    if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc {
-                        let (ref expr, _) = **eval_inner;
-                        if let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*expr).pexp_desc
-                        {
-                            if let Constant::String(txt, _) = &**c {
-                                arena.mark_used_attribute(attr);
-                                return Some(txt.to_string());
-                            }
-                        }
-                    }
-                }
-            }
+        if arena.get_string(attr_name.txt) == "as"
+            && let Some(txt) = payload_semantic_string(payload, arena)
+        {
+            arena.mark_used_attribute(attr);
+            return Some(txt);
         }
     }
     None
@@ -12397,7 +11946,62 @@ pub fn rewrite_structure_with_warnings(
 ) -> (PpxResult<Vec<StructureItem>>, Vec<PpxWarning>) {
     let mut warnings = Vec::new();
     let result = rewrite_structure_impl(structure, arena, true, true, Some(&mut warnings));
-    (with_deferred_ppx_error(result, arena), warnings)
+    let result = with_deferred_ppx_error(result, arena).and_then(|structure| {
+        use super::ast_iter::AstIter;
+        let mut iterator = UnconsumedJsonIterator::default();
+        for item in &structure {
+            iterator.structure_item(arena, item);
+        }
+        match iterator.error {
+            Some(error) => Err(error),
+            None => Ok(structure),
+        }
+    });
+    (result, warnings)
+}
+
+/// OCaml `Ppx_entry.unconsumed_json_iterator`: `json` payloads are
+/// syntax-level expressions until built-in FFI processing consumes valid
+/// `@as(json`...`)` occurrences; anything left after that is rejected.
+#[derive(Default)]
+struct UnconsumedJsonIterator {
+    error: Option<PpxError>,
+}
+
+impl super::ast_iter::AstIter for UnconsumedJsonIterator {
+    fn expr(&mut self, arena: &ParseArena, idx: ExprIdx) {
+        if self.error.is_some() {
+            return;
+        }
+        let expr = arena.get_expr(idx);
+        if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc
+            && let Constant::Json(_) = &**c
+        {
+            self.error = Some(PpxError::at_loc(
+                expr.pexp_loc,
+                crate::ast_payload::JSON_LITERAL_OUTSIDE_EXTERNAL_MESSAGE,
+            ));
+            return;
+        }
+        super::ast_iter::walk_expr(self, arena, idx);
+    }
+
+    fn pat(&mut self, arena: &ParseArena, idx: PatIdx) {
+        if self.error.is_some() {
+            return;
+        }
+        let pat = arena.get_pat(idx);
+        if let PatternDesc::Ppat_constant(c) = &*pat.ppat_desc
+            && let Constant::Json(_) = &**c
+        {
+            self.error = Some(PpxError::at_loc(
+                pat.ppat_loc,
+                crate::ast_payload::JSON_LITERAL_OUTSIDE_EXTERNAL_MESSAGE,
+            ));
+            return;
+        }
+        super::ast_iter::walk_pat(self, arena, idx);
+    }
 }
 
 /// A nested rewrite error was raised before any error returned directly, so
@@ -12852,9 +12456,9 @@ fn expand_extensions_expr(expr: &Expression, arena: &mut ParseArena) -> Expressi
                     let raw_prim = prim_str(arena, "#raw_expr");
                     handle_raw(expr, payload, arena, raw_prim, ext_name.loc)
                 }
-                "re" => match payload_single_string_literal_with_loc(payload, arena) {
-                    Some((code, _loc))
-                        if is_js_regex_literal(code) || is_js_regex_like_literal(code) =>
+                "re" => match payload_raw_source_info(payload, arena) {
+                    Some((code, _loc, _))
+                        if is_js_regex_literal(&code) || is_js_regex_like_literal(&code) =>
                     {
                         handle_re(expr, payload, arena, ext_name.loc)
                     }
@@ -12980,7 +12584,18 @@ pub fn rewrite_signature_with_warnings(
     if let Err(error) = checked {
         return (Err(error), warnings);
     }
-    let rewritten = with_deferred_ppx_error(try_rewrite_signature_items(signature, arena), arena);
+    let rewritten = with_deferred_ppx_error(try_rewrite_signature_items(signature, arena), arena)
+        .and_then(|signature| {
+            use super::ast_iter::AstIter;
+            let mut iterator = UnconsumedJsonIterator::default();
+            for item in &signature {
+                iterator.signature_item(arena, item);
+            }
+            match iterator.error {
+                Some(error) => Err(error),
+                None => Ok(signature),
+            }
+        });
     (rewritten, warnings)
 }
 
@@ -13409,8 +13024,17 @@ fn rewrite_structure_item_no_spice(
                     let vb_expr = arena.get_expr(vb.pvb_expr).clone();
                     let pvb_expr = rewrite_expression(&vb_expr, arena);
 
-                    // Check for @inline attribute
+                    // Check for @inline attribute; its payload must not be a
+                    // `json` literal (`Ast_payload.reject_json_literal_payload`).
                     if has_inline_attr(&vb.pvb_attributes, arena) {
+                        if let Some((_, payload)) = vb
+                            .pvb_attributes
+                            .iter()
+                            .find(|(name, _)| arena.get_string(name.txt) == "inline")
+                            && let Err(error) = reject_json_literal_payload(payload, arena)
+                        {
+                            arena.defer_ppx_error(error);
+                        }
                         // Transform based on the expression type
                         if let Some(prim_item) = transform_inline_binding(
                             &pval_name,

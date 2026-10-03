@@ -24,7 +24,7 @@ use crate::driver::{
 use crate::ident::Ident;
 use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
-use crate::lambda::lam_constant::{Constant as LambdaConstant, PointerInfo, StringDelim};
+use crate::lambda::lam_constant::{Constant as LambdaConstant, PointerInfo};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda, PrimInfo,
@@ -3015,10 +3015,9 @@ fn decode_cmj_lambda_constant(value: &OcamlValue) -> Option<LambdaConstant> {
         OcamlValue::Block(1, fields) if fields.len() == 1 => {
             Some(LambdaConstant::Char(fields[0].as_int() as i32))
         }
-        OcamlValue::Block(2, fields) if fields.len() == 2 => Some(LambdaConstant::String {
-            s: fields[0].as_string().to_string(),
-            delim: decode_cmj_external_delim_option(&fields[1])?,
-        }),
+        OcamlValue::Block(2, fields) if fields.len() == 1 => {
+            Some(LambdaConstant::String(fields[0].as_string().to_string()))
+        }
         OcamlValue::Block(3, fields) if fields.len() == 1 => {
             Some(LambdaConstant::Float(fields[0].as_string().to_string()))
         }
@@ -3327,7 +3326,6 @@ fn decode_cmj_primitive(value: &OcamlValue) -> Option<Primitive> {
         OcamlValue::Int(93) => Some(Primitive::PvalFromOptionNotNest),
         OcamlValue::Int(94) => Some(Primitive::PisPolyVarBlock),
         OcamlValue::Int(95) => Some(Primitive::PjsFnMethod),
-        OcamlValue::Int(96) => Some(Primitive::PtaggedTemplate),
         OcamlValue::Block(0, fields) if fields.len() == 1 => {
             let tag_info = decode_cmj_tag_info(&fields[0])?;
             // `Lambda.mutable_flag_of_tag_info`: a block's mutability follows
@@ -3371,6 +3369,13 @@ fn decode_cmj_primitive(value: &OcamlValue) -> Option<Primitive> {
         OcamlValue::Block(13, fields) if fields.len() == 1 => {
             Some(Primitive::Pstringcomp(decode_cmj_comparison(&fields[0])?))
         }
+        OcamlValue::Block(18, fields) if fields.len() == 1 => {
+            Some(Primitive::PtaggedTemplate(decode_cmj_string_list(&fields[0])?))
+        }
+        OcamlValue::Block(19, fields) if fields.len() == 1 => Some(Primitive::Ptemplate(decode_cmj_list(
+            &fields[0],
+            decode_cmj_template_segment,
+        )?)),
         OcamlValue::Block(16, fields) if fields.len() == 1 => {
             Some(Primitive::Pjscomp(decode_cmj_comparison(&fields[0])?))
         }
@@ -3405,16 +3410,17 @@ fn decode_cmj_field_dbg_info(value: &OcamlValue) -> Option<FieldDbgInfo> {
     }
 }
 
-fn decode_cmj_external_delim_option(value: &OcamlValue) -> Option<Option<StringDelim>> {
+/// `String_literal.payload`: `Valid {source; semantic}` or `Invalid_source`.
+fn decode_cmj_template_segment(value: &OcamlValue) -> Option<crate::string_literal::TemplateSegment> {
+    use std::borrow::Cow;
     match value {
-        OcamlValue::Int(0) => Some(None),
-        OcamlValue::Block(0, fields) if fields.len() == 1 => Some(Some(match fields[0].as_int() {
-            0 => StringDelim::Plain,
-            1 => StringDelim::StarJ,
-            2 => StringDelim::NoQuotes,
-            3 => StringDelim::Backtick,
-            _ => return None,
-        })),
+        OcamlValue::Block(0, fields) if fields.len() == 2 => Some(crate::string_literal::StringLiteral::Valid {
+            source: Cow::Owned(fields[0].as_string().to_string()),
+            semantic: Cow::Owned(fields[1].as_string().to_string()),
+        }),
+        OcamlValue::Block(1, fields) if fields.len() == 1 => Some(
+            crate::string_literal::StringLiteral::InvalidSource(Cow::Owned(fields[0].as_string().to_string())),
+        ),
         _ => None,
     }
 }

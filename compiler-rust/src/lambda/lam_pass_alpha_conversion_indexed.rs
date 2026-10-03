@@ -20,7 +20,7 @@ fn safe_to_share(store: &IndexedLambda, node: NodeId) -> bool {
             Constant::Int { .. }
             | Constant::Constructor(_)
             | Constant::Char(_)
-            | Constant::String { .. }
+            | Constant::String(_)
             | Constant::ImmString(_)
             | Constant::Float(_)
             | Constant::BigInt { .. }

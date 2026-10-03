@@ -330,6 +330,17 @@ pub fn walk_expr<I: TastIterator + ?Sized>(sub: &mut I, e: &Expression) {
             sub.expr(e1);
             sub.expr(e2);
         }
+        ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
+            sub.expr(tag);
+            for value in values {
+                sub.expr(value);
+            }
+        }
+        ExpressionDesc::Texp_template { values, .. } => {
+            for value in values {
+                sub.expr(value);
+            }
+        }
         ExpressionDesc::Texp_ifthenelse(e1, e2, e3) => {
             sub.expr(e1);
             sub.expr(e2);

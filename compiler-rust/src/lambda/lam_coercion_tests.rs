@@ -117,7 +117,7 @@ fn coerce_toplevel_exports_skips_unreachable_undefined_placeholder_after_throw()
     assert!(matches!(
         stmt.desc,
         StatementDesc::Throw(Expression {
-            desc: ExpressionDesc::Str { .. },
+            desc: ExpressionDesc::Str(_),
             ..
         })
     ));
@@ -442,7 +442,7 @@ fn coerce_toplevel_exports_keeps_same_name_function_alias_binding_before_later_e
                 panic!("expected the later top-level call to keep a single argument");
             };
             match &arg.desc {
-                ExpressionDesc::Str { txt, .. } => assert_eq!(txt, "a"),
+                ExpressionDesc::Str(txt) => assert_eq!(txt, "a"),
                 other => panic!(
                     "expected the later top-level call argument to stay as \"a\", got {other:?}"
                 ),
@@ -569,7 +569,7 @@ fn coerce_toplevel_exports_keeps_same_name_function_alias_chain_before_later_eff
                 panic!("expected the later top-level call to keep one argument");
             };
             match &arg.desc {
-                ExpressionDesc::Str { txt, .. } => assert_eq!(txt, "a"),
+                ExpressionDesc::Str(txt) => assert_eq!(txt, "a"),
                 other => {
                     panic!("expected the later top-level call arg to stay as \"a\", got {other:?}")
                 }
@@ -862,7 +862,7 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_when_reused()
             ident,
             value:
                 Some(Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 }),
             property,
@@ -922,7 +922,7 @@ fn coerce_toplevel_exports_keeps_same_name_literal_binding_used_by_later_functio
             ident,
             value:
                 Some(Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 }),
             property,
@@ -1030,14 +1030,14 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_across_later_
             assert!(matches!(
                 left.as_ref(),
                 Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 } if txt == "hello world"
             ));
             assert!(matches!(
                 right.as_ref(),
                 Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 } if txt == "not"
             ));
@@ -1055,7 +1055,7 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_across_later_
             ident,
             value:
                 Some(Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 }),
             property,
@@ -1136,7 +1136,7 @@ fn coerce_toplevel_exports_rewrites_later_initializers_through_materialized_root
             ident,
             value:
                 Some(Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 }),
             property,
@@ -1169,7 +1169,7 @@ fn coerce_toplevel_exports_rewrites_later_initializers_through_materialized_root
             assert!(matches!(
                 right.as_ref(),
                 Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 } if txt == "not"
             ));

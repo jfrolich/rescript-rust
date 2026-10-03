@@ -246,6 +246,7 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
 
         // Offset and misc
         Primitive::Pstringadd
+        | Primitive::Ptemplate(_)
         | Primitive::PfnArity
         | Primitive::PwrapExn
         | Primitive::Phash
@@ -257,7 +258,7 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         Primitive::PrawJsCode(info) => raw_js_is_pure(info),
 
         // Impure primitives
-        Primitive::PtaggedTemplate
+        Primitive::PtaggedTemplate(_)
         | Primitive::PjsApply
         | Primitive::PjsRuntimeApply
         | Primitive::PjsCall { .. }
@@ -432,7 +433,7 @@ fn size_constant(c: &Constant) -> i32 {
         | Constant::JsTrue
         | Constant::JsFalse => 1,
 
-        Constant::String { .. } => 1,
+        Constant::String(_) => 1,
         Constant::ImmString(_) => 1,
 
         Constant::Some(inner) => size_constant(inner),

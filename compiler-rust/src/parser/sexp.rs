@@ -245,10 +245,6 @@ fn quote_string(s: &str) -> String {
     quote_string_literal(unwrap_uppercase_exotic(s))
 }
 
-fn quote_string_tagged(s: &str) -> String {
-    quote_string_literal(s)
-}
-
 fn map_empty<T, F>(items: &[T], f: F) -> Vec<Sexp>
 where
     F: Fn(&T) -> Sexp,
@@ -380,29 +376,19 @@ fn constant_inner(c: &Constant) -> Sexp {
             Sexp::atom(&quote_string(txt)),
             opt_char(tag),
         ]),
-        Constant::Char(_) => Sexp::list(vec![Sexp::atom("Pconst_char")]),
-        Constant::String(txt, tag) => {
-            // Check for internal char marker
-            if tag.as_ref().map(|t| &**t) == Some("INTERNAL_RES_CHAR_CONTENTS") {
-                Sexp::list(vec![Sexp::atom("Pconst_char")])
-            } else {
-                let quoted = if tag.is_some() {
-                    quote_string_tagged(txt)
-                } else {
-                    quote_string_literal(txt)
-                };
-                Sexp::list(vec![
-                    Sexp::atom("Pconst_string"),
-                    Sexp::atom(&quoted),
-                    match tag {
-                        Some(t) => Sexp::list(vec![
-                            Sexp::atom("Some"),
-                            Sexp::atom(&quote_string_literal(t)),
-                        ]),
-                        None => Sexp::atom("None"),
-                    },
-                ])
-            }
+        Constant::Char { source, semantic } => Sexp::list(vec![
+            Sexp::atom("Pconst_char"),
+            Sexp::atom(&quote_string(source)),
+            Sexp::atom(&semantic.to_string()),
+        ]),
+        Constant::String(payload) => Sexp::list(vec![
+            Sexp::atom("Pconst_string"),
+            Sexp::atom(&quote_string(payload.source())),
+            Sexp::atom(&quote_string(payload.semantic())),
+        ]),
+        Constant::Json(source) => Sexp::list(vec![Sexp::atom("Pconst_json"), Sexp::atom(&quote_string(source))]),
+        Constant::RawSource(source) => {
+            Sexp::list(vec![Sexp::atom("Pconst_raw_source"), Sexp::atom(&quote_string(source))])
         }
         Constant::Float(txt, tag) => Sexp::list(vec![
             Sexp::atom("Pconst_float"),
@@ -1041,6 +1027,29 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
         ExpressionDesc::Pexp_extension(ext) => {
             Sexp::list(vec![Sexp::atom("Pexp_extension"), extension(arena, ext)])
         }
+        ExpressionDesc::Pexp_template(template) => Sexp::list(vec![
+            Sexp::atom("Pexp_template"),
+            Sexp::list(
+                template
+                    .source_segments
+                    .iter()
+                    .map(|seg| Sexp::atom(&quote_string(arena.get_string(seg.txt))))
+                    .collect(),
+            ),
+            Sexp::list(template.values.iter().map(|v| expression(arena, arena.get_expr(*v))).collect()),
+        ]),
+        ExpressionDesc::Pexp_tagged_template(template) => Sexp::list(vec![
+            Sexp::atom("Pexp_tagged_template"),
+            expression(arena, arena.get_expr(template.tag)),
+            Sexp::list(
+                template
+                    .raw_sources
+                    .iter()
+                    .map(|seg| Sexp::atom(&quote_string(arena.get_string(seg.txt))))
+                    .collect(),
+            ),
+            Sexp::list(template.values.iter().map(|v| expression(arena, arena.get_expr(*v))).collect()),
+        ]),
         ExpressionDesc::Pexp_await(e) => Sexp::list(vec![
             Sexp::atom("Pexp_await"),
             expression(arena, arena.get_expr(*e)),

@@ -529,6 +529,17 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
             v.expr(arena, *body);
         }
         ExpressionDesc::Pexp_assert(e) | ExpressionDesc::Pexp_await(e) => v.expr(arena, *e),
+        ExpressionDesc::Pexp_template(template) => {
+            for value in &template.values {
+                v.expr(arena, *value);
+            }
+        }
+        ExpressionDesc::Pexp_tagged_template(template) => {
+            v.expr(arena, template.tag);
+            for value in &template.values {
+                v.expr(arena, *value);
+            }
+        }
         ExpressionDesc::Pexp_newtype(inner) => v.expr(arena, inner.1),
         ExpressionDesc::Pexp_pack(me) => v.module_expr(arena, *me),
         ExpressionDesc::Pexp_open(inner) => v.expr(arena, inner.2),

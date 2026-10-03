@@ -147,8 +147,9 @@ pub enum Constant {
     Int(i64),
     /// Character constant (Unicode codepoint).
     Char(i32),
-    /// String constant with optional delimiter.
-    String(String, Option<String>),
+    /// The decoded runtime value of an ordinary string literal; source
+    /// spelling has been discarded after type checking.
+    String(String),
     /// Float constant (as string to preserve precision).
     Float(String),
     /// BigInt constant (sign, digits).
@@ -431,6 +432,23 @@ pub enum ExpressionDesc {
         Box<Expression>,
         Box<Expression>,
     ),
+
+    /// A typed JavaScript tagged template: the typed `tag`, the exact raw
+    /// segment sources (which may contain invalid escapes), and the typed
+    /// interpolated values. There is always one more raw source than value.
+    Texp_tagged_template {
+        tag: Box<Expression>,
+        raw_sources: Vec<String>,
+        values: Vec<Expression>,
+    },
+
+    /// A typed ordinary backquoted template: validated segments carrying
+    /// source and semantic forms, and the typed interpolated values. There is
+    /// always one more segment than value.
+    Texp_template {
+        segments: Vec<crate::string_literal::TemplateSegment>,
+        values: Vec<Expression>,
+    },
 
     /// Object property read: `E["name"]`.
     Texp_object_get(Box<Expression>, Loc<String>),
@@ -1242,8 +1260,8 @@ mod tests {
         let c = Constant::Int(42);
         assert_eq!(c, Constant::Int(42));
 
-        let s = Constant::String("hello".to_string(), None);
-        assert!(matches!(s, Constant::String(_, None)));
+        let s = Constant::String("hello".to_string());
+        assert!(matches!(s, Constant::String(_)));
     }
 
     #[test]

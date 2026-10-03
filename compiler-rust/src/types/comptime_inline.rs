@@ -88,7 +88,7 @@ pub fn translate_simple_expr_to_js(
     use crate::parser::ast::ExpressionDesc as ED;
     match &*expr.pexp_desc {
         ED::Pexp_constant(c) => match &**c {
-            crate::parser::ast::Constant::String(s, _) => Some(format!("{:?}", s.as_ref())),
+            crate::parser::ast::Constant::String(s) => Some(format!("{:?}", s.semantic())),
             crate::parser::ast::Constant::Integer(s, _) => Some(s.to_string()),
             crate::parser::ast::Constant::Float(s, _) => Some(s.to_string()),
             _ => None,

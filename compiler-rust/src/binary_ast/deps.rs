@@ -537,6 +537,17 @@ impl<'a> DependencyCollector<'a> {
                     self.add_expr_idx(*arg);
                 }
             }
+            ExpressionDesc::Pexp_template(template) => {
+                for value in &template.values {
+                    self.add_expr_idx(*value);
+                }
+            }
+            ExpressionDesc::Pexp_tagged_template(template) => {
+                self.add_expr_idx(template.tag);
+                for value in &template.values {
+                    self.add_expr_idx(*value);
+                }
+            }
             ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
                 let (ref expr, ref cases) = **inner;
                 // expr is ExprIdx

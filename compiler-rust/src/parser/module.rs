@@ -370,6 +370,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             p.next();
             let id = parse_extension_id(p, ext_start_idx);
             let payload = parse_payload_region(p);
+            let payload = raw_source_extension_payload(p, &id, payload);
             parse_newline_or_semicolon_structure(p);
             Some(StructureItemDesc::Pstr_extension(Box::new((
                 (id, payload),
@@ -4128,8 +4129,32 @@ pub(super) fn parse_extension(p: &mut Parser<'_>, module_language: bool) -> Exte
     let id = parse_extension_id(p, id_start_idx);
 
     let payload = parse_payload_region(p);
+    let payload = raw_source_extension_payload(p, &id, payload);
 
     (id, payload)
+}
+
+/// The tail of OCaml `parse_extension` (res_core.ml): a `raw`, `ffi` or `re`
+/// extension whose payload is a single string expression carries that
+/// string's source spelling as JavaScript source.
+pub(super) fn raw_source_extension_payload(p: &mut Parser<'_>, id: &StringLoc, payload: Payload) -> Payload {
+    if !matches!(p.arena().get_string(id.txt), "raw" | "ffi" | "re") {
+        return payload;
+    }
+    if let Payload::PStr(items) = &payload
+        && let [item] = items.as_slice()
+        && let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc
+    {
+        let expr_idx = eval.0;
+        let expr = p.arena_mut().get_expr_mut(expr_idx);
+        if let ExpressionDesc::Pexp_constant(constant) = &mut *expr.pexp_desc
+            && let Constant::String(literal) = &**constant
+        {
+            let source = literal.source().to_string();
+            **constant = Constant::RawSource(Cow::Owned(source));
+        }
+    }
+    payload
 }
 
 // ============================================================================

@@ -338,9 +338,13 @@ fn rewrite_expression(mut expression: Expression) -> Expression {
         ),
         ExpressionDesc::TaggedTemplate(tag, strings, values) => ExpressionDesc::TaggedTemplate(
             Box::new(rewrite_expression(*tag)),
-            strings.into_iter().map(rewrite_expression).collect(),
+            strings,
             values.into_iter().map(rewrite_expression).collect(),
         ),
+        ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
+            segments,
+            values: values.into_iter().map(rewrite_expression).collect(),
+        },
         ExpressionDesc::Array(items, mutable) => {
             ExpressionDesc::Array(items.into_iter().map(rewrite_expression).collect(), mutable)
         }

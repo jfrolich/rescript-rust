@@ -345,6 +345,8 @@ pub mod error_messages {
     pub const STRING_INTERPOLATION_IN_PATTERN: &str =
         "String interpolation is not supported in pattern matching.";
 
+    pub const TAGGED_TEMPLATE_IN_PATTERN: &str = "Tagged template literals are not supported in patterns";
+
     /// Error message for type definition in function.
     pub const TYPE_DEFINITION_IN_FUNCTION: &str = "Type definitions are not allowed inside functions.\n  Move this `type` declaration to the top level or into a module.";
 
@@ -603,12 +605,6 @@ pub fn make_braces_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
     (with_loc(str_idx, loc), Payload::PStr(Box::new(vec![])))
 }
 
-/// Create the template literal attribute `@res.template`.
-pub fn template_literal_attr(arena: &mut ParseArena) -> Attribute {
-    let str_idx = arena.intern("res.template");
-    (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
-}
-
 /// Create the spread attribute `@res.spread`.
 pub fn spread_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.spread");
@@ -624,12 +620,6 @@ pub fn dict_spread_attr(arena: &mut ParseArena) -> Attribute {
 /// Create the pattern variant spread attribute.
 pub fn make_pat_variant_spread_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.patVariantSpread");
-    (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
-}
-
-/// Create the tagged template literal attribute.
-pub fn tagged_template_literal_attr(arena: &mut ParseArena) -> Attribute {
-    let str_idx = arena.intern("res.taggedTemplate");
     (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
 }
 
@@ -721,9 +711,8 @@ pub fn doc_comment_to_attribute(
     let str_idx = arena.intern("res.doc");
     let name = with_loc(str_idx, loc);
     let expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
-            Cow::Owned(content.into()),
-            None,
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(
+            &content.into(),
         )))),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
@@ -1453,14 +1442,6 @@ mod tests {
         let mut arena = ParseArena::new();
         let attr = ternary_attr(&mut arena);
         assert_eq!(arena.get_string(attr.0.txt), "res.ternary");
-    }
-
-    #[test]
-    fn test_template_literal_attr() {
-        use crate::parse_arena::ParseArena;
-        let mut arena = ParseArena::new();
-        let attr = template_literal_attr(&mut arena);
-        assert_eq!(arena.get_string(attr.0.txt), "res.template");
     }
 
     #[test]

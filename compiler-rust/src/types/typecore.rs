@@ -76,10 +76,10 @@ fn extension_eval_string(
     let crate::parser::ast::ExpressionDesc::Pexp_constant(constant) = &*expr.pexp_desc else {
         return None;
     };
-    let ParsedConstant::String(message, _) = &**constant else {
+    let ParsedConstant::String(message) = &**constant else {
         return None;
     };
-    Some(message.to_string())
+    Some(message.semantic().to_string())
 }
 
 fn builtin_extension_sub_errors(
@@ -821,6 +821,12 @@ pub enum TypeCoreError {
         literal: String,
         modifier: char,
     },
+
+    /// A template segment with an invalid escape sequence.
+    InvalidStringEscapeSequence { loc: LocIdx },
+
+    /// A `json` literal outside an external payload.
+    JsonLiteralOutsideExternal { loc: LocIdx },
 
     /// Illegal let-rec pattern.
     IllegalLetrecPat { loc: LocIdx },
@@ -2106,7 +2112,7 @@ pub fn type_constant(ctx: &TypeContext, env: &Env, cst: &Constant) -> TypeExprRe
         // so each constant occurrence gets its own instantiated node.
         Constant::Int(_) => crate::types::instance(ctx, env.type_int(ctx)),
         Constant::Char(_) => crate::types::instance(ctx, env.type_char(ctx)),
-        Constant::String(_, _) => crate::types::instance(ctx, env.type_string(ctx)),
+        Constant::String(_) => crate::types::instance(ctx, env.type_string(ctx)),
         Constant::Float(_) => crate::types::instance(ctx, env.type_float(ctx)),
         Constant::BigInt(_, _) => crate::types::instance(ctx, env.type_bigint(ctx)),
     };
@@ -2302,18 +2308,10 @@ pub fn convert_constant(
             literal: i.to_string(),
             modifier: *c,
         }),
-        ParsedConstant::Char(c) => Ok(Constant::Char(*c)),
-        ParsedConstant::String(s, d) => {
-            // Transform "js" delimiter to "*j" to match OCaml's escaped form
-            let delim = d.as_ref().map(|x| {
-                if x.as_ref() == "js" {
-                    "*j".to_string()
-                } else {
-                    x.to_string()
-                }
-            });
-            Ok(Constant::String(s.to_string(), delim))
-        }
+        ParsedConstant::Char { semantic, .. } => Ok(Constant::Char(*semantic)),
+        ParsedConstant::String(payload) => Ok(Constant::String(payload.semantic().to_string())),
+        ParsedConstant::Json(_) => Err(TypeCoreError::JsonLiteralOutsideExternal { loc }),
+        ParsedConstant::RawSource(s) => Ok(Constant::String(s.to_string())),
         ParsedConstant::Float(f, None) => Ok(Constant::Float(f.to_string())),
         ParsedConstant::Float(f, Some(c)) => Err(TypeCoreError::UnknownLiteral {
             loc,
@@ -8350,6 +8348,97 @@ fn type_expect_with_recarg_unscoped<'a>(
             ))
         }
 
+        // compiler/ml/typecore.ml Pexp_template: validate every segment, type
+        // the values as string-concatenation operands.
+        ED::Pexp_template(template) => {
+            ctx.begin_def();
+            let mut segments = Vec::with_capacity(template.source_segments.len());
+            for source in &template.source_segments {
+                match crate::string_literal::template_from_source(tctx.arena.get_string(source.txt)) {
+                    Some(segment) => segments.push(segment),
+                    None => {
+                        return Err(TypeCoreError::InvalidStringEscapeSequence { loc: source.loc });
+                    }
+                }
+            }
+            let mut values = Vec::with_capacity(template.values.len());
+            for value in &template.values {
+                let string_ty = env.type_string(ctx);
+                values.push(type_expect(
+                    tctx,
+                    env,
+                    tctx.arena.get_expr(*value),
+                    string_ty,
+                    Some(TypeClashContext::StringConcat),
+                )?);
+            }
+            ctx.end_def();
+            let exp_type = crate::types::instance(ctx, env.type_string(ctx));
+            rue_unify(tctx, loc, exp_type, expected_ty, context)?;
+            Ok(Expression::new(
+                ExpressionDesc::Texp_template { segments, values },
+                loc,
+                exp_type,
+                exp_env_ref,
+                expr.pexp_attributes.clone(),
+            ))
+        }
+
+        // compiler/ml/typecore.ml Pexp_tagged_template: the tag must be a
+        // value of the builtin `taggedTemplate<'param, 'output>` type.
+        ED::Pexp_tagged_template(template) => {
+            ctx.begin_def();
+            let stag = tctx.arena.get_expr(template.tag);
+            let tag_var = ctx.new_var(None);
+            tctx.deprecated_function_call = matches!(&*stag.pexp_desc, ED::Pexp_ident(_));
+            let tag = type_expect(tctx, env, stag, tag_var, None);
+            tctx.deprecated_function_call = false;
+            let tag = tag?;
+            let param_ty = ctx.new_var(None);
+            let output_ty = ctx.new_var(None);
+            let tag_ty = ctx.new_constr(crate::types::predef::path_tagged_template(), vec![param_ty, output_ty]);
+            tctx.set_unify_env(env);
+            if crate::types::ctype::unify(
+                ctx,
+                &mut tctx.unify_state,
+                crate::types::instance(ctx, tag.exp_type),
+                tag_ty,
+            )
+            .is_err()
+            {
+                return Err(TypeCoreError::TaggedTemplateNonTag {
+                    loc: tag.exp_loc,
+                    typ: tag.exp_type,
+                });
+            }
+            let mut values = Vec::with_capacity(template.values.len());
+            for value in &template.values {
+                values.push(type_expect(
+                    tctx,
+                    env,
+                    tctx.arena.get_expr(*value),
+                    param_ty,
+                    Some(TypeClashContext::TaggedTemplateValue),
+                )?);
+            }
+            unify_expression_types(tctx, loc, ctx.new_var(None), tag.exp_type, None)?;
+            ctx.end_def();
+            rue_unify(tctx, loc, output_ty, expected_ty, context)?;
+            let raw_sources =
+                template.raw_sources.iter().map(|source| tctx.arena.get_string(source.txt).to_string()).collect();
+            Ok(Expression::new(
+                ExpressionDesc::Texp_tagged_template {
+                    tag: Box::new(tag),
+                    raw_sources,
+                    values,
+                },
+                loc,
+                output_ty,
+                exp_env_ref,
+                expr.pexp_attributes.clone(),
+            ))
+        }
+
         ED::Pexp_apply(inner) => {
             let PexpApply {
                 ref funct,
@@ -9263,7 +9352,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             let field_name = match &*name_expr.pexp_desc {
                 // Direct string literal
                 crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match &**c {
-                    crate::parser::ast::Constant::String(s, _) => Some(s.to_string()),
+                    crate::parser::ast::Constant::String(s) => Some(s.semantic().to_string()),
                     _ => None,
                 },
                 // Comptime-known variable (e.g., field.name from inline for)
@@ -9367,7 +9456,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             let msg_expr = tctx.arena.get_expr(*msg_idx);
             let msg = match &*msg_expr.pexp_desc {
                 crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match &**c {
-                    crate::parser::ast::Constant::String(s, _) => s.to_string(),
+                    crate::parser::ast::Constant::String(s) => s.semantic().to_string(),
                     _ => "compile error".to_string(),
                 },
                 _ => "compile error".to_string(),
@@ -10929,98 +11018,6 @@ fn type_application(
 
     ctx.begin_def();
 
-    let is_tagged_template = attributes
-        .iter()
-        .any(|attr| tctx.arena.get_string(attr.0.txt) == "res.taggedTemplate");
-    if is_tagged_template {
-        // Upstream compiler/ml/typecore.ml:2519-2569. The parser represents
-        // `tag`...${value}...`` as an attributed application whose two
-        // arguments are the literal strings and interpolation arrays.
-        let param_ty = ctx.new_var(None);
-        let output_ty = ctx.new_var(None);
-        let tag_ty = ctx.new_constr(
-            crate::types::predef::path_tagged_template(),
-            vec![param_ty, output_ty],
-        );
-        tctx.set_unify_env(env);
-        if crate::types::ctype::unify(
-            ctx,
-            &mut tctx.unify_state,
-            crate::types::instance(ctx, typed_funct.exp_type),
-            tag_ty,
-        )
-        .is_err()
-        {
-            return Err(TypeCoreError::TaggedTemplateNonTag {
-                loc: typed_funct.exp_loc,
-                typ: typed_funct.exp_type,
-            });
-        }
-
-        let [
-            (ArgLabel::Nolabel, strings_idx),
-            (ArgLabel::Nolabel, values_idx),
-        ] = args
-        else {
-            unreachable!("the parser always emits two unlabeled tagged-template arguments")
-        };
-        let strings = tctx.arena.get_expr(*strings_idx);
-        let values = tctx.arena.get_expr(*values_idx);
-        let strings_ty = ctx.new_constr(
-            crate::types::predef::path_array(),
-            vec![env.type_string(ctx)],
-        );
-        let typed_strings = type_expect(tctx, env, strings, strings_ty, None)?;
-        let crate::parser::ast::ExpressionDesc::Pexp_array(interpolation_indices) =
-            &*values.pexp_desc
-        else {
-            unreachable!("the parser always emits a tagged-template interpolation array")
-        };
-        let mut typed_interpolations = Vec::with_capacity(interpolation_indices.len());
-        for interpolation_idx in interpolation_indices.iter() {
-            typed_interpolations.push(type_expect(
-                tctx,
-                env,
-                tctx.arena.get_expr(*interpolation_idx),
-                param_ty,
-                Some(TypeClashContext::TaggedTemplateValue),
-            )?);
-        }
-        let typed_values = Expression::new(
-            ExpressionDesc::Texp_array(typed_interpolations),
-            values.pexp_loc,
-            ctx.new_constr(crate::types::predef::path_array(), vec![param_ty]),
-            tctx.type_ctx.store_typed_env(env),
-            values.pexp_attributes.clone(),
-        );
-        let typed_args = vec![
-            ApplyArg {
-                label: crate::types::ArgLabel::Nolabel,
-                expression: Some(typed_strings),
-            },
-            ApplyArg {
-                label: crate::types::ArgLabel::Nolabel,
-                expression: Some(typed_values),
-            },
-        ];
-
-        ctx.end_def();
-        unify_expression_types(tctx, loc, ctx.new_var(None), typed_funct.exp_type, None)?;
-        rue_unify(tctx, loc, output_ty, expected_ty, context)?;
-        return Ok(Expression::new(
-            ExpressionDesc::Texp_apply {
-                funct: Box::new(typed_funct),
-                args: typed_args,
-                partial,
-                transformed_jsx,
-            },
-            loc,
-            output_ty,
-            tctx.type_ctx.store_typed_env(env),
-            attributes.to_vec().into(),
-        ));
-    }
-
     // Try unified ops dispatch first (matching OCaml's translate_unified_ops)
     if let Some(result) = translate_unified_ops(
         tctx,
@@ -11659,6 +11656,17 @@ fn collect_expression_ident_heads(exp: &Expression, ids: &mut Vec<Ident>) {
                 if let Some(expr) = &arg.expression {
                     collect_expression_ident_heads(expr, ids);
                 }
+            }
+        }
+        ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
+            collect_expression_ident_heads(tag, ids);
+            for value in values {
+                collect_expression_ident_heads(value, ids);
+            }
+        }
+        ExpressionDesc::Texp_template { values, .. } => {
+            for value in values {
+                collect_expression_ident_heads(value, ids);
             }
         }
         ExpressionDesc::Texp_match(scrutinee, cases, exn_cases, _) => {
@@ -12939,6 +12947,17 @@ fn collect_lident_idents_in_expression(
             collect_lident_idents_in_expression(arena, arena.get_expr(inner.funct), out);
             for (_label, arg) in &inner.args {
                 collect_lident_idents_in_expression(arena, arena.get_expr(*arg), out);
+            }
+        }
+        ED::Pexp_template(template) => {
+            for value in &template.values {
+                collect_lident_idents_in_expression(arena, arena.get_expr(*value), out);
+            }
+        }
+        ED::Pexp_tagged_template(template) => {
+            collect_lident_idents_in_expression(arena, arena.get_expr(template.tag), out);
+            for value in &template.values {
+                collect_lident_idents_in_expression(arena, arena.get_expr(*value), out);
             }
         }
         ED::Pexp_match(inner) | ED::Pexp_try(inner) => {
@@ -20387,6 +20406,7 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
     match &exp.exp_desc {
         ExpressionDesc::Texp_ident(_, _, _) => true,
         ExpressionDesc::Texp_constant(_) => true,
+        ExpressionDesc::Texp_template { values, .. } if values.is_empty() => true,
         ExpressionDesc::Texp_let(_, bindings, body) => {
             bindings
                 .iter()
@@ -20891,6 +20911,13 @@ pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> 
                         .is_some_and(|expr| typed_expression_uses_ident(expr, target))
                 })
         }
+        ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
+            typed_expression_uses_ident(tag, target)
+                || values.iter().any(|value| typed_expression_uses_ident(value, target))
+        }
+        ExpressionDesc::Texp_template { values, .. } => {
+            values.iter().any(|value| typed_expression_uses_ident(value, target))
+        }
         ExpressionDesc::Texp_match(scrutinee, value_cases, exn_cases, _) => {
             typed_expression_uses_ident(scrutinee, target)
                 || value_cases
@@ -21274,7 +21301,9 @@ fn rec_expression_class(expr: &Expression) -> RecExpressionClass {
         | ExpressionDesc::Texp_object_set(_, _, _)
         | ExpressionDesc::Texp_field(_, _, _)
         | ExpressionDesc::Texp_assert(_)
-        | ExpressionDesc::Texp_try(_, _) => RecExpressionClass::Dynamic,
+        | ExpressionDesc::Texp_try(_, _)
+        | ExpressionDesc::Texp_tagged_template { .. }
+        | ExpressionDesc::Texp_template { .. } => RecExpressionClass::Dynamic,
     }
 }
 
@@ -21509,6 +21538,20 @@ fn rec_expression(ctx: &TypeContext, env: &RecEnv, expr: &Expression) -> RecUse 
                 rec_use_inspect(rec_expression(ctx, env, funct)),
                 rec_use_inspect(args_use),
             )
+        }
+        ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
+            let values_use = values.iter().fold(RecUse::default(), |use_, value| {
+                rec_use_join(use_, rec_expression(ctx, env, value))
+            });
+            rec_use_join(
+                rec_use_inspect(rec_expression(ctx, env, tag)),
+                rec_use_inspect(values_use),
+            )
+        }
+        ExpressionDesc::Texp_template { values, .. } => {
+            rec_use_guard(values.iter().fold(RecUse::default(), |use_, value| {
+                rec_use_join(use_, rec_expression(ctx, env, value))
+            }))
         }
         ExpressionDesc::Texp_tuple(items) | ExpressionDesc::Texp_array(items) => {
             rec_use_guard(items.iter().fold(RecUse::default(), |use_, item| {
@@ -31923,8 +31966,8 @@ pub fn evaluate_type_builder(
         ED::Pexp_comptime_compile_error(msg_idx) => {
             let msg_expr = tctx.arena.get_expr(*msg_idx);
             let msg = if let ED::Pexp_constant(c) = &*msg_expr.pexp_desc {
-                if let crate::parser::ast::Constant::String(s, _) = &**c {
-                    s.to_string()
+                if let crate::parser::ast::Constant::String(s) = &**c {
+                    s.semantic().to_string()
                 } else {
                     "<non-string message>".to_string()
                 }
@@ -32283,8 +32326,8 @@ fn evaluate_comptime_string(
 
     match &*expr.pexp_desc {
         ED::Pexp_constant(c) => {
-            if let crate::parser::ast::Constant::String(s, _) = &**c {
-                Ok(s.to_string())
+            if let crate::parser::ast::Constant::String(s) = &**c {
+                Ok(s.semantic().to_string())
             } else {
                 Err(super::TypeCoreError::Other(
                     "expected string literal".into(),
@@ -32869,9 +32912,9 @@ mod tests {
 
     #[test]
     fn test_convert_constant_string() {
-        let cst = crate::parser::ast::Constant::String(Cow::Borrowed("hello"), None);
+        let cst = crate::parser::ast::Constant::string("hello");
         let result = convert_constant(&cst, LocIdx(0)).unwrap();
-        assert!(matches!(result, Constant::String(s, None) if s == "hello"));
+        assert!(matches!(result, Constant::String(s) if s == "hello"));
     }
 
     #[test]
@@ -33624,10 +33667,8 @@ fn untype_constant(constant: &Constant) -> ParsedConstant {
     // Untypeast.constant (untypeast.ml:19-27).
     match constant {
         Constant::Int(value) => ParsedConstant::Integer(value.to_string().into(), None),
-        Constant::Char(value) => ParsedConstant::Char(*value),
-        Constant::String(value, delimiter) => {
-            ParsedConstant::String(value.clone().into(), delimiter.clone().map(Into::into))
-        }
+        Constant::Char(value) => ParsedConstant::char(*value),
+        Constant::String(value) => ParsedConstant::string(value),
         Constant::Float(value) => ParsedConstant::Float(value.clone().into(), None),
         Constant::BigInt(positive, digits) => {
             let value = if *positive {

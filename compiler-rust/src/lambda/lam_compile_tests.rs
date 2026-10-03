@@ -11,7 +11,7 @@ pub(super) use crate::lambda::js_exp_make::{
 pub(super) use crate::lambda::lam_coercion::resolve_export_aliases;
 pub(super) use crate::lambda::lam_compile_external::external_module_import_attributes;
 pub(super) use crate::lambda::lam_constant::{
-    Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo, StringDelim,
+    Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo,
 };
 pub(super) use crate::lambda::lam_primitive::{
     Attr, Cst, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, JsRawInfo, Label,
@@ -639,7 +639,7 @@ fn compile_constant_named_constructor_uses_string_runtime_name() {
     assert!(matches!(
         compiled,
         Expression {
-            desc: ExpressionDesc::Str { ref txt, .. },
+            desc: ExpressionDesc::Str(ref txt),
             ..
         } if txt == "NoParam"
     ));
@@ -660,7 +660,7 @@ fn compile_constant_constructor_runtime_tag_uses_runtime_literal() {
     assert!(matches!(
         compiled,
         Expression {
-            desc: ExpressionDesc::Str { ref txt, .. },
+            desc: ExpressionDesc::Str(ref txt),
             ..
         } if txt == "three"
     ));
@@ -717,60 +717,34 @@ fn compile_constant_some_unit_boxes_undefined_none_encoding() {
 }
 
 #[test]
-fn compile_constant_preserves_marshaled_starj_strings() {
-    let compiled = LambdaCompiler::compile_constant(&Constant::String {
-        s: "\\\"".to_string(),
-        delim: Some(StringDelim::StarJ),
-    });
+fn compile_constant_escapes_semantic_strings() {
+    // lam_compile_const.ml: `Const_string s -> E.str s`, printed by
+    // `Js_dump_string.pp_string`.
+    let compiled = LambdaCompiler::compile_constant(&Constant::String("\\\"".to_string()));
 
     assert!(matches!(
         compiled,
         Expression {
-            desc: ExpressionDesc::Str {
-                delim: Delim::StarJ,
-                ref txt,
-            },
+            desc: ExpressionDesc::Str(ref txt),
             ..
         } if txt == "\\\""
     ));
-    assert_eq!(print_expression(&compiled), "\"\\\"\"");
+    assert_eq!(print_expression(&compiled), "\"\\\\\\\"\"");
 }
 
 #[test]
-fn compile_constant_quotes_noquote_delim_strings_like_ocaml() {
-    let compiled = LambdaCompiler::compile_constant(&Constant::String {
-        s: "{foo:true}".to_string(),
-        delim: Some(StringDelim::NoQuotes),
-    });
-
-    assert!(matches!(
-        compiled,
-        Expression {
-            desc: ExpressionDesc::Str {
-                delim: Delim::None,
-                ref txt,
-            },
-            ..
-        } if txt == "{foo:true}"
-    ));
-    assert_eq!(print_expression(&compiled), "\"{foo:true}\"");
-}
-
-#[test]
-fn switch_case_expr_preserves_marshaled_string_tags() {
+fn switch_case_expr_escapes_string_tags() {
+    // js_exp_make.ml `tag_type`: `String s -> str s`.
     let compiled = LambdaCompiler::switch_case_expr(&SwitchCaseTag::String("\\\"".to_string()));
 
     assert!(matches!(
         compiled,
         Expression {
-            desc: ExpressionDesc::Str {
-                delim: Delim::StarJ,
-                ref txt,
-            },
+            desc: ExpressionDesc::Str(ref txt),
             ..
         } if txt == "\\\""
     ));
-    assert_eq!(print_expression(&compiled), "\"\\\"\"");
+    assert_eq!(print_expression(&compiled), "\"\\\\\\\"\"");
 }
 
 #[test]
@@ -883,7 +857,7 @@ fn compile_create_extension_uses_primitive_exceptions_create() {
     assert!(matches!(
         args.as_slice(),
         [Expression {
-            desc: ExpressionDesc::Str { txt, .. },
+            desc: ExpressionDesc::Str(txt),
             ..
         }] if txt == "Local_exception_test.A"
     ));
@@ -935,10 +909,7 @@ fn compile_integer_inequality_preserves_typeof_string_comparison_like_ocaml() {
                 vec![Lambda::const_(Constant::int(3))],
                 Location::none(),
             ),
-            Lambda::const_(Constant::String {
-                s: "number".to_string(),
-                delim: Some(StringDelim::StarJ),
-            }),
+            Lambda::const_(Constant::String("number".to_string())),
         ],
         Location::none(),
     ));
@@ -1527,10 +1498,7 @@ fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_s
     let always_true = Ident::create_local("h");
     let also_true = Ident::create_local("j");
     let loc = Location::none();
-    let starj_empty = Lambda::const_(Constant::String {
-        s: "".to_string(),
-        delim: Some(StringDelim::StarJ),
-    });
+    let starj_empty = Lambda::const_(Constant::String("".to_string()));
 
     let outer_value = Lambda::let_(
         LetKind::Strict,
@@ -2329,10 +2297,7 @@ fn compile_deps_program_rebinds_marshaled_string_exports_after_surviving_functio
         Lambda::let_(
             LetKind::Strict,
             s.clone(),
-            Lambda::const_(Constant::String {
-                s: "😀".to_string(),
-                delim: Some(StringDelim::StarJ),
-            }),
+            Lambda::const_(Constant::String("😀".to_string())),
             Lambda::let_(
                 LetKind::Strict,
                 bar.clone(),
@@ -2485,7 +2450,7 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_across_later_
             ident,
             value:
                 Some(Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 }),
             property,
@@ -2593,7 +2558,7 @@ fn compile_deps_program_skips_unreachable_throwing_export_binding_declaration() 
         stmt,
         Statement {
             desc: StatementDesc::Throw(Expression {
-                desc: ExpressionDesc::Str { txt, .. },
+                desc: ExpressionDesc::Str(txt),
                 ..
             }),
             ..
@@ -2654,7 +2619,7 @@ fn compile_deps_program_skips_unreachable_nested_throwing_export_binding_declara
             stmt,
             Statement {
                 desc: StatementDesc::Throw(Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 }),
                 ..
@@ -2684,7 +2649,7 @@ fn compile_return_block_skips_unreachable_sequence_after_throw() {
         stmt,
         Statement {
             desc: StatementDesc::Throw(Expression {
-                desc: ExpressionDesc::Str { txt, .. },
+                desc: ExpressionDesc::Str(txt),
                 ..
             }),
             ..
@@ -5724,7 +5689,7 @@ pub(super) fn assert_typeof_check(
             assert!(matches!(
                 right.as_ref(),
                 Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 } if txt == expected_type
             ));
@@ -5795,7 +5760,7 @@ pub(super) fn assert_string_equality_check(
             assert!(matches!(
                 right.as_ref(),
                 Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 } if txt == expected_tag
             ));
@@ -8034,7 +7999,7 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
                         items.as_slice(),
                         [
                             Expression {
-                                desc: ExpressionDesc::Str { .. },
+                                desc: ExpressionDesc::Str(_),
                                 ..
                             },
                             Expression {
@@ -8330,16 +8295,18 @@ x: {
 }
 
 #[test]
-fn source_json_template_falls_back_to_regular_string_interpolation_like_ocaml() {
+fn source_json_template_with_interpolation_is_a_syntax_error_like_ocaml() {
     let source = r#"
 let x = json`some random ${"string"}`
 "#;
 
-    let output = compile_test_source_to_js(source, "json_template_test.res").unwrap();
+    let error = compile_test_source_to_js(source, "json_template_test.res")
+        .unwrap_err()
+        .to_string();
 
     assert!(
-        output.contains("let x = \"some random \" + \"string\";"),
-        "expected ordinary string interpolation fallback, got:\n{output}"
+        error.contains("`json` literals do not support interpolation"),
+        "expected json interpolation syntax error, got:\n{error}"
     );
 }
 
@@ -8846,7 +8813,7 @@ fn lowers_pnull_to_opt_non_inline_operand_to_primitive_option_from_null() {
     assert!(matches!(
         args.as_slice(),
         [Expression {
-            desc: ExpressionDesc::Str { txt, .. },
+            desc: ExpressionDesc::Str(txt),
             ..
         }] if txt == "value"
     ));
@@ -8879,7 +8846,7 @@ fn lowers_pnull_undefined_to_opt_non_inline_operand_to_primitive_option_from_nul
     assert!(matches!(
         args.as_slice(),
         [Expression {
-            desc: ExpressionDesc::Str { txt, .. },
+            desc: ExpressionDesc::Str(txt),
             ..
         }] if txt == "value"
     ));

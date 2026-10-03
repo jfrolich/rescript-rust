@@ -99,7 +99,9 @@ pub(crate) fn walk_expression<'a>(visitor: &mut impl Visitor<'a>, expression: &'
     match &expression.desc {
         ExpressionDesc::Var(_)
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Undefined { .. }
@@ -136,9 +138,14 @@ pub(crate) fn walk_expression<'a>(visitor: &mut impl Visitor<'a>, expression: &'
                 walk_expression(visitor, arg);
             }
         }
-        ExpressionDesc::TaggedTemplate(func, strings, values) => {
+        ExpressionDesc::TaggedTemplate(func, _, values) => {
             walk_expression(visitor, func);
-            for item in strings.iter().chain(values.iter()) {
+            for item in values {
+                walk_expression(visitor, item);
+            }
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
+            for item in values {
                 walk_expression(visitor, item);
             }
         }

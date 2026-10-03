@@ -80,7 +80,6 @@ use crate::ident::Ident;
 use crate::location::Location;
 pub use lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 pub use lam_constant::Constant;
-use lam_constant::StringDelim;
 pub use lam_primitive::Primitive;
 pub use lam_tag_info::TagInfo;
 
@@ -451,9 +450,10 @@ impl Lambda {
                     Err(_) => default(primitive, args, loc),
                 },
                 // lam.ml:491-492 — Pstringlength on bare string literal.
-                (Primitive::Pstringlength, Constant::String { s, delim: None }) => {
-                    Lambda::Lconst(Constant::int(s.len() as i32))
-                }
+                (Primitive::Pstringlength, Constant::String(s)) => Lambda::Lconst(Constant::int(
+                    crate::string_literal::utf16_length(s).expect("String_literal.utf16_length: Invalid_utf8")
+                        as i32,
+                )),
                 // lam.ml:496-497
                 (Primitive::Pnot, Constant::JsTrue) => Lambda::false_(),
                 (Primitive::Pnot, Constant::JsFalse) => Lambda::true_(),
@@ -562,26 +562,17 @@ impl Lambda {
                 // lam.ml:539-542
                 (
                     Primitive::Pstringadd,
-                    Constant::String {
-                        s: a_s,
-                        delim: None,
-                    },
-                    Constant::String {
-                        s: b_s,
-                        delim: None,
-                    },
-                ) => Lambda::Lconst(Constant::String {
-                    s: format!("{}{}", a_s, b_s),
-                    delim: None,
-                }),
+                    Constant::String(a_s),
+                    Constant::String(b_s),
+                ) => Lambda::Lconst(Constant::String(format!("{}{}", a_s, b_s))),
                 // lam.ml:543-547 — Pstringrefs / Pstringrefu on (String, Int).
                 (
                     Primitive::Pstringrefs | Primitive::Pstringrefu,
-                    Constant::String { s, delim: None },
+                    Constant::String(s),
                     Constant::Int { i: idx, .. },
-                ) => match s.as_bytes().get(*idx as usize) {
-                    Some(byte) => Lambda::Lconst(Constant::Char(*byte as i32)),
-                    None => default(primitive, args, loc),
+                ) => match crate::string_literal::code_point_at_utf16_index(s, *idx as i64) {
+                    Ok(Some(codepoint)) => Lambda::Lconst(Constant::Char(codepoint as i32)),
+                    _ => default(primitive, args, loc),
                 },
                 _ => default(primitive, args, loc),
             },
@@ -669,10 +660,7 @@ impl Lambda {
 
         match scrutinee {
             Lambda::Lconst(
-                ref constant @ Constant::String {
-                    ref s,
-                    delim: None | Some(StringDelim::NoQuotes),
-                },
+                ref constant @ Constant::String(ref s),
             ) => matched(s).unwrap_or_else(|| {
                 Lambda::LstringSwitch(Box::new(Lambda::Lconst(constant.clone())), cases, default)
             }),

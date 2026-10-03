@@ -1884,21 +1884,9 @@ fn print_string_literal_doc(s: &str) -> Doc {
 }
 
 fn print_inline_const_doc(c: &crate::types::external_ffi_types::InlineConst) -> Doc {
-    use crate::types::external_ffi_types::{Delim, InlineConst};
+    use crate::types::external_ffi_types::InlineConst;
     match c {
-        // DStarJ is the processed form of an ordinary double-quoted string
-        InlineConst::ConstStr {
-            s,
-            delim: None | Some(Delim::DNone) | Some(Delim::DStarJ),
-        } => print_string_literal_doc(s),
-        InlineConst::ConstStr {
-            s,
-            delim: Some(Delim::DBackQuotes),
-        } => Doc::text(format!("`{s}`")),
-        InlineConst::ConstStr {
-            s,
-            delim: Some(Delim::DNoQuotes),
-        } => Doc::text(format!("json`{s}`")),
+        InlineConst::ConstString(s) => print_string_literal_doc(s),
         InlineConst::ConstBool(b) => Doc::text(if *b { "true" } else { "false" }),
         InlineConst::ConstInt(i) => Doc::text(i.to_string()),
         InlineConst::ConstBigint { negative, digits } => {

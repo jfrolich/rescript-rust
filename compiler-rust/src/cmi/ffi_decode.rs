@@ -8,7 +8,7 @@
 use super::marshal_reader::OcamlValue;
 use crate::types::decl::PrimKind;
 use crate::types::external_ffi_types::{
-    Attr, Cst, DeclKind, Delim, ExternalDecl, ExternalFfi, ExternalModuleName, InlineConst, Label,
+    Attr, Cst, DeclKind, ExternalDecl, ExternalFfi, ExternalModuleName, InlineConst, Label,
     LabelNoname, ModuleBindName, ModuleSource, ObjParam, Param, ReturnWrapper,
 };
 
@@ -50,16 +50,6 @@ fn string_pairs(value: &OcamlValue) -> Option<Vec<(String, String)>> {
         .collect()
 }
 
-fn delim(value: &OcamlValue) -> Option<Delim> {
-    Some(match int(value)? {
-        0 => Delim::DNone,
-        1 => Delim::DStarJ,
-        2 => Delim::DNoQuotes,
-        3 => Delim::DBackQuotes,
-        _ => return None,
-    })
-}
-
 fn attr(value: &OcamlValue) -> Option<Attr> {
     match value {
         OcamlValue::Int(0) => Some(Attr::ExternUnit),
@@ -87,7 +77,8 @@ fn attr(value: &OcamlValue) -> Option<Attr> {
             )),
             (3, [cst]) => Some(Attr::ArgCst(match cst.as_block_opt()? {
                 (0, [i]) => Cst::ArgIntLit(int(i)?),
-                (1, [s, d]) => Cst::ArgStringLit(string(s)?, delim(d)?),
+                (1, [s]) => Cst::ArgStringLit(string(s)?),
+                (2, [s]) => Cst::ArgJsonLit(string(s)?),
                 _ => return None,
             })),
             _ => None,
@@ -235,13 +226,7 @@ pub fn external_ffi(value: &OcamlValue) -> Option<ExternalFfi> {
 /// `External_ffi_types.inline_const`.
 pub fn inline_const(value: &OcamlValue) -> Option<InlineConst> {
     match value.as_block_opt()? {
-        (0, [s, d]) => Some(InlineConst::ConstStr {
-            s: string(s)?,
-            delim: match d.as_option() {
-                None => None,
-                Some(d) => Some(delim(d)?),
-            },
-        }),
+        (0, [s]) => Some(InlineConst::ConstString(string(s)?)),
         (1, [b]) => Some(InlineConst::ConstBool(int(b)? != 0)),
         (2, [i]) => Some(InlineConst::ConstInt(int(i)? as i32)),
         (3, [negative, digits]) => Some(InlineConst::ConstBigint {

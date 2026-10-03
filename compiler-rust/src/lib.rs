@@ -68,6 +68,8 @@ pub mod process_cwd;
 pub mod raw_lambda;
 /// Source text decoding helpers.
 pub mod source_text;
+pub mod string_literal;
+pub mod ast_payload;
 /// Optional aggregate compiler phase timings.
 pub mod timing;
 pub mod types;

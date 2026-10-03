@@ -42,6 +42,8 @@ pub(crate) fn append_refine_let(
     fn safe_to_alias(store: &IndexedLambda, node: NodeId) -> bool {
         match store.view(node) {
             NodeView::Var(_) | NodeView::Const(_) => true,
+            // lam_util.ml: a template without interpolations is a literal.
+            NodeView::Prim(Primitive::Ptemplate(segments), [], _) if segments.len() == 1 => true,
             NodeView::Prim(
                 Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { .. }),
                 [base],
@@ -181,7 +183,7 @@ fn append_if(
             | Constant::ModuleAlias
             | Constant::JsUndefined { .. } => Some(false),
             Constant::JsTrue
-            | Constant::String { .. }
+            | Constant::String(_)
             | Constant::ImmString(_)
             | Constant::Pointer(_)
             | Constant::Float(_)
@@ -198,7 +200,7 @@ fn append_if(
                         | Constant::ModuleAlias
                         | Constant::JsUndefined { .. } => Some(false),
                         Constant::JsTrue
-                        | Constant::String { .. }
+                        | Constant::String(_)
                         | Constant::ImmString(_)
                         | Constant::Pointer(_)
                         | Constant::Float(_)
@@ -593,16 +595,10 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
         NodeSnapshot::StringSwitch(scrutinee, cases, default) => {
             let known_constant = matches!(
                 store.view(scrutinee),
-                NodeView::Const(Constant::String {
-                    delim: None | Some(crate::lambda::lam_constant::StringDelim::NoQuotes),
-                    ..
-                }) | NodeView::Const(Constant::ImmString(_))
+                NodeView::Const(Constant::String(_)) | NodeView::Const(Constant::ImmString(_))
             );
             let selected = match store.view(scrutinee) {
-                NodeView::Const(Constant::String {
-                    s,
-                    delim: None | Some(crate::lambda::lam_constant::StringDelim::NoQuotes),
-                })
+                NodeView::Const(Constant::String(s))
                 | NodeView::Const(Constant::ImmString(s)) => cases
                     .iter()
                     .find(|(key, _)| key == s)

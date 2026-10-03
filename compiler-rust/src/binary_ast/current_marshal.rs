@@ -296,7 +296,7 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     let eq_arg1_expr = arena.get_expr(eq_args[1].1);
     matches!(
         &*eq_arg1_expr.pexp_desc,
-        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(s, None) if s == "undefined")
+        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(s) if s.semantic() == "undefined")
     )
 }
 
@@ -319,7 +319,7 @@ fn is_external_raw_expansion_expr(expr: &Expression, w: &MarshalWriter<'_>) -> b
     let arg_expr = w.get_arena().get_expr(args[0].1);
     matches!(
         &*arg_expr.pexp_desc,
-        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(_, Some(delim)) if delim.is_empty())
+        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::RawSource(_))
     )
 }
 
@@ -815,6 +815,22 @@ impl Marshal for Arity {
 
 // ========== Constant ==========
 
+/// `String_literal.payload`: `Valid {source; semantic}` is tag 0, and
+/// `Invalid_source of string` is tag 1.
+fn marshal_string_literal(payload: &crate::string_literal::StringLiteral, w: &mut MarshalWriter<'_>) {
+    match payload {
+        crate::string_literal::StringLiteral::Valid { source, semantic } => {
+            w.write_block_header(0, 2);
+            w.write_str(source);
+            w.write_str(semantic);
+        }
+        crate::string_literal::StringLiteral::InvalidSource(source) => {
+            w.write_block_header(1, 1);
+            w.write_str(source);
+        }
+    }
+}
+
 impl Marshal for Constant {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
@@ -823,39 +839,27 @@ impl Marshal for Constant {
                 w.write_str(s);
                 suffix.marshal(w);
             }
-            Constant::Char(c) => {
-                w.write_block_header(1, 1);
-                w.write_int(*c as i64);
+            Constant::Char { source, semantic } => {
+                // Pconst_char {source; semantic}: inline record, tag 1.
+                w.write_block_header(1, 2);
+                w.write_str(source);
+                w.write_int(*semantic as i64);
             }
-            Constant::String(s, delim) => {
-                w.write_block_header(2, 2);
-                if w.debug_const_share
-                    && matches!(s.as_ref(), "None" | "Mic" | "Camera")
-                {
-                    eprintln!(
-                        "CONST {} delim={:?} obj={} ptr={:p} hit={:?}",
-                        s,
-                        delim,
-                        w.obj_counter(),
-                        s.as_ptr(),
-                        w.get_arena().constant_string_str_idx_by_identity(s)
-                    );
-                }
-                if delim.is_none() && s == "undefined" && w.in_external_ext() {
-                    let undefined_idx = w.get_arena().ppx_undefined_str();
-                    w.write_str_idx(undefined_idx);
-                } else if let Some(str_idx) = w.get_arena().constant_string_str_idx_by_identity(s) {
-                    w.write_str_idx(str_idx);
-                } else if w.get_arena().is_shareable_literal(s) {
-                    w.write_str_value_shared(s);
-                } else {
-                    w.write_str(s);
-                }
-                // Use content-based sharing for string delimiters like Some("js")
-                w.write_option_string(delim);
+            Constant::String(payload) => {
+                // Pconst_string of String_literal.payload, tag 2.
+                w.write_block_header(2, 1);
+                marshal_string_literal(payload, w);
+            }
+            Constant::Json(source) => {
+                w.write_block_header(3, 1);
+                w.write_str(source);
+            }
+            Constant::RawSource(source) => {
+                w.write_block_header(4, 1);
+                w.write_str(source);
             }
             Constant::Float(s, suffix) => {
-                w.write_block_header(3, 2);
+                w.write_block_header(5, 2);
                 w.write_str(s);
                 suffix.marshal(w);
             }
@@ -1331,7 +1335,6 @@ impl Marshal for Expression {
         // sharing of singleton `(mknoloc name, PStr [])` module-level constants.
         //
         // Early-return expression types (preserve attribute tuple pointers):
-        // - Pexp_constant(Box::new(Pconst_string(_, Some _))): template literals
         // - Pexp_constant(Box::new(Pconst_integer(_, Some _))): int suffix stripping
         // - Pexp_extension: unknown extensions return unchanged
         // - Pexp_newtype: preserves attrs in record-with update
@@ -1341,7 +1344,7 @@ impl Marshal for Expression {
         // the default mapper which creates fresh tuples.
         let share_attrs = matches!(
             &*self.pexp_desc,
-            ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(_, Some(_)) | Constant::Integer(_, Some(_)))
+            ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::Integer(_, Some(_)))
         ) || matches!(
             &*self.pexp_desc,
             ExpressionDesc::Pexp_extension(_) | ExpressionDesc::Pexp_newtype(_)
@@ -1424,6 +1427,8 @@ impl Marshal for ExpressionDesc {
         // Pexp_jsx_element = tag 30
         // Pexp_for_of = tag 31
         // Pexp_for_await_of = tag 32
+        // Pexp_template = tag 33
+        // Pexp_tagged_template = tag 34
         // Constant constructors (no payload):
         // Pexp_break = int 0
         // Pexp_continue = int 1
@@ -1693,6 +1698,17 @@ impl Marshal for ExpressionDesc {
                 pat.marshal(w);
                 iterable.marshal(w);
                 body.marshal(w);
+            }
+            ExpressionDesc::Pexp_template(template) => {
+                w.write_block_header(33, 2);
+                template.source_segments.marshal(w);
+                template.values.marshal(w);
+            }
+            ExpressionDesc::Pexp_tagged_template(template) => {
+                w.write_block_header(34, 3);
+                template.tag.marshal(w);
+                template.raw_sources.marshal(w);
+                template.values.marshal(w);
             }
             ExpressionDesc::Pexp_inline_for(_)
             | ExpressionDesc::Pexp_comptime_typeinfo(_)

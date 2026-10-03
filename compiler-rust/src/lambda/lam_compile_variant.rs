@@ -17,7 +17,7 @@ use super::lam_compile::{
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, Number, UsedStats};
 use crate::js_ir::{
-    BinOp, Block, CallInfo, CaseClause, Delim, Expression, ExpressionDesc, Statement,
+    BinOp, Block, CallInfo, CaseClause, Expression, ExpressionDesc, Statement,
     StatementDesc, StringClause, VIdent, VariableDeclaration, expression_has_no_side_effects,
     ocaml_eq_expression,
 };
@@ -1727,10 +1727,7 @@ impl LambdaCompiler {
 
     pub(crate) fn switch_case_expr(tag: &SwitchCaseTag) -> Expression {
         match tag {
-            SwitchCaseTag::String(value) => Expression::new(ExpressionDesc::Str {
-                delim: Delim::StarJ,
-                txt: value.clone(),
-            }),
+            SwitchCaseTag::String(value) => Expression::new(ExpressionDesc::Str(value.clone())),
             SwitchCaseTag::Int(value) => match i32::try_from(*value) {
                 Ok(value) => Expression::number(Number::int(value)),
                 Err(_) => Expression::number(Number::float(value.to_string())),

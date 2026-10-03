@@ -265,7 +265,7 @@ fn expr_constant(constant: Constant, arena: &mut ParseArena) -> Expression {
 
 fn expr_constant_literal(arena: &mut ParseArena, value: &str) -> Expression {
     arena.register_shareable_literal(value);
-    expr_constant(Constant::String(Cow::Owned(value.to_string()), None), arena)
+    expr_constant(Constant::string(value), arena)
 }
 
 fn expr_apply(
@@ -839,7 +839,7 @@ fn get_param_names(
 fn get_string_from_expression(expr: &Expression) -> Result<Option<Constant>, String> {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_constant(constant) => match &**constant {
-            Constant::String(_, _) => Ok(Some((**constant).clone())),
+            Constant::String(_) => Ok(Some((**constant).clone())),
             Constant::Float(_, _) => Ok(None),
             _ => Err("cannot find a name??".to_string()),
         },
@@ -850,7 +850,7 @@ fn get_string_from_expression(expr: &Expression) -> Result<Option<Constant>, Str
 fn get_float_from_expression(expr: &Expression) -> Result<Option<Constant>, String> {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_constant(constant) => match &**constant {
-            Constant::String(_, _) => Ok(None),
+            Constant::String(_) => Ok(None),
             Constant::Float(_, _) => Ok(Some((**constant).clone())),
             _ => Err("cannot find a name??".to_string()),
         },
@@ -861,7 +861,7 @@ fn get_float_from_expression(expr: &Expression) -> Result<Option<Constant>, Stri
 fn index_const(i: usize, arena: &mut ParseArena) -> Expression {
     let value = format!("[{}]", i);
     expr_constant(
-        Constant::String(Cow::Owned(value), Some(Cow::Borrowed("*j"))),
+        Constant::string(&value),
         arena,
     )
 }
@@ -1754,7 +1754,7 @@ fn records_parse_decl(
             arena.register_shareable_literal(name.as_ref());
             arena.register_constant_string_identity(name.as_ref(), name_idx);
             (
-                expr_constant(Constant::String(name, Some(Cow::Borrowed("*j"))), arena),
+                expr_constant(Constant::string(&name), arena),
                 Some(name_idx),
             )
         }
@@ -1807,9 +1807,9 @@ fn clone_record_key(field: &ParsedRecordField, arena: &mut ParseArena) -> Expres
     let key = field.key.clone();
     if let (Some(identity), ExpressionDesc::Pexp_constant(constant)) =
         (field.key_identity, &*key.pexp_desc)
-        && let Constant::String(value, _) = &**constant
+        && let Constant::String(value) = &**constant
     {
-        arena.register_constant_string_identity(value, identity);
+        arena.register_constant_string_identity(value.semantic(), identity);
     }
     key
 }
@@ -2050,7 +2050,7 @@ fn records_generate_flat_decoder_expr(
                     )
                 } else {
                     let missing =
-                        expr_constant(Constant::String(Cow::Borrowed(" missing"), None), arena);
+                        expr_constant(Constant::string(" missing"), arena);
                     let key = clone_record_key(field, arena);
                     let msg = expr_concat(arena, key, missing);
                     let v_loc = arena.dummy_loc();
@@ -2072,7 +2072,7 @@ fn records_generate_flat_decoder_expr(
             }
             None => {
                 let missing =
-                    expr_constant(Constant::String(Cow::Borrowed(" missing"), None), arena);
+                    expr_constant(Constant::string(" missing"), arena);
                 let key = clone_record_key(field, arena);
                 let msg = expr_concat(arena, key, missing);
                 let v_loc = arena.dummy_loc();
@@ -2427,7 +2427,7 @@ fn variants_prefix_inline_payload_error(decoded: Expression, arena: &mut ParseAr
     );
     arena.register_shareable_literal("[1]");
     let index = expr_constant(
-        Constant::String(Cow::Borrowed("[1]"), Some(Cow::Borrowed("*j"))),
+        Constant::string("[1]"),
         arena,
     );
     let path = expr_concat(arena, index, previous_path);
@@ -2477,7 +2477,7 @@ fn variants_parse_decl(
             let name_str = extend_cow_lifetime(Cow::Borrowed(arena.get_string(name_literal)));
             arena.register_constant_string_identity(name_str.as_ref(), name_literal);
             (
-                expr_constant(Constant::String(name_str, Some(Cow::Borrowed("*j"))), arena),
+                expr_constant(Constant::string(&name_str), arena),
                 false,
             )
         }
@@ -2504,7 +2504,7 @@ fn variants_generate_encoder_case(
 
     let json_expr = match &*decl.alias.pexp_desc {
         ExpressionDesc::Pexp_constant(constant) => match &**constant {
-            Constant::String(_, _) => expr_construct_with_loc(
+            Constant::String(_) => expr_construct_with_loc(
                 lident_path_static(arena, &["JSON", "String"]),
                 Some(decl.alias.clone()),
                 arena.dummy_loc(),
@@ -2766,9 +2766,7 @@ fn variants_generate_decoder_case(
             let json_str_pat = pat_construct_with_loc(
                 lident_path_static(arena, &["JSON", "String"]),
                 Some(Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::String(
-                        name_const, None,
-                    )))),
+                    ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::string(&name_const)))),
                     ppat_loc: arena.dummy_loc(),
                     ppat_attributes: Attributes::new(),
                 }),
@@ -2848,9 +2846,7 @@ fn variants_generate_decoder_case(
             let json_str_pat = pat_construct_with_loc(
                 lident_path_static(arena, &["JSON", "String"]),
                 Some(Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::String(
-                        name_const, None,
-                    )))),
+                    ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::string(&name_const)))),
                     ppat_loc: arena.dummy_loc(),
                     ppat_attributes: Attributes::new(),
                 }),
@@ -3226,7 +3222,7 @@ fn polyvars_parse_decl(
             Ok(Some(attr)) => (get_expression_from_payload(attr, arena)?, true),
             Ok(None) => (
                 expr_constant(
-                    Constant::String(name.clone(), Some(Cow::Borrowed("*j"))),
+                    Constant::string(&name),
                     arena,
                 ),
                 false,
@@ -3257,7 +3253,7 @@ fn polyvars_generate_encoder_case(
         RowField::Rtag(_, _, _, core_types) => {
             let json_expr = match &*row.alias.pexp_desc {
                 ExpressionDesc::Pexp_constant(constant) => match &**constant {
-                    Constant::String(_, _) => expr_construct_with_loc(
+                    Constant::String(_) => expr_construct_with_loc(
                         lident_path_static(arena, &["JSON", "String"]),
                         Some(row.alias.clone()),
                         arena.dummy_loc(),
@@ -3465,10 +3461,7 @@ fn polyvars_generate_decoder_case(
             let json_str_pat = pat_construct_with_loc(
                 lident_path_static(arena, &["JSON", "String"]),
                 Some(Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::String(
-                        tag_name.clone(),
-                        None,
-                    )))),
+                    ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::string(&tag_name)))),
                     ppat_loc: arena.dummy_loc(),
                     ppat_attributes: Attributes::new(),
                 }),
@@ -4621,6 +4614,23 @@ impl<'a> LocCloner<'a> {
             ExpressionDesc::Pexp_ident(lid) => self.located(lid),
             ExpressionDesc::Pexp_constant(_) => {}
             ExpressionDesc::Pexp_break | ExpressionDesc::Pexp_continue => {}
+            ExpressionDesc::Pexp_template(template) => {
+                for segment in &mut template.source_segments {
+                    self.located(segment);
+                }
+                for value in &mut template.values {
+                    self.expression_idx(value);
+                }
+            }
+            ExpressionDesc::Pexp_tagged_template(template) => {
+                self.expression_idx(&mut template.tag);
+                for segment in &mut template.raw_sources {
+                    self.located(segment);
+                }
+                for value in &mut template.values {
+                    self.expression_idx(value);
+                }
+            }
             ExpressionDesc::Pexp_let(inner) => {
                 let (_, ref mut bindings, ref mut body) = **inner;
                 for binding in bindings.iter_mut() {

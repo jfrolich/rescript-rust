@@ -6,7 +6,7 @@
 
 use super::shared_types::{Declared, Loc, Located, ModulePath, ModulePathList};
 use crate::parse_arena::{ExprIdx, ParseArena};
-use crate::parser::ast::{Attribute, Constant, ExpressionDesc, Payload, StructureItemDesc};
+use crate::parser::ast::{Attribute, ExpressionDesc, Payload, StructureItemDesc};
 use crate::parser::longident::Longident;
 use crate::types::decl;
 
@@ -28,14 +28,10 @@ fn single_eval(payload: &Payload) -> Option<ExprIdx> {
     }
 }
 
+/// `Ast_payload.semantic_string_of_expression`. OCaml raises on an invalid
+/// escape; the compiler has already rejected such a file.
 fn string_constant(arena: &ParseArena, e: ExprIdx) -> Option<String> {
-    match &*arena.get_expr(e).pexp_desc {
-        ExpressionDesc::Pexp_constant(c) => match &**c {
-            Constant::String(s, _) => Some(s.to_string()),
-            _ => None,
-        },
-        _ => None,
-    }
+    crate::ast_payload::semantic_string_of_expression(arena, arena.get_expr(e)).ok().flatten()
 }
 
 /// `Utils.flatten_long_ident` without its options.
@@ -62,7 +58,7 @@ pub fn find_doc_attribute(attrs: Attrs<'_>) -> Option<String> {
             if !is_doc_name(arena.get_string(name.txt)) {
                 return None;
             }
-            single_eval(payload).and_then(|e| string_constant(arena, e))
+            crate::ast_payload::semantic_string_of_payload(arena, payload).ok().flatten()
         }),
         Attrs::Decl(attrs) => attrs.iter().find_map(|attr| {
             if !is_doc_name(&attr.attr_name.txt) {
@@ -86,8 +82,10 @@ pub fn find_deprecated_attribute(attrs: Attrs<'_>) -> Option<String> {
             let Some(e) = single_eval(payload) else {
                 return Some(String::new());
             };
+            if let Some(msg) = string_constant(arena, e) {
+                return Some(msg);
+            }
             match &*arena.get_expr(e).pexp_desc {
-                ExpressionDesc::Pexp_constant(_) => string_constant(arena, e),
                 ExpressionDesc::Pexp_record(record) => {
                     let mut reason = String::new();
                     for field in &record.0 {

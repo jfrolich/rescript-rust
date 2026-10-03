@@ -363,32 +363,6 @@ fn collect_list_elements<'a>(
     }
 }
 
-fn escape_string(s: &str) -> String {
-    // The source was read as Latin-1 (each byte became a char with code point 0-255).
-    // We need to escape characters with code points > 127 using decimal escape sequences
-    // like \226\156\133, matching OCaml's default string escaping behavior.
-    // We iterate over CHARACTERS (not bytes) since each char IS the original byte value.
-    let mut result = String::new();
-    for ch in s.chars() {
-        let code = ch as u32;
-        match code {
-            0x0A => result.push_str("\\n"),  // newline
-            0x0D => result.push_str("\\r"),  // carriage return
-            0x09 => result.push_str("\\t"),  // tab
-            0x5C => result.push_str("\\\\"), // backslash
-            0x22 => result.push_str("\\\""), // double quote
-            0x20..=0x7E => result.push(ch),  // Printable ASCII
-            _ => {
-                // Non-ASCII or non-printable: use decimal escape
-                // Code point IS the original byte value (0-255) due to Latin-1 reading
-                result.push('\\');
-                result.push_str(&code.to_string());
-            }
-        }
-    }
-    result
-}
-
 // ============================================================================
 // Public API
 // ============================================================================
@@ -1911,10 +1885,12 @@ fn print_expression_inner<W: Write>(
             f.close_box();
         }
         ExpressionDesc::Pexp_field(obj, field) => {
-            // OCaml: (simple_expr ctxt) for the object
+            // OCaml expression2: pp f "@[<hov2>%a.%a@]" (simple_expr ctxt) e longident_loc li
+            f.open_box(BoxKind::HOV, 2);
             print_expression_simple_ctx(f, arena, arena.get_expr(*obj), ctx);
             f.string(".");
             print_longident_idx(f, arena, field.txt);
+            f.close_box();
         }
         ExpressionDesc::Pexp_setfield(inner) => {
             let (ref obj, ref field, ref value) = **inner;
@@ -2270,6 +2246,18 @@ fn print_expression_inner<W: Write>(
             print_payload(f, arena, payload);
             f.string("]");
             f.close_box();
+        }
+        ExpressionDesc::Pexp_template(template) => {
+            // OCaml pprintast: pp f "`%a`" parts, each part "%s${%a}%a".
+            f.string("`");
+            print_template_parts(f, arena, &template.source_segments, &template.values, ctx);
+            f.string("`");
+        }
+        ExpressionDesc::Pexp_tagged_template(template) => {
+            print_expression_simple_ctx(f, arena, arena.get_expr(template.tag), ctx);
+            f.string("`");
+            print_template_parts(f, arena, &template.raw_sources, &template.values, ctx);
+            f.string("`");
         }
         ExpressionDesc::Pexp_await(e) => {
             // OCaml: @[<hov2>await@ %a@]
@@ -3252,6 +3240,25 @@ fn print_arg_with_label_ctx<W: Write>(
 // Constants
 // ============================================================================
 
+/// The `parts` printer of OCaml pprintast's template cases.
+fn print_template_parts<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    sources: &[StringLoc],
+    values: &[ExprIdx],
+    ctx: PrintCtx,
+) {
+    assert_eq!(sources.len(), values.len() + 1);
+    for (index, source) in sources.iter().enumerate() {
+        f.string(arena.get_string(source.txt));
+        if let Some(value) = values.get(index) {
+            f.string("${");
+            print_expression_with_ctx(f, arena, arena.get_expr(*value), ctx);
+            f.string("}");
+        }
+    }
+}
+
 fn print_constant<W: Write>(f: &mut Formatter<W>, c: &Constant) {
     match c {
         Constant::Integer(s, suffix) => {
@@ -3260,44 +3267,25 @@ fn print_constant<W: Write>(f: &mut Formatter<W>, c: &Constant) {
                 f.string(&c.to_string());
             }
         }
-        Constant::Char(i) => {
-            let escaped = match *i {
-                0x5C => "\\\\".to_string(),
-                0x27 => "\\'".to_string(),
-                0x0A => "\\n".to_string(),
-                0x09 => "\\t".to_string(),
-                0x08 => "\\b".to_string(),
-                0x0D => "\\r".to_string(),
-                n if (0x20..=0x7E).contains(&n) => {
-                    if let Some(c) = char::from_u32(n as u32) {
-                        c.to_string()
-                    } else {
-                        format!("\\{}", n)
-                    }
-                }
-                n => format!("\\{}", n),
-            };
+        Constant::Char { source, .. } => {
             f.string("'");
-            f.string(&escaped);
+            f.string(source);
             f.string("'");
         }
-        Constant::String(s, delim) => {
-            // Match OCaml's pprintast.ml:
-            // - None -> %S (quoted string with escaping)
-            // - Some(delim) -> {delim|...|delim} (delimited string)
-            if let Some(d) = delim {
-                f.string("{");
-                f.string(d);
-                f.string("|");
-                f.string(s);
-                f.string("|");
-                f.string(d);
-                f.string("}");
-            } else {
-                f.string("\"");
-                f.string(&escape_string(s));
-                f.string("\"");
-            }
+        Constant::String(payload) => {
+            f.string("{js|");
+            f.string(payload.source());
+            f.string("|js}");
+        }
+        Constant::Json(source) => {
+            f.string("{json|");
+            f.string(source);
+            f.string("|json}");
+        }
+        Constant::RawSource(source) => {
+            f.string("{js|");
+            f.string(source);
+            f.string("|js}");
         }
         Constant::Float(s, suffix) => {
             f.string(s);

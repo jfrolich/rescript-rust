@@ -18,7 +18,7 @@ use crate::js_ir::{Kind, ModuleId};
 use crate::lambda::Constant;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_constant::{
-    ConstructorRuntimeTag, ConstructorTag as PointerConstructorTag, PointerInfo, StringDelim,
+    ConstructorRuntimeTag, ConstructorTag as PointerConstructorTag, PointerInfo,
 };
 use crate::lambda::lam_primitive::{
     ExternalModuleName, ImportSource, Mutable,
@@ -531,7 +531,7 @@ fn config_payload_flags_contains(
                 matches!(
                     &*elem.pexp_desc,
                     PExpressionDesc::Pexp_constant(c)
-                        if matches!(&**c, PConstant::String(s, _) if s.as_ref() == value)
+                        if matches!(&**c, PConstant::String(s) if s.semantic() == value)
                 )
             })
         })
@@ -757,7 +757,7 @@ fn collect_string_pattern_arms(pat: &Pattern) -> Option<Vec<(String, Vec<Ident>)
                 collect_rec(left, aliases.clone(), out)?;
                 collect_rec(right, aliases, out)
             }
-            PatternDesc::Tpat_constant(TConstant::String(s, _)) => {
+            PatternDesc::Tpat_constant(TConstant::String(s)) => {
                 out.push((s.clone(), aliases));
                 Some(())
             }
@@ -1895,28 +1895,15 @@ impl<'a> RawLambdaConverter<'a> {
         attrs: &crate::parser::ast::Attributes,
         arena: &ParseArena,
     ) -> Option<String> {
-        use crate::parser::ast::{Constant, ExpressionDesc, Payload, StructureItemDesc};
-
+        // translcore.ml `extract_directive_for_fn`: the first `directive`
+        // attribute whose payload is a string, read by
+        // `Ast_payload.semantic_string_of_payload`.
         for (located_name, payload) in attrs.iter() {
             if arena.get_string(located_name.txt) != "directive" {
                 continue;
             }
-            let Payload::PStr(items) = payload else {
-                continue;
-            };
-            let [item] = items.as_slice() else {
-                continue;
-            };
-            let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc else {
-                continue;
-            };
-            let (expr_idx, _attrs) = &**eval_inner;
-            let expr = arena.get_expr(*expr_idx);
-            let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc else {
-                continue;
-            };
-            if let Constant::String(s, _) = &**c {
-                return Some(s.to_string());
+            if let Some(directive) = crate::ast_payload::semantic_string_of_payload(arena, payload).ok().flatten() {
+                return Some(directive);
             }
         }
         None
@@ -2634,7 +2621,7 @@ impl<'a> RawLambdaConverter<'a> {
         Constant::Block {
             tag_info: Box::new(TagInfo::Tuple),
             elements: vec![
-                Constant::string_with_delim(self.basename_for_loc(loc), StringDelim::Plain),
+                Constant::const_string(&self.basename_for_loc(loc)),
                 Constant::int(loc.loc_start.line),
                 Constant::int(loc.loc_start.column()),
             ],
@@ -3308,21 +3295,11 @@ impl<'a> RawLambdaConverter<'a> {
         primitive
     }
 
-    /// `Translcore.lambda_of_inline_const`, composed with the Lambda-to-Lam
-    /// constant conversion (whose delimiter parse is the exact inverse of the
-    /// raw delimiter chosen there).
+    /// `Translcore.lambda_of_inline_const`.
     fn lambda_of_inline_const(c: &crate::types::external_ffi_types::InlineConst) -> Constant {
-        use crate::types::external_ffi_types::{Delim, InlineConst};
+        use crate::types::external_ffi_types::InlineConst;
         match c {
-            InlineConst::ConstStr { s, delim } => Constant::String {
-                s: s.clone(),
-                delim: delim.map(|d| match d {
-                    Delim::DNone => StringDelim::Plain,
-                    Delim::DStarJ => StringDelim::StarJ,
-                    Delim::DNoQuotes => StringDelim::NoQuotes,
-                    Delim::DBackQuotes => StringDelim::Backtick,
-                }),
-            },
+            InlineConst::ConstString(s) => Constant::String(s.clone()),
             InlineConst::ConstBool(true) => Constant::JsTrue,
             InlineConst::ConstBool(false) => Constant::JsFalse,
             InlineConst::ConstInt(i) => Constant::Int {
@@ -5787,7 +5764,7 @@ impl<'a> RawLambdaConverter<'a> {
         RawLambda::Lconst(Constant::Block {
             tag_info: Box::new(TagInfo::Tuple),
             elements: vec![
-                Constant::string_with_delim(fname, StringDelim::Plain),
+                Constant::const_string(&fname),
                 Constant::int(loc.loc_start.line),
                 Constant::int(loc.loc_start.column()),
             ],
@@ -5952,7 +5929,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 tag_info: Box::new(TagInfo::Tuple),
                                 elements: vec![
                                     init_v,
-                                    Constant::string_with_delim(id.name(), StringDelim::Plain),
+                                    Constant::const_string(&id.name()),
                                 ],
                             });
                         }
@@ -5971,7 +5948,7 @@ impl<'a> RawLambdaConverter<'a> {
                         tag_info: Box::new(TagInfo::Tuple),
                         elements: vec![
                             sub_shape,
-                            Constant::string_with_delim(id.name(), StringDelim::Plain),
+                            Constant::const_string(&id.name()),
                         ],
                     });
                     env.add_module(id.clone(), md.clone());
@@ -6564,14 +6541,9 @@ impl<'a> RawLambdaConverter<'a> {
             return None;
         };
         let expr = self.arena.get_expr(eval.0);
-        let crate::parser::ast::ExpressionDesc::Pexp_constant(constant) = expr.pexp_desc.as_ref()
-        else {
-            return None;
-        };
-        let crate::parser::ast::Constant::String(spec, _) = constant.as_ref() else {
-            return None;
-        };
-        Some((is_error, spec.to_string()))
+        // builtin_attributes.ml `string_of_payload`.
+        let spec = crate::ast_payload::semantic_string_of_expression(self.arena, expr).ok()??;
+        Some((is_error, spec))
     }
 
     fn with_warning_scope<T>(
@@ -6696,32 +6668,18 @@ impl<'a> RawLambdaConverter<'a> {
                     self.loc(expr.exp_loc),
                 )
             }
-            ExpressionDesc::Texp_apply { funct, args, .. }
-                if expr
-                    .exp_attributes
-                    .iter()
-                    .any(|attr| self.arena.get_string(attr.0.txt) == "res.taggedTemplate") =>
-            {
-                // Upstream compiler/ml/translcore.ml:642-663 lowers the
-                // parser-attributed application independently of the tag's
-                // origin; typecore has already validated its two array args.
-                let [strings, values] = args.as_slice() else {
-                    unreachable!("typed tagged-template applications always have two arguments")
-                };
-                let (Some(strings), Some(values)) =
-                    (strings.expression.as_ref(), values.expression.as_ref())
-                else {
-                    unreachable!("tagged-template arguments are never omitted")
-                };
-                RawLambda::prim(
-                    Primitive::PtaggedTemplate,
-                    vec![
-                        self.convert_expr_raw(funct),
-                        self.convert_expr_raw(strings),
-                        self.convert_expr_raw(values),
-                    ],
-                    self.loc(expr.exp_loc),
-                )
+            // translcore.ml `Texp_tagged_template`: `transl_exp tag ::
+            // transl_list values`; OCaml evaluates the cons tail first.
+            ExpressionDesc::Texp_tagged_template { tag, raw_sources, values } => {
+                let values: Vec<RawLambda> = values.iter().map(|value| self.convert_expr_raw(value)).collect();
+                let mut args = Vec::with_capacity(values.len() + 1);
+                args.push(self.convert_expr_raw(tag));
+                args.extend(values);
+                RawLambda::prim(Primitive::PtaggedTemplate(raw_sources.clone()), args, self.loc(expr.exp_loc))
+            }
+            ExpressionDesc::Texp_template { segments, values } => {
+                let args = values.iter().map(|value| self.convert_expr_raw(value)).collect();
+                RawLambda::prim(Primitive::Ptemplate(segments.clone()), args, self.loc(expr.exp_loc))
             }
             ExpressionDesc::Texp_apply {
                 funct,
@@ -7229,6 +7187,8 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_for(_, _, _, _, _, _) => "Texp_for",
             ExpressionDesc::Texp_for_of(_, _, _, _) => "Texp_for_of",
             ExpressionDesc::Texp_for_await_of(_, _, _, _) => "Texp_for_await_of",
+            ExpressionDesc::Texp_tagged_template { .. } => "Texp_tagged_template",
+            ExpressionDesc::Texp_template { .. } => "Texp_template",
             ExpressionDesc::Texp_object_get(_, _) => "Texp_object_get",
             ExpressionDesc::Texp_object_set(_, _, _) => "Texp_object_set",
             ExpressionDesc::Texp_object_literal(_) => "Texp_object_literal",
@@ -7264,20 +7224,8 @@ impl<'a> RawLambdaConverter<'a> {
                     comment: None,
                 }),
             TConstant::Char(c) => Constant::Char(*c),
-            TConstant::String(s, delim) => Constant::String {
-                s: s.clone(),
-                delim: delim
-                    .as_ref()
-                    .and_then(|d| match d.as_str() {
-                        "" => Some(StringDelim::Plain),
-                        "*j" | "js" | "j" => Some(StringDelim::StarJ),
-                        "json" => Some(StringDelim::NoQuotes),
-                        "bq" => Some(StringDelim::Backtick),
-                        "`" => Some(StringDelim::Backtick),
-                        _ => None,
-                    })
-                    .or_else(|| delim.is_none().then_some(StringDelim::Plain)),
-            },
+            // lambda.ml `const_of_typed`: `Const_string s -> Const_string s`.
+            TConstant::String(s) => Constant::String(s.clone()),
             TConstant::Float(f) => Constant::Float(f.clone()),
             TConstant::BigInt(positive, v) => Constant::BigInt {
                 negative: !*positive,
@@ -7706,7 +7654,7 @@ impl<'a> RawLambdaConverter<'a> {
             let payload = RawLambda::Lconst(Constant::Block {
                 tag_info: Box::new(TagInfo::Tuple),
                 elements: vec![
-                    Constant::string_with_delim(fname.clone(), StringDelim::Plain),
+                    Constant::const_string(&fname.clone()),
                     Constant::int(line),
                     Constant::int(char_pos),
                 ],
@@ -7775,7 +7723,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let payload = RawLambda::Lconst(Constant::Block {
                     tag_info: Box::new(TagInfo::Tuple),
                     elements: vec![
-                        Constant::string_with_delim(fname.clone(), StringDelim::Plain),
+                        Constant::const_string(&fname.clone()),
                         Constant::int(line),
                         Constant::int(char_pos),
                     ],
@@ -9361,7 +9309,7 @@ impl<'a> RawLambdaConverter<'a> {
         for (pats, body) in sub_cases {
             let (pat, _aliases) = peel_aliases(pats[0]);
             match &pat.pat_desc {
-                PatternDesc::Tpat_constant(TConstant::String(s, _)) => {
+                PatternDesc::Tpat_constant(TConstant::String(s)) => {
                     string_cases.push((s.clone(), body.clone()));
                 }
                 PatternDesc::Tpat_constant(TConstant::Int(i)) => {
@@ -9673,7 +9621,7 @@ impl<'a> RawLambdaConverter<'a> {
                 );
                 RawLambda::LifThenElse(Box::new(cond), Box::new(fail_raise), Box::new(body))
             }
-            PatternDesc::Tpat_constant(TConstant::String(s, _)) => {
+            PatternDesc::Tpat_constant(TConstant::String(s)) => {
                 let cond = RawLambda::prim(
                     Primitive::Pjscomp(Comparison::Neq),
                     vec![
@@ -11114,10 +11062,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 let payload = RawLambda::Lconst(Constant::Block {
                                     tag_info: Box::new(TagInfo::Tuple),
                                     elements: vec![
-                                        Constant::string_with_delim(
-                                            fname.clone(),
-                                            StringDelim::Plain,
-                                        ),
+                                        Constant::const_string(&fname),
                                         Constant::int(line),
                                         Constant::int(char_pos),
                                     ],
@@ -11404,7 +11349,7 @@ impl<'a> RawLambdaConverter<'a> {
                             None => match (raw_name, arg_lams.as_slice()) {
                                 ("#raw_expr" | "#raw_stmt", [code]) => {
                                     let code = match code {
-                                        RawLambda::Lconst(Constant::String { s, .. })
+                                        RawLambda::Lconst(Constant::String(s))
                                         | RawLambda::Lconst(Constant::ImmString(s)) => s.clone(),
                                         _ => unreachable!("%raw takes a string constant"),
                                     };
@@ -12418,7 +12363,7 @@ mod tests {
 
         let directive_expr = crate::parser::ast::Expression {
             pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_constant(Box::new(
-                crate::parser::ast::Constant::String(Cow::Owned("'use memo'".to_string()), None),
+                crate::parser::ast::Constant::string("'use memo'"),
             ))),
             pexp_loc: LocIdx::none(),
             pexp_attributes: Attributes::new(),
@@ -13524,11 +13469,10 @@ mod tests {
         let [Constant::Block { elements, .. }] = shape.as_slice() else {
             panic!("expected named tuple shape");
         };
-        let [init_v, Constant::String { s, delim }] = elements.as_slice() else {
+        let [init_v, Constant::String(s)] = elements.as_slice() else {
             panic!("expected function shape tuple");
         };
         assert_eq!(s, "u");
-        assert!(matches!(delim, Some(StringDelim::Plain)));
         assert!(matches!(
             init_v,
             Constant::Constructor(crate::types::VariantTag {

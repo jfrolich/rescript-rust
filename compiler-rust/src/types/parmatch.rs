@@ -536,7 +536,7 @@ pub(crate) fn const_compare(x: &Constant, y: &Constant) -> std::cmp::Ordering {
             }
         }
         (Constant::BigInt(s1, b1), Constant::BigInt(s2, b2)) => bigint_compare((*s1, b1), (*s2, b2)),
-        (Constant::String(s1, _), Constant::String(s2, _)) => s1.as_bytes().cmp(s2.as_bytes()),
+        (Constant::String(s1), Constant::String(s2)) => s1.as_bytes().cmp(s2.as_bytes()),
         _ => constant_structural_compare(x, y),
     }
 }
@@ -1356,7 +1356,10 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                         .iter()
                         .filter_map(|(q, _)| match self.desc(*q) {
                             Desc::Constant(c) => match c.as_ref() {
-                                Constant::String(s, _) => Some(s.len()),
+                                Constant::String(s) => Some(
+                                    crate::string_literal::utf16_length(s)
+                                        .expect("String_literal.utf16_length: Invalid_utf8"),
+                                ),
                                 _ => None,
                             },
                             _ => None,
@@ -1367,7 +1370,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                         i += 1;
                     }
                     self.make_pat_like(
-                        Desc::Constant(Cow::Owned(Constant::String("*".repeat(i), None))),
+                        Desc::Constant(Cow::Owned(Constant::String("*".repeat(i)))),
                         p,
                     )
                 }

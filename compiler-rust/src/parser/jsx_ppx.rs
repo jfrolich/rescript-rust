@@ -3699,11 +3699,17 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
                                 }
                             }
                             "module_" => {
-                                if let ExpressionDesc::Pexp_constant(c) =
-                                    &*arena.get_expr(field.expr).pexp_desc
-                                {
-                                    if let Constant::String(s, _) = &**c {
-                                        module_raw = Some(s.to_string());
+                                match crate::ast_payload::semantic_string_of_expression(
+                                    arena,
+                                    arena.get_expr(field.expr),
+                                ) {
+                                    Ok(value) => {
+                                        if let Some(value) = value {
+                                            module_raw = Some(value);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        set_fatal_error(config, error.loc, error.message);
                                     }
                                 }
                             }
@@ -4356,6 +4362,35 @@ fn transform_expression(
             let transformed = transform_expression(e_expr, config, arena);
             ExpressionDesc::Pexp_await(arena.push_expr(transformed))
         }
+        // Ast_mapper: `Pexp_template` maps its values; `Pexp_tagged_template`
+        // maps the tag, then the values.
+        ExpressionDesc::Pexp_template(mut template) => {
+            template.values = template
+                .values
+                .into_iter()
+                .map(|e| {
+                    let e_expr = arena.get_expr(e).clone();
+                    let transformed = transform_expression(e_expr, config, arena);
+                    arena.push_expr(transformed)
+                })
+                .collect();
+            ExpressionDesc::Pexp_template(template)
+        }
+        ExpressionDesc::Pexp_tagged_template(mut template) => {
+            let tag_expr = arena.get_expr(template.tag).clone();
+            let tag = transform_expression(tag_expr, config, arena);
+            template.tag = arena.push_expr(tag);
+            template.values = template
+                .values
+                .into_iter()
+                .map(|e| {
+                    let e_expr = arena.get_expr(e).clone();
+                    let transformed = transform_expression(e_expr, config, arena);
+                    arena.push_expr(transformed)
+                })
+                .collect();
+            ExpressionDesc::Pexp_tagged_template(template)
+        }
         other => other,
     };
 
@@ -4822,10 +4857,7 @@ fn transform_jsx_unary(
         JsxTagName::Lower(name) => {
             // Lowercase element like <div />
             let component_name_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
-                    Cow::Owned(name.clone()),
-                    None,
-                )))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(name)))),
                 pexp_loc: tag_loc.clone(),
                 pexp_attributes: Attributes::new(),
             };
@@ -4916,10 +4948,7 @@ fn transform_jsx_container(
         JsxTagName::Lower(name) => {
             // Lowercase element like <div>...</div>
             let component_name_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
-                    Cow::Owned(name.clone()),
-                    None,
-                )))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(name)))),
                 pexp_loc: tag_loc.clone(),
                 pexp_attributes: Attributes::new(),
             };
@@ -5155,6 +5184,10 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
                     case.pc_guard.is_some_and(|guard| child(guard, memo))
                         || child(case.pc_rhs, memo)
                 })
+        }
+        ExpressionDesc::Pexp_template(template) => template.values.iter().any(|item| child(*item, memo)),
+        ExpressionDesc::Pexp_tagged_template(template) => {
+            child(template.tag, memo) || template.values.iter().any(|item| child(*item, memo))
         }
         ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
             items.iter().any(|item| child(*item, memo))

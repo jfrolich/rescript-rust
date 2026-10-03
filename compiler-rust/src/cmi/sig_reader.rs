@@ -1437,7 +1437,7 @@ fn read_deprecated_attribute_payload(value: &OcamlValue) -> AttributePayload {
 }
 
 /// `PStr [{pstr_desc = Pstr_eval ({pexp_desc = Pexp_constant
-/// (Pconst_string (s, _))}, _)}]`, given the marshaled structure list.
+/// (Pconst_string payload)}, _)}]`, given the marshaled structure list.
 fn plain_string_payload(structure: &OcamlValue) -> Option<String> {
     let OcamlValue::Block(0, cons) = structure else {
         return None;
@@ -1459,12 +1459,25 @@ fn plain_string_payload(structure: &OcamlValue) -> Option<String> {
     let OcamlValue::Block(1, constant) = expr.first()? else {
         return None;
     };
-    // Pconst_string (string, delimiter)
+    // Pconst_string payload
     let OcamlValue::Block(2, string) = constant.first()? else {
         return None;
     };
-    match string.first()? {
-        OcamlValue::String(s) => Some(s.clone()),
+    string_literal_semantic(string.first()?)
+}
+
+/// `String_literal.string_semantic` of a marshaled `String_literal.payload`:
+/// `Valid {source; semantic}` (tag 0) or `Invalid_source source` (tag 1).
+fn string_literal_semantic(payload: &OcamlValue) -> Option<String> {
+    match payload {
+        OcamlValue::Block(0, fields) => match fields.as_ref() {
+            [OcamlValue::String(_), OcamlValue::String(semantic)] => Some(semantic.clone()),
+            _ => None,
+        },
+        OcamlValue::Block(1, fields) => match fields.as_ref() {
+            [OcamlValue::String(_)] => Some(String::new()),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1520,20 +1533,18 @@ fn extract_ident_payload_name(structure: &OcamlValue) -> Option<String> {
 
 /// Try to extract a string constant from a PStr attribute payload.
 ///
-/// For `@as("foo")`, the expression subtree contains a constant-string node
-/// encoded as `Block(2, [String("foo"), ...])`.
+/// For `@as("foo")`, the expression subtree contains a `Pconst_string`
+/// node encoded as `Block(2, [payload])`, whose `String_literal.payload` holds
+/// the source and semantic strings.
 fn extract_str_payload_string(structure: &OcamlValue) -> Option<String> {
     fn find_string_constant(v: &OcamlValue, depth: usize) -> Option<String> {
         if depth > 12 {
             return None;
         }
         match v {
-            OcamlValue::Block(2, fields) if !fields.is_empty() => match &fields[0] {
-                OcamlValue::String(value) => Some(value.clone()),
-                _ => fields
-                    .iter()
-                    .find_map(|field| find_string_constant(field, depth + 1)),
-            },
+            OcamlValue::Block(2, fields) if fields.len() == 1 && string_literal_semantic(&fields[0]).is_some() => {
+                string_literal_semantic(&fields[0])
+            }
             OcamlValue::Block(_, fields) => fields
                 .iter()
                 .find_map(|field| find_string_constant(field, depth + 1)),
@@ -1661,12 +1672,16 @@ mod tests {
                 0,
                 vec![block(
                     1,
+                    // Pconst_string of a `String_literal.Valid {source; semantic}`
                     vec![block(
                         2,
-                        vec![
-                            OcamlValue::String(value.to_string()),
-                            block(0, vec![OcamlValue::String("*j".to_string())]),
-                        ],
+                        vec![block(
+                            0,
+                            vec![
+                                OcamlValue::String(value.to_string()),
+                                OcamlValue::String(value.to_string()),
+                            ],
+                        )],
                     )],
                 )],
             )],

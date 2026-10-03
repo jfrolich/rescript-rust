@@ -638,8 +638,8 @@ fn inline_string_test_keeps_alias_materialized_named_matcher_like_snapshot() {
 fn gpr_3142_test_reuses_same_name_export_alias_bindings_like_snapshot() {
     let output = compile_checked_in_test_file_to_js("gpr_3142_test");
     assert!(
-        output.contains("Test_utils.eq(\"File \\\"gpr_3142_test.res\\\", line 18, characters 7-14\", tToJs(\"a\"), \"x\")")
-            && output.contains("Test_utils.eq(\"File \\\"gpr_3142_test.res\\\", line 23, characters 7-14\", tFromJs(\"x\"), \"a\")"),
+        output.contains("Test_utils.eq(\"File \\\"gpr_3142_test.res\\\", line 20, characters 7-14\", tToJs(\"a\"), \"x\")")
+            && output.contains("Test_utils.eq(\"File \\\"gpr_3142_test.res\\\", line 27, characters 7-14\", tFromJs(\"x\"), \"a\")"),
         "expected gpr_3142_test to inline the exported aliases back to direct converter calls at the checked internal sites, got:\n{output}"
     );
     assert!(

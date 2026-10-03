@@ -432,11 +432,14 @@ impl<'a> Mapper<'a> {
     fn map_constant(&mut self, c: &current::Constant) -> pt0::Constant {
         match c {
             current::Constant::Integer(s, opt) => pt0::Constant::Integer(s.to_string(), *opt),
-            current::Constant::Char(i) => pt0::Constant::Char(*i),
-            // ast_mapper_to0.ml map_constant keeps the delimiter.
-            current::Constant::String(s, opt) => {
-                pt0::Constant::String(s.to_string(), opt.as_ref().map(|d| d.to_string()))
+            current::Constant::Char { semantic, .. } => pt0::Constant::Char(*semantic),
+            // ast_mapper_to0.ml map_constant: strings and JavaScript source keep
+            // their spelling under the `js` delimiter, `json` under `json`.
+            current::Constant::String(payload) => {
+                pt0::Constant::String(payload.source().to_string(), Some("js".to_string()))
             }
+            current::Constant::RawSource(s) => pt0::Constant::String(s.to_string(), Some("js".to_string())),
+            current::Constant::Json(s) => pt0::Constant::String(s.to_string(), Some("json".to_string())),
             current::Constant::Float(s, opt) => pt0::Constant::Float(s.to_string(), *opt),
         }
     }
@@ -1079,6 +1082,12 @@ impl<'a> Mapper<'a> {
         if let current::ExpressionDesc::Pexp_jsx_element(jsx) = &*expr.pexp_desc {
             return self.map_jsx(expr, jsx);
         }
+        if let current::ExpressionDesc::Pexp_template(template) = &*expr.pexp_desc {
+            return self.map_template(expr, template);
+        }
+        if let current::ExpressionDesc::Pexp_tagged_template(template) = &*expr.pexp_desc {
+            return self.map_tagged_template(expr, template);
+        }
 
         // Check if this is a JSX element that needs the [@JSX] attribute
         let is_jsx = matches!(
@@ -1119,6 +1128,101 @@ impl<'a> Mapper<'a> {
             pexp_desc: self.map_expression_desc(&*expr.pexp_desc, expr.pexp_loc, owner_idx),
             pexp_loc: self.loc(expr.pexp_loc),
             pexp_attributes: attrs,
+        }
+    }
+
+    /// A template segment: `Exp.constant ~loc ~attrs:[template_attr]
+    /// (Pconst_string (source, Some "js"))`.
+    fn template_segment(&mut self, source: &current::StringLoc) -> pt0::Expression {
+        let attr = self.internal_attr("res.template");
+        pt0::Expression {
+            pexp_desc: pt0::ExpressionDesc::Constant(pt0::Constant::String(
+                self.arena.get_string(source.txt).to_string(),
+                Some("js".to_string()),
+            )),
+            pexp_loc: self.loc(source.loc),
+            pexp_attributes: vec![attr],
+        }
+    }
+
+    /// ast_mapper_to0.ml `Pexp_template`: segments and values joined by `^`
+    /// applications marked `res.template`.
+    fn map_template(&mut self, expr: &current::Expression, template: &current::PexpTemplate) -> pt0::Expression {
+        let loc = self.loc(expr.pexp_loc);
+        let attrs = self.map_attributes(&expr.pexp_attributes);
+        let segments: Vec<pt0::Expression> =
+            template.source_segments.iter().map(|source| self.template_segment(source)).collect();
+        let mut parts = Vec::with_capacity(segments.len() + template.values.len());
+        let mut values = template.values.iter();
+        for segment in segments {
+            parts.push(segment);
+            if let Some(value) = values.next() {
+                parts.push(self.map_expr_idx(*value));
+            }
+        }
+        let mut parts = parts.into_iter();
+        let first = parts.next().expect("a template has at least one segment");
+        let mut expression = first;
+        for rhs in parts {
+            let template_attr = self.internal_attr("res.template");
+            let caret = self.intern("^");
+            let none = self.noloc();
+            let op = pt0::Expression {
+                pexp_desc: pt0::ExpressionDesc::Ident(OldLocated::new(Longident::Lident(caret), none)),
+                pexp_loc: loc.clone(),
+                pexp_attributes: vec![],
+            };
+            expression = pt0::Expression {
+                pexp_desc: pt0::ExpressionDesc::Apply(
+                    Box::new(op),
+                    vec![(pt0::ArgLabel::Nolabel, expression), (pt0::ArgLabel::Nolabel, rhs)],
+                ),
+                pexp_loc: loc.clone(),
+                pexp_attributes: vec![template_attr],
+            };
+        }
+        // `add_template_attr attrs`
+        let mut attrs = attrs;
+        if !attrs.iter().any(|(name, _)| name.txt == "res.template") {
+            attrs.insert(0, self.internal_attr("res.template"));
+        }
+        expression.pexp_attributes = attrs;
+        expression
+    }
+
+    /// ast_mapper_to0.ml `Pexp_tagged_template`: `tag([segments], [values])`
+    /// marked `res.taggedTemplate`. OCaml evaluates the argument list right
+    /// to left, so the values are mapped before the tag.
+    fn map_tagged_template(
+        &mut self,
+        expr: &current::Expression,
+        template: &current::PexpTaggedTemplate,
+    ) -> pt0::Expression {
+        let loc = self.loc(expr.pexp_loc);
+        let attrs = self.map_attributes(&expr.pexp_attributes);
+        let segments: Vec<pt0::Expression> =
+            template.raw_sources.iter().map(|source| self.template_segment(source)).collect();
+        let values: Vec<pt0::Expression> = template.values.iter().map(|value| self.map_expr_idx(*value)).collect();
+        let values = pt0::Expression {
+            pexp_desc: pt0::ExpressionDesc::Array(values),
+            pexp_loc: loc.clone(),
+            pexp_attributes: vec![],
+        };
+        let segments = pt0::Expression {
+            pexp_desc: pt0::ExpressionDesc::Array(segments),
+            pexp_loc: loc.clone(),
+            pexp_attributes: vec![],
+        };
+        let tag = self.map_expr_idx(template.tag);
+        let mut all_attrs = vec![self.internal_attr("res.taggedTemplate")];
+        all_attrs.extend(attrs);
+        pt0::Expression {
+            pexp_desc: pt0::ExpressionDesc::Apply(
+                Box::new(tag),
+                vec![(pt0::ArgLabel::Nolabel, segments), (pt0::ArgLabel::Nolabel, values)],
+            ),
+            pexp_loc: loc,
+            pexp_attributes: all_attrs,
         }
     }
 
@@ -1168,6 +1272,9 @@ impl<'a> Mapper<'a> {
             }
             current::ExpressionDesc::Pexp_fun(_) => {
                 unreachable!("functions are mapped by map_expression_with_owner")
+            }
+            current::ExpressionDesc::Pexp_template(_) | current::ExpressionDesc::Pexp_tagged_template(_) => {
+                unreachable!("templates are mapped by map_expression_with_owner")
             }
             current::ExpressionDesc::Pexp_apply(inner) => {
                 let PexpApply {
@@ -2159,17 +2266,17 @@ mod tests {
         let c1 = mapper.map_constant(&current::Constant::Integer(Cow::Borrowed("42"), None));
         assert!(matches!(c1, pt0::Constant::Integer(s, None) if s == "42"));
 
-        let c2 = mapper.map_constant(&current::Constant::Char(65));
+        let c2 = mapper.map_constant(&current::Constant::char(65));
         assert!(matches!(c2, pt0::Constant::Char(65)));
 
-        // ast_mapper_to0.ml map_constant keeps the delimiter.
-        let c3 = mapper.map_constant(&current::Constant::String(Cow::Borrowed("hello"), None));
-        assert!(matches!(c3, pt0::Constant::String(s, None) if s == "hello"));
-        let c4 = mapper.map_constant(&current::Constant::String(
-            Cow::Borrowed("hello"),
-            Some(Cow::Borrowed("js")),
+        // ast_mapper_to0.ml map_constant: strings keep their source spelling
+        // under the `js` delimiter, `json` under `json`.
+        let c3 = mapper.map_constant(&current::Constant::String(
+            crate::string_literal::string_from_source("a\\n").expect("valid string"),
         ));
-        assert!(matches!(c4, pt0::Constant::String(s, Some(d)) if s == "hello" && d == "js"));
+        assert!(matches!(c3, pt0::Constant::String(s, Some(d)) if s == "a\\n" && d == "js"));
+        let c4 = mapper.map_constant(&current::Constant::Json(Cow::Borrowed("{}")));
+        assert!(matches!(c4, pt0::Constant::String(s, Some(d)) if s == "{}" && d == "json"));
     }
 }
 

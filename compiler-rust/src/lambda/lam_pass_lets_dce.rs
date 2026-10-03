@@ -165,7 +165,7 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
 
             // String constants — record in string_table for later Pstringadd
             // folding, but keep the binding (lam_pass_lets_dce.ml:66-69).
-            if let Lambda::Lconst(Constant::String { s, delim: None }) = l1.as_ref() {
+            if let Lambda::Lconst(Constant::String(s)) = l1.as_ref() {
                 state.string_table.insert(v.clone(), s.clone());
                 let simplified_body = lets_helper(state, l2);
                 return Lambda::let_(LetKind::Alias, v.clone(), (**l1).clone(), simplified_body);
@@ -214,7 +214,7 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
 
             // General StrictOpt path (lam_pass_lets_dce.ml:112-120).
             let new_l1 = lets_helper(state, l1);
-            if let Lambda::Lconst(Constant::String { s, delim: None }) = &new_l1 {
+            if let Lambda::Lconst(Constant::String(s)) = &new_l1 {
                 state.string_table.insert(v.clone(), s.clone());
                 let simplified_body = lets_helper(state, lbody);
                 return Lambda::let_(LetKind::Alias, v.clone(), new_l1, simplified_body);
@@ -238,7 +238,7 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
             // Strict + Const_string special case
             // (lam_pass_lets_dce.ml:129-132).
             if matches!(kind, LetKind::Strict) {
-                if let Lambda::Lconst(Constant::String { s, delim: None }) = &new_l1 {
+                if let Lambda::Lconst(Constant::String(s)) = &new_l1 {
                     state.string_table.insert(v.clone(), s.clone());
                     let simplified_body = lets_helper(state, l2);
                     return Lambda::let_(LetKind::Alias, v.clone(), new_l1, simplified_body);
@@ -340,10 +340,7 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
                         None => {
                             Lambda::prim(Primitive::Pstringadd, vec![l_simpl, r_simpl], loc.clone())
                         }
-                        Some(r_s) => Lambda::Lconst(Constant::String {
-                            s: format!("{}{}", l_s, r_s),
-                            delim: None,
-                        }),
+                        Some(r_s) => Lambda::Lconst(Constant::String(format!("{}{}", l_s, r_s))),
                     }
                 }
             }
@@ -565,7 +562,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
                 return lets_helper_owned(state, *l2);
             }
 
-            if let Lambda::Lconst(Constant::String { s, delim: None }) = l1.as_ref() {
+            if let Lambda::Lconst(Constant::String(s)) = l1.as_ref() {
                 state.string_table.insert(v.clone(), s.clone());
                 let simplified_body = lets_helper_owned(state, *l2);
                 return Lambda::let_(LetKind::Alias, v, *l1, simplified_body);
@@ -612,7 +609,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
             }
 
             let new_l1 = lets_helper_owned(state, *l1);
-            if let Lambda::Lconst(Constant::String { s, delim: None }) = &new_l1 {
+            if let Lambda::Lconst(Constant::String(s)) = &new_l1 {
                 state.string_table.insert(v.clone(), s.clone());
                 let simplified_body = lets_helper_owned(state, *lbody);
                 return Lambda::let_(LetKind::Alias, v, new_l1, simplified_body);
@@ -633,7 +630,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
             }
             let new_l1 = lets_helper_owned(state, *l1);
             if matches!(kind, LetKind::Strict) {
-                if let Lambda::Lconst(Constant::String { s, delim: None }) = &new_l1 {
+                if let Lambda::Lconst(Constant::String(s)) = &new_l1 {
                     state.string_table.insert(v.clone(), s.clone());
                     let simplified_body = lets_helper_owned(state, *l2);
                     return Lambda::let_(LetKind::Alias, v, new_l1, simplified_body);
@@ -731,10 +728,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
                     let opt_r = lookup_string(&r_simpl, &state.string_table);
                     match opt_r {
                         None => Lambda::prim(Primitive::Pstringadd, vec![l_simpl, r_simpl], loc),
-                        Some(r_s) => Lambda::Lconst(Constant::String {
-                            s: format!("{}{}", l_s, r_s),
-                            delim: None,
-                        }),
+                        Some(r_s) => Lambda::Lconst(Constant::String(format!("{}{}", l_s, r_s))),
                     }
                 }
             }
@@ -845,7 +839,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
 /// argument is an inline string literal or an alias for one.
 fn lookup_string(lam: &Lambda, table: &HashMap<Ident, String>) -> Option<String> {
     match lam {
-        Lambda::Lconst(Constant::String { s, delim: None }) => Some(s.clone()),
+        Lambda::Lconst(Constant::String(s)) => Some(s.clone()),
         Lambda::Lvar(i) => table.get(i).cloned(),
         _ => None,
     }
@@ -956,7 +950,7 @@ mod tests {
         // Outer let-bindings are dropped because their times become 0 once
         // their uses are inlined and the Alias clause prunes them.
         match result {
-            Lambda::Lconst(Constant::String { s, delim: None }) => assert_eq!(s, "ab"),
+            Lambda::Lconst(Constant::String(s)) => assert_eq!(s, "ab"),
             other => panic!("expected folded string, got {:?}", other),
         }
     }

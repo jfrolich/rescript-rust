@@ -7,9 +7,10 @@ use std::borrow::Cow;
 
 use super::ast::*;
 use super::core::{
-    ast_helper, mknoloc, recover, template_literal_attr, with_loc,
+    ast_helper, mknoloc, recover, with_loc,
 };
 use super::diagnostics::DiagnosticCategory;
+use crate::location::Position;
 use super::grammar::{self, Grammar};
 use super::longident::Longident;
 use super::state::{Parser, ParserMode};
@@ -104,14 +105,35 @@ fn construct_lident(p: &mut Parser<'_>, name: &'static str, loc: LocIdx, attrs: 
     pat(PatternDesc::Ppat_construct(with_loc(lid_idx, loc), None), loc, attrs)
 }
 
-/// OCaml `parse_template_constant ~prefix` (res_core.ml:1045-1066).
-fn parse_template_constant(p: &mut Parser<'_>, prefix: Option<Cow<'static, str>>) -> Constant {
-    let start_pos = p.start_pos;
+/// OCaml `parse_template_constant ~start_pos ~prefix` (res_core.ml).
+fn parse_template_constant(p: &mut Parser<'_>, start_pos: Position, prefix: Option<Cow<'static, str>>) -> Constant {
     p.next_template_literal_token();
     if let Token::TemplateTail { text, .. } = &p.token {
         let text = text.to_string();
         p.next();
-        return Constant::String(Cow::Owned(text), prefix);
+        return match prefix {
+            None => match crate::string_literal::decode_js_template_escapes(&text) {
+                Some(semantic) => Constant::string(&semantic),
+                None => {
+                    p.err_at(
+                        start_pos,
+                        p.prev_end_pos,
+                        DiagnosticCategory::Message("Invalid string escape sequence".to_string()),
+                    );
+                    Constant::string("")
+                }
+            },
+            Some(_) => {
+                p.err_at(
+                    start_pos,
+                    p.prev_end_pos,
+                    DiagnosticCategory::Message(
+                        super::core::error_messages::TAGGED_TEMPLATE_IN_PATTERN.to_string(),
+                    ),
+                );
+                Constant::string(&text)
+            }
+        };
     }
     fn skip_tokens(p: &mut Parser<'_>) {
         if p.token != Token::Eof {
@@ -131,7 +153,7 @@ fn parse_template_constant(p: &mut Parser<'_>, prefix: Option<Cow<'static, str>>
             super::core::error_messages::STRING_INTERPOLATION_IN_PATTERN.to_string(),
         ),
     );
-    Constant::String(Cow::Borrowed(""), None)
+    Constant::string("")
 }
 
 /// OCaml `parse_pattern` with the default `~alias:true ~or_:true`.
@@ -170,14 +192,10 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
             }
         }
         Token::Backtick => {
-            let constant = parse_template_constant(p, Some(Cow::Borrowed("js")));
+            let start_pos = p.arena().get_position(start_pos_idx).clone();
+            let constant = parse_template_constant(p, start_pos, None);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            let template_attr = template_literal_attr(p.arena_mut());
-            pat(
-                PatternDesc::Ppat_constant(Box::new(constant)),
-                loc,
-                Attributes::from_vec(vec![template_attr]),
-            )
+            pat(PatternDesc::Ppat_constant(Box::new(constant)), loc, Attributes::new())
         }
         Token::Lparen => {
             p.next();
@@ -220,7 +238,8 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
             let loc = p.mk_loc_idx_full(start_pos_idx, end_pos);
             p.next();
             if p.token == Token::Backtick {
-                let constant = parse_template_constant(p, Some(Cow::Owned(ident)));
+                let start_pos = p.arena().get_position(start_pos_idx).clone();
+                let constant = parse_template_constant(p, start_pos, Some(Cow::Owned(ident)));
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 pat(PatternDesc::Ppat_constant(Box::new(constant)), loc, Attributes::new())
             } else {
