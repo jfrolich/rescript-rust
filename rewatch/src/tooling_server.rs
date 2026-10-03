@@ -12,8 +12,9 @@
 //!
 //! Protocol (one request per line, any number per connection):
 //! - `AUTH <token>` → `OK 0`
-//! - `RUN <JSON array of the command's arguments>` → `OK <length>` followed
-//!   by what the command prints, or `ERROR <length>` followed by why it failed
+//! - `RUN {"cwd": <client working directory>, "args": [<command and its
+//!   arguments>]}` → `OK <length>` followed by what the command prints, or
+//!   `ERROR <length>` followed by why it failed
 
 use std::hash::{BuildHasher, Hasher};
 use std::io::{BufRead, BufReader, Write};
@@ -27,15 +28,22 @@ pub const ADDRESS_FILE: &str = "rescript-watch.addr";
 /// What tooling asks for.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
-    /// Run a command with these arguments (as given to the analysis binary).
-    Run(Vec<String>),
+    /// Run a command with these arguments (as given to the analysis binary),
+    /// relative paths resolved against `cwd`.
+    Run { cwd: PathBuf, args: Vec<String> },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RunRequest {
+    cwd: PathBuf,
+    args: Vec<String>,
 }
 
 /// The watcher's answer to a [`Request`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
     /// What the command prints.
-    Output(String),
+    Output(Vec<u8>),
     Error(String),
 }
 
@@ -152,8 +160,8 @@ fn serve_connection(
             writer.write_all(b"DENIED\n")?;
             return Ok(());
         }
-        let request = match (command, serde_json::from_str::<Vec<String>>(argument)) {
-            ("RUN", Ok(args)) => Request::Run(args),
+        let request = match (command, serde_json::from_str::<RunRequest>(argument)) {
+            ("RUN", Ok(RunRequest { cwd, args })) => Request::Run { cwd, args },
             ("RUN", Err(err)) => {
                 send(
                     &mut writer,
@@ -176,7 +184,7 @@ fn serve_connection(
             Reply::Error("the watcher stopped".to_string())
         };
         match reply {
-            Reply::Output(output) => send(&mut writer, "OK", output.as_bytes())?,
+            Reply::Output(output) => send(&mut writer, "OK", &output)?,
             Reply::Error(message) => send(&mut writer, "ERROR", message.as_bytes())?,
         }
         writer.flush()?;
@@ -219,14 +227,13 @@ fn read_reply(reader: &mut BufReader<TcpStream>) -> std::io::Result<Reply> {
         .map_err(|_| std::io::Error::other(format!("unexpected reply: {header}")))?;
     let mut payload = vec![0; length];
     reader.read_exact(&mut payload)?;
-    let payload = String::from_utf8_lossy(&payload).into_owned();
     Ok(match status {
         "OK" => Reply::Output(payload),
-        _ => Reply::Error(payload),
+        _ => Reply::Error(String::from_utf8_lossy(&payload).into_owned()),
     })
 }
 
-fn request_from(address_file: &Path, args: &[String]) -> std::io::Result<Reply> {
+fn request_from(address_file: &Path, cwd: &Path, args: &[String]) -> std::io::Result<Reply> {
     let content = std::fs::read_to_string(address_file)?;
     let (address, token) = content
         .trim()
@@ -238,8 +245,12 @@ fn request_from(address_file: &Path, args: &[String]) -> std::io::Result<Reply> 
     if let Reply::Error(message) = read_reply(&mut reader)? {
         return Err(std::io::Error::other(message));
     }
-    let args = serde_json::to_string(args).map_err(std::io::Error::other)?;
-    stream.write_all(format!("RUN {args}\n").as_bytes())?;
+    let request = RunRequest {
+        cwd: cwd.to_path_buf(),
+        args: args.to_vec(),
+    };
+    let request = serde_json::to_string(&request).map_err(std::io::Error::other)?;
+    stream.write_all(format!("RUN {request}\n").as_bytes())?;
     read_reply(&mut reader)
 }
 
@@ -247,10 +258,11 @@ fn request_from(address_file: &Path, args: &[String]) -> std::io::Result<Reply> 
 /// print its output. Returns the process exit code.
 pub fn run_client(cwd: &Path, args: &[String]) -> i32 {
     let start = client_start_dir(cwd, args);
-    let reply = find_address_file(&start).map(|address_file| request_from(&address_file, args));
+    let reply = find_address_file(&start).map(|address_file| request_from(&address_file, cwd, args));
     match reply {
         Some(Ok(Reply::Output(output))) => {
-            print!("{output}");
+            let mut stdout = std::io::stdout().lock();
+            let _ = stdout.write_all(&output).and_then(|()| stdout.flush());
             0
         }
         Some(Ok(Reply::Error(message))) => {
@@ -295,9 +307,9 @@ mod tests {
         server.publish().unwrap();
         std::thread::spawn(move || {
             for ToolingRequest { request, reply } in requests {
-                let Request::Run(args) = request;
+                let Request::Run { args, .. } = request;
                 let _ = reply.send(match args.first().map(String::as_str) {
-                    Some("echo") => Reply::Output(args[1..].join(" ")),
+                    Some("echo") => Reply::Output(args[1..].join(" ").into_bytes()),
                     _ => Reply::Error("unknown".to_string()),
                 });
             }
@@ -309,17 +321,24 @@ mod tests {
 
         let mut denied = TcpStream::connect(address).unwrap();
         let mut denied_reader = BufReader::new(denied.try_clone().unwrap());
-        assert_eq!(request(&mut denied, &mut denied_reader, "RUN []"), "DENIED");
+        assert_eq!(
+            request(&mut denied, &mut denied_reader, r#"RUN {"cwd":"/","args":[]}"#),
+            "DENIED"
+        );
 
         let mut stream = TcpStream::connect(address).unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         assert_eq!(request(&mut stream, &mut reader, &format!("AUTH {token}")), "OK ");
         assert_eq!(
-            request(&mut stream, &mut reader, r#"RUN ["echo","a b","c"]"#),
+            request(
+                &mut stream,
+                &mut reader,
+                r#"RUN {"cwd":"/","args":["echo","a b","c"]}"#
+            ),
             "OK a b c"
         );
         assert_eq!(
-            request(&mut stream, &mut reader, r#"RUN ["nope"]"#),
+            request(&mut stream, &mut reader, r#"RUN {"cwd":"/","args":["nope"]}"#),
             "ERROR unknown"
         );
         assert!(request(&mut stream, &mut reader, "RUN nope").starts_with("ERROR invalid arguments"));

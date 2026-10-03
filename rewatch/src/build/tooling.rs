@@ -120,11 +120,9 @@ pub fn with_typed_implementation<R: Send>(
     })
 }
 
-/// Run an editor tooling command (the arguments of `rescript-editor-analysis`)
-/// and return what it prints.
-pub fn run_command(_build_state: &BuildCommandState, args: &[String]) -> Result<String> {
-    match args.first().map(String::as_str) {
-        Some(command) => Err(anyhow!("`{command}` is not available inside the watcher yet")),
-        None => Err(anyhow!("no command")),
-    }
+/// Run an editor tooling command (the arguments of `rescript-editor-analysis`,
+/// relative paths resolved against `cwd`) and return what it prints.
+pub fn run_command(_build_state: &BuildCommandState, cwd: PathBuf, args: Vec<String>) -> Result<Vec<u8>> {
+    rescript_compiler::analysis::run(&rescript_compiler::analysis::Request { cwd, args })
+        .map_err(|err| anyhow!(err))
 }

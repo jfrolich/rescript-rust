@@ -37,6 +37,7 @@
 #![warn(rust_2018_idioms)]
 #![allow(clippy::uninlined_format_args)] // Style preference, not a correctness issue
 
+pub mod analysis;
 pub mod arena;
 pub mod binary_ast;
 pub mod cache;

@@ -268,8 +268,8 @@ fn serve_tooling_request(
     crate::tooling_server::ToolingRequest { request, reply }: crate::tooling_server::ToolingRequest,
 ) {
     use crate::tooling_server::{Reply, Request};
-    let Request::Run(args) = request;
-    let answer = match crate::build::tooling::run_command(build_state, &args) {
+    let Request::Run { cwd, args } = request;
+    let answer = match crate::build::tooling::run_command(build_state, cwd, args) {
         Ok(output) => Reply::Output(output),
         Err(err) => Reply::Error(format!("{err:#}")),
     };
