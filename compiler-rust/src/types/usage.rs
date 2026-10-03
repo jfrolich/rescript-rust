@@ -176,9 +176,14 @@ impl UsageTables {
     /// `Env.mark_value_used` (env.ml:1125-1128) without the
     /// implicit-coercion guard.
     pub fn mark_value_used(&mut self, name: &str, loc: Location) {
-        let Some(callbacks) = self.value_declarations.get(&NameLoc(name, loc)).cloned() else {
+        let Some(callbacks) = self.value_declarations.get(&NameLoc(name, loc)) else {
             return;
         };
+        // Slots whose recorded identifiers are marked once the callback list
+        // is no longer borrowed; the callbacks only set flags and record
+        // names, so running those marks last leaves the same state.
+        let mut released: smallvec::SmallVec<[(LetSlot, UsedCell, UsedCell); 2]> =
+            smallvec::SmallVec::new();
         for callback in callbacks {
             match callback {
                 ValueCallback::SetUsed(cell) => self.cells[cell.0 as usize] = true,
@@ -194,19 +199,20 @@ impl UsageTables {
                     match state.current_slot {
                         Some(current) => {
                             state.rec_needed = true;
-                            self.let_slots[current.0 as usize].push((name, loc));
+                            self.let_slots[current.0 as usize].push((name.clone(), *loc));
                         }
-                        None => {
-                            let recorded = std::mem::take(&mut self.let_slots[slot.0 as usize]);
-                            for (name, loc) in recorded {
-                                self.mark_value_used(&name, loc);
-                            }
-                            self.cells[used.0 as usize] = true;
-                            self.cells[some_used.0 as usize] = true;
-                        }
+                        None => released.push((*slot, *used, *some_used)),
                     }
                 }
             }
+        }
+        for (slot, used, some_used) in released {
+            let recorded = std::mem::take(&mut self.let_slots[slot.0 as usize]);
+            for (name, loc) in recorded {
+                self.mark_value_used(&name, loc);
+            }
+            self.cells[used.0 as usize] = true;
+            self.cells[some_used.0 as usize] = true;
         }
     }
 
