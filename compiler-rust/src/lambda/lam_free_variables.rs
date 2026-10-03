@@ -103,7 +103,7 @@ fn collect_free_variables(lam: &Lambda, fv: &mut IdentSet) {
             }
         }
 
-        Lambda::LglobalModule(_, _) => {
+        Lambda::LglobalModule(_) => {
             // Global modules are not considered free variables
             // (they represent module references, not local bindings)
         }
@@ -415,7 +415,7 @@ mod tests {
     fn test_global_module_not_free() {
         let m = Ident::create_local("M");
 
-        let global = Lambda::global_module(m.clone(), false);
+        let global = Lambda::global_module(m.clone());
         let fv = free_variables(&global);
 
         // Global modules should not be considered free variables

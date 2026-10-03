@@ -158,7 +158,7 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::PisNullUndefined => write!(f, "[?null?undefined]"),
         Primitive::Pnull => write!(f, "null"),
         Primitive::Pundefined => write!(f, "undefined"),
-        Primitive::Pimport => write!(f, "import"),
+        Primitive::Pimport(_) => write!(f, "import"),
         Primitive::Pmakeblock(tag_info, Mutable::Immutable) => {
             write!(f, "makeblock {}", tag_info.tag_label())
         }
@@ -311,13 +311,7 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt
     match lam {
         Lambda::Lvar(id) => write!(f, "{}", id.name()),
 
-        Lambda::LglobalModule(id, dynamic_import) => {
-            if *dynamic_import {
-                write!(f, "dynamic global {}", id.name())
-            } else {
-                write!(f, "global {}", id.name())
-            }
-        }
+        Lambda::LglobalModule(id) => write!(f, "global {}", id.name()),
 
         Lambda::Lconst(c) => format_constant(c, f),
 
@@ -385,12 +379,8 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt
         Lambda::Lprim(prim_info) => {
             // Special case for module field access
             if let Primitive::Pfield(n, FieldDbgInfo::Module { name }) = &prim_info.primitive {
-                if let [Lambda::LglobalModule(id, dynamic_import)] = prim_info.args.as_slice() {
-                    if *dynamic_import {
-                        return write!(f, "dynamic {}.{name}/{n}", id.name());
-                    } else {
-                        return write!(f, "{}.{name}/{n}", id.name());
-                    }
+                if let [Lambda::LglobalModule(id)] = prim_info.args.as_slice() {
+                    return write!(f, "{}.{name}/{n}", id.name());
                 }
             }
 
@@ -737,12 +727,8 @@ fn raw_innermost_let_body<'a>(mut lam: &'a Lambda) -> &'a Lambda {
 fn format_raw_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt::Result {
     match lam {
         Lambda::Lvar(id) => format_raw_ident(id, f),
-        Lambda::LglobalModule(id, dynamic_import) => {
-            if *dynamic_import {
-                write!(f, "dynamic global ")?;
-            } else {
-                write!(f, "global ")?;
-            }
+        Lambda::LglobalModule(id) => {
+            write!(f, "global ")?;
             format_raw_ident(id, f)
         }
         Lambda::Lconst(c) => format_raw_constant(c, f),
@@ -807,10 +793,7 @@ fn format_raw_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) ->
         }
         Lambda::Lprim(prim_info) => {
             if let Primitive::Pfield(n, FieldDbgInfo::Module { name }) = &prim_info.primitive {
-                if let [Lambda::LglobalModule(id, dynamic_import)] = prim_info.args.as_slice() {
-                    if *dynamic_import {
-                        write!(f, "dynamic ")?;
-                    }
+                if let [Lambda::LglobalModule(id)] = prim_info.args.as_slice() {
                     format_raw_ident(id, f)?;
                     return write!(f, ".{name}/{n}");
                 }
@@ -1130,13 +1113,9 @@ mod tests {
     #[test]
     fn test_print_global_module() {
         let m = Ident::create_local("Module");
-        let global = Lambda::global_module(m, false);
+        let global = Lambda::global_module(m);
         let s = lambda_to_string(&global);
         assert!(s.contains("global Module"));
-
-        let dynamic = Lambda::global_module(Ident::create_local("DynModule"), true);
-        let s = lambda_to_string(&dynamic);
-        assert!(s.contains("dynamic global DynModule"));
     }
 
     #[test]

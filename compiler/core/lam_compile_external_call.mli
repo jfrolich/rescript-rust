@@ -33,9 +33,9 @@ val translate_ffi :
   ?transformed_jsx:bool ->
   Lam_compile_context.t ->
   External_arg_spec.params ->
-  External_ffi_types.external_spec ->
+  prim_name:string ->
+  External_ffi_types.external_decl ->
   J.expression list ->
-  dynamic_import:bool ->
   J.expression
 
 (** TODO: document supported attributes

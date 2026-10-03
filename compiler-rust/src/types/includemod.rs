@@ -2162,10 +2162,10 @@ fn value_descriptions<'a>(
     match (&impl_desc.val_kind, &sig_desc.val_kind) {
         (ValueKind::ValPrim(p1), ValueKind::ValPrim(p2)) => {
             // includecore.ml:49-52: normalize both primitives against their
-            // types, then `!Primitive.coerce`.
+            // types, then `Primitive.coercible`.
             let p1 = normalize_primitive(type_ctx, env, impl_desc.val_type, p1);
             let p2 = normalize_primitive(type_ctx, env, expected_ty, p2);
-            if primitive_coerce(&p1, &p2) {
+            if primitive_coercible(&p1, &p2) {
                 Ok(ModuleCoercion::Tcoerce_none)
             } else {
                 dont_match()
@@ -2208,71 +2208,24 @@ fn normalize_primitive(
     }
 }
 
-/// `Primitive.coerce` as set by External_ffi_types (external_ffi_types.ml:237-270).
-fn primitive_coerce(
-    p1: &crate::types::decl::PrimitiveDescription,
-    p2: &crate::types::decl::PrimitiveDescription,
+/// `Primitive.coercible impl intf` (primitive.ml:41-52): can an
+/// implementation's primitive satisfy an interface's during signature
+/// inclusion? The specs must be equal, up to the widening rule in
+/// `External_ffi_types.inclusion_compatible`.
+fn primitive_coercible(
+    impl_: &crate::types::decl::PrimitiveDescription,
+    intf: &crate::types::decl::PrimitiveDescription,
 ) -> bool {
-    use crate::cmi::marshal_reader::OcamlValue;
-    if p1.prim_name == p2.prim_name
-        && p1.prim_arity == p2.prim_arity
-        && p1.prim_native_name == p2.prim_native_name
-    {
-        return true;
-    }
-    fn ffi(native: &str) -> Option<std::rc::Rc<OcamlValue>> {
-        if crate::raw_lambda::convert::is_bs_primitive(native) {
-            crate::raw_lambda::convert::decode_marshaled_ffi_type(native)
-        } else {
-            None
-        }
-    }
-    fn list(value: &OcamlValue) -> Vec<&OcamlValue> {
-        let mut items = Vec::new();
-        let mut current = value;
-        while let Some((0, [head, tail])) = current.as_block_opt() {
-            items.push(head);
-            current = tail;
-        }
-        items
-    }
-    fn same(a: &OcamlValue, b: &OcamlValue) -> bool {
-        match (a, b) {
-            (OcamlValue::Int(x), OcamlValue::Int(y)) => x == y,
-            (OcamlValue::String(x), OcamlValue::String(y)) => x == y,
-            (OcamlValue::Float(x), OcamlValue::Float(y)) => x == y,
-            (OcamlValue::Block(t1, f1), OcamlValue::Block(t2, f2)) => {
-                t1 == t2 && f1.len() == f2.len() && f1.iter().zip(f2.iter()).all(|(x, y)| same(x, y))
+    use crate::types::decl::PrimKind;
+    (impl_.prim_name == intf.prim_name
+        && impl_.prim_arity == intf.prim_arity
+        && impl_.prim_kind == intf.prim_kind)
+        || match (&impl_.prim_kind, &intf.prim_kind) {
+            (PrimKind::KindExternal(impl_ffi), PrimKind::KindExternal(intf_ffi)) => {
+                crate::types::external_ffi_types::inclusion_compatible(impl_ffi, intf_ffi)
             }
             _ => false,
         }
-    }
-    // `Ffi_obj_create` is tag 1 with the parameter list.
-    let (Some(v1), Some(v2)) = (ffi(&p1.prim_native_name), ffi(&p2.prim_native_name)) else {
-        return false;
-    };
-    let (Some((1, [params1])), Some((1, [params2]))) = (v1.as_block_opt(), v2.as_block_opt())
-    else {
-        return false;
-    };
-    let (params1, params2) = (list(params1), list(params2));
-    params1.len() == params2.len()
-        && params1.iter().zip(params2.iter()).all(|(a, b)| {
-            let (Some((0, [a_type, a_label])), Some((0, [b_type, b_label]))) =
-                (a.as_block_opt(), b.as_block_opt())
-            else {
-                return false;
-            };
-            same(a_type, b_type)
-                && (same(a_label, b_label)
-                    // `Obj_optional {name; for_sure_no_nested_option}` (tag 1).
-                    || match (a_label.as_block_opt(), b_label.as_block_opt()) {
-                        (Some((1, [a_name, a_sure])), Some((1, [b_name, b_sure]))) => {
-                            same(a_name, b_name) && a_sure.as_int() <= b_sure.as_int()
-                        }
-                        _ => false,
-                    })
-        })
 }
 
 pub(crate) fn add_sig_item_to_env(item: &SignatureItem, env: &mut Env) {

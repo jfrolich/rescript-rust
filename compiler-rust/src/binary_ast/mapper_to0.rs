@@ -1894,11 +1894,18 @@ impl<'a> Mapper<'a> {
         pt0::ValueDescription {
             pval_name: self.map_string_loc(&vd.pval_name),
             pval_type: self.map_core_type_idx(vd.pval_type),
-            pval_prim: vd
-                .pval_prim
-                .iter()
-                .map(|idx| self.get_str(*idx).to_string())
-                .collect(),
+            // ast_mapper_to0.ml: external PPXes run before the frontend
+            // digests externals, and nothing else crosses this bridge, so a
+            // digested external never reaches it.
+            pval_prim: match &vd.pval_prim {
+                None => vec![],
+                Some(current::PrimitiveRepr::PrimName(idx)) => vec![self.get_str(*idx).to_string()],
+                Some(current::PrimitiveRepr::PrimFfi { .. } | current::PrimitiveRepr::PrimInlineConst(_)) => {
+                    panic!(
+                        "External declarations already processed for compilation cannot be converted for an external PPX"
+                    )
+                }
+            },
             pval_attributes: self.map_attributes(&vd.pval_attributes),
             pval_loc: self.loc(vd.pval_loc),
         }

@@ -16,178 +16,47 @@ pub struct JsRawInfo {
     pub is_stmt: bool,
 }
 
-/// String delimiter for external constant arguments.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExternalArgDelim {
-    None,
-    StarJ,
-    NoQuotes,
-    BackQuotes,
-}
+pub use crate::types::external_ffi_types::{
+    Attr, Cst, DeclKind, Delim, ExternalDecl, ExternalModuleName, ImportAttributes, Label,
+    LabelNoname, ModuleBindName, ModuleSource, ObjParam, Param,
+};
 
-/// Constant preserved from external argument metadata.
+/// `Lambda.import_source`: the target of a dynamic `import`, resolved at
+/// translation. The argument of the import primitive is a module reference,
+/// never an expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExternalArgConst {
-    IntLit(i64),
-    StringLit(String, ExternalArgDelim),
-}
-
-/// OCaml external argument label metadata.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExternalArgLabel {
-    Label,
-    Empty,
-    Optional,
-}
-
-/// OCaml object-field label metadata for `@obj` externals.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExternalObjLabel {
-    Empty,
-    Label {
-        name: String,
+pub enum ImportSource {
+    /// A ReScript module, or a value/submodule reached from one (`path = []`:
+    /// the module itself). The JS export name for a nested `path` is resolved
+    /// where the cmj tables live, at emission.
+    ImportModule {
+        module_: crate::ident::Ident,
+        path: Vec<String>,
     },
-    Optional {
-        name: String,
-        for_sure_no_nested_option: bool,
+    /// An external's module: `path` is the access path inside the module
+    /// (`@scope` segments then the name; `[]` means the module itself).
+    ImportExternal {
+        module_: ExternalModuleName,
+        path: Vec<String>,
     },
 }
 
-/// OCaml external argument attribute metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExternalArgAttr {
-    PolyVarString {
-        descr: Vec<(String, String)>,
-    },
-    PolyVar {
-        descr: Option<Vec<(String, String)>>,
-    },
-    Int(Vec<(String, i64)>),
-    ArgCst(ExternalArgConst),
-    ExternUnit,
-    Nothing,
-    Ignore,
-    Unwrap,
-}
-
-/// External argument specification.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExternalArgSpec {
-    pub arg_type: ExternalArgAttr,
-    pub arg_label: ExternalArgLabel,
-}
-
-impl ExternalArgSpec {
-    pub fn dummy() -> Self {
-        Self {
-            arg_type: ExternalArgAttr::Nothing,
-            arg_label: ExternalArgLabel::Empty,
+impl ImportSource {
+    /// `Ffi_debug.import_source`.
+    pub fn debug_string(&self) -> String {
+        use crate::types::external_ffi_types::debug::{module_name, quote};
+        let path = |p: &[String]| {
+            format!("[{}]", p.iter().map(|s| quote(s)).collect::<Vec<_>>().join(";"))
+        };
+        match self {
+            ImportSource::ImportModule { module_, path: p } => {
+                format!("Import_module({},{})", module_.name(), path(p))
+            }
+            ImportSource::ImportExternal { module_, path: p } => {
+                format!("Import_external({},{})", module_name(module_), path(p))
+            }
         }
     }
-}
-
-/// `@obj` external field specification.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExternalObjSpec {
-    pub obj_arg_type: ExternalArgAttr,
-    pub obj_arg_label: ExternalObjLabel,
-}
-
-/// Import attributes attached to an external module binding.
-pub type ImportAttributes = Vec<(String, String)>;
-
-/// Module bind name hint for imported externals.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExternalModuleBindName {
-    HintName(String),
-    Nothing,
-}
-
-/// Imported external module metadata preserved from marshaled FFI info.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExternalModuleName {
-    pub bundle: String,
-    pub module_bind_name: ExternalModuleBindName,
-    pub import_attributes: Option<ImportAttributes>,
-}
-
-/// OCaml external-spec metadata preserved for JS lowering.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExternalSpec {
-    JsVar {
-        name: String,
-        external_module_name: Option<ExternalModuleName>,
-        scopes: Vec<String>,
-    },
-    JsModuleAsVar(ExternalModuleName),
-    JsModuleAsFn {
-        external_module_name: ExternalModuleName,
-        splice: bool,
-    },
-    JsModuleAsClass(ExternalModuleName),
-    JsCall {
-        name: String,
-        external_module_name: Option<ExternalModuleName>,
-        splice: bool,
-        scopes: Vec<String>,
-    },
-    JsSend {
-        name: String,
-        splice: bool,
-        js_send_scopes: Vec<String>,
-    },
-    JsNew {
-        name: String,
-        external_module_name: Option<ExternalModuleName>,
-        splice: bool,
-        scopes: Vec<String>,
-    },
-    JsSet {
-        js_set_name: String,
-        js_set_scopes: Vec<String>,
-    },
-    JsGet {
-        js_get_name: String,
-        js_get_scopes: Vec<String>,
-    },
-    JsGetIndex {
-        js_get_index_scopes: Vec<String>,
-    },
-    JsSetIndex {
-        js_set_index_scopes: Vec<String>,
-    },
-}
-
-/// External FFI specification
-#[derive(Debug, Clone, PartialEq)]
-pub struct ExternalFfiSpec {
-    /// Minimal raw-ffi classification kept for optimized-lambda lowering.
-    pub kind: ExternalFfiKind,
-    /// OCaml external-spec metadata used by the backend after optimized lambda.
-    pub spec: Option<ExternalSpec>,
-    /// OCaml `@obj` field metadata preserved across lowering.
-    pub obj_params: Option<Vec<ExternalObjSpec>>,
-    /// How the fully applied call result should be wrapped.
-    pub return_wrapper: ExternalReturnWrapper,
-    /// Optional inline constant preserved from marshaled external ffi metadata.
-    pub inline_constant: Option<super::lam_constant::Constant>,
-}
-
-/// Raw FFI kind preserved across the raw-lambda boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExternalFfiKind {
-    Default,
-    ObjCreate,
-    Normal,
-}
-
-/// Result wrapping preserved for external calls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExternalReturnWrapper {
-    Identity,
-    NullToOpt,
-    NullUndefinedToOpt,
-    ReplacedWithUnit,
 }
 
 /// Primitive operations
@@ -216,16 +85,16 @@ pub enum Primitive {
 
     // ==================== External Call ====================
     /// JavaScript FFI call
+    /// JS FFI calls, expanded from the external's spec at translation.
     PjsCall {
         prim_name: String,
-        arg_types: Vec<ExternalArgSpec>,
-        ffi: Box<ExternalFfiSpec>,
-        dynamic_import: bool,
+        arg_types: Vec<Param>,
+        ffi: Box<ExternalDecl>,
         transformed_jsx: bool,
     },
 
     /// Create a JavaScript object
-    PjsObjectCreate(Vec<ExternalObjSpec>),
+    PjsObjectCreate(Vec<ObjParam>),
 
     // ==================== Exceptions ====================
     /// Raise an exception
@@ -456,8 +325,8 @@ pub enum Primitive {
     Pnull,
     /// Undefined constant (raw lambda only, 0 args)
     Pundefined,
-    /// Dynamic import
-    Pimport,
+    /// Dynamic import of a translation-resolved source
+    Pimport(Box<ImportSource>),
     /// Typeof
     Ptypeof,
     /// Function arity
@@ -592,7 +461,6 @@ impl Primitive {
             | PsomeNotNest
             | PisUndefined
             | PisNullUndefined
-            | Pimport
             | Ptypeof
             | PfnArity
             | PisPolyVarBlock
@@ -646,25 +514,24 @@ impl Primitive {
                 Pmakeblock(info1, flag1) => flag0 == flag1 && info0 == info1,
                 _ => false,
             },
-            // lam_primitive.ml:255-260: Pjs_call only checks
-            // prim_name + arg_types + ffi + dynamic_import
-            // (NOT transformed_jsx).
+            // lam_primitive.ml:250-254: Pjs_call only checks
+            // prim_name + arg_types + ffi (NOT transformed_jsx).
             PjsCall {
                 prim_name,
                 arg_types,
                 ffi,
-                dynamic_import,
                 transformed_jsx: _,
             } => match other {
                 PjsCall {
                     prim_name: pn,
                     arg_types: at,
                     ffi: f,
-                    dynamic_import: di,
                     transformed_jsx: _,
-                } => prim_name == pn && arg_types == at && ffi == f && dynamic_import == di,
+                } => prim_name == pn && arg_types == at && ffi == f,
                 _ => false,
             },
+            // lam_primitive.ml:255-258
+            Pimport(src) => matches!(other, Pimport(src2) if src == src2),
             // lam_primitive.ml:261-264
             PjsObjectCreate(obj0) => match other {
                 PjsObjectCreate(obj1) => obj0 == obj1,

@@ -149,7 +149,7 @@ pub fn free_variables_with_stats(
                 }
             }
 
-            Lambda::LglobalModule(_, _) => {}
+            Lambda::LglobalModule(_) => {}
 
             Lambda::Lfunction(func) => {
                 for param in &func.params {

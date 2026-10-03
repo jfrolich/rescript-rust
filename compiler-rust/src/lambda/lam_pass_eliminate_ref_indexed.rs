@@ -47,7 +47,7 @@ pub(crate) fn eliminate_ref(
             Ok(store.append(NodeSnapshot::Assign(target.clone(), value)))
         }
         NodeSnapshot::Const(_)
-        | NodeSnapshot::GlobalModule(_, _)
+        | NodeSnapshot::GlobalModule(_)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => Ok(node),
         NodeSnapshot::Apply(function, args, info, jsx) => {

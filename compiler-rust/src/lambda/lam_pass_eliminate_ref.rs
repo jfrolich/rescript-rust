@@ -149,7 +149,7 @@ pub fn eliminate_ref(id: &Ident, lam: &Lambda) -> Result<Lambda, RealReference> 
         }
 
         // Lglobal_module (lam_pass_eliminate_ref.ml:65).
-        Lambda::LglobalModule(_, _) => Ok(lam.clone()),
+        Lambda::LglobalModule(_) => Ok(lam.clone()),
 
         // Lprim (general) (lam_pass_eliminate_ref.ml:66-67).
         Lambda::Lprim(prim) => {

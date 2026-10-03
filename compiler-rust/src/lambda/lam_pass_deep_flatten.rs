@@ -65,7 +65,7 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
     fn hit_variable(target: &Ident, lam: &Lambda) -> bool {
         match lam {
             Lambda::Lvar(id) => id.same(target),
-            Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+            Lambda::LglobalModule(_) | Lambda::Lconst(_) => false,
             Lambda::Lapply(apply) => {
                 hit_variable(target, &apply.ap_func)
                     || apply.ap_args.iter().any(|arg| hit_variable(target, arg))
@@ -373,7 +373,7 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
             Lambda::Lsequence(first, second) => {
                 Lambda::seq(aux(*first, id_gen), aux(*second, id_gen))
             }
-            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam,
+            Lambda::Lvar(_) | Lambda::LglobalModule(_) | Lambda::Lconst(_) => lam,
             Lambda::Lapply(apply) => Lambda::Lapply(Box::new(Apply {
                 ap_func: map_box(apply.ap_func, |inner| aux(inner, id_gen)),
                 ap_args: apply
@@ -553,7 +553,7 @@ mod tests {
             }
             Lambda::Lassign(_, value) => has_binding(value, target),
             Lambda::Lvar(_)
-            | Lambda::LglobalModule(_, _)
+            | Lambda::LglobalModule(_)
             | Lambda::Lconst(_)
             | Lambda::Lbreak
             | Lambda::Lcontinue => false,

@@ -402,7 +402,7 @@ fn hash_value_desc(hasher: &mut impl Hasher, vd: &ValueDescription, entries: &[P
             1u8.hash(hasher);
             prim.prim_name.hash(hasher);
             prim.prim_arity.hash(hasher);
-            prim.prim_native_name.hash(hasher);
+            prim.prim_kind.hash(hasher);
             prim.prim_native_float.hash(hasher);
             prim.prim_from_constructor.hash(hasher);
         }

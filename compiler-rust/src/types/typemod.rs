@@ -1158,18 +1158,18 @@ fn primitive_description_from_value_decl(
     arena: &ParseArena,
     ctx: &crate::types::context::TypeContext,
     env: &Env,
-    val_prim: &[StrIdx],
+    val_prim: &crate::parser::ast::PrimitiveRepr,
     core_type_idx: crate::parse_arena::CoreTypeIdx,
     val_ty: TypeExprRef,
 ) -> crate::types::PrimitiveDescription {
-    let prim_name = val_prim
-        .first()
-        .map(|s| arena.get_string(*s).to_string())
-        .unwrap_or_default();
-    let prim_native_name = val_prim
-        .get(1)
-        .map(|s| arena.get_string(*s).to_string())
-        .unwrap_or_default();
+    use crate::parser::ast::PrimitiveRepr;
+    use crate::types::decl::PrimKind;
+    // `Primitive.parse_declaration` (primitive.ml:55-70).
+    let (prim_name, prim_kind) = match val_prim {
+        PrimitiveRepr::PrimName(name) => (arena.get_string(*name).to_string(), PrimKind::KindIntrinsic),
+        PrimitiveRepr::PrimFfi { name, spec } => (name.clone(), PrimKind::KindExternal(spec.clone())),
+        PrimitiveRepr::PrimInlineConst(c) => (String::new(), PrimKind::KindInlineConst(c.clone())),
+    };
     let arity_from_type = get_primitive_arity_from_type(ctx, env, val_ty);
     // OCaml: from_constructor = true when get_arity returns Some AND type is Tconstr
     let prim_from_constructor = arity_from_type.is_some() && is_type_constructor(ctx, val_ty);
@@ -1179,7 +1179,7 @@ fn primitive_description_from_value_decl(
     crate::types::PrimitiveDescription {
         prim_name,
         prim_arity,
-        prim_native_name,
+        prim_kind,
         prim_native_float: false,
         prim_from_constructor,
     }
@@ -13319,19 +13319,13 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                             val_id,
                             ValueDescription {
                                 val_type,
-                                val_kind: if vd.pval_prim.is_empty() {
-                                    crate::types::decl::ValueKind::ValReg
-                                } else {
-                                    crate::types::decl::ValueKind::ValPrim(
+                                val_kind: match &vd.pval_prim {
+                                    None => crate::types::decl::ValueKind::ValReg,
+                                    Some(prim) => crate::types::decl::ValueKind::ValPrim(
                                         primitive_description_from_value_decl(
-                                            arena,
-                                            ctx,
-                                            &sig_env,
-                                            &vd.pval_prim,
-                                            vd.pval_type,
-                                            val_type,
+                                            arena, ctx, &sig_env, prim, vd.pval_type, val_type,
                                         ),
-                                    )
+                                    ),
                                 },
                                 val_loc: arena.to_location(sig_item.psig_loc),
                                 val_attributes: vec![],
@@ -17540,17 +17534,11 @@ pub fn transl_signature<'a>(
                 // primitive branch at typedecl.ml:1897-1898; ordinary
                 // signature values must not force constructor heads before
                 // Env.enter_value allocates val_id at typedecl.ml:1916-1919.
-                let val_kind = if vd.pval_prim.is_empty() {
-                    crate::types::decl::ValueKind::ValReg
-                } else {
-                    crate::types::decl::ValueKind::ValPrim(primitive_description_from_value_decl(
-                        arena,
-                        ctx,
-                        &sig_env,
-                        &vd.pval_prim,
-                        vd.pval_type,
-                        val_ty,
-                    ))
+                let val_kind = match &vd.pval_prim {
+                    None => crate::types::decl::ValueKind::ValReg,
+                    Some(prim) => crate::types::decl::ValueKind::ValPrim(
+                        primitive_description_from_value_decl(arena, ctx, &sig_env, prim, vd.pval_type, val_ty),
+                    ),
                 };
                 // OCaml typedecl.ml:1875-1914 translates the type scheme before
                 // Env.enter_value creates the value ident. Keep the same order so
@@ -17569,12 +17557,7 @@ pub fn transl_signature<'a>(
                         name: name_str.clone(),
                     },
                 );
-                // For primitives, we need the pval_prim as Vec<String> for the typed tree
-                let val_prim: Vec<String> = vd
-                    .pval_prim
-                    .iter()
-                    .map(|s| arena.get_string(*s).to_string())
-                    .collect();
+                let val_prim = vd.pval_prim.clone();
                 TSigDesc::Tsig_value(crate::types::typedtree::TypedValueDescription {
                     val_id: id,
                     val_name: Located {
@@ -18158,6 +18141,7 @@ fn type_structure_unscoped<'a>(
                     fp_param: param_ident,
                     fp_pat: param_pat,
                     fp_partial: crate::types::typedtree::Partial::Total,
+                    fp_has_default: false,
                 }],
                 body: Box::new(gen_fn.body),
                 async_: false,
@@ -18793,19 +18777,16 @@ fn type_structure_item<'a>(
             // Primitive.parse_declaration before Env.enter_value allocates the
             // external id. parse_arity itself delegates to Ctype.get_arity at
             // typedecl.ml:1863-1872; do not expand the whole value type here.
-            let prim_desc = primitive_description_from_value_decl(
-                arena,
-                ctx,
-                env,
-                &vd.pval_prim,
-                vd.pval_type,
-                val_ty,
-            );
-            // compiler/ml/typedecl.ml:1894-1904 permits nullary compiler
-            // primitives and the internal magic native-name marker, but rejects
-            // an ordinary external whose translated type has no arguments.
-            let internal_native_name = prim_desc.prim_native_name.chars().count() >= 20
-                && prim_desc.prim_native_name.starts_with("\u{84}\u{95}");
+            let Some(prim) = &vd.pval_prim else {
+                unreachable!("an external always carries a primitive (typedecl.ml:1890-1896)")
+            };
+            let prim_desc =
+                primitive_description_from_value_decl(arena, ctx, env, prim, vd.pval_type, val_ty);
+            // compiler/ml/typedecl.ml:1898-1905 permits nullary compiler
+            // primitives and digested externals, but rejects an ordinary
+            // external whose translated type has no arguments.
+            let internal_native_name =
+                !matches!(prim_desc.prim_kind, crate::types::decl::PrimKind::KindIntrinsic);
             let compiler_primitive = prim_desc
                 .prim_name
                 .as_bytes()
@@ -18820,13 +18801,7 @@ fn type_structure_item<'a>(
                 });
             }
 
-            // PPX has already encoded the FFI attributes into pval_prim,
-            // so just resolve StrIdx -> String for the typed tree
-            let val_prim: Vec<String> = vd
-                .pval_prim
-                .iter()
-                .map(|s| arena.get_string(*s).to_string())
-                .collect();
+            let val_prim = vd.pval_prim.clone();
 
             // OCaml Typedecl.transl_value_decl enters the value after translating
             // the type and parsing primitive metadata, so type lookup side effects

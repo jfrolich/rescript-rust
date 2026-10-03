@@ -86,7 +86,7 @@ module Types = struct
 
   and t =
     | Lvar of ident
-    | Lglobal_module of ident * bool
+    | Lglobal_module of ident
     | Lconst of Lam_constant.t
     | Lapply of apply
     | Lfunction of lfunction
@@ -196,9 +196,9 @@ let rec apply ?(ap_transformed_jsx = false) fn args (ap_info : ap_info) : t =
 
 let rec eq_approx (l1 : t) (l2 : t) =
   match l1 with
-  | Lglobal_module (i1, b1) -> (
+  | Lglobal_module i1 -> (
     match l2 with
-    | Lglobal_module (i2, b2) -> Ident.same i1 i2 && b1 = b2
+    | Lglobal_module i2 -> Ident.same i1 i2
     | _ -> false)
   | Lvar i1 -> (
     match l2 with
@@ -343,8 +343,7 @@ let rec seq (a : t) b : t =
   | _ -> Lsequence (a, b)
 
 let var id : t = Lvar id
-let global_module ?(dynamic_import = false) id =
-  Lglobal_module (id, dynamic_import)
+let global_module id = Lglobal_module id
 let const ct : t = Lconst ct
 
 let function_ ~loc ~attr ~arity ~params ~body : t =
@@ -385,7 +384,6 @@ let prim ~primitive:(prim : Lam_primitive.t) ~args loc : t =
     | Pintoffloat, Const_float a ->
       Lift.int (Int32.of_float (float_of_string a))
     (* | Pnegfloat -> Lift.float (-. a) *)
-    (* | Pabsfloat -> Lift.float (abs_float a) *)
     | Pstringlength, Const_string {s; delim = None} ->
       Lift.int (Int32.of_int (String.length s))
     (* | Pnegbint Pnativeint, ( (Const_nativeint i)) *)
@@ -463,7 +461,7 @@ let prim ~primitive:(prim : Lam_primitive.t) ~args loc : t =
             Lprim
               {
                 primitive = Pfield (pos, Fld_module {name = f1});
-                args = [(Lglobal_module (v1, _) | Lvar v1)];
+                args = [(Lglobal_module v1 | Lvar v1)];
               }
             :: args ) ->
           pos = i && f = f1 && Ident.same var v1 && aux fields args var (i + 1)
@@ -474,7 +472,7 @@ let prim ~primitive:(prim : Lam_primitive.t) ~args loc : t =
           Lprim
             {
               primitive = Pfield (pos, Fld_module {name = f1});
-              args = [((Lglobal_module (v1, _) | Lvar v1) as lam)];
+              args = [((Lglobal_module v1 | Lvar v1) as lam)];
             }
           :: args1 ) ->
         if pos = 0 && field1 = f1 && aux rest args1 v1 1 then lam
@@ -629,21 +627,3 @@ let sequor l r = if_ l true_ r
 
 (** [l && r ] *)
 let sequand l r = if_ l r false_
-
-let result_wrap loc (result_type : External_ffi_types.return_wrapper) result =
-  match result_type with
-  | Return_replaced_with_unit -> seq result unit
-  | Return_null_to_opt -> prim ~primitive:Pnull_to_opt ~args:[result] loc
-  | Return_null_undefined_to_opt ->
-    prim ~primitive:Pnull_undefined_to_opt ~args:[result] loc
-  | Return_unset | Return_identity -> result
-
-let handle_bs_non_obj_ffi ?(transformed_jsx = false)
-    (arg_types : External_arg_spec.params)
-    (result_type : External_ffi_types.return_wrapper) ffi args loc prim_name
-    ~dynamic_import =
-  result_wrap loc result_type
-    (prim
-       ~primitive:
-         (Pjs_call {prim_name; arg_types; ffi; dynamic_import; transformed_jsx})
-       ~args loc)

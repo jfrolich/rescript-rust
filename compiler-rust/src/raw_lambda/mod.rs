@@ -83,7 +83,7 @@ pub enum RawLambda {
     /// Variable reference.
     Lvar(Ident),
     /// Global module reference.
-    LglobalModule(Ident, bool),
+    LglobalModule(Ident),
     /// Constant value.
     Lconst(Constant),
     /// Function application.
@@ -168,7 +168,7 @@ impl RawLambda {
     pub fn for_each_child_mut(&mut self, f: &mut impl FnMut(&mut RawLambda)) {
         match self {
             RawLambda::Lvar(_)
-            | RawLambda::LglobalModule(_, _)
+            | RawLambda::LglobalModule(_)
             | RawLambda::Lconst(_)
             | RawLambda::Lbreak
             | RawLambda::Lcontinue => {}
@@ -235,8 +235,8 @@ impl RawLambda {
     }
 
     /// Create a global module reference.
-    pub fn global_module(id: Ident, dynamic_import: bool) -> Self {
-        RawLambda::LglobalModule(id, dynamic_import)
+    pub fn global_module(id: Ident) -> Self {
+        RawLambda::LglobalModule(id)
     }
 
     /// Create a constant.
@@ -300,8 +300,8 @@ impl RawLambda {
     pub fn from_lowered(lowered: Lambda) -> Self {
         match lowered {
             Lambda::Lvar(id) => RawLambda::Lvar(id),
-            Lambda::LglobalModule(id, dynamic_import) => {
-                RawLambda::LglobalModule(id, dynamic_import)
+            Lambda::LglobalModule(id) => {
+                RawLambda::LglobalModule(id)
             }
             Lambda::Lconst(c) => RawLambda::Lconst(c),
             Lambda::Lapply(apply) => RawLambda::Lapply(Box::new(RawApply {
@@ -426,8 +426,8 @@ impl RawLambda {
         match self {
             RawLambda::Lshared(inner) => std::sync::Arc::unwrap_or_clone(inner).into_lowered(),
             RawLambda::Lvar(id) => Lambda::Lvar(id),
-            RawLambda::LglobalModule(id, dynamic_import) => {
-                Lambda::LglobalModule(id, dynamic_import)
+            RawLambda::LglobalModule(id) => {
+                Lambda::LglobalModule(id)
             }
             RawLambda::Lconst(c) => Lambda::Lconst(c),
             RawLambda::Lapply(apply) => Lambda::Lapply(Box::new(crate::lambda::Apply {
@@ -537,19 +537,9 @@ impl RawLambda {
             RawLambda::Lcontinue => Lambda::Lcontinue,
             RawLambda::Lassign(id, value) => Lambda::Lassign(id, Box::new(value.into_lowered())),
             RawLambda::Lsend(name, obj, loc) => Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
-                primitive: Primitive::PjsCall {
-                    prim_name: format!("send{name}"),
-                    arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
-                    ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
-                        kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
-                        spec: None,
-                        obj_params: None,
-                        return_wrapper:
-                            crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
-                        inline_constant: None,
-                    }),
-                    dynamic_import: false,
-                    transformed_jsx: false,
+                primitive: Primitive::PjsUnsafeDowngrade {
+                    name,
+                    setter: false,
                 },
                 args: vec![obj.into_lowered()],
                 loc,

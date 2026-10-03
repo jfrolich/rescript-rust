@@ -323,7 +323,8 @@ let primitive ~with_locs (prim : Lam_primitive.t) =
   | Pval_from_option_not_nest -> Sexp.atom "Pval_from_option_not_nest"
   | Pis_undefined -> Sexp.atom "Pis_undefined"
   | Pis_null_undefined -> Sexp.atom "Pis_null_undefined"
-  | Pimport -> Sexp.atom "Pimport"
+  | Pimport src ->
+    Sexp.list [Sexp.atom "Pimport"; string (Ffi_debug.import_source src)]
   | Pmakeblock (info, mut) ->
     Sexp.list [Sexp.atom "Pmakeblock"; tag_info info; mutable_flag_sexp mut]
   | Pfield (n, info) ->
@@ -331,12 +332,11 @@ let primitive ~with_locs (prim : Lam_primitive.t) =
   | Psetfield (n, info) ->
     Sexp.list [Sexp.atom "Psetfield"; int n; set_field_dbg_info info]
   | Pduprecord -> Sexp.atom "Pduprecord"
-  | Pjs_call {prim_name; arg_types = _; ffi = _; dynamic_import; transformed_jsx} ->
+  | Pjs_call {prim_name; arg_types = _; ffi = _; transformed_jsx} ->
     Sexp.list [
       Sexp.atom "Pjs_call";
       string prim_name;
       (* Skip arg_types and ffi for brevity *)
-      bool dynamic_import;
       bool transformed_jsx;
     ]
   | Pjs_object_create _ -> Sexp.atom "Pjs_object_create"
@@ -451,8 +451,7 @@ let rec lambda ~with_locs (lam : Lam.t) =
   match lam with
   | Lvar id ->
     Sexp.list [Sexp.atom "Lvar"; ident id]
-  | Lglobal_module (id, dynamic_import) ->
-    Sexp.list [Sexp.atom "Lglobal_module"; ident id; bool dynamic_import]
+  | Lglobal_module id -> Sexp.list [Sexp.atom "Lglobal_module"; ident id]
   | Lconst c ->
     Sexp.list [Sexp.atom "Lconst"; constant c]
   | Lapply {ap_func; ap_args; ap_info; ap_transformed_jsx} ->

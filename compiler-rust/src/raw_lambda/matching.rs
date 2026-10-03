@@ -1851,7 +1851,7 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                 None
             }
             RawLambda::Lconst(_) => Some(e.clone()),
-            RawLambda::LglobalModule(_, _) => Some(e.clone()),
+            RawLambda::LglobalModule(_) => Some(e.clone()),
             RawLambda::Lapply(ap) => {
                 let func = tr_rec(env, &ap.ap_func, count, next_id)?;
                 let args = tr_recs(env, &ap.ap_args, count, next_id)?;
@@ -2142,10 +2142,10 @@ impl MakeKeyWriter {
                 write!(out, "Lconst({c:?})").ok()?;
                 Some(())
             }
-            RawLambda::LglobalModule(id, dynamic_import) => {
+            RawLambda::LglobalModule(id) => {
                 out.push_str("LglobalModule(");
                 write_ident_key(out, id);
-                write!(out, ",{dynamic_import})").ok()?;
+                out.push(')');
                 Some(())
             }
             RawLambda::Lapply(ap) => {
@@ -3309,7 +3309,7 @@ fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
             RawLambda::Lvar(id) => {
                 fv.insert(id.clone());
             }
-            RawLambda::LglobalModule(_, _) | RawLambda::Lconst(_) => {}
+            RawLambda::LglobalModule(_) | RawLambda::Lconst(_) => {}
             RawLambda::Lapply(apply) => {
                 collect(&apply.ap_func, fv);
                 for arg in &apply.ap_args {
@@ -7342,7 +7342,7 @@ fn transl_normal_path(path: &crate::types::path::Path) -> RawLambda {
     match path {
         Path::Pident(id) => {
             if id.is_global() {
-                RawLambda::LglobalModule(id.clone(), false)
+                RawLambda::LglobalModule(id.clone())
             } else {
                 RawLambda::Lvar(id.clone())
             }
@@ -8162,7 +8162,7 @@ fn compile_test<'p, K: Clone>(
 /// Equivalent to OCaml's `approx_present`.
 fn approx_present(v: &Ident, lam: &RawLambda) -> bool {
     match lam.peel() {
-        RawLambda::Lconst(_) | RawLambda::LglobalModule(_, _) => false,
+        RawLambda::Lconst(_) | RawLambda::LglobalModule(_) => false,
         RawLambda::LstaticRaise(_, args) => args.iter().any(|a| approx_present(v, a)),
         RawLambda::Lprim(info) => info.args.iter().any(|a| approx_present(v, a)),
         RawLambda::Llet(LetKind::Alias, _, l1, l2) => {
@@ -8243,9 +8243,9 @@ fn lower_bind(v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
                 RawLambda::Llet(LetKind::Alias, vv, lv, Box::new(lower_bind(v, arg, *l)))
             }
         }
-        RawLambda::Lvar(u) if u.same(v) && u.name() == "*sth*" => {
-            arg.clone() // eliminate let *sth* = from_option x in *sth*
-        }
+        // matching.ml:2407-2410: eliminate `let v = arg in v`; lower_bind is
+        // only used for alias bindings, so `arg` is pure.
+        RawLambda::Lvar(u) if u.same(v) => arg.clone(),
         other => bind(LetKind::Alias, v, arg, other),
     }
 }
@@ -9426,7 +9426,7 @@ pub fn partial_function(_ctx_ref: &TypeContext, loc: Location) -> RawLambda {
     let fname = String::new();
 
     let match_failure_ident = crate::types::predef::ident_match_failure();
-    let exn = RawLambda::LglobalModule(match_failure_ident, false);
+    let exn = RawLambda::LglobalModule(match_failure_ident);
     let payload = RawLambda::Lconst(crate::lambda::Constant::Block {
         tag_info: Box::new(TagInfo::Tuple),
         elements: vec![

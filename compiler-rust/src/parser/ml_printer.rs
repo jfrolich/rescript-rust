@@ -469,19 +469,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             // where %a%a = core_type followed by optional "@ =@ primitives"
             f.open_box(BoxKind::HOV, 2);
             print_core_type(f, arena, arena.get_core_type(vd.pval_type));
-            if !vd.pval_prim.is_empty() {
-                f.space();
-                f.string("=");
-                f.space();
-                for (i, prim) in vd.pval_prim.iter().enumerate() {
-                    if i > 0 {
-                        f.space();
-                    }
-                    f.string("\"");
-                    f.string(arena.get_string(*prim));
-                    f.string("\"");
-                }
-            }
+            print_value_description_prim(f, arena, &vd.pval_prim);
             f.close_box();
             f.close_box();
             print_item_attributes(f, arena, &vd.pval_attributes);
@@ -3984,12 +3972,48 @@ fn print_module_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
 // Signature items
 // ============================================================================
 
+/// pprintast.ml `value_description`: the primitive after the type.
+fn print_value_description_prim<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    prim: &Option<PrimitiveRepr>,
+) {
+    let quoted = |f: &mut Formatter<W>, s: &str| {
+        f.string("\"");
+        f.string(s);
+        f.string("\"");
+    };
+    match prim {
+        None => {}
+        Some(PrimitiveRepr::PrimName(s)) => {
+            f.space();
+            f.string("=");
+            f.space();
+            quoted(f, arena.get_string(*s));
+        }
+        Some(PrimitiveRepr::PrimFfi { name, .. }) => {
+            f.space();
+            f.string("=");
+            f.space();
+            quoted(f, name);
+            f.space();
+            quoted(f, "#rescript-external");
+        }
+        Some(PrimitiveRepr::PrimInlineConst(_)) => {
+            f.space();
+            f.string("=");
+            f.space();
+            quoted(f, "#rescript-inline");
+        }
+    }
+}
+
 fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item: &SignatureItem) {
     match &*item.psig_desc {
         SignatureItemDesc::Psig_value(vd) => {
             // OCaml: pp f "@[<2>%s@ %a@ :@ %a@]%a"
             f.open_box(BoxKind::Box, 2);
-            if vd.pval_prim.is_empty() {
+            if vd.pval_prim.is_none() {
                 f.string("val");
             } else {
                 f.string("external");
@@ -4002,19 +4026,7 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             // OCaml value_description: pp f "@[<hov2>%a%a@]"
             f.open_box(BoxKind::HOV, 2);
             print_core_type(f, arena, arena.get_core_type(vd.pval_type));
-            if !vd.pval_prim.is_empty() {
-                f.space();
-                f.string("=");
-                f.space();
-                for (i, prim) in vd.pval_prim.iter().enumerate() {
-                    if i > 0 {
-                        f.space();
-                    }
-                    f.string("\"");
-                    f.string(arena.get_string(*prim));
-                    f.string("\"");
-                }
-            }
+            print_value_description_prim(f, arena, &vd.pval_prim);
             f.close_box();
             f.close_box();
             print_item_attributes(f, arena, &vd.pval_attributes);

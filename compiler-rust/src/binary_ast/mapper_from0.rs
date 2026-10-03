@@ -33,18 +33,20 @@ use crate::parser::ast::{PexpApply, PexpFun};
 pub fn map_structure(
     arena: &mut ParseArena,
     str: &[pt0::StructureItem],
-) -> Vec<current::StructureItem> {
+) -> Result<Vec<current::StructureItem>, crate::binary_ast::ppx::PpxError> {
     let mut mapper = Mapper::new(arena);
-    mapper.map_structure(str)
+    let result = mapper.map_structure(str);
+    mapper.finish(result)
 }
 
 /// Convert a signature from parsetree0 to current parsetree
 pub fn map_signature(
     arena: &mut ParseArena,
     sig: &[pt0::SignatureItem],
-) -> Vec<current::SignatureItem> {
+) -> Result<Vec<current::SignatureItem>, crate::binary_ast::ppx::PpxError> {
     let mut mapper = Mapper::new(arena);
-    mapper.map_signature(sig)
+    let result = mapper.map_signature(sig);
+    mapper.finish(result)
 }
 
 // ========== Helper functions ==========
@@ -405,11 +407,20 @@ fn varify_constructors(
 /// Holds a mutable reference to the arena for creating LocIdx values.
 pub struct Mapper<'a> {
     arena: &'a mut ParseArena,
+    /// The first `Location.raise_errorf` the OCaml mapper would raise.
+    error: Option<crate::binary_ast::ppx::PpxError>,
 }
 
 impl<'a> Mapper<'a> {
     pub fn new(arena: &'a mut ParseArena) -> Self {
-        Self { arena }
+        Self { arena, error: None }
+    }
+
+    fn finish<T>(&mut self, result: T) -> Result<T, crate::binary_ast::ppx::PpxError> {
+        match self.error.take() {
+            Some(error) => Err(error),
+            None => Ok(result),
+        }
     }
 
     /// Convert a full Location to LocIdx
@@ -2251,14 +2262,25 @@ impl<'a> Mapper<'a> {
     // ========== Other declarations ==========
 
     fn map_value_description(&mut self, vd: &pt0::ValueDescription) -> current::ValueDescription {
+        // ast_mapper_from0.ml: a parsetree0 external carries one string.
+        let pval_prim = match vd.pval_prim.as_slice() {
+            [] => None,
+            [s] => Some(current::PrimitiveRepr::PrimName(self.arena.push_string(s.clone()))),
+            _ => {
+                if self.error.is_none() {
+                    let loc = self.loc(&vd.pval_loc);
+                    self.error = Some(crate::binary_ast::ppx::PpxError::at_loc(
+                        loc,
+                        "An external declaration can carry only a single primitive string",
+                    ));
+                }
+                None
+            }
+        };
         current::ValueDescription {
             pval_name: self.map_string_loc(&vd.pval_name),
             pval_type: self.push_core_type(&vd.pval_type),
-            pval_prim: vd
-                .pval_prim
-                .iter()
-                .map(|s| self.arena.push_string(s.clone()))
-                .collect(),
+            pval_prim,
             pval_attributes: self.map_attributes(&vd.pval_attributes).into(),
             pval_loc: self.loc(&vd.pval_loc),
         }

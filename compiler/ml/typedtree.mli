@@ -245,6 +245,11 @@ and function_param = {
   fp_param: Ident.t; (* the name the compiled parameter binds to *)
   fp_pat: pattern;
   fp_partial: partial; (* whether [fp_pat] is exhaustive *)
+  fp_has_default: bool;
+      (* optional parameter with a default value. [fp_pat] then binds the
+         option carrier directly to [fp_param] -- a fresh ident named after
+         the label -- and the user's pattern is bound by a let at the head
+         of the body. *)
 }
 
 and record_label_definition =
@@ -458,7 +463,7 @@ and value_description = {
   val_name: string loc;
   val_desc: core_type;
   val_val: Types.value_description;
-  val_prim: string list;
+  val_prim: Parsetree.primitive_repr option;
   val_loc: Location.t;
   val_attributes: attributes;
 }

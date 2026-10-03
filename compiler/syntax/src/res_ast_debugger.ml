@@ -418,7 +418,12 @@ module Sexp_ast = struct
         Sexp.atom "value_description";
         string vd.pval_name.Asttypes.txt;
         core_type vd.pval_type;
-        Sexp.list (map_empty ~f:string vd.pval_prim);
+        Sexp.list
+          (match vd.pval_prim with
+          | None -> []
+          | Some (Prim_name s) -> [string s]
+          | Some (Prim_ffi {name}) -> [string name; string "<ffi spec>"]
+          | Some (Prim_inline_const _) -> [string "<inline const>"]);
         attributes vd.pval_attributes;
       ]
 
@@ -1440,7 +1445,10 @@ module SexpAstWithLocs = struct
         string vd.pval_name.Asttypes.txt;
         location vd.pval_name.Asttypes.loc;
         core_type vd.pval_type;
-        Sexp.list (map_empty ~f:string vd.pval_prim);
+        Sexp.list (map_empty ~f:string
+             (match vd.pval_prim with
+             | None -> []
+             | Some prim -> Ffi_debug.primitive_repr prim));
         attributes vd.pval_attributes;
       ]
 

@@ -35,8 +35,7 @@ type t =
       (* Location.t *  [loc] is passed down *)
       prim_name: string;
       arg_types: External_arg_spec.params;
-      ffi: External_ffi_types.external_spec;
-      dynamic_import: bool;
+      ffi: External_ffi_types.external_decl;
       transformed_jsx: bool;
     }
   | Pjs_object_create of External_arg_spec.obj_params
@@ -150,7 +149,7 @@ type t =
   | Pis_null
   | Pis_undefined
   | Pis_null_undefined
-  | Pimport
+  | Pimport of Lambda.import_source
   | Ptypeof
   | Pfn_arity
   | Pwrap_exn

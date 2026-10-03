@@ -81,7 +81,7 @@ fn count(result: &mut CountResult, lam: &Lambda) {
             }
         }
         // lam_exit_count.ml:65
-        Lambda::LglobalModule(_, _) | Lambda::Lvar(_) | Lambda::Lconst(_) => {}
+        Lambda::LglobalModule(_) | Lambda::Lvar(_) | Lambda::Lconst(_) => {}
         // lam_exit_count.ml:66-68
         Lambda::Lapply(apply) => {
             count(result, &apply.ap_func);
@@ -189,7 +189,7 @@ pub fn no_bounded_variables(l: &Lambda) -> bool {
             no_bounded_variables(&apply.ap_func) && apply.ap_args.iter().all(no_bounded_variables)
         }
         // lam_pass_exits.ml:39
-        Lambda::LglobalModule(_, _) => true,
+        Lambda::LglobalModule(_) => true,
         // lam_pass_exits.ml:40
         Lambda::Lprim(info) => info.args.iter().all(no_bounded_variables),
         // lam_pass_exits.ml:41-43
@@ -374,7 +374,7 @@ fn subst_helper_owned(
             }),
         ),
         // lam_pass_exits.ml:211
-        Lambda::LglobalModule(_, _) => lam,
+        Lambda::LglobalModule(_) => lam,
         // lam_pass_exits.ml:212-214
         Lambda::Lprim(info) => {
             map_prim_args(info, |arg| subst_helper_owned(subst, counts, id_gen, arg))

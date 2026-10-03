@@ -279,8 +279,8 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
 /// the previous pass result into owned ports such as `deep_flatten_owned`
 /// without changing the pass order or behavior.
 pub fn simplify_for_js_backend_with_jsx_preserve_owned(lam: Lambda, jsx_preserve: bool) -> Lambda {
-    let mut no_external_inline = |_: &Ident, _: bool, _: &str| None;
-    let mut no_external_arity = |_: &Ident, _: bool, _: &str| None;
+    let mut no_external_inline = |_: &Ident, _: &str| None;
+    let mut no_external_arity = |_: &Ident, _: &str| None;
     simplify_for_js_backend_with_external_inline_owned(
         lam,
         jsx_preserve,

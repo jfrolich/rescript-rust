@@ -35,10 +35,10 @@ use crate::parser::ast::{
 };
 use crate::parser::longident::Longident;
 
-use super::ffi_types::{
-    Attr, Cst, Delim, ExternalModuleName, ExternalSpec, FfiType, ImportAttributes, Label,
-    LabelNoname, LamConstant, ModuleBindName, ObjParam, Param, Params, PointerInfo, ReturnWrapper,
-    encode_ffi_type,
+use crate::parser::ast::PrimitiveRepr;
+use crate::types::external_ffi_types::{
+    Attr, Cst, DeclKind, Delim, ExternalDecl, ExternalFfi, ExternalModuleName, ImportAttributes,
+    InlineConst, Label, LabelNoname, ModuleBindName, ModuleSource, ObjParam, Param, ReturnWrapper,
 };
 use super::spice_ppx;
 
@@ -90,7 +90,7 @@ impl PpxError {
         }
     }
 
-    fn at_loc(loc: LocIdx, message: impl Into<String>) -> Self {
+    pub(crate) fn at_loc(loc: LocIdx, message: impl Into<String>) -> Self {
         Self {
             loc: Some(loc),
             message: message.into(),
@@ -156,19 +156,9 @@ fn prim_str(arena: &mut ParseArena, s: impl Into<String>) -> StrIdx {
     arena.push_string(s.into())
 }
 
-/// Check if primitives need to be encoded as ReScript FFI
-fn prims_to_be_encoded(pval_prim: &[StrIdx], arena: &ParseArena) -> bool {
-    match pval_prim.first() {
-        None => false, // shouldn't happen for externals
-        Some(first) if first_char_special(arena.get_string(*first)) => false,
-        Some(_) => {
-            // Check if second string already has marshal magic
-            match pval_prim.get(1) {
-                Some(second) if starts_with_marshal_magic(arena.get_string(*second)) => false,
-                _ => true,
-            }
-        }
-    }
+/// `Ast_attributes.prim_to_be_encoded`.
+fn prim_to_be_encoded(name: &str) -> bool {
+    !first_char_special(name)
 }
 
 /// Check if an external declaration has ReScript FFI attributes
@@ -179,12 +169,14 @@ fn has_external_attrs(attrs: &[Attribute], arena: &ParseArena) -> bool {
     })
 }
 
-/// Check if a value description represents a ReScript external
-pub fn is_rs_external(attrs: &[Attribute], pval_prim: &[StrIdx], arena: &ParseArena) -> bool {
-    if pval_prim.is_empty() {
+/// `Ast_attributes.rs_externals`: does a value description need digesting as
+/// a ReScript external? A `val` (`None`) or an already-digested external
+/// does not.
+pub fn is_rs_external(attrs: &[Attribute], pval_prim: &Option<PrimitiveRepr>, arena: &ParseArena) -> bool {
+    let Some(PrimitiveRepr::PrimName(name)) = pval_prim else {
         return false;
-    }
-    has_external_attrs(attrs, arena) || prims_to_be_encoded(pval_prim, arena)
+    };
+    has_external_attrs(attrs, arena) || prim_to_be_encoded(arena.get_string(*name))
 }
 
 /// Check if attributes contain @obj
@@ -1291,7 +1283,7 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
             return;
         }
         // bs_ast_invariant.ml:119-142.
-        if let [byte_name] = vd.pval_prim.as_slice() {
+        if let Some(PrimitiveRepr::PrimName(byte_name)) = &vd.pval_prim {
             let byte_name = arena.get_string(*byte_name);
             if matches!(byte_name, "%identity" | "%component_identity")
                 && !core_type_is_arity_one(vd.pval_type, arena)
@@ -1548,7 +1540,7 @@ fn is_js_regex_literal(s: &str) -> bool {
 /// Process args from list_of_arrow into FFI Param specs and compute arity.
 /// This mirrors OCaml's fold_right in handle_attributes which builds
 /// arg_type_specs and arg_type_specs_length.
-fn build_arg_type_specs(typ: &CoreType, arena: &ParseArena) -> (Params, usize) {
+fn build_arg_type_specs(typ: &CoreType, arena: &ParseArena) -> (Vec<Param>, usize) {
     let (args, _result) = list_of_arrow(typ, arena);
 
     let mut param_specs: Vec<Param> = Vec::new();
@@ -1603,48 +1595,26 @@ fn build_arg_type_specs(typ: &CoreType, arena: &ParseArena) -> (Params, usize) {
         });
     }
 
-    // OCaml's ffi_bs_aux: if all args are {Nothing, Arg_empty}, use ParamNumber(n)
-    // Otherwise use Params(list)
-    let all_simple = param_specs.iter().all(|p| {
-        matches!(
-            (&p.arg_label, &p.arg_type),
-            (LabelNoname::ArgEmpty, Attr::Nothing)
-        )
-    });
-    let params = if all_simple {
-        Params::ParamNumber(arity as i64)
-    } else {
-        Params::Params(param_specs)
-    };
-
-    (params, arity)
+    (param_specs, arity)
 }
 
-fn params_is_single_extern_unit(params: &Params) -> bool {
+fn params_is_single_extern_unit(params: &[Param]) -> bool {
     matches!(
         params,
-        Params::Params(param_specs)
-            if matches!(
-                param_specs.as_slice(),
-                [Param {
-                    arg_type: Attr::ExternUnit,
-                    ..
-                }]
-            )
+        [Param {
+            arg_type: Attr::ExternUnit,
+            ..
+        }]
     )
 }
 
-fn params_first_arg_is_const(params: &Params) -> bool {
+fn params_first_arg_is_const(params: &[Param]) -> bool {
     matches!(
-        params,
-        Params::Params(param_specs)
-            if matches!(
-                param_specs.first(),
-                Some(Param {
-                    arg_type: Attr::ArgCst(_),
-                    ..
-                })
-            )
+        params.first(),
+        Some(Param {
+            arg_type: Attr::ArgCst(_),
+            ..
+        })
     )
 }
 
@@ -2135,7 +2105,7 @@ fn validate_external_attribute_errors(
         return Ok(());
     }
 
-    let Some(prim_name) = vd.pval_prim.first() else {
+    let Some(PrimitiveRepr::PrimName(prim_name)) = &vd.pval_prim else {
         return Ok(());
     };
     let prim_name = arena.get_string(*prim_name).to_string();
@@ -2303,9 +2273,8 @@ fn validate_external_attribute_errors(
         }
     }
 
-    let result_is_unit = is_unit_type(&result_type, arena);
-    let ffi = build_ffi_type(&desc, prim_name.as_str(), arity, result_is_unit, params);
-    validate_ffi_names(&ffi, vd.pval_loc)?;
+    let decl = build_external_decl(&desc, prim_name.as_str(), arity);
+    check_decl(&decl, prim_name.as_str(), vd.pval_loc)?;
     validate_return_wrapper_result_type(&desc.return_wrapper, &result_type, vd.pval_loc, arena)?;
 
     Ok(())
@@ -4038,166 +4007,71 @@ fn get_module_import_attributes(
 }
 
 /// Build FFI type from external description and type info
-fn build_ffi_type(
-    desc: &ExternalDesc,
-    prim_name: &str,
-    arity: usize,
-    result_is_unit: bool,
-    params: Params,
-) -> FfiType {
-    // Determine return wrapper
-    let return_wrapper =
-        if result_is_unit && matches!(desc.return_wrapper, ReturnWrapper::ReturnUnset) {
-            ReturnWrapper::ReturnReplacedWithUnit
-        } else {
-            desc.return_wrapper.clone()
-        };
-
-    // Build ExternalModuleName from desc.external_module_name if present
-    // (this is @module("name") or @module("name", "bind") with string payload)
-    let external_module_name =
-        desc.external_module_name
-            .as_ref()
-            .map(|bundle| ExternalModuleName {
-                bundle: bundle.clone(),
-                module_bind_name: match &desc.module_bind_name {
-                    Some(name) => ModuleBindName::PhintName(name.clone()),
-                    None => ModuleBindName::PhintNothing,
-                },
-                import_attributes: desc.import_attributes.clone(),
-            });
-
-    // Determine external spec based on attributes
-    // Priority follows OCaml's external_desc_of_non_obj pattern matching
-    let external_spec = if desc.get_index {
-        ExternalSpec::JsGetIndex {
-            js_get_index_scopes: desc.scopes.clone(),
-        }
-    } else if desc.set_index {
-        ExternalSpec::JsSetIndex {
-            js_set_index_scopes: desc.scopes.clone(),
-        }
-    } else if desc.module_as_val {
-        // @module with no payload: module_as_val
-        // OCaml: module_as_val = Some external_module_name
-        let emn = ExternalModuleName {
-            bundle: prim_name.to_string(),
-            module_bind_name: ModuleBindName::PhintNothing,
-            import_attributes: None,
-        };
-        if arity == 0 {
-            // No args → Js_module_as_var
-            ExternalSpec::JsModuleAsVar(emn)
-        } else if let Some(ref _new_name) = desc.new_name {
-            // @new + @module → Js_module_as_class
-            ExternalSpec::JsModuleAsClass(emn)
-        } else {
-            // Has args, no @new → Js_module_as_fn
-            ExternalSpec::JsModuleAsFn {
-                external_module_name: emn,
-                splice: desc.splice,
-            }
-        }
-    } else if let Some(ref name) = desc.send_name {
-        ExternalSpec::JsSend {
-            name: name.clone(),
-            splice: desc.splice,
-            js_send_scopes: desc.scopes.clone(),
-        }
-    } else if let Some(ref name) = desc.new_name {
-        ExternalSpec::JsNew {
-            name: name.clone(),
-            external_module_name: external_module_name.clone(),
-            splice: desc.splice,
-            scopes: desc.scopes.clone(),
-        }
-    } else if let Some(ref name) = desc.get_name {
-        ExternalSpec::JsGet {
-            js_get_name: name.clone(),
-            js_get_scopes: desc.scopes.clone(),
-        }
-    } else if let Some(ref name) = desc.set_name {
-        ExternalSpec::JsSet {
-            js_set_name: name.clone(),
-            js_set_scopes: desc.scopes.clone(),
-        }
-    } else if let Some(ref name) = desc.val_name {
-        // @val - always Js_var
-        ExternalSpec::JsVar {
-            name: name.clone(),
-            external_module_name: external_module_name.clone(),
-            scopes: desc.scopes.clone(),
-        }
-    } else if let Some(ref name) = desc.call_name {
-        // Explicit call_name (set as default when no specific attr)
-        if arity == 0 {
-            ExternalSpec::JsVar {
-                name: name.clone(),
-                external_module_name: external_module_name.clone(),
-                scopes: desc.scopes.clone(),
-            }
-        } else {
-            ExternalSpec::JsCall {
-                name: name.clone(),
-                external_module_name,
-                splice: desc.splice,
-                scopes: desc.scopes.clone(),
-            }
-        }
-    } else if external_module_name.is_some() {
-        // @module("name") with payload but no other specific attr
-        let name = prim_name.to_string();
-        if arity == 0 {
-            ExternalSpec::JsVar {
-                name,
-                external_module_name,
-                scopes: desc.scopes.clone(),
-            }
-        } else {
-            ExternalSpec::JsCall {
-                name,
-                external_module_name,
-                splice: desc.splice,
-                scopes: desc.scopes.clone(),
-            }
-        }
-    } else if arity == 0 {
-        // No args = Js_var
-        ExternalSpec::JsVar {
-            name: prim_name.to_string(),
-            external_module_name: None,
-            scopes: desc.scopes.clone(),
-        }
-    } else {
-        // Default: Js_call
-        ExternalSpec::JsCall {
-            name: prim_name.to_string(),
-            external_module_name: None,
-            splice: desc.splice,
-            scopes: desc.scopes.clone(),
-        }
+/// `Ast_external_process.external_decl_of_non_obj` (once the attribute
+/// conflicts it rejects have been reported).
+fn build_external_decl(desc: &ExternalDesc, prim_name: &str, arity: usize) -> ExternalDecl {
+    let mk = |kind: DeclKind, module_: Option<ModuleSource>, scopes: bool, variadic: bool| ExternalDecl {
+        kind,
+        module_,
+        scopes: if scopes { desc.scopes.clone() } else { Vec::new() },
+        variadic,
+        effective_arity: arity as i64,
     };
-
-    FfiType::FfiBs {
-        params,
-        return_wrapper,
-        external_spec,
+    // `@module("name")` / `@module("name", "bind")` payload forms.
+    let named_module = desc.external_module_name.as_ref().map(|bundle| {
+        ModuleSource::ModuleNamed(ExternalModuleName {
+            bundle: bundle.clone(),
+            module_bind_name: match &desc.module_bind_name {
+                Some(name) => ModuleBindName::PhintName(name.clone()),
+                None => ModuleBindName::PhintNothing,
+            },
+            import_attributes: desc.import_attributes.clone(),
+        })
+    });
+    let splice = desc.splice;
+    if desc.set_index {
+        mk(DeclKind::DeclSetIndex, None, true, false)
+    } else if desc.get_index {
+        mk(DeclKind::DeclGetIndex, None, true, false)
+    } else if desc.module_as_val {
+        // A bare `@module`: the external is the module itself.
+        let name = prim_name.to_string();
+        let kind = if desc.new_name.is_some() {
+            DeclKind::DeclNew { name }
+        } else {
+            DeclKind::DeclVal { name }
+        };
+        mk(kind, Some(ModuleSource::ModuleItself), false, splice)
+    } else if let Some(name) = &desc.send_name {
+        mk(DeclKind::DeclSend { name: name.clone() }, None, true, splice)
+    } else if let Some(name) = &desc.new_name {
+        mk(DeclKind::DeclNew { name: name.clone() }, named_module, true, splice)
+    } else if let Some(name) = &desc.get_name {
+        mk(DeclKind::DeclGet { name: name.clone() }, None, true, false)
+    } else if let Some(name) = &desc.set_name {
+        mk(DeclKind::DeclSet { name: name.clone() }, None, true, false)
+    } else if let Some(name) = &desc.val_name {
+        mk(DeclKind::DeclVal { name: name.clone() }, named_module, true, false)
+    } else if let Some(name) = &desc.call_name {
+        mk(DeclKind::DeclVal { name: name.clone() }, named_module, true, splice)
+    } else {
+        mk(DeclKind::DeclVal { name: prim_name.to_string() }, named_module, true, splice)
     }
 }
 
 /// Check if an external value description has relative paths that require
 /// wrapping in Pstr_include to prevent cross-module inlining.
 fn check_external_relative(vd: &ValueDescription, arena: &mut ParseArena) -> bool {
-    let prim_name = match vd.pval_prim.first() {
-        Some(name) => arena.get_string(*name).to_string(),
-        None => return false,
+    let Some(PrimitiveRepr::PrimName(prim_name)) = &vd.pval_prim else {
+        return false;
     };
+    let prim_name = arena.get_string(*prim_name).to_string();
     if !is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
         return false;
     }
     let vd_type = arena.get_core_type(vd.pval_type).clone();
-    let (params, arity) = build_arg_type_specs(&vd_type, arena);
-    let (args, result_type) = list_of_arrow(&vd_type, arena);
+    let (_params, arity) = build_arg_type_specs(&vd_type, arena);
+    let (args, _result_type) = list_of_arrow(&vd_type, arena);
     let no_arguments = args.is_empty();
     let desc = parse_external_attrs(
         &vd.pval_attributes,
@@ -4206,9 +4080,11 @@ fn check_external_relative(vd: &ValueDescription, arena: &mut ParseArena) -> boo
         vd.pval_loc,
         arena,
     );
-    let result_is_unit = is_unit_type(&result_type, arena);
-    let ffi = build_ffi_type(&desc, prim_name.as_str(), arity, result_is_unit, params);
-    check_ffi_relative(&ffi)
+    if desc.mk_obj {
+        return false;
+    }
+    let decl = build_external_decl(&desc, prim_name.as_str(), arity);
+    check_decl(&decl, prim_name.as_str(), vd.pval_loc).unwrap_or(false)
 }
 
 /// Check if a path string is a package-relative path (starts with "./" or "../").
@@ -4260,84 +4136,66 @@ fn validate_external_module_name(
     Ok(())
 }
 
-fn validate_ffi_names(ffi: &FfiType, loc: LocIdx) -> PpxResult<()> {
-    match ffi {
-        FfiType::FfiBs { external_spec, .. } => match external_spec {
-            ExternalSpec::JsVar { name, .. } => validate_global_name(name, loc),
-            ExternalSpec::JsModuleAsVar(module_name)
-            | ExternalSpec::JsModuleAsFn {
-                external_module_name: module_name,
-                ..
+/// `External_ffi_types.check_decl`: validate a declaration; returns whether
+/// the binding refers to a package-relative path (which disables
+/// cross-module inlining). The checks mirror the historical per-runtime-shape
+/// checks exactly, including their asymmetries.
+fn check_decl(decl: &ExternalDecl, prim_name: &str, loc: LocIdx) -> PpxResult<bool> {
+    let mut xrelative = false;
+    let mut upgrade = |b: bool| {
+        if !xrelative {
+            xrelative = b;
+        }
+    };
+    match &decl.module_ {
+        Some(ModuleSource::ModuleItself) => {
+            upgrade(is_package_relative_path(prim_name));
+            if prim_name.is_empty() {
+                return Err(PpxError::at_loc(loc, "empty name encountered"));
             }
-            | ExternalSpec::JsModuleAsClass(module_name) => {
-                validate_external_module_name(module_name, None)
-            }
-            ExternalSpec::JsCall {
-                name,
-                external_module_name,
-                ..
-            }
-            | ExternalSpec::JsNew {
-                name,
-                external_module_name,
-                ..
-            } => {
-                if let Some(module_name) = external_module_name {
-                    validate_external_module_name(module_name, Some(loc))?;
+        }
+        module_ => {
+            let emn = match module_ {
+                Some(ModuleSource::ModuleNamed(emn)) => Some(emn),
+                _ => None,
+            };
+            match &decl.kind {
+                DeclKind::DeclVal { name } => {
+                    if decl.effective_arity == 0 {
+                        upgrade(is_package_relative_path(name));
+                        if let Some(emn) = emn {
+                            upgrade(is_package_relative_path(&emn.bundle));
+                        }
+                        validate_global_name(name, loc)?;
+                    } else {
+                        if let Some(emn) = emn {
+                            upgrade(is_package_relative_path(&emn.bundle));
+                            validate_external_module_name(emn, Some(loc))?;
+                        }
+                        validate_global_name(name, loc)?;
+                    }
                 }
-                validate_global_name(name, loc)
+                DeclKind::DeclNew { name } => {
+                    if let Some(emn) = emn {
+                        upgrade(is_package_relative_path(&emn.bundle));
+                        validate_external_module_name(emn, Some(loc))?;
+                    }
+                    validate_global_name(name, loc)?;
+                }
+                DeclKind::DeclSend { .. }
+                | DeclKind::DeclSet { .. }
+                | DeclKind::DeclGet { .. }
+                | DeclKind::DeclGetIndex
+                | DeclKind::DeclSetIndex => {}
             }
-            ExternalSpec::JsSend { .. }
-            | ExternalSpec::JsSet { .. }
-            | ExternalSpec::JsGet { .. }
-            | ExternalSpec::JsGetIndex { .. }
-            | ExternalSpec::JsSetIndex { .. } => Ok(()),
-        },
-        _ => Ok(()),
+        }
     }
-}
-
-/// Check if an FFI external spec contains relative paths.
-/// When true, the external must be wrapped in Pstr_include to prevent cross-module inlining.
-/// Mirrors OCaml's check_ffi in external_ffi_types.ml.
-fn check_ffi_relative(ffi: &FfiType) -> bool {
-    match ffi {
-        FfiType::FfiBs { external_spec, .. } => match external_spec {
-            ExternalSpec::JsVar {
-                name,
-                external_module_name,
-                ..
-            } => {
-                is_package_relative_path(name)
-                    || external_module_name
-                        .as_ref()
-                        .map_or(false, |m| is_package_relative_path(&m.bundle))
-            }
-            ExternalSpec::JsModuleAsVar(emn)
-            | ExternalSpec::JsModuleAsFn {
-                external_module_name: emn,
-                ..
-            }
-            | ExternalSpec::JsModuleAsClass(emn) => is_package_relative_path(&emn.bundle),
-            ExternalSpec::JsNew {
-                external_module_name,
-                ..
-            }
-            | ExternalSpec::JsCall {
-                external_module_name,
-                ..
-            } => external_module_name
-                .as_ref()
-                .map_or(false, |m| is_package_relative_path(&m.bundle)),
-            _ => false,
-        },
-        _ => false,
-    }
+    Ok(xrelative)
 }
 
 /// Result of encoding an external: new pval_prim and filtered attributes
 pub struct EncodedExternal {
-    pub pval_prim: Vec<StrIdx>,
+    pub pval_prim: Option<PrimitiveRepr>,
     pub pval_attributes: Vec<Attribute>,
 }
 
@@ -4360,18 +4218,15 @@ fn filter_ffi_attributes(attrs: &[Attribute], arena: &mut ParseArena) -> Vec<Att
 
 /// Encode external value description with FFI metadata
 pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> EncodedExternal {
-    // Get the primitive name
-    let prim_name = match vd.pval_prim.first() {
-        Some(name) => arena.get_string(*name).to_string(),
-        None => {
-            return EncodedExternal {
-                pval_prim: vd.pval_prim.clone(),
-                pval_attributes: vd.pval_attributes.to_vec(),
-            };
-        }
+    // `Ast_external_process.handle_attributes_as_prim`.
+    let Some(PrimitiveRepr::PrimName(prim_name)) = &vd.pval_prim else {
+        return EncodedExternal {
+            pval_prim: vd.pval_prim.clone(),
+            pval_attributes: vd.pval_attributes.to_vec(),
+        };
     };
+    let prim_name = arena.get_string(*prim_name).to_string();
 
-    // Check if this is a ReScript external
     if !is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
         return EncodedExternal {
             pval_prim: vd.pval_prim.clone(),
@@ -4385,10 +4240,9 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
     let (params, arity) = build_arg_type_specs(&vd_type, arena);
     // no_arguments = arg_types_ty = [] in OCaml: checks if there are ANY arrow args,
     // regardless of ignored. Use list_of_arrow directly.
-    let (args, result_type) = list_of_arrow(&vd_type, arena);
+    let (args, _result_type) = list_of_arrow(&vd_type, arena);
     let no_arguments = args.is_empty();
 
-    // Parse attributes
     let desc = parse_external_attrs(
         &vd.pval_attributes,
         prim_name.as_str(),
@@ -4397,34 +4251,34 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
         arena,
     );
 
-    // Check if result is unit - use the result from list_of_arrow, not get_final_result_type
-    // OCaml's handle_attributes uses result_type from list_of_arrow, which respects arity boundaries.
-    // For `int => (unit => unit)`, result_type is `(unit => unit)`, NOT `unit`.
-    let result_is_unit = is_unit_type(&result_type, arena);
-
-    // Build FFI type
     let ffi = if desc.mk_obj {
         // @obj external: build FfiObjCreate with field names
         build_obj_ffi_type(&vd_type, arena)
     } else {
-        build_ffi_type(&desc, prim_name.as_str(), arity, result_is_unit, params)
+        // `check_return_wrapper` keeps the declared wrapper; whether a
+        // unit-returning call is replaced by unit is decided at translation.
+        ExternalFfi::FfiBs(
+            params,
+            desc.return_wrapper,
+            build_external_decl(&desc, prim_name.as_str(), arity),
+        )
     };
-
-    // Encode FFI type
-    let encoded = encode_ffi_type(&ffi);
 
     // Filter out consumed FFI attributes
     let filtered_attrs = filter_ffi_attributes(&vd.pval_attributes, arena);
 
     EncodedExternal {
-        pval_prim: vec![prim_str(arena, prim_name), prim_str(arena, encoded)],
+        pval_prim: Some(PrimitiveRepr::PrimFfi {
+            name: prim_name,
+            spec: Box::new(ffi),
+        }),
         pval_attributes: filtered_attrs,
     }
 }
 
 /// Build FfiObjCreate from the type's labeled arguments.
 /// Mirrors OCaml's process_obj which builds arg_kinds from arg_types_ty.
-fn build_obj_ffi_type(typ: &CoreType, arena: &mut ParseArena) -> FfiType {
+fn build_obj_ffi_type(typ: &CoreType, arena: &mut ParseArena) -> ExternalFfi {
     let (args, _result) = list_of_arrow(typ, arena);
 
     let mut obj_params: Vec<ObjParam> = Vec::new();
@@ -4539,96 +4393,45 @@ fn build_obj_ffi_type(typ: &CoreType, arena: &mut ParseArena) -> FfiType {
         }
     }
 
-    FfiType::FfiObjCreate(obj_params)
+    ExternalFfi::FfiObjCreate(obj_params)
 }
 
-/// Encode inline string constant
-/// Matches OCaml's Delim.parse_processed:
-///   None -> Some(DNone)
-///   Some "json" -> Some(DNoQuotes)
-///   Some "*j" -> Some(DStarJ)
-///   Some "bq" -> Some(DBackQuotes)
-///   _ -> None
-///
-/// NOTE: In OCaml, the PPX transforms attribute payloads BEFORE extracting @inline,
-/// so "js" -> "*j" transformation happens first. In Rust, we get the original delimiter,
-/// so we need to handle "js" as if it were already transformed to "*j".
-pub fn inline_string_primitive(
-    s: &str,
-    delim: Option<&str>,
-    arena: &mut ParseArena,
-) -> Vec<StrIdx> {
+/// `Ast_external_mk.inline_string`.
+pub fn inline_string_primitive(s: &str, delim: Option<&str>) -> PrimitiveRepr {
     let delim = match delim {
-        None => Some(Delim::DNone), // Key difference: OCaml wraps None in Some(DNone)
+        None => Some(Delim::DNone),
         Some("json") => Some(Delim::DNoQuotes),
         Some("*j") | Some("js") => Some(Delim::DStarJ), // "js" is transformed to "*j" by PPX, both map to DStarJ
         Some("bq") => Some(Delim::DBackQuotes),
         _ => None,
     };
-
-    let constant = LamConstant::ConstString {
+    PrimitiveRepr::PrimInlineConst(Box::new(InlineConst::ConstStr {
         s: s.to_string(),
         delim,
-    };
-
-    let ffi = FfiType::FfiInlineConst(constant);
-    let encoded = encode_ffi_type(&ffi);
-
-    vec![arena.prim_empty_external_ffi(), prim_str(arena, encoded)]
+    }))
 }
 
-/// Encode inline bool constant
-pub fn inline_bool_primitive(b: bool, arena: &mut ParseArena) -> Vec<StrIdx> {
-    let constant = if b {
-        LamConstant::ConstJsTrue
-    } else {
-        LamConstant::ConstJsFalse
-    };
-
-    let ffi = FfiType::FfiInlineConst(constant);
-    let encoded = encode_ffi_type(&ffi);
-
-    vec![arena.prim_empty_external_ffi(), prim_str(arena, encoded)]
+/// `Ast_external_mk.inline_bool`.
+pub fn inline_bool_primitive(b: bool) -> PrimitiveRepr {
+    PrimitiveRepr::PrimInlineConst(Box::new(InlineConst::ConstBool(b)))
 }
 
-/// Encode inline int constant
-pub fn inline_int_primitive(i: i32, arena: &mut ParseArena) -> Vec<StrIdx> {
-    let constant = LamConstant::ConstInt {
-        i,
-        comment: PointerInfo::None,
-    };
-
-    let ffi = FfiType::FfiInlineConst(constant);
-    let encoded = encode_ffi_type(&ffi);
-
-    vec![arena.prim_empty_external_ffi(), prim_str(arena, encoded)]
+/// `Ast_external_mk.inline_int`.
+pub fn inline_int_primitive(i: i32) -> PrimitiveRepr {
+    PrimitiveRepr::PrimInlineConst(Box::new(InlineConst::ConstInt(i)))
 }
 
-/// Encode inline float constant
-pub fn inline_float_primitive(f: &str, arena: &mut ParseArena) -> Vec<StrIdx> {
-    let constant = LamConstant::ConstFloat(f.to_string());
-
-    let ffi = FfiType::FfiInlineConst(constant);
-    let encoded = encode_ffi_type(&ffi);
-
-    vec![arena.prim_empty_external_ffi(), prim_str(arena, encoded)]
+/// `Ast_external_mk.inline_float`.
+pub fn inline_float_primitive(f: &str) -> PrimitiveRepr {
+    PrimitiveRepr::PrimInlineConst(Box::new(InlineConst::ConstFloat(f.to_string())))
 }
 
-/// Encode inline bigint constant
-pub fn inline_bigint_primitive(s: &str, arena: &mut ParseArena) -> Vec<StrIdx> {
-    // Parse bigint: handle optional - sign
-    let (negative, digits) = if let Some(stripped) = s.strip_prefix('-') {
-        (true, stripped.to_string())
-    } else {
-        (false, s.to_string())
-    };
-
-    let constant = LamConstant::ConstBigint(negative, digits);
-
-    let ffi = FfiType::FfiInlineConst(constant);
-    let encoded = encode_ffi_type(&ffi);
-
-    vec![arena.prim_empty_external_ffi(), prim_str(arena, encoded)]
+/// `Ast_external_mk.inline_bigint`: binds `Bigint_utils.parse_bigint`'s sign
+/// flag (true for a positive literal) to the `negative` field, as upstream
+/// does; translation passes it through unchanged as Lambda's sign.
+pub fn inline_bigint_primitive(s: &str) -> PrimitiveRepr {
+    let (negative, digits) = crate::types::typecore::parse_bigint_literal(s);
+    PrimitiveRepr::PrimInlineConst(Box::new(InlineConst::ConstBigint { negative, digits }))
 }
 
 // ========== @inline Handling ==========
@@ -4683,11 +4486,11 @@ fn transform_inline_sig_value(
                     Some("js") if has_template_attr(&expr, arena) => Some("bq"),
                     other => other,
                 };
-                let prim = inline_string_primitive(s, effective_delim, arena);
+                let prim = inline_string_primitive(s, effective_delim);
                 Some(ValueDescription {
                     pval_name: vd.pval_name.clone(),
                     pval_type: vd.pval_type.clone(),
-                    pval_prim: prim,
+                    pval_prim: Some(prim),
                     pval_attributes: Attributes::new(), // Clear attributes
                     pval_loc: vd.pval_loc,
                 })
@@ -4695,33 +4498,33 @@ fn transform_inline_sig_value(
             // @inline(42) let x: t
             Constant::Integer(s, None) => {
                 let i = s.parse::<i32>().ok()?;
-                let prim = inline_int_primitive(i, arena);
+                let prim = inline_int_primitive(i);
                 Some(ValueDescription {
                     pval_name: vd.pval_name.clone(),
                     pval_type: vd.pval_type.clone(),
-                    pval_prim: prim,
+                    pval_prim: Some(prim),
                     pval_attributes: Attributes::new(), // Clear attributes
                     pval_loc: vd.pval_loc,
                 })
             }
             // @inline(42n) let x: t (bigint)
             Constant::Integer(s, Some('n')) => {
-                let prim = inline_bigint_primitive(s, arena);
+                let prim = inline_bigint_primitive(s);
                 Some(ValueDescription {
                     pval_name: vd.pval_name.clone(),
                     pval_type: vd.pval_type.clone(),
-                    pval_prim: prim,
+                    pval_prim: Some(prim),
                     pval_attributes: Attributes::new(), // Clear attributes
                     pval_loc: vd.pval_loc,
                 })
             }
             // @inline(3.14) let x: t
             Constant::Float(s, None) => {
-                let prim = inline_float_primitive(s, arena);
+                let prim = inline_float_primitive(s);
                 Some(ValueDescription {
                     pval_name: vd.pval_name.clone(),
                     pval_type: vd.pval_type.clone(),
-                    pval_prim: prim,
+                    pval_prim: Some(prim),
                     pval_attributes: Attributes::new(), // Clear attributes
                     pval_loc: vd.pval_loc,
                 })
@@ -4734,11 +4537,11 @@ fn transform_inline_sig_value(
             if let Longident::Lident(name_idx) = longident {
                 let name = arena.get_string(*name_idx);
                 if name == "true" || name == "false" {
-                    let prim = inline_bool_primitive(name == "true", arena);
+                    let prim = inline_bool_primitive(name == "true");
                     return Some(ValueDescription {
                         pval_name: vd.pval_name.clone(),
                         pval_type: vd.pval_type.clone(),
-                        pval_prim: prim,
+                        pval_prim: Some(prim),
                         pval_attributes: Attributes::new(), // Clear attributes
                         pval_loc: vd.pval_loc,
                     });
@@ -4784,7 +4587,7 @@ fn transform_inline_binding(
         ExpressionDesc::Pexp_constant(c) => match &**c {
             // @inline let x = "string"
             Constant::String(s, delim) => {
-                let prim = inline_string_primitive(s, delim.as_deref(), arena);
+                let prim = inline_string_primitive(s, delim.as_deref());
                 Some(StructureItem {
                     pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(
                         ValueDescription {
@@ -4793,7 +4596,7 @@ fn transform_inline_binding(
                                 loc: pval_name.loc,
                             },
                             pval_type: arena.ast_literal_type_string(),
-                            pval_prim: prim,
+                            pval_prim: Some(prim),
                             pval_attributes: Attributes::new(),
                             pval_loc: pvb_loc,
                         },
@@ -4804,7 +4607,7 @@ fn transform_inline_binding(
             // @inline let x = 42
             Constant::Integer(s, None) => {
                 let i = s.parse::<i32>().ok()?;
-                let prim = inline_int_primitive(i, arena);
+                let prim = inline_int_primitive(i);
                 Some(StructureItem {
                     pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(
                         ValueDescription {
@@ -4813,7 +4616,7 @@ fn transform_inline_binding(
                                 loc: pval_name.loc,
                             },
                             pval_type: arena.ast_literal_type_int(),
-                            pval_prim: prim,
+                            pval_prim: Some(prim),
                             pval_attributes: Attributes::new(),
                             pval_loc: pvb_loc,
                         },
@@ -4823,7 +4626,7 @@ fn transform_inline_binding(
             }
             // @inline let x = 3.14
             Constant::Float(s, None) => {
-                let prim = inline_float_primitive(s, arena);
+                let prim = inline_float_primitive(s);
                 Some(StructureItem {
                     pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(
                         ValueDescription {
@@ -4832,7 +4635,7 @@ fn transform_inline_binding(
                                 loc: pval_name.loc,
                             },
                             pval_type: arena.ast_literal_type_float(),
-                            pval_prim: prim,
+                            pval_prim: Some(prim),
                             pval_attributes: Attributes::new(),
                             pval_loc: pvb_loc,
                         },
@@ -4848,7 +4651,7 @@ fn transform_inline_binding(
             if let Longident::Lident(name_idx) = longident {
                 let name = arena.get_string(*name_idx);
                 if name == "true" || name == "false" {
-                    let prim = inline_bool_primitive(name == "true", arena);
+                    let prim = inline_bool_primitive(name == "true");
                     return Some(StructureItem {
                         pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(
                             ValueDescription {
@@ -4857,7 +4660,7 @@ fn transform_inline_binding(
                                     loc: pval_name.loc,
                                 },
                                 pval_type: arena.ast_literal_type_bool(),
-                                pval_prim: prim,
+                                pval_prim: Some(prim),
                                 pval_attributes: Attributes::new(),
                                 pval_loc: pvb_loc,
                             },
@@ -5042,22 +4845,23 @@ fn handle_obj(expr: &Expression, payload: &Payload, arena: &mut ParseArena) -> E
         }
     }
 
-    // === Build pval_prim: [""; encode(Ffi_obj_create(obj_params))] ===
+    // === Build pval_prim: Prim_ffi {name = ""; spec = Ffi_obj_create ...} ===
     // OCaml: pval_prim_of_labels creates ObjLabel for each field
-    let obj_params: Vec<super::ffi_types::ObjParam> = labels
+    let obj_params: Vec<ObjParam> = labels
         .iter()
         .map(|(str_idx, _)| {
             let name = arena.get_string(*str_idx).to_owned();
-            super::ffi_types::ObjParam {
+            ObjParam {
                 obj_arg_type: Attr::Nothing,
-                obj_arg_label: super::ffi_types::Label::ObjLabel { name },
+                obj_arg_label: Label::ObjLabel { name },
             }
         })
         .collect();
 
-    let ffi = FfiType::FfiObjCreate(obj_params);
-    let encoded = encode_ffi_type(&ffi);
-    let pval_prim = vec![arena.prim_empty_external_ffi(), prim_str(arena, encoded)];
+    let pval_prim = Some(PrimitiveRepr::PrimFfi {
+        name: String::new(),
+        spec: Box::new(ExternalFfi::FfiObjCreate(obj_params)),
+    });
 
     // === Build pval_type: (~a: 'a0, ~b: 'a1) => {"a": 'a0, "b": 'a1} ===
     // OCaml: from_labels ~loc arity labels
@@ -5301,7 +5105,7 @@ fn handle_debugger(
             loc,
         },
         pval_type: arena.push_core_type(pval_type),
-        pval_prim: vec![prim_str(arena, "%debugger")],
+        pval_prim: Some(PrimitiveRepr::PrimName(prim_str(arena, "%debugger"))),
         pval_attributes: Attributes::new(),
         pval_loc: loc,
     };
@@ -5514,7 +5318,7 @@ fn handle_raw(
             loc,
         },
         pval_type: arena.push_core_type(pval_type),
-        pval_prim: vec![pval_prim],
+        pval_prim: Some(PrimitiveRepr::PrimName(pval_prim)),
         pval_attributes: Attributes::new(),
         pval_loc: loc,
     };
@@ -5814,7 +5618,7 @@ fn handle_raw_structure(
             loc,
         },
         pval_type: arena.push_core_type(pval_type),
-        pval_prim: vec![arena.prim_raw_stmt()],
+        pval_prim: Some(PrimitiveRepr::PrimName(arena.prim_raw_stmt())),
         pval_attributes: Attributes::new(),
         pval_loc: loc,
     };
@@ -9776,7 +9580,7 @@ fn create_erase_type_str(arena: &mut ParseArena) -> StructureItem {
             loc: none_loc,
         },
         pval_type: arena.push_core_type(arrow_type),
-        pval_prim: vec![prim_str(arena, "%identity")],
+        pval_prim: Some(PrimitiveRepr::PrimName(prim_str(arena, "%identity"))),
         pval_attributes: Attributes::new(),
         pval_loc: none_loc,
     };
@@ -9812,17 +9616,20 @@ fn create_unsafe_index_get_str(arena: &mut ParseArena) -> StructureItem {
     ];
     let arrow_type = make_arrows_type(&args, &any_type, arena);
 
-    // Encode the FFI with @get_index
-    // OCaml uses Param_number when all params are (Nothing, Arg_empty)
-    // The return_wrapper is Return_unset (not Return_identity) for @get_index externals
-    let ffi = FfiType::FfiBs {
-        params: Params::ParamNumber(2),
-        return_wrapper: ReturnWrapper::ReturnUnset,
-        external_spec: ExternalSpec::JsGetIndex {
-            js_get_index_scopes: vec![],
+    // ast_derive_js_mapper.ml `unsafe_index_get` (`Prim_name ""` with
+    // `@get_index`), as the frontend digests it. The return wrapper is
+    // Return_unset for @get_index externals.
+    let ffi = ExternalFfi::FfiBs(
+        vec![Param::dummy(), Param::dummy()],
+        ReturnWrapper::ReturnUnset,
+        ExternalDecl {
+            kind: DeclKind::DeclGetIndex,
+            module_: None,
+            scopes: vec![],
+            variadic: false,
+            effective_arity: 2,
         },
-    };
-    let encoded = encode_ffi_type(&ffi);
+    );
 
     let val_desc = ValueDescription {
         pval_name: Located {
@@ -9830,7 +9637,10 @@ fn create_unsafe_index_get_str(arena: &mut ParseArena) -> StructureItem {
             loc: none_loc,
         },
         pval_type: arena.push_core_type(arrow_type),
-        pval_prim: vec![arena.prim_empty_js_mapper(), prim_str(arena, encoded)],
+        pval_prim: Some(PrimitiveRepr::PrimFfi {
+            name: String::new(),
+            spec: Box::new(ffi),
+        }),
         pval_attributes: Attributes::new(),
         pval_loc: none_loc,
     };
@@ -9880,7 +9690,7 @@ fn create_map_binding(
             loc,
         },
         pval_type: arena.push_core_type(arrow_type),
-        pval_prim: vec![arena.prim_raw_expr()],
+        pval_prim: Some(PrimitiveRepr::PrimName(arena.prim_raw_expr())),
         pval_attributes: Attributes::new(),
         pval_loc: loc,
     };
@@ -10308,7 +10118,7 @@ fn create_to_js_sig(
             loc,
         },
         pval_type: arena.push_core_type(arrow_type),
-        pval_prim: vec![],
+        pval_prim: None,
         pval_attributes: Attributes::new(),
         pval_loc: none_loc,
     };
@@ -10349,7 +10159,7 @@ fn create_from_js_sig(
             loc,
         },
         pval_type: arena.push_core_type(arrow_type),
-        pval_prim: vec![],
+        pval_prim: None,
         pval_attributes: Attributes::new(),
         pval_loc: none_loc,
     };
@@ -11113,7 +10923,7 @@ fn create_record_to_js_sig(
             loc,
         }, // OCaml: pat_to_js uses tdcl.ptype_loc
         pval_type: arena.push_core_type(arrow_type),
-        pval_prim: vec![],
+        pval_prim: None,
         pval_attributes: Attributes::new(),
         pval_loc: none_loc,
     };
@@ -11183,7 +10993,7 @@ fn create_record_from_js_sig(
             loc,
         }, // OCaml: pat_from_js uses tdcl.ptype_loc
         pval_type: arena.push_core_type(arrow_type),
-        pval_prim: vec![],
+        pval_prim: None,
         pval_attributes: Attributes::new(),
         pval_loc: none_loc,
     };
@@ -12451,35 +12261,37 @@ fn handle_abstract_tdcl(
                 //
                 // Note: OCaml's ffi_bs uses Param_number(1) for [dummy] because
                 // ffi_bs_aux counts consecutive dummy params.
+                // ast_derive_abstract.ml: an optional field's accessor is
+                // `Prim_name prim_as_name` with `@get`, digested with the
+                // default Return_unset; a plain field's is built digested with
+                // Return_identity and an empty name.
+                let get_decl = ExternalDecl {
+                    kind: DeclKind::DeclGet {
+                        name: prim_as_name.clone(),
+                    },
+                    module_: None,
+                    scopes: vec![],
+                    variadic: false,
+                    effective_arity: 1,
+                };
                 let accessor_prim = if is_optional {
-                    // OCaml: encode_attributes_as_string processes @get attr
-                    // The default external_desc.return_wrapper is Return_unset
-                    // check_return_wrapper keeps Return_unset for non-unit result types
-                    // ffi_bs([dummy]) returns Param_number(1)
-                    let ffi = FfiType::FfiBs {
-                        params: Params::ParamNumber(1),
-                        return_wrapper: ReturnWrapper::ReturnUnset, // Default for encode_attributes_as_string
-                        external_spec: ExternalSpec::JsGet {
-                            js_get_name: prim_as_name.clone(),
-                            js_get_scopes: vec![],
-                        },
-                    };
-                    vec![prim_as_idx, prim_str(arena, encode_ffi_type(&ffi))]
+                    PrimitiveRepr::PrimFfi {
+                        name: prim_as_name.clone(),
+                        spec: Box::new(ExternalFfi::FfiBs(
+                            vec![Param::dummy()],
+                            ReturnWrapper::ReturnUnset,
+                            get_decl,
+                        )),
+                    }
                 } else {
-                    // OCaml: ffi_bs_as_prims [dummy] Return_identity (Js_get {...})
-                    // This explicitly passes Return_identity
-                    let ffi = FfiType::FfiBs {
-                        params: Params::ParamNumber(1),
-                        return_wrapper: ReturnWrapper::ReturnIdentity,
-                        external_spec: ExternalSpec::JsGet {
-                            js_get_name: prim_as_name.clone(),
-                            js_get_scopes: vec![],
-                        },
-                    };
-                    vec![
-                        arena.prim_empty_external_ffi(),
-                        prim_str(arena, encode_ffi_type(&ffi)),
-                    ]
+                    PrimitiveRepr::PrimFfi {
+                        name: String::new(),
+                        spec: Box::new(ExternalFfi::FfiBs(
+                            vec![Param::dummy()],
+                            ReturnWrapper::ReturnIdentity,
+                            get_decl,
+                        )),
+                    }
                 };
 
                 // Accessor attributes: empty for both (FFI attrs like @get are consumed during encoding)
@@ -12497,7 +12309,7 @@ fn handle_abstract_tdcl(
                 let accessor_vd = ValueDescription {
                     pval_name: accessor_name,
                     pval_type: arena.push_core_type(accessor_type),
-                    pval_prim: accessor_prim,
+                    pval_prim: Some(accessor_prim),
                     pval_attributes: accessor_attrs.into(),
                     pval_loc: label.pld_loc,
                 };
@@ -12517,23 +12329,29 @@ fn handle_abstract_tdcl(
                     // The @set attribute gets processed by encode_external which adds
                     // JsSet FFI encoding as a second prim string.
                     // We do this directly here since our pipeline doesn't re-process.
-                    let setter_ffi = FfiType::FfiBs {
-                        params: Params::ParamNumber(2),
-                        return_wrapper: ReturnWrapper::ReturnReplacedWithUnit,
-                        external_spec: ExternalSpec::JsSet {
-                            js_set_name: prim_as_name.clone(),
-                            js_set_scopes: vec![],
-                        },
+                    let setter_prim = PrimitiveRepr::PrimFfi {
+                        name: prim_as_name.clone(),
+                        spec: Box::new(ExternalFfi::FfiBs(
+                            vec![Param::dummy(), Param::dummy()],
+                            ReturnWrapper::ReturnUnset,
+                            ExternalDecl {
+                                kind: DeclKind::DeclSet {
+                                    name: prim_as_name.clone(),
+                                },
+                                module_: None,
+                                scopes: vec![],
+                                variadic: false,
+                                effective_arity: 2,
+                            },
+                        )),
                     };
-                    let setter_prim =
-                        vec![prim_as_idx, prim_str(arena, encode_ffi_type(&setter_ffi))];
                     let setter_vd = ValueDescription {
                         pval_name: Located {
                             txt: arena.push_string(format!("{}Set", label_name)),
                             loc: label_loc,
                         },
                         pval_type: arena.push_core_type(setter_type),
-                        pval_prim: setter_prim,
+                        pval_prim: Some(setter_prim),
                         pval_attributes: Attributes::new(),
                         pval_loc: label.pld_loc,
                     };
@@ -12574,7 +12392,7 @@ fn handle_abstract_tdcl(
                         loc,
                     },
                     pval_type: arena.push_core_type(make_type),
-                    pval_prim: my_prims,
+                    pval_prim: Some(my_prims),
                     pval_attributes: Attributes::new(),
                     pval_loc: loc,
                 };
@@ -12794,7 +12612,7 @@ fn compute_maker_prims(
     labels_info: &[(bool, Located<StrIdx>)],
     has_optional: bool,
     arena: &mut ParseArena,
-) -> Vec<StrIdx> {
+) -> PrimitiveRepr {
     // Build arg_kinds list matching OCaml's pval_prim_of_option_labels
     let mut arg_kinds: Vec<ObjParam> = Vec::new();
 
@@ -12826,12 +12644,11 @@ fn compute_maker_prims(
         });
     }
 
-    // OCaml: ffi_obj_as_prims arg_kinds = [""; to_string (Ffi_obj_create arg_kinds)]
-    let ffi = FfiType::FfiObjCreate(arg_kinds);
-    vec![
-        arena.prim_empty_external_ffi(),
-        prim_str(arena, encode_ffi_type(&ffi)),
-    ]
+    // OCaml: Prim_ffi {name = ""; spec = Ffi_obj_create arg_kinds}
+    PrimitiveRepr::PrimFfi {
+        name: String::new(),
+        spec: Box::new(ExternalFfi::FfiObjCreate(arg_kinds)),
+    }
 }
 
 /// Generate accessor structure/signature items for one type declaration.
@@ -13047,7 +12864,7 @@ fn generate_record_accessors_and_sigs(
                 loc: label_loc,
             },
             pval_type: arena.push_core_type(arrow_type),
-            pval_prim: vec![],
+            pval_prim: None,
             pval_attributes: gentype_attrs.clone(),
             pval_loc: none_loc,
         };
@@ -13151,7 +12968,7 @@ fn generate_variant_accessors_and_sigs(
                     loc: ctor_loc,
                 },
                 pval_type: arena.push_core_type(signature_annotate_type),
-                pval_prim: vec![],
+                pval_prim: None,
                 pval_attributes: gentype_attrs.clone(),
                 pval_loc: none_loc,
             };
@@ -13298,7 +13115,7 @@ fn generate_variant_accessors_and_sigs(
                     loc: ctor_loc,
                 },
                 pval_type: arena.push_core_type(arrow_type),
-                pval_prim: vec![],
+                pval_prim: None,
                 pval_attributes: gentype_attrs.clone(),
                 pval_loc: none_loc,
             };
@@ -14320,7 +14137,7 @@ fn rewrite_structure_item_no_spice(
                     let sig_value = ValueDescription {
                         pval_name: vd.pval_name.clone(),
                         pval_type: arena.push_core_type(pval_type.clone()),
-                        pval_prim: vec![],
+                        pval_prim: None,
                         pval_attributes: encoded.pval_attributes.clone().into(),
                         pval_loc: vd.pval_loc,
                     };
@@ -15073,14 +14890,9 @@ let f = value => {
     }
 
     #[test]
-    fn test_prims_to_be_encoded() {
-        use crate::parse_arena::ParseArena;
-        let mut arena = ParseArena::new();
-        let console_log = arena.intern("console.log");
-        let foo = arena.intern("#foo");
-        assert!(prims_to_be_encoded(&[console_log], &arena));
-        assert!(!prims_to_be_encoded(&[foo], &arena));
-        assert!(!prims_to_be_encoded(&[], &arena));
+    fn test_prim_to_be_encoded() {
+        assert!(prim_to_be_encoded("console.log"));
+        assert!(!prim_to_be_encoded("#foo"));
     }
 
     #[test]

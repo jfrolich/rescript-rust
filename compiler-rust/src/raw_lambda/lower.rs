@@ -11,7 +11,7 @@ use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind};
 use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo};
-use crate::lambda::lam_primitive::{ExternalFfiSpec, ExternalReturnWrapper, Primitive};
+use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{ApInfo, Apply, ApplyStatus, LFunction, Lambda, LambdaSwitch, PrimInfo};
 use crate::location::Location;
@@ -38,48 +38,31 @@ impl<'a> LoweringContext<'a> {
     }
 
     fn lower_lambda(&mut self, raw: RawLambda) -> Lambda {
-        self.lower_lambda_with_dynamic_import(raw, false)
-    }
-
-    fn lower_lambda_with_dynamic_import(&mut self, raw: RawLambda, dynamic_import: bool) -> Lambda {
         match raw {
-            RawLambda::Lshared(inner) => self.lower_lambda_with_dynamic_import(
-                std::sync::Arc::unwrap_or_clone(inner),
-                dynamic_import,
-            ),
+            RawLambda::Lshared(inner) => self.lower_lambda(std::sync::Arc::unwrap_or_clone(inner)),
             RawLambda::Lvar(id) => Lambda::var(self.alias_target(id)),
-            RawLambda::LglobalModule(id, imported) => {
+            RawLambda::LglobalModule(id) => {
                 if id.is_predef_exn() {
                     Lambda::const_(Constant::String {
                         s: id.name().to_string(),
                         delim: None,
                     })
                 } else {
-                    Lambda::global_module(id, dynamic_import || imported)
+                    Lambda::global_module(id)
                 }
             }
             RawLambda::Lconst(c) => Lambda::const_(lower_constant(c)),
             RawLambda::Lapply(apply) => self.lower_apply(*apply),
-            RawLambda::Lfunction(func) => {
-                let (renamed_params, renamed_body) =
-                    rename_optional_parameters(&self.id_gen, func.params, *func.body);
-                Lambda::function_(
-                    func.arity,
-                    renamed_params,
-                    self.lower_lambda(renamed_body),
-                    func.attr,
-                )
-            }
-            RawLambda::Llet(kind, id, value, body) if dynamic_import => {
-                if let RawLambda::LglobalModule(global_id, _) = value.as_ref() {
-                    return Lambda::global_module(global_id.clone(), true);
-                }
-                self.lower_let(kind, id, *value, *body)
-            }
+            RawLambda::Lfunction(func) => Lambda::function_(
+                func.arity,
+                func.params,
+                self.lower_lambda(*func.body),
+                func.attr,
+            ),
             RawLambda::Llet(kind, id, value, body) => self.lower_let(kind, id, *value, *body),
             RawLambda::Lletrec(bindings, body) => self.lower_letrec(bindings, *body),
             RawLambda::Lprim(info) => {
-                self.lower_primitive(info.primitive, info.args, info.loc, dynamic_import)
+                self.lower_primitive(info.primitive, info.args, info.loc)
             }
             RawLambda::Lswitch(scrutinee, switch, _) => self.lower_switch(*scrutinee, *switch),
             RawLambda::LstringSwitch(scrutinee, cases, default) => {
@@ -267,7 +250,6 @@ impl<'a> LoweringContext<'a> {
         primitive: Primitive,
         args: Vec<RawLambda>,
         loc: Location,
-        dynamic_import_scope: bool,
     ) -> Lambda {
         if let Primitive::PrawJsCode(info) = &primitive {
             let mut info = info.clone();
@@ -282,15 +264,9 @@ impl<'a> LoweringContext<'a> {
             }
         }
 
-        let arg_dynamic_import = matches!(primitive, Primitive::Pimport).then_some(true);
         let args = args
             .into_iter()
-            .map(|arg| {
-                self.lower_lambda_with_dynamic_import(
-                    arg,
-                    arg_dynamic_import.unwrap_or(dynamic_import_scope),
-                )
-            })
+            .map(|arg| self.lower_lambda(arg))
             .collect::<Vec<_>>();
 
         match primitive {
@@ -320,45 +296,6 @@ impl<'a> LoweringContext<'a> {
             Primitive::Pignore => {
                 let arg = args.into_iter().next().unwrap_or_else(Lambda::unit);
                 Lambda::seq(arg, Lambda::unit())
-            }
-            Primitive::PjsCall { ffi, .. } if args.is_empty() && ffi.inline_constant.is_some() => {
-                Lambda::const_(ffi.inline_constant.expect("guarded inline constant"))
-            }
-            Primitive::PjsCall {
-                prim_name,
-                arg_types,
-                ffi,
-                dynamic_import: _call_dynamic_import,
-                transformed_jsx,
-            } if is_object_create_call(&prim_name, &arg_types, &ffi) => Lambda::prim(
-                Primitive::PjsObjectCreate(
-                    ffi.obj_params
-                        .clone()
-                        .expect("guarded object-create metadata"),
-                ),
-                args,
-                loc,
-            ),
-            Primitive::PjsCall {
-                prim_name,
-                arg_types,
-                ffi,
-                dynamic_import: call_dynamic_import,
-                transformed_jsx,
-            } => {
-                let return_wrapper = ffi.return_wrapper;
-                let call = Lambda::prim(
-                    Primitive::PjsCall {
-                        prim_name,
-                        arg_types,
-                        ffi,
-                        dynamic_import: call_dynamic_import || dynamic_import_scope,
-                        transformed_jsx,
-                    },
-                    args,
-                    loc,
-                );
-                wrap_ffi_result(call, return_wrapper, loc)
             }
             Primitive::Pmakeblock(TagInfo::PolyVar(name), mutable_flag) => match args.as_slice() {
                 [_, value] => Lambda::prim(
@@ -514,7 +451,7 @@ impl<'a> LoweringContext<'a> {
 fn collect_exported_idents(raw: &RawLambda, exports: &mut HashSet<Ident>) {
     match raw {
         RawLambda::Lshared(inner) => collect_exported_idents(inner, exports),
-        RawLambda::Lvar(_) | RawLambda::LglobalModule(_, _) | RawLambda::Lconst(_) => {}
+        RawLambda::Lvar(_) | RawLambda::LglobalModule(_) | RawLambda::Lconst(_) => {}
         RawLambda::Lapply(apply) => {
             collect_exported_idents(&apply.ap_func, exports);
             for arg in &apply.ap_args {
@@ -716,88 +653,6 @@ fn is_valid_hash_number(value: &str) -> bool {
     }
 }
 
-fn rename_optional_parameters(
-    id_gen: &IdGenerator,
-    params: Vec<Ident>,
-    body: RawLambda,
-) -> (Vec<Ident>, RawLambda) {
-    let (param_map, body) = rename_optional_parameter_prefix(id_gen, &params, body);
-    let params = params
-        .into_iter()
-        .map(|param| param_map.get(&param).cloned().unwrap_or(param))
-        .collect();
-    (params, body)
-}
-
-fn rename_optional_parameter_prefix(
-    id_gen: &IdGenerator,
-    params: &[Ident],
-    body: RawLambda,
-) -> (HashMap<Ident, Ident>, RawLambda) {
-    let RawLambda::Llet(kind, id, value, rest) = body else {
-        return (HashMap::new(), body);
-    };
-
-    let should_rename = matches_optional_parameter_binding(params, value.as_ref());
-    if !should_rename {
-        return (HashMap::new(), RawLambda::Llet(kind, id, value, rest));
-    }
-
-    let (mut param_map, renamed_rest) = rename_optional_parameter_prefix(id_gen, params, *rest);
-    let RawLambda::LifThenElse(cond, then_, else_) = *value else {
-        unreachable!("validated optional parameter binding")
-    };
-    let RawLambda::Lprim(cond_info) = *cond else {
-        unreachable!("validated optional parameter binding")
-    };
-    let RawLambda::Lprim(then_info) = *then_ else {
-        unreachable!("validated optional parameter binding")
-    };
-    let [RawLambda::Lvar(opt)] = cond_info.args.as_slice() else {
-        unreachable!("validated optional parameter binding")
-    };
-    let new_id = id_gen.create(&format!("{}Opt", id.name()));
-    param_map.insert(opt.clone(), new_id.clone());
-
-    let renamed_value = RawLambda::LifThenElse(
-        Box::new(RawLambda::prim(
-            cond_info.primitive,
-            vec![RawLambda::var(new_id.clone())],
-            cond_info.loc,
-        )),
-        Box::new(RawLambda::prim(
-            then_info.primitive,
-            vec![RawLambda::var(new_id)],
-            then_info.loc,
-        )),
-        else_,
-    );
-
-    (
-        param_map,
-        RawLambda::Llet(kind, id, Box::new(renamed_value), Box::new(renamed_rest)),
-    )
-}
-
-fn matches_optional_parameter_binding(params: &[Ident], value: &RawLambda) -> bool {
-    let RawLambda::LifThenElse(cond, then_, _) = value else {
-        return false;
-    };
-    let RawLambda::Lprim(cond_info) = cond.as_ref() else {
-        return false;
-    };
-    let RawLambda::Lprim(then_info) = then_.as_ref() else {
-        return false;
-    };
-    let [RawLambda::Lvar(opt)] = cond_info.args.as_slice() else {
-        return false;
-    };
-    let [RawLambda::Lvar(opt2)] = then_info.args.as_slice() else {
-        return false;
-    };
-    opt.same(opt2) && params.iter().any(|param| param.same(opt))
-}
-
 fn make_apply(
     func: Lambda,
     args: Vec<Lambda>,
@@ -988,25 +843,6 @@ fn pointer_constant_value(constant: &Constant) -> Option<&str> {
     match constant {
         Constant::Pointer(name) => Some(name.as_str()),
         _ => None,
-    }
-}
-
-fn is_object_create_call(
-    prim_name: &str,
-    _arg_types: &[crate::lambda::lam_primitive::ExternalArgSpec],
-    ffi: &ExternalFfiSpec,
-) -> bool {
-    prim_name.is_empty() && ffi.obj_params.is_some()
-}
-
-fn wrap_ffi_result(call: Lambda, return_wrapper: ExternalReturnWrapper, loc: Location) -> Lambda {
-    match return_wrapper {
-        ExternalReturnWrapper::Identity => call,
-        ExternalReturnWrapper::NullToOpt => Lambda::prim(Primitive::PnullToOpt, vec![call], loc),
-        ExternalReturnWrapper::NullUndefinedToOpt => {
-            Lambda::prim(Primitive::PnullUndefinedToOpt, vec![call], loc)
-        }
-        ExternalReturnWrapper::ReplacedWithUnit => Lambda::seq(call, Lambda::unit()),
     }
 }
 
@@ -1236,7 +1072,7 @@ fn module_field_access(arg: &Lambda) -> Option<(String, i32, Lambda)> {
     else {
         return None;
     };
-    let [module_value @ (Lambda::LglobalModule(_, _) | Lambda::Lvar(_))] = args.as_slice() else {
+    let [module_value @ (Lambda::LglobalModule(_) | Lambda::Lvar(_))] = args.as_slice() else {
         return None;
     };
     if *index < 0 {
@@ -1248,8 +1084,8 @@ fn module_field_access(arg: &Lambda) -> Option<(String, i32, Lambda)> {
 fn same_module_source(lhs: &Lambda, rhs: &Lambda) -> bool {
     match (lhs, rhs) {
         (Lambda::Lvar(lhs), Lambda::Lvar(rhs)) => lhs.same(rhs),
-        (Lambda::LglobalModule(lhs, lhs_dynamic), Lambda::LglobalModule(rhs, rhs_dynamic)) => {
-            lhs.same(rhs) && lhs_dynamic == rhs_dynamic
+        (Lambda::LglobalModule(lhs), Lambda::LglobalModule(rhs)) => {
+            lhs.same(rhs)
         }
         _ => false,
     }
@@ -1290,7 +1126,7 @@ fn exception_id_destructed(lam: &Lambda, exn: &Ident) -> bool {
         Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
             exception_id_destructed(iterable, exn) || exception_id_destructed(body, exn)
         }
-        Lambda::Lconst(_) | Lambda::LglobalModule(_, _) => false,
+        Lambda::Lconst(_) | Lambda::LglobalModule(_) => false,
         Lambda::Lapply(apply) => {
             exception_id_destructed(&apply.ap_func, exn)
                 || apply
@@ -1338,7 +1174,7 @@ fn exception_id_destructed(lam: &Lambda, exn: &Ident) -> bool {
 fn hit_variable(target: &Ident, lam: &Lambda) -> bool {
     match lam {
         Lambda::Lvar(id) => id.same(target),
-        Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+        Lambda::LglobalModule(_) | Lambda::Lconst(_) => false,
         Lambda::Lapply(apply) => {
             hit_variable(target, &apply.ap_func)
                 || apply.ap_args.iter().any(|arg| hit_variable(target, arg))
@@ -1715,7 +1551,7 @@ fn max_ident_stamp(raw: &RawLambda) -> i32 {
     fn visit_raw(max_stamp: &mut i32, raw: &RawLambda) {
         match raw {
             RawLambda::Lshared(inner) => visit_raw(max_stamp, inner),
-            RawLambda::Lvar(id) | RawLambda::LglobalModule(id, _) => visit_ident(max_stamp, id),
+            RawLambda::Lvar(id) | RawLambda::LglobalModule(id) => visit_ident(max_stamp, id),
             RawLambda::Lconst(_) => {}
             RawLambda::Lapply(apply) => {
                 visit_raw(max_stamp, &apply.ap_func);
@@ -1860,7 +1696,7 @@ mod tests {
     use crate::lambda::InlineAttribute;
     use crate::lambda::lam_compat::LetKind;
     use crate::lambda::lam_constant::{ConstructorRuntimeTag, ConstructorTag, StringDelim};
-    use crate::lambda::lam_primitive::{ExternalFfiKind, JsRawInfo, Mutable};
+    use crate::lambda::lam_primitive::{JsRawInfo, Mutable};
 
     #[test]
     fn shared_generator_entrypoint_preserves_the_caller_owned_stamp_stream() {
@@ -1965,175 +1801,6 @@ mod tests {
     }
 
     #[test]
-    fn renames_optional_parameter_guards_from_prefix_lets() {
-        let opt_x = Ident::create_local("*opt*");
-        let y = Ident::create_local("y");
-        let opt_z = Ident::create_local("*opt*");
-        let x = Ident::create_local("x");
-        let z = Ident::create_local("z");
-        let raw = RawLambda::function_(
-            3,
-            vec![opt_x.clone(), y.clone(), opt_z.clone()],
-            RawLambda::let_(
-                LetKind::Strict,
-                x.clone(),
-                RawLambda::LifThenElse(
-                    Box::new(RawLambda::prim(
-                        Primitive::PisNotNone,
-                        vec![RawLambda::var(opt_x.clone())],
-                        Location::none(),
-                    )),
-                    Box::new(RawLambda::prim(
-                        Primitive::PvalFromOptionNotNest,
-                        vec![RawLambda::var(opt_x.clone())],
-                        Location::none(),
-                    )),
-                    Box::new(RawLambda::const_(Constant::int(3))),
-                ),
-                RawLambda::let_(
-                    LetKind::Strict,
-                    z.clone(),
-                    RawLambda::LifThenElse(
-                        Box::new(RawLambda::prim(
-                            Primitive::PisNotNone,
-                            vec![RawLambda::var(opt_z.clone())],
-                            Location::none(),
-                        )),
-                        Box::new(RawLambda::prim(
-                            Primitive::PvalFromOptionNotNest,
-                            vec![RawLambda::var(opt_z.clone())],
-                            Location::none(),
-                        )),
-                        Box::new(RawLambda::const_(Constant::int(4))),
-                    ),
-                    RawLambda::prim(
-                        Primitive::Paddint,
-                        vec![RawLambda::var(x), RawLambda::var(z)],
-                        Location::none(),
-                    ),
-                ),
-            ),
-            crate::lambda::FunctionAttribute::default(),
-        );
-
-        let lowered = lower_to_lambda_with_start_stamp(raw, 41);
-        let Lambda::Lfunction(func) = lowered else {
-            panic!("expected function");
-        };
-        assert_eq!(func.params[0].name(), "xOpt");
-        assert_eq!(func.params[1].name(), "y");
-        assert_eq!(func.params[2].name(), "zOpt");
-        assert_eq!(func.params[0].stamp(), 43);
-        assert_eq!(func.params[2].stamp(), 42);
-
-        let Lambda::Llet(LetKind::Strict, _, first_value, first_rest) = func.body.as_ref() else {
-            panic!("expected first strict let");
-        };
-        let Lambda::LifThenElse(first_cond, first_then, _) = first_value.as_ref() else {
-            panic!("expected first optional guard");
-        };
-        let Lambda::Lprim(first_cond_prim) = first_cond.as_ref() else {
-            panic!("expected first guard primitive");
-        };
-        let [Lambda::Lvar(first_guard_param)] = first_cond_prim.args.as_slice() else {
-            panic!("expected first guard to use renamed param");
-        };
-        assert!(first_guard_param.same(&func.params[0]));
-        let Lambda::Lprim(first_then_prim) = first_then.as_ref() else {
-            panic!("expected first unwrap primitive");
-        };
-        let [Lambda::Lvar(first_unwrap_param)] = first_then_prim.args.as_slice() else {
-            panic!("expected first unwrap to use renamed param");
-        };
-        assert!(first_unwrap_param.same(&func.params[0]));
-
-        let Lambda::Llet(LetKind::Strict, _, second_value, _) = first_rest.as_ref() else {
-            panic!("expected second strict let");
-        };
-        let Lambda::LifThenElse(second_cond, second_then, _) = second_value.as_ref() else {
-            panic!("expected second optional guard");
-        };
-        let Lambda::Lprim(second_cond_prim) = second_cond.as_ref() else {
-            panic!("expected second guard primitive");
-        };
-        let [Lambda::Lvar(second_guard_param)] = second_cond_prim.args.as_slice() else {
-            panic!("expected second guard to use renamed param");
-        };
-        assert!(second_guard_param.same(&func.params[2]));
-        let Lambda::Lprim(second_then_prim) = second_then.as_ref() else {
-            panic!("expected second unwrap primitive");
-        };
-        let [Lambda::Lvar(second_unwrap_param)] = second_then_prim.args.as_slice() else {
-            panic!("expected second unwrap to use renamed param");
-        };
-        assert!(second_unwrap_param.same(&func.params[2]));
-    }
-
-    #[test]
-    fn lowers_blank_js_call_to_object_create() {
-        let raw = RawLambda::prim(
-            Primitive::PjsCall {
-                prim_name: String::new(),
-                arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
-                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
-                    kind: ExternalFfiKind::ObjCreate,
-                    spec: None,
-                    obj_params: Some(vec![crate::lambda::lam_primitive::ExternalObjSpec {
-                        obj_arg_type: crate::lambda::lam_primitive::ExternalArgAttr::Nothing,
-                        obj_arg_label: crate::lambda::lam_primitive::ExternalObjLabel::Label {
-                            name: "name".to_string(),
-                        },
-                    }]),
-                    return_wrapper: ExternalReturnWrapper::Identity,
-                    inline_constant: None,
-                }),
-                dynamic_import: false,
-                transformed_jsx: false,
-            },
-            vec![RawLambda::unit()],
-            Location::none(),
-        );
-
-        let lowered = lower_to_lambda(raw);
-        let Lambda::Lprim(info) = lowered else {
-            panic!("expected Lprim");
-        };
-        assert!(matches!(info.primitive, Primitive::PjsObjectCreate(_)));
-    }
-
-    #[test]
-    fn lowers_labeled_blank_js_call_to_object_create_without_objcreate_kind() {
-        let raw = RawLambda::prim(
-            Primitive::PjsCall {
-                prim_name: String::new(),
-                arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
-                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
-                    kind: ExternalFfiKind::Default,
-                    spec: None,
-                    obj_params: Some(vec![crate::lambda::lam_primitive::ExternalObjSpec {
-                        obj_arg_type: crate::lambda::lam_primitive::ExternalArgAttr::Nothing,
-                        obj_arg_label: crate::lambda::lam_primitive::ExternalObjLabel::Label {
-                            name: "name".to_string(),
-                        },
-                    }]),
-                    return_wrapper: ExternalReturnWrapper::Identity,
-                    inline_constant: None,
-                }),
-                dynamic_import: false,
-                transformed_jsx: false,
-            },
-            vec![RawLambda::unit()],
-            Location::none(),
-        );
-
-        let lowered = lower_to_lambda(raw);
-        let Lambda::Lprim(info) = lowered else {
-            panic!("expected Lprim");
-        };
-        assert!(matches!(info.primitive, Primitive::PjsObjectCreate(_)));
-    }
-
-    #[test]
     fn lowers_extension_slot_eq_via_exception_id_field() {
         let exn = Ident::create_local("exn");
         let slot = Ident::create_local("slot");
@@ -2169,127 +1836,6 @@ mod tests {
             panic!("expected exception id field receiver");
         };
         assert!(field_exn.same(&exn));
-    }
-
-    #[test]
-    fn keeps_unlabeled_blank_js_call_as_call() {
-        let raw = RawLambda::prim(
-            Primitive::PjsCall {
-                prim_name: String::new(),
-                arg_types: vec![
-                    crate::lambda::lam_primitive::ExternalArgSpec::dummy(),
-                    crate::lambda::lam_primitive::ExternalArgSpec::dummy(),
-                ],
-                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
-                    kind: ExternalFfiKind::Default,
-                    spec: None,
-                    obj_params: None,
-                    return_wrapper: ExternalReturnWrapper::Identity,
-                    inline_constant: None,
-                }),
-                dynamic_import: false,
-                transformed_jsx: false,
-            },
-            vec![RawLambda::unit(), RawLambda::unit()],
-            Location::none(),
-        );
-
-        let lowered = lower_to_lambda(raw);
-        let Lambda::Lprim(info) = lowered else {
-            panic!("expected Lprim");
-        };
-        assert!(matches!(
-            info.primitive,
-            Primitive::PjsCall { ref prim_name, .. } if prim_name.is_empty()
-        ));
-    }
-
-    #[test]
-    fn lowers_blank_js_call_with_inline_constant_to_constant() {
-        let lowered = lower_to_lambda(RawLambda::prim(
-            Primitive::PjsCall {
-                prim_name: String::new(),
-                arg_types: Vec::new(),
-                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
-                    kind: ExternalFfiKind::Default,
-                    spec: None,
-                    obj_params: None,
-                    return_wrapper: ExternalReturnWrapper::Identity,
-                    inline_constant: Some(Constant::String {
-                        s: "hello".to_string(),
-                        delim: Some(crate::lambda::lam_constant::StringDelim::StarJ),
-                    }),
-                }),
-                dynamic_import: false,
-                transformed_jsx: false,
-            },
-            Vec::new(),
-            Location::none(),
-        ));
-
-        assert!(matches!(
-            lowered,
-            Lambda::Lconst(Constant::String { ref s, delim: Some(crate::lambda::lam_constant::StringDelim::StarJ) }) if s == "hello"
-        ));
-    }
-
-    #[test]
-    fn wraps_null_to_opt_return_wrapper_around_js_call() {
-        let lowered = lower_to_lambda(RawLambda::prim(
-            Primitive::PjsCall {
-                prim_name: "get".to_string(),
-                arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
-                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
-                    kind: ExternalFfiKind::Default,
-                    spec: None,
-                    obj_params: None,
-                    return_wrapper: ExternalReturnWrapper::NullToOpt,
-                    inline_constant: None,
-                }),
-                dynamic_import: false,
-                transformed_jsx: false,
-            },
-            vec![RawLambda::var(Ident::create_local("obj"))],
-            Location::none(),
-        ));
-
-        let Lambda::Lprim(info) = lowered else {
-            panic!("expected wrapper primitive");
-        };
-        assert!(matches!(info.primitive, Primitive::PnullToOpt));
-        let [Lambda::Lprim(inner)] = info.args.as_slice() else {
-            panic!("expected wrapped js call");
-        };
-        assert!(matches!(
-            inner.primitive,
-            Primitive::PjsCall { ref prim_name, .. } if prim_name == "get"
-        ));
-    }
-
-    #[test]
-    fn wraps_nullable_return_wrapper_around_js_call() {
-        let lowered = lower_to_lambda(RawLambda::prim(
-            Primitive::PjsCall {
-                prim_name: "get".to_string(),
-                arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
-                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
-                    kind: ExternalFfiKind::Default,
-                    spec: None,
-                    obj_params: None,
-                    return_wrapper: ExternalReturnWrapper::NullUndefinedToOpt,
-                    inline_constant: None,
-                }),
-                dynamic_import: false,
-                transformed_jsx: false,
-            },
-            vec![RawLambda::var(Ident::create_local("obj"))],
-            Location::none(),
-        ));
-
-        let Lambda::Lprim(info) = lowered else {
-            panic!("expected wrapper primitive");
-        };
-        assert!(matches!(info.primitive, Primitive::PnullUndefinedToOpt));
     }
 
     #[test]
@@ -2342,10 +1888,8 @@ mod tests {
 
     #[test]
     fn lowers_predef_exception_global_module_to_string_constant() {
-        let lowered = lower_to_lambda(RawLambda::global_module(
-            crate::types::predef::ident_assert_failure(),
-            false,
-        ));
+        let lowered =
+            lower_to_lambda(RawLambda::global_module(crate::types::predef::ident_assert_failure()));
 
         assert!(matches!(
             lowered,
@@ -3018,106 +2562,6 @@ mod tests {
     }
 
     #[test]
-    fn marks_imported_field_global_module_as_dynamic() {
-        let module_id = Ident::create_local("Belt_List");
-        let raw = RawLambda::prim(
-            Primitive::Pimport,
-            vec![RawLambda::prim(
-                Primitive::Pfield(
-                    36,
-                    crate::lambda::lam_compat::FieldDbgInfo::Module {
-                        name: "forEach".to_string(),
-                    },
-                ),
-                vec![RawLambda::global_module(module_id.clone(), false)],
-                Location::none(),
-            )],
-            Location::none(),
-        );
-
-        let lowered = lower_to_lambda(raw);
-        let Lambda::Lprim(import) = lowered else {
-            panic!("expected import primitive");
-        };
-        let [Lambda::Lprim(field)] = import.args.as_slice() else {
-            panic!("expected field primitive under import");
-        };
-        let [Lambda::LglobalModule(id, true)] = field.args.as_slice() else {
-            panic!("expected dynamic imported global module");
-        };
-        assert!(id.same(&module_id));
-    }
-
-    #[test]
-    fn marks_imported_js_call_as_dynamic() {
-        let raw = RawLambda::prim(
-            Primitive::Pimport,
-            vec![RawLambda::prim(
-                Primitive::PjsCall {
-                    prim_name: "default".to_string(),
-                    arg_types: Vec::new(),
-                    ffi: Box::new(ExternalFfiSpec {
-                        kind: ExternalFfiKind::Default,
-                        spec: None,
-                        obj_params: None,
-                        return_wrapper: ExternalReturnWrapper::Identity,
-                        inline_constant: None,
-                    }),
-                    dynamic_import: false,
-                    transformed_jsx: false,
-                },
-                Vec::new(),
-                Location::none(),
-            )],
-            Location::none(),
-        );
-
-        let lowered = lower_to_lambda(raw);
-        let Lambda::Lprim(import) = lowered else {
-            panic!("expected import primitive");
-        };
-        let [Lambda::Lprim(call)] = import.args.as_slice() else {
-            panic!("expected js call under import");
-        };
-        let Primitive::PjsCall { dynamic_import, .. } = &call.primitive else {
-            panic!("expected lowered js call primitive");
-        };
-        assert!(*dynamic_import);
-    }
-
-    #[test]
-    fn keeps_module_alias_import_body_non_dynamic() {
-        let alias = Ident::create_local("let");
-        let module_id = Ident::create_local("Belt_List");
-        let raw = RawLambda::prim(
-            Primitive::Pimport,
-            vec![RawLambda::let_(
-                LetKind::Alias,
-                alias,
-                RawLambda::const_(Constant::ModuleAlias),
-                RawLambda::global_module(module_id.clone(), false),
-            )],
-            Location::none(),
-        );
-
-        let lowered = lower_to_lambda(raw);
-        let Lambda::Lprim(import) = lowered else {
-            panic!("expected import primitive");
-        };
-        let [Lambda::Llet(LetKind::Alias, _, value, body)] = import.args.as_slice() else {
-            panic!("expected alias let under import");
-        };
-        assert!(matches!(
-            value.as_ref(),
-            Lambda::Lconst(Constant::ModuleAlias)
-        ));
-        let Lambda::LglobalModule(id, false) = body.as_ref() else {
-            panic!("expected non-dynamic imported global module in alias body");
-        };
-        assert!(id.same(&module_id));
-    }
-
-    #[test]
     fn preserves_module_makeblock_shape() {
         let module_id = Ident::create_local("A");
         let lowered = lower_to_lambda(RawLambda::prim(
@@ -3154,30 +2598,6 @@ mod tests {
         ));
         let [Lambda::Lvar(id)] = field.args.as_slice() else {
             panic!("expected module source variable");
-        };
-        assert!(id.same(&module_id));
-    }
-
-    #[test]
-    fn collapses_imported_global_module_let_to_dynamic_global_module() {
-        let module_id = Ident::create_local("ModuleWithAlias");
-        let raw = RawLambda::prim(
-            Primitive::Pimport,
-            vec![RawLambda::let_(
-                LetKind::Strict,
-                Ident::create_local("let"),
-                RawLambda::global_module(module_id.clone(), false),
-                RawLambda::unit(),
-            )],
-            Location::none(),
-        );
-
-        let lowered = lower_to_lambda(raw);
-        let Lambda::Lprim(import) = lowered else {
-            panic!("expected import primitive");
-        };
-        let [Lambda::LglobalModule(id, true)] = import.args.as_slice() else {
-            panic!("expected collapsed dynamic global module");
         };
         assert!(id.same(&module_id));
     }

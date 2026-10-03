@@ -1025,6 +1025,35 @@ pub enum SignatureItemDesc {
 // Declarations
 // ============================================================================
 
+/// `Parsetree.primitive_repr`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PrimitiveRepr {
+    /// As written in the source: an intrinsic (`"%identity"`, `"#raw_expr"`)
+    /// or the not-yet-digested JS name of an FFI external.
+    PrimName(StrIdx),
+    /// Produced by the frontend digestion of an FFI external's attributes;
+    /// never observed by external PPXes, which run before digestion.
+    PrimFfi {
+        name: String,
+        spec: Box<crate::types::external_ffi_types::ExternalFfi>,
+    },
+    /// An `@inline(<literal>)` value declaration: a compile-time constant.
+    PrimInlineConst(Box<crate::types::external_ffi_types::InlineConst>),
+}
+
+impl PrimitiveRepr {
+    /// `Ffi_debug.primitive_repr`: the strings the sexp parity printers
+    /// show for a primitive.
+    pub fn debug_strings(&self, arena: &crate::parse_arena::ParseArena) -> Vec<String> {
+        use crate::types::external_ffi_types::debug;
+        match self {
+            PrimitiveRepr::PrimName(s) => vec![arena.get_string(*s).to_string()],
+            PrimitiveRepr::PrimFfi { name, spec } => vec![name.clone(), debug::spec(spec)],
+            PrimitiveRepr::PrimInlineConst(c) => vec![debug::inline_const(c)],
+        }
+    }
+}
+
 /// Value description: `external` or `let` in signature.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValueDescription {
@@ -1032,8 +1061,8 @@ pub struct ValueDescription {
     pub pval_name: StringLoc,
     /// Type (arena index).
     pub pval_type: CoreTypeIdx,
-    /// Primitive names (for externals).
-    pub pval_prim: Vec<StrIdx>,
+    /// The primitive (for externals): `None` for `val x: T`.
+    pub pval_prim: Option<PrimitiveRepr>,
     /// Attributes.
     pub pval_attributes: Attributes,
     /// Location.

@@ -14,9 +14,8 @@ pub(super) use crate::lambda::lam_constant::{
     Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo, StringDelim,
 };
 pub(super) use crate::lambda::lam_primitive::{
-    ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
-    ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName, ExternalObjLabel,
-    ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, JsRawInfo, Mutable, Primitive,
+    Attr, Cst, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, JsRawInfo, Label,
+    LabelNoname, ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
 };
 pub(super) use crate::lambda::{
     ApInfo, Apply, ApplyStatus, Comparison, FieldDbgInfo, FunctionAttribute, InlineAttribute,
@@ -150,7 +149,7 @@ pub(super) fn find_variable_initializer<'a>(
 pub(super) fn external_module(bundle: &str) -> ExternalModuleName {
     ExternalModuleName {
         bundle: bundle.to_string(),
-        module_bind_name: ExternalModuleBindName::Nothing,
+        module_bind_name: ModuleBindName::PhintNothing,
         import_attributes: None,
     }
 }
@@ -162,7 +161,7 @@ fn external_module_with_attrs(
 ) -> ExternalModuleName {
     ExternalModuleName {
         bundle: bundle.to_string(),
-        module_bind_name: ExternalModuleBindName::HintName(hint.to_string()),
+        module_bind_name: ModuleBindName::PhintName(hint.to_string()),
         import_attributes: Some(
             attrs
                 .iter()
@@ -177,18 +176,15 @@ fn js_var_external(name: &str, external_module_name: Option<ExternalModuleName>)
         Primitive::PjsCall {
             prim_name: name.to_string(),
             arg_types: vec![],
-            ffi: Box::new(ExternalFfiSpec {
-                kind: ExternalFfiKind::Default,
-                spec: Some(ExternalSpec::JsVar {
+            ffi: Box::new(ExternalDecl {
+                kind: DeclKind::DeclVal {
                     name: name.to_string(),
-                    external_module_name,
-                    scopes: vec![],
-                }),
-                obj_params: None,
-                return_wrapper: ExternalReturnWrapper::Identity,
-                inline_constant: None,
+                },
+                module_: external_module_name.map(ModuleSource::ModuleNamed),
+                scopes: vec![],
+                variadic: false,
+                effective_arity: 0,
             }),
-            dynamic_import: false,
             transformed_jsx: false,
         },
         vec![],
@@ -340,14 +336,7 @@ fn console_log_effect(arg: Lambda) -> Lambda {
             Primitive::PjsCall {
                 prim_name: "console.log".to_string(),
                 arg_types: vec![],
-                ffi: Box::new(ExternalFfiSpec {
-                    kind: ExternalFfiKind::Default,
-                    spec: None,
-                    obj_params: None,
-                    return_wrapper: ExternalReturnWrapper::Identity,
-                    inline_constant: None,
-                }),
-                dynamic_import: false,
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                 transformed_jsx: false,
             },
             vec![arg],
@@ -1464,7 +1453,7 @@ fn compile_expr_keeps_forwarded_module_call_params_like_ocaml() {
                         name: "fromArray".to_string(),
                     },
                 ),
-                vec![Lambda::LglobalModule(belt_map, false)],
+                vec![Lambda::LglobalModule(belt_map)],
                 Location::none(),
             )),
             ap_args: vec![Lambda::var(none.clone()), Lambda::var(icmp.clone())],
@@ -1516,7 +1505,7 @@ fn compile_expr_keeps_forwarded_nested_wrapper_params_like_ocaml() {
                             name: "eq".to_string(),
                         },
                     ),
-                    vec![Lambda::LglobalModule(belt_map, false)],
+                    vec![Lambda::LglobalModule(belt_map)],
                     Location::none(),
                 )),
                 ap_args: vec![

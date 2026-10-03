@@ -769,7 +769,12 @@ and value_description ~with_locs vd =
     string vd.val_name.txt;
   ] @ loc @ [
     ct_sexp;
-    Sexp.list (Sexp.atom "prim" :: List.map string vd.val_prim);
+    Sexp.list
+      (Sexp.atom "prim"
+      :: List.map string
+           (match vd.val_prim with
+           | None -> []
+           | Some prim -> Ffi_debug.primitive_repr prim));
     attrs_sexp;
   ])
 

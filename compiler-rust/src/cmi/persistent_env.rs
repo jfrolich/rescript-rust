@@ -25,11 +25,7 @@ use crate::ident::Ident;
 use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
 use crate::lambda::lam_constant::{Constant as LambdaConstant, PointerInfo, StringDelim};
-use crate::lambda::lam_primitive::{
-    ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
-    ExternalFfiKind, ExternalFfiSpec, ExternalModuleName, ExternalReturnWrapper, ExternalSpec,
-    Mutable, Primitive,
-};
+use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda, PrimInfo,
     TagInfo,
@@ -2858,10 +2854,9 @@ fn decode_cmj_lambda(value: &OcamlValue) -> Option<Lambda> {
         OcamlValue::Block(0, fields) if fields.len() == 1 => {
             Some(Lambda::Lvar(decode_cmj_ident(&fields[0])?))
         }
-        OcamlValue::Block(1, fields) if fields.len() == 2 => Some(Lambda::LglobalModule(
-            decode_cmj_ident(&fields[0])?,
-            fields[1].as_bool(),
-        )),
+        OcamlValue::Block(1, fields) if fields.len() == 1 => {
+            Some(Lambda::LglobalModule(decode_cmj_ident(&fields[0])?))
+        }
         OcamlValue::Block(2, fields) if fields.len() == 1 => {
             Some(Lambda::Lconst(decode_cmj_lambda_constant(&fields[0])?))
         }
@@ -3250,36 +3245,36 @@ fn decode_cmj_primitive(value: &OcamlValue) -> Option<Primitive> {
     match value {
         // OCaml Lam_primitive.t nullary constructor indexes follow
         // compiler/core/lam_primitive.ml:36-184, excluding payload variants.
-        OcamlValue::Int(1) => Some(Primitive::Praise),
-        OcamlValue::Int(6) => Some(Primitive::Pobjsize),
-        OcamlValue::Int(7) => Some(Primitive::Psequand),
-        OcamlValue::Int(8) => Some(Primitive::Psequor),
-        OcamlValue::Int(9) => Some(Primitive::Pnot),
-        OcamlValue::Int(13) => Some(Primitive::Pisint),
-        OcamlValue::Int(14) => Some(Primitive::Pnegint),
-        OcamlValue::Int(15) => Some(Primitive::Paddint),
-        OcamlValue::Int(16) => Some(Primitive::Psubint),
-        OcamlValue::Int(17) => Some(Primitive::Pmulint),
-        OcamlValue::Int(18) => Some(Primitive::Pdivint),
-        OcamlValue::Int(19) => Some(Primitive::Pmodint),
-        OcamlValue::Int(21) => Some(Primitive::Pandint),
-        OcamlValue::Int(22) => Some(Primitive::Porint),
-        OcamlValue::Int(23) => Some(Primitive::Pxorint),
-        OcamlValue::Int(25) => Some(Primitive::Plslint),
-        OcamlValue::Int(26) => Some(Primitive::Plsrint),
-        OcamlValue::Int(27) => Some(Primitive::Pasrint),
-        OcamlValue::Int(59) => Some(Primitive::Pstringlength),
-        OcamlValue::Int(66) => Some(Primitive::Pmakearray),
-        OcamlValue::Int(67) => Some(Primitive::Parraylength),
-        OcamlValue::Int(68) => Some(Primitive::Parrayrefu),
-        OcamlValue::Int(69) => Some(Primitive::Parraysetu),
-        OcamlValue::Int(77) => Some(Primitive::PjsApply),
-        OcamlValue::Int(91) => Some(Primitive::PfnArity),
-        OcamlValue::Int(93) => Some(Primitive::PisNotNone),
-        OcamlValue::Int(94) => Some(Primitive::PvalFromOption),
-        OcamlValue::Int(95) => Some(Primitive::PvalFromOptionNotNest),
-        OcamlValue::Int(96) => Some(Primitive::Psome),
-        OcamlValue::Int(97) => Some(Primitive::PsomeNotNest),
+        OcamlValue::Int(2) => Some(Primitive::Praise),
+        OcamlValue::Int(7) => Some(Primitive::Pobjsize),
+        OcamlValue::Int(8) => Some(Primitive::Psequand),
+        OcamlValue::Int(9) => Some(Primitive::Psequor),
+        OcamlValue::Int(10) => Some(Primitive::Pnot),
+        OcamlValue::Int(14) => Some(Primitive::Pisint),
+        OcamlValue::Int(15) => Some(Primitive::Pnegint),
+        OcamlValue::Int(16) => Some(Primitive::Paddint),
+        OcamlValue::Int(17) => Some(Primitive::Psubint),
+        OcamlValue::Int(18) => Some(Primitive::Pmulint),
+        OcamlValue::Int(19) => Some(Primitive::Pdivint),
+        OcamlValue::Int(20) => Some(Primitive::Pmodint),
+        OcamlValue::Int(22) => Some(Primitive::Pandint),
+        OcamlValue::Int(23) => Some(Primitive::Porint),
+        OcamlValue::Int(24) => Some(Primitive::Pxorint),
+        OcamlValue::Int(26) => Some(Primitive::Plslint),
+        OcamlValue::Int(27) => Some(Primitive::Plsrint),
+        OcamlValue::Int(28) => Some(Primitive::Pasrint),
+        OcamlValue::Int(60) => Some(Primitive::Pstringlength),
+        OcamlValue::Int(67) => Some(Primitive::Pmakearray),
+        OcamlValue::Int(68) => Some(Primitive::Parraylength),
+        OcamlValue::Int(69) => Some(Primitive::Parrayrefu),
+        OcamlValue::Int(70) => Some(Primitive::Parraysetu),
+        OcamlValue::Int(78) => Some(Primitive::PjsApply),
+        OcamlValue::Int(90) => Some(Primitive::PfnArity),
+        OcamlValue::Int(92) => Some(Primitive::PisNotNone),
+        OcamlValue::Int(93) => Some(Primitive::PvalFromOption),
+        OcamlValue::Int(94) => Some(Primitive::PvalFromOptionNotNest),
+        OcamlValue::Int(95) => Some(Primitive::Psome),
+        OcamlValue::Int(96) => Some(Primitive::PsomeNotNest),
         OcamlValue::Block(0, fields) if fields.len() == 2 => Some(Primitive::Pmakeblock(
             decode_cmj_tag_info(&fields[0])?,
             match fields[1].as_int() {
@@ -3292,12 +3287,11 @@ fn decode_cmj_primitive(value: &OcamlValue) -> Option<Primitive> {
             fields[0].as_int() as i32,
             decode_cmj_field_dbg_info(&fields[1])?,
         )),
-        OcamlValue::Block(4, fields) if fields.len() == 5 => Some(Primitive::PjsCall {
+        OcamlValue::Block(4, fields) if fields.len() == 4 => Some(Primitive::PjsCall {
             prim_name: fields[0].as_string().to_string(),
-            arg_types: decode_cmj_list(&fields[1], decode_cmj_external_arg_spec)?,
-            ffi: Box::new(decode_cmj_external_ffi_spec(&fields[2])?),
-            dynamic_import: fields[3].as_bool(),
-            transformed_jsx: fields[4].as_bool(),
+            arg_types: crate::cmi::ffi_decode::params(&fields[1])?,
+            ffi: Box::new(crate::cmi::ffi_decode::external_decl(&fields[2])?),
+            transformed_jsx: fields[3].as_bool(),
         }),
         OcamlValue::Block(6, fields) if fields.len() == 1 => {
             Some(Primitive::Pobjcomp(decode_cmj_comparison(&fields[0])?))
@@ -3348,63 +3342,6 @@ fn decode_cmj_field_dbg_info(value: &OcamlValue) -> Option<FieldDbgInfo> {
     }
 }
 
-fn decode_cmj_external_arg_spec(value: &OcamlValue) -> Option<ExternalArgSpec> {
-    let (_, fields) = value.as_block_opt()?;
-    if fields.len() < 2 {
-        return None;
-    }
-    Some(ExternalArgSpec {
-        arg_type: decode_cmj_external_arg_attr(&fields[0])?,
-        arg_label: decode_cmj_external_arg_label(&fields[1])?,
-    })
-}
-
-fn decode_cmj_external_arg_attr(value: &OcamlValue) -> Option<ExternalArgAttr> {
-    // compiler/frontend/external_arg_spec.ml:41-61.
-    match value {
-        OcamlValue::Int(0) => Some(ExternalArgAttr::ExternUnit),
-        OcamlValue::Int(1) => Some(ExternalArgAttr::Nothing),
-        OcamlValue::Int(2) => Some(ExternalArgAttr::Ignore),
-        OcamlValue::Int(3) => Some(ExternalArgAttr::Unwrap),
-        OcamlValue::Block(3, fields) if fields.len() == 1 => Some(ExternalArgAttr::ArgCst(
-            decode_cmj_external_arg_const(&fields[0])?,
-        )),
-        _ => None,
-    }
-}
-
-fn decode_cmj_external_arg_label(value: &OcamlValue) -> Option<ExternalArgLabel> {
-    match value.as_int() {
-        0 => Some(ExternalArgLabel::Label),
-        1 => Some(ExternalArgLabel::Empty),
-        2 => Some(ExternalArgLabel::Optional),
-        _ => None,
-    }
-}
-
-fn decode_cmj_external_arg_const(value: &OcamlValue) -> Option<ExternalArgConst> {
-    match value {
-        OcamlValue::Block(0, fields) if fields.len() == 1 => {
-            Some(ExternalArgConst::IntLit(fields[0].as_int()))
-        }
-        OcamlValue::Block(1, fields) if fields.len() == 2 => Some(ExternalArgConst::StringLit(
-            fields[0].as_string().to_string(),
-            decode_cmj_external_arg_delim(&fields[1])?,
-        )),
-        _ => None,
-    }
-}
-
-fn decode_cmj_external_arg_delim(value: &OcamlValue) -> Option<ExternalArgDelim> {
-    match value.as_int() {
-        0 => Some(ExternalArgDelim::None),
-        1 => Some(ExternalArgDelim::StarJ),
-        2 => Some(ExternalArgDelim::NoQuotes),
-        3 => Some(ExternalArgDelim::BackQuotes),
-        _ => None,
-    }
-}
-
 fn decode_cmj_external_delim_option(value: &OcamlValue) -> Option<Option<StringDelim>> {
     match value {
         OcamlValue::Int(0) => Some(None),
@@ -3417,56 +3354,6 @@ fn decode_cmj_external_delim_option(value: &OcamlValue) -> Option<Option<StringD
         })),
         _ => None,
     }
-}
-
-fn decode_cmj_external_ffi_spec(value: &OcamlValue) -> Option<ExternalFfiSpec> {
-    Some(ExternalFfiSpec {
-        kind: ExternalFfiKind::Default,
-        spec: Some(decode_cmj_external_spec(value)?),
-        obj_params: None,
-        return_wrapper: ExternalReturnWrapper::Identity,
-        inline_constant: None,
-    })
-}
-
-fn decode_cmj_external_spec(value: &OcamlValue) -> Option<ExternalSpec> {
-    // compiler/frontend/external_ffi_types.ml:45-75.
-    match value {
-        OcamlValue::Block(4, fields) if fields.len() >= 4 => Some(ExternalSpec::JsCall {
-            name: fields[0].as_string().to_string(),
-            external_module_name: decode_cmj_external_module_name_option(&fields[1])?,
-            splice: fields[2].as_bool(),
-            scopes: decode_cmj_string_list(&fields[3])?,
-        }),
-        OcamlValue::Block(6, fields) if fields.len() >= 4 => Some(ExternalSpec::JsNew {
-            name: fields[0].as_string().to_string(),
-            external_module_name: decode_cmj_external_module_name_option(&fields[1])?,
-            splice: fields[2].as_bool(),
-            scopes: decode_cmj_string_list(&fields[3])?,
-        }),
-        _ => None,
-    }
-}
-
-fn decode_cmj_external_module_name_option(
-    value: &OcamlValue,
-) -> Option<Option<ExternalModuleName>> {
-    match value {
-        OcamlValue::Int(0) => Some(None),
-        _ => Some(Some(decode_cmj_external_module_name(value.as_option()?)?)),
-    }
-}
-
-fn decode_cmj_external_module_name(value: &OcamlValue) -> Option<ExternalModuleName> {
-    let (_, fields) = value.as_block_opt()?;
-    if fields.len() < 2 {
-        return None;
-    }
-    Some(ExternalModuleName {
-        bundle: fields[0].as_string().to_string(),
-        module_bind_name: crate::lambda::lam_primitive::ExternalModuleBindName::Nothing,
-        import_attributes: None,
-    })
 }
 
 fn decode_cmj_string_list(value: &OcamlValue) -> Option<Vec<String>> {

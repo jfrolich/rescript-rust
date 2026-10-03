@@ -57,7 +57,7 @@ and prim_info = private {
 
 and t = private
   | Lvar of ident
-  | Lglobal_module of ident * bool
+  | Lglobal_module of ident
   | Lconst of Lam_constant.t
   | Lapply of apply
   | Lfunction of lfunction
@@ -85,23 +85,12 @@ and t = private
    we should use record for trivial debugger info
 *)
 
-val handle_bs_non_obj_ffi :
-  ?transformed_jsx:bool ->
-  External_arg_spec.params ->
-  External_ffi_types.return_wrapper ->
-  External_ffi_types.external_spec ->
-  t list ->
-  Location.t ->
-  string ->
-  dynamic_import:bool ->
-  t
-
 (**************************************************************)
 
 val var : ident -> t
 (** Smart constructors *)
 
-val global_module : ?dynamic_import:bool -> ident -> t
+val global_module : ident -> t
 
 val const : Lam_constant.t -> t
 

@@ -16,13 +16,13 @@ fn expression(owner: &mut IndexedJsConsumer<'_>, node: NodeId) -> Compiled {
             prelude: vec![],
             expr: Expression::var(id.clone()),
         },
-        NodeView::GlobalModule(id, dynamic_import) => Compiled {
+        NodeView::GlobalModule(id) => Compiled {
             prelude: vec![],
             expr: Expression::qualified(
                 ModuleId {
                     id: id.clone(),
                     kind: Kind::Ml,
-                    dynamic_import,
+                    dynamic_import: false,
                 },
                 None,
             ),
@@ -59,10 +59,7 @@ fn external_application(args: Vec<Lambda>, status: ApplyStatus, jsx: bool) -> La
     Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::prim(
             Primitive::Pfield(0, FieldDbgInfo::Module { name: "run".into() }),
-            vec![Lambda::global_module(
-                Ident::create_persistent("External"),
-                false,
-            )],
+            vec![Lambda::global_module(Ident::create_persistent("External"))],
             Location::none(),
         )),
         ap_args: args,

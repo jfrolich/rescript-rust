@@ -2133,7 +2133,7 @@ fn parse_int_literal(s: &str) -> Option<i64> {
 /// - remove `_` separators
 /// - remove leading zeros only when followed by decimal digits
 /// - preserve non-decimal heads like `00x1` (after `_` removal)
-fn parse_bigint_literal(s: &str) -> (bool, String) {
+pub(crate) fn parse_bigint_literal(s: &str) -> (bool, String) {
     fn remove_leading_sign(s: &str) -> (bool, &str) {
         if s.is_empty() {
             (false, s)
@@ -13939,6 +13939,7 @@ fn type_function_nary(
             unpacks.extend(param_unpacks);
             body_env = next_env;
         }
+        let mut opt_param = None;
         if let Some(default_binding) = default_binding {
             let let_env = body_env.clone_preserve_id();
             let let_check =
@@ -13957,9 +13958,38 @@ fn type_function_nary(
             )?;
             body_env = next_env;
             unpacks.extend(let_unpacks);
+            // typecore.ml:3731-3795: the pattern binds the option carrier
+            // under the unspellable `*opt_<label>*`; replace it with a fresh
+            // `<label>Opt` ident at its binder and at its single use, the
+            // scrutinee of the synthetic match.
+            let crate::parser::ast::ArgLabel::Optional(label) = param.p_lbl else {
+                unreachable!("defaults are only valid on optional parameters");
+            };
+            let param_id = ctx.create_ident(&format!("{}Opt", tctx.arena.get_string(label.txt)));
+            match &mut typed.pat_desc {
+                PatternDesc::Tpat_var(id, name) => {
+                    *id = param_id.clone();
+                    name.txt = param_id.name().to_string();
+                }
+                _ => unreachable!("an optional default's carrier is a variable pattern"),
+            }
+            let mut typed_bindings = typed_bindings;
+            match typed_bindings.as_mut_slice() {
+                [vb] => match &mut vb.vb_expr.exp_desc {
+                    ExpressionDesc::Texp_match(scrut, _, _, _) => match &mut scrut.exp_desc {
+                        ExpressionDesc::Texp_ident(path, _, _) => {
+                            *path = Path::Pident(param_id.clone());
+                        }
+                        _ => unreachable!("an optional default's scrutinee is its carrier"),
+                    },
+                    _ => unreachable!("an optional default binds a match"),
+                },
+                _ => unreachable!("an optional default is a single binding"),
+            }
             default_lets.push((typed_bindings, let_env));
+            opt_param = Some(param_id);
         }
-        typed_patterns.push(typed);
+        typed_patterns.push((typed, opt_param));
     }
 
     let typed_body = type_expect_with_module_unpacks(
@@ -13974,10 +14004,6 @@ fn type_function_nary(
         exp_type: crate::types::instance(ctx, result_type),
         ..typed_body
     };
-    let default_attr = (
-        Located::mknoloc(tctx.arena.default_attr_str()),
-        crate::parser::ast::Payload::PStr(Box::new(vec![])),
-    );
     for (typed_bindings, _let_env) in default_lets.into_iter().rev() {
         let body_type = typed_body.exp_type;
         typed_body = Expression::new(
@@ -13985,7 +14011,7 @@ fn type_function_nary(
             loc,
             body_type,
             EnvRef(0),
-            vec![default_attr.clone()].into(),
+            Attributes::new(),
         );
     }
 
@@ -14014,7 +14040,7 @@ fn type_function_nary(
         check_level = level;
     }
     let mut typed_params = Vec::with_capacity(params.len());
-    for (((source, typed), label), ty_arg_c) in params
+    for (((source, (typed, opt_param)), label), ty_arg_c) in params
         .iter()
         .zip(typed_patterns)
         .zip(labels.iter())
@@ -14054,11 +14080,17 @@ fn type_function_nary(
             );
             partial
         };
+        let fp_has_default = opt_param.is_some();
+        let fp_param = match opt_param {
+            Some(id) => id,
+            None => parameter_ident(ctx, &typed).unwrap_or_else(|| ctx.create_ident("param")),
+        };
         typed_params.push(FunctionParam {
             fp_lbl: label.clone(),
-            fp_param: parameter_ident(ctx, &typed).unwrap_or_else(|| ctx.create_ident("param")),
+            fp_param,
             fp_pat: typed,
             fp_partial: partial,
+            fp_has_default,
         });
     }
 
@@ -21459,21 +21491,15 @@ fn is_fake_optional_arg_let(
     arena: &ParseArena,
     bindings: &[crate::parser::ast::ValueBinding],
 ) -> bool {
+    // typecore.ml:4580-4589: the synthetic let-declaration introduced for an
+    // optional parameter's default carries `#optional_arg_default`.
     let [binding] = bindings else {
         return false;
     };
     let expr = arena.get_expr(binding.pvb_expr);
-    let crate::parser::ast::ExpressionDesc::Pexp_match(inner) = &*expr.pexp_desc else {
-        return false;
-    };
-    let scrutinee = arena.get_expr(inner.0);
-    let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &*scrutinee.pexp_desc else {
-        return false;
-    };
-    matches!(
-        arena.get_longident(lid.txt),
-        Longident::Lident(name) if arena.get_string(*name) == "*opt*"
-    )
+    expr.pexp_attributes
+        .iter()
+        .any(|(name, _)| arena.get_string(name.txt) == "#optional_arg_default")
 }
 
 fn report_let_partial_match_warnings<'a>(

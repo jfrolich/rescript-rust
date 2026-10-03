@@ -233,10 +233,16 @@ pub fn translate_primitive(
         crate::gentype::log_::item("Translate Primitive\n");
     }
 
-    let value_name = match value_description.val_prim.as_slice() {
-        [] => value_description.val_id.name().to_string(),
-        [first, ..] if first.is_empty() => value_description.val_id.name().to_string(),
-        [name_of_extern, ..] => name_of_extern.clone(),
+    // external foo : someType = "abc" -- the extern name is "abc"
+    let name_of_extern = match &value_description.val_prim {
+        Some(crate::parser::ast::PrimitiveRepr::PrimName(name)) => arena.get_string(*name),
+        Some(crate::parser::ast::PrimitiveRepr::PrimFfi { name, .. }) => name.as_str(),
+        _ => "",
+    };
+    let value_name = if name_of_extern.is_empty() {
+        value_description.val_id.name().to_string()
+    } else {
+        name_of_extern.to_string()
     };
 
     let type_expr_translation = crate::gentype::translate_core_type::translate_core_type(

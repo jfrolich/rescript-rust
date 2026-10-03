@@ -5280,7 +5280,7 @@ fn generate_sig_decls(
             let vd = ValueDescription {
                 pval_name: Located::new(name_idx, arena.none_loc()),
                 pval_type: arena.push_core_type(ty),
-                pval_prim: vec![],
+                pval_prim: None,
                 pval_attributes: Attributes::new(),
                 pval_loc: arena.dummy_loc(),
             };
@@ -5303,7 +5303,7 @@ fn generate_sig_decls(
         let vd = ValueDescription {
             pval_name: Located::new(name_idx, arena.none_loc()),
             pval_type: arena.push_core_type(ty),
-            pval_prim: vec![],
+            pval_prim: None,
             pval_attributes: Attributes::new(),
             pval_loc: arena.dummy_loc(),
         };

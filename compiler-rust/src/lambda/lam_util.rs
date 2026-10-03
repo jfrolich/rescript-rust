@@ -36,7 +36,7 @@ fn is_safe_to_alias(lam: &Lambda) -> bool {
             dbg_info,
             crate::lambda::lam_compat::FieldDbgInfo::Module { .. }
         ) && args.len() == 1
-            && matches!(args[0], Lambda::LglobalModule(_, _) | Lambda::Lvar(_))) =>
+            && matches!(args[0], Lambda::LglobalModule(_) | Lambda::Lvar(_))) =>
         {
             let PrimInfo {
                 primitive: Primitive::Pfield(_, dbg_info),
@@ -159,7 +159,7 @@ pub fn field_flatten_get(
         // `Lam.global_module g`.
         Some(IdKind::Module(g)) => Lambda::prim(
             Primitive::Pfield(i, info.clone()),
-            vec![Lambda::global_module(g.clone(), false)],
+            vec![Lambda::global_module(g.clone())],
             Location::none(),
         ),
         // lam_util.ml:208-213 — ImmutableBlock: lift element if `SimpleForm`,

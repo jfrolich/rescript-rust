@@ -292,12 +292,6 @@ let parse_external_attributes (no_arguments : bool) (prim_name_check : string)
                         Location.raise_errorf ~loc:exp.pexp_loc
                           "Only string values are allowed here.")
                 in
-                let import_attributes =
-                  Hashtbl.create (List.length import_attributes_from_record)
-                in
-                import_attributes_from_record
-                |> List.iter (fun (key, value) ->
-                       Hashtbl.replace import_attributes key value);
                 {
                   st with
                   external_module_name =
@@ -305,7 +299,7 @@ let parse_external_attributes (no_arguments : bool) (prim_name_check : string)
                       {
                         bundle = from_name;
                         module_bind_name = Phint_nothing;
-                        import_attributes = Some import_attributes;
+                        import_attributes = Some import_attributes_from_record;
                       };
                 })
             | _ -> (
@@ -394,19 +388,14 @@ let parse_external_attributes (no_arguments : bool) (prim_name_check : string)
 let check_return_wrapper loc (wrapper : External_ffi_types.return_wrapper)
     result_type =
   match wrapper with
-  | Return_identity -> wrapper
-  | Return_unset ->
-    if Ast_core_type.is_unit result_type then Return_replaced_with_unit
-    else wrapper
+  | Return_identity | Return_unset -> wrapper
   | Return_null_to_opt | Return_null_undefined_to_opt ->
     if Ast_core_type.is_user_option result_type then wrapper
     else Bs_syntaxerr.err loc Expect_opt_in_bs_return_to_opt
-  | Return_replaced_with_unit -> assert false
-(* Not going to happen from user input*)
 
 type response = {
   pval_type: Parsetree.core_type;
-  pval_prim: string list;
+  pval_prim: Parsetree.primitive_repr;
   pval_attributes: Parsetree.attributes;
   no_inline_cross_module: bool;
 }
@@ -599,10 +588,14 @@ let process_obj (loc : Location.t) (st : external_desc) (prim_name : string)
       External_ffi_types.ffi_obj_create arg_kinds )
   | _ -> Location.raise_errorf ~loc "Attribute found that conflicts with %@obj"
 
-let external_desc_of_non_obj (loc : Location.t) (st : external_desc)
+let external_decl_of_non_obj (loc : Location.t) (st : external_desc)
     (prim_name_or_pval_prim : bundle_source) (arg_type_specs_length : int)
-    arg_types_ty (arg_type_specs : External_arg_spec.params) :
-    External_ffi_types.external_spec =
+    (arg_type_specs : External_arg_spec.params) :
+    External_ffi_types.external_decl =
+  let mk ?module_ ?(scopes = []) ?(variadic = false) kind :
+      External_ffi_types.external_decl =
+    {kind; module_; scopes; variadic; effective_arity = arg_type_specs_length}
+  in
   match st with
   | {
    set_index = true;
@@ -620,8 +613,7 @@ let external_desc_of_non_obj (loc : Location.t) (st : external_desc)
    return_wrapper = _;
    mk_obj = _;
   } ->
-    if arg_type_specs_length = 3 then
-      Js_set_index {js_set_index_scopes = scopes}
+    if arg_type_specs_length = 3 then mk ~scopes Decl_set_index
     else
       Location.raise_errorf ~loc
         "Ill defined attribute %@set_index (arity of 3)"
@@ -644,8 +636,7 @@ let external_desc_of_non_obj (loc : Location.t) (st : external_desc)
    mk_obj = _;
    return_wrapper = _;
   } ->
-    if arg_type_specs_length = 2 then
-      Js_get_index {js_get_index_scopes = scopes}
+    if arg_type_specs_length = 2 then mk ~scopes Decl_get_index
     else
       Location.raise_errorf ~loc
         "Ill defined attribute %@get_index (arity expected 2 : while %d)"
@@ -654,7 +645,7 @@ let external_desc_of_non_obj (loc : Location.t) (st : external_desc)
     Bs_syntaxerr.err loc
       (Conflict_ffi_attribute "Attribute found that conflicts with @get_index")
   | {
-   module_as_val = Some external_module_name;
+   module_as_val = Some _;
    get_index = false;
    val_name;
    new_name;
@@ -670,15 +661,18 @@ let external_desc_of_non_obj (loc : Location.t) (st : external_desc)
    return_wrapper = _;
    mk_obj = _;
   } -> (
-    match (arg_types_ty, new_name, val_name) with
-    | [], None, _ -> Js_module_as_var external_module_name
-    | _, None, _ -> Js_module_as_fn {splice; external_module_name}
-    | _, Some _, Some _ ->
+    let module_ = External_ffi_types.Module_itself in
+    match (new_name, val_name) with
+    | None, _ ->
+      mk ~module_ ~variadic:splice
+        (Decl_val {name = prim_name_or_pval_prim.name})
+    | Some _, Some _ ->
       Bs_syntaxerr.err loc
         (Conflict_ffi_attribute "Attribute found that conflicts with @module.")
-    | _, Some {source = External; name = _}, None ->
-      Js_module_as_class external_module_name
-    | _, Some {source = Payload; name = _}, None ->
+    | Some {source = External; name = _}, None ->
+      mk ~module_ ~variadic:splice
+        (Decl_new {name = prim_name_or_pval_prim.name})
+    | Some {source = Payload; name = _}, None ->
       Location.raise_errorf ~loc
         "Incorrect FFI attribute found: (%@new should not carry a payload here)"
     )
@@ -711,16 +705,7 @@ let external_desc_of_non_obj (loc : Location.t) (st : external_desc)
    (* mk_obj is always false *)
    return_wrapper = _;
   } ->
-    let name = prim_name_or_pval_prim.name in
-    if arg_type_specs_length = 0 then
-      (*
-         {[
-           external ff : int -> int [@bs] = "" [@@module "xx"]
-         ]}
-         FIXME: splice is not supported here
-      *)
-      Js_var {name; external_module_name = None; scopes}
-    else Js_call {splice; name; external_module_name = None; scopes}
+    mk ~scopes ~variadic:splice (Decl_val {name = prim_name_or_pval_prim.name})
   | {
    call_name = Some {name; source = _};
    splice;
@@ -737,15 +722,13 @@ let external_desc_of_non_obj (loc : Location.t) (st : external_desc)
    mk_obj = _;
    return_wrapper = _;
   } ->
-    if arg_type_specs_length = 0 then
-      (*
-           {[
-             external ff : int -> int = "" [@@module "xx"]
-           ]}
-        *)
-      Js_var {name; external_module_name; scopes}
-      (*FIXME: splice is not supported here *)
-    else Js_call {splice; name; external_module_name; scopes}
+    mk
+      ?module_:
+        (Option.map
+           (fun m -> External_ffi_types.Module_named m)
+           external_module_name)
+      ~scopes ~variadic:splice
+      (Decl_val {name})
   | {call_name = Some _} ->
     Bs_syntaxerr.err loc
       (Conflict_ffi_attribute "Attribute found that conflicts with @val")
@@ -765,13 +748,13 @@ let external_desc_of_non_obj (loc : Location.t) (st : external_desc)
    splice = false;
    scopes;
   } ->
-    (*
-         if no_arguments -->
-               {[
-                 external ff : int = "" [@@val]
-               ]}
-      *)
-    Js_var {name; external_module_name; scopes}
+    mk
+      ?module_:
+        (Option.map
+           (fun m -> External_ffi_types.Module_named m)
+           external_module_name)
+      ~scopes
+      (Decl_val {name})
   | {val_name = Some _} ->
     Bs_syntaxerr.err loc
       (Conflict_ffi_attribute "Attribute found that conflicts with @val")
@@ -791,15 +774,13 @@ let external_desc_of_non_obj (loc : Location.t) (st : external_desc)
    mk_obj = _;
    return_wrapper = _;
   } ->
-    let name = prim_name_or_pval_prim.name in
-    if arg_type_specs_length = 0 then
-      (*
-         {[
-           external ff : int = "" [@@module "xx"]
-         ]}
-      *)
-      Js_var {name; external_module_name; scopes}
-    else Js_call {splice; name; external_module_name; scopes}
+    mk
+      ?module_:
+        (Option.map
+           (fun m -> External_ffi_types.Module_named m)
+           external_module_name)
+      ~scopes ~variadic:splice
+      (Decl_val {name = prim_name_or_pval_prim.name})
   | {
    val_send = Some {name; source = _};
    splice;
@@ -827,7 +808,7 @@ let external_desc_of_non_obj (loc : Location.t) (st : external_desc)
     | {arg_type = Arg_cst _; arg_label = _} :: _ ->
       Location.raise_errorf ~loc
         "Ill defined attribute %@send(first argument can't be const)"
-    | _ :: _ -> Js_send {splice; name; js_send_scopes = scopes})
+    | _ :: _ -> mk ~scopes ~variadic:splice (Decl_send {name}))
   | {val_send = Some _} ->
     Location.raise_errorf ~loc
       "You used a FFI attribute that can't be used with %@send"
@@ -847,7 +828,13 @@ let external_desc_of_non_obj (loc : Location.t) (st : external_desc)
    mk_obj = _;
    return_wrapper = _;
   } ->
-    Js_new {name; external_module_name; splice; scopes}
+    mk
+      ?module_:
+        (Option.map
+           (fun m -> External_ffi_types.Module_named m)
+           external_module_name)
+      ~scopes ~variadic:splice
+      (Decl_new {name})
   | {new_name = Some _} ->
     Bs_syntaxerr.err loc
       (Conflict_ffi_attribute "Attribute found that conflicts with @new")
@@ -867,8 +854,7 @@ let external_desc_of_non_obj (loc : Location.t) (st : external_desc)
    return_wrapper = _;
    scopes;
   } ->
-    if arg_type_specs_length = 2 then
-      Js_set {js_set_scopes = scopes; js_set_name = name}
+    if arg_type_specs_length = 2 then mk ~scopes (Decl_set {name})
     else
       Location.raise_errorf ~loc
         "Ill defined attribute %@set (two args required)"
@@ -896,7 +882,7 @@ let external_desc_of_non_obj (loc : Location.t) (st : external_desc)
       | [{arg_type = Extern_unit}] ->
         Location.raise_errorf ~loc
           "Ill defined attribute %@get (unit argument is not allowed)"
-      | _ -> Js_get {js_get_name = name; js_get_scopes = scopes}
+      | _ -> mk ~scopes (Decl_get {name})
     else
       Location.raise_errorf ~loc
         "Ill defined attribute %@get (only one argument)"
@@ -999,11 +985,11 @@ let handle_attributes (loc : Bs_loc.t) (type_annotation : Parsetree.core_type)
         )
       | _ -> (args, arg_type_specs)
     in
-    let ffi : External_ffi_types.external_spec =
-      external_desc_of_non_obj loc external_desc prim_name_with_source
-        arg_type_specs_length arg_types_ty arg_type_specs
+    let decl : External_ffi_types.external_decl =
+      external_decl_of_non_obj loc external_desc prim_name_with_source
+        arg_type_specs_length arg_type_specs
     in
-    let relative = External_ffi_types.check_ffi ~loc ffi in
+    let relative = External_ffi_types.check_decl ~loc decl ~prim_name in
     (* result type can not be labeled *)
     (* currently we don't process attributes of
        return type, in the future we may *)
@@ -1013,18 +999,18 @@ let handle_attributes (loc : Bs_loc.t) (type_annotation : Parsetree.core_type)
     ( (match args with
       | [] -> result_type
       | _ -> Ast_helper.Typ.arrow ~loc args result_type),
-      External_ffi_types.ffi_bs arg_type_specs return_wrapper ffi,
+      External_ffi_types.ffi_bs arg_type_specs return_wrapper decl,
       unused_attrs,
       relative )
 
-let encode_attributes_as_string (pval_loc : Location.t) (typ : Ast_core_type.t)
+let handle_attributes_as_prim (pval_loc : Location.t) (typ : Ast_core_type.t)
     (attrs : Ast_attributes.t) (prim_name : string) : response =
   let pval_type, ffi, pval_attributes, no_inline_cross_module =
     handle_attributes pval_loc typ attrs prim_name
   in
   {
     pval_type;
-    pval_prim = [prim_name; External_ffi_types.to_string ffi];
+    pval_prim = Prim_ffi {name = prim_name; spec = ffi};
     pval_attributes;
     no_inline_cross_module;
   }
@@ -1037,7 +1023,8 @@ let pval_prim_of_labels (labels : string Asttypes.loc list) =
         let obj_arg_label = External_arg_spec.obj_label p.txt in
         {obj_arg_type = Nothing; obj_arg_label} :: arg_kinds)
   in
-  External_ffi_types.ffi_obj_as_prims arg_kinds
+  Parsetree.Prim_ffi
+    {name = ""; spec = External_ffi_types.ffi_obj_create arg_kinds}
 
 let pval_prim_of_option_labels (labels : (bool * string Asttypes.loc) list)
     (ends_with_unit : bool) =
@@ -1052,4 +1039,5 @@ let pval_prim_of_option_labels (labels : (bool * string Asttypes.loc) list)
         in
         {obj_arg_type = Nothing; obj_arg_label} :: arg_kinds)
   in
-  External_ffi_types.ffi_obj_as_prims arg_kinds
+  Parsetree.Prim_ffi
+    {name = ""; spec = External_ffi_types.ffi_obj_create arg_kinds}

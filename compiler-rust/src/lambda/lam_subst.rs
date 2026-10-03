@@ -79,7 +79,7 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
             loc: prim_info.loc.clone(),
         })),
 
-        Lambda::LglobalModule(_, _) => lam.clone(),
+        Lambda::LglobalModule(_) => lam.clone(),
 
         Lambda::Lswitch(arg, switch) => Lambda::Lswitch(
             Box::new(subst_aux(s, arg)),

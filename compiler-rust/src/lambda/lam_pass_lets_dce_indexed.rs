@@ -84,7 +84,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
             let module_field = matches!(
                 store.view(value),
                 NodeView::Prim(Primitive::Pfield(_, _), [base], _)
-                    if matches!(store.view(*base), NodeView::GlobalModule(_, _))
+                    if matches!(store.view(*base), NodeView::GlobalModule(_))
             );
             let substitute = (info.times == 1 && !info.captured)
                 || (info.times == 1
@@ -195,7 +195,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
             }
         }
         NodeSnapshot::Const(_)
-        | NodeSnapshot::GlobalModule(_, _)
+        | NodeSnapshot::GlobalModule(_)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => node,
         NodeSnapshot::Function(arity, params, body, attr) => {
@@ -379,14 +379,7 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: "effect".into(),
                 arg_types: vec![],
-                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
-                    kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
-                    spec: None,
-                    obj_params: None,
-                    return_wrapper: crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
-                    inline_constant: None,
-                }),
-                dynamic_import: false,
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                 transformed_jsx: false,
             },
             vec![],
@@ -444,14 +437,7 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: "must_not_run".into(),
                 arg_types: vec![],
-                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
-                    kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
-                    spec: None,
-                    obj_params: None,
-                    return_wrapper: crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
-                    inline_constant: None,
-                }),
-                dynamic_import: false,
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                 transformed_jsx: false,
             },
             vec![],
@@ -578,15 +564,7 @@ mod tests {
                 Primitive::PjsCall {
                     prim_name: "unselected".into(),
                     arg_types: vec![],
-                    ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
-                        kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
-                        spec: None,
-                        obj_params: None,
-                        return_wrapper:
-                            crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
-                        inline_constant: None,
-                    }),
-                    dynamic_import: false,
+                    ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                     transformed_jsx: false,
                 },
                 vec![],
@@ -695,10 +673,10 @@ mod tests {
         context.collect_info();
         context.simplify_exits(&generator);
         context.collect_info();
-        let mut inline = |_: &Ident, _: bool, _: &str| None;
+        let mut inline = |_: &Ident, _: &str| None;
         context.simplify_alias(&generator, false, &mut inline);
         context.deep_flatten(&generator);
-        let mut arity = |_: &Ident, _: bool, _: &str| None;
+        let mut arity = |_: &Ident, _: &str| None;
         context.alpha_conversion_with_external_arity(&generator, &mut arity);
         context.simplify_lets();
 

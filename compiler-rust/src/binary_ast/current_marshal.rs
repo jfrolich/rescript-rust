@@ -14,7 +14,7 @@ use super::marshal::{EmptyPayloadShareKind, MarshalWriter, PrimListShareKind};
 use super::serialize::Marshal;
 use crate::parse_arena::{LocIdx, StrIdx};
 use crate::parser::ast::{
-    ArgLabel, Arity, Attribute, Attributes, Case, ClosedFlag, Constant, ConstructorArguments,
+    PrimitiveRepr, ArgLabel, Arity, Attribute, Attributes, Case, ClosedFlag, Constant, ConstructorArguments,
     ConstructorDeclaration, CoreType, CoreTypeDesc, DirectionFlag, Expression, ExpressionDesc,
     ExpressionRecordField, Extension, ExtensionConstructor, ExtensionConstructorKind, FunParam,
     IncludeDeclaration, IncludeDescription, LabelDeclaration, ModuleBinding, ModuleDeclaration,
@@ -167,10 +167,10 @@ fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     if arena.get_string(vd.pval_name.txt) != "unsafe_expr" {
         return false;
     }
-    if vd.pval_prim.len() != 1 {
+    let Some(PrimitiveRepr::PrimName(prim)) = &vd.pval_prim else {
         return false;
-    }
-    let prim = arena.get_string(vd.pval_prim[0]);
+    };
+    let prim = arena.get_string(*prim);
     if prim != "#raw_expr" && prim != "#raw_stmt" {
         return false;
     }
@@ -2047,7 +2047,7 @@ impl Marshal for ExtensionConstructorKind {
 impl Marshal for ValueDescription {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         let key = (self.pval_name.txt, self.pval_name.loc, self.pval_loc);
-        let shared_name_type = if self.pval_prim.is_empty() {
+        let shared_name_type = if self.pval_prim.is_none() {
             w.vd_name_type_table_get(&key).copied()
         } else {
             None
@@ -2071,60 +2071,64 @@ impl Marshal for ValueDescription {
             self.pval_type.marshal(w);
         }
 
-        if !self.pval_prim.is_empty() {
+        if self.pval_prim.is_some() {
             w.vd_name_type_table_insert(key, (name_obj_idx, type_obj_idx));
         }
 
-        // pval_prim contains raw binary data (FFI encoding blobs) that must be
-        // written as raw bytes, not Latin-1 converted. Use write_string directly.
-        marshal_prim_list(&self.pval_prim, w);
+        marshal_prim(&self.pval_prim, w);
         marshal_attributes(&self.pval_attributes, w, false, false, None);
         self.pval_loc.marshal(w);
     }
 }
 
-/// Write a list of pval_prim strings, converting from Latin-1 encoding back to raw bytes.
-/// FFI binary data is stored using Latin-1 encoding (each byte 0-255 becomes Unicode U+0000-U+00FF),
-/// so we need to convert back using chars().map(|c| c as u8) to get the original bytes.
-fn marshal_prim_list(prims: &[StrIdx], w: &mut MarshalWriter<'_>) {
-    if prims.is_empty() {
+/// Write `pval_prim : primitive_repr option`. The parser builds a fresh
+/// `Some (Prim_name s)`; the frontend's `Prim_name "#raw_expr"` /
+/// `Prim_name "#raw_stmt"` are static constants, so OCaml shares them.
+fn marshal_prim(prim: &Option<PrimitiveRepr>, w: &mut MarshalWriter<'_>) {
+    let Some(prim) = prim else {
         w.write_int(0);
+        return;
+    };
+    // `bsc -bs-ast` writes the AST after the builtin PPX digested externals
+    // (js_implementation.ml `after_parsing_impl`).
+    let prim = match prim {
+        PrimitiveRepr::PrimName(prim) => prim,
+        PrimitiveRepr::PrimFfi { name, spec } => {
+            w.write_block_header(0, 1);
+            w.write_block_header(1, 2);
+            w.write_str(name);
+            super::ffi_types::marshal_external_ffi(w, spec);
+            return;
+        }
+        PrimitiveRepr::PrimInlineConst(c) => {
+            w.write_block_header(0, 1);
+            w.write_block_header(2, 1);
+            super::ffi_types::marshal_inline_const(w, c);
+            return;
+        }
+    };
+    let prim = *prim;
+    w.write_block_header(0, 1);
+    if prim == w.get_arena().prim_raw_expr() {
+        w.write_prim_list_shared(PrimListShareKind::RawExpr, prim);
+        return;
+    }
+    if prim == w.get_arena().prim_raw_stmt() {
+        w.write_prim_list_shared(PrimListShareKind::RawStmt, prim);
+        return;
+    }
+    w.write_block_header(0, 1);
+    // OCaml keeps hyphenated JS prim names (e.g. "aria-details") fresh,
+    // while many other prim strings are physically shared.
+    let share_by_idx = {
+        let prim_str = w.get_arena().get_string(prim);
+        !prim_str.contains('-') && !matches!(prim_str, "open" | "type" | "begin" | "end" | "in" | "to")
+    };
+    if share_by_idx {
+        w.write_str_idx(prim);
     } else {
-        if prims.len() == 1 {
-            let prim = prims[0];
-            if prim == w.get_arena().prim_raw_expr() {
-                w.write_prim_list_shared(PrimListShareKind::RawExpr, prim);
-                return;
-            }
-            if prim == w.get_arena().prim_raw_stmt() {
-                w.write_prim_list_shared(PrimListShareKind::RawStmt, prim);
-                return;
-            }
-        }
-        for (i, prim) in prims.iter().enumerate() {
-            w.write_block_header(0, 2);
-            // OCaml keeps hyphenated JS prim names (e.g. "aria-details") fresh,
-            // while many other prim strings are physically shared.
-            let share_by_idx = {
-                let prim_str = w.get_arena().get_string(*prim);
-                !prim_str.contains('-')
-                    && !matches!(prim_str, "open" | "type" | "begin" | "end" | "in" | "to")
-            };
-            if share_by_idx {
-                w.write_str_idx(*prim);
-            } else {
-                let prim_bytes: Vec<u8> = w
-                    .get_arena()
-                    .get_string(*prim)
-                    .chars()
-                    .map(|c| c as u8)
-                    .collect();
-                w.write_string(&prim_bytes);
-            }
-            if i == prims.len() - 1 {
-                w.write_int(0);
-            }
-        }
+        let prim_bytes: Vec<u8> = w.get_arena().get_string(prim).chars().map(|c| c as u8).collect();
+        w.write_string(&prim_bytes);
     }
 }
 

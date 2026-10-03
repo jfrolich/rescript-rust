@@ -86,7 +86,7 @@ pub(crate) fn count_exits(store: &IndexedLambda, root: NodeId) -> ExitCounts {
                 }
             }
             NodeView::Var(_)
-            | NodeView::GlobalModule(_, _)
+            | NodeView::GlobalModule(_)
             | NodeView::Const(_)
             | NodeView::Break
             | NodeView::Continue => {}
@@ -164,7 +164,7 @@ pub(crate) fn count_exits(store: &IndexedLambda, root: NodeId) -> ExitCounts {
 pub(crate) fn no_bounded_variables(store: &IndexedLambda, node: NodeId) -> bool {
     match store.view(node) {
         NodeView::Var(_)
-        | NodeView::GlobalModule(_, _)
+        | NodeView::GlobalModule(_)
         | NodeView::Const(_)
         | NodeView::Break
         | NodeView::Continue => true,
@@ -290,7 +290,7 @@ fn simplify(
         }
         NodeSnapshot::Var(_)
         | NodeSnapshot::Const(_)
-        | NodeSnapshot::GlobalModule(_, _)
+        | NodeSnapshot::GlobalModule(_)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => node,
         snapshot => {
@@ -1027,7 +1027,7 @@ mod tests {
         let mut lambda = Lambda::LstaticCatch(
             Box::new(Lambda::LstaticRaise(20, vec![])),
             (20, vec![]),
-            Box::new(Lambda::LglobalModule(id("M", 0), false)),
+            Box::new(Lambda::LglobalModule(id("M", 0))),
         );
         lambda = Lambda::Lassign(x.clone(), Box::new(lambda));
         lambda = Lambda::Lfor_await_of(

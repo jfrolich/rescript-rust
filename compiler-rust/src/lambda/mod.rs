@@ -290,7 +290,7 @@ pub enum Lambda {
     Lvar(Ident),
 
     /// Global module reference (with dynamic import flag)
-    LglobalModule(Ident, bool),
+    LglobalModule(Ident),
 
     /// Constant value
     Lconst(Constant),
@@ -370,8 +370,8 @@ impl Lambda {
     }
 
     /// Create a global module reference
-    pub fn global_module(id: Ident, dynamic_import: bool) -> Self {
-        Lambda::LglobalModule(id, dynamic_import)
+    pub fn global_module(id: Ident) -> Self {
+        Lambda::LglobalModule(id)
     }
 
     /// Create a constant
@@ -1271,7 +1271,7 @@ fn fold_makeblock_module_alias(primitive: &Primitive, args: &[Lambda]) -> Option
         return None;
     }
     let source_ident = match &first_args[0] {
-        Lambda::LglobalModule(v, _) => v.clone(),
+        Lambda::LglobalModule(v) => v.clone(),
         Lambda::Lvar(v) => v.clone(),
         _ => return None,
     };
@@ -1299,7 +1299,7 @@ fn fold_makeblock_module_alias(primitive: &Primitive, args: &[Lambda]) -> Option
             return None;
         }
         let inner_same = match &inner_args[0] {
-            Lambda::LglobalModule(v, _) | Lambda::Lvar(v) => v.same(&source_ident),
+            Lambda::LglobalModule(v) | Lambda::Lvar(v) => v.same(&source_ident),
             _ => false,
         };
         if !inner_same {
@@ -1388,7 +1388,7 @@ fn complete_range(sw_consts: &[(SwitchKey, Lambda)], start: i32, finish: i32) ->
 
 fn lambda_eq_approx(lhs: &Lambda, rhs: &Lambda) -> bool {
     match (lhs, rhs) {
-        (Lambda::LglobalModule(i1, b1), Lambda::LglobalModule(i2, b2)) => i1.same(i2) && b1 == b2,
+        (Lambda::LglobalModule(i1), Lambda::LglobalModule(i2)) => i1.same(i2),
         (Lambda::Lvar(i1), Lambda::Lvar(i2)) => i1.same(i2),
         (Lambda::Lconst(c1), Lambda::Lconst(c2)) => c1.eq_approx(c2),
         (Lambda::Lapply(app1), Lambda::Lapply(app2)) => {

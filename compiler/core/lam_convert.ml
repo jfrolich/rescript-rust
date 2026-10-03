@@ -154,7 +154,6 @@ let lam_prim ~primitive:(p : Lambda.primitive) ~args loc : Lam.t =
   | Pidentity -> Ext_list.singleton_exn args
   | Pnull -> Lam.const Const_js_null
   | Pundefined -> Lam.const (Const_js_undefined {is_unit = false})
-  | Pccall _ -> assert false
   | Prevapply -> assert false
   | Pdirapply -> assert false
   | Ploc _ -> assert false (* already compiled away here*)
@@ -246,7 +245,6 @@ let lam_prim ~primitive:(p : Lambda.primitive) ~args loc : Lam.t =
   | Pstringmin -> prim ~primitive:Pstringmin ~args loc
   | Pstringmax -> prim ~primitive:Pstringmax ~args loc
   | Pstringadd -> prim ~primitive:Pstringadd ~args loc
-  | Pabsfloat -> assert false
   | Pstringrefs -> prim ~primitive:Pstringrefs ~args loc
   | Pisint -> prim ~primitive:Pisint ~args loc
   | Pisout -> (
@@ -297,7 +295,7 @@ let lam_prim ~primitive:(p : Lambda.primitive) ~args loc : Lam.t =
   | Pmakedict -> prim ~primitive:Pmakedict ~args loc
   | Pdict_has -> prim ~primitive:Pdict_has ~args loc
   | Pawait -> prim ~primitive:Pawait ~args loc
-  | Pimport -> prim ~primitive:Pimport ~args loc
+  | Pimport src -> prim ~primitive:(Pimport src) ~args loc
   | Pinit_mod -> (
     match args with
     | [_loc; Lconst (Const_block (_, [Const_block (_, [])]))] -> Lam.unit
@@ -312,47 +310,18 @@ let lam_prim ~primitive:(p : Lambda.primitive) ~args loc : Lam.t =
   | Phash_finalmix -> prim ~primitive:Phash_finalmix ~args loc
   | Pcurry_apply _ -> prim ~primitive:Pjs_apply ~args loc
   | Pis_poly_var_block -> prim ~primitive:Pis_poly_var_block ~args loc
-  | Pjs_raw_expr -> assert false
-  | Pjs_raw_stmt -> assert false
+  | Pjs_call {prim_name; arg_types; ffi; transformed_jsx} ->
+    prim
+      ~primitive:(Pjs_call {prim_name; arg_types; ffi; transformed_jsx})
+      ~args loc
+  | Pjs_object_create labels ->
+    prim ~primitive:(Pjs_object_create labels) ~args loc
+  | Praw_js_code info -> prim ~primitive:(Praw_js_code info) ~args loc
   | Pjs_fn_method -> prim ~primitive:Pjs_fn_method ~args loc
 
 (* Does not exist since we compile array in js backend unlike native backend *)
 
 let may_depend = Lam_module_ident.Hash_set.add
-
-let is_opt_param_name name =
-  (* [*opt*] historically; [*opt_<label>*] with the n-ary representation *)
-  String.length name >= 5
-  && String.sub name 0 4 = "*opt"
-  && String.get name (String.length name - 1) = '*'
-
-let rec rename_optional_parameters map params (body : Lambda.lambda) =
-  match body with
-  | Llet
-      ( k,
-        value_kind,
-        id,
-        Lifthenelse
-          ( Lprim (p, [Lvar ({name = opt_name} as opt)], p_loc),
-            Lprim (p1, [Lvar ({name = opt_name2} as opt2)], x_loc),
-            f ),
-        rest )
-    when is_opt_param_name opt_name
-         && is_opt_param_name opt_name2
-         && Ident.same opt opt2 && List.mem opt params ->
-    let map, rest = rename_optional_parameters map params rest in
-    let new_id = Ident.create (id.name ^ "Opt") in
-    ( Map_ident.add map opt new_id,
-      Lambda.Llet
-        ( k,
-          value_kind,
-          id,
-          Lifthenelse
-            ( Lprim (p, [Lvar new_id], p_loc),
-              Lprim (p1, [Lvar new_id], x_loc),
-              f ),
-          rest ) )
-  | _ -> (map, body)
 
 let convert (exports : Set_ident.t) (lam : Lambda.lambda) :
     Lam.t * Lam_module_ident.Hash_set.t =
@@ -360,28 +329,7 @@ let convert (exports : Set_ident.t) (lam : Lambda.lambda) :
   let exit_map = Hash_int.create 0 in
   let may_depends = Lam_module_ident.Hash_set.create 0 in
 
-  let rec convert_ccall (a_prim : Primitive.description)
-      (args : Lambda.lambda list) loc ~dynamic_import : Lam.t =
-    let prim_name = a_prim.prim_name in
-    match External_ffi_types.from_string a_prim.prim_native_name with
-    | Ffi_obj_create labels ->
-      let args = Ext_list.map args convert_aux in
-      prim ~primitive:(Pjs_object_create labels) ~args loc
-    | Ffi_bs (arg_types, result_type, ffi) ->
-      let arg_types =
-        match arg_types with
-        | Params ls -> ls
-        | Param_number i -> Ext_list.init i (fun _ -> External_arg_spec.dummy)
-      in
-      let args = Ext_list.map args convert_aux in
-      Lam.handle_bs_non_obj_ffi ~transformed_jsx:a_prim.transformed_jsx
-        arg_types result_type ffi args loc prim_name ~dynamic_import
-    | Ffi_inline_const i -> Lam.const i
-    | Ffi_normal ->
-      Location.raise_errorf ~loc
-        "@{<error>Error:@} internal error, using unrecognized primitive %s"
-        prim_name
-  and convert_aux ?(dynamic_import = false) (lam : Lambda.lambda) : Lam.t =
+  let rec convert_aux (lam : Lambda.lambda) : Lam.t =
     match lam with
     | Lvar x -> Lam.var (Hash_ident.find_default alias_tbl x x)
     | Lconst x -> Lam.const (Lam_constant_convert.convert_constant x)
@@ -415,34 +363,8 @@ let convert (exports : Set_ident.t) (lam : Lambda.lambda) :
         {ap_loc = loc; ap_inlined; ap_status = App_uncurry}
         ~ap_transformed_jsx
     | Lfunction {params; body; attr; loc} ->
-      let new_map, body =
-        rename_optional_parameters Map_ident.empty params body
-      in
-      if Map_ident.is_empty new_map then
-        Lam.function_ ~loc ~attr ~arity:(List.length params) ~params
-          ~body:(convert_aux body)
-      else
-        let params =
-          Ext_list.map params (fun x -> Map_ident.find_default new_map x x)
-        in
-        Lam.function_ ~loc ~attr ~arity:(List.length params) ~params
-          ~body:(convert_aux body)
-    | Llet (_, _, _, Lprim (Pgetglobal id, args, _), _body) when dynamic_import
-      ->
-      (*
-        Normally `await M` produces (global M!)
-        but when M contains an alias such as `module VS = VariantSpreads`,
-        it produces something like this:
-      
-        (let (let/1202 = (global M!))
-              (makeblock [x;M;y;X] (field:x/0 let/1202)
-                ...)
-
-        Here, we need to extract the original module id from the Llet.
-      *)
-      may_depend may_depends (Lam_module_ident.of_ml ~dynamic_import id);
-      assert (args = []);
-      Lam.global_module ~dynamic_import id
+      Lam.function_ ~loc ~attr ~arity:(List.length params) ~params
+        ~body:(convert_aux body)
     | Llet (kind, Pgenval, id, e, body) (*FIXME*) -> convert_let kind id e body
     | Lletrec (bindings, body) ->
       let bindings = Ext_list.map_snd bindings convert_aux in
@@ -455,35 +377,16 @@ let convert (exports : Set_ident.t) (lam : Lambda.lambda) :
       convert_pipe f x outer_loc
     | Lprim (Prevapply, _, _) -> assert false
     | Lprim (Pdirapply, _, _) -> assert false
-    | Lprim (Pccall a, args, loc) -> convert_ccall a args loc ~dynamic_import
-    | Lprim (Pjs_raw_expr, args, loc) -> (
-      match args with
-      | [Lconst (Const_base (Const_string (code, _)))] ->
-        (* js parsing here *)
-        let kind = Classify_function.classify code in
-        prim ~primitive:(Praw_js_code {code; code_info = Exp kind}) ~args:[] loc
-      | _ -> assert false)
-    | Lprim (Pjs_raw_stmt, args, loc) -> (
-      match args with
-      | [Lconst (Const_base (Const_string (code, _)))] ->
-        let kind = Classify_function.classify_stmt code in
-        prim
-          ~primitive:(Praw_js_code {code; code_info = Stmt kind})
-          ~args:[] loc
-      | _ -> assert false)
     | Lprim (Pgetglobal id, args, _) ->
       let args = Ext_list.map args convert_aux in
       if Ident.is_predef_exn id then
         Lam.const (Const_string {s = id.name; delim = None})
       else (
-        may_depend may_depends (Lam_module_ident.of_ml ~dynamic_import id);
+        may_depend may_depends (Lam_module_ident.of_ml id);
         assert (args = []);
-        Lam.global_module ~dynamic_import id)
-    | Lprim (Pimport, args, loc) ->
-      let args = Ext_list.map args (convert_aux ~dynamic_import:true) in
-      lam_prim ~primitive:Pimport ~args loc
+        Lam.global_module id)
     | Lprim (primitive, args, loc) ->
-      let args = Ext_list.map args (convert_aux ~dynamic_import) in
+      let args = Ext_list.map args convert_aux in
       lam_prim ~primitive ~args loc
     | Lswitch (e, s, _loc) -> convert_switch e s
     | Lstringswitch (e, cases, default, _) ->

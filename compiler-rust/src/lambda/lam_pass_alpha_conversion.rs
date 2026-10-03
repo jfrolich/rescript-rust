@@ -223,7 +223,7 @@ impl<'a, 'r> Alpha<'a, 'r> {
             }
 
             // lam_pass_alpha_conversion.ml:66
-            Lambda::LglobalModule(_, _) => lam.clone(),
+            Lambda::LglobalModule(_) => lam.clone(),
 
             // lam_pass_alpha_conversion.ml:67-68 — recurse through primitives.
             Lambda::Lprim(__prim2) => {
@@ -332,7 +332,7 @@ impl<'a, 'r> Alpha<'a, 'r> {
     /// Owned form of `simpl` (`compiler/core/lam_pass_alpha_conversion.ml:50-126`).
     fn simpl_owned(&mut self, lam: Lambda) -> Lambda {
         match lam {
-            Lambda::Lconst(_) | Lambda::Lvar(_) | Lambda::LglobalModule(_, _) => lam,
+            Lambda::Lconst(_) | Lambda::Lvar(_) | Lambda::LglobalModule(_) => lam,
             Lambda::Lapply(__apply1) => {
                 let Apply {
                     ap_func,

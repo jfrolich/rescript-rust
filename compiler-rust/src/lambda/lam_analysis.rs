@@ -41,7 +41,7 @@ pub fn no_side_effects(lam: &Lambda) -> bool {
         Lambda::Lvar(_) | Lambda::Lconst(_) | Lambda::Lfunction(_) => true,
 
         // Global module references are pure (side effects tracked at module level)
-        Lambda::LglobalModule(_, _) => true,
+        Lambda::LglobalModule(_) => true,
 
         // Primitive operations - check if the primitive is pure
         Lambda::Lprim(prim_info) => {
@@ -145,7 +145,7 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         | Primitive::PnullToOpt
         | Primitive::PnullUndefinedToOpt
         | Primitive::PjsObjectCreate(_)
-        | Primitive::Pimport
+        | Primitive::Pimport(_)
         | Primitive::Pnull
         | Primitive::Pundefined => true,
 
@@ -331,7 +331,7 @@ fn size_inner(lam: &Lambda) -> Option<i32> {
                 Primitive::Pfield(_, FieldDbgInfo::Module { .. }) => {
                     if prim_info.args.len() == 1 {
                         match &prim_info.args[0] {
-                            Lambda::LglobalModule(_, _) | Lambda::Lvar(_) => return Some(1),
+                            Lambda::LglobalModule(_) | Lambda::Lvar(_) => return Some(1),
                             _ => {}
                         }
                     }
@@ -356,7 +356,7 @@ fn size_inner(lam: &Lambda) -> Option<i32> {
                         .filter(|param| {
                             !matches!(
                                 param.obj_arg_type,
-                                crate::lambda::lam_primitive::ExternalArgAttr::ArgCst(_)
+                                crate::types::external_ffi_types::Attr::ArgCst(_)
                             )
                         })
                         .count();
@@ -369,7 +369,7 @@ fn size_inner(lam: &Lambda) -> Option<i32> {
             size_lams(1, &prim_info.args)
         }
 
-        Lambda::LglobalModule(_, _) => Some(1),
+        Lambda::LglobalModule(_) => Some(1),
 
         Lambda::Lapply(apply) => {
             let func_size = size_inner(&apply.ap_func)?;

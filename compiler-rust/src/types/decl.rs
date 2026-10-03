@@ -39,6 +39,14 @@ pub enum ValueKind {
     ValPrim(PrimitiveDescription),
 }
 
+/// `Primitive.prim_kind`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PrimKind {
+    KindIntrinsic,
+    KindExternal(Box<crate::types::external_ffi_types::ExternalFfi>),
+    KindInlineConst(Box<crate::types::external_ffi_types::InlineConst>),
+}
+
 /// Description of a primitive operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrimitiveDescription {
@@ -46,8 +54,9 @@ pub struct PrimitiveDescription {
     pub prim_name: String,
     /// Arity
     pub prim_arity: i32,
-    /// Native name (if different)
-    pub prim_native_name: String,
+    /// What the primitive is: an intrinsic, a digested external or an inline
+    /// constant (`Primitive.prim_kind`).
+    pub prim_kind: PrimKind,
     /// Native float flag
     pub prim_native_float: bool,
     /// Is it from a type constructor instead of a concrete function type?

@@ -2721,7 +2721,14 @@ fn sexp_value_description(
     items.push(sexp_core_type(arena, ctx, with_locs, dedup, &vd.val_desc));
     items.push(Sexp::list(
         std::iter::once(Sexp::atom("prim"))
-            .chain(vd.val_prim.iter().map(|s| string(s)))
+            .chain(
+                vd.val_prim
+                    .as_ref()
+                    .map(|prim| prim.debug_strings(arena))
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|s| string(s)),
+            )
             .collect(),
     ));
     items.push(sexp_attributes(arena, with_locs, &vd.val_attributes));

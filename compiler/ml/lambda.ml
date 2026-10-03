@@ -157,6 +157,21 @@ let fld_record_extension_set (lbl : label) =
 
 type immediate_or_pointer = Immediate | Pointer
 
+(* The target of a dynamic [import], resolved at translation: the argument
+   of the import primitive is a module reference, never an expression. *)
+type import_source =
+  | Import_module of {module_: Ident.t; path: string list}
+    (* a ReScript module, or a value/submodule reached from one
+         ([path = []]: the module itself). The module is resolved here, at
+         translation; the JS export name for a nested [path] is resolved
+         where the cmj tables live, at emission. *)
+  | Import_external of {
+      module_: External_ffi_types.external_module_name;
+      path: string list;
+          (* access path inside the module: @scope segments then the
+             name; [] means the external is the module itself *)
+    }
+
 type primitive =
   | Pidentity
   | Pignore
@@ -175,8 +190,14 @@ type primitive =
   | Psetfield of int * set_field_dbg_info
   | Pduprecord
   | Precord_rest of string list (* excluded runtime field names *)
-  (* External call *)
-  | Pccall of Primitive.description
+  (* JS FFI calls, expanded from the external's spec at translation *)
+  | Pjs_call of {
+      prim_name: string;
+      arg_types: External_arg_spec.params;
+      ffi: External_ffi_types.external_decl;
+      transformed_jsx: bool;
+    }
+  | Pjs_object_create of External_arg_spec.obj_params
   (* Exceptions *)
   | Praise of raise_kind
   (* object operations *)
@@ -219,7 +240,6 @@ type primitive =
   | Pintoffloat
   | Pfloatofint
   | Pnegfloat
-  | Pabsfloat
   | Pmodfloat
   | Paddfloat
   | Psubfloat
@@ -272,7 +292,7 @@ type primitive =
   (* promise *)
   | Pawait
   (* module *)
-  | Pimport
+  | Pimport of import_source
   | Pinit_mod
   | Pupdate_mod
   (* hash *)
@@ -299,8 +319,7 @@ type primitive =
   | Pval_from_option
   | Pval_from_option_not_nest
   | Pis_poly_var_block
-  | Pjs_raw_expr
-  | Pjs_raw_stmt
+  | Praw_js_code of Js_raw_info.t
   | Pjs_fn_method
   (* Tagged template literal: [tag; strings_array; values_array] *)
   | Ptagged_template

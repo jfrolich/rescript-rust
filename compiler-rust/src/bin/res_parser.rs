@@ -207,7 +207,10 @@ fn run() {
             // JSX transform.
             let signature = if args.test_ast_conversion {
                 let tree0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
-                mapper_from0::map_signature(parser.arena_mut(), &tree0)
+                mapper_from0::map_signature(parser.arena_mut(), &tree0).unwrap_or_else(|error| {
+                    eprintln!("{error}");
+                    std::process::exit(2)
+                })
             } else {
                 signature
             };
@@ -275,7 +278,7 @@ fn run() {
                 // 3. Marshaled signature (using output_value)
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResIntf01300");
+                let _ = io::stdout().write_all(b"ResIntf01301");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -296,7 +299,7 @@ fn run() {
                 let sig0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResIntf01300");
+                let _ = io::stdout().write_all(b"ResIntf01301");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -340,7 +343,10 @@ fn run() {
             // JSX transform.
             let structure = if args.test_ast_conversion {
                 let tree0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
-                mapper_from0::map_structure(parser.arena_mut(), &tree0)
+                mapper_from0::map_structure(parser.arena_mut(), &tree0).unwrap_or_else(|error| {
+                    eprintln!("{error}");
+                    std::process::exit(2)
+                })
             } else {
                 structure
             };
@@ -417,7 +423,7 @@ fn run() {
                 // 3. Marshaled structure (using output_value)
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResImpl01300");
+                let _ = io::stdout().write_all(b"ResImpl01301");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -438,7 +444,7 @@ fn run() {
                 let str0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResImpl01300");
+                let _ = io::stdout().write_all(b"ResImpl01301");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();

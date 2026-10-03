@@ -115,7 +115,21 @@ pub(crate) struct OutExtensionConstructor {
 pub(crate) struct OutValDecl {
     pub name: String,
     pub typ: OutType,
-    pub prims: Vec<String>,
+    /// `oval_prim`: the primitive, rebuilt from the primitive description by
+    /// `Primitive.print`.
+    pub prim: Option<OutPrim>,
+}
+
+/// `Parsetree.primitive_repr` as `Primitive.print` rebuilds it for the
+/// outcome tree.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum OutPrim {
+    Name(String),
+    Ffi {
+        name: String,
+        spec: crate::types::external_ffi_types::ExternalFfi,
+    },
+    InlineConst(crate::types::external_ffi_types::InlineConst),
 }
 
 /// `Outcometree.out_module_type`.
@@ -1256,20 +1270,22 @@ impl<'a> Printtyp<'a> {
     ) -> OutSigItem {
         self.reset_and_mark_loops(decl.val_type);
         let typ = self.tree_of_typexp(true, decl.val_type);
-        let prims = match &decl.val_kind {
-            crate::types::decl::ValueKind::ValPrim(p) => {
-                if p.prim_native_name.is_empty() {
-                    vec![p.prim_name.clone()]
-                } else {
-                    vec![p.prim_name.clone(), p.prim_native_name.clone()]
-                }
-            }
-            crate::types::decl::ValueKind::ValReg => Vec::new(),
+        // primitive.ml `print`.
+        let prim = match &decl.val_kind {
+            crate::types::decl::ValueKind::ValPrim(p) => Some(match &p.prim_kind {
+                crate::types::decl::PrimKind::KindIntrinsic => OutPrim::Name(p.prim_name.clone()),
+                crate::types::decl::PrimKind::KindExternal(spec) => OutPrim::Ffi {
+                    name: p.prim_name.clone(),
+                    spec: (**spec).clone(),
+                },
+                crate::types::decl::PrimKind::KindInlineConst(c) => OutPrim::InlineConst((**c).clone()),
+            }),
+            crate::types::decl::ValueKind::ValReg => None,
         };
         OutSigItem::Osig_value(OutValDecl {
             name: id.name().to_string(),
             typ,
-            prims,
+            prim,
         })
     }
 
@@ -1905,6 +1921,163 @@ fn print_type_params_doc(params: Vec<Doc>, trailing_comma: bool) -> Doc {
     ]))
 }
 
+// Print a digested FFI declaration as the surface attributes the user wrote;
+// the stored form is the declaration itself (res_outcome_printer.ml:481-613).
+
+fn print_string_literal_doc(s: &str) -> Doc {
+    // `"\"" ^ String.escaped s ^ "\""`
+    Doc::text(crate::types::external_ffi_types::debug::quote(s))
+}
+
+fn print_inline_const_doc(c: &crate::types::external_ffi_types::InlineConst) -> Doc {
+    use crate::types::external_ffi_types::{Delim, InlineConst};
+    match c {
+        // DStarJ is the processed form of an ordinary double-quoted string
+        InlineConst::ConstStr {
+            s,
+            delim: None | Some(Delim::DNone) | Some(Delim::DStarJ),
+        } => print_string_literal_doc(s),
+        InlineConst::ConstStr {
+            s,
+            delim: Some(Delim::DBackQuotes),
+        } => Doc::text(format!("`{s}`")),
+        InlineConst::ConstStr {
+            s,
+            delim: Some(Delim::DNoQuotes),
+        } => Doc::text(format!("json`{s}`")),
+        InlineConst::ConstBool(b) => Doc::text(if *b { "true" } else { "false" }),
+        InlineConst::ConstInt(i) => Doc::text(i.to_string()),
+        InlineConst::ConstBigint { negative, digits } => {
+            Doc::text(format!("{}{}n", if *negative { "-" } else { "" }, digits))
+        }
+        InlineConst::ConstFloat(f) => Doc::text(f.clone()),
+    }
+}
+
+fn print_external_module_doc(emn: &crate::types::external_ffi_types::ExternalModuleName) -> Doc {
+    use crate::types::external_ffi_types::ModuleBindName;
+    let payload = match (&emn.module_bind_name, &emn.import_attributes) {
+        (ModuleBindName::PhintNothing, None) => print_string_literal_doc(&emn.bundle),
+        (ModuleBindName::PhintName(hint), None) => Doc::concat(vec![
+            Doc::text("("),
+            print_string_literal_doc(&emn.bundle),
+            Doc::text(", "),
+            print_string_literal_doc(hint),
+            Doc::text(")"),
+        ]),
+        (bind_name, Some(import_attributes)) => {
+            // `@module({from: "x", with: {k: "v"}})` record payload
+            let with_fields = import_attributes
+                .iter()
+                .map(|(k, v)| {
+                    // digestion stores the source key `type_` as `type`; other
+                    // keys print escaped again to be writable source
+                    let key = if k == "type" {
+                        Doc::text("type_")
+                    } else {
+                        crate::parser::printer::print_ident_like(k, false, false)
+                    };
+                    Doc::concat(vec![key, Doc::text(": "), print_string_literal_doc(v)])
+                })
+                .collect();
+            Doc::concat(vec![
+                Doc::text("{from: "),
+                print_string_literal_doc(&emn.bundle),
+                match bind_name {
+                    ModuleBindName::PhintNothing => Doc::nil(),
+                    ModuleBindName::PhintName(hint) => {
+                        Doc::concat(vec![Doc::text(", as: "), print_string_literal_doc(hint)])
+                    }
+                },
+                Doc::text(", with: {"),
+                Doc::join(Doc::text(", "), with_fields),
+                Doc::text("}}"),
+            ])
+        }
+    };
+    Doc::concat(vec![Doc::text("@module("), payload, Doc::text(") ")])
+}
+
+fn print_scopes_doc(scopes: &[String]) -> Doc {
+    match scopes {
+        [] => Doc::nil(),
+        [s] => Doc::concat(vec![Doc::text("@scope("), print_string_literal_doc(s), Doc::text(") ")]),
+        _ => Doc::concat(vec![
+            Doc::text("@scope(("),
+            Doc::join(Doc::text(", "), scopes.iter().map(|s| print_string_literal_doc(s)).collect()),
+            Doc::text(")) "),
+        ]),
+    }
+}
+
+fn print_return_wrapper_doc(w: crate::types::external_ffi_types::ReturnWrapper) -> Doc {
+    use crate::types::external_ffi_types::ReturnWrapper;
+    match w {
+        ReturnWrapper::ReturnUnset => Doc::nil(),
+        ReturnWrapper::ReturnIdentity => Doc::text("@return(identity) "),
+        ReturnWrapper::ReturnNullToOpt => Doc::text("@return(null_to_opt) "),
+        ReturnWrapper::ReturnNullUndefinedToOpt => Doc::text("@return(nullable) "),
+    }
+}
+
+fn print_decl_kind_doc(
+    kind: &crate::types::external_ffi_types::DeclKind,
+    module_: &Option<crate::types::external_ffi_types::ModuleSource>,
+    prim_name: &str,
+) -> Doc {
+    use crate::types::external_ffi_types::{DeclKind, ModuleSource};
+    // the attribute payload names the JS entity when it differs from the
+    // external's primitive string; print it back
+    let with_payload = |attr: &str, name: &str| {
+        if name == prim_name {
+            Doc::text(format!("@{attr} "))
+        } else {
+            Doc::concat(vec![
+                Doc::text(format!("@{attr}(")),
+                print_string_literal_doc(name),
+                Doc::text(") "),
+            ])
+        }
+    };
+    match kind {
+        // `@val` conflicts with bare `@module`; elsewhere it is the default
+        // and always legal to write
+        DeclKind::DeclVal { name } => match module_ {
+            Some(ModuleSource::ModuleItself) => Doc::nil(),
+            _ => with_payload("val", name),
+        },
+        DeclKind::DeclSend { name } => with_payload("send", name),
+        DeclKind::DeclNew { name } => with_payload("new", name),
+        DeclKind::DeclGet { name } => with_payload("get", name),
+        DeclKind::DeclSet { name } => with_payload("set", name),
+        DeclKind::DeclGetIndex => Doc::text("@get_index "),
+        DeclKind::DeclSetIndex => Doc::text("@set_index "),
+    }
+}
+
+fn print_module_source_doc(module_: &Option<crate::types::external_ffi_types::ModuleSource>) -> Doc {
+    use crate::types::external_ffi_types::ModuleSource;
+    match module_ {
+        None => Doc::nil(),
+        Some(ModuleSource::ModuleItself) => Doc::text("@module "),
+        Some(ModuleSource::ModuleNamed(emn)) => print_external_module_doc(emn),
+    }
+}
+
+fn print_external_decl_attrs_doc(
+    decl: &crate::types::external_ffi_types::ExternalDecl,
+    return_wrapper: crate::types::external_ffi_types::ReturnWrapper,
+    prim_name: &str,
+) -> Doc {
+    Doc::concat(vec![
+        print_decl_kind_doc(&decl.kind, &decl.module_, prim_name),
+        print_module_source_doc(&decl.module_),
+        print_scopes_doc(&decl.scopes),
+        if decl.variadic { Doc::text("@variadic ") } else { Doc::nil() },
+        print_return_wrapper_doc(return_wrapper),
+    ])
+}
+
 /// `print_out_sig_item_doc ~print_name_as_is:false` (res_outcome_printer.ml:481-655).
 pub(crate) fn print_out_sig_item_doc(item: &OutSigItem) -> Doc {
     print_out_sig_item_doc_with(item, false)
@@ -1916,43 +2089,46 @@ pub(crate) fn print_out_sig_item_doc_with(item: &OutSigItem, print_name_as_is: b
         OutSigItem::Osig_class => Doc::nil(),
         OutSigItem::Osig_ellipsis => Doc::dotdotdot(),
         OutSigItem::Osig_value(value_decl) => {
-            let prims_doc = if value_decl.prims.is_empty() {
-                Doc::nil()
-            } else {
-                Doc::indent(Doc::concat(vec![
+            let (ffi_attrs, keyword, prim_name) = match &value_decl.prim {
+                None => (Doc::nil(), "let ", None),
+                Some(OutPrim::Name(s)) => (Doc::nil(), "external ", Some(s.as_str())),
+                // surface syntax: `@inline("hello") let f: string`
+                Some(OutPrim::InlineConst(c)) => (
+                    Doc::concat(vec![
+                        Doc::text("@inline("),
+                        print_inline_const_doc(c),
+                        Doc::text(") "),
+                    ]),
+                    "let ",
+                    None,
+                ),
+                Some(OutPrim::Ffi { name, spec }) => match spec {
+                    crate::types::external_ffi_types::ExternalFfi::FfiObjCreate(_) => {
+                        (Doc::text("@obj "), "external ", Some(name.as_str()))
+                    }
+                    crate::types::external_ffi_types::ExternalFfi::FfiBs(_, return_wrapper, decl) => (
+                        print_external_decl_attrs_doc(decl, *return_wrapper, name),
+                        "external ",
+                        Some(name.as_str()),
+                    ),
+                },
+            };
+            let prim_doc = match prim_name {
+                None => Doc::nil(),
+                Some(prim) => Doc::indent(Doc::concat(vec![
                     Doc::text(" ="),
                     Doc::line(),
-                    Doc::group(Doc::join(
-                        Doc::line(),
-                        value_decl
-                            .prims
-                            .iter()
-                            .map(|prim| {
-                                // '\132' is the marshalled FFI payload marker.
-                                let prim = if prim.as_bytes().first() == Some(&132)
-                                    || prim.chars().next().map(|c| c as u32) == Some(132)
-                                {
-                                    "#rescript-external"
-                                } else {
-                                    prim.as_str()
-                                };
-                                Doc::text(format!("\"{prim}\""))
-                            })
-                            .collect(),
-                    )),
-                ]))
+                    Doc::group(Doc::text(format!("\"{prim}\""))),
+                ])),
             };
             Doc::group(Doc::concat(vec![
-                Doc::text(if value_decl.prims.is_empty() {
-                    "let "
-                } else {
-                    "external "
-                }),
+                ffi_attrs,
+                Doc::text(keyword),
                 Doc::text(value_decl.name.clone()),
                 Doc::text(":"),
                 Doc::space(),
                 print_out_type_doc(&value_decl.typ),
-                prims_doc,
+                prim_doc,
             ]))
         }
         OutSigItem::Osig_typext(ext, _) => print_out_extension_constructor_doc(ext),

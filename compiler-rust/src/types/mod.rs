@@ -39,6 +39,7 @@ pub mod context;
 pub mod ctype;
 pub mod decl;
 pub mod env;
+pub mod external_ffi_types;
 pub(crate) mod env_lazy;
 pub mod includemod;
 pub(crate) mod parmatch;

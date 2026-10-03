@@ -139,7 +139,7 @@ pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> O
                         unreachable!()
                     };
 
-                    matches!(args.as_slice(), [Lambda::LglobalModule(_, _)])
+                    matches!(args.as_slice(), [Lambda::LglobalModule(_)])
                 }
                 _ => false,
             };
@@ -357,7 +357,7 @@ pub fn propagate_beta_reduce_with_map_and_meta_and_id_gen(
                 substitution.insert(param.clone(), arg.clone());
             }
             // Global modules need to be bound (for proper module loading)
-            Lambda::LglobalModule(_, _) => {
+            Lambda::LglobalModule(_) => {
                 let new_param = param.rename(id_gen);
                 rest_bindings.push((new_param.clone(), arg.clone()));
                 substitution.insert(param.clone(), Lambda::var(new_param));
@@ -549,7 +549,7 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
                 .collect(),
             loc: prim_info.loc.clone(),
         })),
-        Lambda::LglobalModule(_, _) => lam.clone(),
+        Lambda::LglobalModule(_) => lam.clone(),
         Lambda::Lswitch(arg, switch) => Lambda::switch(
             rewrite_bounded_vars(substitution, arg, id_gen),
             crate::lambda::LambdaSwitch {
@@ -674,7 +674,7 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
 
 pub(crate) fn max_ident_stamp_in_lambda(lam: &Lambda) -> i32 {
     match lam {
-        Lambda::Lvar(id) | Lambda::LglobalModule(id, _) => id.stamp(),
+        Lambda::Lvar(id) | Lambda::LglobalModule(id) => id.stamp(),
         Lambda::Lconst(_) => 0,
         Lambda::Lapply(apply) => apply.ap_args.iter().fold(
             max_ident_stamp_in_lambda(&apply.ap_func),
@@ -886,15 +886,7 @@ mod tests {
                 Primitive::PjsCall {
                     prim_name: name.to_string(),
                     arg_types: vec![],
-                    ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
-                        kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
-                        spec: None,
-                        obj_params: None,
-                        return_wrapper:
-                            crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
-                        inline_constant: None,
-                    }),
-                    dynamic_import: false,
+                    ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                     transformed_jsx: false,
                 },
                 vec![],
@@ -991,15 +983,7 @@ mod tests {
                 Primitive::PjsCall {
                     prim_name: "exec".to_string(),
                     arg_types: vec![],
-                    ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
-                        kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
-                        spec: None,
-                        obj_params: None,
-                        return_wrapper:
-                            crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
-                        inline_constant: None,
-                    }),
-                    dynamic_import: false,
+                    ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                     transformed_jsx: false,
                 },
                 vec![Lambda::const_(Constant::string("subject"))],

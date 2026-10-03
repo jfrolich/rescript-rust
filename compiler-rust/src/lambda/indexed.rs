@@ -81,7 +81,7 @@ pub(crate) enum IndexedNode {
 }
 
 #[derive(Clone)]
-struct GlobalPayload(Ident, bool);
+struct GlobalPayload(Ident);
 #[derive(Clone)]
 struct ApplyPayload(NodeId, ItemRange, ApInfo, bool);
 #[derive(Clone)]
@@ -125,7 +125,7 @@ struct AssignPayload(Ident, NodeId);
 /// producer; traversals must not infer order from node allocation.
 pub(crate) enum NodeView<'a> {
     Var(&'a Ident),
-    GlobalModule(&'a Ident, bool),
+    GlobalModule(&'a Ident),
     Const(&'a Constant),
     Apply(NodeId, &'a [NodeId], &'a ApInfo, bool),
     Function(i32, &'a [Ident], NodeId, &'a FunctionAttribute),
@@ -161,7 +161,7 @@ pub(crate) enum NodeView<'a> {
 #[derive(Clone)]
 pub(crate) enum NodeSnapshot {
     Var(Ident),
-    GlobalModule(Ident, bool),
+    GlobalModule(Ident),
     Const(Constant),
     Apply(NodeId, Vec<NodeId>, ApInfo, bool),
     Function(i32, Vec<Ident>, NodeId, FunctionAttribute),
@@ -284,7 +284,7 @@ impl IndexedLambda {
             IndexedNode::Var(i) => NodeView::Var(&self.idents[i as usize]),
             IndexedNode::GlobalModule(i) => {
                 let p = &self.globals[i as usize];
-                NodeView::GlobalModule(&p.0, p.1)
+                NodeView::GlobalModule(&p.0)
             }
             IndexedNode::Const(i) => NodeView::Const(&self.constants[i as usize]),
             IndexedNode::Apply(i) => {
@@ -375,7 +375,7 @@ impl IndexedLambda {
     pub(crate) fn materialize_node(&self, id: NodeId) -> Lambda {
         match self.view(id) {
             NodeView::Var(id) => Lambda::Lvar(id.clone()),
-            NodeView::GlobalModule(id, dynamic) => Lambda::LglobalModule(id.clone(), dynamic),
+            NodeView::GlobalModule(id) => Lambda::LglobalModule(id.clone()),
             NodeView::Const(c) => Lambda::Lconst(c.clone()),
             NodeView::Apply(func, args, info, jsx) => Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(self.materialize_node(func)),
@@ -497,7 +497,7 @@ impl IndexedLambda {
     pub(crate) fn snapshot(&self, id: NodeId) -> NodeSnapshot {
         match self.view(id) {
             NodeView::Var(id) => NodeSnapshot::Var(id.clone()),
-            NodeView::GlobalModule(id, dynamic) => NodeSnapshot::GlobalModule(id.clone(), dynamic),
+            NodeView::GlobalModule(id) => NodeSnapshot::GlobalModule(id.clone()),
             NodeView::Const(value) => NodeSnapshot::Const(value.clone()),
             NodeView::Apply(function, args, info, jsx) => {
                 NodeSnapshot::Apply(function, args.to_vec(), info.clone(), jsx)
@@ -564,8 +564,8 @@ impl IndexedLambda {
         }
         match node {
             NodeSnapshot::Var(id) => payload_node!(idents, id, Var),
-            NodeSnapshot::GlobalModule(id, dynamic) => {
-                payload_node!(globals, GlobalPayload(id, dynamic), GlobalModule)
+            NodeSnapshot::GlobalModule(id) => {
+                payload_node!(globals, GlobalPayload(id), GlobalModule)
             }
             NodeSnapshot::Const(value) => payload_node!(constants, value, Const),
             NodeSnapshot::Apply(function, args, info, jsx) => {
@@ -807,7 +807,7 @@ impl IndexedLambda {
                 }
                 NodeView::Assign(_, value) => child(value),
                 NodeView::Var(_)
-                | NodeView::GlobalModule(_, _)
+                | NodeView::GlobalModule(_)
                 | NodeView::Const(_)
                 | NodeView::Break
                 | NodeView::Continue => {}
@@ -872,8 +872,8 @@ impl IndexedLambda {
         }
         match lambda {
             Lambda::Lvar(id) => payload_node!(idents, id, Var),
-            Lambda::LglobalModule(id, dynamic) => {
-                payload_node!(globals, GlobalPayload(id, dynamic), GlobalModule)
+            Lambda::LglobalModule(id) => {
+                payload_node!(globals, GlobalPayload(id), GlobalModule)
             }
             Lambda::Lconst(c) => payload_node!(constants, c, Const),
             Lambda::Lapply(apply) => {
@@ -1246,7 +1246,7 @@ impl IndexedLambdaContext {
                 }
                 NodeView::Assign(_, value) => child(value),
                 NodeView::Var(_)
-                | NodeView::GlobalModule(_, _)
+                | NodeView::GlobalModule(_)
                 | NodeView::Const(_)
                 | NodeView::Break
                 | NodeView::Continue => {}
@@ -1494,7 +1494,7 @@ mod tests {
         let int = || Lambda::Lconst(Constant::int(1));
         for leaf in [
             var(),
-            Lambda::LglobalModule(y.clone(), true),
+            Lambda::LglobalModule(y.clone()),
             int(),
             Lambda::Lbreak,
             Lambda::Lcontinue,

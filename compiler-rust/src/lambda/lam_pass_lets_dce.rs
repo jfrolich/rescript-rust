@@ -148,7 +148,7 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
                                 primitive: Primitive::Pfield(_, _),
                                 args,
                                 ..
-                            } if args.len() == 1 && matches!(args[0], Lambda::LglobalModule(_, _)))
+                            } if args.len() == 1 && matches!(args[0], Lambda::LglobalModule(_)))
             );
             let subst_now = (info.times == 1 && !info.captured)
                 || (info.times == 1
@@ -350,7 +350,7 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
         }
 
         // Lglobal_module (lam_pass_lets_dce.ml:176).
-        Lambda::LglobalModule(_, _) => lam.clone(),
+        Lambda::LglobalModule(_) => lam.clone(),
 
         // Lprim general (lam_pass_lets_dce.ml:177-178).
         Lambda::Lprim(prim) => {
@@ -550,7 +550,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
                                 primitive: Primitive::Pfield(_, _),
                                 args,
                                 ..
-                            } if args.len() == 1 && matches!(args[0], Lambda::LglobalModule(_, _)))
+                            } if args.len() == 1 && matches!(args[0], Lambda::LglobalModule(_)))
             );
             let subst_now = (info.times == 1 && !info.captured)
                 || (info.times == 1
@@ -694,7 +694,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
             }))
         }
 
-        Lambda::Lconst(_) | Lambda::LglobalModule(_, _) => lam,
+        Lambda::Lconst(_) | Lambda::LglobalModule(_) => lam,
 
         Lambda::Lletrec(bindings, body) => {
             let new_bindings = bindings

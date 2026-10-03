@@ -424,14 +424,10 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
     match lam0 {
         RawLambda::Lshared(inner) => lam(f, inner, reraise_exn),
         RawLambda::Lvar(id) => print_ident(f, id),
-        RawLambda::LglobalModule(id, dynamic_import) => {
+        RawLambda::LglobalModule(id) => {
             f.open_box(BoxKind::Box, 2);
             f.string("(");
-            if *dynamic_import {
-                f.string("dynamic global ");
-            } else {
-                f.string("global ");
-            }
+            f.string("global ");
             print_ident(f, id);
             f.string(")");
             f.close_box();

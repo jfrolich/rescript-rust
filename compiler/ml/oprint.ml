@@ -21,7 +21,6 @@ exception Ellipsis
 let cautious f ppf arg = try f ppf arg with Ellipsis -> fprintf ppf "..."
 
 let out_ident = ref pp_print_string
-let map_primitive_name = ref (fun x -> x)
 
 let print_lident ppf = function
   | "::" -> !out_ident ppf "(::)"
@@ -536,20 +535,18 @@ and print_out_sig_item ppf = function
       | Orec_next -> "and")
       ppf td
   | Osig_value vd ->
-    let kwd = if vd.oval_prims = [] then "val" else "external" in
-    let pr_prims ppf = function
-      | [] -> ()
-      | s :: sl ->
-        fprintf ppf "@ = \"%s\"" s;
-        List.iter
-          (fun s ->
-            (* TODO: in general, we should print bs attributes, some attributes like
-               variadic do need it *)
-            fprintf ppf "@ \"%s\"" (!map_primitive_name s))
-          sl
+    let kwd = if vd.oval_prim = None then "val" else "external" in
+    let pr_prim ppf (repr : Parsetree.primitive_repr option) =
+      (* this OCaml-syntax debug printer shows the external's name only; the
+         ReScript outcome printer renders the full attribute syntax *)
+      match repr with
+      | None -> ()
+      | Some (Prim_name s) | Some (Prim_ffi {name = s}) ->
+        fprintf ppf "@ = \"%s\"" s
+      | Some (Prim_inline_const _) -> fprintf ppf "@ = \"#rescript-inline\""
     in
     fprintf ppf "@[<2>%s %a :@ %a%a%a@]" kwd value_ident vd.oval_name !out_type
-      vd.oval_type pr_prims vd.oval_prims
+      vd.oval_type pr_prim vd.oval_prim
       (fun ppf -> List.iter (fun a -> fprintf ppf "@ [@@@@%s]" a.oattr_name))
       vd.oval_attributes
   | Osig_ellipsis -> fprintf ppf "..."

@@ -2413,11 +2413,7 @@ impl JsPrinter {
                 self.write(&mod_name);
                 match &module.kind {
                     Kind::Ml | Kind::Runtime => {
-                        let printed_member = if member == "default" {
-                            "default".to_string()
-                        } else {
-                            convert_ident_name(member)
-                        };
+                        let printed_member = js_export_name(member);
                         self.write_char('.');
                         self.write(&printed_member);
                     }
@@ -3169,6 +3165,16 @@ fn unwrap_uppercase_exotic(name: &str) -> &str {
         &name[2..name.len() - 1]
     } else {
         name
+    }
+}
+
+/// `Js_dump_import_export.js_export_name`: the emitted export name of an ML
+/// binding, JS identifier conversion with the ES default export kept literal.
+pub(crate) fn js_export_name(name: &str) -> String {
+    if name == "default" {
+        name.to_string()
+    } else {
+        convert_ident_name(name)
     }
 }
 

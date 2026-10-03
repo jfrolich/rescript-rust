@@ -6,8 +6,14 @@ let a = import("a").then(m => m.default);
 
 let b = A;
 
+let c = import("./export_keyword.mjs").then(m => m.$$case);
+
+let d = import("./hoisted_function_attr.mjs").then(m => m.Operator$$plus);
+
 export {
   a,
   b,
+  c,
+  d,
 }
-/* a Not a pure module */
+/* b Not a pure module */

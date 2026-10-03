@@ -24,7 +24,7 @@ use crate::js_ir::{
 };
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 use crate::lambda::lam_constant::Constant;
-use crate::lambda::lam_primitive::{ExternalSpec, Mutable, Primitive};
+use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::{Lambda, TagInfo};
 use crate::location::Location;
 
@@ -35,10 +35,6 @@ impl LambdaCompiler {
         args: &[Lambda],
         loc: &Location,
     ) -> Compiled {
-        if matches!(prim, Primitive::Pimport) {
-            return self.compile_import_primitive(loc, args);
-        }
-
         if let Some(compiled) =
             self.compile_hoisted_external_field(prim, LambdaInputs::Recursive(args))
         {
@@ -67,7 +63,7 @@ impl LambdaCompiler {
             prim: &'a Primitive,
             args: LambdaInputs<'a>,
             segments: &mut Vec<String>,
-        ) -> Option<(&'a Ident, bool)> {
+        ) -> Option<&'a Ident> {
             let Primitive::Pfield(_, FieldDbgInfo::Module { name }) = prim else {
                 return None;
             };
@@ -76,13 +72,13 @@ impl LambdaCompiler {
                 return None;
             }
             match args.first()?.view() {
-                LambdaInputView::GlobalModule(id, dynamic_import) => Some((id, dynamic_import)),
+                LambdaInputView::GlobalModule(id) => Some(id),
                 LambdaInputView::Prim(prim, args, _) => external_field_path(prim, args, segments),
                 _ => None,
             }
         }
         let mut reversed = Vec::new();
-        let (id, dynamic_import) = external_field_path(prim, args, &mut reversed)?;
+        let id = external_field_path(prim, args, &mut reversed)?;
         if reversed.len() < 2 {
             return None;
         }
@@ -97,7 +93,7 @@ impl LambdaCompiler {
                 crate::js_ir::ModuleId {
                     id: id.clone(),
                     kind: crate::js_ir::Kind::Ml,
-                    dynamic_import,
+                    dynamic_import: false,
                 },
                 Some(export_name),
             ),
@@ -744,23 +740,13 @@ impl LambdaCompiler {
                 )),
                 _ => Expression::undefined(false),
             },
-            Pimport => self.compile_import(loc, compiled_args),
+            Pimport(source) => self.compile_import(loc, source),
             PjsCall {
                 prim_name,
                 arg_types,
                 ffi,
-                dynamic_import,
                 transformed_jsx,
-            } => self.compile_js_call(
-                loc,
-                prim_name,
-                arg_types,
-                ffi,
-                *dynamic_import,
-                *transformed_jsx,
-                compiled_args,
-                &mut prelude,
-            ),
+            } => self.compile_js_call(prim_name, arg_types, ffi, *transformed_jsx, compiled_args),
             Pnull => Expression::null(),
             Pundefined => Expression::undefined(false),
             _ => Expression::undefined(false),

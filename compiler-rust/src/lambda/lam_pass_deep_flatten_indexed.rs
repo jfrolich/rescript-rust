@@ -181,7 +181,7 @@ fn aux(store: &mut IndexedLambda, node: NodeId, id_gen: &IdGenerator) -> NodeId 
             append_rebuilt(store, NodeSnapshot::Sequence(left, right))
         }
         NodeSnapshot::Var(_)
-        | NodeSnapshot::GlobalModule(_, _)
+        | NodeSnapshot::GlobalModule(_)
         | NodeSnapshot::Const(_)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => node,

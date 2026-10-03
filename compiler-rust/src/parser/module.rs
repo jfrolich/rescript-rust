@@ -3498,7 +3498,7 @@ fn parse_external_value_description(
         Token::String(s) => {
             let s = s.clone();
             p.next();
-            vec![p.arena_mut().push_interned_string(&s)]
+            Some(PrimitiveRepr::PrimName(p.arena_mut().push_interned_string(&s)))
         }
         _ => {
             let msg = format!(
@@ -3506,7 +3506,7 @@ fn parse_external_value_description(
                 name_text
             );
             p.err_at(equal_start, equal_end, DiagnosticCategory::Message(msg));
-            vec![]
+            None
         }
     };
 
@@ -3552,7 +3552,7 @@ fn parse_sign_let_desc(p: &mut Parser<'_>, attrs: Attributes) -> ValueDescriptio
     ValueDescription {
         pval_name: name,
         pval_type: typ,
-        pval_prim: vec![],
+        pval_prim: None,
         pval_attributes: attrs,
         pval_loc: loc,
     }

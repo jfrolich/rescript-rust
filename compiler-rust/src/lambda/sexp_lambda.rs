@@ -497,7 +497,9 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::PisNullUndefined => Sexp::atom("Pis_null_undefined"),
         Primitive::Pnull => Sexp::atom("Pnull"),
         Primitive::Pundefined => Sexp::atom("Pundefined"),
-        Primitive::Pimport => Sexp::atom("Pimport"),
+        Primitive::Pimport(src) => {
+            Sexp::list(vec![Sexp::atom("Pimport"), string(&src.debug_string())])
+        }
         Primitive::Pmakeblock(info, m) => Sexp::list(vec![
             Sexp::atom("Pmakeblock"),
             tag_info(info),
@@ -519,13 +521,11 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         ),
         Primitive::PjsCall {
             prim_name,
-            dynamic_import,
             transformed_jsx,
             ..
         } => Sexp::list(vec![
             Sexp::atom("Pjs_call"),
             string(prim_name),
-            bool_sexp(*dynamic_import),
             bool_sexp(*transformed_jsx),
         ]),
         Primitive::PjsObjectCreate(_) => Sexp::atom("Pjs_object_create"),
@@ -646,10 +646,9 @@ fn function_attribute(attr: &FunctionAttribute) -> Sexp {
 fn lambda(lam: &Lambda, with_locs: bool) -> Sexp {
     match lam {
         Lambda::Lvar(id) => Sexp::list(vec![Sexp::atom("Lvar"), ident(id)]),
-        Lambda::LglobalModule(id, dynamic_import) => Sexp::list(vec![
+        Lambda::LglobalModule(id) => Sexp::list(vec![
             Sexp::atom("Lglobal_module"),
             ident(id),
-            bool_sexp(*dynamic_import),
         ]),
         Lambda::Lconst(c) => Sexp::list(vec![Sexp::atom("Lconst"), constant(c)]),
         Lambda::Lapply(__apply2) => {
@@ -942,10 +941,9 @@ fn indexed_lambda(
     let child = |node| indexed_lambda(store, node, with_locs);
     match store.view(node) {
         NodeView::Var(id) => Sexp::list(vec![Sexp::atom("Lvar"), ident(id)]),
-        NodeView::GlobalModule(id, dynamic) => Sexp::list(vec![
+        NodeView::GlobalModule(id) => Sexp::list(vec![
             Sexp::atom("Lglobal_module"),
             ident(id),
-            bool_sexp(dynamic),
         ]),
         NodeView::Const(value) => Sexp::list(vec![Sexp::atom("Lconst"), constant(value)]),
         NodeView::Apply(function, args, info, jsx) => Sexp::list(vec![

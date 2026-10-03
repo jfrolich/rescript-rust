@@ -103,7 +103,7 @@ fn simplify(
 ) -> NodeId {
     match store.snapshot(node) {
         NodeSnapshot::Var(_)
-        | NodeSnapshot::GlobalModule(_, _)
+        | NodeSnapshot::GlobalModule(_)
         | NodeSnapshot::Const(_)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => node,
@@ -325,7 +325,7 @@ mod tests {
         let generator = IdGenerator::with_start_stamp(start);
         let mut context = IndexedLambdaContext::from_lambda(input, []);
         context.collect_info();
-        let mut external = |_: &Ident, _: bool, _: &str| None;
+        let mut external = |_: &Ident, _: &str| None;
         context.alpha_conversion_with_external_arity(&generator, &mut external);
         (context.materialize(), generator.current_stamp())
     }
@@ -337,7 +337,7 @@ mod tests {
         let access = |name: &str| {
             Lambda::prim(
                 Primitive::Pfield(0, FieldDbgInfo::Module { name: name.into() }),
-                vec![Lambda::LglobalModule(module.clone(), true)],
+                vec![Lambda::LglobalModule(module.clone())],
                 location.clone(),
             )
         };
@@ -361,8 +361,8 @@ mod tests {
         let mut context = IndexedLambdaContext::from_lambda(input, []);
         context.collect_info();
         let mut calls = Vec::new();
-        let mut external = |module: &Ident, dynamic: bool, field: &str| {
-            calls.push((module.name().to_string(), dynamic, field.to_string()));
+        let mut external = |module: &Ident, field: &str| {
+            calls.push((module.name().to_string(), field.to_string()));
             Some(ExternalArityInfo::Single(
                 crate::lambda::lam_arity::Arity::info(vec![1], false),
             ))
@@ -371,8 +371,8 @@ mod tests {
         assert_eq!(
             calls,
             vec![
-                ("External".into(), true, "second".into()),
-                ("External".into(), true, "first".into())
+                ("External".into(), "second".into()),
+                ("External".into(), "first".into())
             ]
         );
         let Lambda::Lsequence(first, second) = context.materialize() else {
@@ -582,7 +582,7 @@ mod tests {
             apply(
                 Lambda::prim(
                     Primitive::Pfield(0, FieldDbgInfo::Module { name: name.into() }),
-                    vec![Lambda::LglobalModule(module.clone(), false)],
+                    vec![Lambda::LglobalModule(module.clone())],
                     Location::none(),
                 ),
                 vec![Lambda::const_(Constant::int(0))],
@@ -604,7 +604,7 @@ mod tests {
         let generator = IdGenerator::new();
         let mut context = IndexedLambdaContext::from_lambda(input, []);
         let mut calls = Vec::new();
-        let mut external = |_: &Ident, _: bool, field: &str| {
+        let mut external = |_: &Ident, field: &str| {
             calls.push(field.to_string());
             Some(ExternalArityInfo::Single(
                 crate::lambda::lam_arity::Arity::info(vec![1], false),
@@ -763,15 +763,7 @@ mod tests {
                 Primitive::PjsCall {
                     prim_name: name.into(),
                     arg_types: vec![],
-                    ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
-                        kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
-                        spec: None,
-                        obj_params: None,
-                        return_wrapper:
-                            crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
-                        inline_constant: None,
-                    }),
-                    dynamic_import: false,
+                    ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                     transformed_jsx: false,
                 },
                 vec![],
@@ -892,7 +884,7 @@ mod tests {
             .store_mut()
             .append(NodeSnapshot::Let(kind, id, value, shared_body));
         context.replace_root(root);
-        let mut external = |_: &Ident, _: bool, _: &str| None;
+        let mut external = |_: &Ident, _: &str| None;
         context.alpha_conversion_with_external_arity(&generator, &mut external);
         assert_eq!(generator.current_stamp(), 52);
         let Lambda::Llet(_, _, _, body) = context.materialize() else {
@@ -948,7 +940,7 @@ mod tests {
         let generator = IdGenerator::with_start_stamp(70);
         let mut context = IndexedLambdaContext::from_lambda(input, []);
         context.collect_info();
-        let mut external = |_: &Ident, _: bool, _: &str| None;
+        let mut external = |_: &Ident, _: &str| None;
         context.alpha_conversion_with_external_arity(&generator, &mut external);
         let once = format!("{:#?}", context.materialize());
         assert_eq!(generator.current_stamp(), 71);
@@ -976,15 +968,7 @@ mod tests {
                 Primitive::PjsCall {
                     prim_name: name.into(),
                     arg_types: vec![],
-                    ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
-                        kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
-                        spec: None,
-                        obj_params: None,
-                        return_wrapper:
-                            crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
-                        inline_constant: None,
-                    }),
-                    dynamic_import: false,
+                    ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                     transformed_jsx: false,
                 },
                 vec![],

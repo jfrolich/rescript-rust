@@ -24,7 +24,7 @@ use crate::location::Location;
 
 /// Rust counterpart to `Lam_compile_env.query_external_id_info` used by
 /// `Lam_pass_remove_alias.simplify_alias` (lam_pass_remove_alias.ml:143-159).
-pub type ExternalInlineResolver<'a> = dyn FnMut(&Ident, bool, &str) -> Option<Lambda> + 'a;
+pub type ExternalInlineResolver<'a> = dyn FnMut(&Ident, &str) -> Option<Lambda> + 'a;
 
 /// Direct port of `Lam_pass_remove_alias.outcome` (lam_pass_remove_alias.ml:25).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,7 +103,7 @@ fn lam_not(loc: Location, x: Lambda) -> Lambda {
     }
 }
 
-fn module_field_apply_target(lam: &Lambda) -> Option<(&Ident, bool, &str)> {
+fn module_field_apply_target(lam: &Lambda) -> Option<(&Ident, &str)> {
     let Lambda::Lprim(__prim201) = lam else {
         return None;
     };
@@ -115,10 +115,10 @@ fn module_field_apply_target(lam: &Lambda) -> Option<(&Ident, bool, &str)> {
     else {
         return None;
     };
-    let [Lambda::LglobalModule(id, dynamic_import)] = args.as_slice() else {
+    let [Lambda::LglobalModule(id)] = args.as_slice() else {
         return None;
     };
-    Some((id, *dynamic_import, name.as_str()))
+    Some((id, name.as_str()))
 }
 
 fn external_inline_args_are_allowed(args: &[Lambda], ident_tbl: &IdentTable) -> bool {
@@ -146,7 +146,7 @@ pub fn simplify_alias(meta: &mut LamStats, lam: &Lambda) -> Lambda {
 /// changes so callers that already own the previous pass output do not clone it
 /// before this pass.
 pub fn simplify_alias_owned(meta: &mut LamStats, lam: Lambda) -> Lambda {
-    let mut no_external_inline = |_: &Ident, _: bool, _: &str| None;
+    let mut no_external_inline = |_: &Ident, _: &str| None;
     simplify_alias_with_external_inline_owned(meta, lam, &mut no_external_inline)
 }
 
@@ -184,7 +184,7 @@ pub fn simplify_alias_with_jsx_owned(
     lam: Lambda,
     jsx_preserve: bool,
 ) -> Lambda {
-    let mut no_external_inline = |_: &Ident, _: bool, _: &str| None;
+    let mut no_external_inline = |_: &Ident, _: &str| None;
     simplify_alias_with_jsx_and_external_inline_owned(
         meta,
         lam,
@@ -337,7 +337,7 @@ impl<'a> Simplifier<'a> {
             }
 
             // lam_pass_remove_alias.ml:80
-            Lambda::LglobalModule(_, _) => lam,
+            Lambda::LglobalModule(_) => lam,
 
             // lam_pass_remove_alias.ml:81-82 — fallback Lprim.
             Lambda::Lprim(info) => map_prim_args(info, |arg| self.simpl_owned(arg)),
@@ -461,10 +461,10 @@ impl<'a> Simplifier<'a> {
                     ap_transformed_jsx,
                 } = *apply;
 
-                if let Some((module_id, dynamic_import, field_name)) =
+                if let Some((module_id, field_name)) =
                     module_field_apply_target(ap_func.as_ref())
                     && let Some(Lambda::Lfunction(func)) =
-                        (self.external_inline)(module_id, dynamic_import, field_name)
+                        (self.external_inline)(module_id, field_name)
                     && func.params.len() == ap_args.len()
                     && external_inline_args_are_allowed(&ap_args, self.ident_tbl)
                     && lfunction_can_be_inlined(&func)
@@ -835,7 +835,7 @@ impl<'a> Simplifier<'a> {
             }
 
             // lam_pass_remove_alias.ml:80
-            Lambda::LglobalModule(_, _) => lam.clone(),
+            Lambda::LglobalModule(_) => lam.clone(),
 
             // lam_pass_remove_alias.ml:81-82 — fallback Lprim: recurse args.
             Lambda::Lprim(__prim0) => {
@@ -960,10 +960,10 @@ impl<'a> Simplifier<'a> {
             Lambda::Lapply(apply)
                 if module_field_apply_target(apply.ap_func.as_ref()).is_some() =>
             {
-                let (module_id, dynamic_import, field_name) =
+                let (module_id, field_name) =
                     module_field_apply_target(apply.ap_func.as_ref()).expect("guarded above");
                 if let Some(Lambda::Lfunction(func)) =
-                    (self.external_inline)(module_id, dynamic_import, field_name)
+                    (self.external_inline)(module_id, field_name)
                     && func.params.len() == apply.ap_args.len()
                     && external_inline_args_are_allowed(&apply.ap_args, self.ident_tbl)
                     && lfunction_can_be_inlined(&func)

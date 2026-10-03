@@ -49,7 +49,7 @@ pub fn hit_variable(fv: &Ident, l: &Lambda) -> bool {
             Lambda::Lconst(_) => false,
             Lambda::Lapply(apply) => hit(fv, &apply.ap_func) || hit_list(fv, &apply.ap_args),
             // Global persistent module — play safe (lam_hit.ml:48).
-            Lambda::LglobalModule(_, _) => false,
+            Lambda::LglobalModule(_) => false,
             Lambda::Lprim(prim) => hit_list(fv, &prim.args),
             Lambda::Lswitch(arg, sw) => {
                 hit(fv, arg)

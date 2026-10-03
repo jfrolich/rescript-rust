@@ -9228,7 +9228,7 @@ fn print_value_description(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    let is_external = !val_desc.pval_prim.is_empty();
+    let is_external = val_desc.pval_prim.is_some();
     // Use value name location for proper attribute line breaking
     let attrs_doc = print_attributes_with_loc(
         state,
@@ -9262,22 +9262,17 @@ fn print_value_description(
     let header = if is_external { "external " } else { "let " };
 
     let prim_doc = if is_external {
-        let prims: Vec<Doc> = val_desc
-            .pval_prim
-            .iter()
-            .map(|s| {
-                Doc::concat(vec![
-                    Doc::text("\""),
-                    Doc::text(arena.get_string(*s)),
-                    Doc::text("\""),
-                ])
-            })
-            .collect();
+        // res_printer.ml:1266-1273.
+        let s = match &val_desc.pval_prim {
+            Some(PrimitiveRepr::PrimName(s)) => arena.get_string(*s),
+            Some(PrimitiveRepr::PrimFfi { name, .. }) => name.as_str(),
+            Some(PrimitiveRepr::PrimInlineConst(_)) | None => "",
+        };
         Doc::group(Doc::concat(vec![
             Doc::text(" ="),
             Doc::indent(Doc::concat(vec![
                 Doc::line(),
-                Doc::join(Doc::line(), prims),
+                Doc::concat(vec![Doc::text("\""), Doc::text(s), Doc::text("\"")]),
             ])),
         ]))
     } else {

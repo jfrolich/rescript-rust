@@ -1520,29 +1520,21 @@ fn extract_str_payload_string(structure: &OcamlValue) -> Option<String> {
 
 /// Read a Primitive.description.
 ///
-/// Record fields:
+/// Record fields (primitive.ml):
 /// 0: prim_name: string
 /// 1: prim_arity: int
 /// 2: prim_alloc: bool
-/// 3: prim_native_name: string
+/// 3: prim_kind: prim_kind
 /// 4: prim_from_constructor: bool
-/// 5: transformed_jsx: bool
 fn read_primitive_description(value: &OcamlValue) -> PrimitiveDescription {
     let fields = &value.as_block().1;
     PrimitiveDescription {
         prim_name: fields[0].as_string().to_string(),
         prim_arity: fields[1].as_int() as i32,
-        prim_native_name: if fields.len() > 3 {
-            fields[3].as_string().to_string()
-        } else {
-            String::new()
-        },
+        prim_kind: super::ffi_decode::prim_kind(&fields[3])
+            .unwrap_or(crate::types::decl::PrimKind::KindIntrinsic),
         prim_native_float: false,
-        prim_from_constructor: if fields.len() > 4 {
-            fields[4].as_bool()
-        } else {
-            false
-        },
+        prim_from_constructor: fields[4].as_bool(),
     }
 }
 

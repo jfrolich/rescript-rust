@@ -45,7 +45,7 @@ use crate::lambda::lam_constant::{Constant, PointerInfo};
 use crate::lambda::lam_exit_code::has_exit_code;
 use crate::lambda::lam_free_variables::free_variables;
 use crate::lambda::lam_pass_collect::get_arity;
-use crate::lambda::lam_primitive::{ExternalArgConst, ExternalArgDelim, Primitive};
+use crate::lambda::lam_primitive::{Cst, Delim as FfiDelim, Primitive};
 use crate::lambda::lam_subst;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda,
@@ -365,6 +365,10 @@ pub struct LambdaCompiler {
     pub(crate) cmj_export_arities: AHashMap<String, CmjExportArity>,
     hoisted_functions: Vec<crate::lambda::HoistedFunction>,
     pub(crate) external_module_ids: HashMap<ExternalModuleCacheKey, Ident>,
+    /// Modules registered by dynamic imports (`Lam_compile_primitive`'s
+    /// `Pimport` registers them in `Lam_compile_env.cached_tbl`), which feed
+    /// `populate_required_modules` like every other cached module.
+    pub(crate) dynamic_import_modules: Vec<ModuleId>,
     pub(crate) static_handlers: Vec<StaticHandler>,
     pub(crate) static_jump_handlers: Vec<StaticJumpHandler>,
     pub(crate) fallthrough_return_handlers: Vec<FallthroughReturnHandler>,
@@ -475,6 +479,7 @@ impl LambdaCompiler {
             cmj_export_arities: AHashMap::new(),
             hoisted_functions: Vec::new(),
             external_module_ids: HashMap::new(),
+            dynamic_import_modules: Vec::new(),
             static_handlers: Vec::new(),
             static_jump_handlers: Vec::new(),
             fallthrough_return_handlers: Vec::new(),
@@ -614,6 +619,7 @@ impl LambdaCompiler {
         )
         .entered();
         self.external_module_ids.clear();
+        self.dynamic_import_modules.clear();
         let simplified_result = crate::timing::measure(
             crate::timing::Phase::LambdaOptimization,
             || {
@@ -627,8 +633,7 @@ impl LambdaCompiler {
                     String,
                     Option<Arc<AHashMap<String, CmjExportArity>>>,
                 > = HashMap::new();
-                let mut external_inline =
-                    |module_id: &Ident, dynamic_import: bool, field_name: &str| {
+                let mut external_inline = |module_id: &Ident, field_name: &str| {
                         if !cross_module_inline {
                             return None;
                         }
@@ -638,21 +643,18 @@ impl LambdaCompiler {
                             });
                             cmj_lambda_cache.insert(module_id.name().to_string(), lambdas);
                         }
-                        let _ = dynamic_import;
                         cmj_lambda_cache
                             .get(module_id.name())
                             .and_then(|exports| exports.as_ref())
                             .and_then(|exports| exports.get(field_name).cloned())
                     };
-                let mut external_arity =
-                    |module_id: &Ident, dynamic_import: bool, field_name: &str| {
+                let mut external_arity = |module_id: &Ident, field_name: &str| {
                         if !cmj_arity_cache.contains_key(module_id.name()) {
                             let arities = module_path_resolver.as_ref().and_then(|resolver| {
                                 resolver.module_cmj_export_arities(module_id.name())
                             });
                             cmj_arity_cache.insert(module_id.name().to_string(), arities);
                         }
-                        let _ = dynamic_import;
                         cmj_arity_cache
                             .get(module_id.name())
                             .and_then(|exports| exports.as_ref())
@@ -747,6 +749,16 @@ impl LambdaCompiler {
             {
                 let _phase = info_span!("compiler.js_required_modules").entered();
                 let mut required_modules = self.collect_required_module_set(&deps.program.block);
+                for module in std::mem::take(&mut self.dynamic_import_modules) {
+                    if required_module_side_effect_reason(
+                        self.module_path_resolver.as_ref(),
+                        std::slice::from_ref(&module),
+                    )
+                    .is_some()
+                    {
+                        required_modules.insert(module);
+                    }
+                }
                 populate_required_modules(
                     self.module_path_resolver.as_ref(),
                     &possible_required_modules,
@@ -803,7 +815,7 @@ impl LambdaCompiler {
                 | Lambda::Lfor_await_of(_, _, body)
                 | Lambda::Lassign(_, body) => find(body),
                 Lambda::Lvar(_)
-                | Lambda::LglobalModule(_, _)
+                | Lambda::LglobalModule(_)
                 | Lambda::Lconst(_)
                 | Lambda::Lbreak
                 | Lambda::Lcontinue => None,
@@ -1142,14 +1154,14 @@ impl LambdaCompiler {
         } = __prim202.as_ref() else {
             return None;
         };
-        let [Lambda::LglobalModule(id, dynamic_import)] = args.as_slice() else {
+        let [Lambda::LglobalModule(id)] = args.as_slice() else {
             return None;
         };
         Some((
             ModuleId {
                 id: id.clone(),
                 kind: Kind::Ml,
-                dynamic_import: *dynamic_import,
+                dynamic_import: false,
             },
             name.as_str(),
         ))
@@ -1230,7 +1242,7 @@ impl LambdaCompiler {
             let [base] = field_args.as_slice() else {
                 return None;
             };
-            let NodeSnapshot::GlobalModule(id, dynamic_import) = context.store().snapshot(*base)
+            let NodeSnapshot::GlobalModule(id) = context.store().snapshot(*base)
             else {
                 return None;
             };
@@ -1238,7 +1250,7 @@ impl LambdaCompiler {
                 ModuleId {
                     id,
                     kind: Kind::Ml,
-                    dynamic_import,
+                    dynamic_import: false,
                 },
                 name,
                 args,
@@ -1492,11 +1504,11 @@ impl LambdaCompiler {
                 prelude: vec![],
                 expr: Expression::var(id.clone()),
             },
-            Lambda::LglobalModule(id, dynamic_import) => {
+            Lambda::LglobalModule(id) => {
                 let module = ModuleId {
                     id: id.clone(),
                     kind: Kind::Ml,
-                    dynamic_import: *dynamic_import,
+                    dynamic_import: false,
                 };
                 Compiled {
                     prelude: vec![],
@@ -5474,108 +5486,18 @@ impl LambdaCompiler {
         block
     }
 
-    fn dynamic_import_body(&self, lam: &Lambda) -> Option<Lambda> {
-        let call = match lam {
-            Lambda::Lfunction(func) => match func.body.as_ref() {
-                Lambda::Lprim(prim) => prim,
-                Lambda::Lsequence(first, second)
-                    if matches!(
-                        second.as_ref(),
-                        Lambda::Lconst(Constant::JsUndefined { .. })
-                    ) =>
-                {
-                    match first.as_ref() {
-                        Lambda::Lprim(prim) => prim,
-                        _ => return None,
-                    }
-                }
-                _ => return None,
-            },
-            _ => return None,
-        };
-
-        match &call.primitive {
-            Primitive::PjsCall {
-                prim_name,
-                arg_types,
-                ffi,
-                transformed_jsx,
-                ..
-            } => Some(Lambda::prim(
-                Primitive::PjsCall {
-                    prim_name: prim_name.clone(),
-                    arg_types: arg_types.clone(),
-                    ffi: ffi.clone(),
-                    dynamic_import: true,
-                    transformed_jsx: *transformed_jsx,
-                },
-                call.args.clone(),
-                call.loc.clone(),
-            )),
-            _ => None,
-        }
-    }
-
-    fn dynamic_import_supported_argument(lam: &Lambda) -> bool {
-        match lam {
-            Lambda::LglobalModule(_, _) | Lambda::Lvar(_) => true,
-            Lambda::Lprim(__prim4) => {
-            let PrimInfo { primitive, .. } = __prim4.as_ref();
-
-                matches!(
-                    primitive,
-                    Primitive::Pfield(_, _) | Primitive::PjsCall { .. }
-                )
-            }
-            Lambda::Lfunction(_) => false,
-            _ => false,
-        }
-    }
-
-    pub(crate) fn compile_import_primitive(&mut self, loc: &Location, args: &[Lambda]) -> Compiled {
-        let target = match args {
-            [arg] => self.dynamic_import_body(arg).unwrap_or_else(|| arg.clone()),
-            _ => {
-                self.report_diagnostic(
-                    loc,
-                    "Missing argument: Dynamic import requires a module or module value that is a file as argument.",
-                );
-                return Compiled {
-                    prelude: vec![],
-                    expr: Expression::undefined(false),
-                };
-            }
-        };
-
-        if !Self::dynamic_import_supported_argument(&target) {
-            self.report_diagnostic(
-                loc,
-                "Invalid argument: unsupported argument to dynamic import. If you believe this should be supported, please open an issue.",
-            );
-            return Compiled {
-                prelude: vec![],
-                expr: Expression::undefined(false),
-            };
-        }
-
-        let compiled = self.compile_expr(&target);
-        let prelude = compiled.prelude;
-        let expr = self.compile_import(loc, vec![compiled.expr]);
-        Compiled { prelude, expr }
-    }
-
-    pub(crate) fn compile_external_arg_const(&self, cst: &ExternalArgConst) -> Expression {
+    pub(crate) fn compile_external_arg_const(&self, cst: &Cst) -> Expression {
         match cst {
-            ExternalArgConst::IntLit(i) => Expression::number(Number::Int {
+            Cst::ArgIntLit(i) => Expression::number(Number::Int {
                 i: *i as i32,
                 c: None,
             }),
-            ExternalArgConst::StringLit(s, delim) => {
+            Cst::ArgStringLit(s, delim) => {
                 let delim = match delim {
-                    ExternalArgDelim::None => Delim::None,
-                    ExternalArgDelim::StarJ => Delim::StarJ,
-                    ExternalArgDelim::NoQuotes => Delim::NoQuotes,
-                    ExternalArgDelim::BackQuotes => Delim::BackQuotes,
+                    FfiDelim::DNone => Delim::None,
+                    FfiDelim::DStarJ => Delim::StarJ,
+                    FfiDelim::DNoQuotes => Delim::NoQuotes,
+                    FfiDelim::DBackQuotes => Delim::BackQuotes,
                 };
                 Expression::new(ExpressionDesc::Str {
                     delim,
@@ -5805,7 +5727,7 @@ impl LambdaCompiler {
 
     fn return_handler_requires_explicit_staticcatch_jump(&self, lam: &Lambda) -> bool {
         match lam {
-            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+            Lambda::Lvar(_) | Lambda::LglobalModule(_) | Lambda::Lconst(_) => false,
             Lambda::LifThenElse(_, _, _)
             | Lambda::Lswitch(_, _)
             | Lambda::LstringSwitch(_, _, _)
@@ -5973,7 +5895,7 @@ impl LambdaCompiler {
 
     fn lambda_requires_explicit_staticcatch_jump(&self, lam: &Lambda) -> bool {
         match lam {
-            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+            Lambda::Lvar(_) | Lambda::LglobalModule(_) | Lambda::Lconst(_) => false,
             Lambda::Lapply(apply) => {
                 self.lambda_requires_explicit_staticcatch_jump(&apply.ap_func)
                     || apply
@@ -6593,7 +6515,7 @@ fn staticcatch_debug_kind(lam: &Lambda) -> &'static str {
         Lambda::Lbreak => "break",
         Lambda::Lcontinue => "continue",
         Lambda::Lassign(_, _) => "assign",
-        Lambda::LglobalModule(_, _) => "global_module",
+        Lambda::LglobalModule(_) => "global_module",
     }
 }
 
@@ -6933,7 +6855,7 @@ fn function_has_self_tailcall(tail_targets: &[Ident], lam: &Lambda) -> bool {
             function_has_self_tailcall(tail_targets, handler)
         }
         Lambda::Lvar(_)
-        | Lambda::LglobalModule(_, _)
+        | Lambda::LglobalModule(_)
         | Lambda::Lconst(_)
         | Lambda::Lfunction(_)
         | Lambda::Lletrec(_, _)
@@ -7477,15 +7399,11 @@ fn cmj_export_constant_from_lambda(lam: &Lambda) -> Option<CmjExportConstant> {
 fn collect_modules_from_lambda(lam: &Lambda, seen: &mut AHashSet<ModuleId>) {
     match lam {
         Lambda::Lvar(_) | Lambda::Lconst(_) => {}
-        Lambda::LglobalModule(id, dynamic_import) => {
-            // OCaml records dynamic imports in `may_required_modules` too:
-            // compiler/core/lam_convert.ml:423-474. They are later used for
-            // side-effect detection by compiler/core/lam_compile_env.ml:139-145
-            // even though js_dump_program.ml:76-98 skips static import output.
+        Lambda::LglobalModule(id) => {
             seen.insert(ModuleId {
                 id: id.clone(),
                 kind: Kind::Ml,
-                dynamic_import: *dynamic_import,
+                dynamic_import: false,
             });
         }
         Lambda::Lapply(apply) => {
@@ -7720,7 +7638,7 @@ pub(crate) fn compiled_from_effect_block(mut block: Block) -> Compiled {
 
 fn lambda_contains_static_raise(lam: &Lambda) -> bool {
     match lam {
-        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+        Lambda::Lvar(_) | Lambda::LglobalModule(_) | Lambda::Lconst(_) => false,
         Lambda::Lapply(apply) => {
             lambda_contains_static_raise(&apply.ap_func)
                 || apply.ap_args.iter().any(lambda_contains_static_raise)
@@ -7803,7 +7721,7 @@ fn no_static_raise_in_handler_like_ocaml(handler: &Lambda) -> bool {
 
 pub(crate) fn lambda_has_exit(lam: &Lambda) -> bool {
     match lam {
-        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+        Lambda::Lvar(_) | Lambda::LglobalModule(_) | Lambda::Lconst(_) => false,
         Lambda::Lapply(apply) => {
             lambda_has_exit(&apply.ap_func) || apply.ap_args.iter().any(lambda_has_exit)
         }
@@ -7912,7 +7830,7 @@ fn count_top_level_if_statements_in_stmt(stmt: &Statement) -> usize {
 
 fn lambda_contains_staticcatch(lam: &Lambda) -> bool {
     match lam {
-        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+        Lambda::Lvar(_) | Lambda::LglobalModule(_) | Lambda::Lconst(_) => false,
         Lambda::Lapply(apply) => {
             lambda_contains_staticcatch(&apply.ap_func)
                 || apply.ap_args.iter().any(lambda_contains_staticcatch)
@@ -7981,7 +7899,7 @@ fn lambda_contains_staticcatch(lam: &Lambda) -> bool {
 
 fn lambda_contains_static_raise_to_label(lam: &Lambda, label: i32, arity: usize) -> bool {
     match lam {
-        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+        Lambda::Lvar(_) | Lambda::LglobalModule(_) | Lambda::Lconst(_) => false,
         Lambda::Lapply(apply) => {
             lambda_contains_static_raise_to_label(&apply.ap_func, label, arity)
                 || apply
@@ -8122,7 +8040,7 @@ fn lambda_static_raise_count_to_label(lam: &Lambda, label: i32, arity: usize) ->
     let add_count = |left: usize, right: usize| left.saturating_add(right).min(2);
 
     match lam {
-        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => 0,
+        Lambda::Lvar(_) | Lambda::LglobalModule(_) | Lambda::Lconst(_) => 0,
         Lambda::Lapply(apply) => apply.ap_args.iter().fold(
             lambda_static_raise_count_to_label(&apply.ap_func, label, arity),
             |count, arg| add_count(count, lambda_static_raise_count_to_label(arg, label, arity)),
@@ -8233,7 +8151,7 @@ fn lambda_static_raise_count_to_label(lam: &Lambda, label: i32, arity: usize) ->
 
 fn lambda_contains_static_raise_to_other_label(lam: &Lambda, label: i32) -> bool {
     match lam {
-        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+        Lambda::Lvar(_) | Lambda::LglobalModule(_) | Lambda::Lconst(_) => false,
         Lambda::Lapply(apply) => {
             lambda_contains_static_raise_to_other_label(&apply.ap_func, label)
                 || apply

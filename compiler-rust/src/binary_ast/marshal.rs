@@ -1708,7 +1708,7 @@ impl<'a> MarshalWriter<'a> {
         self.pstr_empty_table[idx] = Some(obj_idx);
     }
 
-    /// Write a shared single-element `pval_prim` list like ["#raw_expr"].
+    /// Write a shared static `Prim_name "#raw_expr"` block.
     pub(crate) fn write_prim_list_shared(&mut self, kind: PrimListShareKind, prim: StrIdx) {
         let idx = kind.as_index();
         if let Some(obj_idx) = self.prim_list_table[idx] {
@@ -1718,9 +1718,8 @@ impl<'a> MarshalWriter<'a> {
         }
 
         let obj_idx = self.obj_counter;
-        self.write_block_header(0, 2);
+        self.write_block_header(0, 1);
         self.write_str_idx(prim);
-        self.write_int(0); // []
         self.prim_list_table[idx] = Some(obj_idx);
     }
 

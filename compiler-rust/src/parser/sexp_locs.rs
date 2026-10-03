@@ -1380,9 +1380,13 @@ fn value_description(vd: &ValueDescription, arena: &ParseArena) -> Sexp {
         Sexp::atom(&quote_string(arena.get_string(vd.pval_name.txt))),
         location(vd.pval_name.loc, arena),
         core_type(arena.get_core_type(vd.pval_type), arena),
-        Sexp::list(map_empty(&vd.pval_prim, |s| {
-            Sexp::atom(&quote_string(arena.get_string(*s)))
-        })),
+        Sexp::list(map_empty(
+            &vd.pval_prim
+                .as_ref()
+                .map(|prim| prim.debug_strings(arena))
+                .unwrap_or_default(),
+            |s| Sexp::atom(&quote_string(s)),
+        )),
         attributes(&vd.pval_attributes, arena),
     ])
 }

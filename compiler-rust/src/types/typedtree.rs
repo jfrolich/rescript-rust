@@ -506,6 +506,10 @@ pub struct FunctionParam {
     pub fp_pat: Pattern,
     /// Whether the parameter pattern is exhaustive.
     pub fp_partial: Partial,
+    /// Optional parameter with a default value: `fp_pat` binds the option
+    /// carrier directly to `fp_param`, a fresh ident named after the label,
+    /// and the user's pattern is bound by a let at the head of the body.
+    pub fp_has_default: bool,
 }
 
 // ============================================================================
@@ -1055,7 +1059,7 @@ pub struct TypedValueDescription {
     /// Typed core type (the annotated type).
     pub val_desc: TypedCoreType,
     /// Primitive names.
-    pub val_prim: Vec<String>,
+    pub val_prim: Option<crate::parser::ast::PrimitiveRepr>,
     /// `val_val.val_kind` (compiler/ml/typedtree.mli `value_description`):
     /// the kind `Typedecl.transl_value_decl` computed (typedecl.ml:1878-1915),
     /// including a primitive's arity from `parse_arity`.

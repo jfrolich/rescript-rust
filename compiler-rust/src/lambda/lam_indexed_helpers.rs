@@ -48,7 +48,7 @@ pub(crate) fn append_refine_let(
                 _,
             ) if matches!(
                 store.view(*base),
-                NodeView::GlobalModule(_, _) | NodeView::Var(_)
+                NodeView::GlobalModule(_) | NodeView::Var(_)
             ) =>
             {
                 true
@@ -80,7 +80,7 @@ fn list_eq_approx(store: &IndexedLambda, left: &[NodeId], right: &[NodeId]) -> b
 
 fn eq_approx(store: &IndexedLambda, left: NodeId, right: NodeId) -> bool {
     match (store.view(left), store.view(right)) {
-        (NodeView::GlobalModule(a, ad), NodeView::GlobalModule(b, bd)) => a.same(b) && ad == bd,
+        (NodeView::GlobalModule(a), NodeView::GlobalModule(b)) => a.same(b),
         (NodeView::Var(a), NodeView::Var(b)) => a.same(b),
         (NodeView::Const(a), NodeView::Const(b)) => a.eq_approx(b),
         (NodeView::Apply(af, aa, _, _), NodeView::Apply(bf, ba, _, _)) => {
@@ -519,7 +519,7 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                         [source],
                         _,
                     ) if name == &fields[0] => match store.view(*source) {
-                        NodeView::Var(id) | NodeView::GlobalModule(id, _) => {
+                        NodeView::Var(id) | NodeView::GlobalModule(id) => {
                             Some((*source, id.clone()))
                         }
                         _ => None,
@@ -530,7 +530,7 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                 args.iter().zip(fields.iter()).enumerate().all(|(index, (arg, expected_name))| {
                     matches!(store.view(*arg), NodeView::Prim(Primitive::Pfield(position, crate::lambda::FieldDbgInfo::Module { name }), [base], _)
                         if *position as usize == index && name == expected_name
-                            && matches!(store.view(*base), NodeView::Var(id) | NodeView::GlobalModule(id, _) if id.same(source_id)))
+                            && matches!(store.view(*base), NodeView::Var(id) | NodeView::GlobalModule(id) if id.same(source_id)))
                 })
             });
             if reconstructs_source {
@@ -691,7 +691,7 @@ pub(crate) fn substitute(
     match store.snapshot(node) {
         NodeSnapshot::Var(id) => substitutions.get(&id).copied().unwrap_or(node),
         NodeSnapshot::Const(_)
-        | NodeSnapshot::GlobalModule(_, _)
+        | NodeSnapshot::GlobalModule(_)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => node,
         NodeSnapshot::Apply(function, args, info, _) => {
