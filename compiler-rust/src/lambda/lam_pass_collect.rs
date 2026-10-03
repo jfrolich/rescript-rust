@@ -612,7 +612,11 @@ fn collect_bind_with_external(
                     Some(resolver) => get_arity_with_external_arity(meta, x, resolver),
                     None => get_arity(meta, x),
                 };
-                annotate(meta, rec_flag, ident.clone(), arity, Some(lam.clone()));
+                // OCaml stores `x` too (lam_pass_collect.ml:90-93), but the
+                // only reader of the payload, remove-alias inlining, wants an
+                // `Lfunction` (lam_pass_remove_alias.ml:185-197) and `x` is not
+                // one; skip the deep copy.
+                annotate(meta, rec_flag, ident.clone(), arity, None);
             }
         }
     }

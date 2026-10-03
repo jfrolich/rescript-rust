@@ -74,8 +74,10 @@ fn canonicalize_with_cached_parent(path: &Path) -> Option<PathBuf> {
     let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
         return std::fs::canonicalize(path).ok();
     };
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    if metadata.file_type().is_symlink() {
+    // A missing file (in-process builds write no .cmt) resolves through its
+    // directory like an existing regular file would, so its key is stable
+    // and can be remembered.
+    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return std::fs::canonicalize(path).ok();
     }
     if let Some(dir) = CANONICAL_DIRS.with(|dirs| dirs.borrow().get(parent).cloned()) {
@@ -90,8 +92,8 @@ fn canonicalize_with_cached_parent(path: &Path) -> Option<PathBuf> {
 
 fn normalize_cmt_cache_key(cmt_file: &str) -> String {
     // The key is requested several times per artifact; remember the keys that
-    // resolved on the filesystem (a missing file may appear later, so its
-    // lexical fallback is not remembered).
+    // resolved through an existing directory (a missing directory may appear
+    // later, so its lexical fallback is not remembered).
     thread_local! {
         static RESOLVED_KEYS: std::cell::RefCell<HashMap<String, String>> =
             std::cell::RefCell::new(HashMap::new());
@@ -165,7 +167,8 @@ fn get_cmt_file_for_typed_artifact_import(project_root: &str, cmt: &str) -> Stri
     // from the workspace root, so use Config.project_root as the package cwd
     // that compiler/gentype/GenTypeConfig.ml:124-131 gives OCaml GenType.
     crate::gentype::paths::get_cmt_file_from_cwd_with_exists(Path::new(project_root), cmt, |path| {
-        path.exists() || has_in_process_type_declarations(path)
+        // In-process builds write no .cmt; ask the registry before the disk.
+        has_in_process_type_declarations(path) || path.exists()
     })
 }
 
