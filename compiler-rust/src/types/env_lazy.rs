@@ -800,14 +800,32 @@ impl QualifiedModuleComponents {
         // types, labels, constructors and child modules all see it.
         let signature = match &value_source_prefix {
             Some(source) if !source.same(&access_path) => {
-                let mut rerooted =
-                    super::typecore::copy_lookup_signature_for_subst(signature.as_ref(), ctx);
+                // Value types are re-rooted when a value is looked up or
+                // opened (each use copies it anyway); copy and re-root the
+                // other items here. Values are most of a unit's signature.
+                let non_values: Vec<SignatureItem> = signature
+                    .iter()
+                    .filter(|item| !matches!(item, SignatureItem::SigValue(..)))
+                    .cloned()
+                    .collect();
+                let mut copied =
+                    super::typecore::copy_lookup_signature_for_subst(&non_values, ctx).into_iter();
+                let mut rerooted: Vec<SignatureItem> = signature
+                    .iter()
+                    .map(|item| match item {
+                        SignatureItem::SigValue(..) => item.clone(),
+                        _ => copied.next().expect("copied non-value item"),
+                    })
+                    .collect();
                 // A child module of the scraped unit is strengthened into an
                 // alias of the unit's own child (mtype.ml:28-40 via
                 // env.ml:1435-1449), whose components name the parent unit's
                 // items through the unit; only the child's own items move to
                 // the access path (`Unit.Sub.u` -> `Cat.Sub.u`).
                 for item in &rerooted {
+                    if matches!(item, SignatureItem::SigValue(..)) {
+                        continue;
+                    }
                     let (old_prefix, new_prefix) = match item {
                         SignatureItem::SigModule(id, _, _) => (
                             Path::pdot(source.clone(), id.name()),
@@ -917,6 +935,15 @@ impl QualifiedModuleComponents {
 
     pub(crate) fn access_path(&self) -> &Path {
         self.access_path.as_ref()
+    }
+
+    /// The unit path this component's value types still name their own
+    /// items through, when the component sits at a different access path;
+    /// values are re-rooted when they are looked up or opened.
+    pub(crate) fn rerooted_value_source(&self) -> Option<&Path> {
+        self.value_source_prefix
+            .as_deref()
+            .filter(|source| !source.same(self.access_path()))
     }
 
     /// Force one lazily built entry of these tables. Store-resident tables
@@ -1078,6 +1105,16 @@ impl QualifiedModuleComponents {
 
         let (runtime_pos, id, desc) = self.lookup_value(name)?;
         let mut desc = super::typecore::copy_lookup_value_description_for_subst(desc, ctx);
+        // Re-root the copy like the component's other items (see
+        // `new_with_child_components_arc_and_value_source_prefix_inner`).
+        if let Some(source) = self.rerooted_value_source() {
+            crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                &[SignatureItem::SigValue(id.clone(), desc.clone())],
+                source,
+                self.access_path(),
+                ctx,
+            );
+        }
         // OCaml compiler/ml/env.ml:1530-1538 builds `prefix_idents` for the
         // selected component path, then env.ml:1537 always applies
         // compiler/ml/subst.ml:303-309 `Subst.value_description` to component

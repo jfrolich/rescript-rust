@@ -6826,7 +6826,15 @@ fn add_signature_to_env_with_options_inner(
     // only value-bearing items (non-primitive values, modules, extension constructors)
     // get runtime field positions. Types and module types are skipped.
     let mut pos: i32 = 0;
-    let reroot_prefixes = alias_reroot_prefixes(module_path, ctx);
+    let mut reroot_prefixes = alias_reroot_prefixes(module_path, ctx);
+    // Components of an in-process unit keep their value types naming the
+    // unit's items (`Unit.t`); re-root the opened values at the component
+    // path like `prefix_idents` does (env.ml:1454-1481, 1530-1538).
+    if let Some(source) = precomputed_components.and_then(|c| c.rerooted_value_source())
+        && !reroot_prefixes.iter().any(|(from, _)| from.same(source))
+    {
+        reroot_prefixes.push((source.clone(), module_path.clone()));
+    }
     let mut opened_values = Vec::new();
     let mut opened_types = Vec::new();
     let mut opened_constructors = Vec::new();
