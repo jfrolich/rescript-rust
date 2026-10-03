@@ -12826,6 +12826,14 @@ fn in_process_interface_display_name(options: &CompilerOptions, module_name: &st
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The result of checking an implementation against its interface: OCaml's
+/// one `Includemod.compunit` call gives both the coercion Translmod uses and
+/// the inclusion warnings (typemod.ml:1742-1758).
+struct CompunitInclusion {
+    coercion: crate::types::typedtree::ModuleCoercion,
+    warnings: Vec<crate::diagnostics::Warning>,
+}
+
 fn check_compunit_inclusion_for_errors(
     tctx: &mut TypeCheckContext<'_>,
     type_ctx: &TypeContext,
@@ -12836,18 +12844,18 @@ fn check_compunit_inclusion_for_errors(
     filename: &str,
     has_resi: bool,
     interface_file: Option<&str>,
-) -> Result<()> {
+) -> Result<Option<CompunitInclusion>> {
     if !has_resi || !source_file.ends_with(".res") {
-        return Ok(());
+        return Ok(None);
     }
 
     let module_name = module_name_from_source_filename(source_file);
     if module_name.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
     let Some(pers) = &mut tctx.persistent_env else {
-        return Ok(());
+        return Ok(None);
     };
     let source_dir = std::path::Path::new(source_file)
         .parent()
@@ -12867,7 +12875,7 @@ fn check_compunit_inclusion_for_errors(
     let Some(target_sig) =
         raw_in_process_sig.or_else(|| pers.read_raw_sig_shared(&module_name, type_ctx))
     else {
-        return Ok(());
+        return Ok(None);
     };
     // Env.read_signature forces ps_sig, whose Subst.signature identity copy
     // renames every bound interface identifier before compunit inclusion
@@ -12886,7 +12894,10 @@ fn check_compunit_inclusion_for_errors(
         target_sig.as_ref(),
         &mut inclusion_warnings,
     ) {
-        Ok(_) => Ok(()),
+        Ok(coercion) => Ok(Some(CompunitInclusion {
+            coercion,
+            warnings: inclusion_warnings,
+        })),
         Err(error) => Err(UserDiagnostic::new(
             format_compunit_mismatch_report(
                 type_ctx,
@@ -15883,9 +15894,10 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // typemod.ml:1742-1758: with an interface, the implementation is checked
     // against it (marking the included declarations used) before the delayed
     // checks, as the file compile does.
+    let mut interface_inclusion = None;
     if has_interface {
         let interface_file = in_process_interface_display_name(options, module_name);
-        if let Err(error) = check_compunit_inclusion_for_errors(
+        match check_compunit_inclusion_for_errors(
             &mut tctx,
             &type_ctx,
             &env,
@@ -15896,8 +15908,11 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             true,
             interface_file.as_deref(),
         ) {
-            let warnings = format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
-            return Err(prefix_diagnostic(&warnings, error));
+            Ok(inclusion) => interface_inclusion = inclusion,
+            Err(error) => {
+                let warnings = format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
+                return Err(prefix_diagnostic(&warnings, error));
+            }
         }
     }
     // typemod.ml:1769-1776 forces the delayed usage checks before Lambda
@@ -16076,16 +16091,23 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         hoisted_exports,
     ) = crate::timing::measure(crate::timing::Phase::Lambda, || {
         let _phase = info_span!("compiler.raw_lambda").entered();
-        let implementation_coercion = inferred_implementation_coercion.unwrap_or_else(|| {
-            compute_raw_implementation_coercion(
+        // The interface check above already computed the coercion; report
+        // its inclusion warnings where the coercion is used, as before.
+        let implementation_coercion = match (inferred_implementation_coercion, interface_inclusion) {
+            (Some(coercion), _) => coercion,
+            (None, Some(inclusion)) => {
+                report_compunit_inclusion_warnings(&mut tctx, inclusion.warnings);
+                inclusion.coercion
+            }
+            (None, None) => compute_raw_implementation_coercion(
                 &mut tctx,
                 &type_ctx,
                 &env,
                 &typed_structure,
                 options,
                 Some(has_interface),
-            )
-        });
+            ),
+        };
         let mut raw_converter =
             crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
                 arena,
