@@ -141,6 +141,10 @@ fn run_main(otel_enabled: bool) -> Result<()> {
             result
         }
         cli::Command::Format { stdin, check, files } => format::format(stdin, check, files),
+        cli::Command::Analysis { args } => {
+            let cwd = std::env::current_dir()?;
+            std::process::exit(rescript::tooling_server::run_client(&cwd, &args))
+        }
     }
 }
 

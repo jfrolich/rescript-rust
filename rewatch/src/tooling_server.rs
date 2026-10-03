@@ -183,6 +183,91 @@ fn serve_connection(
     }
 }
 
+/// Exit code of a client when no watcher serves the project
+/// (sysexits.h `EX_UNAVAILABLE`).
+pub const NO_WATCHER_EXIT_CODE: i32 = 69;
+
+/// The discovery file of the watcher governing `dir`: the nearest
+/// `lib/rescript-watch.addr` in `dir` or an ancestor.
+fn find_address_file(dir: &Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .map(|dir| dir.join("lib").join(ADDRESS_FILE))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Where to look for the watcher: the directory of the first argument that
+/// names an existing file, else `cwd`.
+fn client_start_dir(cwd: &Path, args: &[String]) -> PathBuf {
+    args.iter()
+        .skip(1)
+        .map(|arg| cwd.join(arg))
+        .find(|path| path.is_file())
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| cwd.to_path_buf())
+}
+
+fn read_reply(reader: &mut BufReader<TcpStream>) -> std::io::Result<Reply> {
+    use std::io::Read;
+    let mut header = String::new();
+    reader.read_line(&mut header)?;
+    let header = header.trim_end();
+    let Some((status, length)) = header.split_once(' ') else {
+        return Ok(Reply::Error(format!("unexpected reply: {header}")));
+    };
+    let length: usize = length
+        .parse()
+        .map_err(|_| std::io::Error::other(format!("unexpected reply: {header}")))?;
+    let mut payload = vec![0; length];
+    reader.read_exact(&mut payload)?;
+    let payload = String::from_utf8_lossy(&payload).into_owned();
+    Ok(match status {
+        "OK" => Reply::Output(payload),
+        _ => Reply::Error(payload),
+    })
+}
+
+fn request_from(address_file: &Path, args: &[String]) -> std::io::Result<Reply> {
+    let content = std::fs::read_to_string(address_file)?;
+    let (address, token) = content
+        .trim()
+        .split_once(' ')
+        .ok_or_else(|| std::io::Error::other("malformed address file"))?;
+    let mut stream = TcpStream::connect(address)?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    stream.write_all(format!("AUTH {token}\n").as_bytes())?;
+    if let Reply::Error(message) = read_reply(&mut reader)? {
+        return Err(std::io::Error::other(message));
+    }
+    let args = serde_json::to_string(args).map_err(std::io::Error::other)?;
+    stream.write_all(format!("RUN {args}\n").as_bytes())?;
+    read_reply(&mut reader)
+}
+
+/// Forward an editor tooling command to the watcher serving the project and
+/// print its output. Returns the process exit code.
+pub fn run_client(cwd: &Path, args: &[String]) -> i32 {
+    let start = client_start_dir(cwd, args);
+    let reply = find_address_file(&start).map(|address_file| request_from(&address_file, args));
+    match reply {
+        Some(Ok(Reply::Output(output))) => {
+            print!("{output}");
+            0
+        }
+        Some(Ok(Reply::Error(message))) => {
+            eprintln!("{message}");
+            1
+        }
+        None | Some(Err(_)) => {
+            eprintln!(
+                "No running `rescript watch` serves {}.\n\
+                 Editor tooling runs inside the watcher: start it with `rescript watch` in the project root.",
+                start.display()
+            );
+            NO_WATCHER_EXIT_CODE
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,7 +324,12 @@ mod tests {
         );
         assert!(request(&mut stream, &mut reader, "RUN nope").starts_with("ERROR invalid arguments"));
 
+        let args = vec!["echo".to_string(), "hi".to_string()];
+        assert_eq!(run_client(project.path(), &args), 0);
+        assert_eq!(run_client(project.path(), &["nope".to_string()]), 1);
+
         drop(server);
         assert!(!address_file.exists());
+        assert_eq!(run_client(project.path(), &args), NO_WATCHER_EXIT_CODE);
     }
 }

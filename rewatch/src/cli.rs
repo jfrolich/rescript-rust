@@ -665,6 +665,14 @@ pub enum Command {
         #[command()]
         path: String,
     },
+    /// Run an editor tooling command in the project's running `rescript watch`.
+    ///
+    /// Exits with 69 when no watcher serves the project.
+    Analysis {
+        /// The command and its arguments, as for `rescript-editor-analysis`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        args: Vec<String>,
+    },
 }
 
 impl Deref for FolderArg {
