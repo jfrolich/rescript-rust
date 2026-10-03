@@ -2552,10 +2552,12 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
             ctx,
         );
     }
+    // predef.ml:248-271: one generic parameter.
     add_type_with_constrs(
         &mut env,
         predef::ident_array(),
         TypeDeclaration {
+            type_params: vec![ctx.new_generic_var(None)],
             type_variance: vec![crate::types::variance::Variance::full()],
             ..decl_abstr(1, false)
         },
@@ -2563,19 +2565,23 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
     );
     // Upstream #8355: iterable / asyncIterable predef types (abstract,
     // covariant, 1 type parameter).
+    // predef.ml:248-271: one generic parameter.
     add_type_with_constrs(
         &mut env,
         predef::ident_iterable(),
         TypeDeclaration {
+            type_params: vec![ctx.new_generic_var(None)],
             type_variance: vec![crate::types::variance::Variance::covariant()],
             ..decl_abstr(1, false)
         },
         ctx,
     );
+    // predef.ml:248-271: one generic parameter.
     add_type_with_constrs(
         &mut env,
         predef::ident_async_iterable(),
         TypeDeclaration {
+            type_params: vec![ctx.new_generic_var(None)],
             type_variance: vec![crate::types::variance::Variance::covariant()],
             ..decl_abstr(1, false)
         },
