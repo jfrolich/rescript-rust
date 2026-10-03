@@ -15564,13 +15564,10 @@ fn compile_js_program_for_output_owned(
     ahash::AHashMap<String, CmjExportArity>,
     ahash::AHashMap<String, crate::lambda::Lambda>,
 ) {
-    let mut collected_possible_required_modules =
-        crate::timing::measure(crate::timing::Phase::Codegen, || {
-            crate::lambda::lam_compile::collect_possible_required_modules_for_lambda(
-                &lowered_lambda,
-            )
-        });
-    collected_possible_required_modules.extend(possible_required_modules.iter().cloned());
+    // The pre-JS result already collected the modules of this lowered lambda
+    // into `possible_required_modules` (see
+    // `compile_preprocessed_structure_in_process_until_js`).
+    let collected_possible_required_modules = possible_required_modules.clone();
     compile_js_program_for_output_owned_with_collected_modules(
         lowered_lambda,
         hoisted_functions,
