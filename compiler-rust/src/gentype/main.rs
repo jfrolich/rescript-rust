@@ -74,12 +74,9 @@ fn canonicalize_with_cached_parent(path: &Path) -> Option<PathBuf> {
     let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
         return std::fs::canonicalize(path).ok();
     };
-    // A missing file (in-process builds write no .cmt) resolves through its
-    // directory like an existing regular file would, so its key is stable
-    // and can be remembered.
-    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return std::fs::canonicalize(path).ok();
-    }
+    // The key is the canonical directory plus the file name, whether or not
+    // the file exists (in-process builds write no .cmt): registration and
+    // lookup both go through here, so it only has to be stable.
     if let Some(dir) = CANONICAL_DIRS.with(|dirs| dirs.borrow().get(parent).cloned()) {
         return Some(dir.join(name));
     }
