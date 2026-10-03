@@ -122,6 +122,14 @@ pub struct DeprecatedUse {
 
 pub struct TypeDescSnapshot(TypeDesc);
 
+impl TypeDescSnapshot {
+    /// The copied descriptor itself.
+    #[inline]
+    pub fn into_desc(self) -> TypeDesc {
+        self.0
+    }
+}
+
 impl Deref for TypeDescSnapshot {
     type Target = TypeDesc;
     fn deref(&self) -> &Self::Target {

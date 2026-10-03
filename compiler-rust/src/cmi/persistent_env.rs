@@ -4482,7 +4482,7 @@ fn restore_child_self_manifests_from_parent_scope(
             continue;
         };
         let manifest = ctx.repr(manifest);
-        let desc = ctx.get_desc(manifest).clone();
+        let desc = ctx.get_desc(manifest).into_desc();
         let TypeDesc::Tconstr { path, args, abbrev } = desc else {
             continue;
         };

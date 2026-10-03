@@ -1451,7 +1451,7 @@ fn rewrite_included_type_paths_to_local(
         return;
     }
 
-    let desc = ctx.get_desc(ty_ref).clone();
+    let desc = ctx.get_desc(ty_ref).into_desc();
     match &desc {
         TypeDesc::Tconstr { path, args, abbrev } => {
             if let Some(rewritten_path) = rewrite_included_path_to_local(
@@ -2659,7 +2659,7 @@ fn rewrite_module_aliases_in_type(
         return;
     }
 
-    let desc = ctx.get_desc(ty_ref).clone();
+    let desc = ctx.get_desc(ty_ref).into_desc();
     match &desc {
         TypeDesc::Tconstr { path, args, abbrev } => {
             let rewritten = rewrite_module_path_prefix_with_aliases(path, old_param, arg_aliases);
@@ -4296,7 +4296,7 @@ fn collect_free_type_variables(
     if !visited.insert(ty) {
         return;
     }
-    let desc = ctx.get_desc(ty).clone();
+    let desc = ctx.get_desc(ty).into_desc();
     match desc {
         TypeDesc::Tvar(_) => {
             result.insert(ty);
@@ -5229,7 +5229,7 @@ fn link_fixed_row_variable(
     }
 
     let replacement = ctx.new_constr(path.clone(), params.to_vec());
-    let replacement_desc = ctx.get_desc(replacement).clone();
+    let replacement_desc = ctx.get_desc(replacement).into_desc();
     ctx.set_desc(row_var, replacement_desc);
     Ok(())
 }
@@ -5608,7 +5608,7 @@ fn build_spread_constructor(
             let copied_args: Vec<TypeExprRef> = if is_pdot_source {
                 args.iter()
                     .map(|&texpr| {
-                        ctx.new_type(ctx.get_desc(texpr).clone())
+                        ctx.new_type(ctx.get_desc(texpr).into_desc())
                     })
                     .collect()
             } else {
@@ -5656,7 +5656,7 @@ fn build_spread_constructor(
                         unwrap_poly_type(ctx, l.ld_type);
                     normalized.ld_type = if is_pdot_source {
                         ctx.new_type(
-                            ctx.get_desc(unwrapped).clone(),
+                            ctx.get_desc(unwrapped).into_desc(),
                         )
                     } else {
                         unwrapped
@@ -7666,7 +7666,7 @@ fn check_constraints_rec(
     if !visited.insert(ty) {
         return Ok(());
     }
-    let desc = ctx.get_desc(ty).clone();
+    let desc = ctx.get_desc(ty).into_desc();
     match desc {
         crate::types::type_expr::TypeDesc::Tconstr { path, args, .. } => {
             let fresh_args = args.iter().map(|_| ctx.new_var(None)).collect();
@@ -9584,7 +9584,7 @@ fn rewrite_package_freshened_type_expr(
         return;
     }
 
-    let desc = ctx.get_desc(ty_ref).clone();
+    let desc = ctx.get_desc(ty_ref).into_desc();
     match &desc {
         TypeDesc::Tconstr { path, args, abbrev } => {
             let rewritten_path = rewrite_package_freshened_type_path(path, fresh_type_ids);
@@ -10146,7 +10146,7 @@ fn apply_with_type_constraints_to_module_type<'b>(
             return;
         }
 
-        let desc = ctx.get_desc(ty).clone();
+        let desc = ctx.get_desc(ty).into_desc();
         match desc {
             TypeDesc::Tconstr { path, args, .. } => {
                 for arg in &args {
@@ -11771,7 +11771,7 @@ fn rewrite_functor_param_type_paths_in_type(
         return;
     }
 
-    let desc = ctx.get_desc(ty).clone();
+    let desc = ctx.get_desc(ty).into_desc();
     match desc {
         TypeDesc::Tconstr { path, args, .. } => {
             let has_args = !args.is_empty();
@@ -16096,7 +16096,7 @@ fn find_unbound_type_var_detail_in_single_type(
         crate::types::ctype::deep_occur(ctx, unbound, ty)
             .then_some(UnboundTypeVarDetail::Type { ty })
     };
-    let desc = ctx.get_desc(ty).clone();
+    let desc = ctx.get_desc(ty).into_desc();
     match desc {
         TypeDesc::Tobject { fields, .. } => {
             let (fields, rest) = crate::types::ctype::flatten_fields(ctx, fields);
@@ -16310,7 +16310,7 @@ fn find_unbound_type_var_in_typed_type_decl_before_closed_decl(
         if !visited.insert(ty) {
             return;
         }
-        if matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(_)) {
+        if matches!(&*ctx.borrow_desc(ty), TypeDesc::Tvar(_)) {
             out.insert(ty);
             return;
         }

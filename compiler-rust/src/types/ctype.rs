@@ -865,8 +865,8 @@ fn mcomp_rec(
     if !state.type_pairs.insert((t1p, t2p)) {
         return Ok(());
     }
-    let d1 = ctx.get_desc(t1p).clone();
-    let d2 = ctx.get_desc(t2p).clone();
+    let d1 = ctx.get_desc(t1p).into_desc();
+    let d2 = ctx.get_desc(t2p).into_desc();
     match (&d1, &d2) {
         (TypeDesc::Tvar(_), TypeDesc::Tvar(_)) => {
             panic!("Ctype.mcomp: unexpected pair of type variables")
@@ -954,7 +954,7 @@ fn mcomp_univars_escape(
         if !visited.insert(t) {
             return false;
         }
-        let desc = ctx.get_desc(t).clone();
+        let desc = ctx.get_desc(t).into_desc();
         match desc {
             TypeDesc::Tpoly { body, vars } => {
                 if vars.iter().any(|v| family.contains(&ctx.repr(*v))) {
@@ -1540,7 +1540,7 @@ fn reify(ctx: &TypeContext, env: &mut Env, newtype_level: i32, ty: TypeExprRef) 
                         )?;
                     } else {
                         let m = ctx.repr(row.row_more);
-                        let TypeDesc::Tvar(name) = ctx.get_desc(m).clone() else {
+                        let TypeDesc::Tvar(name) = ctx.get_desc(m).into_desc() else {
                             panic!("Ctype.reify: non-variable row_more in a non-static row");
                         };
                         let m_level = ctx.get_level(m);
@@ -2207,7 +2207,7 @@ fn unify1_var_link(
         link_type(ctx, var, ty);
         return Ok(());
     };
-    let var_desc = ctx.get_desc(var).clone();
+    let var_desc = ctx.get_desc(var).into_desc();
     link_type(ctx, var, ty);
     if let Err(err) = update_level_checked(ctx, env, level, ty, &mut None, &mut None) {
         ctx.set_desc(var, var_desc);
@@ -5360,8 +5360,8 @@ fn subtype_rec(
             subtype_concrete_typedecls(ctx, env, subtypes, trace, t1, t2, cstrs)
         }
         (TypeDesc::Tobject { fields: f1, .. }, TypeDesc::Tobject { fields: f2, .. })
-            if matches!(&*ctx.get_desc(object_row_of_fields(ctx, *f1)), TypeDesc::Tvar(_))
-                && matches!(&*ctx.get_desc(object_row_of_fields(ctx, *f2)), TypeDesc::Tvar(_)) =>
+            if matches!(&*ctx.borrow_desc(object_row_of_fields(ctx, *f1)), TypeDesc::Tvar(_))
+                && matches!(&*ctx.borrow_desc(object_row_of_fields(ctx, *f2)), TypeDesc::Tvar(_)) =>
         {
             // Same row variable implies same object.
             push_subtype_cstr(cstrs, trace, t1, t2, None);
@@ -5464,7 +5464,7 @@ fn subtype_fields(
     let (fields1, rest1) = flatten_fields(ctx, ty1);
     let (fields2, rest2) = flatten_fields(ctx, ty2);
     let (pairs, miss1, miss2) = associate_fields(fields1, fields2);
-    let rest2_is_nil = matches!(&*ctx.get_desc(ctx.repr(rest2)), TypeDesc::Tnil);
+    let rest2_is_nil = matches!(&*ctx.borrow_desc(ctx.repr(rest2)), TypeDesc::Tnil);
     if !rest2_is_nil {
         if miss1.is_empty() {
             subtype_rec(ctx, env, subtypes, &with_trace(trace, rest1, rest2), rest1, rest2, cstrs)?;
@@ -6391,7 +6391,7 @@ fn rigidify(ctx: &TypeContext, ty: TypeExprRef) -> Vec<TypeExprRef> {
         if !seen.insert(ty) {
             return;
         }
-        let desc = ctx.get_desc(ty).clone();
+        let desc = ctx.get_desc(ty).into_desc();
         match desc {
             TypeDesc::Tvar(_) => {
                 if !vars.contains(&ty) {
@@ -6401,10 +6401,10 @@ fn rigidify(ctx: &TypeContext, ty: TypeExprRef) -> Vec<TypeExprRef> {
             TypeDesc::Tvariant(row) => {
                 let row = crate::types::btype::row_repr(ctx, &row);
                 let more = ctx.repr(row.row_more);
-                if matches!(&*ctx.get_desc(more), TypeDesc::Tvar(_))
+                if matches!(&*ctx.borrow_desc(more), TypeDesc::Tvar(_))
                     && !crate::types::btype::row_fixed(ctx, &row)
                 {
-                    let more_prime = ctx.new_type(ctx.get_desc(more).clone());
+                    let more_prime = ctx.new_type(ctx.get_desc(more).into_desc());
                     ctx.set_level(more_prime, ctx.get_level(more));
                     let fixed_row = crate::types::type_expr::RowDesc {
                         row_fields: Default::default(),
@@ -6457,7 +6457,7 @@ pub(crate) fn matches(ctx: &TypeContext, env: &Env, ty: TypeExprRef, ty2: TypeEx
                 false
             } else {
                 seen.push(expanded);
-                matches!(&*ctx.get_desc(expanded), TypeDesc::Tvar(_))
+                matches!(&*ctx.borrow_desc(expanded), TypeDesc::Tvar(_))
             }
         })
     };
@@ -6474,7 +6474,7 @@ fn full_expand(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
         name: Some((_, args)),
     } = &*desc
         && let Some(first) = args.first()
-        && matches!(&*ctx.get_desc(ctx.repr(*first)), TypeDesc::Tvar(_))
+        && matches!(&*ctx.borrow_desc(ctx.repr(*first)), TypeDesc::Tvar(_))
     {
         let fields = *fields;
         let level = ctx.get_level(expanded);
@@ -6624,10 +6624,10 @@ fn unify_after_expansion<'a>(
         } else {
             (t1, ctx.repr(t1_expanded), t2, ctx.repr(t2_expanded))
         };
-        let left_is_var = matches!(&*ctx.get_desc(left_exp), TypeDesc::Tvar(_));
-        let right_is_var = matches!(&*ctx.get_desc(right_exp), TypeDesc::Tvar(_));
-        let left_is_univar = matches!(&*ctx.get_desc(left_exp), TypeDesc::Tunivar(_));
-        let right_is_univar = matches!(&*ctx.get_desc(right_exp), TypeDesc::Tunivar(_));
+        let left_is_var = matches!(&*ctx.borrow_desc(left_exp), TypeDesc::Tvar(_));
+        let right_is_var = matches!(&*ctx.borrow_desc(right_exp), TypeDesc::Tvar(_));
+        let left_is_univar = matches!(&*ctx.borrow_desc(left_exp), TypeDesc::Tunivar(_));
+        let right_is_univar = matches!(&*ctx.borrow_desc(right_exp), TypeDesc::Tunivar(_));
         if !(left_is_univar && right_is_univar) {
             let var_link = if left_is_var {
                 Some((left_exp, ctx.repr(right)))
@@ -6692,7 +6692,7 @@ fn unify_after_expansion<'a>(
             drop(rhs_desc);
 
             // ctype.ml:2178: `d1` is restored if unification fails.
-            let lhs_desc = ctx.get_desc(lhs).clone();
+            let lhs_desc = ctx.get_desc(lhs).into_desc();
             if state.mode != crate::types::UnifyMode::Pattern {
                 // OCaml unify3 Expression mode (compiler/ml/ctype.ml:2198-2201):
                 // `occur !env t1' t2'` before `link_type t1' t2`.
@@ -10708,7 +10708,7 @@ fn copy_sep_inner(
     delayed_copy: &mut Vec<(TypeExprRef, TypeExprRef)>,
 ) -> TypeExprRef {
     let ty = ctx.repr(ty);
-    let desc = ctx.get_desc(ty).clone();
+    let desc = ctx.get_desc(ty).into_desc();
 
     if let TypeDesc::Tsubst(target) = desc {
         return copy_sep_inner(
@@ -10932,7 +10932,7 @@ fn copy_sep_inner(
             let fresh_vars: Vec<_> = vars
                 .iter()
                 .map(|v| {
-                    let copied = ctx.get_desc(*v).clone();
+                    let copied = ctx.get_desc(*v).into_desc();
                     ctx.new_type(copied)
                 })
                 .collect();
@@ -12026,7 +12026,7 @@ fn subst_identity_copy_rec(
                     } else {
                         let keep = ctx.get_level(more) != GENERIC_LEVEL;
                         let (dup, mut more_copy) = {
-                            let more_desc = ctx.get_desc(more).clone();
+                            let more_desc = ctx.get_desc(more).into_desc();
                             let more_is_constr = matches!(&more_desc, TypeDesc::Tconstr { .. });
                             let dup = ctx.get_level(more) == GENERIC_LEVEL
                                 || super::btype::static_row(ctx, &row)
@@ -12525,7 +12525,7 @@ pub(crate) fn copy_type_cached(
                     let more = ctx.repr(row.row_more);
                     let more_level = ctx.get_level(more);
                     let keep = more_level != GENERIC_LEVEL;
-                    let mut more_copy = match ctx.get_desc(more).clone() {
+                    let mut more_copy = match ctx.get_desc(more).into_desc() {
                         TypeDesc::Tconstr { .. } | TypeDesc::Tnil => {
                             copy_type_cached(ctx, more, cache)
                         }
@@ -12840,7 +12840,7 @@ pub fn sort_all_object_fields(ctx: &TypeContext) {
                 let (sorted_fields, rest) = flatten_fields(ctx, fi_repr);
                 if !sorted_fields.is_empty() {
                     let new_fi = build_fields(ctx, fi_level, &sorted_fields, rest);
-                    let new_desc = ctx.get_desc(new_fi).clone();
+                    let new_desc = ctx.get_desc(new_fi).into_desc();
                     ctx.set_desc(fi_repr, new_desc);
                 }
             }
@@ -12890,7 +12890,7 @@ pub fn normalize_all_types(ctx: &TypeContext) {
                     let (sorted_fields, rest) = flatten_fields(ctx, fi_repr);
                     if !sorted_fields.is_empty() {
                         let new_fi = build_fields(ctx, fi_level, &sorted_fields, rest);
-                        let new_desc = ctx.get_desc(new_fi).clone();
+                        let new_desc = ctx.get_desc(new_fi).into_desc();
                         ctx.set_desc(fi_repr, new_desc);
                     }
                 }
@@ -12962,7 +12962,7 @@ fn normalize_type_rec(ctx: &TypeContext, visited: &mut HashSet<TypeExprRef>, ty:
                 if !sorted_fields.is_empty() {
                     let new_fi = build_fields(ctx, fi_level, &sorted_fields, rest);
                     // Mutate the fields pointer's desc to the sorted chain's desc
-                    let new_desc = ctx.get_desc(new_fi).clone();
+                    let new_desc = ctx.get_desc(new_fi).into_desc();
                     ctx.set_desc(fi_repr, new_desc);
                 }
             }
@@ -13025,7 +13025,7 @@ fn nondep_type_rec<'a>(
     let stub = ctx.new_generic_type(TypeDesc::Tvar(None));
     cache.insert(ty, stub);
 
-    let desc = ctx.get_desc(ty).clone();
+    let desc = ctx.get_desc(ty).into_desc();
     let new_desc = match &desc {
         TypeDesc::Tconstr { path, args, abbrev } => {
             if path.is_free(mid) {
@@ -13290,7 +13290,7 @@ fn unroll_abbrev<'a>(
     }
 
     let level = ctx.get_level(ty);
-    let desc = ctx.get_desc(ty).clone();
+    let desc = ctx.get_desc(ty).into_desc();
     let unrolled = ctx.new_type(desc);
     ctx.set_level(unrolled, level);
 
@@ -13607,7 +13607,7 @@ mod tests {
         ctx.restore_type_state(type_snapshot);
         state.restore_backtrack_state(state_snapshot);
 
-        assert!(matches!(&*ctx.get_desc(variable), TypeDesc::Tvar(Some(name)) if name == "kept"));
+        assert!(matches!(&*ctx.borrow_desc(variable), TypeDesc::Tvar(Some(name)) if name == "kept"));
     }
 
     #[test]
@@ -13888,7 +13888,7 @@ mod tests {
         assert_eq!(owned.type_params[0], manifest);
         ctx.set_desc(manifest, TypeDesc::Tvar(Some("shared".to_string())));
         assert!(
-            matches!(&*ctx.get_desc(first.type_manifest.unwrap()), TypeDesc::Tvar(Some(name)) if name == "shared")
+            matches!(&*ctx.borrow_desc(first.type_manifest.unwrap()), TypeDesc::Tvar(Some(name)) if name == "shared")
         );
     }
 

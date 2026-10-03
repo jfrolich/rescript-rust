@@ -2572,7 +2572,7 @@ fn transl_type_globalized(
                     // OCaml typetexp.ml:675-676: under the Fixed policy an
                     // undeclared variable that is still a Tvar is unbound.
                     if fixed_type_variables
-                        && matches!(&*ctx.get_desc(ctx.repr(used_ty)), TypeDesc::Tvar(_))
+                        && matches!(&*ctx.borrow_desc(ctx.repr(used_ty)), TypeDesc::Tvar(_))
                     {
                         let loc = tctx
                             .used_variable_locs
@@ -2596,7 +2596,7 @@ fn transl_type_globalized(
             } else {
                 // OCaml typetexp.ml:675-676 (Fixed policy).
                 if fixed_type_variables
-                    && matches!(&*ctx.get_desc(ctx.repr(used_ty)), TypeDesc::Tvar(_))
+                    && matches!(&*ctx.borrow_desc(ctx.repr(used_ty)), TypeDesc::Tvar(_))
                 {
                     let loc = tctx
                         .used_variable_locs
@@ -7606,7 +7606,7 @@ fn type_statement<'a>(
     // variable generalizable past the current level (it never returns).
     let ty = crate::types::ctype::expand_head(ctx, env, typed.exp_type);
     let tv = ctx.new_var(None);
-    if matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(_)) && ctx.get_level(ty) > ctx.get_level(tv) {
+    if matches!(&*ctx.borrow_desc(ty), TypeDesc::Tvar(_)) && ctx.get_level(ty) > ctx.get_level(tv) {
         let loc = final_subexpression(tctx.arena, expr).pexp_loc;
         tctx.report_warning(loc, Warning::NonreturningStatement);
     }
@@ -17560,7 +17560,7 @@ fn type_setfield(
                 // `Typetexp.find_all_labels` raises `Unbound_label`.
                 let ty_exp_repr = ctx.repr(ty_exp);
                 let from_type =
-                    matches!(&*ctx.get_desc(ty_exp_repr), TypeDesc::Tconstr { .. })
+                    matches!(&*ctx.borrow_desc(ty_exp_repr), TypeDesc::Tconstr { .. })
                         .then_some(ty_exp_repr);
                 return Err(TypeCoreError::UnboundRecordField {
                     loc: field_lid.loc,
@@ -25459,7 +25459,7 @@ fn qualify_label_description_paths<'a>(
         }
         visited.push(repr);
 
-        let desc = ctx.get_desc(repr).clone();
+        let desc = ctx.get_desc(repr).into_desc();
         match desc {
             TypeDesc::Tconstr { path, args, abbrev } => {
                 for arg in &args {
@@ -26866,7 +26866,7 @@ fn force_type_paths_for_lookup_from_type<'a>(
         return;
     }
 
-    let desc = ctx.get_desc(ty).clone();
+    let desc = ctx.get_desc(ty).into_desc();
     match desc {
         TypeDesc::Tconstr { path, args, .. } => {
             force_type_path_for_lookup_from_type(ctx, env, pers_env, &path);
@@ -27339,7 +27339,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
         return;
     }
 
-    let desc = ctx.get_desc(repr).clone();
+    let desc = ctx.get_desc(repr).into_desc();
     match desc {
         TypeDesc::Tconstr { path, args, abbrev } => {
             for arg in &args {

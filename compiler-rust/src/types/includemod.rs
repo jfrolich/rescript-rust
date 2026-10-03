@@ -3640,8 +3640,8 @@ fn type_manifest_for_inclusion(
         env,
         sig_manifest,
     ));
-    let impl_desc = type_ctx.get_desc(impl_expanded).clone();
-    let sig_desc = type_ctx.get_desc(sig_expanded).clone();
+    let impl_desc = type_ctx.get_desc(impl_expanded).into_desc();
+    let sig_desc = type_ctx.get_desc(sig_expanded).into_desc();
 
     match (&impl_desc, &sig_desc) {
         (TypeDesc::Tvariant(impl_row), TypeDesc::Tvariant(sig_row))
