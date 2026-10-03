@@ -22425,9 +22425,11 @@ where
                     ),
                     row_closed,
                     row_fixed,
+                    // `Subst.typexp` maps the row name's path like a
+                    // `Tconstr` path (compiler/ml/subst.ml:226-231).
                     row_name: row_name.as_ref().map(|(path, args)| {
                         (
-                            path.clone(),
+                            type_path(path),
                             args.iter()
                                 .map(|t| {
                                     copy_lookup_type_expr_with_paths(
@@ -32861,6 +32863,36 @@ mod tests {
     }
 
     #[test]
+    fn copying_with_paths_maps_the_row_name_path() {
+        // `Subst.typexp` maps a row name's path like a `Tconstr` path
+        // (compiler/ml/subst.ml:226-231): `[> Types.t]` reached through an
+        // including module must name that module's `Types`.
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let local = Path::pdot(Path::pident(Ident::create_local("Types")), "t");
+        let rerooted = Path::pdot(
+            Path::pdot(Path::pident(Ident::create_persistent("C")), "Types"),
+            "t",
+        );
+        let row_more = ctx.new_var(None);
+        let ty = ctx.new_type(TypeDesc::Tvariant(Box::new(crate::types::type_expr::RowDesc {
+            row_fields: Vec::new().into(),
+            row_more,
+            row_closed: false,
+            row_fixed: false,
+            row_name: Some((local.clone(), Vec::new())),
+        })));
+        let map = |p: &Path| if p.same(&local) { rerooted.clone() } else { p.clone() };
+        let copied = copy_type_expr_mapping_paths(&ctx, ty, &mut TypeExprRefMap::new(), &map);
+        match &*ctx.get_desc(ctx.repr(copied)) {
+            TypeDesc::Tvariant(row) => {
+                let (name, _) = row.row_name.as_ref().expect("row name");
+                assert!(name.same(&rerooted));
+            }
+            other => panic!("expected a variant, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_convert_constant_int() {
         let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("42"), None);
         let result = convert_constant(&cst, LocIdx(0)).unwrap();
@@ -33376,13 +33408,6 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
             crate::types::parmatch::PredKind::Partial => {
                 (PatternMode::Normal, self.partial_explode)
             }
-            // `check_unused` only asks whether the counter-example types.
-            // It is built from constructors of patterns that already typed
-            // against this type, so only a GADT constructor (type equations
-            // or existentials) can refute it; skip retyping otherwise.
-            crate::types::parmatch::PredKind::Unused if !counter_example_may_refute(&u) => {
-                return Some(u);
-            }
             crate::types::parmatch::PredKind::Unused => (PatternMode::SplitOr, 5),
         };
         partial_pred(
@@ -33600,26 +33625,6 @@ fn pattern_contains_or(p: &Pattern) -> bool {
         PatternDesc::Tpat_construct(_, _, ps) => ps.iter().any(pattern_contains_or),
         PatternDesc::Tpat_variant(_, arg, _) => arg.as_deref().is_some_and(pattern_contains_or),
         PatternDesc::Tpat_record(fields, _, _) => fields.iter().any(|(_, _, p, _)| pattern_contains_or(p)),
-    }
-}
-
-/// Whether typing counter-example `u` can fail: only through a GADT
-/// constructor, whose result type or existentials constrain the match.
-fn counter_example_may_refute(u: &Pattern) -> bool {
-    match &u.pat_desc {
-        PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) | PatternDesc::Tpat_constant(_) => false,
-        PatternDesc::Tpat_alias(p, _, _) => counter_example_may_refute(p),
-        PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => ps.iter().any(counter_example_may_refute),
-        PatternDesc::Tpat_construct(_, cstr, ps) => {
-            cstr.cstr_generalized
-                || !cstr.cstr_existentials.is_empty()
-                || ps.iter().any(counter_example_may_refute)
-        }
-        PatternDesc::Tpat_variant(_, arg, _) => arg.as_deref().is_some_and(counter_example_may_refute),
-        PatternDesc::Tpat_record(fields, _, _) => {
-            fields.iter().any(|(_, _, p, _)| counter_example_may_refute(p))
-        }
-        PatternDesc::Tpat_or(p1, p2, _) => counter_example_may_refute(p1) || counter_example_may_refute(p2),
     }
 }
 
