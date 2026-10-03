@@ -736,7 +736,7 @@ pub struct PersistentEnv {
 /// clones are per compilation, and sharing one lock across workers made it
 /// contended.
 #[derive(Default)]
-struct OutsideLoadPathMemo(Mutex<crate::fast_hash::AHashMap<String, bool>>);
+struct OutsideLoadPathMemo(std::cell::RefCell<crate::fast_hash::AHashMap<String, bool>>);
 
 impl Clone for OutsideLoadPathMemo {
     fn clone(&self) -> Self {
@@ -1108,7 +1108,7 @@ impl PersistentEnv {
         let Some(visible) = self.visible_package_roots.as_deref() else {
             return false;
         };
-        if let Some(&outside) = self.outside_load_path_memo.0.lock().unwrap().get(name) {
+        if let Some(&outside) = self.outside_load_path_memo.0.borrow().get(name) {
             return outside;
         }
         let visible_root = |root: &FsPath| visible.iter().any(|v| v == root);
@@ -1132,8 +1132,7 @@ impl PersistentEnv {
         };
         self.outside_load_path_memo
             .0
-            .lock()
-            .unwrap()
+            .borrow_mut()
             .insert(name.to_string(), outside);
         outside
     }
