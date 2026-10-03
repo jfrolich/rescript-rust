@@ -3000,7 +3000,7 @@ fn compile_runtime_module_from_source(
 
 /// List the runtime `.res` sources as `(module name, path)`, sorted by module
 /// name.
-fn runtime_source_paths(runtime_path: &Path) -> Result<Vec<(String, PathBuf)>> {
+pub(crate) fn runtime_source_paths(runtime_path: &Path) -> Result<Vec<(String, PathBuf)>> {
     let mut paths = Vec::new();
     for entry in std::fs::read_dir(runtime_path)
         .with_context(|| format!("failed to read runtime directory {}", runtime_path.display()))?

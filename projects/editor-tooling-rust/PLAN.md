@@ -59,13 +59,18 @@ compiler assets from disk; it works on the Rust parse and typed trees.
 | Client + server protocol | - | `rescript analysis`, `tooling_server.rs` | done |
 | JSON printer | yojson `safe.ml` | `analysis/json.rs` | done |
 | `Hashtbl` order | stdlib | `analysis/hashtbl.rs` | done |
-| `test` harness | `cli.ml` `test` | `analysis/mod.rs` | `doc` only |
+| `test` harness | `cli.ml` `test` | `analysis/mod.rs` | `doc`, `def`, `typ`, `ref` |
 | documentSymbol | `document_symbol.ml` | `analysis/document_symbol.rs` | done |
-| Data model | `shared_types.ml` | - | next |
-| Module items from typed tree | `process_cmt.ml` | - | next |
-| Positions/references | `process_extra.ml` | - | |
+| Data model | `shared_types.ml` | `analysis/shared_types.rs` | done |
+| Typed-tree iterator | `tast_iterator.ml` | `types/tast_iterator.rs` | done |
+| Module items from typed tree | `process_cmt.ml` | `analysis/process_cmt.rs` | done (no partial typing yet) |
+| Positions/references | `process_extra.ml` | `analysis/process_extra.rs` | done |
+| Path resolution | `resolve_path.ml` | `analysis/resolve_path.rs` | done |
+| Loading modules (`.cmt` reading) | `cmt.ml`, `process_cmt.ml` | `analysis/session.rs` + `rewatch/src/build/tooling.rs` (`WatchProject`) | done: on-demand type-checking, runtime included |
+| URIs | `uri.ml`, `lsp` `Uri` | `analysis/uri.rs` | done |
+| definition, typeDefinition, references | `references.ml`, `commands.ml` | `analysis/references.rs`, `analysis/commands.rs` | done: all 36 test cases match |
 | Type printing | `Printtyp` via `shared.ml` | - | |
-| hover, definition, typeDefinition, references, rename | | - | |
+| hover, rename, prepareRename | | - | next |
 | completion (+ partial typing) | `completion_*.ml` | - | |
 | signatureHelp, inlayHint, codeLens, semanticTokens, codeActions, createInterface, format, diagnosticSyntax | | - | |
 | reanalyze | `analysis/reanalyze` | - | |
@@ -85,3 +90,24 @@ RESCRIPT_RUNTIME=$(realpath ../../../packages/@rescript/runtime) \
 The test projects' Makefiles run their `test.sh` under a watcher
 (`tests/analysis_tests/with-watcher.sh`); `test.sh` still calls the OCaml
 binary and moves to `rescript analysis` as commands are ported.
+
+## Quirks the port keeps
+
+- `Uri.is_interface` is `uri |> Lsp.Uri.to_string |> Filename.check_suffix "i"`,
+  which asks whether `"i"` ends with the URI, so it is false for every file.
+  Definition and references across `.res`/`.resi` pairs (and their expected
+  output) depend on it.
+
+## Reference oracle
+
+The OCaml analysis still runs against `.cmt` files from a subprocess build:
+
+```bash
+cd tests/analysis_tests/tests
+R=$(realpath ../../..)
+RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE=$R/_build/install/default/bin/bsc \
+  RESCRIPT_RUNTIME=$R/packages/@rescript/runtime $R/rewatch/target/release/rescript build
+$R/_build/install/default/bin/rescript-editor-analysis test src/X.res
+```
+
+Put `//^db+` at the top of a scratch test file for the OCaml debug log.

@@ -6,15 +6,18 @@
 //! command gets its arguments as `rescript-editor-analysis` would (see
 //! analysis/bin/main.ml) and returns what that binary prints.
 
+pub mod commands;
 pub mod document_symbol;
 pub mod hashtbl;
 pub mod json;
 pub mod process_attributes;
 pub mod process_cmt;
 pub mod process_extra;
+pub mod references;
 pub mod resolve_path;
 pub mod session;
 pub mod shared_types;
+pub mod uri;
 
 use json::Json;
 use std::path::{Path, PathBuf};
@@ -138,13 +141,68 @@ fn read_file(path: &Path) -> Option<String> {
         .map(crate::source_text::latin1_bytes_to_string)
 }
 
+/// What commands run in: the project and how URIs print.
+struct Cli<'p> {
+    cwd: PathBuf,
+    session: session::ProjectSession<'p>,
+    uri_style: uri::UriStyle,
+}
+
+impl Cli<'_> {
+    fn full(&self, path: &str) -> Option<&session::Loaded> {
+        self.session.full_from_path(&resolve(&self.cwd, path))
+    }
+
+    /// `Cli.definition`.
+    fn definition(&self, out: &mut Output, path: &str, pos: (i32, i32), debug: bool) {
+        let full = self.full(path);
+        match commands::definition(&self.session, self.uri_style, full, pos, debug, out) {
+            None => print_json(out, &Json::Null),
+            Some(location) => print_json(out, &location),
+        }
+    }
+
+    /// `Cli.type_definition`.
+    fn type_definition(&self, out: &mut Output, path: &str, pos: (i32, i32), debug: bool) {
+        let full = self.full(path);
+        match commands::type_definition(&self.session, self.uri_style, full, pos, debug, out) {
+            None => print_json(out, &Json::Null),
+            Some(location) => print_json(out, &location),
+        }
+    }
+
+    /// `Cli.references`.
+    fn references(&self, out: &mut Output, path: &str, pos: (i32, i32), debug: bool) {
+        let full = self.full(path);
+        let all_locs = commands::references(&self.session, self.uri_style, full, pos, debug, out);
+        if all_locs.is_empty() {
+            print_json(out, &Json::Null);
+        } else {
+            print_json(out, &Json::List(all_locs));
+        }
+    }
+}
+
+fn parse_pos(line: &str, col: &str) -> Result<(i32, i32), String> {
+    let int = |s: &str| s.parse::<i32>().map_err(|_| format!("not a number: {s}"));
+    Ok((int(line)?, int(col)?))
+}
+
 /// Run a command; the error is a usage problem, reported instead of output.
-pub fn run(request: &Request) -> Result<Vec<u8>, String> {
+pub fn run(request: &Request, project: &dyn session::Project) -> Result<Vec<u8>, String> {
     let mut out = Output::default();
+    let mut cli = Cli {
+        cwd: request.cwd.clone(),
+        session: session::ProjectSession::new(project),
+        uri_style: uri::UriStyle::default(),
+    };
     let args: Vec<&str> = request.args.iter().map(String::as_str).collect();
     match args.as_slice() {
         ["documentSymbol", path] => document_symbol(&mut out, &request.cwd, path),
-        ["test", path] => test(&mut out, &request.cwd, path)?,
+        ["definition", path, line, col] => cli.definition(&mut out, path, parse_pos(line, col)?, false),
+        ["typeDefinition", path, line, col] => cli.type_definition(&mut out, path, parse_pos(line, col)?, false),
+        ["references", path, line, col] => cli.references(&mut out, path, parse_pos(line, col)?, false),
+        ["test", path] => test(&mut out, &mut cli, path)?,
         [command, ..] => return Err(format!("`{command}` is not available inside the watcher yet")),
         [] => return Err("no command".to_string()),
     }
@@ -183,7 +241,10 @@ fn test_marker_length(line: &str) -> Option<usize> {
 
 /// `Cli.test`: run the command each `//^xxx` comment names, at the position
 /// of the `^` on the line above.
-fn test(out: &mut Output, cwd: &Path, path: &str) -> Result<(), String> {
+fn test(out: &mut Output, cli: &mut Cli<'_>, path: &str) -> Result<(), String> {
+    cli.uri_style.strip_path = true;
+    let cwd = cli.cwd.clone();
+    let cwd = cwd.as_path();
     let text = read_file(&resolve(cwd, path)).ok_or_else(|| format!("cannot read {path}"))?;
     for (i, line) in text.split('\n').enumerate() {
         let Some(mlen) = test_marker_length(line) else {
@@ -193,8 +254,22 @@ fn test(out: &mut Output, cwd: &Path, path: &str) -> Result<(), String> {
             continue;
         }
         let rest = &line[mlen..];
+        let pos = (i as i32 - 1, mlen as i32 - 1);
+        let position = format!("{path} {}:{}", pos.0, pos.1);
         let command = rest.get(..3).ok_or_else(|| format!("{path}:{}: truncated test command", i + 1))?;
         match command {
+            "def" => {
+                out.print_endline(&format!("Definition {position}"));
+                cli.definition(out, path, pos, true);
+            }
+            "ref" => {
+                out.print_endline(&format!("References {position}"));
+                cli.references(out, path, pos, true);
+            }
+            "typ" => {
+                out.print_endline(&format!("TypeDefinition {position}"));
+                cli.type_definition(out, path, pos, true);
+            }
             "doc" => {
                 out.print_endline(&format!("DocumentSymbol {path}"));
                 document_symbol(out, cwd, path);

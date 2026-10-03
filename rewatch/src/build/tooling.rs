@@ -6,11 +6,16 @@
 //! type-checked on demand against the registry, and the command works on the
 //! resulting Rust typed tree.
 
-use super::build_types::{BuildCommandState, SourceType, StoredAst};
+use super::build_types::{BuildCommandState, SourceType, StoredAst, StoredSignatureAst, StoredStructureAst};
 use super::{compile, packages, parse};
-use crate::helpers;
+use crate::{config, helpers};
 use anyhow::{Result, anyhow};
+use rescript_compiler::analysis::session::{Project, SourcePaths, TypedSource};
+use rescript_compiler::cmi::persistent_env::ModuleRegistry;
+use rescript_compiler::parse_arena::ParseArena;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// `path` with its nearest existing ancestor canonicalized, so tooling may
 /// name a project through another spelling (e.g. a symlink).
@@ -73,56 +78,316 @@ pub fn source_module<'a>(build_state: &'a BuildCommandState, path: &Path) -> Opt
     })
 }
 
-/// Type-check a module's implementation on demand, from its current source,
-/// and run `query` on the result. The typed tree is not `Send`, so `query`
-/// runs on the thread that type-checks.
-pub fn with_typed_implementation<R: Send>(
-    build_state: &BuildCommandState,
-    source: &SourceModule<'_>,
-    query: impl FnOnce(&rescript_compiler::driver::ToolingTypedModule) -> R + Send,
-) -> Result<R> {
-    let options = compile::build_compiler_options(
-        source.package,
-        source.module_name,
-        source.implementation,
-        build_state,
-    )?;
-    let StoredAst::Structure(ast) =
-        parse::parse_for_tooling(source.package, source.implementation, build_state)?
-    else {
-        return Err(anyhow!(
-            "expected an implementation AST for {}",
-            source.implementation.display()
-        ));
-    };
-    let filename = helpers::ocaml_absname(&Path::new(&source.package.path).join(source.implementation));
-    let registry = build_state.snapshot_module_registry();
-    // The compiler may recurse deeply on large modules; give it the stack
-    // the build's compile workers get.
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .name("rewatch-tooling-typecheck".to_string())
-            .stack_size(256 * 1024 * 1024)
-            .spawn_scoped(scope, || {
+impl rescript_compiler::analysis::session::ParsedSource for StoredStructureAst {
+    fn arena(&self) -> &ParseArena {
+        &self.arena
+    }
+}
+
+impl rescript_compiler::analysis::session::ParsedSource for StoredSignatureAst {
+    fn arena(&self) -> &ParseArena {
+        &self.arena
+    }
+}
+
+/// A parsed runtime source.
+struct RuntimeParsed(ParseArena);
+
+impl rescript_compiler::analysis::session::ParsedSource for RuntimeParsed {
+    fn arena(&self) -> &ParseArena {
+        &self.0
+    }
+}
+
+/// The runtime sources, which builds compile from source as well.
+struct Runtime {
+    root: PathBuf,
+    path: PathBuf,
+    config: config::Config,
+    /// Module name to implementation path.
+    modules: BTreeMap<String, PathBuf>,
+}
+
+impl Runtime {
+    fn load(root: &Path) -> Option<Runtime> {
+        let config = packages::read_config(root).ok()?;
+        let path = root.join("lib").join("ocaml");
+        let modules = compile::runtime_source_paths(&path).ok()?.into_iter().collect();
+        Some(Runtime {
+            root: root.to_path_buf(),
+            path,
+            config,
+            modules,
+        })
+    }
+
+    fn interface(implementation: &Path) -> Option<PathBuf> {
+        let interface = implementation.with_extension("resi");
+        interface.exists().then_some(interface)
+    }
+}
+
+/// The watch session as the analysis sees it: the project's modules, the
+/// runtime's, and on-demand type-checking against the published interfaces.
+pub struct WatchProject<'a> {
+    build_state: &'a BuildCommandState,
+    /// The package of the file a command is about (OCaml's `package`).
+    package: Option<&'a packages::Package>,
+    runtime: Option<Runtime>,
+    registry: std::sync::OnceLock<ModuleRegistry>,
+}
+
+impl<'a> WatchProject<'a> {
+    pub fn new(build_state: &'a BuildCommandState, cwd: &Path, args: &[String]) -> Self {
+        // The package of the first argument naming a project source.
+        let package = args
+            .iter()
+            .filter(|arg| arg.ends_with(".res") || arg.ends_with(".resi"))
+            .find_map(|arg| source_module(build_state, &cwd.join(arg)))
+            .map(|source| source.package)
+            .or_else(|| build_state.packages.values().find(|p| p.is_root));
+        WatchProject {
+            build_state,
+            package,
+            runtime: Runtime::load(&build_state.compiler_info.runtime_path),
+            registry: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn registry(&self) -> &ModuleRegistry {
+        self.registry
+            .get_or_init(|| self.build_state.snapshot_module_registry())
+    }
+
+    fn typecheck_project_module(&self, source: &SourceModule<'_>, interface: bool) -> Result<TypedSource> {
+        let relative = match (interface, source.interface) {
+            (true, Some(interface)) => interface,
+            (true, None) => return Err(anyhow!("{} has no interface", source.module_name)),
+            (false, _) => source.implementation,
+        };
+        let options =
+            compile::build_compiler_options(source.package, source.module_name, relative, self.build_state)?;
+        let path = Path::new(&source.package.path).join(relative);
+        let filename = helpers::ocaml_absname(&path).to_string_lossy().into_owned();
+        let parsed = parse::parse_for_tooling(source.package, relative, self.build_state)?;
+        Ok(match parsed {
+            StoredAst::Structure(ast) => {
                 let typed = rescript_compiler::driver::typecheck_structure_for_tooling(
                     &ast.arena,
                     &ast.structure,
-                    &filename.to_string_lossy(),
+                    &filename,
                     source.module_name,
                     &options,
-                    &registry,
+                    self.registry(),
                 );
-                query(&typed)
+                TypedSource {
+                    parsed: ast,
+                    typed,
+                    path,
+                }
+            }
+            StoredAst::Signature(ast) => {
+                let typed = rescript_compiler::driver::typecheck_signature_for_tooling(
+                    &ast.arena,
+                    &ast.signature,
+                    &filename,
+                    source.module_name,
+                    &options,
+                    self.registry(),
+                );
+                TypedSource {
+                    parsed: ast,
+                    typed,
+                    path,
+                }
+            }
+        })
+    }
+
+    fn typecheck_runtime_module(
+        &self,
+        runtime: &Runtime,
+        module_name: &str,
+        interface: bool,
+    ) -> Result<TypedSource> {
+        let implementation = runtime
+            .modules
+            .get(module_name)
+            .ok_or_else(|| anyhow!("no runtime module {module_name}"))?;
+        let options = compile::runtime_compiler_options(
+            &runtime.root,
+            &runtime.path,
+            module_name,
+            implementation,
+            &runtime.config,
+        );
+        let path = if interface {
+            Runtime::interface(implementation).ok_or_else(|| anyhow!("{module_name} has no interface"))?
+        } else {
+            implementation.clone()
+        };
+        let source = compile::read_source_latin1(&path)?;
+        let filename = path.to_string_lossy().into_owned();
+        Ok(if interface {
+            let (arena, signature, _) = compile::parse_runtime_signature(&path, &source)?;
+            let typed = rescript_compiler::driver::typecheck_signature_for_tooling(
+                &arena,
+                &signature,
+                &filename,
+                module_name,
+                &options,
+                self.registry(),
+            );
+            TypedSource {
+                parsed: Arc::new(RuntimeParsed(arena)),
+                typed,
+                path,
+            }
+        } else {
+            let (arena, structure, _) = compile::parse_runtime_structure(&path, &source)?;
+            let typed = rescript_compiler::driver::typecheck_structure_for_tooling(
+                &arena,
+                &structure,
+                &filename,
+                module_name,
+                &options,
+                self.registry(),
+            );
+            TypedSource {
+                parsed: Arc::new(RuntimeParsed(arena)),
+                typed,
+                path,
+            }
+        })
+    }
+
+    fn project_source(&self, module_name: &str) -> Option<SourceModule<'a>> {
+        let (module_name, module) = self.build_state.modules.get_key_value(module_name)?;
+        let SourceType::SourceFile(source_file) = &module.source_type else {
+            return None;
+        };
+        Some(SourceModule {
+            module_name,
+            package: self.build_state.packages.get(&module.package_name)?,
+            implementation: source_file.implementation.path.as_path(),
+            interface: source_file.interface.as_ref().map(|i| i.path.as_path()),
+            is_interface: false,
+        })
+    }
+}
+
+impl Project for WatchProject<'_> {
+    fn module_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.build_state.modules.keys().cloned().collect();
+        if let Some(runtime) = &self.runtime {
+            names.extend(
+                runtime
+                    .modules
+                    .keys()
+                    .filter(|name| !self.build_state.modules.contains_key(*name))
+                    .cloned(),
+            );
+        }
+        names
+    }
+
+    fn module_for_path(&self, path: &Path) -> Option<String> {
+        if let Some(source) = source_module(self.build_state, path) {
+            return Some(source.module_name.to_string());
+        }
+        let path = canonical(path);
+        let runtime = self.runtime.as_ref()?;
+        runtime.modules.iter().find_map(|(name, implementation)| {
+            let implementation = canonical(implementation);
+            let is_module =
+                implementation == path || Runtime::interface(&implementation).is_some_and(|i| i == path);
+            is_module.then(|| name.clone())
+        })
+    }
+
+    fn paths_for_module(&self, module_name: &str) -> Option<SourcePaths> {
+        if let Some(module) = self.build_state.modules.get(module_name) {
+            return Some(match &module.source_type {
+                SourceType::SourceFile(_) => {
+                    let source = self.project_source(module_name)?;
+                    let root = Path::new(&source.package.path);
+                    SourcePaths {
+                        implementation: Some(root.join(source.implementation)),
+                        interface: source.interface.map(|i| root.join(i)),
+                    }
+                }
+                SourceType::MlMap(_) => SourcePaths::default(),
+            });
+        }
+        let implementation = self.runtime.as_ref()?.modules.get(module_name)?;
+        Some(SourcePaths {
+            implementation: Some(implementation.clone()),
+            interface: Runtime::interface(implementation),
+        })
+    }
+
+    fn project_files(&self) -> Vec<String> {
+        let Some(package) = self.package else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = self
+            .build_state
+            .modules
+            .iter()
+            .filter(|(_, module)| {
+                module.package_name == package.name && matches!(module.source_type, SourceType::SourceFile(_))
             })
-            .map_err(|err| anyhow!("could not start type-checking: {err}"))?
-            .join()
-            .map_err(|_| anyhow!("type-checking {} panicked", source.module_name))
-    })
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn namespace(&self) -> Option<String> {
+        match &self.package?.namespace {
+            packages::Namespace::Namespace(namespace) => Some(namespace.clone()),
+            packages::Namespace::NamespaceWithEntry { namespace, .. } => Some(namespace.clone()),
+            packages::Namespace::NoNamespace => None,
+        }
+    }
+
+    fn typecheck(&self, module_name: &str, interface: bool) -> Option<TypedSource> {
+        let result = match self.project_source(module_name) {
+            Some(source) => self.typecheck_project_module(&source, interface),
+            None => match &self.runtime {
+                Some(runtime) => self.typecheck_runtime_module(runtime, module_name, interface),
+                None => return None,
+            },
+        };
+        match result {
+            Ok(typed) => Some(typed),
+            Err(err) => {
+                log::debug!("tooling: cannot type-check {module_name}: {err:#}");
+                None
+            }
+        }
+    }
 }
 
 /// Run an editor tooling command (the arguments of `rescript-editor-analysis`,
-/// relative paths resolved against `cwd`) and return what it prints.
-pub fn run_command(_build_state: &BuildCommandState, cwd: PathBuf, args: Vec<String>) -> Result<Vec<u8>> {
-    rescript_compiler::analysis::run(&rescript_compiler::analysis::Request { cwd, args })
-        .map_err(|err| anyhow!(err))
+/// relative paths resolved against `cwd`) and return what it prints. Typed
+/// trees are not `Send`, so the whole command runs on one thread, with the
+/// stack the build's compile workers get.
+pub fn run_command(build_state: &BuildCommandState, cwd: PathBuf, args: Vec<String>) -> Result<Vec<u8>> {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("rewatch-tooling".to_string())
+            .stack_size(256 * 1024 * 1024)
+            .spawn_scoped(scope, || {
+                let project = WatchProject::new(build_state, &cwd, &args);
+                rescript_compiler::analysis::run(
+                    &rescript_compiler::analysis::Request { cwd, args },
+                    &project,
+                )
+            })
+            .map_err(|err| anyhow!("could not start the tooling thread: {err}"))?
+            .join()
+            .map_err(|_| anyhow!("the tooling command panicked"))?
+            .map_err(|err| anyhow!(err))
+    })
 }

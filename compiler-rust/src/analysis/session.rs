@@ -42,6 +42,10 @@ pub trait Project {
     fn module_for_path(&self, path: &Path) -> Option<String>;
     /// `Hashtbl.find_opt package.paths_for_module`.
     fn paths_for_module(&self, module_name: &str) -> Option<SourcePaths>;
+    /// `package.project_files`: the package's own modules, sorted.
+    fn project_files(&self) -> Vec<String>;
+    /// `package.namespace`.
+    fn namespace(&self) -> Option<String>;
     /// Type-check a module's interface or implementation from its current
     /// source.
     fn typecheck(&self, module_name: &str, interface: bool) -> Option<TypedSource>;
@@ -100,6 +104,27 @@ impl<'p> ProjectSession<'p> {
             .get()
             .and_then(Option::as_ref)
             .expect("a file's module id names a loaded module")
+    }
+
+    /// `Cmt.full_from_module`: the interface when there is one.
+    pub fn full_from_module(&self, module_name: &str) -> Option<&Loaded> {
+        let paths = self.project.paths_for_module(module_name)?;
+        self.load(module_name, paths.interface.is_some())
+    }
+
+    /// `Cmt.fulls_from_module`: the implementation, then the interface.
+    pub fn fulls_from_module(&self, module_name: &str) -> Vec<&Loaded> {
+        let Some(paths) = self.project.paths_for_module(module_name) else {
+            return Vec::new();
+        };
+        let mut fulls = Vec::new();
+        if paths.implementation.is_some() {
+            fulls.extend(self.load(module_name, false));
+        }
+        if paths.interface.is_some() {
+            fulls.extend(self.load(module_name, true));
+        }
+        fulls
     }
 
     /// `Cmt.full_from_path`: the module whose source is at `path`, loaded
