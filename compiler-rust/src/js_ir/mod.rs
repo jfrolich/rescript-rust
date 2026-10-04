@@ -2744,13 +2744,7 @@ pub(crate) fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool
             ocaml_eq_expression(left_first, right_first)
                 && ocaml_eq_expression(left_second, right_second)
         }
-        (
-            ExpressionDesc::StringAppend(left_first, left_second),
-            ExpressionDesc::StringAppend(right_first, right_second),
-        ) => {
-            ocaml_eq_expression(left_first, right_first)
-                && ocaml_eq_expression(left_second, right_second)
-        }
+        // js_analyzer.ml `eq_expression`: `String_append _` is never equal.
         (ExpressionDesc::Bool(left_bool), ExpressionDesc::Bool(right_bool)) => {
             left_bool == right_bool
         }
