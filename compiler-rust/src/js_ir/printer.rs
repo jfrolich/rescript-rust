@@ -1195,7 +1195,8 @@ impl JsPrinter {
                 self.print_function_body(body, return_unit);
             }
             self.dedent();
-            self.newline();
+            // Ext_pp.brace_vgroup closes with `force_newline`.
+            self.force_newline();
         }
         self.write_char('}');
     }
