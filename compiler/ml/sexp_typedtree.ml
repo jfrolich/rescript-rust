@@ -295,8 +295,6 @@ and pat_extra ~with_locs extra loc attrs =
     Sexp.list ([Sexp.atom "Tpat_constraint"; ct_sexp] @ loc_sexp @ [attrs_sexp])
   | Tpat_type (p, _) ->
     Sexp.list ([Sexp.atom "Tpat_type"; path p] @ loc_sexp @ [attrs_sexp])
-  | Tpat_open (p, _, _) ->
-    Sexp.list ([Sexp.atom "Tpat_open"; path p] @ loc_sexp @ [attrs_sexp])
   | Tpat_unpack ->
     Sexp.list ([Sexp.atom "Tpat_unpack"] @ loc_sexp @ [attrs_sexp])
 

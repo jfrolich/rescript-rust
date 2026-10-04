@@ -710,11 +710,6 @@ fn pattern(arena: &ParseArena, p: &Pattern) -> Sexp {
         PatternDesc::Ppat_extension(ext) => {
             Sexp::list(vec![Sexp::atom("Ppat_extension"), extension(arena, ext)])
         }
-        PatternDesc::Ppat_open(lid, pat) => Sexp::list(vec![
-            Sexp::atom("Ppat_open"),
-            longident_idx(arena, lid.txt),
-            pattern(arena, arena.get_pat(*pat)),
-        ]),
     };
     Sexp::list(vec![Sexp::atom("pattern"), descr])
 }
@@ -725,6 +720,15 @@ fn pattern(arena: &ParseArena, p: &Pattern) -> Sexp {
 
 fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
     let desc = match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_braces(braces) => Sexp::list(vec![
+            Sexp::atom("Pexp_braces"),
+            Sexp::list(vec![
+                Sexp::atom("braces_loc"),
+                Sexp::atom(&arena.loc_start(braces.braces_loc).cnum.to_string()),
+                Sexp::atom(&arena.loc_end(braces.braces_loc).cnum.to_string()),
+            ]),
+            expression(arena, arena.get_expr(braces.expr)),
+        ]),
         ExpressionDesc::Pexp_ident(lid) => Sexp::list(vec![
             Sexp::atom("Pexp_ident"),
             longident_idx(arena, lid.txt),
@@ -874,6 +878,15 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
                 },
             ])
         }
+        ExpressionDesc::Pexp_ternary(inner) => {
+            let (cond, consequent, alternate) = **inner;
+            Sexp::list(vec![
+                Sexp::atom("Pexp_ternary"),
+                expression(arena, arena.get_expr(cond)),
+                expression(arena, arena.get_expr(consequent)),
+                expression(arena, arena.get_expr(alternate)),
+            ])
+        }
         ExpressionDesc::Pexp_sequence(e1, e2) => Sexp::list(vec![
             Sexp::atom("Pexp_sequence"),
             expression(arena, arena.get_expr(*e1)),
@@ -1004,6 +1017,11 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
                 expression(arena, arena.get_expr(*body)),
             ])
         }
+        ExpressionDesc::Pexp_regexp(regexp) => Sexp::list(vec![
+            Sexp::atom("Pexp_regexp"),
+            Sexp::atom(&quote_string(&regexp.pattern)),
+            Sexp::atom(&quote_string(&regexp.flags)),
+        ]),
         ExpressionDesc::Pexp_extension(ext) => {
             Sexp::list(vec![Sexp::atom("Pexp_extension"), extension(arena, ext)])
         }
@@ -1227,6 +1245,13 @@ fn type_declaration(arena: &ParseArena, td: &TypeDeclaration) -> Sexp {
         Sexp::list(vec![
             Sexp::atom("ptype_private"),
             private_flag(&td.ptype_private),
+        ]),
+        Sexp::list(vec![
+            Sexp::atom("ptype_origin"),
+            Sexp::atom(match td.ptype_origin {
+                TypeDeclarationOrigin::Declared => "Declared",
+                TypeDeclarationOrigin::Inline_record_definition => "Inline_record_definition",
+            }),
         ]),
         attributes(arena, &td.ptype_attributes),
     ])

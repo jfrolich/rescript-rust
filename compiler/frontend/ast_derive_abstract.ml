@@ -22,7 +22,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA. *)
 
-(* let derivingName = "abstract" *)
 module U = Ast_derive_util
 open Ast_helper
 (* type tdcls = Parsetree.type_declaration list *)
@@ -32,11 +31,10 @@ type abstract_kind = Not_abstract | Light_abstract | Complex_abstract
 let is_abstract (xs : Ast_payload.action list) =
   match xs with
   | [({txt = "abstract"}, None)] -> Complex_abstract
-  | [({txt = "abstract"}, Some {pexp_desc = Pexp_ident {txt = Lident "light"}})]
-    ->
-    Light_abstract
-  | [({loc; txt = "abstract"}, Some _)] ->
-    Location.raise_errorf ~loc "invalid config for abstract"
+  | [({loc; txt = "abstract"}, Some config)] -> (
+    match (Ast_payload.unwrap_braces config).pexp_desc with
+    | Pexp_ident {txt = Lident "light"} -> Light_abstract
+    | _ -> Location.raise_errorf ~loc "invalid config for abstract")
   | xs ->
     Ext_list.iter xs (function {loc; txt}, _ ->
         (match txt with
@@ -211,7 +209,6 @@ let handle_tdcl light (tdcl : Parsetree.type_declaration) :
         my_maker :: setter_accessor )
   | Ptype_abstract | Ptype_variant _ | Ptype_open ->
     (* Looks obvious that it does not make sense to warn *)
-    (* U.notApplicable tdcl.ptype_loc derivingName;  *)
     (tdcl, [])
 
 let handle_tdcls_in_str ~light rf tdcls =

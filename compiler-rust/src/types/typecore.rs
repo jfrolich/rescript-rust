@@ -56,7 +56,6 @@ const DICT_MAGIC_FIELD_NAME: &str = "dictValuesType";
 const DICT_TYPE_NAME: &str = "dict";
 const PAT_VARIANT_SPREAD_ATTRIBUTE: &str = "res.patVariantSpread";
 const PAT_FROM_VARIANT_SPREAD_ATTRIBUTE: &str = "res.patFromVariantSpread";
-const TERNARY_ATTRIBUTE: &str = "res.ternary";
 
 #[derive(Debug, Clone)]
 pub struct BuiltinExtensionError {
@@ -341,18 +340,6 @@ fn has_dict_pattern_attribute(arena: &ParseArena, attrs: &[crate::parser::ast::A
     attrs
         .iter()
         .any(|attr| arena.get_string(attr.0.txt) == DICT_PATTERN_ATTRIBUTE)
-}
-
-fn has_ternary_attribute(arena: &ParseArena, attrs: &[crate::parser::ast::Attribute]) -> bool {
-    attrs
-        .iter()
-        .any(|attr| arena.get_string(attr.0.txt) == TERNARY_ATTRIBUTE)
-}
-
-fn has_res_braces_attribute(arena: &ParseArena, attrs: &[crate::parser::ast::Attribute]) -> bool {
-    attrs
-        .iter()
-        .any(|attr| arena.get_string(attr.0.txt) == "res.braces")
 }
 
 fn has_explicit_arity_attribute(
@@ -5036,24 +5023,6 @@ fn type_pattern_inner(
             )
         }
 
-        PD::Ppat_open(mod_lid, inner_pat_idx) => {
-            // Local open pattern: M.(p)
-            let inner_pat = tctx.arena.get_pat(*inner_pat_idx);
-            type_pattern_open(
-                tctx,
-                env,
-                loc,
-                mod_lid,
-                inner_pat,
-                expected_ty,
-                mode,
-                allow_existentials,
-                state,
-                explode,
-                pat,
-            )
-        }
-
         PD::Ppat_unpack(name) => {
             // Module unpack pattern: module(M)
             let id = state.enter_variable(
@@ -7529,49 +7498,6 @@ fn type_pattern_exception(
     Err(TypeCoreError::ExceptionPatternBelowToplevel { loc })
 }
 
-/// Type check local open pattern.
-#[allow(clippy::too_many_arguments)]
-fn type_pattern_open(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    loc: LocIdx,
-    mod_lid: &Located<crate::parse_arena::LidentIdx>,
-    inner_pat: &ParsedPattern,
-    expected_ty: TypeExprRef,
-    mode: PatternMode,
-    allow_existentials: bool,
-    state: &mut PatternState,
-    explode: i32,
-    pat: &ParsedPattern,
-) -> TypeCoreResult<Pattern> {
-    // For now, just type check the inner pattern without opening the module
-    // Full implementation would look up the module and extend the environment
-    let typed_inner = type_pattern_inner(
-        tctx,
-        env,
-        inner_pat,
-        expected_ty,
-        mode,
-        allow_existentials,
-        state,
-        explode,
-    )?;
-
-    // Create the open pattern
-    let mod_lid_txt = tctx.arena.get_longident(mod_lid.txt);
-    let _mod_path = Path::pident(Ident::create_persistent(
-        tctx.longident_last_name(mod_lid_txt),
-    ));
-
-    Ok(Pattern::new(
-        PatternDesc::Tpat_or(Box::new(typed_inner.clone()), Box::new(typed_inner), None),
-        loc.clone(),
-        expected_ty,
-        EnvRef(0),
-        pat.ppat_attributes.clone(),
-    ))
-}
-
 // ============================================================================
 // Expression Type Checking
 // ============================================================================
@@ -7624,7 +7550,9 @@ fn final_subexpression<'e>(
             ED::Pexp_let(inner) => inner.2,
             ED::Pexp_sequence(_, e) => *e,
             ED::Pexp_try(inner) => inner.0,
+            ED::Pexp_braces(braces) => braces.expr,
             ED::Pexp_ifthenelse(inner) => inner.1,
+            ED::Pexp_ternary(inner) => inner.1,
             ED::Pexp_match(inner) => match inner.1.first() {
                 Some(case) => case.pc_rhs,
                 None => return sexp,
@@ -7899,7 +7827,10 @@ fn type_expect_with_recarg_unscoped<'a>(
     let ctx = tctx.type_ctx;
     let exp_env_ref = ctx.store_typed_env(env);
     let context = match &*expr.pexp_desc {
-        ED::Pexp_ident(_) if has_res_braces_attribute(tctx.arena, &expr.pexp_attributes) => {
+        // Special errors for braced identifiers passed to records.
+        ED::Pexp_braces(braces)
+            if matches!(&*tctx.arena.get_expr(braces.expr).pexp_desc, ED::Pexp_ident(_)) =>
+        {
             Some(TypeClashContext::BracedIdent)
         }
         _ => context,
@@ -7910,6 +7841,17 @@ fn type_expect_with_recarg_unscoped<'a>(
     tctx.set_unify_env(env);
 
     match &*expr.pexp_desc {
+        ED::Pexp_braces(braces) => {
+            // typecore.ml: type the inner expression, then prepend the
+            // braces node's attributes.
+            let inner = tctx.arena.get_expr(braces.expr);
+            let mut exp = type_expect_with_recarg(tctx, env, inner, expected_ty, context, recarg)?;
+            let mut attrs = expr.pexp_attributes.clone();
+            attrs.extend(exp.exp_attributes.iter().cloned());
+            exp.exp_attributes = attrs;
+            Ok(exp)
+        }
+        ED::Pexp_regexp(_) => unreachable!("Lowered by the built-in frontend mapper."),
         ED::Pexp_ident(lid) => {
             // Check for comptime-known variable (from @typeInfo destructuring etc.)
             let longident = tctx.arena.get_longident(lid.txt);
@@ -8131,17 +8073,20 @@ fn type_expect_with_recarg_unscoped<'a>(
             ))
         }
 
-        ED::Pexp_ifthenelse(inner) => {
-            let (ref cond_idx, ref then_idx, ref else_idx) = **inner;
+        ED::Pexp_ifthenelse(_) | ED::Pexp_ternary(_) => {
+            // typecore.ml `(Pexp_ifthenelse _ | Pexp_ternary _) as conditional`.
+            let (cond_idx, then_idx, else_idx, return_context) = match &*expr.pexp_desc {
+                ED::Pexp_ifthenelse(inner) => {
+                    (inner.0, inner.1, inner.2, Some(TypeClashContext::IfReturn))
+                }
+                ED::Pexp_ternary(inner) => {
+                    (inner.0, inner.1, Some(inner.2), Some(TypeClashContext::TernaryReturn))
+                }
+                _ => unreachable!(),
+            };
+            let (cond_idx, then_idx, else_idx) = (&cond_idx, &then_idx, &else_idx);
             // If expression
             let bool_ty = env.type_bool(ctx);
-            let return_context = Some(
-                if has_ternary_attribute(tctx.arena, &expr.pexp_attributes) {
-                    TypeClashContext::TernaryReturn
-                } else {
-                    TypeClashContext::IfReturn
-                },
-            );
 
             // Condition should be bool
             let cond = tctx.arena.get_expr(*cond_idx);
@@ -12801,8 +12746,7 @@ fn pattern_contains_generalized_constructor(
         crate::parser::ast::PatternDesc::Ppat_constraint(inner) => {
             pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(inner.0))
         }
-        crate::parser::ast::PatternDesc::Ppat_exception(inner)
-        | crate::parser::ast::PatternDesc::Ppat_open(_, inner) => {
+        crate::parser::ast::PatternDesc::Ppat_exception(inner) => {
             pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(*inner))
         }
         _ => false,
@@ -12978,6 +12922,15 @@ fn collect_lident_idents_in_expression(
                 collect_lident_idents_in_expression(arena, arena.get_expr(else_expr), out);
             }
         }
+        ED::Pexp_ternary(inner) => {
+            collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
+            collect_lident_idents_in_expression(arena, arena.get_expr(inner.1), out);
+            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
+        }
+        ED::Pexp_braces(braces) => {
+            collect_lident_idents_in_expression(arena, arena.get_expr(braces.expr), out);
+        }
+        ED::Pexp_regexp(_) => {}
         ED::Pexp_sequence(lhs, rhs) | ED::Pexp_while(lhs, rhs) => {
             collect_lident_idents_in_expression(arena, arena.get_expr(*lhs), out);
             collect_lident_idents_in_expression(arena, arena.get_expr(*rhs), out);
@@ -13201,8 +13154,7 @@ fn parsed_pattern_contains_polymorphic_variant(arena: &ParseArena, pat: &ParsedP
             parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(field.pat))
         }),
         crate::parser::ast::PatternDesc::Ppat_exception(inner)
-        | crate::parser::ast::PatternDesc::Ppat_alias(inner, _)
-        | crate::parser::ast::PatternDesc::Ppat_open(_, inner) => {
+        | crate::parser::ast::PatternDesc::Ppat_alias(inner, _) => {
             parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*inner))
         }
         crate::parser::ast::PatternDesc::Ppat_constraint(inner) => {
@@ -20664,6 +20616,7 @@ fn type_approx_for_rec_let(
     let loc = sexp.pexp_loc;
 
     match &*sexp.pexp_desc {
+        ED::Pexp_braces(braces) => type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(braces.expr)),
         ED::Pexp_let(inner) => {
             let (_, _, body) = &**inner;
             type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*body))
@@ -20708,6 +20661,7 @@ fn type_approx_for_rec_let(
             let (_, then_expr, _) = &**inner;
             type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*then_expr))
         }
+        ED::Pexp_ternary(inner) => type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(inner.1)),
         ED::Pexp_sequence(_, expr) => {
             type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*expr))
         }
@@ -31731,6 +31685,13 @@ fn contains_build_variant_inside(
                 || else_opt.map_or(false, |e| {
                     contains_build_variant_inside(arena.get_expr(e), arena, registry)
                 })
+        }
+        ED::Pexp_ternary(inner) => {
+            contains_build_variant_inside(arena.get_expr(inner.1), arena, registry)
+                || contains_build_variant_inside(arena.get_expr(inner.2), arena, registry)
+        }
+        ED::Pexp_braces(braces) => {
+            contains_build_variant_inside(arena.get_expr(braces.expr), arena, registry)
         }
         ED::Pexp_apply(inner) => {
             if let Some(reg) = registry {

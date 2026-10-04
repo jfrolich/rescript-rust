@@ -911,7 +911,8 @@ fn parser_deprecated_payload_to_decl_payload(
         return None;
     };
     let (expr_idx, _attrs) = eval_box.as_ref();
-    let expr = arena.get_expr(*expr_idx);
+    // builtin_attributes.ml: `Ast_payload.unwrap_payload_expression payload`.
+    let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr_idx));
 
     // The plain `string_of_payload` form (builtin_attributes.ml
     // `string_of_payload`); `Deprecated` is kept for the record form.
@@ -17789,22 +17790,21 @@ pub fn transl_signature<'a>(
 // Structure Type Checking
 // ============================================================================
 
-/// typedecl.ml:1509-1520 `inline_types`: the record declarations of a group
-/// that carry `@res.inlineRecordDefinition`, in declaration order.
+/// typedecl.ml:1527-1540 `inline_types`: the record declarations of a group
+/// whose source origin is `Inline_record_definition`, in declaration order.
 fn group_inline_record_types(
-    arena: &ParseArena,
+    origins: &[crate::parser::ast::TypeDeclarationOrigin],
     typed_decls: &[TypedTypeDeclaration],
 ) -> Vec<crate::types::decl::TypeInlinedType> {
-    typed_decls
+    debug_assert_eq!(origins.len(), typed_decls.len());
+    origins
         .iter()
-        .filter(|tdecl| {
-            tdecl
-                .typ_attributes
-                .iter()
-                .any(|(name, _)| arena.get_string(name.txt) == "res.inlineRecordDefinition")
-        })
-        .filter_map(|tdecl| match &tdecl.typ_type.type_kind {
-            crate::types::TypeKind::TypeRecord(labels, _) => {
+        .zip(typed_decls)
+        .filter_map(|(origin, tdecl)| match (origin, &tdecl.typ_type.type_kind) {
+            (
+                crate::parser::ast::TypeDeclarationOrigin::Inline_record_definition,
+                crate::types::TypeKind::TypeRecord(labels, _),
+            ) => {
                 Some(crate::types::decl::TypeInlinedType::Record {
                     type_name: tdecl.typ_name.txt.clone(),
                     labels: labels.to_vec(),
@@ -18822,6 +18822,10 @@ fn type_structure_item<'a>(
             let ctx = tctx.type_ctx;
             let mut new_env = env.clone();
             let mut typed_tree_decls: Vec<TypedTypeDeclaration> = Vec::new();
+            // typedecl.ml:1527-1533 pairs each typed declaration with its
+            // source declaration (`List.combine sdecl_list tdecls`); this is
+            // the source origin of each entry of `typed_tree_decls`.
+            let mut typed_tree_decl_origins: Vec<crate::parser::ast::TypeDeclarationOrigin> = Vec::new();
             let mut internal_decls_for_generalize: Vec<crate::types::TypeDeclaration> = Vec::new();
             // OCaml typedecl.ml:1500 `type_record_as_object`: set when a
             // spread-only record becomes an object manifest; it then skips
@@ -18995,6 +18999,7 @@ fn type_structure_item<'a>(
                 type_entry_is_synthetic_row.push(true);
                 internal_decls_for_generalize.push(row_internal_decl);
                 typed_tree_decls.push(typed_row_decl);
+                typed_tree_decl_origins.push(decls[row_id.decl_idx].ptype_origin);
             }
 
             for (decl_idx, decl) in decls.iter().enumerate() {
@@ -20120,6 +20125,7 @@ fn type_structure_item<'a>(
                 };
 
                 typed_tree_decls.push(typed_tree_decl);
+                typed_tree_decl_origins.push(decl.ptype_origin);
                 if has_fixed_rows {
                     type_entry_ids.push(type_id.clone());
                     type_entry_parser_indices.push(Some(decl_idx));
@@ -20137,7 +20143,7 @@ fn type_structure_item<'a>(
             check_type_declaration_duplicate_definitions(tctx, arena, decls);
             // typedecl.ml:1509-1526: every declaration of the group records
             // the group's inline record definitions for printing.
-            let inline_types = group_inline_record_types(arena, &typed_tree_decls);
+            let inline_types = group_inline_record_types(&typed_tree_decl_origins, &typed_tree_decls);
             if !inline_types.is_empty() {
                 for (_, decl, _, _) in final_env_entries.iter_mut() {
                     decl.type_inlined_types = inline_types.clone();
@@ -22053,6 +22059,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
 ) -> TypeModResult<Vec<TypedTypeDeclaration>> {
     let ctx = tctx.type_ctx;
     let mut typed_tree_decls = Vec::new();
+    let mut typed_tree_decl_origins: Vec<crate::parser::ast::TypeDeclarationOrigin> = Vec::new();
     let mut internal_decls_for_generalize: Vec<crate::types::TypeDeclaration> = Vec::new();
     // OCaml typedecl.ml:1447-1484 prepends synthetic `t#row`
     // declarations for fixed private rows before the user-written
@@ -22163,6 +22170,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
             type_entry_is_synthetic_row.push(true);
             internal_decls_for_generalize.push(row_internal_decl);
             typed_tree_decls.push(typed_row_decl);
+            typed_tree_decl_origins.push(decls[row_id.decl_idx].ptype_origin);
         }
 
         for (decl_idx, decl) in decls.iter().enumerate() {
@@ -22750,6 +22758,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 typ_loc: decl.ptype_loc,
                 typ_attributes: decl.ptype_attributes.clone(),
             });
+            typed_tree_decl_origins.push(decl.ptype_origin);
             if has_fixed_rows {
                 type_entry_ids.push(type_id);
                 type_entry_parser_indices.push(Some(decl_idx));
@@ -22766,7 +22775,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         check_type_declaration_duplicate_definitions(tctx, arena, decls);
         // typedecl.ml:1509-1526: every declaration of the group records
         // the group's inline record definitions for printing.
-        let inline_types = group_inline_record_types(arena, &typed_tree_decls);
+        let inline_types = group_inline_record_types(&typed_tree_decl_origins, &typed_tree_decls);
         if !inline_types.is_empty() {
             for typed_decl in typed_tree_decls.iter_mut() {
                 typed_decl.typ_type.type_inlined_types = inline_types.clone();

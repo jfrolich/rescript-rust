@@ -7,14 +7,8 @@ let print_engine =
       print_implementation =
         (fun ~width:_ ~filename:_ ~comments:_ structure ->
           Printast.implementation Format.std_formatter structure);
-      print_implementation_from_source =
-        (fun ~width:_ ~source:_ ~comments:_ structure ->
-          Printast.implementation Format.std_formatter structure);
       print_interface =
         (fun ~width:_ ~filename:_ ~comments:_ signature ->
-          Printast.interface Format.std_formatter signature);
-      print_interface_from_source =
-        (fun ~width:_ ~source:_ ~comments:_ signature ->
           Printast.interface Format.std_formatter signature);
     }
 
@@ -460,6 +454,14 @@ module Sexp_ast = struct
             | Some typ -> Sexp.list [Sexp.atom "Some"; core_type typ]);
           ];
         Sexp.list [Sexp.atom "ptype_private"; private_flag td.ptype_private];
+        Sexp.list
+          [
+            Sexp.atom "ptype_origin";
+            Sexp.atom
+              (match td.ptype_origin with
+              | Declared -> "Declared"
+              | Inline_record_definition -> "Inline_record_definition");
+          ];
         attributes td.ptype_attributes;
       ]
 
@@ -569,6 +571,18 @@ module Sexp_ast = struct
   and expression expr =
     let desc =
       match expr.pexp_desc with
+      | Pexp_braces {expr = inner; braces_loc} ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_braces";
+            Sexp.list
+              [
+                Sexp.atom "braces_loc";
+                Sexp.atom (string_of_int braces_loc.Location.loc_start.pos_cnum);
+                Sexp.atom (string_of_int braces_loc.loc_end.pos_cnum);
+              ];
+            expression inner;
+          ]
       | Pexp_ident longident_loc ->
         Sexp.list [Sexp.atom "Pexp_ident"; longident longident_loc.Asttypes.txt]
       | Pexp_constant c -> Sexp.list [Sexp.atom "Pexp_constant"; constant c]
@@ -689,6 +703,14 @@ module Sexp_ast = struct
             | None -> Sexp.atom "None"
             | Some expr -> Sexp.list [Sexp.atom "Some"; expression expr]);
           ]
+      | Pexp_ternary (condition, consequent, alternate) ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_ternary";
+            expression condition;
+            expression consequent;
+            expression alternate;
+          ]
       | Pexp_sequence (expr1, expr2) ->
         Sexp.list
           [Sexp.atom "Pexp_sequence"; expression expr1; expression expr2]
@@ -765,6 +787,8 @@ module Sexp_ast = struct
           ]
       | Pexp_extension ext ->
         Sexp.list [Sexp.atom "Pexp_extension"; extension ext]
+      | Pexp_regexp {pattern; flags} ->
+        Sexp.list [Sexp.atom "Pexp_regexp"; string pattern; string flags]
       | Pexp_template {source_segments; values} ->
         Sexp.list
           [
@@ -898,13 +922,6 @@ module Sexp_ast = struct
       | Ppat_exception p -> Sexp.list [Sexp.atom "Ppat_exception"; pattern p]
       | Ppat_extension ext ->
         Sexp.list [Sexp.atom "Ppat_extension"; extension ext]
-      | Ppat_open (longident_loc, p) ->
-        Sexp.list
-          [
-            Sexp.atom "Ppat_open";
-            longident longident_loc.Location.txt;
-            pattern p;
-          ]
     in
     Sexp.list [Sexp.atom "pattern"; descr]
 
@@ -1042,14 +1059,8 @@ module Sexp_ast = struct
         print_implementation =
           (fun ~width:_ ~filename:_ ~comments:_ parsetree ->
             parsetree |> structure |> Sexp.to_string |> print_string);
-        print_implementation_from_source =
-          (fun ~width:_ ~source:_ ~comments:_ parsetree ->
-            parsetree |> structure |> Sexp.to_string |> print_string);
         print_interface =
           (fun ~width:_ ~filename:_ ~comments:_ parsetree ->
-            parsetree |> signature |> Sexp.to_string |> print_string);
-        print_interface_from_source =
-          (fun ~width:_ ~source:_ ~comments:_ parsetree ->
             parsetree |> signature |> Sexp.to_string |> print_string);
       }
 end
@@ -1518,6 +1529,14 @@ module SexpAstWithLocs = struct
             | Some typ -> Sexp.list [Sexp.atom "Some"; core_type typ]);
           ];
         Sexp.list [Sexp.atom "ptype_private"; private_flag td.ptype_private];
+        Sexp.list
+          [
+            Sexp.atom "ptype_origin";
+            Sexp.atom
+              (match td.ptype_origin with
+              | Declared -> "Declared"
+              | Inline_record_definition -> "Inline_record_definition");
+          ];
         attributes td.ptype_attributes;
       ]
 
@@ -1634,6 +1653,9 @@ module SexpAstWithLocs = struct
   and expression expr =
     let desc =
       match expr.pexp_desc with
+      | Pexp_braces {expr = inner; braces_loc} ->
+        Sexp.list
+          [Sexp.atom "Pexp_braces"; location braces_loc; expression inner]
       | Pexp_ident longident_loc ->
         Sexp.list [Sexp.atom "Pexp_ident"; longident longident_loc.Asttypes.txt; location longident_loc.Asttypes.loc]
       | Pexp_constant c -> Sexp.list [Sexp.atom "Pexp_constant"; constant c]
@@ -1762,6 +1784,14 @@ module SexpAstWithLocs = struct
             | None -> Sexp.atom "None"
             | Some expr -> Sexp.list [Sexp.atom "Some"; expression expr]);
           ]
+      | Pexp_ternary (condition, consequent, alternate) ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_ternary";
+            expression condition;
+            expression consequent;
+            expression alternate;
+          ]
       | Pexp_sequence (expr1, expr2) ->
         Sexp.list
           [Sexp.atom "Pexp_sequence"; expression expr1; expression expr2]
@@ -1829,6 +1859,8 @@ module SexpAstWithLocs = struct
             location longident_loc.Asttypes.loc;
             expression expr;
           ]
+      | Pexp_regexp {pattern; flags} ->
+        Sexp.list [Sexp.atom "Pexp_regexp"; string pattern; string flags]
       | Pexp_extension ext ->
         Sexp.list [Sexp.atom "Pexp_extension"; extension ext]
       | Pexp_template {source_segments; values} ->
@@ -1975,14 +2007,6 @@ module SexpAstWithLocs = struct
       | Ppat_exception p -> Sexp.list [Sexp.atom "Ppat_exception"; pattern p]
       | Ppat_extension ext ->
         Sexp.list [Sexp.atom "Ppat_extension"; extension ext]
-      | Ppat_open (longident_loc, p) ->
-        Sexp.list
-          [
-            Sexp.atom "Ppat_open";
-            longident longident_loc.Location.txt;
-            location longident_loc.Location.loc;
-            pattern p;
-          ]
     in
     Sexp.list [Sexp.atom "pattern"; location p.ppat_loc; descr; attributes p.ppat_attributes]
 
@@ -2127,12 +2151,6 @@ module SexpAstWithLocs = struct
             parsetree |> structure |> Sexp.to_string |> print_string);
         print_interface =
           (fun ~width:_ ~filename:_ ~comments:_ parsetree ->
-            parsetree |> signature |> Sexp.to_string |> print_string);
-        print_implementation_from_source =
-          (fun ~width:_ ~source:_ ~comments:_ parsetree ->
-            parsetree |> structure |> Sexp.to_string |> print_string);
-        print_interface_from_source =
-          (fun ~width:_ ~source:_ ~comments:_ parsetree ->
             parsetree |> signature |> Sexp.to_string |> print_string);
       }
 end
@@ -3098,16 +3116,6 @@ module SexpAst0WithLocs = struct
             let tree0 = Ast_mapper_to0.default_mapper.signature
               Ast_mapper_to0.default_mapper parsetree in
             tree0 |> signature |> Sexp.to_string |> print_string);
-        print_implementation_from_source =
-          (fun ~width:_ ~source:_ ~comments:_ parsetree ->
-            let tree0 = Ast_mapper_to0.default_mapper.structure
-              Ast_mapper_to0.default_mapper parsetree in
-            tree0 |> structure |> Sexp.to_string |> print_string);
-        print_interface_from_source =
-          (fun ~width:_ ~source:_ ~comments:_ parsetree ->
-            let tree0 = Ast_mapper_to0.default_mapper.signature
-              Ast_mapper_to0.default_mapper parsetree in
-            tree0 |> signature |> Sexp.to_string |> print_string);
       }
 end
 
@@ -3120,18 +3128,8 @@ let comments_print_engine =
         let cmt_tbl = Comment_table.make () in
         Comment_table.walk_structure s cmt_tbl comments;
         Comment_table.log cmt_tbl);
-    Res_driver.print_implementation_from_source =
-      (fun ~width:_ ~source:_ ~comments s ->
-        let cmt_tbl = Comment_table.make () in
-        Comment_table.walk_structure s cmt_tbl comments;
-        Comment_table.log cmt_tbl);
     Res_driver.print_interface =
       (fun ~width:_ ~filename:_ ~comments s ->
-        let cmt_tbl = Comment_table.make () in
-        Comment_table.walk_signature s cmt_tbl comments;
-        Comment_table.log cmt_tbl);
-    Res_driver.print_interface_from_source =
-      (fun ~width:_ ~source:_ ~comments s ->
         let cmt_tbl = Comment_table.make () in
         Comment_table.walk_signature s cmt_tbl comments;
         Comment_table.log cmt_tbl);

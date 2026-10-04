@@ -9,7 +9,7 @@ use crate::parse_arena::{ExprIdx, LidentIdx, LocIdx, Located, ParseArena, PosIdx
 
 use super::ast::*;
 use super::core::{
-    ExprContext, ast_helper, if_let_attr, make_braces_attr, mknoloc,
+    ExprContext, ast_helper, if_let_attr, mknoloc,
     recover, with_loc,
 };
 use super::diagnostics::DiagnosticCategory;
@@ -495,13 +495,11 @@ pub fn parse_ternary_expr(p: &mut Parser<'_>, left_operand: Expression) -> Expre
         let true_idx = p.arena_mut().push_expr(true_branch);
         let false_idx = p.arena_mut().push_expr(false_branch);
         Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ifthenelse(Box::new((
-                cond_idx,
-                true_idx,
-                Some(false_idx),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_ternary(Box::new((
+                cond_idx, true_idx, false_idx,
             )))),
             pexp_loc: loc,
-            pexp_attributes: Attributes::from_vec(vec![super::core::ternary_attr(p.arena_mut())]),
+            pexp_attributes: Attributes::new(),
         }
     } else {
         left_operand
@@ -1474,7 +1472,7 @@ pub fn parse_binary_expr(
     // OCaml `parse_binary_expr` (compiler/syntax/src/res_core.ml:2408-2458).
     let mut left = left;
     loop {
-        let token = p.token.clone().into_owned();
+        let token = p.peek_binary_operator().into_owned();
         let token_prec = match token {
             // Can the minus be interpreted as a binary operator? Or is it a
             // unary? See `Scanner.is_binary_op`.
@@ -1545,136 +1543,21 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             ast_helper::make_constant(c, loc)
         }
-        Token::Regex { pattern, flags } => {
-            let pattern = pattern.clone();
-            let flags = flags.clone();
+        // OCaml `parse_regex`: rescan `/` or `/.` as a regexp literal.
+        Token::Forwardslash | Token::ForwardslashDot => {
+            p.next_regex_token();
+            let (pattern, flags) = match &p.token {
+                Token::Regex { pattern, flags } => (pattern.to_string(), flags.to_string()),
+                _ => unreachable!("next_regex_token always returns Regex"),
+            };
             p.next();
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-            // OCaml format: single string with slashes: "/" + pattern + "/" + flags
-            let regex_str = format!("/{}/{}", pattern, flags);
-            let str_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::RawSource(
-                    Cow::Owned(regex_str),
-                )))),
-                pexp_loc: loc.clone(),
-                pexp_attributes: Attributes::new(),
-            };
-            let str_expr_idx = p.arena_mut().push_expr(str_expr);
-            let str_item = StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                    str_expr_idx,
-                    Attributes::new(),
-                )))),
-                pstr_loc: loc.clone(),
-            };
-
-            // OCaml uses ghost location for the Pexp_extension when parsing regex literals
-            let re_str_idx = p.arena_mut().intern("re");
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
-                    with_loc(re_str_idx, loc),
-                    Payload::PStr(Box::new(vec![str_item])),
-                )))),
-                pexp_loc: LocIdx::none(),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_regexp(Box::new(
+                    crate::parser::ast::PexpRegexp { pattern, flags },
+                ))),
+                pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
-            }
-        }
-        // OCaml: when parser sees `/` in expression position, it rescans as regex
-        Token::Forwardslash => {
-            p.next_regex_token();
-            if let Token::Regex {
-                ref pattern,
-                ref flags,
-            } = p.token
-            {
-                let pattern = pattern.clone();
-                let flags = flags.clone();
-                p.next();
-                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                let regex_str = format!("/{}/{}", pattern, flags);
-                let str_expr = Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::RawSource(
-                        Cow::Owned(regex_str),
-                    )))),
-                    pexp_loc: loc.clone(),
-                    pexp_attributes: Attributes::new(),
-                };
-                let str_expr_idx = p.arena_mut().push_expr(str_expr);
-                let str_item = StructureItem {
-                    pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                        str_expr_idx,
-                        Attributes::new(),
-                    )))),
-                    pstr_loc: loc.clone(),
-                };
-                let re_str_idx = p.arena_mut().intern("re");
-                Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
-                        with_loc(re_str_idx, loc),
-                        Payload::PStr(Box::new(vec![str_item])),
-                    )))),
-                    pexp_loc: LocIdx::none(),
-                    pexp_attributes: Attributes::new(),
-                }
-            } else {
-                let re_str_idx = p.arena_mut().intern("re");
-                Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
-                        with_loc(re_str_idx, LocIdx::none()),
-                        Payload::PStr(Box::new(vec![])),
-                    )))),
-                    pexp_loc: LocIdx::none(),
-                    pexp_attributes: Attributes::new(),
-                }
-            }
-        }
-        Token::ForwardslashDot => {
-            p.next_regex_token();
-            if let Token::Regex {
-                ref pattern,
-                ref flags,
-            } = p.token
-            {
-                let pattern = format!(".{}", pattern);
-                let flags = flags.clone();
-                p.next();
-                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                let regex_str = format!("/{}/{}", pattern, flags);
-                let str_expr = Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::RawSource(
-                        Cow::Owned(regex_str),
-                    )))),
-                    pexp_loc: loc.clone(),
-                    pexp_attributes: Attributes::new(),
-                };
-                let str_expr_idx = p.arena_mut().push_expr(str_expr);
-                let str_item = StructureItem {
-                    pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                        str_expr_idx,
-                        Attributes::new(),
-                    )))),
-                    pstr_loc: loc.clone(),
-                };
-                let re_str_idx = p.arena_mut().intern("re");
-                Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
-                        with_loc(re_str_idx, loc),
-                        Payload::PStr(Box::new(vec![str_item])),
-                    )))),
-                    pexp_loc: LocIdx::none(),
-                    pexp_attributes: Attributes::new(),
-                }
-            } else {
-                let re_str_idx = p.arena_mut().intern("re");
-                Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
-                        with_loc(re_str_idx, LocIdx::none()),
-                        Payload::PStr(Box::new(vec![])),
-                    )))),
-                    pexp_loc: LocIdx::none(),
-                    pexp_attributes: Attributes::new(),
-                }
             }
         }
         // `inline for` — comptime loop unrolling
@@ -3281,12 +3164,22 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
 // (OCaml compiler/syntax/src/res_core.ml:3099-3688)
 // ============================================================================
 
-/// Prepend the `res.braces` attribute spanning `{` to the previous token.
-fn with_braces(p: &mut Parser<'_>, start_pos_idx: PosIdx, mut expr: Expression) -> Expression {
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    let braces = make_braces_attr(p.arena_mut(), loc);
-    expr.pexp_attributes.insert(0, braces);
-    expr
+/// `Ast_helper.Exp.braces ~braces_loc expr`, with the braces spanning `{` to
+/// the previous token. The node keeps the inner expression's location.
+fn with_braces(p: &mut Parser<'_>, start_pos_idx: PosIdx, expr: Expression) -> Expression {
+    let braces_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    let loc = expr.pexp_loc;
+    let inner = p.arena_mut().push_expr(expr);
+    Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_braces(Box::new(
+            crate::parser::ast::PexpBraces {
+                expr: inner,
+                braces_loc,
+            },
+        ))),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    }
 }
 
 /// OCaml `parse_braced_or_record_expr` (compiler/syntax/src/res_core.ml:3099-3330).

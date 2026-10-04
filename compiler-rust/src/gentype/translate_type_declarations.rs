@@ -487,12 +487,7 @@ fn traslate_declaration_kind_with_attribute_info(
                                 config,
                                 type_env,
                                 true,
-                                type_representation == TypeRepresentation::Unboxed
-                                    || matches!(
-                                        case,
-                                        crate::types::VariantConstructorCase::Block(block)
-                                            if block.is_untagged()
-                                    ),
+                                type_representation == TypeRepresentation::Unboxed,
                                 label_declarations,
                             ),
                         ],

@@ -28,13 +28,6 @@ use super::utf8;
 /// We use a value outside the valid char range.
 const EOF_CHAR: char = '\u{FFFF}';
 
-/// Scanner mode for context-sensitive tokenization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScannerMode {
-    /// Diamond mode for type parameter parsing (affects `>` tokenization).
-    Diamond,
-}
-
 /// A snapshot of scanner state for lookahead/restore.
 #[derive(Debug, Clone)]
 pub struct ScannerSnapshot {
@@ -45,7 +38,6 @@ pub struct ScannerSnapshot {
     offset16: usize,
     line_offset: usize,
     lnum: i32,
-    mode: Vec<ScannerMode>,
     diagnostics_len: usize,
 }
 
@@ -74,8 +66,6 @@ pub struct Scanner<'src> {
     line_offset: usize,
     /// Current line number (1-indexed).
     lnum: i32,
-    /// Stack of scanner modes.
-    mode: Vec<ScannerMode>,
     /// Collected diagnostics.
     diagnostics: Vec<ParserDiagnostic>,
 }
@@ -116,7 +106,6 @@ impl<'src> Scanner<'src> {
             offset16: 0,
             line_offset: 0,
             lnum: 1,
-            mode: Vec::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -131,15 +120,30 @@ impl<'src> Scanner<'src> {
         std::mem::take(&mut self.diagnostics)
     }
 
-    /// Push diamond mode for type parameter parsing.
-    pub fn set_diamond_mode(&mut self) {
-        self.mode.push(ScannerMode::Diamond);
-    }
-
-    /// Pop diamond mode.
-    pub fn pop_diamond_mode(&mut self) {
-        if let Some(ScannerMode::Diamond) = self.mode.last() {
-            self.mode.pop();
+    /// res_scanner.ml `scan_binary_operator`: extend a just-scanned `<` or
+    /// `>` with an immediately adjacent operator suffix, without skipping
+    /// trivia. Returns the token unchanged (and does not advance) when there
+    /// is no suffix.
+    pub fn scan_binary_operator(&mut self, token: &Token<'src>) -> Option<Token<'src>> {
+        match (token, self.ch) {
+            (Token::LessThan, '<') => {
+                self.next();
+                Some(Token::LeftShift)
+            }
+            (Token::GreaterThan, '=') => {
+                self.next();
+                Some(Token::GreaterEqual)
+            }
+            (Token::GreaterThan, '>') => {
+                self.next();
+                if self.ch == '>' {
+                    self.next();
+                    Some(Token::RightShiftUnsigned)
+                } else {
+                    Some(Token::RightShift)
+                }
+            }
+            _ => None,
         }
     }
 
@@ -153,7 +157,6 @@ impl<'src> Scanner<'src> {
             offset16: self.offset16,
             line_offset: self.line_offset,
             lnum: self.lnum,
-            mode: self.mode.clone(),
             diagnostics_len: self.diagnostics.len(),
         }
     }
@@ -167,18 +170,12 @@ impl<'src> Scanner<'src> {
         self.offset16 = snapshot.offset16;
         self.line_offset = snapshot.line_offset;
         self.lnum = snapshot.lnum;
-        self.mode = snapshot.mode;
         self.diagnostics.truncate(snapshot.diagnostics_len);
     }
 
     /// Get a reference to the source string.
     pub fn src(&self) -> &str {
         self.src
-    }
-
-    /// Check if in diamond mode.
-    pub fn in_diamond_mode(&self) -> bool {
-        matches!(self.mode.last(), Some(ScannerMode::Diamond))
     }
 
     /// Get the current position.
@@ -784,6 +781,7 @@ impl<'src> Scanner<'src> {
             style: CommentStyle::SingleLine,
             loc: crate::location::Location::from_positions(start_pos, end_pos),
             prev_tok_end_pos: Position::default(),
+            prev_tok_is_question: false,
         })
     }
 
@@ -893,6 +891,7 @@ impl<'src> Scanner<'src> {
                 style: CommentStyle::MultiLine,
                 loc,
                 prev_tok_end_pos: Position::default(),
+                prev_tok_is_question: false,
             })
         }
     }
@@ -900,11 +899,6 @@ impl<'src> Scanner<'src> {
     /// Scan a template literal token.
     pub fn scan_template_literal_token(&mut self) -> ScanResult<'src> {
         let start_off = self.offset;
-
-        // If starting with }, consume it
-        if self.ch == '}' {
-            self.next();
-        }
 
         let start_pos = self.position();
 
@@ -1209,35 +1203,12 @@ impl<'src> Scanner<'src> {
                 }
             },
 
-            '>' if !self.in_diamond_mode() => match self.peek() {
-                '=' => {
-                    self.next2();
-                    Token::GreaterEqual
-                }
-                '>' => {
-                    if self.peek2() == '>' {
-                        self.next3();
-                        Token::RightShiftUnsigned
-                    } else {
-                        self.next2();
-                        Token::RightShift
-                    }
-                }
-                _ => {
-                    self.next();
-                    Token::GreaterThan
-                }
-            },
             '>' => {
                 self.next();
                 Token::GreaterThan
             }
 
             '<' => match self.peek() {
-                '<' if !self.in_diamond_mode() => {
-                    self.next2();
-                    Token::LeftShift
-                }
                 '=' => {
                     self.next2();
                     Token::LessEqual
@@ -1395,8 +1366,16 @@ impl<'src> Scanner<'src> {
     /// token in expression position and needs to rescan it as a regex.
     /// Unlike `try_scan_regex_literal`, this does not restore on failure - it emits an error
     /// and returns a Regex token with empty pattern on unterminated regex.
-    pub fn scan_regex(&mut self) -> ScanResult<'src> {
+    pub fn scan_regex(&mut self, opening_pos: Position, prefix_length: usize) -> ScanResult<'src> {
         let start_pos = self.position();
+        // The normal token is `/` or `/.`; restart at its ASCII opening
+        // delimiter (res_scanner.ml `scan_regex`).
+        self.offset -= prefix_length;
+        self.char_pos -= prefix_length;
+        self.offset16 = (opening_pos.cnum - opening_pos.bol) as usize;
+        self.ch = '/';
+        self.ch_len = 1;
+        self.next();
         let pattern_start = self.offset;
 
         // OCaml `scan_regex` (compiler/syntax/src/res_scanner.ml:562-624).
@@ -1421,7 +1400,7 @@ impl<'src> Scanner<'src> {
                         end_pos,
                         DiagnosticCategory::message("unterminated regex".to_string()),
                     );
-                    break (Cow::Borrowed(""), Cow::Borrowed(""));
+                    break (Cow::Borrowed(self.substring(pattern_start, self.offset)), Cow::Borrowed(""));
                 }
                 '\\' => {
                     self.next();
@@ -1441,7 +1420,7 @@ impl<'src> Scanner<'src> {
 
         let end_pos = self.position();
         ScanResult {
-            start_pos,
+            start_pos: opening_pos,
             end_pos,
             token: Token::Regex { pattern, flags },
         }
@@ -1800,19 +1779,22 @@ mod tests {
     }
 
     #[test]
-    fn test_diamond_mode() {
+    fn test_binary_operator_suffix() {
         let mut arena = ParseArena::new();
         let filename = arena.intern("test.res");
-        let mut scanner = Scanner::new(filename, ">> >");
+        let mut scanner = Scanner::new(filename, ">> > =");
 
-        // Normal mode: >> is right shift
-        let result = scanner.scan();
-        assert_eq!(result.token, Token::RightShift);
-
-        // In diamond mode: > is just greater than
-        scanner.set_diamond_mode();
+        // `>` is always scanned alone; the parser extends adjacent suffixes.
         let result = scanner.scan();
         assert_eq!(result.token, Token::GreaterThan);
+        assert_eq!(
+            scanner.scan_binary_operator(&result.token),
+            Some(Token::RightShift)
+        );
+        let result = scanner.scan();
+        assert_eq!(result.token, Token::GreaterThan);
+        // Trivia is never skipped.
+        assert_eq!(scanner.scan_binary_operator(&result.token), None);
     }
 
     #[test]

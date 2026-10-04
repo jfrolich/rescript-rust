@@ -352,6 +352,24 @@ fn apply_signature_ready(build_command_state: &BuildCommandState, msg: Signature
     }
 }
 
+/// Mark a module's dependents in the compile universe dirty without
+/// releasing them.
+fn mark_dependents_dirty(
+    build_state: &BuildState,
+    compile_universe: &AHashSet<String>,
+    dirty_set: &mut AHashSet<String>,
+    module_name: &str,
+) {
+    let Some(module) = build_state.get_module(module_name) else {
+        return;
+    };
+    for dep in &module.dependents {
+        if compile_universe.contains(dep) {
+            dirty_set.insert(dep.clone());
+        }
+    }
+}
+
 fn unblock_dependents(
     build_state: &BuildState,
     compile_universe: &AHashSet<String>,
@@ -954,11 +972,11 @@ pub fn compile(
                     in_flight,
                 );
             }
-            // A subprocess build stops dispatching at the first error. An
-            // in-process build recompiles everything, so it keeps compiling
-            // the modules that do not depend on a failed one: the result no
-            // longer depends on scheduling and every error is reported.
-            while in_flight < capacity && (in_process_mode || !has_errors) {
+            // Keep dispatching work that was already independent of any
+            // failed module. Otherwise diagnostics vary with worker count:
+            // a warning-producing module may or may not have started before
+            // an unrelated error finishes.
+            while in_flight < capacity {
                 if let Some(pre_js_msg) = pop_ready_js(&mut ready_js, &waiting_js_by_dep) {
                     if let Some(counters) = scheduler_counters.as_mut() {
                         counters.scheduled_js += 1;
@@ -1058,10 +1076,6 @@ pub fn compile(
             }
 
             if in_flight == 0 {
-                if !ready_heap.is_empty() {
-                    // Errors suppressed new spawns; nothing left to drain.
-                    break;
-                }
                 if completed.len() < compile_universe_count && !has_errors {
                     stalled = true;
                 }
@@ -1216,6 +1230,19 @@ pub fn compile(
                                     is_clean,
                                 );
                             }
+                        } else if module_failed {
+                            // A successful interface can replace the CMI even
+                            // when its implementation fails. Keep dependents
+                            // dirty for recovery, but do not release them
+                            // until the module succeeds.
+                            if !is_clean {
+                                mark_dependents_dirty(
+                                    build_state_ref,
+                                    &compile_universe,
+                                    &mut dirty_set,
+                                    &finished_name,
+                                );
+                            }
                         } else {
                             unblock_dependents(
                                 build_state_ref,
@@ -1264,9 +1291,9 @@ pub fn compile(
     let mut num_compiled_modules = 0;
 
     // Persist propagated dirtiness back onto build_state. Modules that were
-    // marked dirty (because a predecessor's cmi changed) but never scheduled
-    // — e.g. the first compile error aborted further dispatch — must keep
-    // compile_dirty = true so the next incremental build recompiles them.
+    // marked dirty (because a predecessor's cmi changed) but blocked by a
+    // failed prerequisite must keep compile_dirty = true so the next
+    // incremental build recompiles them.
     // Successful recompiles in the result loop below override this back to
     // false for the modules that actually ran.
     for name in &dirty_set {

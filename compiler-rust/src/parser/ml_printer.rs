@@ -117,7 +117,6 @@ fn pattern_is_simple(pat: &Pattern, arena: &ParseArena) -> bool {
         PatternDesc::Ppat_constraint(_) => true,
         PatternDesc::Ppat_exception(_) => true,
         PatternDesc::Ppat_extension(_) => true,
-        PatternDesc::Ppat_open(_, _) => true,
         PatternDesc::Ppat_construct(lid, _) => {
             // () and [] are simple, others are not
             match arena.get_longident(lid.txt) {
@@ -1364,7 +1363,9 @@ fn print_expression_inner<W: Write>(
     if ctx.ifthenelse
         && matches!(
             &*expr.pexp_desc,
-            ExpressionDesc::Pexp_ifthenelse(_) | ExpressionDesc::Pexp_sequence(_, _)
+            ExpressionDesc::Pexp_ifthenelse(_)
+                | ExpressionDesc::Pexp_ternary(_)
+                | ExpressionDesc::Pexp_sequence(_, _)
         )
     {
         if use_parens {
@@ -1943,6 +1944,51 @@ fn print_expression_inner<W: Write>(
                 f.string(")");
             }
         }
+        ExpressionDesc::Pexp_ternary(inner) => {
+            let (cond, consequent, alternate) = **inner;
+            if use_parens {
+                f.string("(");
+            }
+            // OCaml: @[<2>%a@ ?@ %a@ :@ %a@]
+            f.open_box(BoxKind::Box, 2);
+            print_expression_simple_ctx(f, arena, arena.get_expr(cond), ctx);
+            f.space();
+            f.string("?");
+            f.space();
+            print_expression_with_ctx(f, arena, arena.get_expr(consequent), PrintCtx::reset());
+            f.space();
+            f.string(":");
+            f.space();
+            print_expression_with_ctx(f, arena, arena.get_expr(alternate), PrintCtx::reset());
+            f.close_box();
+            if use_parens {
+                f.string(")");
+            }
+        }
+        ExpressionDesc::Pexp_regexp(regexp) => {
+            if use_parens {
+                f.string("(");
+            }
+            f.string("/");
+            f.string(&regexp.pattern);
+            f.string("/");
+            f.string(&regexp.flags);
+            if use_parens {
+                f.string(")");
+            }
+        }
+        ExpressionDesc::Pexp_braces(braces) => {
+            if use_parens {
+                f.string("(");
+            }
+            // OCaml: {%a} with the enclosing context.
+            f.string("{");
+            print_expression_with_ctx(f, arena, arena.get_expr(braces.expr), ctx);
+            f.string("}");
+            if use_parens {
+                f.string(")");
+            }
+        }
         ExpressionDesc::Pexp_sequence(e1, e2) => {
             if use_parens {
                 f.string("(");
@@ -2071,9 +2117,11 @@ fn print_expression_inner<W: Write>(
         }
         ExpressionDesc::Pexp_constraint(inner) => {
             let (ref e, ref t) = **inner;
+            // OCaml: (%a :@ %a)
             f.string("(");
             print_expression(f, arena, arena.get_expr(*e));
-            f.string(" : ");
+            f.string(" :");
+            f.space();
             print_core_type(f, arena, arena.get_core_type(*t));
             f.string(")");
         }
@@ -2773,12 +2821,6 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             print_payload(f, arena, payload);
             f.string("]");
             f.close_box();
-        }
-        PatternDesc::Ppat_open(lid, p) => {
-            print_longident_idx(f, arena, lid.txt);
-            f.string(".(");
-            print_pattern(f, arena, arena.get_pat(*p));
-            f.string(")");
         }
     }
 }

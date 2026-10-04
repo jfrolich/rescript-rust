@@ -197,8 +197,6 @@ pub enum PatExtra {
     Tpat_constraint(TypedCoreType),
     /// Type pattern: `#tconst`.
     Tpat_type(Path, Loc<LidentIdx>),
-    /// Open pattern: `M.(P)`.
-    Tpat_open(Path, Loc<LidentIdx>, EnvRef),
     /// Unpack pattern: `(module P)`.
     Tpat_unpack,
 }

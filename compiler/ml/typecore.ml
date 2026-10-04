@@ -165,6 +165,7 @@ let iter_expression f e =
   let rec expr e =
     f e;
     match e.pexp_desc with
+    | Pexp_braces {expr = inner} -> expr inner
     | Pexp_extension _ (* we don't iterate under extension point *)
     | Pexp_ident _ | Pexp_constant _ ->
       ()
@@ -174,6 +175,7 @@ let iter_expression f e =
     | Pexp_apply {funct = e; args = lel} ->
       expr e;
       List.iter (fun (_, e) -> expr e) lel
+    | Pexp_regexp _ -> ()
     | Pexp_template {values} -> List.iter expr values
     | Pexp_tagged_template {tag; values} ->
       expr tag;
@@ -212,6 +214,10 @@ let iter_expression f e =
       expr e1;
       expr e2;
       may expr eo
+    | Pexp_ternary (e1, e2, e3) ->
+      expr e1;
+      expr e2;
+      expr e3
     | Pexp_for (_, e1, e2, _, e3) ->
       expr e1;
       expr e2;
@@ -1757,18 +1763,6 @@ and type_pat_aux ~constrs ~labels ~no_existentials ~mode ~explode ~env sp
         pat_extra =
           (Tpat_type (path, lid), loc, sp.ppat_attributes) :: p.pat_extra;
       }
-  | Ppat_open (lid, p) ->
-    let path, new_env = !type_open Asttypes.Fresh !env sp.ppat_loc lid in
-    let new_env = ref new_env in
-    type_pat ~env:new_env p expected_ty (fun p ->
-        env := Env.copy_local !env ~from:!new_env;
-        k
-          {
-            p with
-            pat_extra =
-              (Tpat_open (path, lid, !new_env), loc, sp.ppat_attributes)
-              :: p.pat_extra;
-          })
   | Ppat_exception _ ->
     raise (Error (loc, !env, Exception_pattern_below_toplevel))
   | Ppat_extension ext ->
@@ -1867,10 +1861,12 @@ let type_pattern_list env spatl scope expected_tys allow =
 
 let rec final_subexpression sexp =
   match sexp.pexp_desc with
+  | Pexp_braces {expr = e} -> final_subexpression e
   | Pexp_let (_, _, e)
   | Pexp_sequence (_, e)
   | Pexp_try (e, _)
   | Pexp_ifthenelse (_, e, _)
+  | Pexp_ternary (_, e, _)
   | Pexp_match (_, {pc_rhs = e} :: _) ->
     final_subexpression e
   | _ -> sexp
@@ -2048,6 +2044,7 @@ let rec approx_type env sty =
 
 let rec type_approx env sexp =
   match sexp.pexp_desc with
+  | Pexp_braces {expr = e} -> type_approx env e
   | Pexp_let (_, _, e) -> type_approx env e
   | Pexp_fun {params; body} ->
     newty
@@ -2066,6 +2063,7 @@ let rec type_approx env sexp =
   | Pexp_try (e, _) -> type_approx env e
   | Pexp_tuple l -> newty (Ttuple (List.map (type_approx env) l))
   | Pexp_ifthenelse (_, e, _) -> type_approx env e
+  | Pexp_ternary (_, e, _) -> type_approx env e
   | Pexp_sequence (_, e) -> type_approx env e
   | Pexp_constraint (e, sty) ->
     let ty = type_approx env e in
@@ -2199,11 +2197,7 @@ let iter_ppat f p =
   | Ppat_construct (_, {txt = args}) -> List.iter f args
   | Ppat_variant (_, {txt = args}) -> List.iter f args
   | Ppat_tuple lst -> List.iter f lst
-  | Ppat_exception p
-  | Ppat_alias (p, _)
-  | Ppat_open (_, p)
-  | Ppat_constraint (p, _) ->
-    f p
+  | Ppat_exception p | Ppat_alias (p, _) | Ppat_constraint (p, _) -> f p
   | Ppat_record (args, _flag, _rest) -> List.iter (fun {x = p} -> f p) args
 
 let contains_polymorphic_variant p =
@@ -2228,9 +2222,6 @@ let contains_gadt env p =
            cstrs
        with Not_found -> ());
       iter_ppat (loop env) p
-    | Ppat_open (lid, sub_p) ->
-      let _, new_env = !type_open Asttypes.Override env p.ppat_loc lid in
-      loop new_env sub_p
     | _ -> iter_ppat (loop env) p
   in
   try
@@ -2423,12 +2414,8 @@ and type_expect ~context ?deprecated_context ?recarg env sexp ty_expected =
   (* Special errors for braced identifiers passed to records *)
   let context =
     match sexp.pexp_desc with
-    | Pexp_ident _ ->
-      if
-        sexp.pexp_attributes
-        |> List.exists (fun (attr, _) -> attr.txt = "res.braces")
-      then Some Error_message_utils.BracedIdent
-      else context
+    | Pexp_braces {expr = {pexp_desc = Pexp_ident _}} ->
+      Some Error_message_utils.BracedIdent
     | _ -> context
   in
   let previous_saved_types = Cmt_format.get_saved_types () in
@@ -2460,6 +2447,11 @@ and type_expect_ ?deprecated_context ~context ?(recarg = Rejected) env sexp
     else (id, ld, e, opt)
   in
   match sexp.pexp_desc with
+  | Pexp_braces {expr = inner} ->
+    let exp =
+      type_expect ~context ?deprecated_context ~recarg env inner ty_expected
+    in
+    {exp with exp_attributes = sexp.pexp_attributes @ exp.exp_attributes}
   | Pexp_ident lid ->
     let path, desc =
       Typetexp.find_value
@@ -2568,6 +2560,7 @@ and type_expect_ ?deprecated_context ~context ?(recarg = Rejected) env sexp
   | Pexp_fun {newtypes = []; params; body = sfun_body; async} ->
     type_function ~async loc sexp.pexp_attributes env ty_expected params
       sfun_body
+  | Pexp_regexp _ -> assert false (* Lowered by the built-in frontend mapper. *)
   | Pexp_template {source_segments; values} ->
     begin_def ();
     let segments : Asttypes.template_segment list =
@@ -3075,18 +3068,14 @@ and type_expect_ ?deprecated_context ~context ?(recarg = Rejected) env sexp
         exp_attributes = sexp.pexp_attributes;
         exp_env = env;
       }
-  | Pexp_ifthenelse (scond, sifso, sifnot) -> (
-    (* TODO(attributes) Unify the attribute handling in the parser and rest of the compiler. *)
-    let is_ternary =
-      let rec has_ternary = function
-        | [] -> false
-        | ({Location.txt = "res.ternary"}, _) :: _ -> true
-        | _ :: rest -> has_ternary rest
-      in
-      has_ternary sexp.pexp_attributes
-    in
-    let return_context =
-      if is_ternary then Some TernaryReturn else Some IfReturn
+  | (Pexp_ifthenelse _ | Pexp_ternary _) as conditional -> (
+    let scond, sifso, sifnot, return_context =
+      match conditional with
+      | Pexp_ifthenelse (condition, consequent, alternate) ->
+        (condition, consequent, alternate, Some IfReturn)
+      | Pexp_ternary (condition, consequent, alternate) ->
+        (condition, consequent, Some alternate, Some TernaryReturn)
+      | _ -> assert false
     in
     let cond =
       type_expect ~context:(Some IfCondition) env scond Predef.type_bool

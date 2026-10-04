@@ -795,12 +795,6 @@ fn sexp_pat_extra(
             items.push(attrs_sexp);
             Sexp::list(items)
         }
-        PatExtra::Tpat_open(p, _, _) => {
-            let mut items = vec![Sexp::atom("Tpat_open"), sexp_path(p)];
-            items.extend(loc_sexp);
-            items.push(attrs_sexp);
-            Sexp::list(items)
-        }
         PatExtra::Tpat_unpack => {
             let mut items = vec![Sexp::atom("Tpat_unpack")];
             items.extend(loc_sexp);

@@ -406,6 +406,21 @@ fn rewrite_expression(
                 rewritten_else,
             )))
         }
+        ExpressionDesc::Pexp_ternary(inner) => {
+            let (cond, consequent, alternate) = **inner;
+            let cond = rewrite_expr_idx(cond, arena, let_unwrap_enabled)?;
+            let consequent = rewrite_expr_idx(consequent, arena, let_unwrap_enabled)?;
+            let alternate = rewrite_expr_idx(alternate, arena, let_unwrap_enabled)?;
+            ExpressionDesc::Pexp_ternary(Box::new((cond, consequent, alternate)))
+        }
+        ExpressionDesc::Pexp_braces(braces) => {
+            let expr = rewrite_expr_idx(braces.expr, arena, let_unwrap_enabled)?;
+            ExpressionDesc::Pexp_braces(Box::new(crate::parser::ast::PexpBraces {
+                expr,
+                braces_loc: braces.braces_loc,
+            }))
+        }
+        ExpressionDesc::Pexp_regexp(regexp) => ExpressionDesc::Pexp_regexp(regexp.clone()),
         ExpressionDesc::Pexp_sequence(lhs, rhs) => {
             let rewritten_lhs = rewrite_expr_idx(*lhs, arena, let_unwrap_enabled)?;
             let rewritten_rhs = rewrite_expr_idx(*rhs, arena, let_unwrap_enabled)?;
@@ -969,7 +984,7 @@ let f = x => {
         let ExpressionDesc::Pexp_fun(fun) = &*fun_expr.pexp_desc else {
             panic!("expected function expression");
         };
-        let body = arena.get_expr(fun.rhs);
+        let body = crate::parser::parsetree_viewer::unwrap_braces(&arena, arena.get_expr(fun.rhs));
         let rewritten_to_match = match &*body.pexp_desc {
             ExpressionDesc::Pexp_match(_) => true,
             ExpressionDesc::Pexp_let(inner) => {

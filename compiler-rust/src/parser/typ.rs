@@ -947,14 +947,29 @@ pub(super) fn parse_type_constructor_args(
 ) -> Vec<CoreType> {
     let lid_loc = lid_loc.clone();
     if p.token == Token::LessThan || p.token == Token::Lparen {
-        let opening = p.token.clone();
-        let opening_start_pos = p.start_pos.clone();
-        p.set_diamond_mode();
+        let opening = p.token.clone().into_owned();
+        // Report before recovery to suppress cascading errors. The
+        // diagnostic is rendered afterwards, using the recovered arguments.
+        let diagnostic = if opening == Token::Lparen {
+            p.err_lazy_message()
+        } else {
+            None
+        };
         p.next();
-        let args = parse_type_args(p);
-        if p.token == Token::Rparen && opening == Token::Lparen {
-            // OCaml `parse_type_constructor_args` (res_core.ml:5150-5176):
-            // the message reprints `Typ.constr constr_name type_args`.
+        let closing = if opening == Token::Lparen {
+            Token::Rparen
+        } else {
+            Token::GreaterThan
+        };
+        let args = super::core::parse_comma_delimited_region(
+            p,
+            Grammar::TypExprList,
+            closing.clone(),
+            parse_type_constructor_arg_region,
+        );
+        p.expect(closing);
+        if let Some(index) = diagnostic {
+            // The message reprints `Typ.constr constr_name type_args`.
             let arg_idxs: Vec<CoreTypeIdx> = args
                 .iter()
                 .map(|arg| p.arena_mut().push_core_type(arg.clone()))
@@ -984,16 +999,8 @@ pub(super) fn parse_type_constructor_args(
                 true,
             )
             .to_string(80);
-            p.err_at(
-                opening_start_pos,
-                p.end_pos.clone(),
-                DiagnosticCategory::message(&msg),
-            );
-            p.next(); // consume )
-        } else {
-            p.expect(Token::GreaterThan);
+            p.set_diagnostic_message(index, msg);
         }
-        p.pop_diamond_mode();
         args
     } else {
         vec![]
@@ -1062,72 +1069,13 @@ fn parse_type_constr(p: &mut Parser<'_>) -> CoreType {
 }
 
 /// Parse type arguments.
-/// Parse a single type constructor argument, matching OCaml's parse_type_constructor_arg_region.
-/// Handles the special case where `<` tokens are silently skipped (e.g., `option(<node<int>>)`).
+/// OCaml `parse_type_constructor_arg_region`.
 fn parse_type_constructor_arg_region(p: &mut Parser<'_>) -> Option<CoreType> {
     if super::grammar::is_typ_expr_start(&p.token) {
         Some(parse_typ_expr(p))
-    } else if p.token == Token::LessThan {
-        // OCaml: skip the < and retry
-        p.next();
-        parse_type_constructor_arg_region(p)
     } else {
         None
     }
-}
-
-fn parse_type_args(p: &mut Parser<'_>) -> Vec<CoreType> {
-    // OCaml: parse_comma_delimited_region ~grammar:TypExprList ~closing:GreaterThan
-    //        ~f:parse_type_constructor_arg_region
-    let mut args = vec![];
-
-    p.leave_breadcrumb(Grammar::TypExprList);
-    loop {
-        match parse_type_constructor_arg_region(p) {
-            Some(typ) => {
-                if p.token == Token::Comma {
-                    p.next();
-                    args.push(typ);
-                } else if p.token == Token::GreaterThan || p.token == Token::Eof {
-                    args.push(typ);
-                    break;
-                } else if super::grammar::is_typ_expr_start(&p.token) || p.token == Token::LessThan
-                {
-                    // Missing comma - report and continue
-                    p.expect(Token::Comma);
-                    args.push(typ);
-                } else {
-                    args.push(typ);
-                    if !(p.token == Token::Eof
-                        || p.token == Token::GreaterThan
-                        || super::core::recover::should_abort_list_parse(p))
-                    {
-                        p.expect(Token::Comma);
-                    }
-                    if p.token == Token::Semicolon {
-                        p.next();
-                    }
-                }
-            }
-            None => {
-                if p.token == Token::Eof
-                    || p.token == Token::GreaterThan
-                    || super::core::recover::should_abort_list_parse(p)
-                {
-                    break;
-                } else {
-                    p.err(DiagnosticCategory::unexpected(
-                        p.token.clone().into_owned(),
-                        p.breadcrumbs().to_vec(),
-                    ));
-                    p.next();
-                }
-            }
-        }
-    }
-    p.eat_breadcrumb();
-
-    args
 }
 
 // ============================================================================

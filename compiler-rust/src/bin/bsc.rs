@@ -877,8 +877,8 @@ fn maybe_process_gentype(source_path: &Path, opts: &Options) -> Result<()> {
 fn check_gentype_cmt_file(cmt_file: &Path) -> Result<()> {
     // Cmt_format.read_cmt raises Cmt_format.Error(Not_a_typedtree _) when the
     // selected file contains a compiled interface without typedtree data.
-    const CMT_MAGIC: &[u8; 12] = b"Caml1999T037";
-    const CMI_MAGIC: &[u8; 12] = b"Caml1999I034";
+    const CMT_MAGIC: &[u8; 12] = b"Caml1999T039";
+    const CMI_MAGIC: &[u8; 12] = b"Caml1999I035";
 
     let data = fs::read(cmt_file).with_context(|| cmt_file.display().to_string())?;
     if data.len() < CMT_MAGIC.len() {
@@ -905,7 +905,7 @@ fn check_gentype_cmt_file(cmt_file: &Path) -> Result<()> {
     );
     let _ = io::stdout().flush();
     Err(UserDiagnostic::new(
-        "Fatal error: exception File \"compiler/gentype/gentype_main.ml\", line 91, characters 4-10: Assertion failed\n".to_string(),
+        "Fatal error: exception File \"compiler/gentype/gentype_main.ml\", line 89, characters 4-10: Assertion failed\n".to_string(),
         2,
     )
     .into())

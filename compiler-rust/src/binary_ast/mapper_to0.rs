@@ -1134,10 +1134,6 @@ impl<'a> Mapper<'a> {
             current::PatternDesc::Ppat_extension(ext) => {
                 pt0::PatternDesc::Extension(self.map_extension(ext))
             }
-            current::PatternDesc::Ppat_open(lid, pat_idx) => pt0::PatternDesc::Open(
-                self.map_longident_loc(lid),
-                Box::new(self.map_pat_idx(*pat_idx)),
-            ),
         }
     }
 
@@ -1159,6 +1155,21 @@ impl<'a> Mapper<'a> {
             let mut attrs = self.map_attributes(&expr.pexp_attributes);
             let mut inner = self.map_expr_idx(*inner_idx);
             attrs.push(self.mk_await_attr());
+            attrs.append(&mut inner.pexp_attributes);
+            inner.pexp_attributes = attrs;
+            return inner;
+        }
+        if let current::ExpressionDesc::Pexp_braces(braces) = &*expr.pexp_desc {
+            // ast_mapper_to0.ml Pexp_braces: the braces node disappears into
+            // a `res.braces` attribute located at the delimiters, after the
+            // node's own attributes and before the inner expression's.
+            let mut attrs = self.map_attributes(&expr.pexp_attributes);
+            let mut inner = self.map_expr_idx(braces.expr);
+            let braces_loc = self.loc(braces.braces_loc);
+            attrs.push((
+                OldLocated::new("res.braces".to_string(), braces_loc),
+                pt0::Payload::PStr(vec![]),
+            ));
             attrs.append(&mut inner.pexp_attributes);
             inner.pexp_attributes = attrs;
             return inner;
@@ -1202,6 +1213,12 @@ impl<'a> Mapper<'a> {
                 attrs.insert(0, attr);
             }
             _ => {}
+        }
+        // ast_mapper_to0.ml Pexp_ternary: an if-then-else carrying the
+        // `res.ternary` marker.
+        if let current::ExpressionDesc::Pexp_ternary(_) = &*expr.pexp_desc {
+            let attr = self.internal_attr("res.ternary");
+            attrs.insert(0, attr);
         }
         // ast_mapper_to0.ml Pexp_apply: `res.partial` marks a partial
         // application.
@@ -1514,6 +1531,39 @@ impl<'a> Mapper<'a> {
                     Box::new(self.map_expr_idx(*e2_idx)),
                     else_idx.map(|e| Box::new(self.map_expr_idx(e))),
                 )
+            }
+            current::ExpressionDesc::Pexp_ternary(inner) => {
+                let (cond, consequent, alternate) = **inner;
+                pt0::ExpressionDesc::Ifthenelse(
+                    Box::new(self.map_expr_idx(cond)),
+                    Box::new(self.map_expr_idx(consequent)),
+                    Some(Box::new(self.map_expr_idx(alternate))),
+                )
+            }
+            current::ExpressionDesc::Pexp_regexp(regexp) => {
+                // %re is only a frozen PPX wire encoding, not source syntax.
+                let full_loc = self.loc(loc);
+                let source = format!("/{}/{}", regexp.pattern, regexp.flags);
+                pt0::ExpressionDesc::Extension((
+                    OldLocated::new("re".to_string(), full_loc.clone()),
+                    pt0::Payload::PStr(vec![pt0::StructureItem {
+                        pstr_desc: pt0::StructureItemDesc::Eval(
+                            pt0::Expression {
+                                pexp_desc: pt0::ExpressionDesc::Constant(pt0::Constant::String(
+                                    source,
+                                    Some("js".to_string()),
+                                )),
+                                pexp_loc: full_loc.clone(),
+                                pexp_attributes: vec![],
+                            },
+                            vec![],
+                        ),
+                        pstr_loc: full_loc,
+                    }]),
+                ))
+            }
+            current::ExpressionDesc::Pexp_braces(_) => {
+                unreachable!("Pexp_braces is mapped in map_expression_with_owner")
             }
             current::ExpressionDesc::Pexp_sequence(e1_idx, e2_idx) => {
                 pt0::ExpressionDesc::Sequence(
@@ -1834,7 +1884,16 @@ impl<'a> Mapper<'a> {
             ptype_kind: self.map_type_kind(&td.ptype_kind),
             ptype_private: self.map_private_flag(td.ptype_private),
             ptype_manifest: td.ptype_manifest.map(|t| self.map_core_type_idx(t)),
-            ptype_attributes: self.map_attributes(&td.ptype_attributes),
+            ptype_attributes: {
+                // Ast_helper.Type.declaration_attributes restores the
+                // inline-record marker for the frozen v0 tree.
+                let mut attrs = Vec::new();
+                if td.ptype_origin == current::TypeDeclarationOrigin::Inline_record_definition {
+                    attrs.push(self.internal_attr("res.inlineRecordDefinition"));
+                }
+                attrs.extend(self.map_attributes(&td.ptype_attributes));
+                attrs
+            },
             ptype_loc: self.loc(td.ptype_loc),
         }
     }

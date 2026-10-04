@@ -714,6 +714,29 @@ impl LambdaCompiler {
                     (vec![], vec![])
                 }
             };
+            // lam_compile_main.ml `declare_undeclared_exports`: when the
+            // toplevel always throws, the groups after the throw are dropped
+            // and the identifiers they bind are undeclared. Declare each such
+            // exported identifier after the throw.
+            if block_terminates(&block) {
+                let declared: AHashSet<Ident> = block
+                    .iter()
+                    .filter_map(|stmt| match &stmt.desc {
+                        StatementDesc::Variable(decl) => Some(decl.ident.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                for id in &exports {
+                    if !declared.contains(id) {
+                        block.push(Statement::variable(VariableDeclaration {
+                            ident: id.clone(),
+                            value: None,
+                            property: LetKind::Strict,
+                            ident_info: IdentInfo::default(),
+                        }));
+                    }
+                }
+            }
             let exports = resolve_export_aliases(&block, exports);
             let side_effect = module_side_effect_reason(&simplified);
 

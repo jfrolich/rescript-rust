@@ -195,9 +195,6 @@ let rec add_pattern bv pat =
   | Ppat_variant (_, {txt = args}) -> List.iter (add_pattern bv) args
   | Ppat_type li -> add bv li
   | Ppat_unpack id -> pattern_bv := String_map.add id.txt bound !pattern_bv
-  | Ppat_open (m, p) ->
-    let bv = open_module bv m.txt in
-    add_pattern bv p
   | Ppat_exception p -> add_pattern bv p
   | Ppat_extension e -> handle_extension e
 
@@ -208,6 +205,7 @@ let add_pattern bv pat =
 
 let rec add_expr bv exp =
   match exp.pexp_desc with
+  | Pexp_braces {expr = inner} -> add_expr bv inner
   | Pexp_ident l -> add bv l
   | Pexp_constant _ -> ()
   | Pexp_let (rf, pel, e) ->
@@ -225,6 +223,7 @@ let rec add_expr bv exp =
   | Pexp_apply {funct = e; args = el} ->
     add_expr bv e;
     List.iter (fun (_, e) -> add_expr bv e) el
+  | Pexp_regexp _ -> ()
   | Pexp_template {values} -> List.iter (add_expr bv) values
   | Pexp_tagged_template {tag; values} ->
     add_expr bv tag;
@@ -259,6 +258,10 @@ let rec add_expr bv exp =
     add_expr bv e1;
     add_expr bv e2;
     add_opt add_expr bv opte3
+  | Pexp_ternary (e1, e2, e3) ->
+    add_expr bv e1;
+    add_expr bv e2;
+    add_expr bv e3
   | Pexp_sequence (e1, e2) ->
     add_expr bv e1;
     add_expr bv e2

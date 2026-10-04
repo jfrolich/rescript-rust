@@ -4535,10 +4535,6 @@ impl<'a> LocCloner<'a> {
             PatternDesc::Ppat_unpack(name) => self.located(name),
             PatternDesc::Ppat_exception(pat) => self.pattern_idx(pat),
             PatternDesc::Ppat_extension(ext) => self.extension(ext),
-            PatternDesc::Ppat_open(lid, pat) => {
-                self.located(lid);
-                self.pattern_idx(pat);
-            }
         }
     }
 
@@ -4792,6 +4788,17 @@ impl<'a> LocCloner<'a> {
                     self.expression_idx(expr);
                 }
             }
+            ExpressionDesc::Pexp_ternary(inner) => {
+                let (ref mut cond, ref mut consequent, ref mut alternate) = **inner;
+                self.expression_idx(cond);
+                self.expression_idx(consequent);
+                self.expression_idx(alternate);
+            }
+            ExpressionDesc::Pexp_braces(braces) => {
+                self.loc(&mut braces.braces_loc);
+                self.expression_idx(&mut braces.expr);
+            }
+            ExpressionDesc::Pexp_regexp(_) => {}
             ExpressionDesc::Pexp_sequence(first, second)
             | ExpressionDesc::Pexp_while(first, second) => {
                 self.expression_idx(first);

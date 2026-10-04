@@ -126,6 +126,7 @@ module T = struct
         ptype_kind;
         ptype_private;
         ptype_manifest;
+        ptype_origin;
         ptype_attributes;
         ptype_loc;
       } =
@@ -138,6 +139,7 @@ module T = struct
            ptype_cstrs)
       ~kind:(sub.type_kind sub ptype_kind)
       ?manifest:(map_opt (sub.typ sub) ptype_manifest)
+      ~origin:ptype_origin
       ~loc:(sub.location sub ptype_loc)
       ~attrs:(sub.attributes sub ptype_attributes)
 
@@ -290,6 +292,10 @@ module E = struct
     let loc = sub.location sub loc in
     let attrs = sub.attributes sub attrs in
     match desc with
+    | Pexp_braces {expr; braces_loc} ->
+      braces
+        ~braces_loc:(sub.location sub braces_loc)
+        ~attrs (sub.expr sub expr)
     | Pexp_ident x -> ident ~loc ~attrs (map_loc sub x)
     | Pexp_constant x -> constant ~loc ~attrs x
     | Pexp_let (r, vbs, e) ->
@@ -337,6 +343,8 @@ module E = struct
     | Pexp_ifthenelse (e1, e2, e3) ->
       ifthenelse ~loc ~attrs (sub.expr sub e1) (sub.expr sub e2)
         (map_opt (sub.expr sub) e3)
+    | Pexp_ternary (e1, e2, e3) ->
+      ternary ~loc ~attrs (sub.expr sub e1) (sub.expr sub e2) (sub.expr sub e3)
     | Pexp_sequence (e1, e2) ->
       sequence ~loc ~attrs (sub.expr sub e1) (sub.expr sub e2)
     | Pexp_break -> break ~loc ~attrs ()
@@ -352,6 +360,7 @@ module E = struct
     | Pexp_for_await_of (p, e1, e2) ->
       Exp.mk ~loc ~attrs
         (Pexp_for_await_of (sub.pat sub p, sub.expr sub e1, sub.expr sub e2))
+    | Pexp_regexp {pattern; flags} -> regexp ~loc ~attrs pattern flags
     | Pexp_template {source_segments; values} ->
       Exp.template ~loc ~attrs
         (List.map (map_loc sub) source_segments)
@@ -455,7 +464,6 @@ module P = struct
       constraint_ ~loc ~attrs (sub.pat sub p) (sub.typ sub t)
     | Ppat_type s -> type_ ~loc ~attrs (map_loc sub s)
     | Ppat_unpack s -> unpack ~loc ~attrs (map_loc sub s)
-    | Ppat_open (lid, p) -> open_ ~loc ~attrs (map_loc sub lid) (sub.pat sub p)
     | Ppat_exception p -> exception_ ~loc ~attrs (sub.pat sub p)
     | Ppat_extension x -> extension ~loc ~attrs (sub.extension sub x)
 end

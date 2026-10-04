@@ -116,7 +116,6 @@ module Pat : sig
   val constraint_ : ?loc:loc -> ?attrs:attrs -> pattern -> core_type -> pattern
   val type_ : ?loc:loc -> ?attrs:attrs -> lid -> pattern
   val unpack : ?loc:loc -> ?attrs:attrs -> str -> pattern
-  val open_ : ?loc:loc -> ?attrs:attrs -> lid -> pattern -> pattern
   val exception_ : ?loc:loc -> ?attrs:attrs -> pattern -> pattern
   val extension : ?loc:loc -> ?attrs:attrs -> extension -> pattern
 end
@@ -126,6 +125,7 @@ module Exp : sig
   val mk : ?loc:loc -> ?attrs:attrs -> expression_desc -> expression
   val attr : expression -> attribute -> expression
 
+  val braces : ?attrs:attrs -> braces_loc:loc -> expression -> expression
   val ident : ?loc:loc -> ?attrs:attrs -> lid -> expression
   val constant : ?loc:loc -> ?attrs:attrs -> constant -> expression
   val let_ :
@@ -186,6 +186,13 @@ module Exp : sig
     expression ->
     expression option ->
     expression
+  val ternary :
+    ?loc:loc ->
+    ?attrs:attrs ->
+    expression ->
+    expression ->
+    expression ->
+    expression
   val sequence :
     ?loc:loc -> ?attrs:attrs -> expression -> expression -> expression
   val break : ?loc:loc -> ?attrs:attrs -> unit -> expression
@@ -225,6 +232,8 @@ module Exp : sig
 
   val object_literal :
     ?loc:loc -> ?attrs:attrs -> (str * expression) list -> expression
+
+  val regexp : ?loc:loc -> ?attrs:attrs -> string -> string -> expression
 
   val template :
     ?loc:loc -> ?attrs:attrs -> str list -> expression list -> expression
@@ -300,8 +309,12 @@ module Type : sig
     ?kind:type_kind ->
     ?priv:private_flag ->
     ?manifest:core_type ->
+    ?origin:type_declaration_origin ->
     str ->
     type_declaration
+
+  val declaration_attributes : type_declaration -> attributes
+  (** Restore the inline-record marker for the frozen v0 PPX tree. *)
 
   val constructor :
     ?loc:loc ->

@@ -13,7 +13,7 @@ use crate::parse_arena::{
     CoreTypeIdx, ExprIdx, LidentIdx, ModExprIdx, ModTypeIdx, ParseArena, PatIdx,
 };
 use crate::parser::ast::{
-    Attributes, Case, ConstructorArguments, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
+    Case, ConstructorArguments, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
     ExtensionConstructor, ExtensionConstructorKind, IncludeDeclaration, IncludeDescription,
     LabelDeclaration, ModuleBinding, ModuleDeclaration, ModuleExpr, ModuleExprDesc, ModuleType,
     ModuleTypeDeclaration, ModuleTypeDesc, ObjectField, OpenDescription, Pattern, PatternDesc,
@@ -438,7 +438,14 @@ impl<'a> DependencyCollector<'a> {
             ExpressionDesc::Pexp_ident(lid) => {
                 self.add_lident_idx(lid.txt);
             }
-            ExpressionDesc::Pexp_constant(_) => {}
+            ExpressionDesc::Pexp_braces(braces) => self.add_expr_idx(braces.expr),
+            ExpressionDesc::Pexp_constant(_) | ExpressionDesc::Pexp_regexp(_) => {}
+            ExpressionDesc::Pexp_ternary(inner) => {
+                let (cond, consequent, alternate) = **inner;
+                self.add_expr_idx(cond);
+                self.add_expr_idx(consequent);
+                self.add_expr_idx(alternate);
+            }
             ExpressionDesc::Pexp_break | ExpressionDesc::Pexp_continue => {}
             ExpressionDesc::Pexp_let(inner) => {
                 let (ref _rec_flag, ref bindings, ref body) = **inner;
@@ -964,13 +971,6 @@ impl<'a> DependencyCollector<'a> {
             PatternDesc::Ppat_extension(ext) => {
                 self.handle_extension(ext);
             }
-            PatternDesc::Ppat_open(lid, pat_idx) => {
-                // Pattern open uses full module path
-                self.add_lident_idx_full(lid.txt);
-                // pat is PatIdx
-                let pat_idx = *pat_idx;
-                self.add_pat_idx_inner(pat_idx, unpack_names);
-            }
         }
     }
 
@@ -1363,6 +1363,7 @@ impl<'a> DependencyCollector<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::ast::Attributes;
     use crate::parse_arena::{LocIdx, Located};
 
     /// Parse a dotted string like "Foo.Bar.baz" into a Longident using the arena.

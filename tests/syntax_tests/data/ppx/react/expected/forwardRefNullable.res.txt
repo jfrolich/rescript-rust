@@ -8,14 +8,9 @@ module NullableT = {
   let make = (
     {id, ?children, _}: props<string, _, React.ref<Nullable.t<Dom.element>>>,
     ref: Nullable.t<React.ref<Nullable.t<Dom.element>>>,
-  ) => {
+  ): React.element => {
     ignore(ref)
-    (
-      ReactDOM.jsx(
-        "div",
-        {id, children: ?ReactDOM.someElement({children->Option.getOr(React.null)})},
-      ): React.element
-    )
+    ReactDOM.jsx("div", {id, children: ?ReactDOM.someElement({children->Option.getOr(React.null)})})
   }
   let make = React.forwardRef({
     let \"ForwardRefNullable$NullableT" = (props: props<_>, ref) => make(props, ref)
@@ -33,9 +28,9 @@ module StdlibNullableT = {
   let make = (
     {id, _}: props<string, React.ref<Nullable.t<Dom.element>>>,
     ref: Stdlib.Nullable.t<React.ref<Nullable.t<Dom.element>>>,
-  ) => {
+  ): React.element => {
     ignore(ref)
-    (ReactDOM.jsx("div", {id: id}): React.element)
+    ReactDOM.jsx("div", {id: id})
   }
   let make = React.forwardRef({
     let \"ForwardRefNullable$StdlibNullableT" = (props: props<_>, ref) => make(props, ref)
@@ -54,9 +49,9 @@ module LowercaseNullable = {
   let make = (
     {id, _}: props<string, React.ref<Nullable.t<Dom.element>>>,
     ref: nullable<React.ref<Nullable.t<Dom.element>>>,
-  ) => {
+  ): React.element => {
     ignore(ref)
-    (ReactDOM.jsx("div", {id: id}): React.element)
+    ReactDOM.jsx("div", {id: id})
   }
   let make = React.forwardRef({
     let \"ForwardRefNullable$LowercaseNullable" = (props: props<_>, ref) => make(props, ref)

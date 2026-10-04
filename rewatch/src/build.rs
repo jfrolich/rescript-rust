@@ -81,7 +81,7 @@ fn mark_modules_dirty(build_state: &mut BuildCommandState, namespaces: bool) {
 }
 
 #[derive(Serialize, Debug, Clone)]
-pub struct CompilerArgs {
+struct CompilerArgs {
     pub compiler_args: Vec<String>,
     pub parser_args: Vec<String>,
 }

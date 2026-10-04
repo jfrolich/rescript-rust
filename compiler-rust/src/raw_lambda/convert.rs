@@ -1739,7 +1739,8 @@ impl<'a> RawLambdaConverter<'a> {
             Payload::PStr(items) if items.len() == 1 => {
                 if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
                     let (expr_idx, attrs) = &**eval_inner;
-                    let expr = self.arena.get_expr(*expr_idx);
+                    // translattribute.ml: `Ast_payload.unwrap_braces expression`.
+                    let expr = crate::ast_payload::unwrap_braces(self.arena, self.arena.get_expr(*expr_idx));
                     if attrs.is_empty()
                         && let ExpressionDesc::Pexp_ident(ident) = &*expr.pexp_desc
                     {

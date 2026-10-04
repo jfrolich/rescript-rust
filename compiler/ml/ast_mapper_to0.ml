@@ -222,16 +222,15 @@ module T = struct
     | Ptyp_extension x -> extension ~loc ~attrs (sub.extension sub x)
 
   let map_type_declaration sub
-      {
-        ptype_name;
-        ptype_params;
-        ptype_cstrs;
-        ptype_kind;
-        ptype_private;
-        ptype_manifest;
-        ptype_attributes;
-        ptype_loc;
-      } =
+      ({
+         ptype_name;
+         ptype_params;
+         ptype_cstrs;
+         ptype_kind;
+         ptype_private;
+         ptype_manifest;
+         ptype_loc;
+       } as decl) =
     Type.mk (map_loc sub ptype_name)
       ~params:(List.map (map_fst (sub.typ sub)) ptype_params)
       ~priv:ptype_private
@@ -242,7 +241,7 @@ module T = struct
       ~kind:(sub.type_kind sub ptype_kind)
       ?manifest:(map_opt (sub.typ sub) ptype_manifest)
       ~loc:(sub.location sub ptype_loc)
-      ~attrs:(sub.attributes sub ptype_attributes)
+      ~attrs:(sub.attributes sub (Ast_helper.Type.declaration_attributes decl))
 
   let map_type_kind sub = function
     | Ptype_abstract -> Pt.Ptype_abstract
@@ -443,6 +442,16 @@ module E = struct
     let is_ppx_context_string = has_ppx_context_string_attr attrs in
     let attrs = sub.attributes sub (remove_ppx_context_string_attr attrs) in
     match desc with
+    | Pexp_braces {expr; braces_loc} ->
+      let inner = sub.expr sub expr in
+      {
+        inner with
+        pexp_attributes =
+          attrs
+          @ ( Location.mkloc "res.braces" (sub.location sub braces_loc),
+              Pt.PStr [] )
+            :: inner.pexp_attributes;
+      }
     | Pexp_ident x -> ident ~loc ~attrs (map_loc sub x)
     | Pexp_constant (Pconst_string payload) when is_ppx_context_string ->
       (* The PPX protocol predates source-preserving strings. Existing PPXs
@@ -616,6 +625,11 @@ module E = struct
     | Pexp_ifthenelse (e1, e2, e3) ->
       ifthenelse ~loc ~attrs (sub.expr sub e1) (sub.expr sub e2)
         (map_opt (sub.expr sub) e3)
+    | Pexp_ternary (condition, consequent, alternate) ->
+      let marker = (Location.mknoloc "res.ternary", Pt.PStr []) in
+      ifthenelse ~loc ~attrs:(marker :: attrs) (sub.expr sub condition)
+        (sub.expr sub consequent)
+        (Some (sub.expr sub alternate))
     | Pexp_sequence (e1, e2) ->
       sequence ~loc ~attrs (sub.expr sub e1) (sub.expr sub e2)
     | Pexp_break ->
@@ -652,6 +666,16 @@ module E = struct
         ~attrs:(for_await_of_attr :: attrs)
         (sub.pat sub pat) start_expr end_expr Asttypes.Upto
         (sub.expr sub body_expr)
+    | Pexp_regexp {pattern; flags} ->
+      (* %re is only a frozen PPX wire encoding, not source syntax. *)
+      extension ~loc ~attrs
+        ( Location.mkloc "re" loc,
+          Pt.PStr
+            [
+              Ast_helper0.Str.eval ~loc
+                (Ast_helper0.Exp.constant ~loc
+                   (Pt.Pconst_string ("/" ^ pattern ^ "/" ^ flags, Some "js")));
+            ] )
     | Pexp_template {source_segments; values} ->
       let segments =
         List.map
@@ -872,7 +896,6 @@ module P = struct
       constraint_ ~loc ~attrs (sub.pat sub p) (sub.typ sub t)
     | Ppat_type s -> type_ ~loc ~attrs (map_loc sub s)
     | Ppat_unpack s -> unpack ~loc ~attrs (map_loc sub s)
-    | Ppat_open (lid, p) -> open_ ~loc ~attrs (map_loc sub lid) (sub.pat sub p)
     | Ppat_exception p -> exception_ ~loc ~attrs (sub.pat sub p)
     | Ppat_extension x -> extension ~loc ~attrs (sub.extension sub x)
 end

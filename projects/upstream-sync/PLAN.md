@@ -22,7 +22,7 @@ the change to `compiler-rust/`, reruns the gates and commits the merge.
 | 5 | ..7875e74f9 (111-117) | string literal normalization, formatter | done |
 | 6 | ..0aa58d8aa (118-148) | scalar replacement, @as in the AST, sharing passes | done (Tella blocked, see log) |
 | 7 | ..1cec5eb9e (149-162) | constructor argument lists, parser modes removed, coercions, untagged blocks | done (Tella blocked, see step 6) |
-| 8 | ..204 | parser token inspection, regexp/ternary/braces nodes, cleanup | |
+| 8 | ..8c3fecc56 (163-204) | parser token inspection, regexp/ternary/braces nodes, cleanup | done (Tella blocked, see step 6) |
 
 ## Debug-printer conventions
 
@@ -301,4 +301,36 @@ Gates (release): JS output parity 640/640, typedtree parity 639/639
 (`string_unicode_test` exceeds the 10s limit in both compilers), error output
 parity 1898/1898, syntax tests 588/588, compiler tests green except
 `parse_inline_for`, rewatch unit tests 147/147, `cargo fmt` clean and
+`tests/suite.sh` green. `make test-analysis` stops at `no-watcher.sh`.
+
+### Step 8 (`8c3fecc56`)
+
+- New Parsetree nodes `Pexp_braces {expr; braces_loc}` (tag 0, so every
+  later `expression_desc` tag moved up), `Pexp_ternary` and
+  `Pexp_regexp {pattern; flags}` replace the `res.braces`/`res.ternary`
+  attributes and `%re`; `Ppat_open`/`Tpat_open` and `pat_record_label` are
+  gone; type declarations carry `ptype_origin`. The AST, sexp printers,
+  iterators, dependency walk, marshalling (`ResImpl01311`/`ResIntf01311`),
+  the v0 PPX bridge and every consumer that looked at the old attributes
+  (printer, parens, JSX PPX, builtin PPX, let? and Spice PPX, type checker,
+  payload readers, `.cmi` attribute decoding) were moved over. Payload
+  readers look through braces (`Ast_payload.unwrap_braces`).
+- Parser: diamond scanner mode removed, binary operators assembled on
+  demand (`peek_binary_operator`), regexp literals rescanned from the `/`,
+  type-constructor arguments written with parentheses are recovered with a
+  diagnostic, comma-delimited regions recover paired delimiters, and
+  lookahead/snapshots roll back error-region state.
+- Pipes bind their left side when the right side is a block, open, let or
+  sequence (`desugar_pipe`).
+- Backend: exports left unbound by a toplevel throw are declared after it
+  (`declare_undeclared_exports`). GenType keeps inline-record cases of
+  untagged variants as objects. Magics `Caml1999I035`/`Caml1999T039`.
+- Rust's module-inclusion elision is still its own size approximation; the
+  error gate shows it matches upstream's word-count `is_big` on every
+  fixture.
+
+Gates (release): JS output parity 635/635, typedtree parity 634/634
+(`string_unicode_test` exceeds the 10s limit in both compilers), error output
+parity 1896/1896, syntax tests all green, compiler tests green except
+`parse_inline_for`, rewatch unit tests 150/150, `cargo fmt` clean and
 `tests/suite.sh` green. `make test-analysis` stops at `no-watcher.sh`.

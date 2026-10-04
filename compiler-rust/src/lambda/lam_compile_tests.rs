@@ -2523,7 +2523,7 @@ fn compile_deps_program_keeps_exports_after_trailing_effect_sequence() {
 }
 
 #[test]
-fn compile_deps_program_skips_unreachable_throwing_export_binding_declaration() {
+fn compile_deps_program_declares_export_left_unbound_by_throwing_binding() {
     let mut compiler = LambdaCompiler::new();
     let exported = Ident::create_local("u");
     let export_block = Lambda::prim(
@@ -2548,12 +2548,21 @@ fn compile_deps_program_skips_unreachable_throwing_export_binding_declaration() 
     let deps = compiler.compile_deps_program(&lam);
 
     assert_eq!(deps.program.exports, vec![exported.clone()]);
-    let [stmt] = deps.program.block.as_slice() else {
+    // lam_compile_main.ml `declare_undeclared_exports`: the export the
+    // throw left unbound is declared after it.
+    let [stmt, declared] = deps.program.block.as_slice() else {
         panic!(
-            "expected the terminating throw to stay as the only statement, got {:?}",
+            "expected the terminating throw followed by the export declaration, got {:?}",
             deps.program.block
         );
     };
+    assert!(matches!(
+        declared,
+        Statement {
+            desc: StatementDesc::Variable(VariableDeclaration { ident, value: None, .. }),
+            ..
+        } if ident.same(&exported)
+    ));
     assert!(matches!(
         stmt,
         Statement {
@@ -2567,7 +2576,7 @@ fn compile_deps_program_skips_unreachable_throwing_export_binding_declaration() 
 }
 
 #[test]
-fn compile_deps_program_skips_unreachable_nested_throwing_export_binding_declaration() {
+fn compile_deps_program_declares_export_left_unbound_by_nested_throwing_binding() {
     let mut compiler = LambdaCompiler::new();
     let exported = Ident::create_local("A");
     let nested = Ident::create_local("u");
@@ -2608,12 +2617,21 @@ fn compile_deps_program_skips_unreachable_nested_throwing_export_binding_declara
     let deps = compiler.compile_deps_program(&lam);
 
     assert_eq!(deps.program.exports, vec![exported.clone()]);
-    let [stmt] = deps.program.block.as_slice() else {
+    // lam_compile_main.ml `declare_undeclared_exports`: the export the
+    // throw left unbound is declared after it.
+    let [stmt, declared] = deps.program.block.as_slice() else {
         panic!(
-            "expected the terminating throw to stay as the only statement, got {:?}",
+            "expected the terminating throw followed by the export declaration, got {:?}",
             deps.program.block
         );
     };
+    assert!(matches!(
+        declared,
+        Statement {
+            desc: StatementDesc::Variable(VariableDeclaration { ident, value: None, .. }),
+            ..
+        } if ident.same(&exported)
+    ));
     assert!(
         matches!(
             stmt,

@@ -8,10 +8,10 @@ module V4C = {
     label: 'label,
   }
 
-  let make = ({?id, ?ref, label, _}: props<string, 'ref, string>) => {
+  let make = ({?id, ?ref, label, _}: props<string, 'ref, string>): React.element => {
     let _ = id
     let _ = ref
-    (React.string(label): React.element)
+    React.string(label)
   }
   let make = React.component({
     let \"UnannotatedRefProp$V4C" = (props: props<_>) => make(props)

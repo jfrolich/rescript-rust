@@ -625,8 +625,7 @@ impl<'a> Checker<'a> {
             | PatternDesc::Ppat_type(_)
             | PatternDesc::Ppat_unpack(_) => Ok(()),
             PatternDesc::Ppat_alias(inner, _)
-            | PatternDesc::Ppat_exception(inner)
-            | PatternDesc::Ppat_open(_, inner) => self.pat(*inner),
+            | PatternDesc::Ppat_exception(inner) => self.pat(*inner),
             PatternDesc::Ppat_tuple(items) | PatternDesc::Ppat_array(items) => {
                 for item in items.iter() {
                     self.pat(*item)?;
@@ -699,6 +698,42 @@ impl<'a> Checker<'a> {
         let old_in_function_def = self.in_function_def;
         self.in_function_def = false;
         match &*expr.pexp_desc {
+            // `Pexp_regexp`: `Ast_payload.validate_raw_source ~kind:Raw_re`
+            // on `/pattern/flags`, then the attributes are mapped.
+            ExpressionDesc::Pexp_regexp(regexp) => {
+                let source = format!("/{}/{}", regexp.pattern, regexp.flags);
+                validate_regexp_source(&source, expr.pexp_loc, self.arena, &mut self.warnings)?;
+                self.attributes(&expr.pexp_attributes)
+            }
+            // `Pexp_braces`: forward `@this` to a braced function.
+            ExpressionDesc::Pexp_braces(braces) => {
+                let (this_attrs, other_attrs): (Vec<Attribute>, Vec<Attribute>) = expr
+                    .pexp_attributes
+                    .iter()
+                    .cloned()
+                    .partition(|(name, _)| self.arena.get_string(name.txt) == "this");
+                let forwarded = if this_attrs.is_empty() {
+                    None
+                } else {
+                    add_this_to_braced_function(&this_attrs, braces.expr, self.arena)
+                };
+                match forwarded {
+                    Some(inner) => {
+                        let rewritten = Expression {
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_braces(Box::new(
+                                crate::parser::ast::PexpBraces {
+                                    expr: inner,
+                                    braces_loc: braces.braces_loc,
+                                },
+                            ))),
+                            pexp_loc: expr.pexp_loc,
+                            pexp_attributes: Attributes::from_vec(other_attrs),
+                        };
+                        self.default_expr(&rewritten)
+                    }
+                    None => self.default_expr(expr),
+                }
+            }
             // `Ast_exp_extension.handle_extension` (ast_exp_extension.ml:26-83).
             ExpressionDesc::Pexp_extension(extension) => {
                 self.expression_extension(expr.pexp_loc, extension)
@@ -835,7 +870,8 @@ impl<'a> Checker<'a> {
             && self.arena.value_constraint(vb.pvb_pat).is_none()
             && self.is_record_pattern(vb.pvb_pat)
             && !matches!(
-                &*self.arena.get_expr(vb.pvb_expr).pexp_desc,
+                &*crate::parser::parsetree_viewer::unwrap_braces(self.arena, self.arena.get_expr(vb.pvb_expr))
+                    .pexp_desc,
                 ExpressionDesc::Pexp_pack(_)
             )
         {
@@ -885,11 +921,6 @@ impl<'a> Checker<'a> {
             "raw" => {
                 validate_expression_extension_payload_error(extension, self.arena)?;
                 push_raw_js_expression_warning(payload, self.arena, &mut self.warnings);
-                return Ok(());
-            }
-            "re" => {
-                validate_expression_extension_payload_error(extension, self.arena)?;
-                push_raw_re_warning(payload, self.arena, &mut self.warnings);
                 return Ok(());
             }
             _ => validate_expression_extension_payload_error(extension, self.arena),
@@ -965,6 +996,14 @@ impl<'a> Checker<'a> {
                 self.expr(*then_expr)?;
                 self.expr(*cond)
             }
+            ExpressionDesc::Pexp_ternary(inner) => {
+                let (cond, consequent, alternate) = **inner;
+                self.expr(alternate)?;
+                self.expr(consequent)?;
+                self.expr(cond)
+            }
+            ExpressionDesc::Pexp_braces(braces) => self.expr(braces.expr),
+            ExpressionDesc::Pexp_regexp(_) => Ok(()),
             ExpressionDesc::Pexp_sequence(first, second) | ExpressionDesc::Pexp_while(first, second) => {
                 self.expr(*second)?;
                 self.expr(*first)

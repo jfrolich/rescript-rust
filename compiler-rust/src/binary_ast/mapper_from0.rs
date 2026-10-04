@@ -61,10 +61,6 @@ fn map_closed_flag(flag: &pt0::ClosedFlag) -> current::ClosedFlag {
 
 // ========== Attribute helpers ==========
 
-fn has_await_attribute(attrs: &[pt0::Attribute]) -> bool {
-    attrs.iter().any(|(name, _)| name.txt == "res.await")
-}
-
 fn remove_await_attribute(attrs: &[pt0::Attribute]) -> Vec<pt0::Attribute> {
     attrs
         .iter()
@@ -672,6 +668,10 @@ impl<'a> Mapper<'a> {
     }
 
     fn map_extension(&mut self, ext: &pt0::Extension) -> current::Extension {
+        if ext.0.txt == "re" {
+            let loc = self.loc(&ext.0.loc);
+            self.raise(loc, "A PPX returned a regexp extension outside an expression.");
+        }
         (self.map_string_loc(&ext.0), self.map_payload(&ext.1))
     }
 
@@ -959,8 +959,8 @@ impl<'a> Mapper<'a> {
             pt0::PatternDesc::Unpack(name) => {
                 current::PatternDesc::Ppat_unpack(self.map_string_loc(name))
             }
-            pt0::PatternDesc::Open(lid, p) => {
-                current::PatternDesc::Ppat_open(self.map_longident_loc(lid), self.push_pat(p))
+            pt0::PatternDesc::Open(_, _) => {
+                panic!("Ppat_open is no longer present in ReScript")
             }
             pt0::PatternDesc::Exception(p) => {
                 current::PatternDesc::Ppat_exception(self.push_pat(p))
@@ -1215,9 +1215,42 @@ impl<'a> Mapper<'a> {
             self.map_attributes(&expr.pexp_attributes)
         };
 
+        // ast_mapper_from0.ml E.map: the first `res.braces`/`ns.braces` or
+        // `res.await` marker decides which wrapper node the v0 attribute
+        // slot encodes.
+        let first_wrapper = expr.pexp_attributes.iter().find_map(|(name, _)| match name.txt.as_str() {
+            "res.braces" | "ns.braces" => Some(true),
+            "res.await" => Some(false),
+            _ => None,
+        });
+        if first_wrapper == Some(true) {
+            let at = expr
+                .pexp_attributes
+                .iter()
+                .position(|(name, _)| name.txt == "res.braces" || name.txt == "ns.braces")
+                .expect("found above");
+            let outer_attrs = &expr.pexp_attributes[..at];
+            let braces_loc = self.loc(&expr.pexp_attributes[at].0.loc);
+            let inner_expr = pt0::Expression {
+                pexp_desc: expr.pexp_desc.clone(),
+                pexp_loc: expr.pexp_loc.clone(),
+                pexp_attributes: expr.pexp_attributes[at + 1..].to_vec(),
+            };
+            let inner_idx = self.push_expr(&inner_expr);
+            let inner_loc = self.arena.get_expr(inner_idx).pexp_loc;
+            return current::Expression {
+                pexp_desc: Box::new(current::ExpressionDesc::Pexp_braces(Box::new(current::PexpBraces {
+                    expr: inner_idx,
+                    braces_loc,
+                }))),
+                pexp_loc: inner_loc,
+                pexp_attributes: self.map_attributes(outer_attrs),
+            };
+        }
+
         // ast_mapper_from0.ml E.map `res.await`: await-node attributes before
         // the marker, the inner expression's after it.
-        if has_await_attribute(&expr.pexp_attributes) {
+        if first_wrapper == Some(false) {
             let (await_attrs, inner_attrs) =
                 split_at_marker(&expr.pexp_attributes, "res.await").unwrap_or((&[], &[]));
             let inner_expr = pt0::Expression {
@@ -1752,6 +1785,27 @@ impl<'a> Mapper<'a> {
             pt0::ExpressionDesc::Array(el) => current::ExpressionDesc::Pexp_array(Box::new(
                 el.iter().map(|e| self.push_expr(e)).collect(),
             )),
+            pt0::ExpressionDesc::Ifthenelse(e1, e2, Some(e3))
+                if attrs.iter().any(|(name, payload)| {
+                    self.arena.get_string(name.txt) == "res.ternary"
+                        && matches!(payload, current::Payload::PStr(items) if items.is_empty())
+                }) =>
+            {
+                // ast_mapper_from0.ml `extract_ternary_attr`: drop the first
+                // `res.ternary` marker.
+                let at = attrs
+                    .iter()
+                    .position(|(name, payload)| {
+                        self.arena.get_string(name.txt) == "res.ternary"
+                            && matches!(payload, current::Payload::PStr(items) if items.is_empty())
+                    })
+                    .expect("checked by the guard");
+                attrs.remove(at);
+                let e1_idx = self.push_expr(e1);
+                let e2_idx = self.push_expr(e2);
+                let e3_idx = self.push_expr(e3);
+                current::ExpressionDesc::Pexp_ternary(Box::new((e1_idx, e2_idx, e3_idx)))
+            }
             pt0::ExpressionDesc::Ifthenelse(e1, e2, e3) => {
                 let e1_idx = self.push_expr(e1);
                 let e2_idx = self.push_expr(e2);
@@ -1880,6 +1934,45 @@ impl<'a> Mapper<'a> {
                     })
                     .collect();
                 current::ExpressionDesc::Pexp_object_literal(Box::new(fields))
+            }
+            pt0::ExpressionDesc::Extension((name, payload)) if name.txt == "re" => {
+                let regexp = match payload {
+                    pt0::Payload::PStr(items) => match items.as_slice() {
+                        [pt0::StructureItem {
+                            pstr_desc: pt0::StructureItemDesc::Eval(source_expr, eval_attrs),
+                            ..
+                        }] => match &source_expr.pexp_desc {
+                            pt0::ExpressionDesc::Constant(pt0::Constant::String(source, _)) => {
+                                match crate::binary_ast::ppx::parse_js_regexp_literal(source) {
+                                    Some(parsed) => Ok((parsed, eval_attrs, &source_expr.pexp_attributes)),
+                                    None => Err(self.loc(&source_expr.pexp_loc)),
+                                }
+                            }
+                            _ => Err(loc),
+                        },
+                        _ => Err(loc),
+                    },
+                    _ => Err(loc),
+                };
+                match regexp {
+                    Ok(((pattern, flags), eval_attrs, source_attrs)) => {
+                        // Payload wrappers disappear at this boundary: the
+                        // expression keeps its location and receives both
+                        // levels of payload attributes.
+                        let eval_attrs = self.map_attributes(eval_attrs);
+                        let source_attrs = self.map_attributes(source_attrs);
+                        attrs.extend(eval_attrs);
+                        attrs.extend(source_attrs);
+                        current::ExpressionDesc::Pexp_regexp(Box::new(current::PexpRegexp { pattern, flags }))
+                    }
+                    Err(error_loc) => {
+                        self.raise(
+                            error_loc,
+                            "A PPX returned a malformed regexp payload. Expected a string containing one regexp literal.",
+                        );
+                        current::ExpressionDesc::Pexp_extension(Box::new(self.map_extension(&(name.clone(), payload.clone()))))
+                    }
+                }
             }
             pt0::ExpressionDesc::Extension(ext) => {
                 current::ExpressionDesc::Pexp_extension(Box::new(self.map_extension(ext)))
@@ -2484,6 +2577,19 @@ impl<'a> Mapper<'a> {
     // ========== Type declarations ==========
 
     fn map_type_declaration(&mut self, td: &pt0::TypeDeclaration) -> current::TypeDeclaration {
+        // Ast_helper.Type.mk: the first `res.inlineRecordDefinition`
+        // attribute becomes the declaration's origin.
+        let mut ptype_attributes = self.map_attributes(&td.ptype_attributes);
+        let ptype_origin = match ptype_attributes
+            .iter()
+            .position(|(name, _)| self.arena.get_string(name.txt) == "res.inlineRecordDefinition")
+        {
+            Some(at) => {
+                ptype_attributes.remove(at);
+                current::TypeDeclarationOrigin::Inline_record_definition
+            }
+            None => current::TypeDeclarationOrigin::Declared,
+        };
         current::TypeDeclaration {
             ptype_name: self.map_string_loc(&td.ptype_name),
             ptype_params: td
@@ -2505,7 +2611,8 @@ impl<'a> Mapper<'a> {
             ptype_kind: self.map_type_kind(&td.ptype_kind),
             ptype_private: map_private_flag(td.ptype_private),
             ptype_manifest: td.ptype_manifest.as_ref().map(|t| self.push_core_type(t)),
-            ptype_attributes: self.map_attributes(&td.ptype_attributes).into(),
+            ptype_origin,
+            ptype_attributes: ptype_attributes.into(),
             ptype_loc: self.loc(&td.ptype_loc),
         }
     }

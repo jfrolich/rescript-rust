@@ -527,7 +527,6 @@ fn parse_type_params(p: &mut Parser<'_>, parent: &[String]) -> Vec<(CoreTypeIdx,
     {
         return vec![];
     }
-    p.set_diamond_mode();
     let opening_start = p.start_pos.clone();
     p.leave_breadcrumb(Grammar::TypeParams);
     p.next();
@@ -564,7 +563,6 @@ fn parse_type_params(p: &mut Parser<'_>, parent: &[String]) -> Vec<(CoreTypeIdx,
     } else {
         p.expect(Token::GreaterThan);
     }
-    p.pop_diamond_mode();
     p.eat_breadcrumb();
     params
 }
@@ -587,8 +585,6 @@ fn parse_type_definitions(
     let ctx = inline_ctx.into_inner();
     let has_inline_types = !ctx.found_inline_types.is_empty();
     if has_inline_types {
-        let inline_str_idx = p.arena_mut().intern("res.inlineRecordDefinition");
-        let inline_attr: Attribute = (mknoloc(inline_str_idx), Payload::PStr(Box::new(vec![])));
         for (inline_name_idx, loc, type_kind, params) in ctx.found_inline_types.iter() {
             decls.push(TypeDeclaration {
                 ptype_name: with_loc(*inline_name_idx, ctx.outer_name_loc.clone()),
@@ -597,7 +593,8 @@ fn parse_type_definitions(
                 ptype_kind: type_kind.clone(),
                 ptype_private: PrivateFlag::Public,
                 ptype_manifest: None,
-                ptype_attributes: Attributes::from_vec(vec![inline_attr.clone()]),
+                ptype_origin: TypeDeclarationOrigin::Inline_record_definition,
+                ptype_attributes: Attributes::new(),
                 ptype_loc: loc.clone(),
             });
         }
@@ -1854,6 +1851,7 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
                 ptype_kind: TypeKind::Ptype_abstract,
                 ptype_private: private,
                 ptype_manifest: Some(typ_idx),
+                ptype_origin: TypeDeclarationOrigin::Declared,
                 ptype_attributes: Attributes::new(),
                 ptype_loc: type_loc,
             };
@@ -1900,6 +1898,7 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
                 ptype_kind: TypeKind::Ptype_abstract,
                 ptype_private: PrivateFlag::Public,
                 ptype_manifest: Some(typ_idx),
+                ptype_origin: TypeDeclarationOrigin::Declared,
                 ptype_attributes: Attributes::new(),
                 ptype_loc: LocIdx::none(),
             };
@@ -2259,6 +2258,7 @@ fn parse_type_declaration_body(
         ptype_kind: kind,
         ptype_private: private,
         ptype_manifest: manifest,
+        ptype_origin: TypeDeclarationOrigin::Declared,
         ptype_attributes: attrs,
         ptype_loc: loc,
     })
@@ -3520,8 +3520,6 @@ fn parse_external_value_description(
         pval_loc: loc,
     };
 
-    let inline_attr_name = p.arena_mut().intern("res.inlineRecordDefinition");
-    let inline_attr: Attribute = (mknoloc(inline_attr_name), Payload::PStr(Box::new(vec![])));
     let inline_types = inline_types_found
         .into_iter()
         .map(|(inline_name_idx, loc, kind, params)| TypeDeclaration {
@@ -3531,7 +3529,8 @@ fn parse_external_value_description(
             ptype_kind: kind,
             ptype_private: PrivateFlag::Public,
             ptype_manifest: None,
-            ptype_attributes: Attributes::from_vec(vec![inline_attr.clone()]),
+            ptype_origin: TypeDeclarationOrigin::Inline_record_definition,
+            ptype_attributes: Attributes::new(),
             ptype_loc: loc,
         })
         .collect();
@@ -4134,11 +4133,22 @@ pub(super) fn parse_extension(p: &mut Parser<'_>, module_language: bool) -> Exte
     (id, payload)
 }
 
-/// The tail of OCaml `parse_extension` (res_core.ml): a `raw`, `ffi` or `re`
+/// The tail of OCaml `parse_extension` (res_core.ml): a `raw` or `ffi`
 /// extension whose payload is a single string expression carries that
 /// string's source spelling as JavaScript source.
 pub(super) fn raw_source_extension_payload(p: &mut Parser<'_>, id: &StringLoc, payload: Payload) -> Payload {
-    if !matches!(p.arena().get_string(id.txt), "raw" | "ffi" | "re") {
+    if p.arena().get_string(id.txt) == "re" {
+        let start = p.loc_start(id.loc);
+        let end = p.loc_end(id.loc);
+        p.err_at(
+            start,
+            end,
+            DiagnosticCategory::message(
+                "The %re extension has been removed. Use a regexp literal such as /abc/i.",
+            ),
+        );
+    }
+    if !matches!(p.arena().get_string(id.txt), "raw" | "ffi") {
         return payload;
     }
     if let Payload::PStr(items) = &payload

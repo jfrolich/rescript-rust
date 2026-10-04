@@ -46,6 +46,7 @@ pub struct ParserSnapshot<'src> {
     /// Arena index for prev end position (for identity-based sharing).
     prev_end_pos_idx: PosIdx,
     breadcrumbs: Vec<(Grammar, Position)>,
+    regions: Vec<RegionStatus>,
     diagnostics_len: usize,
     warnings_len: usize,
     comments_len: usize,
@@ -543,6 +544,23 @@ impl<'src> Parser<'src> {
         }
     }
 
+    /// res_parser.ml `err p (Diagnostics.lazy_message ...)`: report an error
+    /// at the current token now (so it silences the region before recovery),
+    /// with its message filled in later via `set_diagnostic_message`. Returns
+    /// the diagnostic's index, or `None` when the region is silent.
+    pub fn err_lazy_message(&mut self) -> Option<usize> {
+        let len = self.diagnostics.len();
+        self.err(DiagnosticCategory::Message(String::new()));
+        (self.diagnostics.len() > len).then_some(len)
+    }
+
+    /// Fill in the message of a diagnostic reported by `err_lazy_message`.
+    pub fn set_diagnostic_message(&mut self, index: usize, message: String) {
+        if let Some(diagnostic) = self.diagnostics.get_mut(index) {
+            diagnostic.category = DiagnosticCategory::Message(message);
+        }
+    }
+
     /// Record a diagnostic error without silencing subsequent errors.
     /// Use this for errors that should allow additional errors to be reported.
     pub fn err_multiple(
@@ -635,6 +653,9 @@ impl<'src> Parser<'src> {
 
         // In lookahead mode, skip arena allocations to prevent affecting position indices
         let in_lookahead = self.lookahead_depth > 0;
+        // res_parser.ml `read`: a comment records whether the item scanned
+        // right before it (the previous token, or an earlier comment) is `?`.
+        let mut preceding_is_question = matches!(self.token, Token::Question);
 
         loop {
             let result = self.scanner.scan();
@@ -648,6 +669,8 @@ impl<'src> Parser<'src> {
                     // Collect comment and continue scanning.
                     let mut comment = c.clone();
                     comment.set_prev_tok_end_pos(self.end_pos.clone());
+                    comment.set_prev_tok_is_question(preceding_is_question);
+                    preceding_is_question = false;
                     self.comments.push(comment);
                     self.prev_end_pos = self.end_pos.clone();
                     self.prev_end_pos_idx = self.end_pos_idx;
@@ -712,20 +735,22 @@ impl<'src> Parser<'src> {
     /// expression position and needs to interpret it as a regex start.
     /// The scanner's current position should be just after the `/` that was already consumed.
     pub fn next_regex_token(&mut self) {
-        let result = self.scanner.scan_regex();
+        let prefix_length = match self.token {
+            Token::Forwardslash => 1,
+            Token::ForwardslashDot => 2,
+            _ => unreachable!("next_regex_token on a non-slash token"),
+        };
+        let result = self.scanner.scan_regex(self.start_pos.clone(), prefix_length);
 
         // Propagate scanner diagnostics to parser
         let scanner_diagnostics = self.scanner.take_diagnostics();
         self.diagnostics.extend(scanner_diagnostics);
 
+        // res_parser.ml `next_regex_token` replaces the current token in
+        // place: nothing is consumed, and the token keeps its start.
         self.token = result.token;
-        self.prev_end_pos = self.end_pos.clone();
-        self.prev_end_pos_idx = self.end_pos_idx;
-        self.start_pos = result.start_pos;
         self.end_pos = result.end_pos;
-        // Only push positions to arena when not in lookahead mode
         if self.lookahead_depth == 0 {
-            self.start_pos_idx = self.arena.push_position(result.start_pos);
             self.end_pos_idx = self.arena.push_position(result.end_pos);
         }
     }
@@ -816,6 +841,7 @@ impl<'src> Parser<'src> {
             std::mem::replace(&mut self.lookahead_breadcrumb_floor, self.breadcrumbs.len());
         let popped_breadcrumbs_len = self.lookahead_popped_breadcrumbs.len();
         let diagnostics_len = self.diagnostics.len();
+        let regions = self.regions.clone();
         let warnings_len = self.warnings.len();
         let comments_len = self.comments.len();
         let in_external = self.in_external;
@@ -855,6 +881,9 @@ impl<'src> Parser<'src> {
             self.breadcrumbs.push(popped);
         }
         self.lookahead_breadcrumb_floor = outer_breadcrumb_floor;
+        // res_parser.ml `with_checkpoint`: immutable region states also roll
+        // back error suppression, including nested regions.
+        self.regions = regions;
         self.diagnostics.truncate(diagnostics_len);
         self.warnings.truncate(warnings_len);
         self.comments.truncate(comments_len);
@@ -884,6 +913,7 @@ impl<'src> Parser<'src> {
             end_pos_idx: self.end_pos_idx,
             prev_end_pos_idx: self.prev_end_pos_idx,
             breadcrumbs: self.breadcrumbs.clone(),
+            regions: self.regions.clone(),
             diagnostics_len: self.diagnostics.len(),
             warnings_len: self.warnings.len(),
             comments_len: self.comments.len(),
@@ -915,6 +945,9 @@ impl<'src> Parser<'src> {
         self.end_pos_idx = snapshot.end_pos_idx;
         self.prev_end_pos_idx = snapshot.prev_end_pos_idx;
         self.breadcrumbs = snapshot.breadcrumbs;
+        // res_parser.ml `with_checkpoint`: immutable region states also roll
+        // back error suppression.
+        self.regions = snapshot.regions;
         self.diagnostics.truncate(snapshot.diagnostics_len);
         self.warnings.truncate(snapshot.warnings_len);
         self.comments.truncate(snapshot.comments_len);
@@ -994,14 +1027,21 @@ impl<'src> Parser<'src> {
             .is_binary_op(self.start_pos.cnum as usize, self.end_pos.cnum as usize)
     }
 
-    /// Set diamond mode on the scanner (for type parameters).
-    pub fn set_diamond_mode(&mut self) {
-        self.scanner.set_diamond_mode();
-    }
-
-    /// Pop diamond mode from the scanner.
-    pub fn pop_diamond_mode(&mut self) {
-        self.scanner.pop_diamond_mode();
+    /// res_parser.ml `peek_binary_operator`: the current token, with a `<` or
+    /// `>` extended by an immediately adjacent operator suffix (`<<`, `>=`,
+    /// `>>`, `>>>`). The extended token replaces the current one.
+    pub fn peek_binary_operator(&mut self) -> Token<'src> {
+        if matches!(self.token, Token::LessThan | Token::GreaterThan) {
+            let current = self.token.clone();
+            if let Some(operator) = self.scanner.scan_binary_operator(&current) {
+                self.token = operator;
+                self.end_pos = self.scanner.position();
+                if self.lookahead_depth == 0 {
+                    self.end_pos_idx = self.arena.push_position(self.end_pos.clone());
+                }
+            }
+        }
+        self.token.clone()
     }
 
     /// Get the filename index being parsed.

@@ -38,6 +38,15 @@ let extract_internal_loc_attr attr_name attrs =
   in
   loop [] attrs
 
+let extract_ternary_attr (attrs : Pt.attributes) =
+  let rec loop rev_acc = function
+    | [] -> (false, List.rev rev_acc)
+    | ({txt = "res.ternary"}, Pt.PStr []) :: rest ->
+      (true, List.rev_append rev_acc rest)
+    | attr :: rest -> loop (attr :: rev_acc) rest
+  in
+  loop [] attrs
+
 type mapper = {
   attribute: mapper -> attribute -> Pt.attribute;
   attributes: mapper -> attribute list -> Pt.attribute list;
@@ -123,7 +132,7 @@ let map_pattern_constant ~loc = function
   | constant -> map_constant ~loc constant
 
 let is_raw_source_extension = function
-  | "raw" | "ffi" | "re" -> true
+  | "raw" | "ffi" -> true
   | _ -> false
 
 let map_raw_source_payload sub = function
@@ -625,8 +634,36 @@ module E = struct
     let has_jsx_attribute () =
       attrs |> List.exists (fun ({txt}, _) -> txt = "JSX")
     in
+    let first_wrapper =
+      let rec find = function
+        | ({txt = "res.braces" | "ns.braces"; loc}, _) :: _ ->
+          Some (`Braces loc)
+        | ({txt = "res.await"}, _) :: _ -> Some `Await
+        | _ :: rest -> find rest
+        | [] -> None
+      in
+      find e.pexp_attributes
+    in
     match desc with
-    | _ when has_await_attribute attrs ->
+    | _
+      when match first_wrapper with
+           | Some (`Braces _) -> true
+           | _ -> false ->
+      let outer_attrs0, braces_loc, inner_attrs0 =
+        let rec split acc = function
+          | ({Location.txt = "res.braces" | "ns.braces"; loc}, _) :: rest ->
+            (List.rev acc, loc, rest)
+          | a :: rest -> split (a :: acc) rest
+          | [] -> assert false
+        in
+        split [] e.pexp_attributes
+      in
+      let inner = sub.expr sub {e with pexp_attributes = inner_attrs0} in
+      braces
+        ~braces_loc:(sub.location sub braces_loc)
+        ~attrs:(sub.attributes sub outer_attrs0)
+        inner
+    | _ when first_wrapper = Some `Await ->
       (* [Ast_mapper_to0] merges the await node's attributes and the inner
          expression's attributes into the one v0 slot, with [res.await] as
          the boundary: await-node attributes before it, inner attributes
@@ -1009,9 +1046,15 @@ module E = struct
     | Pexp_setfield (e1, lid, e2) ->
       setfield ~loc ~attrs (sub.expr sub e1) (map_loc sub lid) (sub.expr sub e2)
     | Pexp_array el -> array ~loc ~attrs (List.map (sub.expr sub) el)
-    | Pexp_ifthenelse (e1, e2, e3) ->
-      ifthenelse ~loc ~attrs (sub.expr sub e1) (sub.expr sub e2)
-        (map_opt (sub.expr sub) e3)
+    | Pexp_ifthenelse (e1, e2, e3) -> (
+      let is_ternary, remaining_attrs = extract_ternary_attr attrs in
+      match (is_ternary, e3) with
+      | true, Some alternate ->
+        ternary ~loc ~attrs:remaining_attrs (sub.expr sub e1) (sub.expr sub e2)
+          (sub.expr sub alternate)
+      | _ ->
+        ifthenelse ~loc ~attrs (sub.expr sub e1) (sub.expr sub e2)
+          (map_opt (sub.expr sub) e3))
     | Pexp_sequence (e1, e2) ->
       sequence ~loc ~attrs (sub.expr sub e1) (sub.expr sub e2)
     | Pexp_extension ({txt = "res.break"; _}, PStr []) -> break ~loc ~attrs ()
@@ -1132,6 +1175,49 @@ module E = struct
     | Pexp_pack me -> pack ~loc ~attrs (sub.module_expr sub me)
     | Pexp_open (ovf, lid, e) ->
       open_ ~loc ~attrs ovf (map_loc sub lid) (sub.expr sub e)
+    | Pexp_extension ({txt = "re"}, payload) -> (
+      let malformed ~loc =
+        Location.raise_errorf ~loc
+          "A PPX returned a malformed regexp payload. Expected a string \
+           containing one regexp literal."
+      in
+      match payload with
+      | PStr
+          [
+            {
+              pstr_desc =
+                Pstr_eval
+                  ( {
+                      pexp_desc = Pexp_constant (Pconst_string (source, _));
+                      pexp_loc = source_loc;
+                      pexp_attributes = source_attrs;
+                    },
+                    eval_attrs );
+            };
+          ] -> (
+        let env = Parser_env.init_env None source in
+        let (_, expression), errors =
+          Parser_flow.do_parse env Parser_flow.Parse.expression false
+        in
+        match expression with
+        | Flow_ast.Expression.RegExpLiteral {pattern; raw}
+          when errors = [] && Parser_env.Peek.token env = Token.T_EOF ->
+          (* Flow filters unknown flags in its [flags] field. Keep the raw
+             spelling so the bridge never silently changes a PPX's regexp. *)
+          let flags_start = String.length pattern + 2 in
+          let flags =
+            String.sub raw flags_start (String.length raw - flags_start)
+          in
+          (* Payload wrappers disappear at this boundary. Keep the expression's
+             location and transfer both levels of payload attributes to it. *)
+          regexp ~loc
+            ~attrs:
+              (attrs
+              @ sub.attributes sub eval_attrs
+              @ sub.attributes sub source_attrs)
+            pattern flags
+        | _ -> malformed ~loc:(sub.location sub source_loc))
+      | _ -> malformed ~loc)
     | Pexp_extension x -> extension ~loc ~attrs (sub.extension sub x)
     | Pexp_unreachable -> assert false
 end
@@ -1214,7 +1300,7 @@ module P = struct
     | Ppat_type s -> type_ ~loc ~attrs (map_loc sub s)
     | Ppat_lazy _ -> failwith "Ppat_lazy is no longer present in ReScript"
     | Ppat_unpack s -> unpack ~loc ~attrs (map_loc sub s)
-    | Ppat_open (lid, p) -> open_ ~loc ~attrs (map_loc sub lid) (sub.pat sub p)
+    | Ppat_open _ -> failwith "Ppat_open is no longer present in ReScript"
     | Ppat_exception p -> exception_ ~loc ~attrs (sub.pat sub p)
     | Ppat_extension x -> extension ~loc ~attrs (sub.extension sub x)
 end
@@ -1369,6 +1455,9 @@ let default_mapper =
     location = (fun _this l -> l);
     extension =
       (fun this (s, payload) ->
+        if s.txt = "re" then
+          Location.raise_errorf ~loc:(this.location this s.loc)
+            "A PPX returned a regexp extension outside an expression.";
         let payload =
           if is_raw_source_extension s.txt then
             match map_raw_source_payload this payload with

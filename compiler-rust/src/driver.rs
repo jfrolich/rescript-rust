@@ -233,7 +233,7 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
                 PatExtra::Tpat_constraint(core_type) => {
                     visit_typed_core_type(max_stamp, core_type);
                 }
-                PatExtra::Tpat_type(path, _) | PatExtra::Tpat_open(path, _, _) => {
+                PatExtra::Tpat_type(path, _) => {
                     visit_path(max_stamp, path);
                 }
                 PatExtra::Tpat_unpack => {}
@@ -931,6 +931,14 @@ fn expression_has_string_literal(
             expression_has_string_literal(arena.get_expr(*lhs), value, arena)
                 || expression_has_string_literal(arena.get_expr(*rhs), value, arena)
         }
+        ED::Pexp_braces(braces) => expression_has_string_literal(arena.get_expr(braces.expr), value, arena),
+        ED::Pexp_regexp(_) => false,
+        ED::Pexp_ternary(inner) => {
+            let (cond, consequent, alternate) = **inner;
+            expression_has_string_literal(arena.get_expr(cond), value, arena)
+                || expression_has_string_literal(arena.get_expr(consequent), value, arena)
+                || expression_has_string_literal(arena.get_expr(alternate), value, arena)
+        }
         ED::Pexp_ifthenelse(inner) => {
             let (cond, then_expr, else_expr) = &**inner;
             expression_has_string_literal(arena.get_expr(*cond), value, arena)
@@ -1024,7 +1032,7 @@ fn pattern_has_string_literal(
 
     match &*pat.ppat_desc {
         PD::Ppat_constant(c) => matches!(&**c, Constant::String(s) if s.semantic() == value),
-        PD::Ppat_alias(inner, _) | PD::Ppat_exception(inner) | PD::Ppat_open(_, inner) => {
+        PD::Ppat_alias(inner, _) | PD::Ppat_exception(inner) => {
             pattern_has_string_literal(arena.get_pat(*inner), value, arena)
         }
         PD::Ppat_constraint(inner) => {
@@ -2510,6 +2518,10 @@ fn invalid_enabled_let_unwrap_in_expr(
                         .and_then(|else_expr| invalid_enabled_let_unwrap_in_expr(else_expr, arena))
                 })
         }
+        ExpressionDesc::Pexp_braces(braces) => invalid_enabled_let_unwrap_in_expr(braces.expr, arena),
+        ExpressionDesc::Pexp_ternary(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena)
+            .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.1, arena))
+            .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena)),
         ExpressionDesc::Pexp_sequence(lhs, rhs) => invalid_enabled_let_unwrap_in_expr(*lhs, arena)
             .or_else(|| invalid_enabled_let_unwrap_in_expr(*rhs, arena)),
         ExpressionDesc::Pexp_while(cond, body) => invalid_enabled_let_unwrap_in_expr(*cond, arena)
@@ -2702,6 +2714,10 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
                     .2
                     .and_then(|else_expr| disabled_let_unwrap_loc_in_expr(else_expr, arena))
             }),
+        ExpressionDesc::Pexp_braces(braces) => disabled_let_unwrap_loc_in_expr(braces.expr, arena),
+        ExpressionDesc::Pexp_ternary(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena)
+            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.1, arena))
+            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena)),
         ExpressionDesc::Pexp_sequence(lhs, rhs) => disabled_let_unwrap_loc_in_expr(*lhs, arena)
             .or_else(|| disabled_let_unwrap_loc_in_expr(*rhs, arena)),
         ExpressionDesc::Pexp_while(cond, body) => disabled_let_unwrap_loc_in_expr(*cond, arena)

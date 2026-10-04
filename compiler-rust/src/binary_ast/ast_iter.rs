@@ -408,8 +408,15 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
     let expr = arena.get_expr(idx);
     v.attributes(arena, expr.pexp_attributes.as_slice());
     match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_braces(braces) => v.expr(arena, braces.expr),
+        ExpressionDesc::Pexp_ternary(inner) => {
+            v.expr(arena, inner.0);
+            v.expr(arena, inner.1);
+            v.expr(arena, inner.2);
+        }
         ExpressionDesc::Pexp_ident(_)
         | ExpressionDesc::Pexp_constant(_)
+        | ExpressionDesc::Pexp_regexp(_)
         | ExpressionDesc::Pexp_break
         | ExpressionDesc::Pexp_continue => {}
         ExpressionDesc::Pexp_let(inner) => {
@@ -644,7 +651,6 @@ pub fn walk_pat<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: PatIdx)
             v.typ(arena, inner.1);
         }
         PatternDesc::Ppat_extension(ext) => v.extension(arena, ext),
-        PatternDesc::Ppat_open(_, p) => v.pat(arena, *p),
     }
 }
 

@@ -1430,8 +1430,18 @@ fn plain_string_payload(structure: &OcamlValue) -> Option<String> {
     let OcamlValue::Block(0, expr) = eval.first()? else {
         return None;
     };
-    // Pexp_constant constant
-    let OcamlValue::Block(1, constant) = expr.first()? else {
+    // `Ast_payload.unwrap_payload_expression`: look through
+    // `Pexp_braces {expr; braces_loc}` (tag 0).
+    let mut expr = expr;
+    while let Some(OcamlValue::Block(0, braces)) = expr.first() {
+        let OcamlValue::Block(0, inner) = braces.first()? else {
+            return None;
+        };
+        expr = inner;
+    }
+    // Pexp_constant constant (tag 2: `Pexp_braces` and `Pexp_ident` precede
+    // it in parsetree.ml `expression_desc`)
+    let OcamlValue::Block(2, constant) = expr.first()? else {
         return None;
     };
     // Pconst_string payload

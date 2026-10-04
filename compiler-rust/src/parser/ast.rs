@@ -97,6 +97,14 @@ pub enum MutableFlag {
     Mutable,
 }
 
+/// OCaml `type_declaration_origin`: inline records in field and external
+/// types are lifted to named declarations for type checking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TypeDeclarationOrigin {
+    Declared,
+    Inline_record_definition,
+}
+
 /// Private flag for type definitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrivateFlag {
@@ -324,6 +332,16 @@ impl Attributes {
             }
             Some(v) => v.insert(index, attr),
         }
+    }
+
+    /// Remove and return the attribute at the given position.
+    pub fn remove(&mut self, index: usize) -> Attribute {
+        let v = self.0.as_mut().expect("remove from empty attributes");
+        let attr = v.remove(index);
+        if v.is_empty() {
+            self.0 = None;
+        }
+        attr
     }
 
     /// Extend with attributes from an iterator.
@@ -586,8 +604,6 @@ pub enum PatternDesc {
     Ppat_exception(PatIdx),
     /// Extension: `[%id]`.
     Ppat_extension(Box<Extension>),
-    /// Open: `M.(P)`.
-    Ppat_open(Loc<LidentIdx>, PatIdx),
 }
 
 /// A record field in a pattern.
@@ -679,9 +695,27 @@ pub struct PexpTaggedTemplate {
     pub values: Vec<ExprIdx>,
 }
 
+/// OCaml `Pexp_braces {expr; braces_loc}`: explicit braces around an
+/// expression. The node's `pexp_loc` stays on the enclosed expression;
+/// `braces_loc` covers the delimiters for printing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PexpBraces {
+    pub expr: ExprIdx,
+    pub braces_loc: Location,
+}
+
+/// OCaml `Pexp_regexp {pattern; flags}`: literal source without delimiters.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PexpRegexp {
+    pub pattern: String,
+    pub flags: String,
+}
+
 /// Expression descriptions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExpressionDesc {
+    /// Explicit braces: `{E}`.
+    Pexp_braces(Box<PexpBraces>),
     /// Identifier: `x` or `M.x`.
     Pexp_ident(Loc<LidentIdx>),
     /// Constant: `1`, `'a'`, `"hello"`.
@@ -713,6 +747,8 @@ pub enum ExpressionDesc {
     Pexp_array(Box<Vec<ExprIdx>>),
     /// If-then-else: `if E1 { E2 } else { E3 }`.
     Pexp_ifthenelse(Box<(ExprIdx, ExprIdx, Option<ExprIdx>)>),
+    /// Ternary: `E1 ? E2 : E3`.
+    Pexp_ternary(Box<(ExprIdx, ExprIdx, ExprIdx)>),
     /// Sequence: `E1; E2`.
     Pexp_sequence(ExprIdx, ExprIdx),
     /// `break` (upstream #8348). Exits the nearest enclosing loop.
@@ -728,6 +764,8 @@ pub enum ExpressionDesc {
     Pexp_for_of(Box<(PatIdx, ExprIdx, ExprIdx)>),
     /// For-await-of: `for await pat of asyncIterable { body }` (upstream #7887).
     Pexp_for_await_of(Box<(PatIdx, ExprIdx, ExprIdx)>),
+    /// Regexp literal: `/pattern/flags`.
+    Pexp_regexp(Box<PexpRegexp>),
     /// Constraint: `(E: T)`.
     Pexp_constraint(Box<(ExprIdx, CoreTypeIdx)>),
     /// Coercion: `(E :> T)`.
@@ -1151,6 +1189,8 @@ pub struct TypeDeclaration {
     pub ptype_private: PrivateFlag,
     /// Manifest (arena index).
     pub ptype_manifest: Option<CoreTypeIdx>,
+    /// Source origin (parsetree.ml `type_declaration_origin`).
+    pub ptype_origin: TypeDeclarationOrigin,
     /// Attributes.
     pub ptype_attributes: Attributes,
     /// Location.

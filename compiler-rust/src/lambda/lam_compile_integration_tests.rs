@@ -483,37 +483,6 @@ fn deriving_accessors_curried_rewrites_alias_initializers_through_exported_bindi
 }
 
 #[test]
-fn deriving_accessors_uncurried_rewrites_alias_initializers_through_exported_bindings_like_snapshot()
- {
-    let output = compile_checked_in_test_file_to_js("DerivingAccessorsUncurried");
-    assert!(
-        output.contains("let _myFieldAlias = myField;")
-            && output.contains("let _noParamAlias = \"NoParam\";")
-            && output.contains("let _numAlias = num;")
-            && output.contains("let _doubleNumAlias = doubleNum;"),
-        "expected DerivingAccessorsUncurried to reuse the underlying exported bindings in later alias initializers, got:\n{output}"
-    );
-    assert!(
-        !output.contains("let myField$1 = myField;")
-            && !output.contains("let num$1 = num;")
-            && !output.contains("let doubleNum$1 = doubleNum;")
-            && !output.contains("let _noParamAlias = noParam;"),
-        "unexpected redundant same-name export aliases remained in DerivingAccessorsUncurried:\n{output}"
-    );
-    let compose_idx = output.find("function compose").unwrap();
-    let no_param_idx = output.find("let noParam = \"NoParam\";").unwrap();
-    let composed_idx = output.find("let _composedMyField = 1;").unwrap();
-    assert!(
-        compose_idx < composed_idx && composed_idx < no_param_idx,
-        "expected derived accessors before compose and the rebound literal export after compose in the natural semantic layout of DerivingAccessorsUncurried, got:\n{output}"
-    );
-    assert!(
-        output.contains("let _composedNum = {\n  TAG: \"Num\",\n  _0: 1\n};"),
-        "expected the composed num alias to keep its canonical substituted initializer in DerivingAccessorsUncurried, got:\n{output}"
-    );
-}
-
-#[test]
 fn coercion_rebinds_same_name_literal_exports_after_surviving_function_binding_like_snapshot() {
     let output = compile_checked_in_test_file_to_js("Coercion");
     let foo_idx = output.find("function foo").unwrap();

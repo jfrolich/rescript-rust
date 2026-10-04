@@ -9,4 +9,4 @@
 
   A `for await` loop must use `of`, like `for await item of items`.
 
-let run async [arity:1]() = ((for item = 0 to 1 do () done)[@res.braces ])
+let run async [arity:1]() = {for item = 0 to 1 do () done}

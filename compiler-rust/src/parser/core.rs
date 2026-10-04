@@ -242,22 +242,35 @@ pub fn parse_comma_delimited_region<'a, T>(
 ) -> Vec<T> {
     p.leave_breadcrumb(grammar.clone());
     let mut nodes = vec![];
+    comma_delimited_loop(p, &grammar, &closing, &mut Vec::new(), &mut nodes, &mut f);
+    p.eat_breadcrumb();
+    nodes
+}
+
+/// The `loop closing parents nodes` of OCaml
+/// `parse_comma_delimited_reversed_list`. `parents` holds the closers of the
+/// enclosing groups being recovered inside.
+fn comma_delimited_loop<'a, T>(
+    p: &mut Parser<'a>,
+    grammar: &grammar::Grammar,
+    closing: &Token<'static>,
+    parents: &mut Vec<Token<'static>>,
+    nodes: &mut Vec<T>,
+    f: &mut impl FnMut(&mut Parser<'a>) -> Option<T>,
+) {
     loop {
         match f(p) {
             Some(node) => {
                 nodes.push(node);
                 if p.token == Token::Comma {
                     p.next();
-                } else if p.token == closing || p.token == Token::Eof {
-                    break;
-                } else if grammar::is_list_element(&grammar, &p.token) {
+                } else if p.token == *closing || p.token == Token::Eof {
+                    return;
+                } else if grammar::is_list_element(grammar, &p.token) {
                     // Missing comma, but the next token starts another element.
                     p.expect(Token::Comma);
                 } else {
-                    if !(p.token == Token::Eof
-                        || p.token == closing
-                        || recover::should_abort_list_parse(p))
-                    {
+                    if !recover::should_abort_list_parse(p) {
                         p.expect(Token::Comma);
                     }
                     if p.token == Token::Semicolon {
@@ -266,19 +279,39 @@ pub fn parse_comma_delimited_region<'a, T>(
                 }
             }
             None => {
-                if p.token == Token::Eof
-                    || p.token == closing
-                    || recover::should_abort_list_parse(p)
-                {
-                    break;
+                if p.token == Token::Eof || p.token == *closing {
+                    return;
                 }
-                p.err_unexpected();
-                p.next();
+                match p.token {
+                    // Keep unexpected delimiters paired, so their closer does
+                    // not escape into an enclosing grammar. Retain recoverable
+                    // list elements.
+                    Token::Lparen | Token::Lbrace | Token::Lbracket | Token::LessThan => {
+                        let opening = p.token.clone().into_owned();
+                        p.err_unexpected();
+                        p.next();
+                        let nested_closing = get_closing_token(&opening);
+                        parents.push(closing.clone());
+                        comma_delimited_loop(p, grammar, &nested_closing, parents, nodes, f);
+                        parents.pop();
+                        p.expect(nested_closing);
+                    }
+                    // Return only closers belonging to a group we are
+                    // recovering inside.
+                    Token::Rparen | Token::Rbrace | Token::Rbracket | Token::GreaterThan
+                        if parents.contains(&p.token.clone().into_owned()) =>
+                    {
+                        return;
+                    }
+                    _ if recover::should_abort_list_parse(p) => return,
+                    _ => {
+                        p.err_unexpected();
+                        p.next();
+                    }
+                }
             }
         }
     }
-    p.eat_breadcrumb();
-    nodes
 }
 
 /// OCaml `parse_comma_delimited_reversed_list`
@@ -581,12 +614,6 @@ pub fn parse_ident(p: &mut Parser<'_>, msg: &str, start_pos_idx: PosIdx) -> (Str
 // Special Attributes
 // ============================================================================
 
-/// Create the ternary attribute `@res.ternary`.
-pub fn ternary_attr(arena: &mut ParseArena) -> Attribute {
-    let str_idx = arena.intern("res.ternary");
-    (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
-}
-
 /// Create the if-let attribute `@res.iflet`.
 pub fn if_let_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.iflet");
@@ -596,12 +623,6 @@ pub fn if_let_attr(arena: &mut ParseArena) -> Attribute {
 /// Create the await attribute `@res.await` with location.
 pub fn make_await_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
     let str_idx = arena.intern("res.await");
-    (with_loc(str_idx, loc), Payload::PStr(Box::new(vec![])))
-}
-
-/// Create the braces attribute `@res.braces` with location.
-pub fn make_braces_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
-    let str_idx = arena.intern("res.braces");
     (with_loc(str_idx, loc), Payload::PStr(Box::new(vec![])))
 }
 
@@ -664,6 +685,17 @@ pub fn get_closing_token(token: &Token<'_>) -> Token<'static> {
 /// Skip to the closing token, handling nested brackets.
 pub fn go_to_closing(closing_token: &Token<'_>, p: &mut Parser<'_>) {
     loop {
+        // A `<`/`>` that extends into a shift or comparison operator is
+        // skipped like any other token, unless `>` is the closing token.
+        let is_closing_gt =
+            matches!(p.token, Token::GreaterThan) && *closing_token == Token::GreaterThan;
+        if matches!(p.token, Token::LessThan | Token::GreaterThan) && !is_closing_gt {
+            let token = p.token.clone().into_owned();
+            if *closing_token != Token::GreaterThan && p.peek_binary_operator() != token {
+                p.next();
+                continue;
+            }
+        }
         match (&p.token, closing_token) {
             (Token::Rparen, Token::Rparen)
             | (Token::Rbrace, Token::Rbrace)
@@ -1161,10 +1193,8 @@ pub fn is_es6_arrow_expression(p: &mut Parser<'_>, in_ternary: bool) -> bool {
                                     Token::Lident(_) => {
                                         state.next();
                                         if state.token == Token::LessThan {
-                                            state.set_diamond_mode();
                                             state.next();
                                             go_to_closing(&Token::GreaterThan, state);
-                                            state.pop_diamond_mode();
                                         }
                                         matches!(state.token, Token::EqualGreater)
                                     }
@@ -1434,14 +1464,6 @@ mod tests {
     fn test_expr_context_default() {
         let ctx = ExprContext::default();
         assert_eq!(ctx, ExprContext::Ordinary);
-    }
-
-    #[test]
-    fn test_ternary_attr() {
-        use crate::parse_arena::ParseArena;
-        let mut arena = ParseArena::new();
-        let attr = ternary_attr(&mut arena);
-        assert_eq!(arena.get_string(attr.0.txt), "res.ternary");
     }
 
     #[test]
