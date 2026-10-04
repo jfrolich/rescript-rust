@@ -273,6 +273,55 @@ impl RawLambda {
         }))
     }
 
+    /// `Lambda.mk_builtin` builds a builtin through the smart `Lambda.prim`
+    /// (lambda.ml), whose folds evaluate a primitive over one or two
+    /// constant arguments at construction. Those folds read constants only,
+    /// so they are taken from [`Lambda::prim`], applied to the constants in
+    /// the form OCaml builds them (raw constants keep a few encodings, such
+    /// as an int-named polymorphic variant, until they are lowered).
+    pub fn prim_folded(primitive: Primitive, args: Vec<RawLambda>, loc: Location) -> Self {
+        if matches!(args.len(), 1 | 2) && args.iter().all(|arg| matches!(arg, RawLambda::Lconst(_))) {
+            let consts = args
+                .iter()
+                .map(|arg| match arg {
+                    RawLambda::Lconst(c) => Lambda::Lconst(crate::raw_lambda::lower::lower_constant(c.clone())),
+                    _ => unreachable!(),
+                })
+                .collect();
+            if let Lambda::Lconst(c) = Lambda::prim(primitive.clone(), consts, loc.clone()) {
+                return RawLambda::Lconst(c);
+            }
+        }
+        RawLambda::prim(primitive, args, loc)
+    }
+
+    /// Translcore builds conditionals through the smart `Lambda.if_`
+    /// (lambda.ml). Its constant-condition and `assert false` arms decide
+    /// which branches the match compiler sees, so they apply here; the arms
+    /// that rewrite the condition itself are applied by [`Lambda::if_`] when
+    /// the term is lowered.
+    pub fn if_(cond: RawLambda, then_: RawLambda, else_: RawLambda) -> Self {
+        let is_assertfalse = |lam: &RawLambda| {
+            matches!(
+                lam,
+                RawLambda::Lconst(Constant::Int { comment: Some(info), .. })
+                    if matches!(**info, crate::lambda::lam_constant::PointerInfo::AssertFalse)
+            )
+        };
+        match cond {
+            RawLambda::Lconst(c) => {
+                if crate::raw_lambda::lower::lower_constant(c).eval_as_bool() {
+                    then_
+                } else {
+                    else_
+                }
+            }
+            cond if is_assertfalse(&else_) => RawLambda::seq(cond, then_),
+            cond if is_assertfalse(&then_) => RawLambda::seq(cond, else_),
+            cond => RawLambda::LifThenElse(Box::new(cond), Box::new(then_), Box::new(else_)),
+        }
+    }
+
     /// Create a sequence.
     pub fn seq(first: RawLambda, second: RawLambda) -> Self {
         RawLambda::Lsequence(Box::new(first), Box::new(second))

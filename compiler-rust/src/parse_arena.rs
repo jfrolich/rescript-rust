@@ -84,6 +84,9 @@ impl ArenaIdx for LocIdx {
 const SYNTHETIC_LOCATION_BASE: u32 = 0x8000_0000;
 /// First index of the positions of typechecker-interned locations.
 const SYNTHETIC_POSITION_BASE: u32 = 0x8000_0000;
+/// First index of expressions appended while the arena is shared
+/// ([`ParseArena::push_shared_expr`]).
+const SHARED_EXPRESSION_BASE: u32 = 0x8000_0000;
 
 impl LocIdx {
     /// Check if this is the "none" location (index 0).
@@ -531,6 +534,14 @@ pub struct ParseArena {
     /// true}` copies), appended while the arena is shared. Addressed from
     /// `SYNTHETIC_LOCATION_BASE` so they never collide with primary indices.
     synthetic_locations: elsa::sync::FrozenVec<Box<InternedLocation>>,
+    /// Expressions built while the arena is shared, addressed from
+    /// `SHARED_EXPRESSION_BASE`: the `@as` payloads printers put back with
+    /// `Ast_helper.Type.field_attributes` / `constructor_attributes`.
+    shared_expressions: elsa::sync::FrozenVec<Box<Expression>>,
+    /// `Lident` of `true`, `false`, `null` and `undefined`, for those payloads.
+    runtime_tag_lidents: [LidentIdx; 4],
+    /// The attribute name `as`.
+    as_attribute_name: StrIdx,
     /// Positions of typechecker-interned locations, addressed from
     /// `SYNTHETIC_POSITION_BASE`.
     synthetic_positions: elsa::sync::FrozenVec<Box<Position>>,
@@ -719,7 +730,9 @@ impl Default for ParseArena {
         // during typedtree reconstruction. Pre-intern the common decl-attr names
         // that can arrive from external CMIs so that round-tripping imported
         // attrs does not depend on local source text having mentioned them.
-        let _ = strings.intern("as");
+        let as_attribute_name = strings.intern("as");
+        let runtime_tag_lidents = ["true", "false", "null", "undefined"]
+            .map(|name| longidents.push(Longident::Lident(strings.intern(name))));
         let _ = strings.intern("deprecated");
         let _ = strings.intern("tag");
         let _ = strings.intern("unboxed");
@@ -948,6 +961,9 @@ impl Default for ParseArena {
             synthetic_patterns: elsa::sync::FrozenVec::new(),
             synthetic_pattern_base: u32::MAX,
             synthetic_locations: elsa::sync::FrozenVec::new(),
+            shared_expressions: elsa::sync::FrozenVec::new(),
+            runtime_tag_lidents,
+            as_attribute_name,
             synthetic_positions: elsa::sync::FrozenVec::new(),
             synthetic_strings: elsa::sync::FrozenVec::new(),
             synthetic_string_base: u32::MAX,
@@ -2429,7 +2445,40 @@ impl ParseArena {
     /// Get an expression by index.
     #[inline]
     pub fn get_expr(&self, idx: ExprIdx) -> &Expression {
-        self.expressions.get(idx)
+        let raw = idx.0;
+        if raw < SHARED_EXPRESSION_BASE {
+            self.expressions.get(idx)
+        } else {
+            self.shared_expressions
+                .get((raw - SHARED_EXPRESSION_BASE) as usize)
+                .expect("shared expression read before it was pushed")
+        }
+    }
+
+    /// Append an expression while the arena is shared. Such expressions have
+    /// no sparse side-table entries, so they must not carry function
+    /// defaults, case guards or other side-table payloads.
+    pub fn push_shared_expr(&self, expr: Expression) -> ExprIdx {
+        let slot = self.shared_expressions.len();
+        self.shared_expressions.push(Box::new(expr));
+        ExprIdx(SHARED_EXPRESSION_BASE + slot as u32)
+    }
+
+    /// `Lident` of `true`, `false`, `null` or `undefined`.
+    pub fn runtime_tag_lident(&self, name: &str) -> LidentIdx {
+        let index = match name {
+            "true" => 0,
+            "false" => 1,
+            "null" => 2,
+            "undefined" => 3,
+            _ => unreachable!("runtime_tag_lident: {name}"),
+        };
+        self.runtime_tag_lidents[index]
+    }
+
+    /// The interned attribute name `as`.
+    pub fn as_attribute_name(&self) -> StrIdx {
+        self.as_attribute_name
     }
 
     /// Get a mutable expression by index.

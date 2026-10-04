@@ -70,6 +70,7 @@ pub mod raw_lambda;
 pub mod source_text;
 pub mod string_literal;
 pub mod ast_payload;
+pub mod ast_helper_type;
 /// Optional aggregate compiler phase timings.
 pub mod timing;
 pub mod types;

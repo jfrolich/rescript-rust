@@ -2313,6 +2313,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
     // Helper: create a constructor declaration (like OCaml's Predef.cstr)
     let cstr = |id: Ident, args: Vec<TypeExprRef>| ConstructorDeclaration {
         cd_id: id,
+        cd_runtime_tag: None,
         cd_args: ConstructorArguments::CstrTuple(args),
         cd_res: None,
         cd_loc: Location::none(),
@@ -2402,6 +2403,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 for (pos, ld) in labels.iter().enumerate() {
                     let label_desc = LabelDescription {
                         lbl_name: ld.ld_id.name().to_string(),
+                        lbl_runtime_name: ld.declaration_name(),
                         lbl_res: res_ty,
                         lbl_arg: crate::types::ctype::remap_label_type_to_params(
                             ctx,
@@ -2611,6 +2613,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         let option_t = ctx.new_generic_constr(predef::path_option(), vec![tvar]);
         let dict_label = crate::types::decl::LabelDeclaration {
             ld_id: predef::ident_dict_magic_field(),
+            ld_runtime_name: None,
             ld_mutable: MutableFlag::Immutable,
             ld_optional: true,
             ld_type: option_t,
@@ -2644,6 +2647,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 type_arity: 0,
                 type_kind: variant_kind(vec![ConstructorDeclaration {
                     cd_id: predef::ident_ctor_unknown(),
+                    cd_runtime_tag: None,
                     cd_args: ConstructorArguments::CstrTuple(vec![tvar]),
                     cd_res: Some(type_unknown),
                     cd_loc: Location::none(),
@@ -2697,9 +2701,11 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         // Record({name: string, fields: array<fieldInfo>, unboxed: bool})
         let record_ctor = ConstructorDeclaration {
             cd_id: predef::ident_ti_record(),
+            cd_runtime_tag: None,
             cd_args: ConstructorArguments::CstrRecord(vec![
                 LabelDeclaration {
                     ld_id: predef::ident_fi_name(),
+                    ld_runtime_name: None,
                     ld_mutable: MutableFlag::Immutable,
                     ld_optional: false,
                     ld_type: string_ty,
@@ -2708,6 +2714,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 },
                 LabelDeclaration {
                     ld_id: Ident::new("fields", 900, IdentFlags::NONE), // reuse a stamp for inline record
+                    ld_runtime_name: None,
                     ld_mutable: MutableFlag::Immutable,
                     ld_optional: false,
                     ld_type: array_field_info_ty,
@@ -2716,6 +2723,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 },
                 LabelDeclaration {
                     ld_id: Ident::new("unboxed", 901, IdentFlags::NONE),
+                    ld_runtime_name: None,
                     ld_mutable: MutableFlag::Immutable,
                     ld_optional: false,
                     ld_type: bool_ty,
@@ -2731,9 +2739,11 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         // Variant({name: string, constructors: array<constructorInfo>, unboxed: bool})
         let variant_ctor = ConstructorDeclaration {
             cd_id: predef::ident_ti_variant(),
+            cd_runtime_tag: None,
             cd_args: ConstructorArguments::CstrRecord(vec![
                 LabelDeclaration {
                     ld_id: Ident::new("name", 902, IdentFlags::NONE),
+                    ld_runtime_name: None,
                     ld_mutable: MutableFlag::Immutable,
                     ld_optional: false,
                     ld_type: string_ty,
@@ -2742,6 +2752,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 },
                 LabelDeclaration {
                     ld_id: Ident::new("constructors", 903, IdentFlags::NONE),
+                    ld_runtime_name: None,
                     ld_mutable: MutableFlag::Immutable,
                     ld_optional: false,
                     ld_type: array_constructor_info_ty,
@@ -2750,6 +2761,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 },
                 LabelDeclaration {
                     ld_id: Ident::new("unboxed", 901, IdentFlags::NONE),
+                    ld_runtime_name: None,
                     ld_mutable: MutableFlag::Immutable,
                     ld_optional: false,
                     ld_type: bool_ty,
@@ -2765,8 +2777,10 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         // Array({element: typeInfo})
         let array_ctor = ConstructorDeclaration {
             cd_id: predef::ident_ti_array(),
+            cd_runtime_tag: None,
             cd_args: ConstructorArguments::CstrRecord(vec![LabelDeclaration {
                 ld_id: Ident::new("element", 900, IdentFlags::NONE),
+                ld_runtime_name: None,
                 ld_mutable: MutableFlag::Immutable,
                 ld_optional: false,
                 ld_type: type_info_ty,
@@ -2781,8 +2795,10 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         // Option({inner: typeInfo})
         let option_ctor = ConstructorDeclaration {
             cd_id: predef::ident_ti_option(),
+            cd_runtime_tag: None,
             cd_args: ConstructorArguments::CstrRecord(vec![LabelDeclaration {
                 ld_id: Ident::new("inner", 901, IdentFlags::NONE),
+                ld_runtime_name: None,
                 ld_mutable: MutableFlag::Immutable,
                 ld_optional: false,
                 ld_type: type_info_ty,
@@ -2797,9 +2813,11 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         // Function({args: array<typeInfo>, returnType: typeInfo})
         let function_ctor = ConstructorDeclaration {
             cd_id: predef::ident_ti_function(),
+            cd_runtime_tag: None,
             cd_args: ConstructorArguments::CstrRecord(vec![
                 LabelDeclaration {
                     ld_id: Ident::new("args", 902, IdentFlags::NONE),
+                    ld_runtime_name: None,
                     ld_mutable: MutableFlag::Immutable,
                     ld_optional: false,
                     ld_type: array_type_info_ty,
@@ -2808,6 +2826,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 },
                 LabelDeclaration {
                     ld_id: Ident::new("returnType", 903, IdentFlags::NONE),
+                    ld_runtime_name: None,
                     ld_mutable: MutableFlag::Immutable,
                     ld_optional: false,
                     ld_type: type_info_ty,
@@ -2823,8 +2842,10 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         // External({name: string}) and Opaque({name: string})
         let external_ctor = ConstructorDeclaration {
             cd_id: predef::ident_ti_external(),
+            cd_runtime_tag: None,
             cd_args: ConstructorArguments::CstrRecord(vec![LabelDeclaration {
                 ld_id: Ident::new("name", 904, IdentFlags::NONE),
+                ld_runtime_name: None,
                 ld_mutable: MutableFlag::Immutable,
                 ld_optional: false,
                 ld_type: string_ty,
@@ -2838,8 +2859,10 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
 
         let opaque_ctor = ConstructorDeclaration {
             cd_id: predef::ident_ti_opaque(),
+            cd_runtime_tag: None,
             cd_args: ConstructorArguments::CstrRecord(vec![LabelDeclaration {
                 ld_id: Ident::new("name", 905, IdentFlags::NONE),
+                ld_runtime_name: None,
                 ld_mutable: MutableFlag::Immutable,
                 ld_optional: false,
                 ld_type: string_ty,
@@ -2885,6 +2908,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                     crate::types::decl::SharedVec::from(vec![
                         LabelDeclaration {
                             ld_id: predef::ident_fi_name(),
+                            ld_runtime_name: None,
                             ld_mutable: MutableFlag::Immutable,
                             ld_optional: false,
                             ld_type: string_ty,
@@ -2893,6 +2917,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                         },
                         LabelDeclaration {
                             ld_id: predef::ident_fi_typ(),
+                            ld_runtime_name: None,
                             ld_mutable: MutableFlag::Immutable,
                             ld_optional: false,
                             ld_type: type_info_ty,
@@ -2901,6 +2926,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                         },
                         LabelDeclaration {
                             ld_id: predef::ident_fi_optional(),
+                            ld_runtime_name: None,
                             ld_mutable: MutableFlag::Immutable,
                             ld_optional: false,
                             ld_type: bool_ty,
@@ -2909,6 +2935,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                         },
                         LabelDeclaration {
                             ld_id: predef::ident_fi_mutable(),
+                            ld_runtime_name: None,
                             ld_mutable: MutableFlag::Immutable,
                             ld_optional: false,
                             ld_type: bool_ty,
@@ -2931,6 +2958,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                     crate::types::decl::SharedVec::from(vec![
                         LabelDeclaration {
                             ld_id: predef::ident_ci_name(),
+                            ld_runtime_name: None,
                             ld_mutable: MutableFlag::Immutable,
                             ld_optional: false,
                             ld_type: string_ty,
@@ -2939,6 +2967,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                         },
                         LabelDeclaration {
                             ld_id: predef::ident_ci_args(),
+                            ld_runtime_name: None,
                             ld_mutable: MutableFlag::Immutable,
                             ld_optional: false,
                             ld_type: array_type_info_ty,

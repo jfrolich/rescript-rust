@@ -101,26 +101,23 @@ impl LambdaCompiler {
                 }
                 None => Expression::number(Number::int(*i)),
             },
-            Constant::Constructor(tag) => match &tag.tag_type {
-                Some(crate::types::VariantTagType::Int(value)) => {
+            Constant::Constructor(tag) => match &tag.literal {
+                Some(crate::types::VariantLiteralTag::Int(value)) => {
                     Expression::number(Number::int(*value))
                 }
                 // lam_compile_const.ml `E.tag_type t`: `String s -> str s`.
-                Some(crate::types::VariantTagType::String(value)) => {
+                Some(crate::types::VariantLiteralTag::String(value)) => {
                     Expression::new(ExpressionDesc::Str(value.clone()))
                 }
-                Some(crate::types::VariantTagType::Float(value)) => {
+                Some(crate::types::VariantLiteralTag::Float(value)) => {
                     Expression::number(Number::float(value.clone()))
                 }
-                Some(crate::types::VariantTagType::BigInt(value)) => {
+                Some(crate::types::VariantLiteralTag::BigInt(value)) => {
                     Expression::number(Number::bigint(true, value.clone()))
                 }
-                Some(crate::types::VariantTagType::Bool(value)) => Expression::bool(*value),
-                Some(crate::types::VariantTagType::Null) => Expression::null(),
-                Some(crate::types::VariantTagType::Undefined) => Expression::undefined(false),
-                Some(crate::types::VariantTagType::Untagged(_)) => {
-                    Expression::string(tag.name.clone())
-                }
+                Some(crate::types::VariantLiteralTag::Bool(value)) => Expression::bool(*value),
+                Some(crate::types::VariantLiteralTag::Null) => Expression::null(),
+                Some(crate::types::VariantLiteralTag::Undefined) => Expression::undefined(false),
                 None if tag.name == "[]" => Expression::with_comment(
                     ExpressionDesc::Number(Number::int(0)),
                     tag.name.clone(),

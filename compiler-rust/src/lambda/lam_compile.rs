@@ -4499,7 +4499,10 @@ impl LambdaCompiler {
             | Lambda::Lfor_await_of(_, _, _)
             | Lambda::LstaticRaise(_, _)
             | Lambda::Lbreak
-            | Lambda::Lcontinue => true,
+            | Lambda::Lcontinue
+            // OCaml `compile_assign` (lam_compile.ml) always emits the
+            // assignment as a statement, whatever the continuation.
+            | Lambda::Lassign(_, _) => true,
             Lambda::Llet(_, _, value, body) => {
                 Self::lambda_contains_statement_value_form(value)
                     || Self::lambda_contains_statement_value_form(body)

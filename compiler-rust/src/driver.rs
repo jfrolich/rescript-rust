@@ -9300,19 +9300,8 @@ fn runtime_field_type_compatible(
 }
 
 fn label_declaration_runtime_name(label: &crate::types::decl::LabelDeclaration) -> String {
-    label_declaration_as_name(label).unwrap_or_else(|| label.ld_id.name().to_string())
-}
-
-fn label_declaration_as_name(label: &crate::types::decl::LabelDeclaration) -> Option<String> {
-    label.ld_attributes.iter().find_map(|attr| {
-        if attr.attr_name.txt == "as"
-            && let crate::types::decl::AttributePayload::Str(value) = &attr.attr_payload
-        {
-            Some(value.clone())
-        } else {
-            None
-        }
-    })
+    // `Record_runtime.declaration_name`.
+    label.declaration_name()
 }
 
 fn runtime_variant_to_primitive_coercion_compatible(
@@ -9411,7 +9400,7 @@ fn variant_constructor_runtime_matches_primitive(
     match &constructor.cd_args {
         crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty() => {
             let tag = match case {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
                 crate::types::VariantConstructorCase::Block(_) => unreachable!(),
             };
             match variant_constructor_as_payload(tag) {
@@ -9454,17 +9443,16 @@ enum VariantConstructorAsPayload {
 }
 
 fn variant_constructor_as_payload(
-    tag: &Option<crate::types::VariantTagType>,
+    tag: &Option<crate::types::VariantLiteralTag>,
 ) -> Option<VariantConstructorAsPayload> {
     tag.as_ref().map(|tag| match tag {
-        crate::types::VariantTagType::String(_) => VariantConstructorAsPayload::String,
-        crate::types::VariantTagType::Int(_) => VariantConstructorAsPayload::Int,
-        crate::types::VariantTagType::Float(_) => VariantConstructorAsPayload::Float,
-        crate::types::VariantTagType::BigInt(_) => VariantConstructorAsPayload::BigInt,
-        crate::types::VariantTagType::Bool(_) => VariantConstructorAsPayload::Bool,
-        crate::types::VariantTagType::Null => VariantConstructorAsPayload::Null,
-        crate::types::VariantTagType::Undefined => VariantConstructorAsPayload::Undefined,
-        crate::types::VariantTagType::Untagged(_) => unreachable!(),
+        crate::types::VariantLiteralTag::String(_) => VariantConstructorAsPayload::String,
+        crate::types::VariantLiteralTag::Int(_) => VariantConstructorAsPayload::Int,
+        crate::types::VariantLiteralTag::Float(_) => VariantConstructorAsPayload::Float,
+        crate::types::VariantLiteralTag::BigInt(_) => VariantConstructorAsPayload::BigInt,
+        crate::types::VariantLiteralTag::Bool(_) => VariantConstructorAsPayload::Bool,
+        crate::types::VariantLiteralTag::Null => VariantConstructorAsPayload::Null,
+        crate::types::VariantLiteralTag::Undefined => VariantConstructorAsPayload::Undefined,
     })
 }
 
@@ -9648,11 +9636,11 @@ fn variant_constructor_string_runtime_repr(
     case: &crate::types::VariantConstructorCase,
 ) -> Option<String> {
     let tag = match case {
-        crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
-        crate::types::VariantConstructorCase::Block(block) => &block.runtime.tag.tag_type,
+        crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
+        crate::types::VariantConstructorCase::Block(block) => &block.runtime.tag.literal,
     };
     match tag {
-        Some(crate::types::VariantTagType::String(value)) => Some(value.clone()),
+        Some(crate::types::VariantLiteralTag::String(value)) => Some(value.clone()),
         Some(_) => None,
         None => Some(constructor.cd_id.name().to_string()),
     }

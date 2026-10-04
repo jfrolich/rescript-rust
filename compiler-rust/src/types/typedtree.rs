@@ -945,6 +945,8 @@ pub struct TypedConstructorDeclaration {
     pub cd_id: Ident,
     /// Constructor name with location.
     pub cd_name: Loc<String>,
+    /// The decoded `@as` tag (OCaml `cd_runtime_tag`).
+    pub cd_runtime_tag: Option<super::variant_runtime::LiteralTag>,
     /// Constructor arguments.
     pub cd_args: TypedConstructorArguments,
     /// Result type (for GADTs).
@@ -971,6 +973,8 @@ pub struct TypedLabelDeclaration {
     pub ld_id: Ident,
     /// Label name with location.
     pub ld_name: Loc<String>,
+    /// The `@as` rename (OCaml `ld_runtime_name`).
+    pub ld_runtime_name: Option<String>,
     /// Whether the label is mutable.
     pub ld_mutable: MutableFlag,
     /// Whether the label is optional.
@@ -1134,6 +1138,8 @@ pub struct LabelDeclaration {
     pub ld_id: Ident,
     /// Label name with location.
     pub ld_name: Loc<String>,
+    /// The `@as` rename (OCaml `ld_runtime_name`).
+    pub ld_runtime_name: Option<String>,
     /// Whether the label is mutable.
     pub ld_mutable: MutableFlag,
     /// Whether the label is optional.

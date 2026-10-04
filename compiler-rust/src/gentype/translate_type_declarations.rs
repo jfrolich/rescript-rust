@@ -109,16 +109,16 @@ pub fn create_case(
     VariantCase { label_js }
 }
 
-fn create_variant_case(label: &str, tag: &Option<crate::types::VariantTagType>) -> VariantCase {
+fn create_variant_case(label: &str, tag: &Option<crate::types::VariantLiteralTag>) -> VariantCase {
     let label_js = match tag {
-        Some(crate::types::VariantTagType::String(value)) => LabelJs::StringLabel(value.clone()),
-        Some(crate::types::VariantTagType::Int(value)) => LabelJs::IntLabel(value.to_string()),
-        Some(crate::types::VariantTagType::Float(value)) => LabelJs::FloatLabel(value.clone()),
-        Some(crate::types::VariantTagType::BigInt(value)) => LabelJs::IntLabel(value.clone()),
-        Some(crate::types::VariantTagType::Bool(value)) => LabelJs::BoolLabel(*value),
-        Some(crate::types::VariantTagType::Null) => LabelJs::NullLabel,
-        Some(crate::types::VariantTagType::Undefined) => LabelJs::UndefinedLabel,
-        Some(crate::types::VariantTagType::Untagged(_)) | None => {
+        Some(crate::types::VariantLiteralTag::String(value)) => LabelJs::StringLabel(value.clone()),
+        Some(crate::types::VariantLiteralTag::Int(value)) => LabelJs::IntLabel(value.to_string()),
+        Some(crate::types::VariantLiteralTag::Float(value)) => LabelJs::FloatLabel(value.clone()),
+        Some(crate::types::VariantLiteralTag::BigInt(value)) => LabelJs::IntLabel(value.clone()),
+        Some(crate::types::VariantLiteralTag::Bool(value)) => LabelJs::BoolLabel(*value),
+        Some(crate::types::VariantLiteralTag::Null) => LabelJs::NullLabel,
+        Some(crate::types::VariantLiteralTag::Undefined) => LabelJs::UndefinedLabel,
+        None => {
             LabelJs::StringLabel(label.to_string())
         }
     };
@@ -134,16 +134,14 @@ pub fn rename_record_field(arena: &ParseArena, attributes: &Attributes, name: &s
     }
 }
 
-pub fn rename_record_field_from_decl_attributes(
-    attributes: &[DeclAttribute],
-    name: &str,
-) -> String {
-    // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:39-53 for
-    // Types.signature attributes.
-    crate::gentype::annotation::check_unsupported_decl_gentype_as_renaming(attributes);
-    match crate::gentype::annotation::get_decl_as_string(attributes) {
-        Some(s) => string_escaped_like_ocaml(&s),
-        None => unwrap_uppercase_exotic(name).to_string(),
+/// OCaml `Translate_type_declarations.declared_field_name`: a declared field
+/// carries its runtime name; only the renaming that reaches gentype through
+/// an expression's attributes still has to be read off one.
+pub fn declared_field_name(ld: &LabelDeclaration) -> String {
+    crate::gentype::annotation::check_unsupported_decl_gentype_as_renaming(&ld.ld_attributes);
+    match &ld.ld_runtime_name {
+        Some(s) => string_escaped_like_ocaml(s),
+        None => unwrap_uppercase_exotic(ld.ld_id.name()).to_string(),
     }
 }
 
@@ -466,9 +464,9 @@ fn traslate_declaration_kind_with_attribute_info(
                 .map(|(position, constructor_declaration)| {
                     let case = &layout.constructors[position];
                     let tag = match case {
-                        crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                        crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
                         crate::types::VariantConstructorCase::Block(block) => {
-                            &block.runtime.tag.tag_type
+                            &block.runtime.tag.literal
                         }
                     };
                     let tag = tag.clone();
@@ -694,10 +692,7 @@ fn translate_label_declarations(
         .iter()
         .map(|label_declaration| {
             let attributes = &label_declaration.ld_attributes;
-            let name = rename_record_field_from_decl_attributes(
-                attributes,
-                label_declaration.ld_id.name(),
-            );
+            let name = declared_field_name(label_declaration);
             let mutable_ = match label_declaration.ld_mutable {
                 MutableFlag::Mutable => Mutable::Mutable,
                 MutableFlag::Immutable => Mutable::Immutable,

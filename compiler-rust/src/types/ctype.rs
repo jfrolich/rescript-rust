@@ -4529,6 +4529,7 @@ pub(crate) fn instance_declaration(
                 .iter()
                 .map(|label| crate::types::decl::LabelDeclaration {
                     ld_id: label.ld_id.clone(),
+                    ld_runtime_name: label.ld_runtime_name.clone(),
                     ld_mutable: label.ld_mutable,
                     ld_optional: label.ld_optional,
                     ld_type: copy(label.ld_type),
@@ -4734,29 +4735,26 @@ fn type_expr_path_same(ctx: &TypeContext, ty: TypeExprRef, target_path: &Path) -
 }
 
 fn variant_constructor_as_payload(
-    tag: &Option<crate::types::VariantTagType>,
+    tag: &Option<crate::types::VariantLiteralTag>,
 ) -> Option<VariantConstructorAsPayload> {
     tag.as_ref().map(|tag| match tag {
-        crate::types::VariantTagType::String(_) => VariantConstructorAsPayload::String,
-        crate::types::VariantTagType::Int(_) => VariantConstructorAsPayload::Int,
-        crate::types::VariantTagType::Float(_) => VariantConstructorAsPayload::Float,
-        crate::types::VariantTagType::BigInt(_) => VariantConstructorAsPayload::BigInt,
-        crate::types::VariantTagType::Bool(_) => VariantConstructorAsPayload::Bool,
-        crate::types::VariantTagType::Null => VariantConstructorAsPayload::Null,
-        crate::types::VariantTagType::Undefined => VariantConstructorAsPayload::Undefined,
-        crate::types::VariantTagType::Untagged(_) => {
-            unreachable!("constructor tags are never untagged")
-        }
+        crate::types::VariantLiteralTag::String(_) => VariantConstructorAsPayload::String,
+        crate::types::VariantLiteralTag::Int(_) => VariantConstructorAsPayload::Int,
+        crate::types::VariantLiteralTag::Float(_) => VariantConstructorAsPayload::Float,
+        crate::types::VariantLiteralTag::BigInt(_) => VariantConstructorAsPayload::BigInt,
+        crate::types::VariantLiteralTag::Bool(_) => VariantConstructorAsPayload::Bool,
+        crate::types::VariantLiteralTag::Null => VariantConstructorAsPayload::Null,
+        crate::types::VariantLiteralTag::Undefined => VariantConstructorAsPayload::Undefined,
     })
 }
 
 fn variant_constructor_tag(
     layout: &crate::types::VariantLayout,
     position: usize,
-) -> &Option<crate::types::VariantTagType> {
+) -> &Option<crate::types::VariantLiteralTag> {
     match &layout.constructors[position] {
-        crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
-        crate::types::VariantConstructorCase::Block(block) => &block.runtime.tag.tag_type,
+        crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
+        crate::types::VariantConstructorCase::Block(block) => &block.runtime.tag.literal,
     }
 }
 
@@ -4776,11 +4774,11 @@ fn variant_constructor_covers_primitive(
 fn variant_constructor_matches_polyvariant_label(
     ctx: &TypeContext,
     constructor: &crate::types::decl::ConstructorDeclaration,
-    tag: &Option<crate::types::VariantTagType>,
+    tag: &Option<crate::types::VariantLiteralTag>,
     label: &str,
     unboxed: bool,
 ) -> bool {
-    if let Some(crate::types::VariantTagType::String(as_string)) = tag {
+    if let Some(crate::types::VariantLiteralTag::String(as_string)) = tag {
         return as_string == label;
     }
     if tag.is_some() {
@@ -6131,19 +6129,12 @@ fn check_record_fields(
 }
 
 fn label_declaration_runtime_name(label: &LabelDeclaration) -> String {
-    label_declaration_as_name(label).unwrap_or_else(|| label.ld_id.name().to_string())
+    // `Record_runtime.declaration_name`.
+    label.declaration_name()
 }
 
 fn label_declaration_as_name(label: &LabelDeclaration) -> Option<String> {
-    label.ld_attributes.iter().find_map(|attr| {
-        if attr.attr_name.txt == "as"
-            && let super::decl::AttributePayload::Str(value) = &attr.attr_payload
-        {
-            Some(value.clone())
-        } else {
-            None
-        }
-    })
+    label.ld_runtime_name.clone()
 }
 
 fn expand_head_with_mode<'a>(

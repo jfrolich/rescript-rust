@@ -347,23 +347,22 @@ impl LambdaCompiler {
             && !self.uses_untagged_variant_switch(switch)
     }
 
-    fn tag_type_value(tag: &crate::types::VariantTagType) -> SwitchCaseTag {
+    fn literal_tag_value(tag: &crate::types::VariantLiteralTag) -> SwitchCaseTag {
         match tag {
-            crate::types::VariantTagType::String(value) => SwitchCaseTag::String(value.clone()),
-            crate::types::VariantTagType::Int(value) => SwitchCaseTag::Int(*value as i64),
-            crate::types::VariantTagType::Float(value) => SwitchCaseTag::Float(value.clone()),
-            crate::types::VariantTagType::BigInt(value) => SwitchCaseTag::BigInt(value.clone()),
-            crate::types::VariantTagType::Bool(value) => SwitchCaseTag::Bool(*value),
-            crate::types::VariantTagType::Null => SwitchCaseTag::Null,
-            crate::types::VariantTagType::Undefined => SwitchCaseTag::Undefined,
-            crate::types::VariantTagType::Untagged(_) => unreachable!("literal tag is untagged"),
+            crate::types::VariantLiteralTag::String(value) => SwitchCaseTag::String(value.clone()),
+            crate::types::VariantLiteralTag::Int(value) => SwitchCaseTag::Int(*value as i64),
+            crate::types::VariantLiteralTag::Float(value) => SwitchCaseTag::Float(value.clone()),
+            crate::types::VariantLiteralTag::BigInt(value) => SwitchCaseTag::BigInt(value.clone()),
+            crate::types::VariantLiteralTag::Bool(value) => SwitchCaseTag::Bool(*value),
+            crate::types::VariantLiteralTag::Null => SwitchCaseTag::Null,
+            crate::types::VariantLiteralTag::Undefined => SwitchCaseTag::Undefined,
         }
     }
 
     fn switch_tag_value(tag: &crate::types::VariantTag) -> SwitchCaseTag {
-        tag.tag_type
+        tag.literal
             .as_ref()
-            .map(Self::tag_type_value)
+            .map(Self::literal_tag_value)
             .unwrap_or_else(|| SwitchCaseTag::String(tag.name.clone()))
     }
 
@@ -379,7 +378,7 @@ impl LambdaCompiler {
             facts
                 .literal_tags
                 .iter()
-                .map(Self::tag_type_value)
+                .map(Self::literal_tag_value)
                 .collect(),
         )
     }

@@ -300,8 +300,8 @@ fn variant_block_type(block: &crate::types::VariantBlockType) -> Sexp {
     }
 }
 
-fn variant_tag_type(tag: &crate::types::VariantTagType) -> Sexp {
-    use crate::types::VariantTagType as T;
+fn variant_literal_tag(tag: &crate::types::VariantLiteralTag) -> Sexp {
+    use crate::types::VariantLiteralTag as T;
     match tag {
         T::String(value) => Sexp::list(vec![Sexp::atom("String"), string(value)]),
         T::Int(value) => Sexp::list(vec![Sexp::atom("Int"), int(*value)]),
@@ -310,7 +310,6 @@ fn variant_tag_type(tag: &crate::types::VariantTagType) -> Sexp {
         T::Bool(value) => Sexp::list(vec![Sexp::atom("Bool"), bool_sexp(*value)]),
         T::Null => Sexp::atom("Null"),
         T::Undefined => Sexp::atom("Undefined"),
-        T::Untagged(block) => Sexp::list(vec![Sexp::atom("Untagged"), variant_block_type(block)]),
     }
 }
 
@@ -330,9 +329,9 @@ fn variant_tag(tag: &crate::types::VariantTag) -> Sexp {
     Sexp::list(vec![
         Sexp::atom("tag"),
         string(&tag.name),
-        tag.tag_type.as_ref().map_or_else(
+        tag.literal.as_ref().map_or_else(
             || Sexp::atom("None"),
-            |tag| Sexp::list(vec![Sexp::atom("Some"), variant_tag_type(tag)]),
+            |literal| Sexp::list(vec![Sexp::atom("Some"), variant_literal_tag(literal)]),
         ),
     ])
 }
@@ -361,7 +360,7 @@ fn variant_matching_facts(facts: &crate::types::VariantMatchingFacts) -> Sexp {
             |name| Sexp::list(vec![Sexp::atom("Some"), string(name)]),
         ),
         Sexp::list(facts.block_types.iter().map(variant_block_type).collect()),
-        Sexp::list(facts.literal_tags.iter().map(variant_tag_type).collect()),
+        Sexp::list(facts.literal_tags.iter().map(variant_literal_tag).collect()),
         bool_sexp(facts.has_null),
         bool_sexp(facts.has_undefined),
         bool_sexp(facts.has_other_literal),
@@ -538,7 +537,6 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::Pintorder => Sexp::atom("Pintorder"),
         Primitive::Pintmin => Sexp::atom("Pintmin"),
         Primitive::Pintmax => Sexp::atom("Pintmax"),
-        Primitive::Poffsetref(n) => Sexp::list(vec![Sexp::atom("Poffsetref"), int(*n)]),
         Primitive::Pintoffloat => Sexp::atom("Pintoffloat"),
         Primitive::Pfloatofint => Sexp::atom("Pfloatofint"),
         Primitive::Pnegfloat => Sexp::atom("Pnegfloat"),
@@ -851,7 +849,7 @@ mod tests {
         let constant_key = crate::lambda::SwitchKey::Constructor(
             crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                 name: "Null".to_string(),
-                tag_type: None,
+                literal: None,
             }),
         );
         let block_key = crate::lambda::SwitchKey::Constructor(
@@ -859,7 +857,7 @@ mod tests {
                 runtime: crate::types::BlockRuntime {
                     tag: crate::types::VariantTag {
                         name: "Boolean".to_string(),
-                        tag_type: None,
+                        literal: None,
                     },
                     tag_name: None,
                     untagged: false,

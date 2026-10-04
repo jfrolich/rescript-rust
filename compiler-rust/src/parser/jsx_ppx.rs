@@ -2230,17 +2230,20 @@ fn make_props_record_type_with_live(
             };
 
             let label_idx = arena.push_interned_string(&nt.label);
-            LabelDeclaration {
-                pld_name: Loc {
+            let typ_idx = arena.push_core_type(type_var);
+            crate::ast_helper_type::field(
+                arena,
+                nt.loc.clone(),
+                nt.attrs.clone(),
+                MutableFlag::Immutable,
+                is_optional,
+                None,
+                Loc {
                     txt: label_idx,
                     loc: nt.loc.clone(),
                 },
-                pld_mutable: MutableFlag::Immutable,
-                pld_type: arena.push_core_type(type_var),
-                pld_loc: nt.loc.clone(),
-                pld_attributes: nt.attrs.clone(),
-                pld_optional: is_optional,
-            }
+                typ_idx,
+            )
         })
         .collect();
 
@@ -3433,17 +3436,20 @@ fn make_props_record_type(
             };
 
             let label_str_idx = arena.push_interned_string(&nt.label);
-            LabelDeclaration {
-                pld_name: Loc {
+            let typ_idx = arena.push_core_type(type_var);
+            crate::ast_helper_type::field(
+                arena,
+                nt.loc.clone(),
+                nt.attrs.clone(),
+                MutableFlag::Immutable,
+                is_optional,
+                None,
+                Loc {
                     txt: label_str_idx,
                     loc: nt.loc.clone(),
                 },
-                pld_mutable: MutableFlag::Immutable,
-                pld_type: arena.push_core_type(type_var),
-                pld_loc: nt.loc.clone(),
-                pld_optional: is_optional,
-                pld_attributes: nt.attrs.clone(),
-            }
+                typ_idx,
+            )
         })
         .collect();
 
@@ -3526,17 +3532,20 @@ fn make_props_record_type_sig(
             };
 
             let label_str_idx = arena.push_interned_string(&nt.label);
-            LabelDeclaration {
-                pld_name: Loc {
+            let typ_idx = arena.push_core_type(type_var);
+            crate::ast_helper_type::field(
+                arena,
+                nt.loc.clone(),
+                nt.attrs.clone(),
+                MutableFlag::Immutable,
+                is_optional,
+                None,
+                Loc {
                     txt: label_str_idx,
                     loc: nt.loc.clone(),
                 },
-                pld_mutable: MutableFlag::Immutable,
-                pld_type: arena.push_core_type(type_var),
-                pld_loc: nt.loc.clone(),
-                pld_optional: is_optional,
-                pld_attributes: nt.attrs.clone(),
-            }
+                typ_idx,
+            )
         })
         .collect();
 

@@ -2418,13 +2418,14 @@ impl<'a> Mapper<'a> {
         &mut self,
         cd: &pt0::ConstructorDeclaration,
     ) -> current::ConstructorDeclaration {
-        current::ConstructorDeclaration {
-            pcd_name: self.map_string_loc(&cd.pcd_name),
-            pcd_args: self.map_constructor_arguments(&cd.pcd_args),
-            pcd_res: cd.pcd_res.as_ref().map(|t| self.push_core_type(t)),
-            pcd_loc: self.loc(&cd.pcd_loc),
-            pcd_attributes: self.map_attributes(&cd.pcd_attributes).into(),
-        }
+        // ast_mapper_from0.ml: `Type.constructor`, which takes a valid
+        // `@as` out of the attributes.
+        let name = self.map_string_loc(&cd.pcd_name);
+        let args = self.map_constructor_arguments(&cd.pcd_args);
+        let res = cd.pcd_res.as_ref().map(|t| self.push_core_type(t));
+        let loc = self.loc(&cd.pcd_loc);
+        let attrs = self.map_attributes(&cd.pcd_attributes).into();
+        crate::ast_helper_type::constructor(self.arena, loc, attrs, args, res, None, name)
     }
 
     fn map_constructor_arguments(
@@ -2452,14 +2453,13 @@ impl<'a> Mapper<'a> {
             attrs
         };
 
-        current::LabelDeclaration {
-            pld_name: self.map_string_loc(&ld.pld_name),
-            pld_mutable: map_mutable_flag(ld.pld_mutable),
-            pld_type: self.push_core_type(&ld.pld_type),
-            pld_loc: self.loc(&ld.pld_loc),
-            pld_attributes: final_attrs.into(),
-            pld_optional: optional,
-        }
+        // ast_mapper_from0.ml: `Type.field`, which takes the `@as` rename
+        // out of the attributes.
+        let name = self.map_string_loc(&ld.pld_name);
+        let mutable = map_mutable_flag(ld.pld_mutable);
+        let typ = self.push_core_type(&ld.pld_type);
+        let loc = self.loc(&ld.pld_loc);
+        crate::ast_helper_type::field(self.arena, loc, final_attrs.into(), mutable, optional, None, name, typ)
     }
 
     fn map_type_extension(&mut self, te: &pt0::TypeExtension) -> current::TypeExtension {

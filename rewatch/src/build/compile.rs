@@ -2399,7 +2399,10 @@ fn copy_sources_to_build_dirs(package: &packages::Package, module: &Module) {
         return;
     };
     let interface_path = source_file.interface.as_ref().map(|interface| &interface.path);
-    for path in interface_path.into_iter().chain([&source_file.implementation.path]) {
+    for path in interface_path
+        .into_iter()
+        .chain([&source_file.implementation.path])
+    {
         let source = Path::new(&package.path).join(path);
         let build_copy = package.get_build_path().join(path);
         if let Some(parent) = build_copy.parent() {

@@ -491,7 +491,6 @@ impl LambdaCompiler {
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
             ),
-            Poffsetref(_) => unreachable!("%incr/%decr are expanded when raw lambda is lowered"),
             Pisint => is_type_number_expr(take_arg(&mut compiled_args, 0)),
             PisPolyVarBlock => is_type_object_expr(take_arg(&mut compiled_args, 0)),
             Pmakearray => Expression::array(compiled_args, MutableFlag::Mutable),

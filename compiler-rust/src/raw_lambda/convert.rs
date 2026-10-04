@@ -81,7 +81,7 @@ fn predef_exception_ident(name: &str, stamp: i32) -> Ident {
 fn recmodule_function_shape_constant() -> Constant {
     Constant::Constructor(crate::types::VariantTag {
         name: "Function".to_string(),
-        tag_type: None,
+        literal: None,
     })
 }
 
@@ -113,10 +113,10 @@ fn raw_constructor_constant(
             crate::types::ConstructorKind::Ordinary(reference) => {
                 match reference.representation(ctx) {
                     crate::types::VariantConstructorCase::Constant(tag) => {
-                        constructor_runtime_tag(&tag.tag_type)
+                        constructor_runtime_tag(&tag.literal)
                     }
                     crate::types::VariantConstructorCase::Block(block) => {
-                        constructor_runtime_tag(&block.runtime.tag.tag_type)
+                        constructor_runtime_tag(&block.runtime.tag.literal)
                     }
                 }
             }
@@ -459,37 +459,29 @@ fn nonrecursive_alias_any_binding(binding: &ValueBinding) -> bool {
     )
 }
 
-/// OCaml's Lambda.find_name: check for @as attribute to get the JS runtime name.
-/// Falls back to the label's declared name.
+/// The label's runtime name, decided when its declaration was typed
+/// (OCaml `lbl.lbl_runtime_name`).
 fn label_runtime_name(lbl: &LabelDescription) -> String {
-    for attr in &lbl.lbl_attributes {
-        if attr.attr_name.txt == "as" {
-            if let crate::types::decl::AttributePayload::Str(name) = &attr.attr_payload {
-                return name.clone();
-            }
-        }
-    }
-    lbl.lbl_name.clone()
+    lbl.lbl_runtime_name.clone()
 }
 
 fn constructor_runtime_tag(
-    tag: &Option<crate::types::VariantTagType>,
+    tag: &Option<crate::types::VariantLiteralTag>,
 ) -> Option<ConstructorRuntimeTag> {
     tag.as_ref().and_then(|tag| match tag {
-        crate::types::VariantTagType::Int(value) => Some(ConstructorRuntimeTag::Int(*value as i64)),
-        crate::types::VariantTagType::String(value) => {
+        crate::types::VariantLiteralTag::Int(value) => Some(ConstructorRuntimeTag::Int(*value as i64)),
+        crate::types::VariantLiteralTag::String(value) => {
             Some(ConstructorRuntimeTag::String(value.clone()))
         }
-        crate::types::VariantTagType::Float(value) => {
+        crate::types::VariantLiteralTag::Float(value) => {
             Some(ConstructorRuntimeTag::Float(value.clone()))
         }
-        crate::types::VariantTagType::BigInt(value) => {
+        crate::types::VariantLiteralTag::BigInt(value) => {
             Some(ConstructorRuntimeTag::BigInt(value.clone()))
         }
-        crate::types::VariantTagType::Bool(value) => Some(ConstructorRuntimeTag::Bool(*value)),
-        crate::types::VariantTagType::Null => Some(ConstructorRuntimeTag::Null),
-        crate::types::VariantTagType::Undefined => Some(ConstructorRuntimeTag::Undefined),
-        crate::types::VariantTagType::Untagged(_) => None,
+        crate::types::VariantLiteralTag::Bool(value) => Some(ConstructorRuntimeTag::Bool(*value)),
+        crate::types::VariantLiteralTag::Null => Some(ConstructorRuntimeTag::Null),
+        crate::types::VariantLiteralTag::Undefined => Some(ConstructorRuntimeTag::Undefined),
     })
 }
 
@@ -1417,17 +1409,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 .iter()
                                 .enumerate()
                                 .map(|(pos, ld)| {
-                                    let name = ld
-                                        .ld_attributes
-                                        .iter()
-                                        .find(|a| a.attr_name.txt == "as")
-                                        .and_then(|a| match &a.attr_payload {
-                                            crate::types::decl::AttributePayload::Str(s) => {
-                                                Some(s.clone())
-                                            }
-                                            _ => None,
-                                        })
-                                        .unwrap_or_else(|| ld.ld_id.name().to_string());
+                                    let name = ld.declaration_name();
                                     (
                                         name,
                                         pos as i32,
@@ -1449,17 +1431,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 .iter()
                                 .enumerate()
                                 .map(|(pos, ld)| {
-                                    let name = ld
-                                        .ld_attributes
-                                        .iter()
-                                        .find(|a| a.attr_name.txt == "as")
-                                        .and_then(|a| match &a.attr_payload {
-                                            crate::types::decl::AttributePayload::Str(s) => {
-                                                Some(s.clone())
-                                            }
-                                            _ => None,
-                                        })
-                                        .unwrap_or_else(|| ld.ld_id.name().to_string());
+                                    let name = ld.declaration_name();
                                     (
                                         name,
                                         pos as i32,
@@ -1480,17 +1452,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 .iter()
                                 .enumerate()
                                 .map(|(pos, ld)| {
-                                    let name = ld
-                                        .ld_attributes
-                                        .iter()
-                                        .find(|a| a.attr_name.txt == "as")
-                                        .and_then(|a| match &a.attr_payload {
-                                            crate::types::decl::AttributePayload::Str(s) => {
-                                                Some(s.clone())
-                                            }
-                                            _ => None,
-                                        })
-                                        .unwrap_or_else(|| ld.ld_id.name().to_string());
+                                    let name = ld.declaration_name();
                                     (
                                         name,
                                         pos as i32,
@@ -3030,14 +2992,6 @@ impl<'a> RawLambdaConverter<'a> {
                 0,
                 crate::lambda::lam_compat::SetFieldDbgInfo::RecordSet("contents".to_string()),
             )),
-            "%refget" => Some(Primitive::Pfield(
-                0,
-                FieldDbgInfo::Record {
-                    name: "contents".to_string(),
-                },
-            )),
-            "%incr" => Some(Primitive::Poffsetref(1)),
-            "%decr" => Some(Primitive::Poffsetref(-1)),
             "%identity" | "%component_identity" => Some(Primitive::Pidentity),
             "%ignore" => Some(Primitive::Pignore),
             // Direct bigint primitives (used by Js.BigInt externals)
@@ -6774,11 +6728,10 @@ impl<'a> RawLambdaConverter<'a> {
                     .as_ref()
                     .map(|e| self.convert_expr_raw(e))
                     .unwrap_or_else(RawLambda::unit);
-                RawLambda::LifThenElse(
-                    Box::new(self.convert_expr_raw(cond)),
-                    Box::new(self.convert_expr_raw(then_)),
-                    Box::new(else_lam),
-                )
+                // Keeps the converter's existing order: else, condition, then.
+                let cond_lam = self.convert_expr_raw(cond);
+                let then_lam = self.convert_expr_raw(then_);
+                RawLambda::if_(cond_lam, then_lam, else_lam)
             }
             ExpressionDesc::Texp_record {
                 fields,
@@ -11974,10 +11927,9 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     /// OCaml `Lambda.mk_builtin` (lambda.ml): builtins with no primitive form
-    /// are erased at translation. `%identity` is its argument, `%ignore`
-    /// sequences its argument with unit, and `%incr` / `%decr` expand to the
-    /// field write (`Lambda.offset_ref`), binding the reference unless it is
-    /// already a variable.
+    /// are erased at translation. `%identity` is its argument and `%ignore`
+    /// sequences its argument with unit; every other primitive is built
+    /// through the folding `Lambda.prim`.
     fn mk_builtin(&mut self, primitive: Primitive, args: Vec<RawLambda>, loc: Location) -> RawLambda {
         match primitive {
             Primitive::Pidentity => {
@@ -11988,43 +11940,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let [arg] = <[RawLambda; 1]>::try_from(args).expect("%ignore takes one argument");
                 RawLambda::seq(arg, RawLambda::unit())
             }
-            Primitive::Poffsetref(delta) => {
-                let [r] = <[RawLambda; 1]>::try_from(args).expect("%incr/%decr take one argument");
-                let assign = |r: RawLambda| {
-                    RawLambda::prim(
-                        Primitive::Psetfield(0, SetFieldDbgInfo::RecordSet("contents".to_string())),
-                        vec![
-                            r.clone(),
-                            RawLambda::prim(
-                                Primitive::Paddint,
-                                vec![
-                                    RawLambda::prim(
-                                        Primitive::Pfield(
-                                            0,
-                                            FieldDbgInfo::Record {
-                                                name: "contents".to_string(),
-                                            },
-                                        ),
-                                        vec![r],
-                                        loc.clone(),
-                                    ),
-                                    RawLambda::const_(Constant::int(delta)),
-                                ],
-                                loc.clone(),
-                            ),
-                        ],
-                        loc.clone(),
-                    )
-                };
-                match r {
-                    RawLambda::Lvar(_) => assign(r),
-                    _ => {
-                        let id = self.fresh_ident("ref");
-                        RawLambda::let_(LetKind::Strict, id.clone(), r, assign(RawLambda::var(id)))
-                    }
-                }
-            }
-            primitive => RawLambda::prim(primitive, args, loc),
+            primitive => RawLambda::prim_folded(primitive, args, loc),
         }
     }
 
@@ -13477,7 +13393,7 @@ mod tests {
             init_v,
             Constant::Constructor(crate::types::VariantTag {
                 name,
-                tag_type: None,
+                literal: None,
             }) if name == "Function"
         ));
     }

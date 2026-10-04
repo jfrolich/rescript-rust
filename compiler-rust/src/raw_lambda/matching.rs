@@ -921,7 +921,9 @@ fn record_all_labels(
                     cached
                         .into_iter()
                         .map(|(name, pos, mutflag, repr, attrs)| LabelDescription {
-                            lbl_name: name,
+                            lbl_name: name.clone(),
+                            // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
+                            lbl_runtime_name: name,
                             lbl_res: TypeExprRef(0),
                             lbl_arg: TypeExprRef(0),
                             lbl_mut: mutflag,
@@ -4895,16 +4897,9 @@ fn matcher_constr_arityN<'p>(
     }
 }
 
-/// Helper: get runtime name from label attributes (OCaml's Lambda.find_name).
+/// The label's runtime name (OCaml `lbl.lbl_runtime_name`).
 fn label_runtime_name_matching(lbl: &LabelDescription) -> String {
-    for attr in &lbl.lbl_attributes {
-        if attr.attr_name.txt == "as" {
-            if let crate::types::decl::AttributePayload::Str(name) = &attr.attr_payload {
-                return name.clone();
-            }
-        }
-    }
-    lbl.lbl_name.clone()
+    lbl.lbl_runtime_name.clone()
 }
 
 /// Create field debug info for a record label (equivalent to OCaml's Lambda.fld_record).
@@ -8752,7 +8747,9 @@ fn label_descriptions_from_cached_entries(
     cached
         .into_iter()
         .map(|(name, pos, mutflag, repr, attrs)| LabelDescription {
-            lbl_name: name,
+            lbl_name: name.clone(),
+            // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
+            lbl_runtime_name: name,
             lbl_res: TypeExprRef(0),
             lbl_arg: TypeExprRef(0),
             lbl_mut: mutflag,
@@ -8790,7 +8787,9 @@ fn resolve_labels_from_type(
                 cached
                     .into_iter()
                     .map(|(name, pos, mutflag, repr, attrs)| LabelDescription {
-                        lbl_name: name,
+                        lbl_name: name.clone(),
+                        // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
+                        lbl_runtime_name: name,
                         lbl_res: TypeExprRef(0),
                         lbl_arg: TypeExprRef(0),
                         lbl_mut: mutflag,
@@ -8943,6 +8942,7 @@ fn build_label_descriptions(
         .map(|(pos, ld)| {
             LabelDescription {
                 lbl_name: ld.ld_id.name().to_string(),
+                lbl_runtime_name: ld.declaration_name(),
                 lbl_res: TypeExprRef(0), // Not used by matching
                 lbl_arg: ld.ld_type,
                 lbl_mut: ld.ld_mutable,

@@ -1285,7 +1285,7 @@ fn constructor_declaration(arena: &ParseArena, cd: &ConstructorDeclaration) -> S
                 ]),
             },
         ]),
-        attributes(arena, &cd.pcd_attributes),
+        attributes(arena, &crate::ast_helper_type::constructor_attributes(arena, cd)),
     ])
 }
 

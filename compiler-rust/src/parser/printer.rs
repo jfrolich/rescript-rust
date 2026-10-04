@@ -8931,8 +8931,8 @@ fn print_constructor_declaration2(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    let (comment_attrs, attrs) =
-        parsetree_viewer::partition_doc_comment_attributes(arena, &cd.pcd_attributes);
+    let all_attrs = crate::ast_helper_type::constructor_attributes(arena, cd);
+    let (comment_attrs, attrs) = parsetree_viewer::partition_doc_comment_attributes(arena, &all_attrs);
     let comment_doc = if comment_attrs.is_empty() {
         Doc::nil()
     } else {
@@ -8941,7 +8941,7 @@ fn print_constructor_declaration2(
     let attrs: Vec<Attribute> = attrs.into_iter().cloned().collect();
     let attrs = print_attributes(state, &attrs, cmt_tbl, arena);
     let is_dot_dot_dot = arena.get_string(cd.pcd_name.txt) == "...";
-    let bar = if i > 0 || !cd.pcd_attributes.is_empty() || is_dot_dot_dot {
+    let bar = if i > 0 || !all_attrs.is_empty() || is_dot_dot_dot {
         Doc::text("| ")
     } else {
         Doc::if_breaks(Doc::text("| "), Doc::nil())
@@ -9039,9 +9039,12 @@ fn print_label_declaration(
     // so their attributes are printed too.
     let is_dot = arena.get_string(field.pld_name.txt) == "...";
     // Pass field name location for proper attribute line breaking
+    // The runtime name is held as a field rather than an attribute, so put
+    // its surface syntax back (res_printer.ml `print_label_declaration`).
+    let written_attrs = crate::ast_helper_type::field_attributes(arena, field);
     let attrs_doc = print_attributes_with_loc(
         state,
-        &field.pld_attributes,
+        &written_attrs,
         Some(field.pld_name.loc),
         cmt_tbl,
         arena,

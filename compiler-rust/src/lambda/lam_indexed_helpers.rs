@@ -206,21 +206,20 @@ fn append_if(
                         | Constant::Float(_)
                         | Constant::BigInt { .. }
                         | Constant::Block { .. } => Some(true),
-                        Constant::Constructor(tag) => match &tag.tag_type {
+                        Constant::Constructor(tag) => match &tag.literal {
                             None => Some(tag.name != "[]"),
-                            Some(crate::types::VariantTagType::String(value)) => {
+                            Some(crate::types::VariantLiteralTag::String(value)) => {
                                 Some(!value.is_empty())
                             }
-                            Some(crate::types::VariantTagType::Int(value)) => Some(*value != 0),
-                            Some(crate::types::VariantTagType::Bool(value)) => Some(*value),
+                            Some(crate::types::VariantLiteralTag::Int(value)) => Some(*value != 0),
+                            Some(crate::types::VariantLiteralTag::Bool(value)) => Some(*value),
                             Some(
-                                crate::types::VariantTagType::Null
-                                | crate::types::VariantTagType::Undefined,
+                                crate::types::VariantLiteralTag::Null
+                                | crate::types::VariantLiteralTag::Undefined,
                             ) => Some(false),
                             Some(
-                                crate::types::VariantTagType::Float(_)
-                                | crate::types::VariantTagType::BigInt(_)
-                                | crate::types::VariantTagType::Untagged(_),
+                                crate::types::VariantLiteralTag::Float(_)
+                                | crate::types::VariantLiteralTag::BigInt(_),
                             ) => None,
                         },
                         Constant::NativeInt { .. } => None,
@@ -228,18 +227,17 @@ fn append_if(
                 }
                 inner_truthy(inner)
             }
-            Constant::Constructor(tag) => match &tag.tag_type {
+            Constant::Constructor(tag) => match &tag.literal {
                 None => Some(tag.name != "[]"),
-                Some(crate::types::VariantTagType::String(value)) => Some(!value.is_empty()),
-                Some(crate::types::VariantTagType::Int(value)) => Some(*value != 0),
-                Some(crate::types::VariantTagType::Bool(value)) => Some(*value),
+                Some(crate::types::VariantLiteralTag::String(value)) => Some(!value.is_empty()),
+                Some(crate::types::VariantLiteralTag::Int(value)) => Some(*value != 0),
+                Some(crate::types::VariantLiteralTag::Bool(value)) => Some(*value),
                 Some(
-                    crate::types::VariantTagType::Null | crate::types::VariantTagType::Undefined,
+                    crate::types::VariantLiteralTag::Null | crate::types::VariantLiteralTag::Undefined,
                 ) => Some(false),
                 Some(
-                    crate::types::VariantTagType::Float(_)
-                    | crate::types::VariantTagType::BigInt(_)
-                    | crate::types::VariantTagType::Untagged(_),
+                    crate::types::VariantLiteralTag::Float(_)
+                    | crate::types::VariantLiteralTag::BigInt(_),
                 ) => None,
             },
             // OCaml Lambda has no native-int constant in this branch.
@@ -516,8 +514,8 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                     NodeView::Const(Constant::Constructor(left)),
                     NodeView::Const(Constant::Constructor(right)),
                 ) = (store.view(*left), store.view(*right))
-                && left.tag_type.is_none()
-                && right.tag_type.is_none()
+                && left.literal.is_none()
+                && right.literal.is_none()
             {
                 let equal = left.name == right.name;
                 let result = match operation {
@@ -565,7 +563,7 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                         || comment.is_none() && matches!(key,
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Constant(tag)
-                            ) if matches!(tag.tag_type, Some(crate::types::VariantTagType::Int(value)) if value == *i)
+                            ) if matches!(tag.literal, Some(crate::types::VariantLiteralTag::Int(value)) if value == *i)
                         )
                 }).map(|(_, node)| *node),
                 NodeView::Const(Constant::Block { tag_info, .. }) => {

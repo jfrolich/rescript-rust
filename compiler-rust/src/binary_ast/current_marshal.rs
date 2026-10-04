@@ -14,7 +14,7 @@ use super::marshal::{EmptyPayloadShareKind, MarshalWriter, PrimListShareKind};
 use super::serialize::Marshal;
 use crate::parse_arena::{LocIdx, StrIdx};
 use crate::parser::ast::{
-    PrimitiveRepr, ArgLabel, Arity, Attribute, Attributes, Case, ClosedFlag, Constant, ConstructorArguments,
+    PrimitiveRepr, ArgLabel, Arity, Attribute, Attributes, Case, ClosedFlag, Constant, ConstructorArguments, ConstructorTag,
     ConstructorDeclaration, CoreType, CoreTypeDesc, DirectionFlag, Expression, ExpressionDesc,
     ExpressionRecordField, Extension, ExtensionConstructor, ExtensionConstructorKind, FunParam,
     IncludeDeclaration, IncludeDescription, LabelDeclaration, ModuleBinding, ModuleDeclaration,
@@ -1994,10 +1994,45 @@ impl Marshal for TypeKind {
     }
 }
 
+/// `Parsetree.constructor_tag`: the string, int, float, bigint and bool cases
+/// are blocks with tags 0-4; `Pct_null` and `Pct_undefined` are the constant
+/// constructors 0 and 1.
+impl Marshal for ConstructorTag {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        match self {
+            ConstructorTag::Pct_string(s) => {
+                w.write_block_header(0, 1);
+                marshal_string_literal(s, w);
+            }
+            ConstructorTag::Pct_int(i) => {
+                w.write_block_header(1, 1);
+                w.write_str(i);
+            }
+            ConstructorTag::Pct_float(f) => {
+                w.write_block_header(2, 1);
+                w.write_str(f);
+            }
+            ConstructorTag::Pct_bigint(i) => {
+                w.write_block_header(3, 1);
+                w.write_str(i);
+            }
+            ConstructorTag::Pct_bool(b) => {
+                w.write_block_header(4, 1);
+                w.write_int(if *b { 1 } else { 0 });
+            }
+            ConstructorTag::Pct_null => w.write_int(0),
+            ConstructorTag::Pct_undefined => w.write_int(1),
+        }
+    }
+}
+
 impl Marshal for ConstructorDeclaration {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        w.write_block_header(0, 5);
+        // OCaml field order: pcd_name, pcd_runtime_tag, pcd_args, pcd_res,
+        // pcd_loc, pcd_attributes
+        w.write_block_header(0, 6);
         self.pcd_name.marshal(w);
+        self.pcd_runtime_tag.marshal(w);
         self.pcd_args.marshal(w);
         self.pcd_res.marshal(w);
         self.pcd_loc.marshal(w);
@@ -2022,9 +2057,19 @@ impl Marshal for ConstructorArguments {
 
 impl Marshal for LabelDeclaration {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        // OCaml field order: pld_name, pld_mutable, pld_optional, pld_type, pld_loc, pld_attributes
-        w.write_block_header(0, 6);
+        // OCaml field order: pld_name, pld_runtime_name, pld_mutable,
+        // pld_optional, pld_type, pld_loc, pld_attributes
+        w.write_block_header(0, 7);
         self.pld_name.marshal(w);
+        match &self.pld_runtime_name {
+            None => w.write_int(0),
+            Some(name) => {
+                w.write_block_header(0, 1);
+                w.write_block_header(0, 2);
+                marshal_string_literal(&name.txt, w);
+                name.loc.marshal(w);
+            }
+        }
         self.pld_mutable.marshal(w);
         w.write_int(if self.pld_optional { 1 } else { 0 });
         self.pld_type.marshal(w);

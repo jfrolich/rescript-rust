@@ -167,10 +167,6 @@ pub enum Primitive {
     Plsrint,
     /// Arithmetic right shift
     Pasrint,
-    /// `%incr` / `%decr`: OCaml `Lambda.Offset_ref`, a builtin expanded to
-    /// `r := r.contents + delta` when raw lambda is lowered; it never reaches
-    /// Lam.
-    Poffsetref(i32),
     /// Integer comparison
     Pintcomp(Comparison),
     /// Integer ordering
@@ -561,7 +557,6 @@ impl Primitive {
                 _ => false,
             },
             // Expanded when raw lambda is lowered; never compared in Lam.
-            Poffsetref(i0) => matches!(other, Poffsetref(i1) if i0 == i1),
             // lam_primitive.ml:298
             PrawJsCode(_) => false,
         }

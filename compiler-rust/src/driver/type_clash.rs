@@ -1004,7 +1004,7 @@ fn print_extra_type_clash_help_by_types(
             let matching = constructors.iter().enumerate().find_map(|(position, cd)| {
                 let constructor_name = cd.cd_id.name().to_string();
                 let runtime_repr = match constructor_tag(&layout, position) {
-                    Some(crate::types::variant_runtime::TagType::String(s)) => Some(s),
+                    Some(crate::types::variant_runtime::LiteralTag::String(s)) => Some(s),
                     Some(_) => None,
                     None => Some(constructor_name.clone()),
                 };
@@ -1087,11 +1087,11 @@ fn print_extra_type_clash_help_by_types(
 fn constructor_tag(
     layout: &crate::types::variant_runtime::Layout,
     position: usize,
-) -> Option<crate::types::variant_runtime::TagType> {
+) -> Option<crate::types::variant_runtime::LiteralTag> {
     match layout.constructors.get(position)? {
-        crate::types::variant_runtime::ConstructorCase::Constant(tag) => tag.tag_type.clone(),
+        crate::types::variant_runtime::ConstructorCase::Constant(tag) => tag.literal.clone(),
         crate::types::variant_runtime::ConstructorCase::Block(block) => {
-            block.runtime.tag.tag_type.clone()
+            block.runtime.tag.literal.clone()
         }
     }
 }

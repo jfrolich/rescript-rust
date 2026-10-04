@@ -107,7 +107,7 @@ let variant_block_type = function
   | ObjectType -> Sexp.atom "ObjectType"
   | UnknownType -> Sexp.atom "UnknownType"
 
-let variant_tag_type = function
+let variant_literal_tag = function
   | Variant_runtime.String value -> Sexp.list [Sexp.atom "String"; string value]
   | Int value -> Sexp.list [Sexp.atom "Int"; int value]
   | Float value -> Sexp.list [Sexp.atom "Float"; string value]
@@ -115,17 +115,15 @@ let variant_tag_type = function
   | Bool value -> Sexp.list [Sexp.atom "Bool"; bool value]
   | Null -> Sexp.atom "Null"
   | Undefined -> Sexp.atom "Undefined"
-  | Untagged block_type ->
-    Sexp.list [Sexp.atom "Untagged"; variant_block_type block_type]
 
-let variant_tag ({name; tag_type} : Variant_runtime.tag) =
+let variant_tag ({name; literal} : Variant_runtime.tag) =
   Sexp.list
     [
       Sexp.atom "tag";
       string name;
-      (match tag_type with
+      (match literal with
       | None -> Sexp.atom "None"
-      | Some tag_type -> Sexp.list [Sexp.atom "Some"; variant_tag_type tag_type]);
+      | Some literal -> Sexp.list [Sexp.atom "Some"; variant_literal_tag literal]);
     ]
 
 let variant_block_runtime
@@ -170,7 +168,7 @@ let variant_matching_facts
       | None -> Sexp.atom "None"
       | Some name -> Sexp.list [Sexp.atom "Some"; string name]);
       Sexp.list (List.map variant_block_type block_types);
-      Sexp.list (List.map variant_tag_type literal_tags);
+      Sexp.list (List.map variant_literal_tag literal_tags);
       bool has_null;
       bool has_undefined;
       bool has_other_literal;

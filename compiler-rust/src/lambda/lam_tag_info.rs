@@ -105,7 +105,7 @@ impl TagInfo {
             runtime: Box::new(crate::types::BlockRuntime {
                 tag: crate::types::VariantTag {
                     name: name.clone(),
-                    tag_type: None,
+                    literal: None,
                 },
                 tag_name: None,
                 untagged: false,

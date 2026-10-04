@@ -2901,15 +2901,14 @@ fn call_argument_needs_extra_group_indent(
 }
 
 fn variant_tag_to_switch(tag: &crate::types::VariantTag) -> Option<SwitchCaseTag> {
-    match tag.tag_type.as_ref()? {
-        crate::types::VariantTagType::String(value) => Some(SwitchCaseTag::String(value.clone())),
-        crate::types::VariantTagType::Int(value) => Some(SwitchCaseTag::Int(*value as i64)),
-        crate::types::VariantTagType::Float(value) => Some(SwitchCaseTag::Float(value.clone())),
-        crate::types::VariantTagType::BigInt(value) => Some(SwitchCaseTag::BigInt(value.clone())),
-        crate::types::VariantTagType::Bool(value) => Some(SwitchCaseTag::Bool(*value)),
-        crate::types::VariantTagType::Null => Some(SwitchCaseTag::Null),
-        crate::types::VariantTagType::Undefined => Some(SwitchCaseTag::Undefined),
-        crate::types::VariantTagType::Untagged(_) => None,
+    match tag.literal.as_ref()? {
+        crate::types::VariantLiteralTag::String(value) => Some(SwitchCaseTag::String(value.clone())),
+        crate::types::VariantLiteralTag::Int(value) => Some(SwitchCaseTag::Int(*value as i64)),
+        crate::types::VariantLiteralTag::Float(value) => Some(SwitchCaseTag::Float(value.clone())),
+        crate::types::VariantLiteralTag::BigInt(value) => Some(SwitchCaseTag::BigInt(value.clone())),
+        crate::types::VariantLiteralTag::Bool(value) => Some(SwitchCaseTag::Bool(*value)),
+        crate::types::VariantLiteralTag::Null => Some(SwitchCaseTag::Null),
+        crate::types::VariantLiteralTag::Undefined => Some(SwitchCaseTag::Undefined),
     }
 }
 
@@ -5995,7 +5994,7 @@ mod tests {
                 runtime: Box::new(crate::types::BlockRuntime {
                     tag: crate::types::VariantTag {
                         name: "One".to_string(),
-                        tag_type: None,
+                        literal: None,
                     },
                     tag_name: None,
                     untagged: false,

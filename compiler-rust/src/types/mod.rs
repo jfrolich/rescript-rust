@@ -45,6 +45,7 @@ pub mod includemod;
 pub(crate) mod parmatch;
 pub mod path;
 pub mod predef;
+pub mod record_runtime;
 pub mod printtyp;
 pub mod sexp_typedtree;
 pub mod shared_store;
@@ -85,7 +86,7 @@ pub use variant_runtime::{
     Configuration as VariantConfiguration, ConstructorCase as VariantConstructorCase,
     ConstructorReference, Instance as VariantInstance, Layout as VariantLayout,
     LayoutRef as VariantLayoutRef, MatchingFacts as VariantMatchingFacts, Tag as VariantTag,
-    TagType as VariantTagType,
+    TagType as VariantTagType, LiteralTag as VariantLiteralTag, MatchableTag as VariantMatchableTag,
 };
 
 // btype exports

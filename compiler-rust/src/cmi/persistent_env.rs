@@ -3055,24 +3055,25 @@ fn decode_cmj_variant_tag(value: &OcamlValue) -> Option<crate::types::VariantTag
     }
     Some(crate::types::VariantTag {
         name: fields[0].as_string().to_string(),
-        tag_type: decode_cmj_variant_tag_type_option(&fields[1])?,
+        literal: decode_cmj_variant_literal_tag_option(&fields[1])?,
     })
 }
 
-fn decode_cmj_variant_tag_type_option(
+fn decode_cmj_variant_literal_tag_option(
     value: &OcamlValue,
-) -> Option<Option<crate::types::VariantTagType>> {
+) -> Option<Option<crate::types::VariantLiteralTag>> {
     match value {
         OcamlValue::Int(0) => Some(None),
         OcamlValue::Block(0, fields) if fields.len() == 1 => {
-            Some(Some(decode_cmj_variant_tag_type(&fields[0])?))
+            Some(Some(decode_cmj_variant_literal_tag(&fields[0])?))
         }
         _ => None,
     }
 }
 
-fn decode_cmj_variant_tag_type(value: &OcamlValue) -> Option<crate::types::VariantTagType> {
-    use crate::types::VariantTagType as T;
+/// `Variant_runtime.literal_tag`.
+fn decode_cmj_variant_literal_tag(value: &OcamlValue) -> Option<crate::types::VariantLiteralTag> {
+    use crate::types::VariantLiteralTag as T;
     match value {
         OcamlValue::Int(0) => Some(T::Null),
         OcamlValue::Int(1) => Some(T::Undefined),
@@ -3089,52 +3090,6 @@ fn decode_cmj_variant_tag_type(value: &OcamlValue) -> Option<crate::types::Varia
             Some(T::BigInt(fields[0].as_string().to_string()))
         }
         OcamlValue::Block(4, fields) if fields.len() == 1 => Some(T::Bool(fields[0].as_bool())),
-        OcamlValue::Block(5, fields) if fields.len() == 1 => {
-            Some(T::Untagged(decode_cmj_variant_block_type(&fields[0])?))
-        }
-        _ => None,
-    }
-}
-
-fn decode_cmj_variant_block_type(value: &OcamlValue) -> Option<crate::types::VariantBlockType> {
-    use crate::types::{VariantBlockType as T, VariantInstance as I};
-    match value {
-        OcamlValue::Int(0) => Some(T::Int),
-        OcamlValue::Int(1) => Some(T::String),
-        OcamlValue::Int(2) => Some(T::Float),
-        OcamlValue::Int(3) => Some(T::Bigint),
-        OcamlValue::Int(4) => Some(T::Boolean),
-        OcamlValue::Int(5) => Some(T::Function),
-        OcamlValue::Int(6) => Some(T::Object),
-        OcamlValue::Int(7) => Some(T::Unknown),
-        OcamlValue::Block(0, fields) if fields.len() == 1 => {
-            Some(T::Instance(match fields[0].as_int() {
-                0 => I::Array,
-                1 => I::ArrayBuffer,
-                2 => I::BigInt64Array,
-                3 => I::BigUint64Array,
-                4 => I::Blob,
-                5 => I::DataView,
-                6 => I::Date,
-                7 => I::File,
-                8 => I::Float32Array,
-                9 => I::Float64Array,
-                10 => I::Int16Array,
-                11 => I::Int32Array,
-                12 => I::Int8Array,
-                13 => I::Promise,
-                14 => I::RegExp,
-                15 => I::Uint16Array,
-                16 => I::Uint32Array,
-                17 => I::Uint8Array,
-                18 => I::Uint8ClampedArray,
-                19 => I::Set,
-                20 => I::Map,
-                21 => I::WeakSet,
-                22 => I::WeakMap,
-                _ => return None,
-            }))
-        }
         _ => None,
     }
 }
@@ -6958,6 +6913,7 @@ fn add_signature_to_env_with_options_inner(
                                     for (pos, ld) in labels.iter().enumerate() {
                                         let label_desc = LabelDescription {
                                             lbl_name: ld.ld_id.name().to_string(),
+                                            lbl_runtime_name: ld.declaration_name(),
                                             lbl_res: ty_res,
                                             lbl_arg:
                                                 crate::types::ctype::remap_label_type_to_params(
@@ -6997,6 +6953,7 @@ fn add_signature_to_env_with_options_inner(
                         for (pos, ld) in labels.iter().enumerate() {
                             let label_desc = LabelDescription {
                                 lbl_name: ld.ld_id.name().to_string(),
+                                lbl_runtime_name: ld.declaration_name(),
                                 lbl_res: res_ty,
                                 lbl_arg: crate::types::ctype::remap_label_type_to_params(
                                     ctx,

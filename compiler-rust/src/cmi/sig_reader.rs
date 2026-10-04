@@ -391,12 +391,14 @@ impl<'a> SigReadContext<'a> {
         let (_, fields) = value.as_block();
         crate::types::VariantTag {
             name: fields[0].as_string().to_string(),
-            tag_type: fields[1].as_option().map(|v| self.read_variant_tag_type(v)),
+            literal: fields[1].as_option().map(|v| self.read_variant_literal_tag(v)),
         }
     }
 
-    fn read_variant_tag_type(&mut self, value: &OcamlValue) -> crate::types::VariantTagType {
-        use crate::types::VariantTagType as T;
+    /// `Variant_runtime.literal_tag`: `Null`/`Undefined` are the constant
+    /// constructors, the others blocks with tags 0-4.
+    fn read_variant_literal_tag(&mut self, value: &OcamlValue) -> crate::types::VariantLiteralTag {
+        use crate::types::VariantLiteralTag as T;
         match value {
             OcamlValue::Int(0) => T::Null,
             OcamlValue::Int(1) => T::Undefined,
@@ -406,8 +408,7 @@ impl<'a> SigReadContext<'a> {
                 2 => T::Float(fields[0].as_string().to_string()),
                 3 => T::BigInt(fields[0].as_string().to_string()),
                 4 => T::Bool(fields[0].as_bool()),
-                5 => T::Untagged(self.read_variant_block_type(&fields[0])),
-                _ => panic!("invalid variant tag type {tag}"),
+                _ => panic!("invalid variant literal tag {tag}"),
             },
             _ => panic!("invalid variant tag type"),
         }
@@ -462,22 +463,25 @@ impl<'a> SigReadContext<'a> {
     ///
     /// Record fields:
     /// 0: ld_id: Ident.t
-    /// 1: ld_mutable: mutable_flag
-    /// 2: ld_optional: bool
-    /// 3: ld_type: type_expr
-    /// 4: ld_loc: Location.t
-    /// 5: ld_attributes: attributes
+    /// 1: ld_runtime_name: string option
+    /// 2: ld_mutable: mutable_flag
+    /// 3: ld_optional: bool
+    /// 4: ld_type: type_expr
+    /// 5: ld_loc: Location.t
+    /// 6: ld_attributes: attributes
     fn read_label_declaration(&mut self, value: &OcamlValue) -> LabelDeclaration {
         let fields = &value.as_block().1;
         let ld_id = read_ident(&fields[0]);
-        let ld_mutable = read_mutable_flag(&fields[1]);
-        let ld_optional = fields[2].as_bool();
-        let ld_type = self.read_type_expr(&fields[3]);
-        let ld_loc = read_location(self.ctx, &fields[4]);
-        let ld_attributes = read_attributes(self.ctx, &fields[5]);
+        let ld_runtime_name = fields[1].as_option().map(|name| name.as_string().to_string());
+        let ld_mutable = read_mutable_flag(&fields[2]);
+        let ld_optional = fields[3].as_bool();
+        let ld_type = self.read_type_expr(&fields[4]);
+        let ld_loc = read_location(self.ctx, &fields[5]);
+        let ld_attributes = read_attributes(self.ctx, &fields[6]);
 
         LabelDeclaration {
             ld_id,
+            ld_runtime_name,
             ld_mutable,
             ld_optional,
             ld_type,
@@ -490,20 +494,23 @@ impl<'a> SigReadContext<'a> {
     ///
     /// Record fields:
     /// 0: cd_id: Ident.t
-    /// 1: cd_args: constructor_arguments
-    /// 2: cd_res: type_expr option
-    /// 3: cd_loc: Location.t
-    /// 4: cd_attributes: attributes
+    /// 1: cd_runtime_tag: Variant_runtime.literal_tag option
+    /// 2: cd_args: constructor_arguments
+    /// 3: cd_res: type_expr option
+    /// 4: cd_loc: Location.t
+    /// 5: cd_attributes: attributes
     fn read_constructor_declaration(&mut self, value: &OcamlValue) -> ConstructorDeclaration {
         let fields = &value.as_block().1;
         let cd_id = read_ident(&fields[0]);
-        let cd_args = self.read_constructor_arguments(&fields[1]);
-        let cd_res = fields[2].as_option().map(|te| self.read_type_expr(te));
-        let cd_loc = read_location(self.ctx, &fields[3]);
-        let cd_attributes = read_attributes(self.ctx, &fields[4]);
+        let cd_runtime_tag = fields[1].as_option().map(|tag| self.read_variant_literal_tag(tag));
+        let cd_args = self.read_constructor_arguments(&fields[2]);
+        let cd_res = fields[3].as_option().map(|te| self.read_type_expr(te));
+        let cd_loc = read_location(self.ctx, &fields[4]);
+        let cd_attributes = read_attributes(self.ctx, &fields[5]);
 
         ConstructorDeclaration {
             cd_id,
+            cd_runtime_tag,
             cd_args,
             cd_res,
             cd_loc,

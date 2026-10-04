@@ -2685,6 +2685,7 @@ fn lookup_labels_in_unforced_module_decl(
             }
             labels.push(crate::types::LabelDescription {
                 lbl_name: label.ld_id.name().to_string(),
+                lbl_runtime_name: label.declaration_name(),
                 lbl_res: res_ty,
                 lbl_arg: crate::types::ctype::remap_label_type_to_params(
                     ctx,
@@ -5310,6 +5311,7 @@ fn build_as_type(
                         let label_name = label_decl.ld_id.name().to_string();
                         let resolved_label = crate::types::LabelDescription {
                             lbl_name: label_decl.ld_id.name().to_string(),
+                            lbl_runtime_name: label_decl.declaration_name(),
                             // Keep OCaml's build_as_type constraint: each label
                             // result type must point to the concrete record type.
                             lbl_res: record_res,
@@ -6524,7 +6526,9 @@ fn type_pattern_record(
             }
             let field_ty = ctx.new_var(None);
             let label_desc = crate::types::LabelDescription {
-                lbl_name: field.field_name,
+                lbl_name: field.field_name.clone(),
+                // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
+                lbl_runtime_name: field.field_name,
                 lbl_res: record_ty,
                 lbl_arg: field_ty,
                 lbl_mut: crate::types::MutableFlag::Immutable,
@@ -6844,23 +6848,6 @@ impl RecordRestError {
     }
 }
 
-/// Lambda.find_name (compiler/ml/lambda.ml:71-82): the runtime label name from
-/// a string-typed `@as` attribute, defaulting to the declared name.
-fn record_rest_runtime_name_from_attrs(
-    default: &str,
-    attrs: &[crate::types::decl::Attribute],
-) -> String {
-    attrs
-        .iter()
-        .find(|a| a.attr_name.txt == "as")
-        .and_then(|a| match &a.attr_payload {
-            crate::types::decl::AttributePayload::Str(s) => Some(s.clone()),
-            _ => None,
-        })
-        .unwrap_or_else(|| default.to_string())
-}
-
-
 /// Ctype.extract_concrete_typedecl (compiler/ml/ctype.ml:1248-1261) followed by
 /// instance_declaration and param/arg unification
 /// (compiler/ml/typecore_record_rest.ml
@@ -7147,9 +7134,7 @@ fn type_record_pat_rest(
         .collect();
     let explicit_runtime_labels: Vec<String> = lbl_pat_list
         .iter()
-        .map(|(_, label, _, _)| {
-            record_rest_runtime_name_from_attrs(&label.lbl_name, &label.lbl_attributes)
-        })
+        .map(|(_, label, _, _)| label.lbl_runtime_name.clone())
         .collect();
     let explicit_optional_fields: Vec<String> = lbl_pat_list
         .iter()
@@ -7229,8 +7214,7 @@ fn type_record_pat_rest(
     }
     for rest_label in &rest_labels {
         let rest_field = rest_label.ld_id.name().to_string();
-        let rest_runtime_name =
-            record_rest_runtime_name_from_attrs(&rest_field, &rest_label.ld_attributes);
+        let rest_runtime_name = rest_label.declaration_name();
         let source_field = source_fields
             .iter()
             .find(|field| field.ld_id.name() == rest_field);
@@ -7240,8 +7224,7 @@ fn type_record_pat_rest(
                 RecordRestError::ExtraField(rest_field, rest_type_longident),
             );
         };
-        let source_runtime_name =
-            record_rest_runtime_name_from_attrs(&rest_field, &source_field.ld_attributes);
+        let source_runtime_name = source_field.declaration_name();
         if source_runtime_name != rest_runtime_name {
             return rest_err(
                 rest_type_lid.loc,
@@ -16064,6 +16047,7 @@ fn type_record(
                     (
                         crate::types::LabelDescription {
                             lbl_name: env_label.lbl_name.clone(),
+                            lbl_runtime_name: env_label.lbl_runtime_name.clone(),
                             lbl_res: record_ty,
                             lbl_arg: ty_arg,
                             lbl_mut: env_label.lbl_mut.clone(),
@@ -16475,6 +16459,7 @@ fn type_record(
                     let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
                     let label_desc = crate::types::LabelDescription {
                         lbl_name: raw_label_desc.lbl_name.clone(),
+                        lbl_runtime_name: raw_label_desc.lbl_runtime_name.clone(),
                         lbl_res: record_ty,
                         lbl_arg: ty_arg,
                         lbl_mut: raw_label_desc.lbl_mut.clone(),
@@ -16582,6 +16567,7 @@ fn type_record(
                     let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
                     crate::types::LabelDescription {
                         lbl_name: raw_label_desc.lbl_name.clone(),
+                        lbl_runtime_name: raw_label_desc.lbl_runtime_name.clone(),
                         lbl_res: record_ty,
                         lbl_arg: ty_arg,
                         lbl_mut: raw_label_desc.lbl_mut.clone(),
@@ -16596,6 +16582,7 @@ fn type_record(
                 } else {
                     crate::types::LabelDescription {
                         lbl_name: label_name.clone(),
+                        lbl_runtime_name: label_decl.declaration_name(),
                         lbl_res: record_ty,
                         lbl_arg: crate::types::instance(ctx, label_decl.ld_type),
                         lbl_mut: label_decl.ld_mutable,
@@ -16636,6 +16623,7 @@ fn type_record(
                 } else {
                     crate::types::LabelDescription {
                         lbl_name: label_name.clone(),
+                        lbl_runtime_name: label_decl.declaration_name(),
                         lbl_res: record_ty,
                         lbl_arg: option_ty,
                         lbl_mut: label_decl.ld_mutable,
@@ -17049,15 +17037,7 @@ fn get_record_labels<'a>(
                 .iter()
                 .enumerate()
                 .map(|(pos, ld)| {
-                    let name = ld
-                        .ld_attributes
-                        .iter()
-                        .find(|a| a.attr_name.txt == "as")
-                        .and_then(|a| match &a.attr_payload {
-                            crate::types::decl::AttributePayload::Str(s) => Some(s.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| ld.ld_id.name().to_string());
+                    let name = ld.declaration_name();
                     (
                         name,
                         pos as i32,
@@ -18543,6 +18523,7 @@ fn type_letexception(
                                 txt: label_name.clone(),
                                 loc: label.pld_name.loc,
                             },
+                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                             ld_mutable: label.pld_mutable,
                             ld_optional: label.pld_optional,
                             ld_type: poly_typed_ct,
@@ -18551,6 +18532,7 @@ fn type_letexception(
                         });
                         decl_labels.push(crate::types::decl::LabelDeclaration {
                             ld_id: label_id,
+                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                             ld_mutable: match label.pld_mutable {
                                 crate::parser::ast::MutableFlag::Immutable => {
                                     crate::types::MutableFlag::Immutable
@@ -22737,6 +22719,7 @@ where
                     .iter()
                     .map(|label| crate::types::decl::LabelDeclaration {
                         ld_id: label.ld_id.clone(),
+                        ld_runtime_name: label.ld_runtime_name.clone(),
                         ld_mutable: label.ld_mutable,
                         ld_optional: label.ld_optional,
                         ld_type: copy_lookup_type_expr_with_paths(
@@ -22789,6 +22772,7 @@ where
                     .iter()
                     .map(|label| crate::types::decl::LabelDeclaration {
                         ld_id: label.ld_id.clone(),
+                        ld_runtime_name: label.ld_runtime_name.clone(),
                         ld_mutable: label.ld_mutable,
                         ld_optional: label.ld_optional,
                         ld_type: copy_lookup_type_expr_with_paths(
@@ -22811,6 +22795,7 @@ where
                     .iter()
                     .map(|constructor| crate::types::decl::ConstructorDeclaration {
                         cd_id: constructor.cd_id.clone(),
+                        cd_runtime_tag: constructor.cd_runtime_tag.clone(),
                         cd_args: copy_lookup_constructor_args_with_paths(
                             &constructor.cd_args,
                             ctx,
@@ -22864,6 +22849,7 @@ where
                     .iter()
                     .map(|label| crate::types::decl::LabelDeclaration {
                         ld_id: label.ld_id.clone(),
+                        ld_runtime_name: label.ld_runtime_name.clone(),
                         ld_mutable: label.ld_mutable,
                         ld_optional: label.ld_optional,
                         ld_type: copy_lookup_type_expr_with_paths(
@@ -26580,6 +26566,7 @@ fn build_record_label_descriptions_info<'a>(
                 .enumerate()
                 .map(|(pos, ld)| crate::types::LabelDescription {
                     lbl_name: ld.ld_id.name().to_string(),
+                    lbl_runtime_name: ld.declaration_name(),
                     lbl_res: shared_res,
                     lbl_arg: crate::types::ctype::remap_label_type_to_params(
                         ctx,
@@ -26641,6 +26628,7 @@ fn build_record_label_descriptions_info<'a>(
                 .enumerate()
                 .map(|(pos, ld)| crate::types::LabelDescription {
                     lbl_name: ld.ld_id.name().to_string(),
+                    lbl_runtime_name: ld.declaration_name(),
                     lbl_res: shared_res,
                     lbl_arg: crate::types::ctype::remap_label_type_to_params(
                         ctx,
@@ -26690,6 +26678,7 @@ fn build_record_label_descriptions_info<'a>(
         .enumerate()
         .map(|(pos, ld)| crate::types::LabelDescription {
             lbl_name: ld.ld_id.name().to_string(),
+            lbl_runtime_name: ld.declaration_name(),
             lbl_res: shared_res,
             lbl_arg: crate::types::ctype::remap_label_type_to_params(
                 ctx,
@@ -26843,6 +26832,7 @@ fn lookup_label_by_expected_type<'a>(
         if ld.ld_id.name() == label_name {
             let mut selected = crate::types::LabelDescription {
                 lbl_name: ld.ld_id.name().to_string(),
+                lbl_runtime_name: ld.declaration_name(),
                 lbl_res: res_ty,
                 lbl_arg: crate::types::ctype::remap_label_type_to_params(
                     ctx,

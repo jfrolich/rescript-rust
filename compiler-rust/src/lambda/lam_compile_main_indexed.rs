@@ -1807,7 +1807,7 @@ mod tests {
                 ),
                 Lambda::const_(Constant::Constructor(crate::types::VariantTag {
                     name: "Done".into(),
-                    tag_type: None,
+                    literal: None,
                 })),
                 Lambda::const_(Constant::JsNull),
             ],

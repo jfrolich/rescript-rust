@@ -973,7 +973,7 @@ mod tests {
         let unknown_truth = store.append_compat_lambda(Lambda::const_(Constant::Constructor(
             crate::types::VariantTag {
                 name: "unknown".into(),
-                tag_type: Some(crate::types::VariantTagType::Float("nan".into())),
+                literal: Some(crate::types::VariantLiteralTag::Float("nan".into())),
             },
         )));
         let before = store.node_count();

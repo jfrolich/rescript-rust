@@ -3624,6 +3624,7 @@ fn make_typed_spread_label(
             txt: field.ld_id.name().to_string(),
             loc: source_loc,
         },
+        ld_runtime_name: field.ld_runtime_name.clone(),
         ld_mutable: parser_mutable,
         ld_optional: field.ld_optional,
         ld_type: typed_ld_type,
@@ -4859,11 +4860,11 @@ fn compare_definition_constructors(
             crate::types::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
         ) {
             let expected_tag = match &expected_layout.constructors[idx] {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
                 crate::types::VariantConstructorCase::Block(_) => unreachable!(),
             };
             let actual_tag = match &actual_layout.constructors[idx] {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
                 crate::types::VariantConstructorCase::Block(_) => unreachable!(),
             };
             if expected_tag != actual_tag {
@@ -5677,6 +5678,7 @@ fn build_spread_constructor(
                             )
                             .unwrap_or(source_cd_loc),
                         },
+                        ld_runtime_name: l.ld_runtime_name.clone(),
                         ld_mutable: match l.ld_mutable {
                             crate::types::asttypes::MutableFlag::Mutable => crate::parser::ast::MutableFlag::Mutable,
                             crate::types::asttypes::MutableFlag::Immutable => crate::parser::ast::MutableFlag::Immutable,
@@ -5728,8 +5730,11 @@ fn build_spread_constructor(
     };
 
 
+    // Variant_type_spread.map_constructors carries the source constructor's
+    // tag over as `pcd_runtime_tag`, which typedecl decodes back.
     let internal = crate::types::ConstructorDeclaration {
         cd_id: sc_id.clone(),
+        cd_runtime_tag: source_cstr.cd_runtime_tag.clone(),
         cd_args: sc_internal_cd_args,
         cd_res: source_cstr.cd_res,
         cd_loc: source_cstr.cd_loc.clone(),
@@ -5749,6 +5754,7 @@ fn build_spread_constructor(
             txt: sc_name.clone(),
             loc: source_cd_loc,
         },
+        cd_runtime_tag: source_cstr.cd_runtime_tag.clone(),
         cd_args: sc_typed_tree_cd_args,
         cd_res: spread_cd_res,
         cd_loc: source_cd_loc,
@@ -5797,73 +5803,42 @@ fn check_duplicate_constructor_declarations(
     Ok(())
 }
 
-/// `Record_attributes_check.check_duplicated_labels`
-/// (record_attributes_check.ml:28-69), installed as
-/// `Builtin_attributes.check_duplicated_labels` and run by
-/// `Typedecl.transl_labels` (typedecl.ml:209-213). An `@as` name clashes with
-/// any earlier label or `@as` name.
+/// `Record_runtime.check_duplicated_labels` (record_runtime.ml), run by
+/// `Typedecl.transl_labels` (typedecl.ml:209-213). A runtime name clashes
+/// with any earlier declared or runtime name.
 fn check_duplicate_label_declarations(
     arena: &ParseArena,
     labels: &[crate::parser::ast::LabelDeclaration],
     record_name: Option<&str>,
 ) -> TypeModResult<()> {
-    let mut coll: HashSet<String> = HashSet::default();
-    for label in labels {
-        let name = arena.get_string(label.pld_name.txt);
-        if coll.contains(name) && name != "..." {
-            return Err(TypeModError::DuplicateLabel {
-                loc: label.pld_name.loc,
-                label: name.to_string(),
-                record_name: record_name.map(str::to_string),
-            });
-        }
-        // The `@as` name is checked against the names before this label, so
-        // `@as("x") x` is allowed (record_attributes_check.ml:58-64).
-        let as_name = label
-            .pld_attributes
-            .iter()
-            .find_map(|attr| label_as_name_with_loc(arena, attr));
-        let clashes = as_name
-            .as_ref()
-            .is_some_and(|(as_name, _)| coll.contains(as_name));
-        coll.insert(name.to_string());
-        if let Some((as_name, as_loc)) = as_name {
-            if clashes {
-                return Err(TypeModError::DuplicateLabel {
-                    loc: as_loc,
-                    label: as_name,
-                    record_name: record_name.map(str::to_string),
-                });
-            }
-            coll.insert(as_name);
-        }
+    match crate::types::record_runtime::check_duplicated_labels(arena, labels) {
+        None => Ok(()),
+        Some((label, loc)) => Err(TypeModError::DuplicateLabel {
+            loc,
+            label,
+            record_name: record_name.map(str::to_string),
+        }),
     }
-    Ok(())
 }
 
-/// `find_name_with_loc` (record_attributes_check.ml:28-41).
-fn label_as_name_with_loc(
+/// `Record_runtime.extra_as_attribute` raised as
+/// `Ast_untagged_variants.Error (loc, Duplicated_bs_as)` (typedecl.ml
+/// `transl_labels`).
+fn check_extra_as_attribute(
     arena: &ParseArena,
-    attr: &crate::parser::ast::Attribute,
-) -> Option<(String, LocIdx)> {
-    if arena.get_string(attr.0.txt) != "as" {
-        return None;
-    }
-    let crate::parser::ast::Payload::PStr(items) = &attr.1 else {
-        return None;
-    };
-    let [item] = items.as_slice() else {
-        return None;
-    };
-    let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
-        return None;
-    };
-    match &*arena.get_expr(eval.0).pexp_desc {
-        crate::parser::ast::ExpressionDesc::Pexp_constant(constant) => match &**constant {
-            crate::parser::ast::Constant::String(s) => Some((s.semantic().to_string(), attr.0.loc)),
-            _ => None,
-        },
-        _ => None,
+    label: &crate::parser::ast::LabelDeclaration,
+) -> TypeModResult<()> {
+    match crate::types::record_runtime::extra_as_attribute(arena, label) {
+        Ok(None) => Ok(()),
+        Ok(Some(loc)) => Err(ast_untagged_variant_error(
+            arena.to_location(loc),
+            AstUntaggedVariantError::DuplicatedBsAs,
+        )),
+        // `Location.raise_errorf` from `Ast_payload.string_literal_of_payload`.
+        Err(error) => Err(TypeModError::InvalidAttribute {
+            loc: error.loc,
+            message: error.message.to_string(),
+        }),
     }
 }
 
@@ -6097,6 +6072,8 @@ fn reject_object_spread_with_record_field(
 pub enum AstUntaggedVariantError {
     /// A variant `@as(...)` payload has an unsupported shape.
     InvalidVariantAsAnnotation,
+    /// The integer of a variant case's `@as` is out of range.
+    VariantAsIntegerOutOfRange(String),
     /// More than one `@as` attribute was found.
     DuplicatedBsAs,
     /// A variant `@tag(...)` payload is not a string.
@@ -6119,6 +6096,9 @@ impl AstUntaggedVariantError {
             AstUntaggedVariantError::InvalidVariantAsAnnotation => {
                 "A variant case annotation @as(...) must be a string, integer, boolean, null, or undefined.".to_string()
             }
+            AstUntaggedVariantError::VariantAsIntegerOutOfRange(value) => format!(
+                "The integer {value} in this variant case's @as annotation is out of range."
+            ),
             AstUntaggedVariantError::DuplicatedBsAs => {
                 "Duplicate @as annotation; only one @as is allowed here.".to_string()
             }
@@ -6140,74 +6120,49 @@ fn ast_untagged_variant_error(loc: Location, error: AstUntaggedVariantError) -> 
     TypeModError::AstUntaggedVariantError { loc, error }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum VariantRuntimeTag {
-    String(String),
-    Int(i64),
-    Float(String),
-    BigInt(String),
-    Bool(bool),
-    Null,
-    Undefined,
+/// OCaml `Ast_untagged_variants.runtime_tag_of_parsetree`.
+pub(crate) fn runtime_tag_of_parsetree(
+    tag: &crate::parser::ast::ConstructorTag,
+) -> Result<crate::types::VariantLiteralTag, AstUntaggedVariantError> {
+    use crate::parser::ast::ConstructorTag as P;
+    use crate::types::VariantLiteralTag as T;
+    Ok(match tag {
+        P::Pct_string(s) => T::String(s.semantic().to_string()),
+        P::Pct_int(source) => match crate::types::decl::parse_ocaml_int_literal(source) {
+            Some(i) => T::Int(i as i32),
+            None => return Err(AstUntaggedVariantError::VariantAsIntegerOutOfRange(source.clone())),
+        },
+        P::Pct_float(f) => T::Float(f.clone()),
+        P::Pct_bigint(i) => T::BigInt(i.clone()),
+        P::Pct_bool(b) => T::Bool(*b),
+        P::Pct_null => T::Null,
+        P::Pct_undefined => T::Undefined,
+    })
 }
 
-fn process_variant_as_attributes(
-    attrs: &[crate::types::decl::Attribute],
-) -> TypeModResult<Option<VariantRuntimeTag>> {
-    let mut tag = None;
-    for attr in attrs {
-        if attr.attr_name.txt != "as" {
-            continue;
-        }
-        if tag.is_some() {
-            return Err(ast_untagged_variant_error(
-                attr.attr_name.loc.clone(),
-                AstUntaggedVariantError::DuplicatedBsAs,
-            ));
-        }
-        tag = match &attr.attr_payload {
-            crate::types::decl::AttributePayload::Str(value) => {
-                Some(VariantRuntimeTag::String(value.clone()))
+/// OCaml `Ast_untagged_variants.process_constructor_tag`: an `@as` left in
+/// the attributes is invalid (no valid tag was taken out) or a duplicate.
+pub(crate) fn process_constructor_tag(
+    arena: &ParseArena,
+    cstr: &crate::parser::ast::ConstructorDeclaration,
+) -> Result<Option<crate::types::VariantLiteralTag>, (LocIdx, AstUntaggedVariantError)> {
+    let leftover_as = cstr
+        .pcd_attributes
+        .iter()
+        .find(|attr| arena.get_string(attr.0.txt) == "as")
+        .map(|attr| attr.0.loc);
+    match &cstr.pcd_runtime_tag {
+        None => match leftover_as {
+            Some(loc) => Err((loc, AstUntaggedVariantError::InvalidVariantAsAnnotation)),
+            None => Ok(None),
+        },
+        Some(tag) => {
+            if let Some(loc) = leftover_as {
+                return Err((loc, AstUntaggedVariantError::DuplicatedBsAs));
             }
-            crate::types::decl::AttributePayload::Int(value) => {
-                Some(VariantRuntimeTag::Int(*value))
-            }
-            crate::types::decl::AttributePayload::IntLiteral(value) => {
-                match crate::types::decl::parse_ocaml_int_literal(value) {
-                    Some(value) => Some(VariantRuntimeTag::Int(value)),
-                    None => {
-                        return Err(TypeModError::FatalError {
-                            message: "Fatal error: exception Failure(\"int_of_string\")\n"
-                                .to_string(),
-                        });
-                    }
-                }
-            }
-            crate::types::decl::AttributePayload::Float(value) => {
-                Some(VariantRuntimeTag::Float(value.clone()))
-            }
-            crate::types::decl::AttributePayload::BigInt(value) => {
-                Some(VariantRuntimeTag::BigInt(value.clone()))
-            }
-            crate::types::decl::AttributePayload::Bool(value) => {
-                Some(VariantRuntimeTag::Bool(*value))
-            }
-            crate::types::decl::AttributePayload::Ident(value) if value == "null" => {
-                Some(VariantRuntimeTag::Null)
-            }
-            crate::types::decl::AttributePayload::Ident(value) if value == "undefined" => {
-                Some(VariantRuntimeTag::Undefined)
-            }
-            _ => None,
-        };
-        if tag.is_none() {
-            return Err(ast_untagged_variant_error(
-                attr.attr_name.loc.clone(),
-                AstUntaggedVariantError::InvalidVariantAsAnnotation,
-            ));
+            runtime_tag_of_parsetree(&tag.txt).map(Some).map_err(|error| (tag.loc, error))
         }
     }
-    Ok(tag)
 }
 
 fn process_variant_tag_name(
@@ -6250,10 +6205,8 @@ fn check_variant_tag_field_conflicts(
         };
         for field in fields {
             let field_name = field.ld_id.name().to_string();
-            let effective_field_name = match process_variant_as_attributes(&field.ld_attributes)? {
-                Some(VariantRuntimeTag::String(as_name)) => as_name,
-                Some(_) | None => field_name.clone(),
-            };
+            // `Record_runtime.declaration_name field`.
+            let effective_field_name = field.declaration_name();
             if effective_field_name == effective_tag_name {
                 return Err(ast_untagged_variant_error(
                     constructor.cd_loc.clone(),
@@ -6387,24 +6340,24 @@ fn get_untagged_constructor_block_type(
     }
 }
 
-fn variant_tag_literal(constructor_name: &str, tag: &Option<VariantRuntimeTag>) -> (bool, String) {
+fn variant_tag_literal(constructor_name: &str, tag: &Option<crate::types::VariantLiteralTag>) -> (bool, String) {
     match tag {
-        Some(VariantRuntimeTag::String(value)) => (true, value.clone()),
-        Some(VariantRuntimeTag::Int(value)) => (false, value.to_string()),
-        Some(VariantRuntimeTag::Float(value)) => (false, value.clone()),
-        Some(VariantRuntimeTag::BigInt(value)) => (false, value.clone()),
-        Some(VariantRuntimeTag::Bool(value)) => {
+        Some(crate::types::VariantLiteralTag::String(value)) => (true, value.clone()),
+        Some(crate::types::VariantLiteralTag::Int(value)) => (false, value.to_string()),
+        Some(crate::types::VariantLiteralTag::Float(value)) => (false, value.clone()),
+        Some(crate::types::VariantLiteralTag::BigInt(value)) => (false, value.clone()),
+        Some(crate::types::VariantLiteralTag::Bool(value)) => {
             (false, if *value { "true" } else { "false" }.to_string())
         }
-        Some(VariantRuntimeTag::Null) => (false, "null".to_string()),
-        Some(VariantRuntimeTag::Undefined) => (false, "undefined".to_string()),
+        Some(crate::types::VariantLiteralTag::Null) => (false, "null".to_string()),
+        Some(crate::types::VariantLiteralTag::Undefined) => (false, "undefined".to_string()),
         None => (true, constructor_name.to_string()),
     }
 }
 
 fn add_variant_literal(
     loc: &Location,
-    tag: &Option<VariantRuntimeTag>,
+    tag: &Option<crate::types::VariantLiteralTag>,
     constructor_name: &str,
     string_literals: &mut HashSet<String>,
     nonstring_literals: &mut HashSet<String>,
@@ -6436,7 +6389,8 @@ fn check_variant_well_formed(
     let mut consts = Vec::new();
     let mut blocks = Vec::new();
     for constructor in constructors {
-        let tag = process_variant_as_attributes(&constructor.cd_attributes)?;
+        // `get_cstr_loc_tag`: the declaration's decoded `@as`.
+        let tag = constructor.cd_runtime_tag.clone();
         let name = constructor.cd_id.name().to_string();
         if matches!(
             &constructor.cd_args,
@@ -6568,18 +6522,6 @@ fn check_variant_well_formed(
     Ok(())
 }
 
-fn canonical_variant_tag_type(tag: VariantRuntimeTag) -> crate::types::VariantTagType {
-    match tag {
-        VariantRuntimeTag::String(value) => crate::types::VariantTagType::String(value),
-        VariantRuntimeTag::Int(value) => crate::types::VariantTagType::Int(value as i32),
-        VariantRuntimeTag::Float(value) => crate::types::VariantTagType::Float(value),
-        VariantRuntimeTag::BigInt(value) => crate::types::VariantTagType::BigInt(value),
-        VariantRuntimeTag::Bool(value) => crate::types::VariantTagType::Bool(value),
-        VariantRuntimeTag::Null => crate::types::VariantTagType::Null,
-        VariantRuntimeTag::Undefined => crate::types::VariantTagType::Undefined,
-    }
-}
-
 fn canonical_variant_block_type(
     block_type: UntaggedVariantBlockType,
 ) -> crate::types::VariantBlockType {
@@ -6633,8 +6575,7 @@ fn derive_variant_layout(
         let name = constructor.cd_id.name().to_string();
         let tag = crate::types::VariantTag {
             name,
-            tag_type: process_variant_as_attributes(&constructor.cd_attributes)?
-                .map(canonical_variant_tag_type),
+            literal: constructor.cd_runtime_tag.clone(),
         };
         if matches!(&constructor.cd_args, crate::types::ConstructorArguments::CstrTuple(args) if args.is_empty())
         {
@@ -13460,6 +13401,11 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         // make_constructor translates inline
                                         // record labels.
                                         let cstr_id = tctx.type_ctx.create_ident(cstr_name);
+                                        let runtime_tag = process_constructor_tag(arena, cstr).map_err(
+                                            |(loc, error)| {
+                                                ast_untagged_variant_error(arena.to_location(loc), error)
+                                            },
+                                        )?;
                                         let cstr_args = match &cstr.pcd_args {
                                             crate::parser::ast::ConstructorArguments::Pcstr_tuple(
                                                 args,
@@ -13484,6 +13430,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                 let mut record_labels =
                                                     Vec::with_capacity(labels.len());
                                                 for label in labels {
+                                                    check_extra_as_attribute(arena, label)?;
                                                     let lbl_name = arena.get_string(label.pld_name.txt);
                                                     let (_typed_label_ty, lbl_type) =
                                                         transl_label_type(tctx, &sig_env, arena, label, false)?;
@@ -13500,6 +13447,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                     let label_id = tctx.type_ctx.create_ident(lbl_name);
                                                     record_labels.push(crate::types::LabelDeclaration {
                                                         ld_id: label_id,
+                                                        ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                                                         ld_mutable: mutable_flag,
                                                         ld_optional: label.pld_optional,
                                                         ld_type: lbl_type,
@@ -13514,6 +13462,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         };
                                         constructors.push(crate::types::ConstructorDeclaration {
                                             cd_id: cstr_id,
+                                            cd_runtime_tag: runtime_tag,
                                             cd_args: cstr_args,
                                             cd_res: match &cstr.pcd_res {
                                                 Some(res_core_type_idx) => {
@@ -13542,6 +13491,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                     )?;
                                     let mut record_labels = Vec::with_capacity(labels.len());
                                     for label in labels {
+                                        check_extra_as_attribute(arena, label)?;
                                         let lbl_name = arena.get_string(label.pld_name.txt);
                                         let (_typed_label_ty, lbl_type) =
                                             transl_label_type(tctx, &sig_env, arena, label, false)?;
@@ -13557,6 +13507,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         let label_id = tctx.type_ctx.create_ident(lbl_name);
                                         record_labels.push(crate::types::LabelDeclaration {
                                             ld_id: label_id,
+                                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                                             ld_mutable: mutable_flag,
                                             ld_optional: label.pld_optional,
                                             ld_type: lbl_type,
@@ -17954,6 +17905,7 @@ fn type_structure_unscoped<'a>(
                     let cid = ctx.create_ident(cname);
                     constructors.push(crate::types::decl::ConstructorDeclaration {
                         cd_id: cid,
+                        cd_runtime_tag: None,
                         cd_args: crate::types::decl::ConstructorArguments::CstrTuple(vec![]),
                         cd_res: None,
                         cd_loc: crate::location::Location::none(),
@@ -18023,6 +17975,7 @@ fn type_structure_unscoped<'a>(
                             txt: cname.clone(),
                             loc: LocIdx(0),
                         },
+                        cd_runtime_tag: None,
                         cd_args: crate::types::typedtree::TypedConstructorArguments::Cstr_tuple(
                             vec![],
                         ),
@@ -18348,6 +18301,7 @@ fn type_structure_item<'a>(
                             let cid = ctx.create_ident(cname);
                             constructors.push(crate::types::decl::ConstructorDeclaration {
                                 cd_id: cid,
+                                cd_runtime_tag: None,
                                 cd_args: crate::types::decl::ConstructorArguments::CstrTuple(
                                     vec![],
                                 ),
@@ -18416,6 +18370,7 @@ fn type_structure_item<'a>(
                                     txt: cname.clone(),
                                     loc: LocIdx(0),
                                 },
+                                cd_runtime_tag: None,
                                 cd_args:
                                     crate::types::typedtree::TypedConstructorArguments::Cstr_tuple(
                                         vec![],
@@ -18480,6 +18435,7 @@ fn type_structure_item<'a>(
                                 })?;
                             labels.push(crate::types::decl::LabelDeclaration {
                                 ld_id: ctx.create_ident(&fs.name),
+                                ld_runtime_name: None,
                                 ld_mutable: if fs.mutable_ {
                                     crate::types::MutableFlag::Mutable
                                 } else {
@@ -18524,6 +18480,7 @@ fn type_structure_item<'a>(
                         for (pos, label) in labels.iter().enumerate() {
                             let lbl_desc = crate::types::LabelDescription {
                                 lbl_name: label.ld_id.name().to_string(),
+                                lbl_runtime_name: label.declaration_name(),
                                 lbl_res: res_ty,
                                 lbl_arg: label.ld_type,
                                 lbl_mut: label.ld_mutable,
@@ -18555,6 +18512,7 @@ fn type_structure_item<'a>(
                                     txt: label.ld_id.name().to_string(),
                                     loc: LocIdx(0),
                                 },
+                                ld_runtime_name: label.ld_runtime_name.clone(),
                                 ld_mutable: parser_mutable,
                                 ld_optional: label.ld_optional,
                                 ld_type: crate::types::typedtree::TypedCoreType {
@@ -19352,6 +19310,11 @@ fn type_structure_item<'a>(
 
                             let cstr_name_str = arena.get_string(cstr.pcd_name.txt);
                             let cstr_id = ctx.create_ident(cstr_name_str);
+                            // typedecl.ml `make_cstr`: the runtime tag is
+                            // decoded right after the constructor's ident.
+                            let runtime_tag = process_constructor_tag(arena, cstr).map_err(
+                                |(loc, error)| ast_untagged_variant_error(arena.to_location(loc), error),
+                            )?;
                             let is_constant = matches!(cstr.pcd_args, crate::parser::ast::ConstructorArguments::Pcstr_tuple(ref args) if args.is_empty());
                             // OCaml `make_constructor` (compiler/ml/typedecl.ml:337-356):
                             // a generalized constructor is translated after
@@ -19394,6 +19357,7 @@ fn type_structure_item<'a>(
                                     let mut internal_labels: Vec<crate::types::LabelDeclaration> =
                                         Vec::new();
                                     for lbl in labels {
+                                        check_extra_as_attribute(arena, lbl)?;
                                         let (typed_core_type, type_ref) =
                                             transl_label_type(tctx, &temp_env, arena, lbl, cstr.pcd_res.is_none())?;
                                         let mutable_flag = match lbl.pld_mutable {
@@ -19426,6 +19390,7 @@ fn type_structure_item<'a>(
                                         let label_id = ctx.create_ident(lbl_name_str);
                                         internal_labels.push(crate::types::LabelDeclaration {
                                             ld_id: label_id.clone(),
+                                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(lbl),
                                             ld_mutable: mutable_flag,
                                             ld_optional: lbl.pld_optional,
                                             ld_type: internal_type_ref,
@@ -19441,6 +19406,7 @@ fn type_structure_item<'a>(
                                                 txt: lbl_name_str.to_string(),
                                                 loc: lbl.pld_name.loc,
                                             },
+                                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(lbl),
                                             ld_mutable: lbl.pld_mutable,
                                             ld_optional: lbl.pld_optional,
                                             ld_type: poly_typed_core_type,
@@ -19661,6 +19627,7 @@ fn type_structure_item<'a>(
                             // Create internal constructor declaration
                             internal_cstrs.push(crate::types::ConstructorDeclaration {
                                 cd_id: cstr_id.clone(),
+                                cd_runtime_tag: runtime_tag.clone(),
                                 cd_args: internal_cd_args,
                                 cd_res: internal_cd_res,
                                 cd_loc: arena.to_location(cstr.pcd_loc),
@@ -19674,6 +19641,7 @@ fn type_structure_item<'a>(
                                     txt: cstr_name_str.to_string(),
                                     loc: cstr.pcd_name.loc,
                                 },
+                                cd_runtime_tag: runtime_tag,
                                 cd_args: typed_tree_cd_args,
                                 cd_res: typed_cd_res,
                                 cd_loc: cstr.pcd_loc,
@@ -19767,6 +19735,7 @@ fn type_structure_item<'a>(
                         let mut internal_labels: Vec<crate::types::LabelDeclaration> = Vec::new();
                         let mut typed_tree_labels: Vec<TypedLabelDeclaration> = Vec::new();
                         for lbl in labels {
+                            check_extra_as_attribute(arena, lbl)?;
                             let lbl_name_str = arena.get_string(lbl.pld_name.txt);
                             // typedecl.ml:223: `transl_labels` translates each
                             // label in `warning_scope pld_attributes`.
@@ -19797,6 +19766,7 @@ fn type_structure_item<'a>(
                             let label_id = ctx.create_ident(lbl_name_str);
                             internal_labels.push(crate::types::LabelDeclaration {
                                 ld_id: label_id.clone(),
+                                ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(lbl),
                                 ld_mutable: mutable_flag,
                                 ld_optional: lbl.pld_optional,
                                 ld_type: internal_type_ref,
@@ -19812,6 +19782,7 @@ fn type_structure_item<'a>(
                                     txt: lbl_name_str.to_string(),
                                     loc: lbl.pld_name.loc,
                                 },
+                                ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(lbl),
                                 ld_mutable: lbl.pld_mutable,
                                 ld_optional: lbl.pld_optional,
                                 ld_type: poly_typed_core_type,
@@ -20089,6 +20060,7 @@ fn type_structure_item<'a>(
                     for (pos, ld) in labels.iter().enumerate() {
                         let lbl_desc = crate::types::LabelDescription {
                             lbl_name: ld.ld_id.name().to_string(),
+                            lbl_runtime_name: ld.declaration_name(),
                             lbl_res: ty_res,
                             lbl_arg: crate::types::ctype::remap_label_type_to_params(
                                 ctx,
@@ -20600,6 +20572,7 @@ fn type_structure_item<'a>(
                                 let mut typed_labels = Vec::new();
                                 let mut decl_labels = Vec::new();
                                 for label in labels {
+                                    check_extra_as_attribute(arena, label)?;
                                     let label_name =
                                         arena.get_string(label.pld_name.txt).to_string();
                                     let (typed_ct, ty_ref) =
@@ -20621,6 +20594,7 @@ fn type_structure_item<'a>(
                                             txt: label_name.clone(),
                                             loc: label.pld_name.loc,
                                         },
+                                        ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                                         ld_mutable: label.pld_mutable,
                                         ld_optional: label.pld_optional,
                                         ld_type: poly_typed_ct,
@@ -20629,6 +20603,7 @@ fn type_structure_item<'a>(
                                     });
                                     decl_labels.push(crate::types::LabelDeclaration {
                                         ld_id: label_id,
+                                        ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                                         ld_mutable: match label.pld_mutable {
                                             crate::parser::ast::MutableFlag::Immutable => {
                                                 crate::types::MutableFlag::Immutable
@@ -20964,6 +20939,7 @@ fn type_structure_item<'a>(
                             let mut typed_labels = Vec::new();
                             let mut decl_labels = Vec::new();
                             for label in labels {
+                                check_extra_as_attribute(arena, label)?;
                                 let label_name = arena.get_string(label.pld_name.txt).to_string();
                                 let (typed_ct, ty_ref) =
                                     transl_label_type(tctx, env, arena, label, ret.is_none())?;
@@ -20984,6 +20960,7 @@ fn type_structure_item<'a>(
                                         txt: label_name.clone(),
                                         loc: label.pld_name.loc,
                                     },
+                                    ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                                     ld_mutable: label.pld_mutable,
                                     ld_optional: label.pld_optional,
                                     ld_type: poly_typed_ct,
@@ -20992,6 +20969,7 @@ fn type_structure_item<'a>(
                                 });
                                 decl_labels.push(crate::types::LabelDeclaration {
                                     ld_id: label_id,
+                                    ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                                     ld_mutable: match label.pld_mutable {
                                         crate::parser::ast::MutableFlag::Immutable => {
                                             crate::types::MutableFlag::Immutable
@@ -21903,6 +21881,7 @@ fn type_structure_item<'a>(
                                     );
                                     let lbl_desc = crate::types::LabelDescription {
                                         lbl_name: ld.ld_id.name().to_string(),
+                                        lbl_runtime_name: ld.declaration_name(),
                                         lbl_res: ty_res,
                                         lbl_arg,
                                         lbl_mut: ld.ld_mutable,
@@ -22296,6 +22275,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                     let mut typed_tree_labels = Vec::with_capacity(labels.len());
 
                     for label in labels {
+                        check_extra_as_attribute(arena, label)?;
                         let lbl_name = arena.get_string(label.pld_name.txt);
                         let (typed_label_ty, lbl_type) =
                             transl_label_type(tctx, &temp_env, arena, label, true)?;
@@ -22320,6 +22300,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                         let label_id = ctx.create_ident(lbl_name);
                         internal_labels.push(crate::types::LabelDeclaration {
                             ld_id: label_id.clone(),
+                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                             ld_mutable: mutable_flag,
                             ld_optional: label.pld_optional,
                             ld_type: internal_lbl_type,
@@ -22333,6 +22314,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                 txt: lbl_name.to_string(),
                                 loc: label.pld_name.loc,
                             },
+                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                             ld_mutable: label.pld_mutable,
                             ld_optional: label.pld_optional,
                             ld_type: poly_typed_core_type,
@@ -22464,6 +22446,10 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                         // the constructor id before make_constructor
                         // translates inline record labels.
                         let cstr_id = ctx.create_ident(cstr_name);
+                        // typedecl.ml `make_cstr`.
+                        let runtime_tag = process_constructor_tag(arena, cstr).map_err(|(loc, error)| {
+                            ast_untagged_variant_error(arena.to_location(loc), error)
+                        })?;
                         // OCaml `make_constructor` (compiler/ml/typedecl.ml:337-356): narrow,
                         // reset the type variables for a generalized constructor, then widen.
                         let gadt_scope = cstr.pcd_res.is_some().then(|| {
@@ -22498,6 +22484,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                 let mut internal_record_labels = Vec::with_capacity(labels.len());
                                 let mut typed_record_labels = Vec::with_capacity(labels.len());
                                 for label in labels {
+                                    check_extra_as_attribute(arena, label)?;
                                     let lbl_name = arena.get_string(label.pld_name.txt);
                                     let (typed_label_ty, lbl_type) =
                                         transl_label_type(tctx, &temp_env, arena, label, cstr.pcd_res.is_none())?;
@@ -22526,6 +22513,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                     let label_id = ctx.create_ident(lbl_name);
                                     internal_record_labels.push(crate::types::LabelDeclaration {
                                         ld_id: label_id.clone(),
+                                        ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                                         ld_mutable: mutable_flag,
                                         ld_optional: label.pld_optional,
                                         ld_type: internal_lbl_type,
@@ -22541,6 +22529,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                             txt: lbl_name.to_string(),
                                             loc: label.pld_name.loc,
                                         },
+                                        ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                                         ld_mutable: label.pld_mutable,
                                         ld_optional: label.pld_optional,
                                         ld_type: poly_typed_core_type,
@@ -22588,6 +22577,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
 
                         internal_cstrs.push(crate::types::ConstructorDeclaration {
                             cd_id: cstr_id.clone(),
+                            cd_runtime_tag: runtime_tag.clone(),
                             cd_args: internal_args,
                             cd_res: internal_res,
                             cd_loc: arena.to_location(cstr.pcd_loc),
@@ -22603,6 +22593,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                 txt: cstr_name.to_string(),
                                 loc: cstr.pcd_name.loc,
                             },
+                            cd_runtime_tag: runtime_tag,
                             cd_args: typed_args,
                             cd_res: typed_res,
                             cd_loc: cstr.pcd_loc,

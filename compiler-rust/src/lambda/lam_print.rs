@@ -206,7 +206,6 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::Pintorder => write!(f, "compare"),
         Primitive::Pintmin => write!(f, "min"),
         Primitive::Pintmax => write!(f, "max"),
-        Primitive::Poffsetref(n) => write!(f, "+:={n}"),
         Primitive::Pintoffloat => write!(f, "int_of_float"),
         Primitive::Pfloatofint => write!(f, "float_of_int"),
         Primitive::Pnegfloat => write!(f, "~-."),

@@ -346,7 +346,7 @@ fn push_module_types_symptom(
     let actual_text = format_module_type(type_ctx, actual);
     let expected_text = format_module_type(type_ctx, expected);
     if should_elide_module_mismatch(&actual_text, &expected_text)
-        || should_elide_type_declaration_module_mismatch(error, &actual_text, &expected_text)
+        || should_elide_type_declaration_module_mismatch(error)
     {
         output.push_str("  ...\n");
     } else if is_compact_type_declaration_mismatch(error) {
@@ -661,15 +661,11 @@ fn should_elide_module_mismatch(actual: &str, expected: &str) -> bool {
     actual.len() + expected.len() > 120
 }
 
-fn should_elide_type_declaration_module_mismatch(
-    error: &IncludeModError,
-    actual: &str,
-    expected: &str,
-) -> bool {
+fn should_elide_type_declaration_module_mismatch(error: &IncludeModError) -> bool {
     // OCaml includemod.ml:637-655 bounds the structured `Module_types`
     // symptom, whose declarations still carry @tag attributes even though
-    // Printtyp omits them. Preserve that distinction after the semantic
-    // layout migration rather than inferring it from rendered text.
+    // Printtyp omits them. `@as` no longer counts: it is decided at typedecl
+    // into `cd_runtime_tag`/`ld_runtime_name` and leaves the attributes.
     let has_hidden_tag_layout = matches!(
         error,
         IncludeModError::TypeDeclarationMismatch {
@@ -679,7 +675,7 @@ fn should_elide_type_declaration_module_mismatch(
     );
     matches!(error, IncludeModError::TypeDeclarationMismatch { .. })
         && !is_compact_type_declaration_mismatch(error)
-        && (has_hidden_tag_layout || actual.len() + expected.len() > 80)
+        && has_hidden_tag_layout
 }
 
 /// Whether an `@[<hv>` box at column 2 holding `parts` separated by break
@@ -3790,11 +3786,11 @@ fn compare_variant_declarations(
 
         if constructor_is_nullary(impl_constructor) && {
             let impl_tag = match &impl_layout.constructors[index] {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
                 crate::types::VariantConstructorCase::Block(_) => unreachable!(),
             };
             let sig_tag = match &sig_layout.constructors[index] {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
                 crate::types::VariantConstructorCase::Block(_) => unreachable!(),
             };
             impl_tag != sig_tag
@@ -3825,19 +3821,12 @@ fn compare_variant_declarations(
 }
 
 pub(crate) fn label_declaration_runtime_name(label: &LabelDeclaration) -> String {
-    label_declaration_as_name(label).unwrap_or_else(|| label.ld_id.name().to_string())
+    // `Record_runtime.declaration_name`.
+    label.declaration_name()
 }
 
 fn label_declaration_as_name(label: &LabelDeclaration) -> Option<String> {
-    label.ld_attributes.iter().find_map(|attr| {
-        if attr.attr_name.txt == "as"
-            && let AttributePayload::Str(value) = &attr.attr_payload
-        {
-            Some(value.clone())
-        } else {
-            None
-        }
-    })
+    label.ld_runtime_name.clone()
 }
 
 fn constructor_is_nullary(constructor: &ConstructorDeclaration) -> bool {

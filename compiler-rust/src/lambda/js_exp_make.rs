@@ -52,8 +52,24 @@ pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
                 && js_expr_no_side_effects(consequent)
                 && js_expr_no_side_effects(alternate)
         }
-        ExpressionDesc::Bin(op, left, right) => {
-            *op != BinOp::Eq && js_expr_no_side_effects(left) && js_expr_no_side_effects(right)
+        ExpressionDesc::Bin(BinOp::Eq, _, _) => false,
+        ExpressionDesc::Bin(op @ (BinOp::Pow | BinOp::Div | BinOp::Mod), left, right) => {
+            // js_analyzer.ml: on BigInt operands these throw (`**` on a
+            // negative exponent, `/` and `%` on a zero divisor). The operand
+            // types are not known here, so only a literal right operand that
+            // cannot throw is taken as pure.
+            let safe_literal = match &right.desc {
+                ExpressionDesc::Number(Number::BigInt(lit)) => {
+                    if *op == BinOp::Pow { lit.positive } else { lit.value != "0" }
+                }
+                ExpressionDesc::Number(Number::Int { i, .. }) => *op == BinOp::Pow || *i != 0,
+                ExpressionDesc::Number(Number::Float(_)) => true,
+                _ => false,
+            };
+            safe_literal && js_expr_no_side_effects(left)
+        }
+        ExpressionDesc::Bin(_, left, right) => {
+            js_expr_no_side_effects(left) && js_expr_no_side_effects(right)
         }
         ExpressionDesc::TaggedTemplate(tag, _, values) => {
             js_expr_no_side_effects(tag)

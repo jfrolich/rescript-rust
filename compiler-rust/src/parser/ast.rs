@@ -1160,6 +1160,9 @@ pub enum TypeKind {
 pub struct ConstructorDeclaration {
     /// Name.
     pub pcd_name: StringLoc,
+    /// The `@as(...)` runtime tag, taken out of the attributes when the
+    /// constructor is built (OCaml `pcd_runtime_tag`).
+    pub pcd_runtime_tag: Option<Located<ConstructorTag>>,
     /// Arguments.
     pub pcd_args: ConstructorArguments,
     /// Return type (arena index).
@@ -1168,6 +1171,19 @@ pub struct ConstructorDeclaration {
     pub pcd_loc: Location,
     /// Attributes.
     pub pcd_attributes: Attributes,
+}
+
+/// OCaml `Parsetree.constructor_tag`: the literal a constructor's `@as`
+/// denotes, with its source spelling.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ConstructorTag {
+    Pct_string(StringLiteral),
+    Pct_int(String),
+    Pct_float(String),
+    Pct_bigint(String),
+    Pct_bool(bool),
+    Pct_null,
+    Pct_undefined,
 }
 
 /// Constructor arguments.
@@ -1184,6 +1200,9 @@ pub enum ConstructorArguments {
 pub struct LabelDeclaration {
     /// Name.
     pub pld_name: StringLoc,
+    /// The `@as("...")` rename, taken out of the attributes when the field is
+    /// built (OCaml `pld_runtime_name`). The location is the attribute's own.
+    pub pld_runtime_name: Option<Located<StringLiteral>>,
     /// Mutable flag.
     pub pld_mutable: MutableFlag,
     /// Type (arena index).

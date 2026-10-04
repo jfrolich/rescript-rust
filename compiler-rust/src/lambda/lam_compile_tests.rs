@@ -4158,7 +4158,7 @@ fn unit_return_function_with_trivial_if_branches_keeps_condition_effect_only() {
 }
 
 #[test]
-fn unit_return_function_keeps_positive_effect_guard_through_js_pipeline() {
+fn unit_return_function_flips_effect_guard_into_early_return() {
     let mut compiler = LambdaCompiler::new();
     let run = Ident::create_local("run");
     let cond = Ident::create_local("cond");
@@ -4191,21 +4191,13 @@ fn unit_return_function_keeps_positive_effect_guard_through_js_pipeline() {
 
     let deps = compiler.compile_deps_program(&lam);
     let rendered = print_deps_program(&deps, None);
+    // OCaml compiles the assignment as a statement whatever the
+    // continuation (`compile_assign`), so the tail `else` is
+    // `[Return undefined]` and `Js_stmt_make.if_` flips the guard into an
+    // early return.
     assert!(
-        rendered.contains("if (cond) {"),
-        "expected the unit-return function to keep a positive guard, got:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("seen = 1;"),
-        "expected the effectful branch to stay inside the positive guard, got:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("return;"),
-        "expected the unit-return branch to keep its tail return, got:\n{rendered}"
-    );
-    assert!(
-        !rendered.contains("if (!cond) {"),
-        "unexpected negative guard in final JS pipeline output:\n{rendered}"
+        rendered.contains("  if (!cond) {\n    return;\n  }\n  seen = 1;\n}"),
+        "expected the guard to flip into an early return, got:\n{rendered}"
     );
 }
 
@@ -5310,7 +5302,7 @@ pub(super) fn mixed_untagged_string_overlap_switch(
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                         name: "a".to_string(),
-                        tag_type: Some(crate::types::VariantTagType::String("a".to_string())),
+                        literal: Some(crate::types::VariantLiteralTag::String("a".to_string())),
                     }),
                 ),
                 default_body.clone(),
@@ -5319,7 +5311,7 @@ pub(super) fn mixed_untagged_string_overlap_switch(
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                         name: "b".to_string(),
-                        tag_type: Some(crate::types::VariantTagType::String("b".to_string())),
+                        literal: Some(crate::types::VariantLiteralTag::String("b".to_string())),
                     }),
                 ),
                 default_body.clone(),
@@ -5328,7 +5320,7 @@ pub(super) fn mixed_untagged_string_overlap_switch(
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                         name: "space".to_string(),
-                        tag_type: Some(crate::types::VariantTagType::String("space".to_string())),
+                        literal: Some(crate::types::VariantLiteralTag::String("space".to_string())),
                     }),
                 ),
                 space_body,
@@ -5341,9 +5333,9 @@ pub(super) fn mixed_untagged_string_overlap_switch(
             tag_name: None,
             block_types: vec![crate::types::VariantBlockType::String],
             literal_tags: vec![
-                crate::types::VariantTagType::String("space".to_string()),
-                crate::types::VariantTagType::String("b".to_string()),
-                crate::types::VariantTagType::String("a".to_string()),
+                crate::types::VariantLiteralTag::String("space".to_string()),
+                crate::types::VariantLiteralTag::String("b".to_string()),
+                crate::types::VariantLiteralTag::String("a".to_string()),
             ],
             has_null: false,
             has_undefined: false,
@@ -5362,7 +5354,7 @@ pub(super) fn single_complete_array_block_switch(
             crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(
                 crate::types::VariantTag {
                     name: "Empty".to_string(),
-                    tag_type: Some(crate::types::VariantTagType::Undefined),
+                    literal: Some(crate::types::VariantLiteralTag::Undefined),
                 },
             )),
             undefined_body,
@@ -5374,7 +5366,7 @@ pub(super) fn single_complete_array_block_switch(
                     runtime: crate::types::BlockRuntime {
                         tag: crate::types::VariantTag {
                             name: "Cons".to_string(),
-                            tag_type: None,
+                            literal: None,
                         },
                         tag_name: None,
                         untagged: true,
@@ -5392,7 +5384,7 @@ pub(super) fn single_complete_array_block_switch(
             block_types: vec![crate::types::VariantBlockType::Instance(
                 crate::types::VariantInstance::Array,
             )],
-            literal_tags: vec![crate::types::VariantTagType::Undefined],
+            literal_tags: vec![crate::types::VariantLiteralTag::Undefined],
             has_null: false,
             has_undefined: true,
             has_other_literal: false,
@@ -5414,7 +5406,7 @@ pub(super) fn default_only_untagged_boolean_switch(
                     runtime: crate::types::BlockRuntime {
                         tag: crate::types::VariantTag {
                             name: "B".to_string(),
-                            tag_type: None,
+                            literal: None,
                         },
                         tag_name: None,
                         untagged: true,
@@ -5433,8 +5425,8 @@ pub(super) fn default_only_untagged_boolean_switch(
                 crate::types::VariantBlockType::Boolean,
             ],
             literal_tags: vec![
-                crate::types::VariantTagType::Undefined,
-                crate::types::VariantTagType::Null,
+                crate::types::VariantLiteralTag::Undefined,
+                crate::types::VariantLiteralTag::Null,
             ],
             has_null: true,
             has_undefined: true,
@@ -7404,7 +7396,7 @@ fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
                                     runtime: Box::new(crate::types::BlockRuntime {
                                         tag: crate::types::VariantTag {
                                             name: "::".to_string(),
-                                            tag_type: None,
+                                            literal: None,
                                         },
                                         tag_name: None,
                                         untagged: false,
@@ -7419,7 +7411,7 @@ fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
                             runtime: Box::new(crate::types::BlockRuntime {
                                 tag: crate::types::VariantTag {
                                     name: "::".to_string(),
-                                    tag_type: None,
+                                    literal: None,
                                 },
                                 tag_name: None,
                                 untagged: false,
@@ -9123,7 +9115,7 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
                 runtime: Box::new(crate::types::BlockRuntime {
                     tag: crate::types::VariantTag {
                         name: "::".to_string(),
-                        tag_type: None,
+                        literal: None,
                     },
                     tag_name: None,
                     untagged: false,
@@ -9143,7 +9135,7 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
                 runtime: Box::new(crate::types::BlockRuntime {
                     tag: crate::types::VariantTag {
                         name: "::".to_string(),
-                        tag_type: None,
+                        literal: None,
                     },
                     tag_name: None,
                     untagged: false,
@@ -10382,7 +10374,7 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                         name: "Empty".to_string(),
-                        tag_type: None,
+                        literal: None,
                     }),
                 ),
                 Lambda::const_(Constant::int(0)),
@@ -10394,7 +10386,7 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
                         runtime: crate::types::BlockRuntime {
                             tag: crate::types::VariantTag {
                                 name: "Node".to_string(),
-                                tag_type: None,
+                                literal: None,
                             },
                             tag_name: None,
                             untagged: false,
@@ -10409,7 +10401,7 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
                 crate::types::VariantMatchingFacts {
                     tag_name: None,
                     block_types: vec![],
-                    literal_tags: vec![crate::types::VariantTagType::String(
+                    literal_tags: vec![crate::types::VariantLiteralTag::String(
                         "Empty".to_string().clone(),
                     )],
                     has_null: false,

@@ -1156,46 +1156,6 @@ pub(crate) fn warn_discarded_unused_attributes(
     }
 }
 
-/// Whether an `@as` payload is one `Ast_untagged_variants.process_tag_type`
-/// accepts (and therefore marks used): a string, number, bigint, bool, or the
-/// identifiers `null` / `undefined`.
-fn is_valid_tag_as_payload(payload: &Payload, arena: &ParseArena) -> bool {
-    let Payload::PStr(items) = payload else {
-        return false;
-    };
-    let [item] = items.as_slice() else {
-        return false;
-    };
-    let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
-        return false;
-    };
-    let expr = arena.get_expr(inner.0);
-    match &*expr.pexp_desc {
-        // `is_single_string`/`int`/`float`/`bigint`; a character is none of
-        // them.
-        ExpressionDesc::Pexp_constant(constant) => matches!(
-            &**constant,
-            Constant::Integer(..) | Constant::Float(..) | Constant::String(_)
-        ),
-        // `semantic_string_of_payload` accepts a non-interpolated template.
-        ExpressionDesc::Pexp_template(template) => {
-            template.source_segments.len() == 1 && template.values.is_empty()
-        }
-        // `is_single_bool` accepts `true`/`false` with any argument.
-        ExpressionDesc::Pexp_construct(lid, _) => matches!(
-            arena.get_longident(lid.txt),
-            crate::parser::longident::Longident::Lident(idx)
-                if matches!(arena.get_string(*idx), "true" | "false")
-        ),
-        ExpressionDesc::Pexp_ident(lid) => matches!(
-            arena.get_longident(lid.txt),
-            crate::parser::longident::Longident::Lident(idx)
-                if matches!(arena.get_string(*idx), "null" | "undefined")
-        ),
-        _ => false,
-    }
-}
-
 /// OCaml `Bs_ast_invariant.check_constant` (bs_ast_invariant.ml:54-64): an
 /// integer literal without suffix that `Int32.of_string` rejects warns.
 fn check_constant(loc: LocIdx, constant: &Constant, warnings: &mut Vec<PpxWarning>) {
@@ -1350,9 +1310,21 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
     }
 
     fn label_declaration(&mut self, arena: &ParseArena, ld: &LabelDeclaration) {
+        // bs_ast_invariant.ml: a field's `@as` is taken out of its attributes
+        // when it names the field, so one still here is either a second one,
+        // which the type checker rejects, or a payload that is not a name and
+        // warns as the unused attribute it is.
         for attr in ld.pld_attributes.iter() {
-            if arena.get_string(attr.0.txt) == "as" {
-                arena.mark_used_attribute(attr);
+            if arena.get_string(attr.0.txt) != "as" {
+                continue;
+            }
+            match crate::ast_payload::string_literal_of_payload(arena, &attr.1) {
+                Ok(Some(_)) => arena.mark_used_attribute(attr),
+                Ok(None) => {}
+                Err(error) => {
+                    self.raise(error.loc, error.message);
+                    return;
+                }
             }
         }
         super::ast_iter::walk_label_declaration(self, arena, ld);
@@ -1362,27 +1334,11 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
         if self.stopped {
             return;
         }
-        // `Ast_untagged_variants.process_tag_type` (ast_untagged_variants.ml:
-        // 113-143) marks a valid `@as` and raises for an invalid payload or a
-        // second `@as`.
-        let mut seen_as = false;
-        for attr in cd.pcd_attributes.iter() {
-            if arena.get_string(attr.0.txt) != "as" {
-                continue;
-            }
-            if seen_as {
-                self.raise(attr.0.loc, "Duplicate @as annotation; only one @as is allowed here.");
-                return;
-            }
-            if !is_valid_tag_as_payload(&attr.1, arena) {
-                self.raise(
-                    attr.0.loc,
-                    "A variant case annotation @as(...) must be a string, integer, boolean, null, or undefined.",
-                );
-                return;
-            }
-            seen_as = true;
-            arena.mark_used_attribute(attr);
+        // `Ast_untagged_variants.process_constructor_tag`: an `@as` left in
+        // the attributes is invalid or a duplicate, and the tag must decode.
+        if let Err((loc, error)) = crate::types::typemod::process_constructor_tag(arena, cd) {
+            self.raise(loc, error.message_text());
+            return;
         }
         let name = arena.get_string(cd.pcd_name.txt);
         if matches!(name, "false" | "true" | "()") {
@@ -6409,13 +6365,12 @@ fn rewrite_constructor_declaration(
         let rw = rewrite_core_type(&ct, arena);
         arena.push_core_type(rw)
     });
-    ConstructorDeclaration {
-        pcd_name: ctor.pcd_name.clone(),
-        pcd_args: rewrite_constructor_arguments(&ctor.pcd_args, arena),
-        pcd_res,
-        pcd_loc: ctor.pcd_loc,
-        pcd_attributes: rewrite_attributes(&ctor.pcd_attributes, arena).into(),
-    }
+    // ast_mapper.ml: the runtime tag goes back into the attributes for the
+    // mapper and `Type.constructor` takes it out again.
+    let pcd_args = rewrite_constructor_arguments(&ctor.pcd_args, arena);
+    let written = crate::ast_helper_type::constructor_attributes_owned(arena, ctor);
+    let attrs = rewrite_attributes(&written, arena).into();
+    crate::ast_helper_type::constructor(arena, ctor.pcd_loc, attrs, pcd_args, pcd_res, None, ctor.pcd_name)
 }
 
 /// Rewrite constructor arguments, transforming strings in nested record labels
@@ -6449,20 +6404,26 @@ fn rewrite_label_declaration(label: &LabelDeclaration, arena: &mut ParseArena) -
     let label_type = arena.get_core_type(label.pld_type).clone();
     let rewritten_label_type = rewrite_core_type(&label_type, arena);
     let mut pld_name = label.pld_name;
-    let mut pld_attributes = rewrite_attributes(&label.pld_attributes, arena);
+    // ast_mapper.ml: the runtime name goes back into the attributes so a
+    // mapper sees `@as` where it was written; `Type.field` takes it out again.
+    let written = crate::ast_helper_type::field_attributes_owned(arena, label);
+    let mut pld_attributes = rewrite_attributes(&written, arena);
     if pld_attributes.len() == 1 && arena.get_string(pld_attributes[0].0.txt) == "internal" {
         let capitalized = capitalize_ascii(arena.get_string(pld_name.txt));
         pld_name.txt = arena.push_string(capitalized);
         pld_attributes.clear();
     }
-    LabelDeclaration {
+    let pld_type = arena.push_core_type(rewritten_label_type);
+    crate::ast_helper_type::field(
+        arena,
+        label.pld_loc,
+        pld_attributes.into(),
+        label.pld_mutable,
+        label.pld_optional,
+        None,
         pld_name,
-        pld_mutable: label.pld_mutable,
-        pld_type: arena.push_core_type(rewritten_label_type),
-        pld_loc: label.pld_loc,
-        pld_attributes: pld_attributes.into(),
-        pld_optional: label.pld_optional,
-    }
+        pld_type,
+    )
 }
 
 fn capitalize_ascii(s: &str) -> String {
@@ -10479,16 +10440,8 @@ fn run_derivers(
         }
     };
     if is_abstract {
-        // `Ast_derive_abstract.handle_tdcls_in_str`/`handle_tdcls_in_sig`
-        // fold right over the declarations and their record labels, reading
-        // each `@as` with `Ast_attributes.iter_process_bs_string_as`.
-        for tdcl in tdcls.iter().rev() {
-            if let TypeKind::Ptype_record(labels) = &tdcl.ptype_kind {
-                for label in labels.iter().rev() {
-                    validate_string_as_attrs(&label.pld_attributes, arena)?;
-                }
-            }
-        }
+        // `Ast_derive_abstract` reads each field's rename from
+        // `pld_runtime_name`, which needs no validation.
         return Ok(());
     }
     for action in &actions {
@@ -10931,8 +10884,8 @@ fn handle_abstract_tdcl(
                 let label_loc = label.pld_name.loc;
                 let pld_type = &label.pld_type;
 
-                // Check for @as attribute
-                let prim_as_attr = get_bs_as_string(&label.pld_attributes, arena);
+                // ast_derive_abstract.ml: the field's `pld_runtime_name`.
+                let prim_as_attr = crate::types::record_runtime::parsetree_runtime_name(label);
                 let prim_as_name = prim_as_attr.clone().unwrap_or_else(|| label_name.clone());
                 let prim_as_idx = match &prim_as_attr {
                     Some(name) if name != &label_name => arena.intern_string(name),
@@ -11318,21 +11271,6 @@ fn make_set_attr(loc: LocIdx, arena: &mut ParseArena) -> Attribute {
         },
         Payload::PStr(Box::new(vec![])),
     )
-}
-
-/// Get the @as("...") attribute value
-fn get_bs_as_string(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
-    // OCaml `Ast_attributes.iter_process_bs_string_as`.
-    for attr in attrs {
-        let (attr_name, payload) = attr;
-        if arena.get_string(attr_name.txt) == "as"
-            && let Some(txt) = payload_semantic_string(payload, arena)
-        {
-            arena.mark_used_attribute(attr);
-            return Some(txt);
-        }
-    }
-    None
 }
 
 /// Compute prims for maker function based on optional labels

@@ -1118,23 +1118,23 @@ impl<'a> Printtyp<'a> {
             None
         } else {
             let tag_type = layout.and_then(|layout| match layout.constructors.get(position) {
-                Some(crate::types::VariantConstructorCase::Constant(tag)) => tag.tag_type.clone(),
+                Some(crate::types::VariantConstructorCase::Constant(tag)) => tag.literal.clone(),
                 Some(crate::types::VariantConstructorCase::Block(block)) => {
-                    block.runtime.tag.tag_type.clone()
+                    block.runtime.tag.literal.clone()
                 }
                 None => None,
             });
             match tag_type {
-                Some(crate::types::VariantTagType::Null) => Some("@as(null)".to_string()),
-                Some(crate::types::VariantTagType::Undefined) => Some("@as(undefined)".to_string()),
-                Some(crate::types::VariantTagType::String(s)) => {
+                Some(crate::types::VariantLiteralTag::Null) => Some("@as(null)".to_string()),
+                Some(crate::types::VariantLiteralTag::Undefined) => Some("@as(undefined)".to_string()),
+                Some(crate::types::VariantLiteralTag::String(s)) => {
                     Some(format!("@as(\"{}\")", ocaml_string_escaped(&s)))
                 }
-                Some(crate::types::VariantTagType::Int(i)) => Some(format!("@as({i})")),
-                Some(crate::types::VariantTagType::Float(f)) => Some(format!("@as({f})")),
-                Some(crate::types::VariantTagType::Bool(b)) => Some(format!("@as({b})")),
-                Some(crate::types::VariantTagType::BigInt(s)) => Some(format!("@as({s}n)")),
-                Some(crate::types::VariantTagType::Untagged(_)) | None => None,
+                Some(crate::types::VariantLiteralTag::Int(i)) => Some(format!("@as({i})")),
+                Some(crate::types::VariantLiteralTag::Float(f)) => Some(format!("@as({f})")),
+                Some(crate::types::VariantLiteralTag::Bool(b)) => Some(format!("@as({b})")),
+                Some(crate::types::VariantLiteralTag::BigInt(s)) => Some(format!("@as({s}n)")),
+                None => None,
             }
         };
         match cd.cd_res {

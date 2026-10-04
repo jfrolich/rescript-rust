@@ -412,6 +412,9 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     // lam_compile_main.ml:193 — simplify_lets (DCE + alias inlining).
     let lam = simplify_lets_owned(lam);
 
+    // lam_compile_main.ml — scalar replacement of local mutable blocks.
+    let lam = crate::lambda::lam_pass_sroa::simplify(lam, &meta.id_gen);
+
     // lam_compile_main.ml:200 — final simplify_exits.
     let lam = simplify_exits_owned(lam, &meta.id_gen);
 

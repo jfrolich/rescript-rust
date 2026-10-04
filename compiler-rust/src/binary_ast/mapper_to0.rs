@@ -1784,7 +1784,9 @@ impl<'a> Mapper<'a> {
             pld_type: self.map_core_type_idx(ld.pld_type),
             pld_loc: self.loc(ld.pld_loc),
             pld_attributes: {
-                let mut attrs = self.map_attributes(&ld.pld_attributes);
+                // ast_mapper_to0.ml: `Ast_helper.Type.field_attributes ld`.
+                let written = crate::ast_helper_type::field_attributes(self.arena, ld);
+                let mut attrs = self.map_attributes(&written);
                 self.add_optional_attr(ld.pld_optional, &mut attrs);
                 attrs
             },
@@ -1800,7 +1802,11 @@ impl<'a> Mapper<'a> {
             pcd_args: self.map_constructor_arguments(&cd.pcd_args),
             pcd_res: cd.pcd_res.map(|t| self.map_core_type_idx(t)),
             pcd_loc: self.loc(cd.pcd_loc),
-            pcd_attributes: self.map_attributes(&cd.pcd_attributes),
+            pcd_attributes: {
+                // ast_mapper_to0.ml: `Ast_helper.Type.constructor_attributes cd`.
+                let written = crate::ast_helper_type::constructor_attributes(self.arena, cd);
+                self.map_attributes(&written)
+            },
         }
     }
 

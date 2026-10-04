@@ -103,12 +103,12 @@ fn type_cannot_contain_undefined_rec(
                                 case,
                                 Some(crate::types::VariantConstructorCase::Constant(
                                     crate::types::VariantTag {
-                                        tag_type: Some(crate::types::VariantTagType::Undefined),
+                                        literal: Some(crate::types::VariantLiteralTag::Undefined),
                                         ..
                                     }
                                 ))
                             ) || case.is_none()
-                                && has_undefined_literal(&cd.cd_attributes);
+                                && cd.cd_runtime_tag == Some(crate::types::VariantLiteralTag::Undefined);
                             let untagged = matches!(
                                 case,
                                 Some(crate::types::VariantConstructorCase::Block(
@@ -465,17 +465,6 @@ fn is_not_undefined_attr(attr: &Attribute) -> bool {
 
 pub(crate) fn has_untagged(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| attr.attr_name.txt == UNTAGGED_ATTR)
-}
-
-fn has_undefined_literal(attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|attr| {
-        attr.attr_name.txt == "as"
-            && matches!(
-                attr.attr_payload,
-                crate::types::decl::AttributePayload::Ident(ref ident)
-                    if ident == "undefined"
-            )
-    })
 }
 
 pub(crate) fn type_is_builtin_object(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {

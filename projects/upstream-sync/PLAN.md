@@ -20,7 +20,7 @@ the change to `compiler-rust/`, reruns the gates and commits the merge.
 | 3 | ..055e9e091 (29-49) | object representation cleanup (field mutability, Stage 0-E) | done |
 | 4 | ..ebc61dd5b (50-110) | Lambda/Lam merge, curried application removal | done |
 | 5 | ..7875e74f9 (111-117) | string literal normalization, formatter | done |
-| 6 | ..148 | scalar replacement, @as in the AST, sharing passes | |
+| 6 | ..0aa58d8aa (118-148) | scalar replacement, @as in the AST, sharing passes | done (Tella blocked, see log) |
 | 7 | ..162 | parser modes removed, coercions, reanalyze | |
 | 8 | ..204 | parser token inspection, regexp/ternary/braces nodes, cleanup | |
 
@@ -209,3 +209,58 @@ compilers; its 138 MB sexp matches byte for byte), error output parity
 `parse_inline_for` (independent), rewatch unit tests and `tests/suite.sh`
 green. `make test-analysis` stops at `no-watcher.sh` (editor-tooling port in
 progress).
+
+### Step 6 (`0aa58d8aa`)
+
+Upstream decides a field's runtime name and a constructor's runtime tag once,
+in the AST: `@as` moves out of the attributes into `pld_runtime_name` and
+`pcd_runtime_tag` (built by `Ast_helper.Type.field`/`constructor`), and from
+there into `ld_runtime_name`, `cd_runtime_tag` and `lbl_runtime_name`. The
+variant tag type splits into literal tags and the `Untagged` block types. On
+the Lambda side, scalar replacement (`Lam_pass_sroa`) replaces ref
+elimination, `%incr`/`%decr`/`%refget` and `Int.Ref` are gone, the passes
+rebuild only what changed (`Lambda_traverse.shallow_map_sharing`), match
+guards are kept as data until the fallthrough is known, and builtins are
+built through the folding `Lambda.prim`.
+
+Ported to Rust:
+
+- `ast_helper_type.rs`, the new `ast_payload` readers, the parsetree fields
+  and their marshalling (`ResImpl01306`/`ResIntf01306`), printers that put
+  `@as` back from the fields, and the mapper and ppx builders.
+- `.cmi` decoding of the new label and constructor layouts (`Caml1999I032`),
+  `record_runtime.rs` (duplicate runtime names, extra `@as` on a field), the
+  typedecl tag decoding with `VariantAsIntegerOutOfRange`, and consumers
+  reading the declared names instead of attributes (typecore, includemod,
+  ctype, convert, matching, gentype's `declared_field_name`).
+- `bs_ast_invariant`: a field's leftover `@as` warns only when its payload is
+  a name; a constructor runs `process_constructor_tag`.
+- `lambda_traverse.rs` (`shallow_exists`, `shallow_map_sharing`, with a
+  changed flag standing in for physical equality), `lam_pass_sroa.rs` after
+  `simplify_lets`, `lets_dce` without the ref arms and with `refine_let
+  ~original`, removal of `lam_pass_eliminate_ref.rs` and `Poffsetref`.
+- Effect analysis: `**` on BigInt, checked array and string reads, and the JS
+  `Bin (Pow|Div|Mod)` rule.
+- The raw match-compiler input is built through the folding `prim` and the
+  constant arms of `if_` (on lowered constants), so the switcher sees merged
+  arms as OCaml does.
+- `lam_compile`: an assignment is a statement in every continuation, so a
+  unit-returning `if` with an assignment flips into an early return.
+- Includemod: `@as` no longer inflates the marshalled declaration, so the
+  `Module_types` elision keeps only the `@tag` case.
+
+Tella: upstream deleted `Int.Ref`, and Tella's own sources still call
+`Int.Ref.increment` (`tella-std/src/ArrayExt.res` and
+`chrome/src/ExtensionIcon.res`), so the OCaml reference build of Tella fails.
+Tella parity cannot run against this step until those calls change.
+
+Error parity needed the ignored `.cmi`/`.cmj`/`.cmt` files written next to
+the fixtures by earlier runs removed: they were in the old format and the
+OCaml reference rejected them.
+
+Gates (release): JS output parity 637/637, typedtree parity 636/636
+(`string_unicode_test` exceeds the 10s limit in both compilers), error output
+parity 1895/1895, syntax tests 583/583, compiler tests green except
+`parse_inline_for` (independent), rewatch unit tests 147/147 and
+`tests/suite.sh` green. `make test-analysis` stops at `no-watcher.sh`
+(editor-tooling port in progress).

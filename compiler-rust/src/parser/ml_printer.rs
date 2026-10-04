@@ -3412,7 +3412,7 @@ fn print_record_declaration<W: Write>(
         f.space();
         print_core_type(f, arena, arena.get_core_type(field.pld_type));
         f.space();
-        print_attributes(f, arena, &field.pld_attributes);
+        print_attributes(f, arena, &crate::ast_helper_type::field_attributes(arena, field));
         f.close_box();
         if i < fields.len() - 1 {
             f.string(";");
@@ -3549,7 +3549,7 @@ fn print_type_declaration<W: Write>(
                 }
                 // OCaml: @;%a for attrs (break hint before attrs)
                 f.space();
-                print_attributes(f, arena, &ctor.pcd_attributes);
+                print_attributes(f, arena, &crate::ast_helper_type::constructor_attributes(arena, ctor));
             }
         }
         TypeKind::Ptype_record(fields) => {

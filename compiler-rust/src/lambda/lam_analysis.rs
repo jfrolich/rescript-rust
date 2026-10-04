@@ -131,6 +131,11 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         Primitive::Pmodint | Primitive::Pdivint | Primitive::Pdivbigint | Primitive::Pmodbigint => {
             second_constant.is_some_and(not_zero_constant)
         }
+        // lam_analysis.ml: raises on a negative exponent, so pure only when
+        // the exponent is a nonnegative constant.
+        Primitive::Ppowbigint => {
+            matches!(second_constant, Some(Constant::BigInt { negative: false, .. }))
+        }
 
         // Creation and type checking primitives
         Primitive::PcreateExtension(_)
@@ -211,7 +216,6 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         | Primitive::Paddbigint
         | Primitive::Psubbigint
         | Primitive::Pmulbigint
-        | Primitive::Ppowbigint
         | Primitive::Pnotbigint
         | Primitive::Pandbigint
         | Primitive::Porbigint
@@ -225,8 +229,6 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
 
         // String primitives
         Primitive::Pstringlength
-        | Primitive::Pstringrefu
-        | Primitive::Pstringrefs
         | Primitive::Pstringcomp(_)
         | Primitive::Pstringorder
         | Primitive::Pstringmin
@@ -235,8 +237,7 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         // Array primitives (read-only)
         Primitive::Pmakearray
         | Primitive::Parraylength
-        | Primitive::Parrayrefu
-        | Primitive::Parrayrefs => true,
+        | Primitive::Parrayrefu => true,
 
         // List and dict primitives
         Primitive::Pmakelist | Primitive::Pmakedict | Primitive::PdictHas => true,
@@ -271,9 +272,12 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         | Primitive::Pawait
         | Primitive::Parraysets
         | Primitive::Parraysetu
-        | Primitive::Poffsetref(_)
         | Primitive::Praise
-        | Primitive::Psetfield(_, _) => false,
+        | Primitive::Psetfield(_, _)
+        // Bounds-checked reads throw when the index is out of range.
+        | Primitive::Parrayrefs
+        | Primitive::Pstringrefs
+        | Primitive::Pstringrefu => false,
     }
 }
 

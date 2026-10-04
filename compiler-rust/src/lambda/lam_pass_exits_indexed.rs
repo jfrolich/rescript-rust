@@ -921,15 +921,14 @@ mod tests {
 
     #[test]
     fn inherited_smart_constructor_debt_follows_ocaml_reference() {
-        use crate::types::{VariantBlockType, VariantTag, VariantTagType};
+        use crate::types::VariantTag;
         for tag_type in [
-            VariantTagType::Float("1.0".into()),
-            VariantTagType::BigInt("1".into()),
-            VariantTagType::Untagged(VariantBlockType::Unknown),
+            crate::types::VariantLiteralTag::Float("1.0".into()),
+            crate::types::VariantLiteralTag::BigInt("1".into()),
         ] {
             let condition = Constant::Constructor(VariantTag {
                 name: "C".into(),
-                tag_type: Some(tag_type),
+                literal: Some(tag_type),
             });
             let result = simplify_indexed(
                 Lambda::LifThenElse(
@@ -944,7 +943,7 @@ mod tests {
 
         let int_tag = VariantTag {
             name: "One".into(),
-            tag_type: Some(VariantTagType::Int(1)),
+            literal: Some(crate::types::VariantLiteralTag::Int(1)),
         };
         let result = simplify_indexed(
             Lambda::Lswitch(
@@ -979,7 +978,7 @@ mod tests {
                         SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(
                             VariantTag {
                                 name: "One".into(),
-                                tag_type: Some(VariantTagType::Int(1)),
+                                literal: Some(crate::types::VariantLiteralTag::Int(1)),
                             },
                         )),
                         Lambda::true_(),
@@ -1000,11 +999,11 @@ mod tests {
         ] {
             let left = Constant::Constructor(VariantTag {
                 name: "A".into(),
-                tag_type: None,
+                literal: None,
             });
             let right = Constant::Constructor(VariantTag {
                 name: "B".into(),
-                tag_type: None,
+                literal: None,
             });
             let result = simplify_indexed(
                 Lambda::Lprim(Box::new(crate::lambda::PrimInfo {

@@ -267,18 +267,17 @@ impl Constant {
         match self {
             Constant::Int { i, .. } => *i != 0,
             Constant::NativeInt { i, .. } => *i != 0,
-            Constant::Constructor(tag) => match &tag.tag_type {
+            Constant::Constructor(tag) => match &tag.literal {
                 None => tag.name != "[]",
-                Some(crate::types::VariantTagType::String(value)) => !value.is_empty(),
-                Some(crate::types::VariantTagType::Int(value)) => *value != 0,
-                Some(crate::types::VariantTagType::Bool(value)) => *value,
+                Some(crate::types::VariantLiteralTag::String(value)) => !value.is_empty(),
+                Some(crate::types::VariantLiteralTag::Int(value)) => *value != 0,
+                Some(crate::types::VariantLiteralTag::Bool(value)) => *value,
                 Some(
-                    crate::types::VariantTagType::Null | crate::types::VariantTagType::Undefined,
+                    crate::types::VariantLiteralTag::Null | crate::types::VariantLiteralTag::Undefined,
                 ) => false,
                 Some(
-                    crate::types::VariantTagType::Float(_)
-                    | crate::types::VariantTagType::BigInt(_)
-                    | crate::types::VariantTagType::Untagged(_),
+                    crate::types::VariantLiteralTag::Float(_)
+                    | crate::types::VariantLiteralTag::BigInt(_),
                 ) => true,
             },
             Constant::Char(c) => *c != 0,

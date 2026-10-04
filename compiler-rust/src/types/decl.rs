@@ -283,6 +283,9 @@ pub enum TypeRepresentation {
 pub struct LabelDeclaration {
     /// Label identifier
     pub ld_id: Ident,
+    /// The name the field has at run time when an `@as` renames it, as its
+    /// decoded value (OCaml `ld_runtime_name`).
+    pub ld_runtime_name: Option<String>,
     /// Is the field mutable?
     pub ld_mutable: MutableFlag,
     /// Is the field optional?
@@ -295,11 +298,24 @@ pub struct LabelDeclaration {
     pub ld_attributes: Vec<Attribute>,
 }
 
+impl LabelDeclaration {
+    /// OCaml `Record_runtime.declaration_name`: the field's runtime name,
+    /// its `@as` rename or else its declared name.
+    pub fn declaration_name(&self) -> String {
+        match &self.ld_runtime_name {
+            Some(name) => name.clone(),
+            None => self.ld_id.name().to_string(),
+        }
+    }
+}
+
 /// A constructor declaration in a variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstructorDeclaration {
     /// Constructor identifier
     pub cd_id: Ident,
+    /// The decoded `@as` value of the constructor (OCaml `cd_runtime_tag`).
+    pub cd_runtime_tag: Option<super::variant_runtime::LiteralTag>,
     /// Constructor arguments
     pub cd_args: ConstructorArguments,
     /// Result type (for GADTs)
@@ -411,6 +427,9 @@ pub fn may_equal_constructor(c1: &ConstructorDescription, c2: &ConstructorDescri
 pub struct LabelDescription {
     /// Short name
     pub lbl_name: String,
+    /// The name the field has at run time: its `@as` payload when it has
+    /// one, otherwise `lbl_name` (OCaml `lbl_runtime_name`).
+    pub lbl_runtime_name: String,
     /// Result type (the record type)
     pub lbl_res: TypeExprRef,
     /// Argument type (the field type)
