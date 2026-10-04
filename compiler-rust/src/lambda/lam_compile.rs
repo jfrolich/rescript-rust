@@ -3314,6 +3314,15 @@ impl LambdaCompiler {
         block
     }
 
+    /// Whether the current return continuation is no longer OCaml's
+    /// `Tail_with_name {in_staticcatch = false}` (lam_compile.ml:1022-1028).
+    pub(crate) fn in_staticcatch_like_ocaml(&self) -> bool {
+        self.try_body_depth > 0
+            || !self.fallthrough_return_handlers.is_empty()
+            || !self.static_handlers.is_empty()
+            || !self.static_jump_handlers.is_empty()
+    }
+
     fn uses_fallthrough_staticcatch_return(
         &self,
         body: &Lambda,
@@ -3544,7 +3553,11 @@ impl LambdaCompiler {
             // compiler/core/js_output.ml:88-100). When a case resolves to a
             // fallthrough static-raise handler, the empty body still needs a
             // `break;` so the appended handler runs once after the switch.
-            let should_break = return_switch_case_needs_break_like_ocaml(body, &compiled_body);
+            let should_break = return_switch_case_needs_break_like_ocaml(
+                body,
+                &compiled_body,
+                self.in_staticcatch_like_ocaml(),
+            );
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 clauses.push((
@@ -3998,7 +4011,11 @@ impl LambdaCompiler {
             // that break only when the source lambda has an exit
             // (compiler/core/lam_compile.ml:613-624;
             // compiler/core/js_output.ml:88-100).
-            let should_break = return_switch_case_needs_break_like_ocaml(body, &compiled_body);
+            let should_break = return_switch_case_needs_break_like_ocaml(
+                body,
+                &compiled_body,
+                self.in_staticcatch_like_ocaml(),
+            );
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 cases.push((tag.clone(), empty_switch_case_clause(), group_falls_through));
@@ -5241,7 +5258,11 @@ impl LambdaCompiler {
             // case body resolved away through a fallthrough static-raise
             // handler, OCaml still prints an explicit `break;` to exit the
             // switch so the subsequent appended handler reads cleanly.
-            let should_break = return_switch_case_needs_break_like_ocaml(body, &compiled_body);
+            let should_break = return_switch_case_needs_break_like_ocaml(
+                body,
+                &compiled_body,
+                self.in_staticcatch_like_ocaml(),
+            );
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 cases.push((tag.clone(), empty_switch_case_clause(), group_falls_through));
@@ -7768,6 +7789,7 @@ pub(crate) fn lambda_has_exit(lam: &Lambda) -> bool {
 pub(crate) fn return_switch_case_needs_break_like_ocaml(
     body: &Lambda,
     compiled_body: &Block,
+    in_staticcatch: bool,
 ) -> bool {
     if !lambda_has_exit(body) {
         return false;
@@ -7775,13 +7797,21 @@ pub(crate) fn return_switch_case_needs_break_like_ocaml(
     if !block_terminates(compiled_body) {
         return true;
     }
-    return_output_is_compound_like_ocaml(body, compiled_body)
+    return_output_is_compound_like_ocaml(body, compiled_body, in_staticcatch)
 }
 
-fn return_output_is_compound_like_ocaml(body: &Lambda, compiled_body: &Block) -> bool {
+
+fn return_output_is_compound_like_ocaml(
+    body: &Lambda,
+    compiled_body: &Block,
+    in_staticcatch: bool,
+) -> bool {
+    if let Some(finished) = return_output_finished_like_ocaml(body, in_staticcatch) {
+        return !finished;
+    }
     match body {
         Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) | Lambda::Lsequence(_, body) => {
-            return_output_is_compound_like_ocaml(body, compiled_body)
+            return_output_is_compound_like_ocaml(body, compiled_body, in_staticcatch)
         }
         // `compile_general_cases` uses `Js_output.to_break_block`, then gates
         // it with `Lam_exit_code.has_exit` in return continuation
@@ -7798,6 +7828,47 @@ fn return_output_is_compound_like_ocaml(body: &Lambda, compiled_body: &Block) ->
         | Lambda::LstaticCatch(_, _, _)
         | Lambda::LtryWith(_, _, _) => return_block_has_multi_test_guard_chain(compiled_body),
         _ => false,
+    }
+}
+
+/// `Js_output.output_finished` of `compile_lambda` in an
+/// `EffectCall (Maybe_tail_is_return _)` continuation, where it does not
+/// depend on how the branches compile. `None` means it does (`Lifthenelse`)
+/// or the form is not modelled here.
+fn return_output_finished_like_ocaml(lam: &Lambda, in_staticcatch: bool) -> Option<bool> {
+    match lam {
+        // `compile_let`/`compile_sequence` append the binding or effect output
+        // to the body output (js_output.ml `append_output`), so the body's
+        // flag wins.
+        Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) | Lambda::Lsequence(_, body) => {
+            return_output_finished_like_ocaml(body, in_staticcatch)
+        }
+        // compile_switch (lam_compile.ml:822) and compile_stringswitch return
+        // `Js_output.make` without `~output_finished`, and so does the
+        // `S.try_` built for `Ltrywith`.
+        Lambda::Lswitch(_, _) | Lambda::LstringSwitch(_, _, _) | Lambda::LtryWith(_, _, _) => {
+            Some(false)
+        }
+        Lambda::LstaticCatch(body, (label, bindings), handler) => {
+            let (code_table, inner_body) = flatten_nested_caches(*label, bindings, body, handler);
+            // lam_compile.ml:1022-1047: only the single-exit pseudo-jump arm
+            // (tail position, not already in a static catch, handler without
+            // static raises) ends with the handler output; the exit-variable
+            // arm ends with `Js_output.make (compile_cases ...)`.
+            let [entry] = code_table.as_slice() else {
+                return Some(false);
+            };
+            if in_staticcatch || !no_static_raise_in_handler_like_ocaml(&entry.handler) {
+                return Some(false);
+            }
+            // `append_output declares (append_output lbody handler)`: a
+            // finished body wins, otherwise the handler's flag is kept.
+            match return_output_finished_like_ocaml(inner_body, true)? {
+                true => Some(true),
+                false => return_output_finished_like_ocaml(&entry.handler, in_staticcatch),
+            }
+        }
+        _ => None,
     }
 }
 
@@ -8468,3 +8539,4 @@ fn drop_toplevel_pure_sequence_heads(lam: Lambda) -> Lambda {
         lam => lam,
     }
 }
+

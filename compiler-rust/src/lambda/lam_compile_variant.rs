@@ -2129,7 +2129,11 @@ impl LambdaCompiler {
                         // `Js_output.to_break_block`
                         // (compiler/core/js_output.ml:88-100).
                         let should_break =
-                            return_switch_case_needs_break_like_ocaml(body, &compiled_body);
+                            return_switch_case_needs_break_like_ocaml(
+                                body,
+                                &compiled_body,
+                                self.in_staticcatch_like_ocaml(),
+                            );
                         CaseClause {
                             source_loc: None,
                             body: compiled_body,
@@ -2230,7 +2234,11 @@ impl LambdaCompiler {
             // Mirror `compile_general_cases` + `Js_output.to_break_block`
             // (compiler/core/lam_compile.ml:610-624;
             // compiler/core/js_output.ml:88-100).
-            let should_break = return_switch_case_needs_break_like_ocaml(body, &compiled_body);
+            let should_break = return_switch_case_needs_break_like_ocaml(
+                                body,
+                                &compiled_body,
+                                self.in_staticcatch_like_ocaml(),
+                            );
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 clauses.push((
