@@ -3888,6 +3888,25 @@ impl LambdaCompiler {
         tail_loop: &mut TailLoopState,
     ) -> Block {
         let cond_compiled = self.compile_expr(cond);
+        // lam_compile.ml:1514-1518: compile both branches in
+        // `NeedValue should_return` first and emit `return e ? a : b` when
+        // neither needs statements. A branch with a self tail call compiles
+        // to the loop jump there, so it always has a block.
+        if !function_has_self_tailcall(&tail_loop.tail_targets, then_)
+            && !function_has_self_tailcall(&tail_loop.tail_targets, else_)
+        {
+            let then_value = self.compile_expr(then_);
+            let else_value = self.compile_expr(else_);
+            if then_value.prelude.is_empty() && else_value.prelude.is_empty() {
+                let mut block = cond_compiled.prelude;
+                block.push(Statement::return_(Expression::cond(
+                    cond_compiled.expr,
+                    then_value.expr,
+                    else_value.expr,
+                )));
+                return block;
+            }
+        }
         let then_block = self.compile_tail_loop_return_block(then_, tail_loop);
         let else_block = self.compile_tail_loop_return_block(else_, tail_loop);
 
@@ -8559,4 +8578,5 @@ fn drop_toplevel_pure_sequence_heads(lam: Lambda) -> Lambda {
         lam => lam,
     }
 }
+
 
