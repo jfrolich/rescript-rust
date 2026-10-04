@@ -2646,60 +2646,6 @@ fn lookup_type_decl_in_unforced_module_decl(
     })
 }
 
-fn lookup_labels_in_unforced_module_decl(
-    ctx: &crate::types::context::TypeContext,
-    module_path: &Path,
-    md: &crate::types::decl::ModuleDeclaration,
-    label_name: &str,
-) -> Option<Vec<crate::types::LabelDescription>> {
-    let crate::types::decl::ModuleType::MtySignature(sig) = &md.md_type else {
-        return None;
-    };
-
-    let mut labels = Vec::new();
-    for item in sig.iter() {
-        let crate::types::decl::SignatureItem::SigType(type_id, decl, _) = item else {
-            continue;
-        };
-        let crate::types::TypeKind::TypeRecord(record_labels, repr) = &decl.type_kind else {
-            continue;
-        };
-        let type_path = Path::pdot(module_path.clone(), type_id.name());
-        let res_ty = ctx.new_generic_constr(type_path, decl.type_params.clone());
-        for (pos, label) in record_labels.iter().enumerate() {
-            if label.ld_id.name() != label_name {
-                continue;
-            }
-            labels.push(crate::types::LabelDescription {
-                lbl_name: label.ld_id.name().to_string(),
-                lbl_runtime_name: label.declaration_name(),
-                lbl_res: res_ty,
-                lbl_arg: crate::types::ctype::remap_label_type_to_params(
-                    ctx,
-                    label.ld_type,
-                    &decl.type_params,
-                ),
-                lbl_mut: label.ld_mutable,
-                lbl_optional: label.ld_optional,
-                lbl_pos: pos as i32,
-                lbl_all: crate::types::LabelArrayRef(0),
-                lbl_repres: repr.clone(),
-                lbl_private: decl.type_private,
-                lbl_loc: label.ld_loc.clone(),
-                lbl_attributes: label.ld_attributes.clone(),
-            });
-        }
-    }
-
-    // OCaml compiler/ml/env.ml:1513-1559 builds component labels by iterating
-    // the signature in order while `add_to_tbl` conses onto `comp_labels`. A
-    // later record type with the same field name is therefore first in
-    // `Typetexp.find_all_labels` scope. Preserve that order while reading the
-    // already-typed local signature without forcing the component table.
-    labels.reverse();
-    (!labels.is_empty()).then_some(labels)
-}
-
 fn select_record_type_in_unforced_module_decl(
     ctx: &crate::types::context::TypeContext,
     module_path: &Path,
@@ -6281,6 +6227,33 @@ fn type_pattern_record(
         ) {
             return Err(err);
         }
+        // `process_label` (typecore.ml:1063-1073): with no `opath` the label
+        // scope is first reduced by every field name of the pattern
+        // (`disambiguate_label_by_ids`, record patterns pass `closed = false`),
+        // and `Label.disambiguate` then takes the first remaining label.
+        let by_ids_label = if !record_is_concrete && !has_dict_pattern_attr {
+            let module_labels = match &resolved_lid {
+                Longident::Ldot(module_lid, _) => with_resolved_module_components_for_lid(
+                    module_lid,
+                    tctx.arena,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                    |components| components.lookup_labels(&field_name, ctx).as_ref().clone(),
+                )
+                .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let scope: Vec<&crate::types::LabelDescription> = match &resolved_lid {
+                Longident::Ldot(..) => module_labels.iter().collect(),
+                _ => env.find_all_labels(&field_name),
+            };
+            disambiguate_label_by_ids(scope, &field_names, false, env, &mut tctx.persistent_env, ctx)
+                .first()
+                .map(|label| (*label).clone())
+        } else {
+            None
+        };
         // Try to look up the label from the environment for type info
         let disambiguated = tctx
             .generated_pattern_labels
@@ -6288,6 +6261,7 @@ fn type_pattern_record(
             .rev()
             .find(|(name, _)| name == &field_name)
             .map(|(_, label)| (**label).clone())
+            .or(by_ids_label)
             .or_else(|| {
                 lookup_label_by_lid(
                     &resolved_lid,
@@ -15131,6 +15105,42 @@ fn ambiguous_record_label_warning_info<'a>(
     let printer = crate::types::printtyp::Printtyp::new(ctx);
     let types = paths.iter().map(|path| printer.string_of_path(path)).collect();
     Some((types, Some(selected_path)))
+}
+
+/// OCaml `disambiguate_label_by_ids` (typecore.ml:1017-1041): keep the
+/// labels whose record has every id (`labels'`), then those passing the
+/// closed-record check (`labels''`); a filter that leaves nothing falls back
+/// to the previous list.
+fn disambiguate_label_by_ids<'a>(
+    labels: Vec<&'a crate::types::LabelDescription>,
+    ids: &[&str],
+    closed: bool,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a TypeContext,
+) -> Vec<&'a crate::types::LabelDescription> {
+    let mut with_ids = Vec::new();
+    let mut with_closed = Vec::new();
+    for label in &labels {
+        let Some(info) = build_record_label_descriptions_info(label.lbl_res, env, pers_env, ctx)
+        else {
+            continue;
+        };
+        if !ids.iter().all(|name| info.summary.contains_label(name)) {
+            continue;
+        }
+        with_ids.push(*label);
+        if info.matches_field_names(ids, closed) {
+            with_closed.push(*label);
+        }
+    }
+    if with_ids.is_empty() {
+        labels
+    } else if with_closed.is_empty() {
+        with_ids
+    } else {
+        with_closed
+    }
 }
 
 fn reduce_record_label_scope_by_ids<'a>(
@@ -26112,54 +26122,23 @@ fn lookup_label_by_lid<'a>(
     mark_open_lid_use(ctx, env, arena, lid, crate::types::env::OpenLookupKind::Component, loc);
 
     let label_name = arena.get_string(*label_idx);
-    let mut defer_component_label_force = false;
     // OCaml compiler/ml/typecore.ml:1107-1126 calls
     // `Typetexp.find_all_labels` before `Label.disambiguate`; for qualified
     // labels that reaches compiler/ml/env.ml:1114-1120/1138-1142 and reads the
-    // module component `comp_labels` table. Do the same instead of resolving and
-    // copying the full module signature, which would force unrelated
-    // compiler/ml/subst.ml:378-400 binder freshening before OCaml does.
-    let mut candidates = if expected_record_ty.is_none()
-        && record_field_names.is_some()
-        && let Longident::Lident(module_idx) = module_lid.as_ref()
-    {
-        let module_name = arena.get_string(*module_idx);
-        if let Ok((module_path, md)) = env.find_module_with_path(module_name) {
-            if matches!(&module_path, Path::Pident(id) if !id.is_persistent() && id.stamp() != 0)
-                && let Some(labels) =
-                    lookup_labels_in_unforced_module_decl(ctx, &module_path, md, label_name)
-            {
-                // OCaml compiler/ml/typecore.ml:1075-1104 only chooses label
-                // descriptors while building `lbl_a_list`; compiler/ml/typecore.ml:3535-3575
-                // then runs `instance_label`/`type_argument` for each field value.
-                // For local module-qualified record literals, read the already
-                // typed module declaration signature here and leave the selected
-                // component-table force to that later `type_label_exp` path.
-                defer_component_label_force = true;
-                Some(labels)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    }
-    .or_else(|| {
-        with_resolved_module_components_for_lid(
-            module_lid,
-            arena,
-            env,
-            pers_env,
-            ctx,
-            |components| {
-                let labels = components.lookup_labels(label_name, ctx);
-                (!labels.is_empty()).then(|| labels.as_ref().clone())
-            },
-        )
-        .flatten()
-    })?;
+    // module component `comp_labels` table, whose label types went through
+    // `prefix_idents`/`Subst` (env.ml:1516-1559).
+    let mut candidates = with_resolved_module_components_for_lid(
+        module_lid,
+        arena,
+        env,
+        pers_env,
+        ctx,
+        |components| {
+            let labels = components.lookup_labels(label_name, ctx);
+            (!labels.is_empty()).then(|| labels.as_ref().clone())
+        },
+    )
+    .flatten()?;
 
     if candidates.is_empty() {
         return None;
@@ -26256,9 +26235,7 @@ fn lookup_label_by_lid<'a>(
             ctx,
         );
     }
-    if !defer_component_label_force {
-        qualify_label_description_paths(&mut selected, env, pers_env, ctx);
-    }
+    qualify_label_description_paths(&mut selected, env, pers_env, ctx);
     Some(selected)
 }
 
