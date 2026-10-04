@@ -550,7 +550,8 @@ impl<'a> Printtyp<'a> {
 
     /// `mark_loops`.
     pub(crate) fn mark_loops(&mut self, ty: TypeExprRef) {
-        crate::types::ctype::normalize_type(self.ctx, ty);
+        // printtyp.ml:520: `normalize_type Env.empty ty`.
+        crate::types::ctype::normalize_type(self.ctx, &crate::types::env::Env::empty(), ty);
         self.mark_loops_rec(&mut Vec::new(), ty);
     }
 

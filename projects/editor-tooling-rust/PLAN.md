@@ -102,13 +102,13 @@ binary and moves to `rescript analysis` as commands are ported.
 ## Known type-checker divergences found through the tests
 
 - `Hover.res` 116/119 (`AA.fnnxx`, a constrained polymorphic-variant
-  abbreviation unified with itself): OCaml `unify3` (ctype.ml:2197-2202)
-  links the expanded side to the original opposite type *before* unifying
-  the expansions; Rust's `unify_after_expansion` does it afterwards for all
-  but same-path constructors, so the row field reached through the
-  generalized type differs (`[< #str(string)]` vs
-  `[< #str(string) & (string) & ...]`). The typed-tree corpus does not cover
-  it.
+  abbreviation): fixed. The extra `& (string)` conjuncts were never a
+  `unify3` link-order issue. OCaml's `Ctype.normalize_type`
+  (ctype.ml:4069-4092), run from `Typemod.normalize_signature`, removes
+  conjuncts that are `equal`. Rust's port only sorted the fields. The fix
+  also ports `expand_head_rigid` for `eqtype`, `correct_levels` in
+  `Typeopt.scrape_ty`, and the unconditional `Subst.value_description`
+  copy in `Includemod.value_descriptions`.
 
 ## Reference oracle
 

@@ -12010,7 +12010,7 @@ fn compile_source_to_js_with_options_inner(
                 suppress_info_style,
             ));
         }
-        normalize_signature(&type_ctx, &simple_signature);
+        normalize_signature(&type_ctx, &final_env, &simple_signature);
         (Some(simple_signature), Some(implementation_coercion))
     } else {
         (None, None)
@@ -14886,26 +14886,27 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
 /// `simplify_signature sg`, so shadowed items are left as typed.
 pub(crate) fn normalize_signature(
     type_ctx: &TypeContext,
+    env: &Env,
     sig: &[crate::types::decl::SignatureItem],
 ) {
     use crate::types::decl::SignatureItem;
     for item in sig {
         match item {
             SignatureItem::SigValue(_, desc) => {
-                crate::types::ctype::normalize_type(type_ctx, desc.val_type);
+                crate::types::ctype::normalize_type(type_ctx, env, desc.val_type);
             }
-            SignatureItem::SigModule(_, md, _) => normalize_modtype(type_ctx, &md.md_type),
+            SignatureItem::SigModule(_, md, _) => normalize_modtype(type_ctx, env, &md.md_type),
             _ => {}
         }
     }
 }
 
-fn normalize_modtype(type_ctx: &TypeContext, mty: &crate::types::decl::ModuleType) {
+fn normalize_modtype(type_ctx: &TypeContext, env: &Env, mty: &crate::types::decl::ModuleType) {
     use crate::types::decl::ModuleType;
     match mty {
         ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
-        ModuleType::MtySignature(sig) => normalize_signature(type_ctx, sig),
-        ModuleType::MtyFunctor { result, .. } => normalize_modtype(type_ctx, result),
+        ModuleType::MtySignature(sig) => normalize_signature(type_ctx, env, sig),
+        ModuleType::MtyFunctor { result, .. } => normalize_modtype(type_ctx, env, result),
     }
 }
 
@@ -15791,7 +15792,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                     ),
                 ));
             }
-            normalize_signature(&type_ctx, &simple_signature);
+            normalize_signature(&type_ctx, &final_env, &simple_signature);
         }
 
         // `Env.save_signature` (typemod.ml:1779-1788) renames the bound
