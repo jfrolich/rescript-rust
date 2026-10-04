@@ -82,7 +82,7 @@ pub use type_expr::{
 };
 pub use variance::{Variance, VarianceFlag};
 pub use variant_runtime::{
-    Block as VariantBlock, BlockRuntime, BlockType as VariantBlockType,
+    Block as VariantBlock, BlockType as VariantBlockType, TaggedBlock,
     Configuration as VariantConfiguration, ConstructorCase as VariantConstructorCase,
     ConstructorReference, Instance as VariantInstance, Layout as VariantLayout,
     LayoutRef as VariantLayoutRef, MatchingFacts as VariantMatchingFacts, Tag as VariantTag,

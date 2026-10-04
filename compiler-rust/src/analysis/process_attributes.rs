@@ -132,7 +132,7 @@ pub fn find_editor_complete_from_attribute(attrs: Attrs<'_>) -> Vec<ModulePathLi
                 let mut from_array: Vec<ModulePathList> = items
                     .iter()
                     .filter_map(|item| match &*arena.get_expr(*item).pexp_desc {
-                        ExpressionDesc::Pexp_construct(lid, None) => {
+                        ExpressionDesc::Pexp_construct(lid, args) if args.txt.is_empty() => {
                             Some(flatten_long_ident(arena, arena.get_longident(lid.txt)))
                         }
                         _ => None,

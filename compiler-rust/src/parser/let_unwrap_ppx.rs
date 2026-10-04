@@ -341,18 +341,22 @@ fn rewrite_expression(
                 .collect::<Result<Vec<_>, _>>()?;
             ExpressionDesc::Pexp_tuple(Box::new(rewritten))
         }
-        ExpressionDesc::Pexp_construct(lid, arg) => {
-            let rewritten_arg = arg
-                .map(|idx| rewrite_expr_idx(idx, arena, let_unwrap_enabled))
-                .transpose()?;
-            ExpressionDesc::Pexp_construct(*lid, rewritten_arg)
+        ExpressionDesc::Pexp_construct(lid, args) => {
+            let rewritten = args
+                .txt
+                .iter()
+                .map(|idx| rewrite_expr_idx(*idx, arena, let_unwrap_enabled))
+                .collect::<Result<Vec<_>, _>>()?;
+            ExpressionDesc::Pexp_construct(*lid, crate::parser::ast::ctor_args(rewritten, args.loc))
         }
         ExpressionDesc::Pexp_variant(inner) => {
-            let (label, arg) = &**inner;
-            let rewritten_arg = arg
-                .map(|idx| rewrite_expr_idx(idx, arena, let_unwrap_enabled))
-                .transpose()?;
-            ExpressionDesc::Pexp_variant(Box::new((label.clone(), rewritten_arg)))
+            let (label, args) = &**inner;
+            let rewritten = args
+                .txt
+                .iter()
+                .map(|idx| rewrite_expr_idx(*idx, arena, let_unwrap_enabled))
+                .collect::<Result<Vec<_>, _>>()?;
+            ExpressionDesc::Pexp_variant(Box::new((label.clone(), Located::new(rewritten, args.loc))))
         }
         ExpressionDesc::Pexp_record(inner) => {
             let (fields, spread) = &**inner;
@@ -779,9 +783,9 @@ fn make_ctor_pattern(
             ppat_loc: loc,
             ppat_attributes: Attributes::new(),
         });
-        Some(any_idx)
+        vec![any_idx]
     } else {
-        None
+        Vec::new()
     };
     Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_construct(
@@ -789,7 +793,7 @@ fn make_ctor_pattern(
                 txt: ctor_lid_idx,
                 loc,
             },
-            payload,
+            crate::parser::ast::ctor_args(payload, loc),
         )),
         ppat_loc: loc,
         ppat_attributes: Attributes::new(),
@@ -805,7 +809,7 @@ fn classify_let_unwrap_pattern(pat: &Pattern, arena: &ParseArena) -> Option<LetU
     };
     let name = arena.get_string(*name_idx);
 
-    match (name, arg.is_some()) {
+    match (name, !arg.txt.is_empty()) {
         ("Ok", true) => Some(LetUnwrapKind::ResultOk),
         ("Error", true) => Some(LetUnwrapKind::ResultError),
         ("Some", true) => Some(LetUnwrapKind::OptionSome),
@@ -815,7 +819,10 @@ fn classify_let_unwrap_pattern(pat: &Pattern, arena: &ParseArena) -> Option<LetU
 }
 
 fn extract_binding_name(pat: &Pattern, arena: &ParseArena) -> Option<crate::intern::StrIdx> {
-    let PatternDesc::Ppat_construct(_, Some(inner)) = &*pat.ppat_desc else {
+    let PatternDesc::Ppat_construct(_, args) = &*pat.ppat_desc else {
+        return None;
+    };
+    let [inner] = args.txt.as_slice() else {
         return None;
     };
     extract_single_variable_name(*inner, arena)

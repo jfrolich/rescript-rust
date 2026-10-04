@@ -977,7 +977,7 @@ fn print_extra_type_clash_help_by_types(
                 Some(crate::parser::ast::Expression {
                     pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_variant(Box::new((
                         std::borrow::Cow::Owned(s),
-                        None,
+                        crate::parse_arena::Located::new(Vec::new(), exp.pexp_loc),
                     )))),
                     ..exp
                 })
@@ -1024,7 +1024,7 @@ fn print_extra_type_clash_help_by_types(
                                 txt: lid,
                                 loc: exp.pexp_loc,
                             },
-                            None,
+                            crate::parser::ast::ctor_args(Vec::new(), exp.pexp_loc),
                         )),
                         ..exp
                     })
@@ -1091,7 +1091,7 @@ fn constructor_tag(
     match layout.constructors.get(position)? {
         crate::types::variant_runtime::ConstructorCase::Constant(tag) => tag.literal.clone(),
         crate::types::variant_runtime::ConstructorCase::Block(block) => {
-            block.runtime.tag.literal.clone()
+            block.tag().literal.clone()
         }
     }
 }

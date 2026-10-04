@@ -568,10 +568,11 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                 }).map(|(_, node)| *node),
                 NodeView::Const(Constant::Block { tag_info, .. }) => {
                     let runtime = match &**tag_info {
-                        crate::lambda::TagInfo::Constructor { runtime, .. } | crate::lambda::TagInfo::RecordInlined { runtime, .. } => Some(runtime),
+                        crate::lambda::TagInfo::Constructor { runtime, .. } => Some(crate::types::VariantBlock::Tagged((**runtime).clone())),
+                        crate::lambda::TagInfo::RecordInlined { runtime, .. } => Some((**runtime).clone()),
                         _ => None,
                     };
-                    blocks.iter().find(|(key, _)| matches!((key, runtime), (crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)), Some(runtime)) if &candidate.runtime == &**runtime)).map(|(_, node)| *node)
+                    blocks.iter().find(|(key, _)| matches!((key, runtime.as_ref()), (crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)), Some(runtime)) if candidate == runtime)).map(|(_, node)| *node)
                 }
                 _ => None,
             };

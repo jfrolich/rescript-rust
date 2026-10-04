@@ -502,11 +502,23 @@ pub enum CoreTypeDesc {
 /// Package type: `module S with type t = T`.
 pub type PackageType = (Loc<LidentIdx>, Vec<(Loc<LidentIdx>, CoreTypeIdx)>);
 
+/// Constructor or variant arguments: the source list and the span of its
+/// parentheses (parsetree.ml `Pexp_construct`/`Ppat_construct`).
+pub fn ctor_args<T>(txt: Vec<T>, loc: LocIdx) -> Box<Loc<Vec<T>>> {
+    Box::new(Located { txt, loc })
+}
+
+/// One payload group of a polymorphic variant tag type.
+pub type VariantTypeArgs = Loc<Vec<CoreTypeIdx>>;
+
 /// Row field in a polymorphic variant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RowField {
-    /// Tag: `\`A of T1 & T2`.
-    Rtag(Loc<Label>, Attributes, bool, Vec<CoreTypeIdx>),
+    /// Tag: `\`A of T1 & T2`. Each payload group keeps the source argument
+    /// list and the span of its parentheses: `#A(T1, T2)` is one group
+    /// `[T1, T2]`, `#A((T1, T2))` one group `[Ptyp_tuple [T1, T2]]`
+    /// (parsetree.ml `variant_type_args`).
+    Rtag(Loc<Label>, Attributes, bool, Vec<VariantTypeArgs>),
     /// Inherited type: `[T]`.
     Rinherit(CoreTypeIdx),
 }
@@ -550,10 +562,12 @@ pub enum PatternDesc {
     Ppat_interval(Box<(Constant, Constant)>),
     /// Tuple: `(P1, P2, ..., Pn)`.
     Ppat_tuple(Box<Vec<PatIdx>>),
-    /// Constructor: `C` or `C(P)`.
-    Ppat_construct(Loc<LidentIdx>, Option<PatIdx>),
-    /// Variant: `\`A` or `\`A(P)`.
-    Ppat_variant(Box<(Label, Option<PatIdx>)>),
+    /// Constructor: `C`, `C(P)` or `C(P1, ..., Pn)`. The arguments are the
+    /// source list, located at the argument parentheses (or the enclosing
+    /// node when there are none); see parsetree.ml `Ppat_construct`.
+    Ppat_construct(Loc<LidentIdx>, Box<Loc<Vec<PatIdx>>>),
+    /// Variant: `#A`, `#A(P)` or `#A(P1, ..., Pn)`.
+    Ppat_variant(Box<(Label, Loc<Vec<PatIdx>>)>),
     /// Record: `{l1: P1, ..., ln: Pn}`.
     /// Record: `{l1: P1, ...}`, closed flag, and an optional `...Type.t as name` rest
     /// (compiler/ml/parsetree.ml:164-168).
@@ -684,10 +698,11 @@ pub enum ExpressionDesc {
     Pexp_try(Box<(ExprIdx, Vec<Case>)>),
     /// Tuple: `(E1, E2, ..., En)`.
     Pexp_tuple(Box<Vec<ExprIdx>>),
-    /// Constructor: `C` or `C(E)`.
-    Pexp_construct(Loc<LidentIdx>, Option<ExprIdx>),
-    /// Variant: `\`A` or `\`A(E)`.
-    Pexp_variant(Box<(Label, Option<ExprIdx>)>),
+    /// Constructor: `C`, `C(E)` or `C(E1, ..., En)`, with the source argument
+    /// list located at its parentheses (parsetree.ml `Pexp_construct`).
+    Pexp_construct(Loc<LidentIdx>, Box<Loc<Vec<ExprIdx>>>),
+    /// Variant: `#A`, `#A(E)` or `#A(E1, ..., En)`.
+    Pexp_variant(Box<(Label, Loc<Vec<ExprIdx>>)>),
     /// Record: `{l1: E1, ..., ln: En}` or `{...E, l1: E1, ...}`.
     Pexp_record(Box<(Vec<ExpressionRecordField>, Option<ExprIdx>)>),
     /// Field access: `E.l`.

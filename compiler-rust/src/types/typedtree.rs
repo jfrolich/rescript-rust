@@ -287,8 +287,15 @@ pub struct Expression {
 pub enum ExpExtra {
     /// Type constraint: `E : T`.
     Texp_constraint(TypedCoreType),
-    /// Coercion: `(E :> T)`.
-    Texp_coerce(TypedCoreType),
+    /// Coercion: `(E :> T)`. `target` is T as written; `source_type` is the
+    /// inferred type of E and `target_type` the type of T, both
+    /// head-expanded so a consumer without a typing environment can still
+    /// relate them.
+    Texp_coerce {
+        source_type: TypeExprRef,
+        target: TypedCoreType,
+        target_type: TypeExprRef,
+    },
     /// Open: `let open M in E`.
     Texp_open(OverrideFlag, Path, Loc<LidentIdx>, EnvRef),
     /// Newtype: `fun (type t) -> E`.

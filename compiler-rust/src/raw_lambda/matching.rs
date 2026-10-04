@@ -9895,7 +9895,7 @@ mod tests {
             .iter()
             .map(|case| match case {
                 crate::types::VariantConstructorCase::Block(block) => {
-                    block.runtime.tag.name.as_str()
+                    block.tag().name.as_str()
                 }
                 crate::types::VariantConstructorCase::Constant(tag) => tag.name.as_str(),
             })

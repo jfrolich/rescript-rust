@@ -16,13 +16,12 @@
 //!   -jsx-version <n>        JSX version (3 or 4)
 //!   -jsx-module <mod>       JSX module (default: react)
 //!   -test-ast-conversion    Test AST conversion roundtrip (parsetree -> parsetree0 -> parsetree)
-//!   -typechecker            Parse for typechecker (not printer)
 
 use clap::Parser as ClapParser;
 use rescript_compiler::binary_ast::{Marshal, MarshalWriter, mapper_from0, mapper_to0, ppx};
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::{
-    Comment, Parser, ParserMode, ParserWarning, Scanner, SignatureItem, Structure, code_frame,
+    Comment, Parser, ParserWarning, Scanner, SignatureItem, Structure, code_frame,
     jsx_ppx, ml_printer, module, printer, sexp, sexp_locs, sexp_locs0,
 };
 use rescript_compiler::source_text::latin1_bytes_to_string;
@@ -102,9 +101,6 @@ struct Args {
     #[arg(long = "jsx-module", default_value = "react")]
     jsx_module: String,
 
-    /// Parse for typechecker (not printer)
-    #[arg(long = "typechecker")]
-    typechecker: bool,
 
     /// Test AST conversion
     #[arg(long = "test-ast-conversion")]
@@ -125,7 +121,6 @@ fn normalize_args() -> Vec<String> {
                 "-width" => "--width".to_string(),
                 "-jsx-version" => "--jsx-version".to_string(),
                 "-jsx-module" => "--jsx-module".to_string(),
-                "-typechecker" => "--typechecker".to_string(),
                 "-test-ast-conversion" => "--test-ast-conversion".to_string(),
                 _ => arg,
             }
@@ -169,18 +164,7 @@ fn run() {
     // Determine if we're parsing an interface
     let is_interface = args.interface || filename.ends_with(".resi") || filename.ends_with(".mli");
 
-    // Determine parser mode based on output format
-    // For sexp/res output (printer), use Default mode where strings get None delimiter
-    // For ML output and type checking, use ParseForTypeChecker mode where strings get Some("js") delimiter
-    // This matches OCaml's for_printer flag behavior
-    let mode = match args.print.as_str() {
-        // res_cli.ml: `for_printer` only for res / sexp / sexp-locs.
-        "sexp" | "sexp-locs" | "res" if !args.typechecker => ParserMode::Default,
-        _ => ParserMode::ParseForTypeChecker,
-    };
-
-    // Parse the file
-    let mut parser = Parser::with_mode(&filename, &source, mode);
+    let mut parser = Parser::new(&filename, &source);
 
     // Parse structure or signature
     if is_interface {
@@ -278,7 +262,7 @@ fn run() {
                 // 3. Marshaled signature (using output_value)
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResIntf01306");
+                let _ = io::stdout().write_all(b"ResIntf01307");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -299,7 +283,7 @@ fn run() {
                 let sig0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResIntf01306");
+                let _ = io::stdout().write_all(b"ResIntf01307");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -423,7 +407,7 @@ fn run() {
                 // 3. Marshaled structure (using output_value)
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResImpl01306");
+                let _ = io::stdout().write_all(b"ResImpl01307");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -444,7 +428,7 @@ fn run() {
                 let str0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResImpl01306");
+                let _ = io::stdout().write_all(b"ResImpl01307");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();

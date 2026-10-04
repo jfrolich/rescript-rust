@@ -571,7 +571,7 @@ impl<'a> Checker<'a> {
                 for row in &inner.0 {
                     match row {
                         RowField::Rtag(_label, attrs, _empty, types) => {
-                            for typ in types {
+                            for typ in types.iter().flat_map(|group| group.txt.iter()) {
                                 self.typ(*typ)?;
                             }
                             self.attributes(attrs)?;
@@ -633,14 +633,18 @@ impl<'a> Checker<'a> {
                 }
                 Ok(())
             }
-            PatternDesc::Ppat_construct(_, arg) => match arg {
-                Some(arg) => self.pat(*arg),
-                None => Ok(()),
-            },
-            PatternDesc::Ppat_variant(inner) => match inner.1 {
-                Some(arg) => self.pat(arg),
-                None => Ok(()),
-            },
+            PatternDesc::Ppat_construct(_, args) => {
+                for arg in args.txt.iter() {
+                    self.pat(*arg)?;
+                }
+                Ok(())
+            }
+            PatternDesc::Ppat_variant(inner) => {
+                for arg in inner.1.txt.iter() {
+                    self.pat(*arg)?;
+                }
+                Ok(())
+            }
             PatternDesc::Ppat_record(inner) => {
                 let (fields, _closed, rest) = &**inner;
                 for field in fields {
@@ -925,14 +929,18 @@ impl<'a> Checker<'a> {
                 }
                 self.expr(template.tag)
             }
-            ExpressionDesc::Pexp_construct(_, arg) => match arg {
-                Some(arg) => self.expr(*arg),
-                None => Ok(()),
-            },
-            ExpressionDesc::Pexp_variant(inner) => match inner.1 {
-                Some(arg) => self.expr(arg),
-                None => Ok(()),
-            },
+            ExpressionDesc::Pexp_construct(_, args) => {
+                for arg in args.txt.iter() {
+                    self.expr(*arg)?;
+                }
+                Ok(())
+            }
+            ExpressionDesc::Pexp_variant(inner) => {
+                for arg in inner.1.txt.iter() {
+                    self.expr(*arg)?;
+                }
+                Ok(())
+            }
             ExpressionDesc::Pexp_record(inner) => {
                 let (fields, spread) = &**inner;
                 if let Some(spread) = spread {
@@ -1083,8 +1091,8 @@ impl<'a> Checker<'a> {
         case.pc_guard.is_none()
             && matches!(
                 &*self.arena.get_pat(case.pc_lhs).ppat_desc,
-                PatternDesc::Ppat_construct(lid, None)
-                    if matches!(
+                PatternDesc::Ppat_construct(lid, args)
+                    if args.txt.is_empty() && matches!(
                         self.arena.get_longident(lid.txt),
                         Longident::Lident(n) if self.arena.get_string(*n) == name
                     )

@@ -357,9 +357,13 @@ and exp_extra ~with_locs extra loc attrs =
   | Texp_constraint ct ->
     let ct_sexp = core_type ~with_locs ct in
     Sexp.list ([Sexp.atom "Texp_constraint"; ct_sexp] @ loc_sexp @ [attrs_sexp])
-  | Texp_coerce ct ->
-    let ct_sexp = core_type ~with_locs ct in
-    Sexp.list ([Sexp.atom "Texp_coerce"; ct_sexp] @ loc_sexp @ [attrs_sexp])
+  | Texp_coerce {source_type; target; target_type} ->
+    let source_sexp = Sexp.list [Sexp.atom "source"; type_expr source_type] in
+    let ct_sexp = core_type ~with_locs target in
+    let target_sexp = Sexp.list [Sexp.atom "target"; type_expr target_type] in
+    Sexp.list
+      ([Sexp.atom "Texp_coerce"; source_sexp; ct_sexp; target_sexp]
+      @ loc_sexp @ [attrs_sexp])
   | Texp_open (flag, p, _, _) ->
     Sexp.list ([Sexp.atom "Texp_open"; override_flag flag; path p] @ loc_sexp @ [attrs_sexp])
 

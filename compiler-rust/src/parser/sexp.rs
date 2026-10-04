@@ -577,8 +577,8 @@ fn row_field(arena: &ParseArena, field: &RowField) -> Sexp {
             Sexp::atom(&quote_string(&lbl.txt)),
             attributes(arena, attrs),
             Sexp::atom(if *empty { "true" } else { "false" }),
-            Sexp::list(map_empty(types, |t| {
-                core_type(arena, arena.get_core_type(*t))
+            Sexp::list(map_empty(types, |group| {
+                Sexp::list(map_empty(&group.txt, |t| core_type(arena, arena.get_core_type(*t))))
             })),
         ]),
         RowField::Rinherit(t) => Sexp::list(vec![
@@ -640,22 +640,14 @@ fn pattern(arena: &ParseArena, p: &Pattern) -> Sexp {
         PatternDesc::Ppat_construct(lid, opt_pat) => Sexp::list(vec![
             Sexp::atom("Ppat_construct"),
             longident_idx(arena, lid.txt),
-            match opt_pat {
-                None => Sexp::atom("None"),
-                Some(p) => Sexp::list(vec![Sexp::atom("some"), pattern(arena, arena.get_pat(*p))]), // Note: lowercase "some" matches OCaml
-            },
+            Sexp::list(map_empty(&opt_pat.txt, |p| pattern(arena, arena.get_pat(*p)))),
         ]),
         PatternDesc::Ppat_variant(inner) => {
             let (ref lbl, ref opt_pat) = **inner;
             Sexp::list(vec![
                 Sexp::atom("Ppat_variant"),
                 Sexp::atom(&quote_string(lbl)),
-                match opt_pat {
-                    None => Sexp::atom("None"),
-                    Some(p) => {
-                        Sexp::list(vec![Sexp::atom("Some"), pattern(arena, arena.get_pat(*p))])
-                    }
-                },
+                Sexp::list(map_empty(&opt_pat.txt, |p| pattern(arena, arena.get_pat(*p)))),
             ])
         }
         PatternDesc::Ppat_record(inner) => {
@@ -820,26 +812,14 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
         ExpressionDesc::Pexp_construct(lid, opt_expr) => Sexp::list(vec![
             Sexp::atom("Pexp_construct"),
             longident_idx(arena, lid.txt),
-            match opt_expr {
-                None => Sexp::atom("None"),
-                Some(e) => Sexp::list(vec![
-                    Sexp::atom("Some"),
-                    expression(arena, arena.get_expr(*e)),
-                ]),
-            },
+            Sexp::list(map_empty(&opt_expr.txt, |e| expression(arena, arena.get_expr(*e)))),
         ]),
         ExpressionDesc::Pexp_variant(inner) => {
             let (ref lbl, ref opt_expr) = **inner;
             Sexp::list(vec![
                 Sexp::atom("Pexp_variant"),
                 Sexp::atom(&quote_string(lbl)),
-                match opt_expr {
-                    None => Sexp::atom("None"),
-                    Some(e) => Sexp::list(vec![
-                        Sexp::atom("Some"),
-                        expression(arena, arena.get_expr(*e)),
-                    ]),
-                },
+                Sexp::list(map_empty(&opt_expr.txt, |e| expression(arena, arena.get_expr(*e)))),
             ])
         }
         ExpressionDesc::Pexp_record(inner) => {

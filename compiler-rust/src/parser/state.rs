@@ -18,16 +18,6 @@ use super::grammar::Grammar;
 use super::scanner::Scanner;
 use super::token::Token;
 
-/// Parser mode determines some parsing behaviors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ParserMode {
-    /// Parsing for the type checker (standard mode).
-    #[default]
-    ParseForTypeChecker,
-    /// Default mode.
-    Default,
-}
-
 /// Region status for error reporting.
 ///
 /// Used to avoid reporting duplicate errors in the same region.
@@ -89,8 +79,6 @@ pub struct ParserSnapshot<'src> {
 /// - Collected errors, diagnostics, and comments
 /// - Arena for interned positions and locations
 pub struct Parser<'src> {
-    /// Parser mode.
-    pub mode: ParserMode,
     /// The scanner for lexical analysis.
     scanner: Scanner<'src>,
     /// Current token.
@@ -163,11 +151,6 @@ pub struct Parser<'src> {
 impl<'src> Parser<'src> {
     /// Create a new parser for the given source code.
     pub fn new(filename: impl Into<String>, src: &'src str) -> Self {
-        Self::with_mode(filename, src, ParserMode::default())
-    }
-
-    /// Create a new parser with a specific mode.
-    pub fn with_mode(filename: impl Into<String>, src: &'src str, mode: ParserMode) -> Self {
         // Create arena first so we can intern the filename
         let mut arena = ParseArena::new();
         arena.reserve_for_source(src.len());
@@ -178,7 +161,6 @@ impl<'src> Parser<'src> {
         let default_pos = Position::default();
         let default_pos_idx = arena.push_position(default_pos);
         let mut parser = Parser {
-            mode,
             scanner,
             token: Token::Semicolon, // Placeholder, will be replaced by first scan
             start_pos: default_pos,
@@ -1174,7 +1156,6 @@ mod tests {
         fn assert_send<T: Send>() {}
         // Parser contains Scanner which contains a reference, so not Send
         // But we can still verify the basic types are
-        assert_send::<ParserMode>();
         assert_send::<RegionStatus>();
     }
 }

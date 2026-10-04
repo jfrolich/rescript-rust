@@ -116,7 +116,7 @@ fn raw_constructor_constant(
                         constructor_runtime_tag(&tag.literal)
                     }
                     crate::types::VariantConstructorCase::Block(block) => {
-                        constructor_runtime_tag(&block.runtime.tag.literal)
+                        constructor_runtime_tag(&block.tag().literal)
                     }
                 }
             }
@@ -3726,9 +3726,12 @@ impl<'a> RawLambdaConverter<'a> {
                     self.type_ctx
                         .with_variant_layout(reference.variant, |layout| {
                             let runtime = match &layout.constructors[reference.position] {
-                                crate::types::VariantConstructorCase::Block(block) => {
-                                    block.runtime.clone()
-                                }
+                                crate::types::VariantConstructorCase::Block(
+                                    crate::types::VariantBlock::Tagged(runtime),
+                                ) => runtime.clone(),
+                                crate::types::VariantConstructorCase::Block(
+                                    crate::types::VariantBlock::Untagged { .. },
+                                ) => unreachable!("untagged constructors are erased"),
                                 crate::types::VariantConstructorCase::Constant(_) => {
                                     unreachable!("payload constructor has constant layout")
                                 }
@@ -3806,7 +3809,7 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 }
                 crate::types::VariantConstructorCase::Block(block)
-                    if block.runtime.untagged
+                    if block.is_untagged()
                         && self
                             .type_ctx
                             .with_variant_layout(reference.variant, |layout| {
@@ -3817,6 +3820,16 @@ impl<'a> RawLambdaConverter<'a> {
                         [arg] => self.convert_expr_raw(arg),
                         [] => RawLambda::const_(raw_constructor_constant(self.type_ctx, cstr, 0)),
                         _ => RawLambda::unit(),
+                    }
+                }
+                // translcore.ml Texp_construct: untagged payload constructors
+                // have no Lambda or JS block.
+                crate::types::VariantConstructorCase::Block(block)
+                    if block.is_untagged() && !constructor_has_optional_shape(cstr) =>
+                {
+                    match args {
+                        [arg] => self.convert_expr_raw(arg),
+                        _ => unreachable!("untagged constructor arity is checked by the type checker"),
                     }
                 }
                 crate::types::VariantConstructorCase::Block(_) => {
@@ -3971,7 +3984,7 @@ impl<'a> RawLambdaConverter<'a> {
                         fields: fields_info,
                         logical_field_count,
                         mutable_flag,
-                        runtime: Box::new(block.runtime),
+                        runtime: Box::new(block),
                     };
                     // OCaml: if mut = Mutable then raise Not_constant
                     if matches!(mutable_flag, ParserMutableFlag::Mutable) {
@@ -6673,7 +6686,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 crate::types::ConstructorKind::Ordinary(reference)
                                     if matches!(reference.representation(self.type_ctx),
                                         crate::types::VariantConstructorCase::Block(ref block)
-                                            if block.runtime.untagged)
+                                            if block.is_untagged())
                             ) {
                                 if let Some(result) =
                                     self.compile_irrefutable_match_raw(scrut, cases)
@@ -7230,7 +7243,7 @@ impl<'a> RawLambdaConverter<'a> {
                             seen_const_tags.push(key);
                         }
                         crate::types::VariantConstructorCase::Block(block) => {
-                            if block.runtime.untagged
+                            if block.is_untagged()
                                 || seen_block_tags.contains(&key)
                                 || !args.iter().all(|pat| self.is_irrefutable_pattern(pat))
                             {
@@ -8086,7 +8099,7 @@ impl<'a> RawLambdaConverter<'a> {
                 crate::types::ConstructorKind::Ordinary(reference) => {
                     match reference.representation(self.type_ctx) {
                         crate::types::VariantConstructorCase::Block(block)
-                            if block.runtime.untagged =>
+                            if block.is_untagged() =>
                         {
                             RawLambda::var(scrut_id.clone())
                         }
@@ -8300,7 +8313,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 args.is_empty() && seen_const_tags.insert(reference.position as i32)
                             }
                             crate::types::VariantConstructorCase::Block(block)
-                                if !block.runtime.untagged =>
+                                if !block.is_untagged() =>
                             {
                                 seen_block_tags.insert(reference.position as i32);
                                 true
@@ -9149,7 +9162,7 @@ impl<'a> RawLambdaConverter<'a> {
                 crate::types::ConstructorKind::Ordinary(reference) => {
                     match reference.representation(self.type_ctx) {
                         crate::types::VariantConstructorCase::Block(block)
-                            if block.runtime.untagged =>
+                            if block.is_untagged() =>
                         {
                             Lambda::var(tmp.clone())
                         }
@@ -9930,7 +9943,7 @@ impl<'a> RawLambdaConverter<'a> {
             PatternDesc::Tpat_construct(_, cstr, args) => {
                 match constructor_case(self.type_ctx, cstr) {
                     Some(crate::types::VariantConstructorCase::Block(block))
-                        if block.runtime.untagged =>
+                        if block.is_untagged() =>
                     {
                         args.first().map_or(body.clone(), |arg| {
                             self.bind_irrefutable_pattern(arg, scrut, body)
@@ -11515,7 +11528,7 @@ impl<'a> RawLambdaConverter<'a> {
                 }
             }
             Some(crate::types::VariantConstructorCase::Block(block))
-                if block.runtime.untagged
+                if block.is_untagged()
                     && matches!(cstr.cstr_kind, crate::types::ConstructorKind::Ordinary(reference)
                     if self.type_ctx.with_variant_layout(reference.variant, |layout| {
                         layout.constructors.len() == 1

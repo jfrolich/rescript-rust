@@ -156,9 +156,9 @@ pub fn walk_typ<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: CoreTyp
         CoreTypeDesc::Ptyp_variant(inner) => {
             for row in inner.0.iter() {
                 match row {
-                    RowField::Rtag(_, attrs, _, types) => {
+                    RowField::Rtag(_, attrs, _, groups) => {
                         v.attributes(arena, attrs.as_slice());
-                        for t in types {
+                        for t in groups.iter().flat_map(|group| group.txt.iter()) {
                             v.typ(arena, *t);
                         }
                     }
@@ -450,14 +450,14 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
                 v.expr(arena, *e);
             }
         }
-        ExpressionDesc::Pexp_construct(_, _) => {
-            if let Some(arg) = arena.construct_arg(idx) {
-                v.expr(arena, arg);
+        ExpressionDesc::Pexp_construct(_, args) => {
+            for arg in &args.txt {
+                v.expr(arena, *arg);
             }
         }
-        ExpressionDesc::Pexp_variant(_) => {
-            if let Some(arg) = arena.variant_arg(idx) {
-                v.expr(arena, arg);
+        ExpressionDesc::Pexp_variant(inner) => {
+            for arg in &inner.1.txt {
+                v.expr(arena, *arg);
             }
         }
         ExpressionDesc::Pexp_record(inner) => {
@@ -615,14 +615,14 @@ pub fn walk_pat<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: PatIdx)
                 v.pat(arena, *p);
             }
         }
-        PatternDesc::Ppat_construct(_, arg) => {
-            if let Some(arg) = arg {
+        PatternDesc::Ppat_construct(_, args) => {
+            for arg in &args.txt {
                 v.pat(arena, *arg);
             }
         }
         PatternDesc::Ppat_variant(inner) => {
-            if let Some(arg) = inner.1 {
-                v.pat(arena, arg);
+            for arg in &inner.1.txt {
+                v.pat(arena, *arg);
             }
         }
         PatternDesc::Ppat_record(inner) => {

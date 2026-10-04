@@ -1075,11 +1075,11 @@ pub fn print_expression(
         ExpressionDesc::Pexp_break => Doc::text("break"),
         ExpressionDesc::Pexp_continue => Doc::text("continue"),
         // Unit constructor: ()
-        ExpressionDesc::Pexp_construct(lid, None) if arena.is_lident(lid.txt, "()") => {
+        ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "()") => {
             Doc::text("()")
         }
         // Empty list: []
-        ExpressionDesc::Pexp_construct(lid, None) if arena.is_lident(lid.txt, "[]") => {
+        ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "[]") => {
             Doc::concat(vec![
                 Doc::text("list{"),
                 print_comments_inside(cmt_tbl, e.pexp_loc, arena),
@@ -1093,73 +1093,7 @@ pub fn print_expression(
         // Other constructors
         ExpressionDesc::Pexp_construct(longident_loc, args) => {
             let constr = print_longident_location(longident_loc, cmt_tbl, arena);
-            let args_doc = match args {
-                None => Doc::nil(),
-                Some(arg_idx) => {
-                    let arg = arena.get_expr(*arg_idx);
-                    match &*arg.pexp_desc {
-                        ExpressionDesc::Pexp_construct(lid, None)
-                            if arena.is_lident(lid.txt, "()") =>
-                        {
-                            Doc::text("()")
-                        }
-                        // Some((1, 2))
-                        ExpressionDesc::Pexp_tuple(exprs) if exprs.len() == 1 => {
-                            if let ExpressionDesc::Pexp_tuple(_) =
-                                &*arena.get_expr(exprs[0]).pexp_desc
-                            {
-                                let doc = print_expression_with_comments(
-                                    state,
-                                    arena.get_expr(exprs[0]),
-                                    cmt_tbl,
-                                    arena,
-                                );
-                                let doc = match parens::expr(arena, arena.get_expr(exprs[0])) {
-                                    ParenKind::Parenthesized => add_parens(doc),
-                                    ParenKind::Braced(loc) => {
-                                        print_braces(doc, arena.get_expr(exprs[0]), loc, arena)
-                                    }
-                                    ParenKind::Nothing => doc,
-                                };
-                                Doc::concat(vec![Doc::lparen(), doc, Doc::rparen()])
-                            } else {
-                                print_constructor_args(
-                                    state,
-                                    Some(arena.get_expr(*arg_idx)),
-                                    cmt_tbl,
-                                    arena,
-                                )
-                            }
-                        }
-                        ExpressionDesc::Pexp_tuple(exprs) => {
-                            print_tuple_args(state, exprs, cmt_tbl, arena)
-                        }
-                        _ => {
-                            let arg_doc =
-                                print_expression_with_comments(state, arg, cmt_tbl, arena);
-                            let arg_doc = match parens::expr(arena, arg) {
-                                ParenKind::Parenthesized => add_parens(arg_doc),
-                                ParenKind::Braced(loc) => print_braces(arg_doc, arg, loc, arena),
-                                ParenKind::Nothing => arg_doc,
-                            };
-                            let should_hug = parsetree_viewer::is_huggable_expression(arena, arg);
-                            Doc::concat(vec![
-                                Doc::lparen(),
-                                if should_hug {
-                                    arg_doc
-                                } else {
-                                    Doc::concat(vec![
-                                        Doc::indent(Doc::concat(vec![Doc::soft_line(), arg_doc])),
-                                        Doc::trailing_comma(),
-                                        Doc::soft_line(),
-                                    ])
-                                },
-                                Doc::rparen(),
-                            ])
-                        }
-                    }
-                }
-            };
+            let args_doc = print_expression_args(state, &args.txt, cmt_tbl, arena);
             Doc::group(Doc::concat(vec![constr, args_doc]))
         }
         // Identifier
@@ -1224,69 +1158,7 @@ pub fn print_expression(
         ExpressionDesc::Pexp_variant(inner) => {
             let (ref label, ref args) = **inner;
             let variant_name = Doc::concat(vec![Doc::text("#"), print_poly_var_ident(label)]);
-            let args_doc = match args {
-                None => Doc::nil(),
-                Some(arg_idx) => {
-                    let arg = arena.get_expr(*arg_idx);
-                    match &*arg.pexp_desc {
-                        ExpressionDesc::Pexp_construct(lid, None)
-                            if arena.is_lident(lid.txt, "()") =>
-                        {
-                            Doc::text("()")
-                        }
-                        // Special case: #poly((1, 2)) - tuple containing a single tuple
-                        // OCaml prints this hugged without indent
-                        ExpressionDesc::Pexp_tuple(exprs)
-                            if exprs.len() == 1
-                                && matches!(
-                                    &*arena.get_expr(exprs[0]).pexp_desc,
-                                    ExpressionDesc::Pexp_tuple(_)
-                                ) =>
-                        {
-                            let inner_doc = print_expression_with_comments(
-                                state,
-                                arena.get_expr(exprs[0]),
-                                cmt_tbl,
-                                arena,
-                            );
-                            let inner_doc = match parens::expr(arena, arena.get_expr(exprs[0])) {
-                                ParenKind::Parenthesized => add_parens(inner_doc),
-                                ParenKind::Braced(loc) => {
-                                    print_braces(inner_doc, arena.get_expr(exprs[0]), loc, arena)
-                                }
-                                ParenKind::Nothing => inner_doc,
-                            };
-                            Doc::concat(vec![Doc::lparen(), inner_doc, Doc::rparen()])
-                        }
-                        ExpressionDesc::Pexp_tuple(exprs) => {
-                            print_tuple_args(state, exprs, cmt_tbl, arena)
-                        }
-                        _ => {
-                            let arg_doc =
-                                print_expression_with_comments(state, arg, cmt_tbl, arena);
-                            let arg_doc = match parens::expr(arena, arg) {
-                                ParenKind::Parenthesized => add_parens(arg_doc),
-                                ParenKind::Braced(loc) => print_braces(arg_doc, arg, loc, arena),
-                                ParenKind::Nothing => arg_doc,
-                            };
-                            let should_hug = parsetree_viewer::is_huggable_expression(arena, arg);
-                            Doc::concat(vec![
-                                Doc::lparen(),
-                                if should_hug {
-                                    arg_doc
-                                } else {
-                                    Doc::concat(vec![
-                                        Doc::indent(Doc::concat(vec![Doc::soft_line(), arg_doc])),
-                                        Doc::trailing_comma(),
-                                        Doc::soft_line(),
-                                    ])
-                                },
-                                Doc::rparen(),
-                            ])
-                        }
-                    }
-                }
-            };
+            let args_doc = print_expression_args(state, &args.txt, cmt_tbl, arena);
             Doc::group(Doc::concat(vec![variant_name, args_doc]))
         }
         // Record expression
@@ -1751,55 +1623,32 @@ fn print_lident_path(
     print_comments(doc, cmt_tbl, path.loc, arena)
 }
 
-/// Print tuple arguments.
-fn print_tuple_args(
+/// res_printer.ml `print_expression_args`: the argument list of a
+/// constructor or polymorphic variant expression.
+fn print_expression_args(
     state: &PrinterState,
-    exprs: &[ExprIdx],
+    args: &[ExprIdx],
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    Doc::concat(vec![
-        Doc::lparen(),
-        Doc::indent(Doc::concat(vec![
-            Doc::soft_line(),
-            Doc::join(
-                Doc::concat(vec![Doc::comma(), Doc::line()]),
-                exprs
-                    .iter()
-                    .map(|expr_idx| {
-                        let expr = arena.get_expr(*expr_idx);
-                        let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
-                        match parens::expr(arena, expr) {
-                            ParenKind::Parenthesized => add_parens(doc),
-                            ParenKind::Braced(loc) => print_braces(doc, expr, loc, arena),
-                            ParenKind::Nothing => doc,
-                        }
-                    })
-                    .collect(),
-            ),
-        ])),
-        Doc::trailing_comma(),
-        Doc::soft_line(),
-        Doc::rparen(),
-    ])
-}
-
-/// Print constructor arguments (for pattern).
-fn print_constructor_args(
-    state: &PrinterState,
-    arg: Option<&Expression>,
-    cmt_tbl: &mut CommentTable,
-    arena: &ParseArena,
-) -> Doc {
-    match arg {
-        None => Doc::nil(),
-        Some(arg) => {
-            let arg_doc = print_expression_with_comments(state, arg, cmt_tbl, arena);
-            let arg_doc = match parens::expr(arena, arg) {
-                ParenKind::Parenthesized => add_parens(arg_doc),
-                ParenKind::Braced(loc) => print_braces(arg_doc, arg, loc, arena),
-                ParenKind::Nothing => arg_doc,
-            };
+    let mut print_arg = |expr: &Expression, cmt_tbl: &mut CommentTable| {
+        let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
+        match parens::expr(arena, expr) {
+            ParenKind::Parenthesized => add_parens(doc),
+            ParenKind::Braced(loc) => print_braces(doc, expr, loc, arena),
+            ParenKind::Nothing => doc,
+        }
+    };
+    match args {
+        [] => Doc::nil(),
+        [arg] if matches!(&*arena.get_expr(*arg).pexp_desc,
+            ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "()")) =>
+        {
+            Doc::text("()")
+        }
+        [arg] => {
+            let arg = arena.get_expr(*arg);
+            let arg_doc = print_arg(arg, cmt_tbl);
             let should_hug = parsetree_viewer::is_huggable_expression(arena, arg);
             Doc::concat(vec![
                 Doc::lparen(),
@@ -1815,6 +1664,79 @@ fn print_constructor_args(
                 Doc::rparen(),
             ])
         }
+        args => {
+            let docs = args.iter().map(|idx| print_arg(arena.get_expr(*idx), cmt_tbl)).collect();
+            Doc::concat(vec![
+                Doc::lparen(),
+                Doc::indent(Doc::concat(vec![
+                    Doc::soft_line(),
+                    Doc::join(Doc::concat(vec![Doc::comma(), Doc::line()]), docs),
+                ])),
+                Doc::trailing_comma(),
+                Doc::soft_line(),
+                Doc::rparen(),
+            ])
+        }
+    }
+}
+
+/// res_printer.ml `print_pattern_args`: the argument list of a constructor
+/// or polymorphic variant pattern.
+fn print_pattern_args(
+    state: &PrinterState,
+    patterns: &[PatIdx],
+    cmt_tbl: &mut CommentTable,
+    arena: &ParseArena,
+) -> Doc {
+    match patterns {
+        [] => Doc::nil(),
+        [arg] if matches!(&*arena.get_pat(*arg).ppat_desc,
+            PatternDesc::Ppat_construct(lid, _) if arena.is_lident(lid.txt, "()")) =>
+        {
+            Doc::concat(vec![
+                Doc::lparen(),
+                print_comments_inside(cmt_tbl, arena.get_pat(*arg).ppat_loc, arena),
+                Doc::rparen(),
+            ])
+        }
+        [arg] if matches!(&*arena.get_pat(*arg).ppat_desc, PatternDesc::Ppat_tuple(pats) if pats.is_empty()) => {
+            Doc::concat(vec![
+                Doc::lparen(),
+                print_comments_inside(cmt_tbl, arena.get_pat(*arg).ppat_loc, arena),
+                Doc::rparen(),
+            ])
+        }
+        [arg] => {
+            let arg = arena.get_pat(*arg);
+            let arg_doc = print_pattern(state, arg, cmt_tbl, arena);
+            let should_hug = is_huggable_pattern(arg);
+            Doc::concat(vec![
+                Doc::lparen(),
+                if should_hug {
+                    arg_doc
+                } else {
+                    Doc::concat(vec![
+                        Doc::indent(Doc::concat(vec![Doc::soft_line(), arg_doc])),
+                        Doc::trailing_comma(),
+                        Doc::soft_line(),
+                    ])
+                },
+                Doc::rparen(),
+            ])
+        }
+        patterns => Doc::concat(vec![
+            Doc::lparen(),
+            Doc::indent(Doc::concat(vec![
+                Doc::soft_line(),
+                Doc::join(
+                    Doc::concat(vec![Doc::comma(), Doc::line()]),
+                    patterns.iter().map(|p| print_pattern(state, arena.get_pat(*p), cmt_tbl, arena)).collect(),
+                ),
+            ])),
+            Doc::trailing_comma(),
+            Doc::soft_line(),
+            Doc::rparen(),
+        ]),
     }
 }
 
@@ -1934,10 +1856,10 @@ fn print_pexp_fun(
             (
                 ExpressionDesc::Pexp_array(_)
                 | ExpressionDesc::Pexp_tuple(_)
-                | ExpressionDesc::Pexp_construct(_, Some(_))
                 | ExpressionDesc::Pexp_record(_),
                 _,
             ) => true,
+            (ExpressionDesc::Pexp_construct(_, args), _) if !args.txt.is_empty() => true,
             _ => false,
         };
         let should_indent = match &*return_expr.pexp_desc {
@@ -2073,8 +1995,8 @@ fn print_expr_fun_parameters(
         ] if parsetree_viewer::filter_parsing_attrs_slice(arena, attrs).is_empty()
             && matches!(
                 &*pat.ppat_desc,
-                PatternDesc::Ppat_construct(lid, None)
-                    if arena.is_lident(lid.txt, "()")
+                PatternDesc::Ppat_construct(lid, args)
+                    if arena.is_lident(lid.txt, "()") && args.txt.is_empty()
             ) =>
         {
             let doc = Doc::text("()");
@@ -3564,12 +3486,17 @@ fn print_underscore_apply_call(
     };
     // Note: OCaml checks this AFTER rewriting __x to _, so __x args are treated
     // as regular identifiers (not callbacks) in this check.
-    if parsetree_viewer::requires_special_callback_printing_first_arg(arena, args, false) {
+    let requires_regular_layout = arguments_require_regular_layout(cmt_tbl, args, arena);
+    if !requires_regular_layout
+        && parsetree_viewer::requires_special_callback_printing_first_arg(arena, args, false)
+    {
         let args_doc = print_arguments_with_callback_in_first_position_underscore_subst(
             state, args, false, cmt_tbl, arena,
         );
         Doc::concat(vec![funct_doc, args_doc])
-    } else if parsetree_viewer::requires_special_callback_printing_last_arg(arena, args, false) {
+    } else if !requires_regular_layout
+        && parsetree_viewer::requires_special_callback_printing_last_arg(arena, args, false)
+    {
         let args_doc = print_arguments_with_callback_in_last_position_underscore_subst(
             state, args, false, cmt_tbl, arena,
         );
@@ -3663,6 +3590,13 @@ fn print_arguments_with_underscore_subst(
         return Doc::text("()");
     }
 
+    // res_printer.ml print_arguments `force_break`.
+    let force_break = args.iter().any(|(label, arg)| {
+        let arg = arena.get_expr(*arg);
+        matches!(&*arg.pexp_desc, ExpressionDesc::Pexp_fun(_))
+            && (cmt_tbl.has_any_trailing_line_comment_at(PosRange::argument(arena, label, arg))
+                || cmt_tbl.has_any_trailing_line_comment_at(PosRange::from_loc(arg.pexp_loc, arena)))
+    });
     let mut all_docs: Vec<Doc> = args
         .iter()
         .map(|(lbl, arg)| print_argument_with_underscore_subst(state, lbl, arg, cmt_tbl, arena))
@@ -3671,7 +3605,7 @@ fn print_arguments_with_underscore_subst(
         all_docs.push(Doc::text("..."));
     }
 
-    Doc::group(Doc::concat(vec![
+    Doc::breakable_group(Doc::concat(vec![
         Doc::lparen(),
         Doc::indent(Doc::concat(vec![
             Doc::soft_line(),
@@ -3685,7 +3619,7 @@ fn print_arguments_with_underscore_subst(
         },
         Doc::soft_line(),
         Doc::rparen(),
-    ]))
+    ]), force_break)
 }
 
 /// Print arguments with callback in first position, with underscore substitution.
@@ -4198,12 +4132,17 @@ fn print_pexp_apply(
 
     // res_printer.ml:4778-4817: the attributes are printed after the
     // arguments, and the plain call is not grouped on its own.
-    if parsetree_viewer::requires_special_callback_printing_first_arg(arena, args, partial) {
+    let requires_regular_layout = arguments_require_regular_layout(cmt_tbl, args, arena);
+    if !requires_regular_layout
+        && parsetree_viewer::requires_special_callback_printing_first_arg(arena, args, partial)
+    {
         let args_doc =
             print_arguments_with_callback_in_first_position(state, args, partial, cmt_tbl, arena);
         let attrs_doc = print_attributes(state, &expr.pexp_attributes, cmt_tbl, arena);
         Doc::concat(vec![attrs_doc, funct_doc, args_doc])
-    } else if parsetree_viewer::requires_special_callback_printing_last_arg(arena, args, partial) {
+    } else if !requires_regular_layout
+        && parsetree_viewer::requires_special_callback_printing_last_arg(arena, args, partial)
+    {
         let args_doc =
             print_arguments_with_callback_in_last_position(state, args, partial, cmt_tbl, arena);
         // Check if args doc will break - if so, add break_parent
@@ -4908,6 +4847,15 @@ fn print_arguments(
         }
     }
 
+    // res_printer.ml print_arguments: flush a callback's line comment before
+    // closing the argument list, so reparsing cannot attach it to an
+    // enclosing call instead.
+    let force_break = args.iter().any(|(label, arg)| {
+        let arg = arena.get_expr(*arg);
+        matches!(&*arg.pexp_desc, ExpressionDesc::Pexp_fun(_))
+            && (cmt_tbl.has_any_trailing_line_comment_at(PosRange::argument(arena, label, arg))
+                || cmt_tbl.has_any_trailing_line_comment_at(PosRange::from_loc(arg.pexp_loc, arena)))
+    });
     let args_doc: Vec<Doc> = args
         .iter()
         .map(|(label, expr)| print_argument(state, label, arena.get_expr(*expr), cmt_tbl, arena))
@@ -4919,7 +4867,7 @@ fn print_arguments(
         all_docs.push(Doc::text("..."));
     }
 
-    Doc::group(Doc::concat(vec![
+    Doc::breakable_group(Doc::concat(vec![
         Doc::lparen(),
         Doc::indent(Doc::concat(vec![
             Doc::soft_line(),
@@ -4933,7 +4881,7 @@ fn print_arguments(
         },
         Doc::soft_line(),
         Doc::rparen(),
-    ]))
+    ]), force_break)
 }
 
 /// Print a single function argument (like OCaml's print_argument).
@@ -5123,9 +5071,40 @@ fn make_combined_pos_range(
 /// Check if an expression is unit: `()`
 fn is_unit_expr(arena: &ParseArena, expr: &Expression) -> bool {
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_construct(lid, None) => arena.is_lident(lid.txt, "()"),
+        ExpressionDesc::Pexp_construct(lid, _) => arena.is_lident(lid.txt, "()"),
         _ => false,
     }
+}
+
+/// res_printer.ml `argument_requires_regular_layout`: compact callback
+/// layouts print expression comments but not comments on the full labeled
+/// argument, and trailing comments can escape them when the body breaks.
+fn argument_requires_regular_layout(
+    cmt_tbl: &CommentTable,
+    lbl: &ArgLabel,
+    arg: &Expression,
+    arena: &ParseArena,
+) -> bool {
+    let loc = PosRange::argument(arena, lbl, arg);
+    let has_leading_label_comments = match lbl {
+        ArgLabel::Nolabel => false,
+        ArgLabel::Labelled(_) | ArgLabel::Optional(_) => {
+            cmt_tbl.has_leading_comments_at(loc) || cmt_tbl.has_leading_comments(arg.pexp_loc, arena)
+        }
+    };
+    has_leading_label_comments
+        || cmt_tbl.has_trailing_comments_at(loc)
+        || cmt_tbl.has_trailing_comments(arg.pexp_loc, arena)
+}
+
+/// Whether any argument rules out the compact callback layouts.
+fn arguments_require_regular_layout(
+    cmt_tbl: &CommentTable,
+    args: &[(ArgLabel, ExprIdx)],
+    arena: &ParseArena,
+) -> bool {
+    args.iter()
+        .any(|(lbl, arg)| argument_requires_regular_layout(cmt_tbl, lbl, arena.get_expr(*arg), arena))
 }
 
 /// Check if there's a leading line comment at a location.
@@ -5221,7 +5200,7 @@ pub fn print_pattern(
             Doc::text("]"),
         ])),
         // ()
-        PatternDesc::Ppat_construct(lid, None) if arena.is_lident(lid.txt, "()") => {
+        PatternDesc::Ppat_construct(lid, _) if arena.is_lident(lid.txt, "()") => {
             Doc::concat(vec![
                 Doc::lparen(),
                 print_comments_inside(cmt_tbl, pat.ppat_loc, arena),
@@ -5229,7 +5208,7 @@ pub fn print_pattern(
             ])
         }
         // list{}
-        PatternDesc::Ppat_construct(lid, None) if arena.is_lident(lid.txt, "[]") => {
+        PatternDesc::Ppat_construct(lid, _) if arena.is_lident(lid.txt, "[]") => {
             Doc::concat(vec![
                 Doc::text("list{"),
                 print_comments_inside(cmt_tbl, pat.ppat_loc, arena),
@@ -5243,118 +5222,14 @@ pub fn print_pattern(
         // Constructor(args)
         PatternDesc::Ppat_construct(constr_name, constructor_args) => {
             let constr = print_longident_location(constr_name, cmt_tbl, arena);
-            let args_doc = match constructor_args {
-                None => Doc::nil(),
-                Some(arg_idx) => {
-                    let arg = arena.get_pat(*arg_idx);
-                    match &*arg.ppat_desc {
-                        PatternDesc::Ppat_construct(lid, None)
-                            if arena.is_lident(lid.txt, "()") =>
-                        {
-                            Doc::concat(vec![
-                                Doc::lparen(),
-                                print_comments_inside(cmt_tbl, arg.ppat_loc, arena),
-                                Doc::rparen(),
-                            ])
-                        }
-                        // Some((1, 2))
-                        PatternDesc::Ppat_tuple(pats) if pats.len() == 1 => {
-                            if let PatternDesc::Ppat_tuple(_) = &*arena.get_pat(pats[0]).ppat_desc {
-                                Doc::concat(vec![
-                                    Doc::lparen(),
-                                    print_pattern(state, arena.get_pat(pats[0]), cmt_tbl, arena),
-                                    Doc::rparen(),
-                                ])
-                            } else {
-                                print_pattern_constructor_args(state, Some(arg), cmt_tbl, arena)
-                            }
-                        }
-                        PatternDesc::Ppat_tuple(patterns) => Doc::concat(vec![
-                            Doc::lparen(),
-                            Doc::indent(Doc::concat(vec![
-                                Doc::soft_line(),
-                                Doc::join(
-                                    Doc::concat(vec![Doc::comma(), Doc::line()]),
-                                    patterns
-                                        .iter()
-                                        .map(|p| {
-                                            print_pattern(state, arena.get_pat(*p), cmt_tbl, arena)
-                                        })
-                                        .collect(),
-                                ),
-                            ])),
-                            Doc::trailing_comma(),
-                            Doc::soft_line(),
-                            Doc::rparen(),
-                        ]),
-                        _ => {
-                            let arg_doc = print_pattern(state, arg, cmt_tbl, arena);
-                            let should_hug = is_huggable_pattern(arg);
-                            Doc::concat(vec![
-                                Doc::lparen(),
-                                if should_hug {
-                                    arg_doc
-                                } else {
-                                    Doc::concat(vec![
-                                        Doc::indent(Doc::concat(vec![Doc::soft_line(), arg_doc])),
-                                        Doc::trailing_comma(),
-                                        Doc::soft_line(),
-                                    ])
-                                },
-                                Doc::rparen(),
-                            ])
-                        }
-                    }
-                }
-            };
+            let args_doc = print_pattern_args(state, &constructor_args.txt, cmt_tbl, arena);
             Doc::group(Doc::concat(vec![constr, args_doc]))
         }
         // #variant or #variant(args)
         PatternDesc::Ppat_variant(inner) => {
-            let (ref label, ref opt_arg) = **inner;
-            if opt_arg.is_none() {
-                return Doc::concat(vec![Doc::text("#"), print_poly_var_ident(label)]);
-            }
-            let arg = arena.get_pat(*opt_arg.as_ref().unwrap());
+            let (ref label, ref variant_args) = **inner;
             let variant_name = Doc::concat(vec![Doc::text("#"), print_poly_var_ident(label)]);
-            let args_doc = match &*arg.ppat_desc {
-                PatternDesc::Ppat_construct(lid, None) if arena.is_lident(lid.txt, "()") => {
-                    Doc::text("()")
-                }
-                PatternDesc::Ppat_tuple(patterns) => Doc::concat(vec![
-                    Doc::lparen(),
-                    Doc::indent(Doc::concat(vec![
-                        Doc::soft_line(),
-                        Doc::join(
-                            Doc::concat(vec![Doc::comma(), Doc::line()]),
-                            patterns
-                                .iter()
-                                .map(|p| print_pattern(state, arena.get_pat(*p), cmt_tbl, arena))
-                                .collect(),
-                        ),
-                    ])),
-                    Doc::trailing_comma(),
-                    Doc::soft_line(),
-                    Doc::rparen(),
-                ]),
-                _ => {
-                    let arg_doc = print_pattern(state, arg, cmt_tbl, arena);
-                    let should_hug = is_huggable_pattern(arg);
-                    Doc::concat(vec![
-                        Doc::lparen(),
-                        if should_hug {
-                            arg_doc
-                        } else {
-                            Doc::concat(vec![
-                                Doc::indent(Doc::concat(vec![Doc::soft_line(), arg_doc])),
-                                Doc::trailing_comma(),
-                                Doc::soft_line(),
-                            ])
-                        },
-                        Doc::rparen(),
-                    ])
-                }
-            };
+            let args_doc = print_pattern_args(state, &variant_args.txt, cmt_tbl, arena);
             Doc::group(Doc::concat(vec![variant_name, args_doc]))
         }
         // {field1, field2: pat, ...spread} or dict{"key": pat}
@@ -5544,35 +5419,6 @@ fn is_huggable_pattern(pat: &Pattern) -> bool {
             | PatternDesc::Ppat_variant(_)
             | PatternDesc::Ppat_construct(_, _)
     )
-}
-
-/// Print pattern constructor args.
-fn print_pattern_constructor_args(
-    state: &PrinterState,
-    arg: Option<&Pattern>,
-    cmt_tbl: &mut CommentTable,
-    arena: &ParseArena,
-) -> Doc {
-    match arg {
-        None => Doc::nil(),
-        Some(p) => {
-            let doc = print_pattern(state, p, cmt_tbl, arena);
-            let should_hug = is_huggable_pattern(p);
-            Doc::concat(vec![
-                Doc::lparen(),
-                if should_hug {
-                    doc
-                } else {
-                    Doc::concat(vec![
-                        Doc::indent(Doc::concat(vec![Doc::soft_line(), doc])),
-                        Doc::trailing_comma(),
-                        Doc::soft_line(),
-                    ])
-                },
-                Doc::rparen(),
-            ])
-        }
-    }
 }
 
 /// Print list pattern.
@@ -6413,19 +6259,21 @@ fn print_row_field(
             let types_doc = if types.is_empty() {
                 Doc::nil()
             } else {
+                // res_printer.ml `do_group`: each payload group prints as a
+                // parenthesized, comma-separated type list.
                 let printed_types: Vec<Doc> = types
                     .iter()
-                    .map(|t| {
-                        let t = arena.get_core_type(*t);
-                        if matches!(*t.ptyp_desc, CoreTypeDesc::Ptyp_tuple(_)) {
-                            print_typ_expr(state, t, cmt_tbl, arena)
-                        } else {
-                            Doc::concat(vec![
-                                Doc::lparen(),
-                                print_typ_expr(state, t, cmt_tbl, arena),
-                                Doc::rparen(),
-                            ])
-                        }
+                    .map(|group| {
+                        let docs = group
+                            .txt
+                            .iter()
+                            .map(|t| print_typ_expr(state, arena.get_core_type(*t), cmt_tbl, arena))
+                            .collect();
+                        Doc::concat(vec![
+                            Doc::lparen(),
+                            Doc::join(Doc::concat(vec![Doc::comma(), Doc::line()]), docs),
+                            Doc::rparen(),
+                        ])
                     })
                     .collect();
                 let cases = Doc::join(
@@ -9137,9 +8985,7 @@ fn print_constructor_arguments(
                 Doc::rbrace(),
                 Doc::rparen(),
             ]);
-            // res_printer.ml:1833-1857: no group of its own; the record
-            // breaks with the constructor declaration's group.
-            if indent { Doc::indent(inner) } else { inner }
+            Doc::group(if indent { Doc::indent(inner) } else { inner })
         }
     }
 }

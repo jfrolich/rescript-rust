@@ -5362,19 +5362,12 @@ pub(super) fn single_complete_array_block_switch(
         sw_blocks_full: true,
         sw_blocks: vec![(
             crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                crate::types::VariantBlock {
-                    runtime: crate::types::BlockRuntime {
-                        tag: crate::types::VariantTag {
+                crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                             name: "Cons".to_string(),
                             literal: None,
-                        },
-                        tag_name: None,
-                        untagged: true,
-                    },
-                    block_type: Some(crate::types::VariantBlockType::Instance(
+                        }, block_type: crate::types::VariantBlockType::Instance(
                         crate::types::VariantInstance::Array,
-                    )),
-                },
+                    ) },
             )),
             array_body,
         )],
@@ -5402,17 +5395,10 @@ pub(super) fn default_only_untagged_boolean_switch(
         sw_blocks_full: false,
         sw_blocks: vec![(
             crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                crate::types::VariantBlock {
-                    runtime: crate::types::BlockRuntime {
-                        tag: crate::types::VariantTag {
+                crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                             name: "B".to_string(),
                             literal: None,
-                        },
-                        tag_name: None,
-                        untagged: true,
-                    },
-                    block_type: Some(crate::types::VariantBlockType::Boolean),
-                },
+                        }, block_type: crate::types::VariantBlockType::Boolean },
             )),
             boolean_body,
         )],
@@ -7393,14 +7379,10 @@ fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
                                 Box::new(TagInfo::Constructor {
                                     name: "::".to_string(),
                                     num_nonconst: 1,
-                                    runtime: Box::new(crate::types::BlockRuntime {
-                                        tag: crate::types::VariantTag {
+                                    runtime: Box::new(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                             name: "::".to_string(),
                                             literal: None,
-                                        },
-                                        tag_name: None,
-                                        untagged: false,
-                                    }),
+                                        }, tag_name: None }),
                                 }),
                             )),
                         ],
@@ -7408,14 +7390,10 @@ fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
                         Box::new(TagInfo::Constructor {
                             name: "::".to_string(),
                             num_nonconst: 1,
-                            runtime: Box::new(crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                            runtime: Box::new(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                     name: "::".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: false,
-                            }),
+                                }, tag_name: None }),
                         }),
                     ))),
                     property: LetKind::Strict,
@@ -9112,14 +9090,10 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
             Box::new(TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
-                runtime: Box::new(crate::types::BlockRuntime {
-                    tag: crate::types::VariantTag {
+                runtime: Box::new(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                         name: "::".to_string(),
                         literal: None,
-                    },
-                    tag_name: None,
-                    untagged: false,
-                }),
+                    }, tag_name: None }),
             }),
         )),
     );
@@ -9132,14 +9106,10 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
             Box::new(TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
-                runtime: Box::new(crate::types::BlockRuntime {
-                    tag: crate::types::VariantTag {
+                runtime: Box::new(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                         name: "::".to_string(),
                         literal: None,
-                    },
-                    tag_name: None,
-                    untagged: false,
-                }),
+                    }, tag_name: None }),
             }),
         )),
     );
@@ -10382,17 +10352,10 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
             sw_blocks_full: true,
             sw_blocks: vec![(
                 crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                    crate::types::VariantBlock {
-                        runtime: crate::types::BlockRuntime {
-                            tag: crate::types::VariantTag {
+                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                 name: "Node".to_string(),
                                 literal: None,
-                            },
-                            tag_name: None,
-                            untagged: false,
-                        },
-                        block_type: None,
-                    },
+                            }, tag_name: None }),
                 )),
                 tailcall,
             )],

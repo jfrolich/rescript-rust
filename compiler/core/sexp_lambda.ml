@@ -126,31 +126,27 @@ let variant_tag ({name; literal} : Variant_runtime.tag) =
       | Some literal -> Sexp.list [Sexp.atom "Some"; variant_literal_tag literal]);
     ]
 
-let variant_block_runtime
-    ({tag; tag_name; untagged} : Variant_runtime.block_runtime) =
+let variant_tagged_block ({tag; tag_name} : Variant_runtime.tagged_block) =
   Sexp.list
     [
-      Sexp.atom "runtime";
+      Sexp.atom "Tagged";
       variant_tag tag;
       (match tag_name with
       | None -> Sexp.atom "None"
       | Some name -> Sexp.list [Sexp.atom "Some"; string name]);
-      bool untagged;
     ]
+
+let variant_block (block : Variant_runtime.block) =
+  match block with
+  | Tagged tagged -> variant_tagged_block tagged
+  | Untagged {tag; block_type} ->
+    Sexp.list
+      [Sexp.atom "Untagged"; variant_tag tag; variant_block_type block_type]
 
 let variant_constructor_case = function
   | Variant_runtime.Constant tag ->
     Sexp.list [Sexp.atom "Constant"; variant_tag tag]
-  | Block {runtime; block_type} ->
-    Sexp.list
-      [
-        Sexp.atom "Block";
-        variant_block_runtime runtime;
-        (match block_type with
-        | None -> Sexp.atom "None"
-        | Some block_type ->
-          Sexp.list [Sexp.atom "Some"; variant_block_type block_type]);
-      ]
+  | Block block -> Sexp.list [Sexp.atom "Block"; variant_block block]
 
 let variant_matching_facts
     ({
@@ -183,7 +179,7 @@ let tag_info (info : Lambda.tag_info) =
         Sexp.atom "Blk_constructor";
         string name;
         int num_nonconst;
-        variant_block_runtime runtime;
+        variant_tagged_block runtime;
       ]
   | Blk_tuple -> Sexp.atom "Blk_tuple"
   | Blk_poly_var -> Sexp.atom "Blk_poly_var"
@@ -200,7 +196,7 @@ let tag_info (info : Lambda.tag_info) =
         Sexp.atom "Blk_record_inlined";
         string name;
         int num_nonconst;
-        variant_block_runtime runtime;
+        variant_block runtime;
         Sexp.list (List.map (fun (name, _) -> string name) (Array.to_list fields));
         mutable_flag_sexp mutable_flag;
       ]

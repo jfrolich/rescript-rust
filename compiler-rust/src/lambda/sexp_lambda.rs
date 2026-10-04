@@ -181,7 +181,7 @@ fn tag_info(info: &TagInfo) -> Sexp {
             Sexp::atom("Blk_constructor"),
             string(name),
             int(*num_nonconst),
-            variant_block_runtime(runtime),
+            variant_tagged_block(runtime),
         ]),
         TagInfo::Tuple => Sexp::atom("Blk_tuple"),
         TagInfo::PolyVar(s) => Sexp::list(vec![Sexp::atom("Blk_poly_var"), string(s)]),
@@ -205,7 +205,7 @@ fn tag_info(info: &TagInfo) -> Sexp {
             Sexp::atom("Blk_record_inlined"),
             string(name),
             int(*num_nonconst),
-            variant_block_runtime(runtime),
+            variant_block(runtime),
             Sexp::list(fields.iter().map(|(name, _)| string(name)).collect()),
             mutable_flag_sexp(mutable_flag),
         ]),
@@ -313,16 +313,26 @@ fn variant_literal_tag(tag: &crate::types::VariantLiteralTag) -> Sexp {
     }
 }
 
-fn variant_block_runtime(runtime: &crate::types::BlockRuntime) -> Sexp {
+fn variant_tagged_block(runtime: &crate::types::TaggedBlock) -> Sexp {
     Sexp::list(vec![
-        Sexp::atom("runtime"),
+        Sexp::atom("Tagged"),
         variant_tag(&runtime.tag),
         runtime.tag_name.as_ref().map_or_else(
             || Sexp::atom("None"),
             |name| Sexp::list(vec![Sexp::atom("Some"), string(name)]),
         ),
-        bool_sexp(runtime.untagged),
     ])
+}
+
+fn variant_block(block: &crate::types::VariantBlock) -> Sexp {
+    match block {
+        crate::types::VariantBlock::Tagged(tagged) => variant_tagged_block(tagged),
+        crate::types::VariantBlock::Untagged { tag, block_type } => Sexp::list(vec![
+            Sexp::atom("Untagged"),
+            variant_tag(tag),
+            variant_block_type(block_type),
+        ]),
+    }
 }
 
 fn variant_tag(tag: &crate::types::VariantTag) -> Sexp {
@@ -341,14 +351,9 @@ fn variant_constructor_case(case: &crate::types::VariantConstructorCase) -> Sexp
         crate::types::VariantConstructorCase::Constant(tag) => {
             Sexp::list(vec![Sexp::atom("Constant"), variant_tag(tag)])
         }
-        crate::types::VariantConstructorCase::Block(block) => Sexp::list(vec![
-            Sexp::atom("Block"),
-            variant_block_runtime(&block.runtime),
-            block.block_type.as_ref().map_or_else(
-                || Sexp::atom("None"),
-                |ty| Sexp::list(vec![Sexp::atom("Some"), variant_block_type(ty)]),
-            ),
-        ]),
+        crate::types::VariantConstructorCase::Block(block) => {
+            Sexp::list(vec![Sexp::atom("Block"), variant_block(block)])
+        }
     }
 }
 
@@ -853,17 +858,15 @@ mod tests {
             }),
         );
         let block_key = crate::lambda::SwitchKey::Constructor(
-            crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                runtime: crate::types::BlockRuntime {
+            crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(
+                crate::types::TaggedBlock {
                     tag: crate::types::VariantTag {
                         name: "Boolean".to_string(),
                         literal: None,
                     },
                     tag_name: None,
-                    untagged: false,
                 },
-                block_type: None,
-            }),
+            )),
         );
 
         let constant_printed = switch_key(&constant_key).to_string();

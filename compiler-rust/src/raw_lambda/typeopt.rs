@@ -42,7 +42,7 @@ pub(crate) fn constructor_payload_is_unboxed(
 ) -> bool {
     matches!(
         constructor_case(ctx, cstr),
-        Some(crate::types::VariantConstructorCase::Block(block)) if block.runtime.untagged
+        Some(crate::types::VariantConstructorCase::Block(block)) if block.is_untagged()
     )
 }
 
@@ -112,10 +112,7 @@ fn type_cannot_contain_undefined_rec(
                             let untagged = matches!(
                                 case,
                                 Some(crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock {
-                                        runtime: crate::types::BlockRuntime { untagged: true, .. },
-                                        ..
-                                    }
+                                    crate::types::VariantBlock::Untagged { .. }
                                 ))
                             ) || case.is_none()
                                 && has_untagged(&decl.type_attributes);

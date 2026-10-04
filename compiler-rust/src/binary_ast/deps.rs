@@ -562,20 +562,15 @@ impl<'a> DependencyCollector<'a> {
                     self.add_expr_idx(*expr);
                 }
             }
-            ExpressionDesc::Pexp_construct(lid, arg) => {
+            ExpressionDesc::Pexp_construct(lid, args) => {
                 self.add_lident_idx(lid.txt);
-                if let Some(arg) = arg {
-                    // arg is ExprIdx
-                    let arg = *arg;
-                    self.add_expr_idx(arg);
+                for arg in &args.txt {
+                    self.add_expr_idx(*arg);
                 }
             }
             ExpressionDesc::Pexp_variant(inner) => {
-                let (ref _label, ref arg) = **inner;
-                if let Some(arg) = arg {
-                    // arg is ExprIdx
-                    let arg = *arg;
-                    self.add_expr_idx(arg);
+                for arg in &inner.1.txt {
+                    self.add_expr_idx(*arg);
                 }
             }
             ExpressionDesc::Pexp_record(inner) => {
@@ -750,7 +745,7 @@ impl<'a> DependencyCollector<'a> {
                         match items[0].pstr_desc.as_ref() {
                             StructureItemDesc::Pstr_eval(inner) => {
                                 match self.arena.get_expr(inner.0).pexp_desc.as_ref() {
-                                    ExpressionDesc::Pexp_construct(c, None) => Some(c.txt),
+                                    ExpressionDesc::Pexp_construct(c, args) if args.txt.is_empty() => Some(c.txt),
                                     _ => None,
                                 }
                             }
@@ -911,20 +906,15 @@ impl<'a> DependencyCollector<'a> {
                     self.add_pat_idx_inner(*pat, unpack_names);
                 }
             }
-            PatternDesc::Ppat_construct(lid, arg) => {
+            PatternDesc::Ppat_construct(lid, args) => {
                 self.add_lident_idx(lid.txt);
-                if let Some(arg) = arg {
-                    // arg is PatIdx
-                    let arg = *arg;
-                    self.add_pat_idx_inner(arg, unpack_names);
+                for arg in &args.txt {
+                    self.add_pat_idx_inner(*arg, unpack_names);
                 }
             }
             PatternDesc::Ppat_variant(inner) => {
-                let (ref _label, ref arg) = **inner;
-                if let Some(arg) = arg {
-                    // arg is PatIdx
-                    let arg = *arg;
-                    self.add_pat_idx_inner(arg, unpack_names);
+                for arg in &inner.1.txt {
+                    self.add_pat_idx_inner(*arg, unpack_names);
                 }
             }
             PatternDesc::Ppat_record(inner) => {
@@ -1039,9 +1029,8 @@ impl<'a> DependencyCollector<'a> {
                 let (ref rows, ref _closed, ref _labels) = **inner;
                 for row in rows {
                     match row {
-                        RowField::Rtag(_label, _attrs, _bool, tys) => {
-                            for ty in tys {
-                                // ty is CoreTypeIdx
+                        RowField::Rtag(_label, _attrs, _bool, groups) => {
+                            for ty in groups.iter().flat_map(|group| group.txt.iter()) {
                                 self.add_core_type_idx(*ty);
                             }
                         }

@@ -106,6 +106,31 @@ fn remove_optional_attribute(arena: &ParseArena, attrs: &[current::Attribute]) -
         .into()
 }
 
+/// `Ast_mapper_from0.remove_constructor_args_attr`: drop the first
+/// `_res.constructor_args` marker with an empty structure payload.
+fn remove_constructor_args_attr(arena: &ParseArena, attrs: Attributes) -> (bool, Attributes) {
+    let mut v: Vec<current::Attribute> = attrs.iter().cloned().collect();
+    let found = v.iter().position(|(name, payload)| {
+        arena.get_string(name.txt) == "_res.constructor_args"
+            && matches!(payload, current::Payload::PStr(items) if items.is_empty())
+    });
+    match found {
+        Some(i) => {
+            v.remove(i);
+            (true, Attributes::from_vec(v))
+        }
+        None => (false, attrs),
+    }
+}
+
+/// `Ast_mapper_from0.has_explicit_arity_attr`.
+fn has_explicit_arity_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
+    attrs.iter().any(|(name, _)| {
+        let name = arena.get_string(name.txt);
+        name == "ocaml.explicit_arity" || name == "explicit_arity"
+    })
+}
+
 fn get_arity_from_attributes(arena: &ParseArena, attrs: &[current::Attribute]) -> Option<i32> {
     for (name, payload) in attrs {
         if arena.get_string(name.txt) == "res.arity" {
@@ -566,6 +591,33 @@ impl<'a> Mapper<'a> {
         self.arena.push_pat(mapped)
     }
 
+    /// `Ast_mapper_from0.decode_args` for patterns: a v0 tuple without
+    /// attributes splits into the argument list when `split_tuple` holds.
+    fn decode_pat_args(&mut self, arg: Option<&pt0::Pattern>, split_tuple: bool) -> Vec<PatIdx> {
+        match arg {
+            None => Vec::new(),
+            Some(pt0::Pattern { ppat_desc: pt0::PatternDesc::Tuple(args), ppat_attributes, .. })
+                if split_tuple && ppat_attributes.is_empty() =>
+            {
+                args.iter().map(|p| self.push_pat(p)).collect()
+            }
+            Some(arg) => vec![self.push_pat(arg)],
+        }
+    }
+
+    /// `Ast_mapper_from0.decode_args` for expressions.
+    fn decode_expr_args(&mut self, arg: Option<&pt0::Expression>, split_tuple: bool) -> Vec<ExprIdx> {
+        match arg {
+            None => Vec::new(),
+            Some(pt0::Expression { pexp_desc: pt0::ExpressionDesc::Tuple(args), pexp_attributes, .. })
+                if split_tuple && pexp_attributes.is_empty() =>
+            {
+                args.iter().map(|e| self.push_expr(e)).collect()
+            }
+            Some(arg) => vec![self.push_expr(arg)],
+        }
+    }
+
     fn push_core_type(&mut self, ct: &pt0::CoreType) -> CoreTypeIdx {
         let mapped = self.map_core_type(ct);
         self.arena.push_core_type(mapped)
@@ -749,12 +801,33 @@ impl<'a> Mapper<'a> {
 
     fn map_row_field(&mut self, rf: &pt0::RowField) -> current::RowField {
         match rf {
-            pt0::RowField::Rtag(label, attrs, empty, types) => current::RowField::Rtag(
-                self.map_label_loc(label),
-                self.map_attributes(attrs),
-                *empty,
-                types.iter().map(|t| self.push_core_type(t)).collect(),
-            ),
+            pt0::RowField::Rtag(label, attrs, empty, types) => {
+                let label = self.map_label_loc(label);
+                let attrs = self.map_attributes(attrs);
+                // ast_mapper_from0.ml T.row_field `map_group`: a marked tuple
+                // with no other attributes is a multi-argument group; a PPX
+                // annotated tuple keeps its wrapper.
+                let groups = types
+                    .iter()
+                    .map(|t| {
+                        let mut typ = self.map_core_type(t);
+                        let (has_constructor_args, rest) =
+                            remove_constructor_args_attr(self.arena, std::mem::take(&mut typ.ptyp_attributes));
+                        let loc = typ.ptyp_loc;
+                        let txt = match &*typ.ptyp_desc {
+                            current::CoreTypeDesc::Ptyp_tuple(args) if has_constructor_args && rest.is_empty() => {
+                                args.to_vec()
+                            }
+                            _ => {
+                                typ.ptyp_attributes = rest;
+                                vec![self.arena.push_core_type(typ)]
+                            }
+                        };
+                        Located::new(txt, loc)
+                    })
+                    .collect();
+                current::RowField::Rtag(label, attrs, *empty, groups)
+            }
             pt0::RowField::Rinherit(t) => current::RowField::Rinherit(self.push_core_type(t)),
         }
     }
@@ -803,14 +876,37 @@ impl<'a> Mapper<'a> {
             pt0::PatternDesc::Tuple(pl) => current::PatternDesc::Ppat_tuple(Box::new(
                 pl.iter().map(|p| self.push_pat(p)).collect(),
             )),
-            pt0::PatternDesc::Construct(lid, arg) => current::PatternDesc::Ppat_construct(
-                self.map_longident_loc(lid),
-                arg.as_ref().map(|p| self.push_pat(p)),
-            ),
-            pt0::PatternDesc::Variant(tag, arg) => current::PatternDesc::Ppat_variant(Box::new((
-                Cow::Owned(tag.clone()),
-                arg.as_ref().map(|p| self.push_pat(p)),
-            ))),
+            pt0::PatternDesc::Construct(lid, arg) => {
+                let args_loc = match arg {
+                    Some(arg) => self.loc(&arg.ppat_loc),
+                    None => loc,
+                };
+                let (has_constructor_args, rest) =
+                    remove_constructor_args_attr(self.arena, std::mem::take(&mut attrs));
+                attrs = rest;
+                let split_tuple = has_constructor_args
+                    || has_explicit_arity_attr(self.arena, &attrs)
+                    || self.is_lident(&lid.txt, "::");
+                let args = self.decode_pat_args(arg.as_deref(), split_tuple);
+                current::PatternDesc::Ppat_construct(
+                    self.map_longident_loc(lid),
+                    current::ctor_args(args, args_loc),
+                )
+            }
+            pt0::PatternDesc::Variant(tag, arg) => {
+                let (has_constructor_args, rest) =
+                    remove_constructor_args_attr(self.arena, std::mem::take(&mut attrs));
+                attrs = rest;
+                let args_loc = match arg {
+                    Some(arg) => self.loc(&arg.ppat_loc),
+                    None => loc,
+                };
+                let args = self.decode_pat_args(arg.as_deref(), has_constructor_args);
+                current::PatternDesc::Ppat_variant(Box::new((
+                    Cow::Owned(tag.clone()),
+                    Located::new(args, args_loc),
+                )))
+            }
             pt0::PatternDesc::Record(fields, closed) => {
                 let fields = fields
                     .iter()
@@ -1583,15 +1679,32 @@ impl<'a> Mapper<'a> {
                     fun_attrs.extend(self.map_attributes(&node_attrs));
                     return self.mk_fun(e1.pexp_loc, fun_attrs, params, body, is_async);
                 }
-                current::ExpressionDesc::Pexp_construct(
-                    self.map_longident_loc(lid),
-                    arg.as_ref().map(|e| self.push_expr(e)),
-                )
+                let args_loc = match arg {
+                    Some(arg) => self.loc(&arg.pexp_loc),
+                    None => loc,
+                };
+                let lid1 = self.map_longident_loc(lid);
+                let (has_constructor_args, rest) =
+                    remove_constructor_args_attr(self.arena, std::mem::take(&mut attrs));
+                attrs = rest;
+                let split_tuple = has_constructor_args
+                    || has_explicit_arity_attr(self.arena, &attrs)
+                    || self.is_lident(&lid.txt, "::");
+                let args = self.decode_expr_args(arg.as_deref(), split_tuple);
+                current::ExpressionDesc::Pexp_construct(lid1, current::ctor_args(args, args_loc))
             }
             pt0::ExpressionDesc::Variant(label, arg) => {
+                let (has_constructor_args, rest) =
+                    remove_constructor_args_attr(self.arena, std::mem::take(&mut attrs));
+                attrs = rest;
+                let args_loc = match arg {
+                    Some(arg) => self.loc(&arg.pexp_loc),
+                    None => loc,
+                };
+                let args = self.decode_expr_args(arg.as_deref(), has_constructor_args);
                 current::ExpressionDesc::Pexp_variant(Box::new((
                     Cow::Owned(label.clone()),
-                    arg.as_ref().map(|e| self.push_expr(e)),
+                    Located::new(args, args_loc),
                 )))
             }
             pt0::ExpressionDesc::Record(fields, base) => {

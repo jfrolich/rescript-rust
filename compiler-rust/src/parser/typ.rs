@@ -12,7 +12,7 @@ use super::diagnostics::DiagnosticCategory;
 use super::grammar;
 use super::grammar::Grammar;
 use super::longident::Longident;
-use super::state::{Parser, ParserMode};
+use super::state::Parser;
 use super::token::Token;
 use crate::parse_arena::{CoreTypeIdx, LocIdx, Located, PosIdx, StrIdx};
 
@@ -225,16 +225,23 @@ pub fn substitute_type_vars(
             let new_rows: Vec<RowField> = rows
                 .into_iter()
                 .map(|row| match row {
-                    RowField::Rtag(name, attrs, empty, types) => {
-                        let new_types: Vec<CoreTypeIdx> = types
-                            .into_iter()
-                            .map(|t_idx| {
-                                let t_type = arena.get_core_type(t_idx).clone();
-                                substitute_type_vars(arena, t_type, vars)
-                                    .map(|substituted| arena.push_core_type(substituted))
-                            })
-                            .collect::<Result<_, _>>()?;
-                        Ok(RowField::Rtag(name, attrs, empty, new_types))
+                    RowField::Rtag(name, attrs, empty, groups) => {
+                        // ast_helper.ml `Typ.varify_constructors`: map each
+                        // group's types, keeping its location.
+                        let mut new_groups = Vec::with_capacity(groups.len());
+                        for group in groups {
+                            let txt = group
+                                .txt
+                                .into_iter()
+                                .map(|t_idx| {
+                                    let t_type = arena.get_core_type(t_idx).clone();
+                                    substitute_type_vars(arena, t_type, vars)
+                                        .map(|substituted| arena.push_core_type(substituted))
+                                })
+                                .collect::<Result<_, _>>()?;
+                            new_groups.push(Located { txt, loc: group.loc });
+                        }
+                        Ok(RowField::Rtag(name, attrs, empty, new_groups))
                     }
                     RowField::Rinherit(inner_typ_idx) => {
                         let inner_type = arena.get_core_type(inner_typ_idx).clone();
@@ -1899,15 +1906,11 @@ fn parse_string_field_declaration_inner(p: &mut Parser<'_>) -> Option<ObjectFiel
 // Polymorphic Variant Type
 // ============================================================================
 
-/// Parse polymorphic variant type args: `(typ1, typ2, ...)` for intersection types.
-/// OCaml's `parse_polymorphic_variant_type_args` behavior:
-/// - For a single non-tuple type, returns it without updating location (no parens in loc)
-/// - For multiple types or a single tuple, creates a Ptyp_tuple with full parenthesis location
-fn parse_polymorphic_variant_type_args(p: &mut Parser<'_>) -> CoreType {
-    // OCaml `parse_polymorphic_variant_type_args` (compiler/syntax/src/res_core.ml:6303-6318).
+/// OCaml `parse_polymorphic_variant_type_args` (res_core.ml): one payload
+/// group, the source list located at its parentheses.
+fn parse_polymorphic_variant_type_args(p: &mut Parser<'_>) -> VariantTypeArgs {
     let start_pos_idx = p.start_pos_idx();
     p.expect(Token::Lparen);
-
     let args =
         super::core::parse_comma_delimited_region(p, Grammar::TypExprList, Token::Rparen, |p| {
             if super::grammar::is_typ_expr_start(&p.token) {
@@ -1918,41 +1921,8 @@ fn parse_polymorphic_variant_type_args(p: &mut Parser<'_>) -> CoreType {
         });
     p.expect(Token::Rparen);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    match args.as_slice() {
-        // Single tuple type:
-        // In type-checker mode: pass through directly (no extra wrapping)
-        // In printer mode: wrap in another tuple to distinguish (a, b) from ((a, b))
-        [typ] if matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_tuple(_)) => {
-            if p.mode == ParserMode::ParseForTypeChecker {
-                args.into_iter().next().unwrap()
-            } else {
-                let args_idx: Vec<CoreTypeIdx> = args
-                    .into_iter()
-                    .map(|a| p.arena_mut().push_core_type(a))
-                    .collect();
-                CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(args_idx))),
-                    ptyp_loc: loc,
-                    ptyp_attributes: Attributes::new(),
-                }
-            }
-        }
-        // Single non-tuple type - return as-is (without parenthesis location!)
-        [typ] => typ.clone(),
-        // Multiple types - create tuple with full parenthesis location
-        _ => {
-            let args_idx: Vec<CoreTypeIdx> = args
-                .into_iter()
-                .map(|a| p.arena_mut().push_core_type(a))
-                .collect();
-            CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(args_idx))),
-                ptyp_loc: loc,
-                ptyp_attributes: Attributes::new(),
-            }
-        }
-    }
+    let txt = args.into_iter().map(|a| p.arena_mut().push_core_type(a)).collect();
+    Located { txt, loc }
 }
 
 /// OCaml `parse_polymorphic_variant_type` (compiler/syntax/src/res_core.ml:6108-6146).
@@ -2158,10 +2128,6 @@ fn parse_polymorphic_variant_type_spec_hash(
         p.next();
         tuples.push(parse_polymorphic_variant_type_args(p));
     }
-    let tuples = tuples
-        .into_iter()
-        .map(|t| p.arena_mut().push_core_type(t))
-        .collect();
     RowField::Rtag(with_loc(Cow::Owned(ident), loc), attrs, constant, tuples)
 }
 

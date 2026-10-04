@@ -76,5 +76,5 @@ pub use diagnostics::{DiagnosticCategory, ParserDiagnostic, ParserWarning, Parse
 pub use grammar::Grammar;
 pub use longident::{Longident, LongidentLoc};
 pub use scanner::{ScanResult, Scanner, ScannerMode, ScannerSnapshot};
-pub use state::{Parser, ParserMode, RegionStatus};
+pub use state::{Parser, RegionStatus};
 pub use token::Token;

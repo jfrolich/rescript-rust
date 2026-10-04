@@ -112,8 +112,10 @@ impl LambdaCompiler {
                 Some(crate::types::VariantLiteralTag::Float(value)) => {
                     Expression::number(Number::float(value.clone()))
                 }
+                // js_exp_make.ml `literal_tag`: `Bigint_utils.parse_bigint`.
                 Some(crate::types::VariantLiteralTag::BigInt(value)) => {
-                    Expression::number(Number::bigint(true, value.clone()))
+                    let (positive, digits) = crate::types::typecore::parse_bigint_literal(value);
+                    Expression::number(Number::bigint(positive, digits))
                 }
                 Some(crate::types::VariantLiteralTag::Bool(value)) => Expression::bool(*value),
                 Some(crate::types::VariantLiteralTag::Null) => Expression::null(),

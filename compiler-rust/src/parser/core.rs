@@ -832,7 +832,7 @@ pub mod ast_helper {
     pub fn make_unit(p: &mut Parser<'_>, loc: Location) -> Expression {
         let lid_idx = p.push_lident_static("()");
         make_expr(
-            ExpressionDesc::Pexp_construct(with_loc(lid_idx, loc), None),
+            ExpressionDesc::Pexp_construct(with_loc(lid_idx, loc), ctor_args(Vec::new(), loc)),
             loc,
         )
     }
@@ -917,12 +917,14 @@ pub mod ast_helper {
     pub fn make_construct_pat(
         arena: &mut ParseArena,
         lid_idx: crate::parse_arena::LidentIdx,
-        arg: Option<Pattern>,
+        args: Vec<Pattern>,
+        args_loc: Location,
         lid_loc: Location,
         ppat_loc: Location,
     ) -> Pattern {
+        let args = args.into_iter().map(|p| arena.push_pat(p)).collect();
         make_pat(
-            PatternDesc::Ppat_construct(with_loc(lid_idx, lid_loc), arg.map(|p| arena.push_pat(p))),
+            PatternDesc::Ppat_construct(with_loc(lid_idx, lid_loc), ctor_args(args, args_loc)),
             ppat_loc,
         )
     }
@@ -946,7 +948,7 @@ pub mod ast_helper {
                 // This matches OCaml's behavior: Location { loc_ghost: true, ..loc }
                 let nil_loc = p.arena_mut().mk_ghost_loc(loc);
                 let nil = with_loc(nil_idx, nil_loc);
-                make_pat(PatternDesc::Ppat_construct(nil, None), nil_loc)
+                make_pat(PatternDesc::Ppat_construct(nil, ctor_args(Vec::new(), nil_loc)), nil_loc)
             }
         };
 
@@ -955,17 +957,15 @@ pub mod ast_helper {
             // Reuse the existing PosIdx from item.ppat_loc and result.ppat_loc to match OCaml's sharing
             let start_idx = p.loc_start_idx(item.ppat_loc);
             let end_idx = p.loc_end_idx(result.ppat_loc);
-            let tuple_loc = p.mk_loc_idx_full(start_idx, end_idx);
-            let cons_loc = tuple_loc;
+            // res_core.ml `make_list_pattern`: `{txt = [p1; pat_pl]; loc}`.
+            let cons_loc = p.mk_loc_idx_full(start_idx, end_idx);
             let item_idx = p.arena_mut().push_pat(item);
             let result_idx = p.arena_mut().push_pat(result);
-            let tuple = make_pat(
-                PatternDesc::Ppat_tuple(Box::new(vec![item_idx, result_idx])),
-                tuple_loc,
-            );
-            let tuple_idx = p.arena_mut().push_pat(tuple);
             let cons = with_loc(cons_idx, cons_loc);
-            result = make_pat(PatternDesc::Ppat_construct(cons, Some(tuple_idx)), cons_loc);
+            result = make_pat(
+                PatternDesc::Ppat_construct(cons, ctor_args(vec![item_idx, result_idx], cons_loc)),
+                cons_loc,
+            );
         }
 
         // The outermost pattern uses the full list{...} location

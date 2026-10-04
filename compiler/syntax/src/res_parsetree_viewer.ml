@@ -1,5 +1,11 @@
 open Parsetree
 
+let argument_loc (lbl, (arg : Parsetree.expression)) =
+  match lbl with
+  | Asttypes.Labelled {loc} | Optional {loc} ->
+    {loc with loc_end = arg.pexp_loc.loc_end}
+  | Nolabel -> arg.pexp_loc
+
 let arrow_type ct =
   match ct with
   | {ptyp_desc = Ptyp_arrow {params; ret}; ptyp_attributes = attrs} ->
@@ -70,9 +76,10 @@ let collect_list_expressions expr =
   let rec collect acc expr =
     match expr.pexp_desc with
     | Pexp_construct ({txt = Longident.Lident "[]"}, _) -> (List.rev acc, None)
+    | Pexp_construct ({txt = Longident.Lident "::"}, {txt = hd :: [tail]})
     | Pexp_construct
         ( {txt = Longident.Lident "::"},
-          Some {pexp_desc = Pexp_tuple (hd :: [tail])} ) ->
+          {txt = [{pexp_desc = Pexp_tuple [hd; tail]}]} ) ->
       collect (hd :: acc) tail
     | _ -> (List.rev acc, Some expr)
   in
@@ -644,9 +651,10 @@ let mod_expr_functor mod_expr =
 let rec collect_patterns_from_list_construct acc pattern =
   let open Parsetree in
   match pattern.ppat_desc with
+  | Ppat_construct ({txt = Longident.Lident "::"}, {txt = [pat; rest]})
   | Ppat_construct
-      ({txt = Longident.Lident "::"}, Some {ppat_desc = Ppat_tuple [pat; rest]})
-    ->
+      ( {txt = Longident.Lident "::"},
+        {txt = [{ppat_desc = Ppat_tuple [pat; rest]}]} ) ->
     collect_patterns_from_list_construct (pat :: acc) rest
   | _ -> (List.rev acc, pattern)
 

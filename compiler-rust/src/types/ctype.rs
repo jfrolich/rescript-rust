@@ -4754,7 +4754,7 @@ fn variant_constructor_tag(
 ) -> &Option<crate::types::VariantLiteralTag> {
     match &layout.constructors[position] {
         crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
-        crate::types::VariantConstructorCase::Block(block) => &block.runtime.tag.literal,
+        crate::types::VariantConstructorCase::Block(block) => &block.tag().literal,
     }
 }
 

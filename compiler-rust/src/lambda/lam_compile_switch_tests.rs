@@ -15,17 +15,10 @@ fn untagged_object_return_switches_keep_outer_plain_handler_inside_the_switch() 
                 sw_blocks_full: false,
                 sw_blocks: vec![(
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Object".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Object),
-                        }),
+                                }, block_type: crate::types::VariantBlockType::Object }),
                     ),
                     Lambda::LstaticCatch(
                         Box::new(Lambda::static_raise(2, Vec::new())),
@@ -99,17 +92,10 @@ fn named_variant_switch_expressions_split_const_and_block_dispatch() {
             sw_blocks_full: false,
             sw_blocks: vec![(
                 crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                    crate::types::VariantBlock {
-                        runtime: crate::types::BlockRuntime {
-                            tag: crate::types::VariantTag {
+                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                 name: "B".to_string(),
                                 literal: None,
-                            },
-                            tag_name: None,
-                            untagged: false,
-                        },
-                        block_type: None,
-                    },
+                            }, tag_name: None }),
                 )),
                 Lambda::const_(Constant::int(2)),
             )],
@@ -243,17 +229,10 @@ fn named_variant_effect_switches_keep_payload_cases() {
             sw_blocks_full: false,
             sw_blocks: vec![(
                 crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                    crate::types::VariantBlock {
-                        runtime: crate::types::BlockRuntime {
-                            tag: crate::types::VariantTag {
+                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                 name: "WithPayload".to_string(),
                                 literal: None,
-                            },
-                            tag_name: None,
-                            untagged: false,
-                        },
-                        block_type: None,
-                    },
+                            }, tag_name: None }),
                 )),
                 Lambda::Lassign(captured.clone(), Box::new(Lambda::const_(Constant::int(1)))),
             )],
@@ -297,33 +276,19 @@ fn named_variant_return_switches_with_only_payload_cases_skip_object_split() {
             sw_blocks: vec![
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                     name: "Ok".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: false,
-                            },
-                            block_type: None,
-                        }),
+                                }, tag_name: None })),
                     ),
                     Lambda::const_(Constant::int(1)),
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                     name: "Error".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: false,
-                            },
-                            block_type: None,
-                        }),
+                                }, tag_name: None })),
                     ),
                     Lambda::const_(Constant::int(2)),
                 ),
@@ -383,33 +348,19 @@ fn named_variant_mixed_const_and_identical_payload_return_cases_drop_redundant_t
             sw_blocks: vec![
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                     name: "Int1".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: false,
-                            },
-                            block_type: None,
-                        }),
+                                }, tag_name: None })),
                     ),
                     payload.clone(),
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                     name: "Int2".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: false,
-                            },
-                            block_type: None,
-                        }),
+                                }, tag_name: None })),
                     ),
                     payload,
                 ),
@@ -448,17 +399,10 @@ fn named_variant_incomplete_payload_only_return_switches_keep_default_as_negated
             sw_blocks_full: false,
             sw_blocks: vec![(
                 crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                    crate::types::VariantBlock {
-                        runtime: crate::types::BlockRuntime {
-                            tag: crate::types::VariantTag {
+                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                 name: "C".to_string(),
                                 literal: None,
-                            },
-                            tag_name: None,
-                            untagged: false,
-                        },
-                        block_type: None,
-                    },
+                            }, tag_name: None }),
                 )),
                 Lambda::const_(Constant::int(7)),
             )],
@@ -570,49 +514,28 @@ fn named_variant_return_switches_keep_default_only_const_side_inside_outer_else_
             sw_blocks: vec![
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                     name: "WithPayloadA".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: false,
-                            },
-                            block_type: None,
-                        }),
+                                }, tag_name: None })),
                     ),
                     Lambda::const_(Constant::int(1)),
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                     name: "WithPayloadB".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: false,
-                            },
-                            block_type: None,
-                        }),
+                                }, tag_name: None })),
                     ),
                     Lambda::const_(Constant::int(2)),
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                     name: "WithPayloadC".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: false,
-                            },
-                            block_type: None,
-                        }),
+                                }, tag_name: None })),
                     ),
                     Lambda::const_(Constant::int(3)),
                 ),
@@ -754,49 +677,28 @@ fn named_variant_return_switches_keep_shared_final_groups_inside_the_switch_with
             sw_blocks: vec![
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                     name: "A".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: false,
-                            },
-                            block_type: None,
-                        }),
+                                }, tag_name: None })),
                     ),
                     Lambda::const_(Constant::int(1)),
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                     name: "B".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: false,
-                            },
-                            block_type: None,
-                        }),
+                                }, tag_name: None })),
                     ),
                     Lambda::const_(Constant::int(2)),
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                     name: "C".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: false,
-                            },
-                            block_type: None,
-                        }),
+                                }, tag_name: None })),
                     ),
                     Lambda::const_(Constant::int(2)),
                 ),
@@ -864,17 +766,10 @@ fn nested_named_variant_complete_return_switches_keep_plain_handlers_inside_swit
                         (
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock {
-                                        runtime: crate::types::BlockRuntime {
-                                            tag: crate::types::VariantTag {
+                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                                 name: "A".to_string(),
                                                 literal: None,
-                                            },
-                                            tag_name: None,
-                                            untagged: false,
-                                        },
-                                        block_type: None,
-                                    },
+                                            }, tag_name: None }),
                                 ),
                             ),
                             Lambda::static_raise(1, Vec::new()),
@@ -882,17 +777,10 @@ fn nested_named_variant_complete_return_switches_keep_plain_handlers_inside_swit
                         (
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock {
-                                        runtime: crate::types::BlockRuntime {
-                                            tag: crate::types::VariantTag {
+                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                                 name: "B".to_string(),
                                                 literal: None,
-                                            },
-                                            tag_name: None,
-                                            untagged: false,
-                                        },
-                                        block_type: None,
-                                    },
+                                            }, tag_name: None }),
                                 ),
                             ),
                             Lambda::static_raise(2, Vec::new()),
@@ -900,17 +788,10 @@ fn nested_named_variant_complete_return_switches_keep_plain_handlers_inside_swit
                         (
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock {
-                                        runtime: crate::types::BlockRuntime {
-                                            tag: crate::types::VariantTag {
+                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                                 name: "C".to_string(),
                                                 literal: None,
-                                            },
-                                            tag_name: None,
-                                            untagged: false,
-                                        },
-                                        block_type: None,
-                                    },
+                                            }, tag_name: None }),
                                 ),
                             ),
                             Lambda::static_raise(1, Vec::new()),
@@ -918,17 +799,10 @@ fn nested_named_variant_complete_return_switches_keep_plain_handlers_inside_swit
                         (
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock {
-                                        runtime: crate::types::BlockRuntime {
-                                            tag: crate::types::VariantTag {
+                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                                 name: "D".to_string(),
                                                 literal: None,
-                                            },
-                                            tag_name: None,
-                                            untagged: false,
-                                        },
-                                        block_type: None,
-                                    },
+                                            }, tag_name: None }),
                                 ),
                             ),
                             Lambda::static_raise(2, Vec::new()),
@@ -1131,17 +1005,10 @@ fn nested_named_variant_return_switches_keep_complete_payload_handlers_inline() 
                         (
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock {
-                                        runtime: crate::types::BlockRuntime {
-                                            tag: crate::types::VariantTag {
+                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                                 name: "C".to_string(),
                                                 literal: None,
-                                            },
-                                            tag_name: None,
-                                            untagged: false,
-                                        },
-                                        block_type: None,
-                                    },
+                                            }, tag_name: None }),
                                 ),
                             ),
                             Lambda::static_raise(18, Vec::new()),
@@ -1149,17 +1016,10 @@ fn nested_named_variant_return_switches_keep_complete_payload_handlers_inline() 
                         (
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock {
-                                        runtime: crate::types::BlockRuntime {
-                                            tag: crate::types::VariantTag {
+                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                                 name: "D".to_string(),
                                                 literal: None,
-                                            },
-                                            tag_name: None,
-                                            untagged: false,
-                                        },
-                                        block_type: None,
-                                    },
+                                            }, tag_name: None }),
                                 ),
                             ),
                             Lambda::static_raise(18, Vec::new()),
@@ -1167,17 +1027,10 @@ fn nested_named_variant_return_switches_keep_complete_payload_handlers_inline() 
                         (
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock {
-                                        runtime: crate::types::BlockRuntime {
-                                            tag: crate::types::VariantTag {
+                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                                 name: "E".to_string(),
                                                 literal: None,
-                                            },
-                                            tag_name: None,
-                                            untagged: false,
-                                        },
-                                        block_type: None,
-                                    },
+                                            }, tag_name: None }),
                                 ),
                             ),
                             Lambda::static_raise(19, Vec::new()),
@@ -1340,17 +1193,10 @@ fn builtin_untagged_block_switch_expressions_dispatch_on_object_runtime_shape() 
             sw_blocks_full: false,
             sw_blocks: vec![(
                 crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                    crate::types::VariantBlock {
-                        runtime: crate::types::BlockRuntime {
-                            tag: crate::types::VariantTag {
+                    crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                 name: "Object".to_string(),
                                 literal: None,
-                            },
-                            tag_name: None,
-                            untagged: true,
-                        },
-                        block_type: Some(crate::types::VariantBlockType::Object),
-                    },
+                            }, block_type: crate::types::VariantBlockType::Object },
                 )),
                 Lambda::let_(
                     LetKind::Strict,
@@ -1441,19 +1287,12 @@ fn builtin_untagged_object_switches_use_plain_object_check_after_array_split() {
             sw_blocks: vec![
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Array".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Instance(
+                                }, block_type: crate::types::VariantBlockType::Instance(
                                 crate::types::VariantInstance::Array,
-                            )),
-                        }),
+                            ) }),
                     ),
                     Lambda::Lassign(
                         array_seen.clone(),
@@ -1462,17 +1301,10 @@ fn builtin_untagged_object_switches_use_plain_object_check_after_array_split() {
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Object".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Object),
-                        }),
+                                }, block_type: crate::types::VariantBlockType::Object }),
                     ),
                     Lambda::Lassign(
                         object_seen.clone(),
@@ -1529,67 +1361,39 @@ fn object_and_array_untagged_return_switches_keep_object_inside_typeof_switch_li
             sw_blocks: vec![
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "String".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::String),
-                        }),
+                                }, block_type: crate::types::VariantBlockType::String }),
                     ),
                     Lambda::const_(Constant::int(1)),
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Number".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Int),
-                        }),
+                                }, block_type: crate::types::VariantBlockType::Int }),
                     ),
                     Lambda::const_(Constant::int(2)),
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Object".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Object),
-                        }),
+                                }, block_type: crate::types::VariantBlockType::Object }),
                     ),
                     Lambda::const_(Constant::int(3)),
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Array".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Instance(
+                                }, block_type: crate::types::VariantBlockType::Instance(
                                 crate::types::VariantInstance::Array,
-                            )),
-                        }),
+                            ) }),
                     ),
                     Lambda::const_(Constant::int(4)),
                 ),
@@ -1677,51 +1481,30 @@ fn mixed_array_object_function_untagged_return_switches_keep_typeof_tail_as_swit
             sw_blocks: vec![
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Array".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Instance(
+                                }, block_type: crate::types::VariantBlockType::Instance(
                                 crate::types::VariantInstance::Array,
-                            )),
-                        }),
+                            ) }),
                     ),
                     Lambda::const_(Constant::int(1)),
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Object".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Object),
-                        }),
+                                }, block_type: crate::types::VariantBlockType::Object }),
                     ),
                     Lambda::const_(Constant::int(2)),
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Function".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Function),
-                        }),
+                                }, block_type: crate::types::VariantBlockType::Function }),
                     ),
                     Lambda::const_(Constant::int(3)),
                 ),
@@ -1839,35 +1622,21 @@ fn mixed_literal_and_block_untagged_return_dispatch_keeps_outer_else_block() {
             sw_blocks: vec![
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Array".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Instance(
+                                }, block_type: crate::types::VariantBlockType::Instance(
                                 crate::types::VariantInstance::Array,
-                            )),
-                        }),
+                            ) }),
                     ),
                     mark(&array_seen, 3),
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Object".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Object),
-                        }),
+                                }, block_type: crate::types::VariantBlockType::Object }),
                     ),
                     mark(&object_seen, 4),
                 ),
@@ -1934,19 +1703,12 @@ fn mixed_array_object_function_untagged_effect_switches_keep_typeof_tail_as_swit
             sw_blocks: vec![
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Array".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Instance(
+                                }, block_type: crate::types::VariantBlockType::Instance(
                                 crate::types::VariantInstance::Array,
-                            )),
-                        }),
+                            ) }),
                     ),
                     Lambda::Lassign(
                         array_seen.clone(),
@@ -1955,17 +1717,10 @@ fn mixed_array_object_function_untagged_effect_switches_keep_typeof_tail_as_swit
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Object".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Object),
-                        }),
+                                }, block_type: crate::types::VariantBlockType::Object }),
                     ),
                     Lambda::Lassign(
                         object_seen.clone(),
@@ -1974,17 +1729,10 @@ fn mixed_array_object_function_untagged_effect_switches_keep_typeof_tail_as_swit
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Function".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Function),
-                        }),
+                                }, block_type: crate::types::VariantBlockType::Function }),
                     ),
                     Lambda::Lassign(
                         function_seen.clone(),
@@ -2115,17 +1863,10 @@ fn untagged_literal_dispatch_keeps_ocaml_case_order() {
             sw_blocks_full: true,
             sw_blocks: vec![(
                 crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                    crate::types::VariantBlock {
-                        runtime: crate::types::BlockRuntime {
-                            tag: crate::types::VariantTag {
+                    crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                 name: "FutureAddedValue".to_string(),
                                 literal: None,
-                            },
-                            tag_name: None,
-                            untagged: true,
-                        },
-                        block_type: Some(crate::types::VariantBlockType::String),
-                    },
+                            }, block_type: crate::types::VariantBlockType::String },
                 )),
                 Lambda::const_(Constant::int(4)),
             )],
@@ -2214,49 +1955,28 @@ fn mixed_untagged_literal_dispatch_keeps_ocaml_block_overlap_order() {
             sw_blocks: vec![
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "String".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::String),
-                        }),
+                                }, block_type: crate::types::VariantBlockType::String }),
                     ),
                     Lambda::const_(Constant::int(5)),
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Int".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Int),
-                        }),
+                                }, block_type: crate::types::VariantBlockType::Int }),
                     ),
                     Lambda::const_(Constant::int(6)),
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Object".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Object),
-                        }),
+                                }, block_type: crate::types::VariantBlockType::Object }),
                     ),
                     Lambda::const_(Constant::int(7)),
                 ),
@@ -2407,17 +2127,10 @@ fn small_untagged_object_value_switches_keep_ocaml_runtime_guards() {
             sw_blocks_full: false,
             sw_blocks: vec![(
                 crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                    crate::types::VariantBlock {
-                        runtime: crate::types::BlockRuntime {
-                            tag: crate::types::VariantTag {
+                    crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                 name: "Object".to_string(),
                                 literal: None,
-                            },
-                            tag_name: None,
-                            untagged: true,
-                        },
-                        block_type: Some(crate::types::VariantBlockType::Object),
-                    },
+                            }, block_type: crate::types::VariantBlockType::Object },
                 )),
                 Lambda::const_(Constant::int(1)),
             )],
@@ -2460,35 +2173,21 @@ fn complete_object_then_array_untagged_return_switches_preserve_case_order() {
             sw_blocks: vec![
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Object".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Object),
-                        }),
+                                }, block_type: crate::types::VariantBlockType::Object }),
                     ),
                     Lambda::const_(Constant::int(1)),
                 ),
                 (
                     crate::lambda::SwitchKey::Constructor(
-                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                        crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                     name: "Array".to_string(),
                                     literal: None,
-                                },
-                                tag_name: None,
-                                untagged: true,
-                            },
-                            block_type: Some(crate::types::VariantBlockType::Instance(
+                                }, block_type: crate::types::VariantBlockType::Instance(
                                 crate::types::VariantInstance::Array,
-                            )),
-                        }),
+                            ) }),
                     ),
                     Lambda::const_(Constant::int(2)),
                 ),
@@ -2703,17 +2402,10 @@ fn default_only_untagged_object_return_keeps_literal_default_branch_outside_obje
             sw_blocks_full: false,
             sw_blocks: vec![(
                 crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                    crate::types::VariantBlock {
-                        runtime: crate::types::BlockRuntime {
-                            tag: crate::types::VariantTag {
+                    crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                 name: "Object".to_string(),
                                 literal: None,
-                            },
-                            tag_name: None,
-                            untagged: true,
-                        },
-                        block_type: Some(crate::types::VariantBlockType::Object),
-                    },
+                            }, block_type: crate::types::VariantBlockType::Object },
                 )),
                 Lambda::let_(
                     LetKind::Strict,

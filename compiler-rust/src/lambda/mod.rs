@@ -180,7 +180,161 @@ impl std::fmt::Display for SwitchKey {
                 write!(f, "constructor {:?}", tag.name)
             }
             Self::Constructor(crate::types::VariantConstructorCase::Block(block)) => {
-                write!(f, "constructor {:?}", block.runtime.tag.name)
+                write!(f, "constructor {:?}", block.tag().name)
+            }
+        }
+    }
+}
+
+/// lambda.ml `value_kind`: constants classified by the JavaScript value
+/// emitted for them, not by their source constructor.
+enum ValueKind {
+    IsLiteral(crate::types::VariantLiteralTag),
+    IsObject,
+    IsArray,
+    UnknownValue,
+}
+
+/// lambda.ml `runtime_value_kind`.
+fn runtime_value_kind(c: &Constant) -> ValueKind {
+    use crate::types::VariantLiteralTag as L;
+    match c {
+        Constant::String(s) | Constant::ImmString(s) => ValueKind::IsLiteral(L::String(s.clone())),
+        Constant::Int { i, .. } => ValueKind::IsLiteral(L::Int(*i)),
+        Constant::NativeInt { i, .. } => ValueKind::IsLiteral(L::Int(*i as i32)),
+        Constant::Float(f) => ValueKind::IsLiteral(L::Float(f.clone())),
+        Constant::JsTrue => ValueKind::IsLiteral(L::Bool(true)),
+        Constant::JsFalse => ValueKind::IsLiteral(L::Bool(false)),
+        Constant::JsNull => ValueKind::IsLiteral(L::Null),
+        Constant::JsUndefined { .. } => ValueKind::IsLiteral(L::Undefined),
+        Constant::Pointer(name) => ValueKind::IsLiteral(L::String(name.clone())),
+        Constant::Constructor(tag) => match &tag.literal {
+            None if tag.name == "[]" => ValueKind::IsLiteral(L::Int(0)),
+            None => ValueKind::IsLiteral(L::String(tag.name.clone())),
+            Some(L::BigInt(_)) => ValueKind::UnknownValue,
+            Some(literal) => ValueKind::IsLiteral(literal.clone()),
+        },
+        Constant::Block { tag_info, .. } => match &**tag_info {
+            TagInfo::Tuple => ValueKind::IsArray,
+            TagInfo::Record { fields, .. } => {
+                if !fields.is_empty()
+                    && fields.iter().enumerate().all(|(i, (name, _))| i.to_string() == *name)
+                {
+                    ValueKind::IsArray
+                } else {
+                    ValueKind::IsObject
+                }
+            }
+            _ => ValueKind::IsObject,
+        },
+        Constant::Char(_) | Constant::BigInt { .. } | Constant::Some(_) | Constant::ModuleAlias => {
+            ValueKind::UnknownValue
+        }
+    }
+}
+
+/// OCaml `float_of_string` for the spellings a literal tag can carry.
+fn ocaml_float_of_string(s: &str) -> Option<f64> {
+    if let Some(value) = crate::js_ir::printer::parse_hex_float_literal(s) {
+        return Some(value);
+    }
+    s.replace('_', "").parse::<f64>().ok()
+}
+
+/// lambda.ml `literal_denotes_same`: runtime equality rather than equality
+/// of tags; bigint spellings are not compared.
+fn literal_denotes_same(a: &crate::types::VariantLiteralTag, b: &crate::types::VariantLiteralTag) -> bool {
+    use crate::types::VariantLiteralTag as L;
+    match (a, b) {
+        (L::String(x), L::String(y)) => x == y,
+        (L::Int(x), L::Int(y)) => x == y,
+        (L::Float(x), L::Float(y)) => {
+            matches!((ocaml_float_of_string(x), ocaml_float_of_string(y)), (Some(x), Some(y)) if x == y)
+        }
+        (L::Int(x), L::Float(y)) | (L::Float(y), L::Int(x)) => {
+            ocaml_float_of_string(y).is_some_and(|y| *x as f64 == y)
+        }
+        (L::Bool(x), L::Bool(y)) => x == y,
+        (L::Null, L::Null) | (L::Undefined, L::Undefined) => true,
+        _ => false,
+    }
+}
+
+/// lambda.ml `value_has_block_type`, mirroring `Dynamic_checks`.
+fn value_has_block_type(
+    block_types: &[crate::types::VariantBlockType],
+    kind: &ValueKind,
+    block_type: &crate::types::VariantBlockType,
+) -> bool {
+    use crate::types::{VariantBlockType as B, VariantInstance as I, VariantLiteralTag as L};
+    match (block_type, kind) {
+        (B::Int | B::Float, ValueKind::IsLiteral(L::Int(_) | L::Float(_))) => true,
+        (B::String, ValueKind::IsLiteral(L::String(_))) => true,
+        (B::Boolean, ValueKind::IsLiteral(L::Bool(_))) => true,
+        (B::Object, ValueKind::IsObject) => true,
+        (B::Instance(I::Array), ValueKind::IsArray) => true,
+        (B::Object, ValueKind::IsArray) => !block_types.contains(&B::Instance(I::Array)),
+        (B::Unknown, ValueKind::IsLiteral(_) | ValueKind::IsObject | ValueKind::IsArray) => true,
+        _ => false,
+    }
+}
+
+enum UntaggedAction {
+    /// The case decided by the constant (`None`: no case of the switch).
+    Case(Option<Lambda>),
+    /// The constant's runtime shape cannot be named here.
+    Undecided,
+}
+
+/// lambda.ml `switch`'s `untagged_action`.
+fn untagged_action(
+    facts: &crate::types::VariantMatchingFacts,
+    cst: &Constant,
+    switch: &LambdaSwitch,
+) -> UntaggedAction {
+    let literal_of_tag = |tag: &crate::types::VariantTag| match &tag.literal {
+        Some(literal) => literal.clone(),
+        None => crate::types::VariantLiteralTag::String(tag.name.clone()),
+    };
+    let kind = runtime_value_kind(cst);
+    match &kind {
+        ValueKind::UnknownValue => UntaggedAction::Undecided,
+        ValueKind::IsLiteral(literal)
+            if facts.literal_tags.iter().any(|tag| literal_denotes_same(literal, tag)) =>
+        {
+            // The literal side wins, exactly as it does at runtime.
+            UntaggedAction::Case(
+                switch
+                    .sw_consts
+                    .iter()
+                    .find(|(key, _)| match key {
+                        SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(tag)) => {
+                            literal_denotes_same(literal, &literal_of_tag(tag))
+                        }
+                        _ => false,
+                    })
+                    .map(|(_, action)| action.clone()),
+            )
+        }
+        _ => {
+            // Not a declared literal, so the payload's runtime shape decides.
+            let matches_block =
+                |block_type: &crate::types::VariantBlockType| value_has_block_type(&facts.block_types, &kind, block_type);
+            if facts.block_types.iter().any(matches_block) {
+                UntaggedAction::Case(
+                    switch
+                        .sw_blocks
+                        .iter()
+                        .find(|(key, _)| match key {
+                            SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+                                crate::types::VariantBlock::Untagged { block_type, .. },
+                            )) => matches_block(block_type),
+                            _ => false,
+                        })
+                        .map(|(_, action)| action.clone()),
+                )
+            } else {
+                UntaggedAction::Undecided
             }
         }
     }
@@ -592,6 +746,20 @@ impl Lambda {
 
     /// Create a switch using OCaml's `Lam.switch` smart constructor.
     pub fn switch(scrutinee: Lambda, switch: LambdaSwitch) -> Self {
+        // lambda.ml `switch`: an untagged variant is dispatched on the value,
+        // so a constant scrutinee is decided here rather than by the
+        // constructor it was written with. Undecided keeps the switch.
+        if let Lambda::Lconst(cst) = &scrutinee
+            && let SwitchDispatch::Variant(facts) = &switch.sw_dispatch
+            && !facts.block_types.is_empty()
+        {
+            return match untagged_action(facts, cst, &switch) {
+                UntaggedAction::Case(action) => action
+                    .or_else(|| switch.sw_failaction.as_deref().cloned())
+                    .unwrap_or_else(|| Lambda::Lswitch(Box::new(scrutinee), Box::new(switch))),
+                UntaggedAction::Undecided => Lambda::Lswitch(Box::new(scrutinee), Box::new(switch)),
+            };
+        }
         match scrutinee {
             Lambda::Lconst(Constant::Constructor(tag)) => {
                 let action = switch.sw_consts.iter().find(|(key, _)| matches!(
@@ -618,8 +786,10 @@ impl Lambda {
                 .unwrap_or_else(|| Lambda::Lswitch(Box::new(Lambda::Lconst(constant)), Box::new(switch))),
             Lambda::Lconst(Constant::Block { tag_info, elements }) => {
                 let runtime = match &*tag_info {
-                    TagInfo::Constructor { runtime, .. }
-                    | TagInfo::RecordInlined { runtime, .. } => Some(runtime.clone()),
+                    TagInfo::Constructor { runtime, .. } => {
+                        Some(crate::types::VariantBlock::Tagged((**runtime).clone()))
+                    }
+                    TagInfo::RecordInlined { runtime, .. } => Some((**runtime).clone()),
                     _ => None,
                 };
                 switch
@@ -630,7 +800,7 @@ impl Lambda {
                         (
                             SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)),
                             Some(runtime)
-                        ) if &candidate.runtime == &**runtime
+                        ) if candidate == runtime
                     ))
                     .map(|(_, branch)| branch.clone())
                     .or_else(|| switch.sw_failaction.as_deref().cloned())

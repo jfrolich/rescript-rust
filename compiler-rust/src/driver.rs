@@ -415,7 +415,7 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
 
         for (extra, _, _) in &expr.exp_extra {
             match extra {
-                ExpExtra::Texp_constraint(core_type) | ExpExtra::Texp_coerce(core_type) => {
+                ExpExtra::Texp_constraint(core_type) | ExpExtra::Texp_coerce { target: core_type, .. } => {
                     visit_typed_core_type(max_stamp, core_type);
                 }
                 ExpExtra::Texp_open(_, path, _, _) => visit_path(max_stamp, path),
@@ -877,14 +877,15 @@ fn expression_has_string_literal(
         ED::Pexp_tuple(items) | ED::Pexp_array(items) => items
             .iter()
             .any(|item| expression_has_string_literal(arena.get_expr(*item), value, arena)),
-        ED::Pexp_construct(_, arg) => arg
-            .as_ref()
-            .is_some_and(|arg| expression_has_string_literal(arena.get_expr(*arg), value, arena)),
+        ED::Pexp_construct(_, args) => args
+            .txt
+            .iter()
+            .any(|arg| expression_has_string_literal(arena.get_expr(*arg), value, arena)),
         ED::Pexp_variant(inner) => {
-            let (_, arg) = &**inner;
-            arg.as_ref().is_some_and(|arg| {
-                expression_has_string_literal(arena.get_expr(*arg), value, arena)
-            })
+            let (_, args) = &**inner;
+            args.txt
+                .iter()
+                .any(|arg| expression_has_string_literal(arena.get_expr(*arg), value, arena))
         }
         ED::Pexp_record(inner) => {
             let (fields, base) = &**inner;
@@ -1033,13 +1034,15 @@ fn pattern_has_string_literal(
         PD::Ppat_tuple(items) | PD::Ppat_array(items) => items
             .iter()
             .any(|item| pattern_has_string_literal(arena.get_pat(*item), value, arena)),
-        PD::Ppat_construct(_, Some(arg)) => {
-            pattern_has_string_literal(arena.get_pat(*arg), value, arena)
-        }
+        PD::Ppat_construct(_, args) => args
+            .txt
+            .iter()
+            .any(|arg| pattern_has_string_literal(arena.get_pat(*arg), value, arena)),
         PD::Ppat_variant(inner) => {
-            let (_, arg) = &**inner;
-            arg.as_ref()
-                .is_some_and(|arg| pattern_has_string_literal(arena.get_pat(*arg), value, arena))
+            let (_, args) = &**inner;
+            args.txt
+                .iter()
+                .any(|arg| pattern_has_string_literal(arena.get_pat(*arg), value, arena))
         }
         PD::Ppat_or(lhs, rhs) => {
             pattern_has_string_literal(arena.get_pat(*lhs), value, arena)
@@ -1343,7 +1346,7 @@ pub fn format_source_with(
 ) -> (String, Option<Vec<u8>>) {
     let source = crate::source_text::latin1_bytes_to_string(source.to_vec());
     let is_interface = filename.ends_with(".resi");
-    let mut parser = Parser::with_mode(filename, &source, crate::parser::ParserMode::Default);
+    let mut parser = Parser::new(filename, &source);
     let (report, output) = if is_interface {
         let signature = module::parse_signature(&mut parser);
         let report = parse_diagnostics_report(&parser, &source, filename);
@@ -2337,7 +2340,7 @@ fn is_supported_let_unwrap_pattern(pat: &crate::parser::ast::Pattern, arena: &Pa
     let Longident::Lident(ctor_name_idx) = arena.get_longident(ctor_lid.txt) else {
         return false;
     };
-    match (arena.get_string(*ctor_name_idx), payload.is_some()) {
+    match (arena.get_string(*ctor_name_idx), !payload.txt.is_empty()) {
         ("Ok", true) | ("Error", true) | ("Some", true) | ("None", false) => true,
         _ => false,
     }
@@ -2467,12 +2470,15 @@ fn invalid_enabled_let_unwrap_in_expr(
         ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => items
             .iter()
             .find_map(|item| invalid_enabled_let_unwrap_in_expr(*item, arena)),
-        ExpressionDesc::Pexp_construct(_, payload) => {
-            payload.and_then(|expr| invalid_enabled_let_unwrap_in_expr(expr, arena))
-        }
+        ExpressionDesc::Pexp_construct(_, payload) => payload
+            .txt
+            .iter()
+            .find_map(|expr| invalid_enabled_let_unwrap_in_expr(*expr, arena)),
         ExpressionDesc::Pexp_variant(inner) => inner
             .1
-            .and_then(|expr| invalid_enabled_let_unwrap_in_expr(expr, arena)),
+            .txt
+            .iter()
+            .find_map(|expr| invalid_enabled_let_unwrap_in_expr(*expr, arena)),
         ExpressionDesc::Pexp_record(record) => record
             .0
             .iter()
@@ -2658,12 +2664,15 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
         ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => items
             .iter()
             .find_map(|item| disabled_let_unwrap_loc_in_expr(*item, arena)),
-        ExpressionDesc::Pexp_construct(_, payload) => {
-            payload.and_then(|expr| disabled_let_unwrap_loc_in_expr(expr, arena))
-        }
+        ExpressionDesc::Pexp_construct(_, payload) => payload
+            .txt
+            .iter()
+            .find_map(|expr| disabled_let_unwrap_loc_in_expr(*expr, arena)),
         ExpressionDesc::Pexp_variant(inner) => inner
             .1
-            .and_then(|expr| disabled_let_unwrap_loc_in_expr(expr, arena)),
+            .txt
+            .iter()
+            .find_map(|expr| disabled_let_unwrap_loc_in_expr(*expr, arena)),
         ExpressionDesc::Pexp_record(record) => record
             .0
             .iter()
@@ -9637,7 +9646,7 @@ fn variant_constructor_string_runtime_repr(
 ) -> Option<String> {
     let tag = match case {
         crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
-        crate::types::VariantConstructorCase::Block(block) => &block.runtime.tag.literal,
+        crate::types::VariantConstructorCase::Block(block) => &block.tag().literal,
     };
     match tag {
         Some(crate::types::VariantLiteralTag::String(value)) => Some(value.clone()),
@@ -14417,7 +14426,7 @@ fn validate_config_bool_literal(
 ) -> Result<(), ConfigPayloadError> {
     let expr = arena.get_expr(expr_idx);
     let is_bool_literal = match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_construct(lid, None) => matches!(
+        ExpressionDesc::Pexp_construct(lid, args) if args.txt.is_empty() => matches!(
             arena.get_longident(lid.txt),
             Longident::Lident(name_idx)
                 if matches!(arena.get_string(*name_idx), "true" | "false")

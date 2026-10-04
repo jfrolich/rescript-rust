@@ -87,6 +87,8 @@ const SYNTHETIC_POSITION_BASE: u32 = 0x8000_0000;
 /// First index of expressions appended while the arena is shared
 /// ([`ParseArena::push_shared_expr`]).
 const SHARED_EXPRESSION_BASE: u32 = 0x8000_0000;
+/// First index of core types appended while the arena is shared.
+const SHARED_CORE_TYPE_BASE: u32 = 0x8000_0000;
 
 impl LocIdx {
     /// Check if this is the "none" location (index 0).
@@ -507,10 +509,6 @@ pub struct ParseArena {
     /// Sparse side table for case guards, keyed by owning match/try ExprIdx.
     /// Value is a case-indexed list of optional guard expressions.
     expr_case_guards: Vec<Option<Box<[Option<ExprIdx>]>>>,
-    /// Sparse side table for constructor payload argument, keyed by construct ExprIdx.
-    expr_construct_args: Vec<Option<ExprIdx>>,
-    /// Sparse side table for polymorphic variant payload argument, keyed by variant ExprIdx.
-    expr_variant_args: Vec<Option<ExprIdx>>,
     /// Sparse side table for record spread/base expression, keyed by record ExprIdx.
     expr_record_spreads: Vec<Option<ExprIdx>>,
     /// Sparse side table for record-rest pattern bindings (`...T as r`),
@@ -538,6 +536,10 @@ pub struct ParseArena {
     /// `SHARED_EXPRESSION_BASE`: the `@as` payloads printers put back with
     /// `Ast_helper.Type.field_attributes` / `constructor_attributes`.
     shared_expressions: elsa::sync::FrozenVec<Box<Expression>>,
+    /// Core types built while the arena is shared, addressed from
+    /// `SHARED_CORE_TYPE_BASE`: the tuples the type checker rebuilds from
+    /// polymorphic variant payload groups (`Ast_helper.Typ.tuple`).
+    shared_core_types: elsa::sync::FrozenVec<Box<CoreType>>,
     /// `Lident` of `true`, `false`, `null` and `undefined`, for those payloads.
     runtime_tag_lidents: [LidentIdx; 4],
     /// The attribute name `as`.
@@ -951,8 +953,6 @@ impl Default for ParseArena {
             ppx_deferred_error: None,
             builtin_spice_disabled: false,
             expr_case_guards: Vec::new(),
-            expr_construct_args: Vec::new(),
-            expr_variant_args: Vec::new(),
             expr_record_spreads: Vec::new(),
             used_attributes: std::sync::Mutex::new(HashSet::new()),
             expr_if_else_branches: Vec::new(),
@@ -962,6 +962,7 @@ impl Default for ParseArena {
             synthetic_pattern_base: u32::MAX,
             synthetic_locations: elsa::sync::FrozenVec::new(),
             shared_expressions: elsa::sync::FrozenVec::new(),
+            shared_core_types: elsa::sync::FrozenVec::new(),
             runtime_tag_lidents,
             as_attribute_name,
             synthetic_positions: elsa::sync::FrozenVec::new(),
@@ -2328,23 +2329,6 @@ impl ParseArena {
         }
     }
 
-    fn extract_construct_arg(expr: &Expression) -> Option<ExprIdx> {
-        match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_construct(_, arg) => *arg,
-            _ => None,
-        }
-    }
-
-    fn extract_variant_arg(expr: &Expression) -> Option<ExprIdx> {
-        match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_variant(inner) => {
-                let (_, arg) = &**inner;
-                *arg
-            }
-            _ => None,
-        }
-    }
-
     fn extract_record_spread(expr: &Expression) -> Option<ExprIdx> {
         match &*expr.pexp_desc {
             ExpressionDesc::Pexp_record(inner) => {
@@ -2381,16 +2365,12 @@ impl ParseArena {
     pub fn push_expr(&mut self, expr: Expression) -> ExprIdx {
         let default = Self::extract_fun_default(&expr);
         let case_guards = Self::extract_case_guards(&expr);
-        let construct_arg = Self::extract_construct_arg(&expr);
-        let variant_arg = Self::extract_variant_arg(&expr);
         let record_spread = Self::extract_record_spread(&expr);
         let if_else = Self::extract_if_else_branch(&expr);
         let coerce_from = Self::extract_coerce_from_type(&expr);
         let idx = self.expressions.push(expr);
         self.expr_fun_defaults.push(default);
         self.expr_case_guards.push(case_guards);
-        self.expr_construct_args.push(construct_arg);
-        self.expr_variant_args.push(variant_arg);
         self.expr_record_spreads.push(record_spread);
         self.expr_if_else_branches.push(if_else);
         self.expr_coerce_from_types.push(coerce_from);
@@ -2406,8 +2386,6 @@ impl ParseArena {
         let idx = self.expressions.reserve_with(Self::placeholder_expr());
         self.expr_fun_defaults.push(None);
         self.expr_case_guards.push(None);
-        self.expr_construct_args.push(None);
-        self.expr_variant_args.push(None);
         self.expr_record_spreads.push(None);
         self.expr_if_else_branches.push(None);
         self.expr_coerce_from_types.push(None);
@@ -2420,23 +2398,17 @@ impl ParseArena {
         let slot = idx.0 as usize;
         debug_assert!(slot < self.expr_fun_defaults.len());
         debug_assert!(slot < self.expr_case_guards.len());
-        debug_assert!(slot < self.expr_construct_args.len());
-        debug_assert!(slot < self.expr_variant_args.len());
         debug_assert!(slot < self.expr_record_spreads.len());
         debug_assert!(slot < self.expr_if_else_branches.len());
         debug_assert!(slot < self.expr_coerce_from_types.len());
         let default = Self::extract_fun_default(&expr);
         let case_guards = Self::extract_case_guards(&expr);
-        let construct_arg = Self::extract_construct_arg(&expr);
-        let variant_arg = Self::extract_variant_arg(&expr);
         let record_spread = Self::extract_record_spread(&expr);
         let if_else = Self::extract_if_else_branch(&expr);
         let coerce_from = Self::extract_coerce_from_type(&expr);
         self.expressions.initialize(idx, expr);
         self.expr_fun_defaults[slot] = default;
         self.expr_case_guards[slot] = case_guards;
-        self.expr_construct_args[slot] = construct_arg;
-        self.expr_variant_args[slot] = variant_arg;
         self.expr_record_spreads[slot] = record_spread;
         self.expr_if_else_branches[slot] = if_else;
         self.expr_coerce_from_types[slot] = coerce_from;
@@ -2490,12 +2462,6 @@ impl ParseArena {
         }
         if slot < self.expr_case_guards.len() {
             self.expr_case_guards[slot] = None;
-        }
-        if slot < self.expr_construct_args.len() {
-            self.expr_construct_args[slot] = None;
-        }
-        if slot < self.expr_variant_args.len() {
-            self.expr_variant_args[slot] = None;
         }
         if slot < self.expr_record_spreads.len() {
             self.expr_record_spreads[slot] = None;
@@ -2871,53 +2837,6 @@ impl ParseArena {
             })
     }
 
-    /// Attach sparse constructor payload argument data to a construct expression node.
-    pub fn set_construct_arg(&mut self, owner: ExprIdx, arg: Option<ExprIdx>) {
-        let slot = owner.0 as usize;
-        if slot >= self.expr_construct_args.len() {
-            self.expr_construct_args.resize(slot + 1, None);
-        }
-        self.expr_construct_args[slot] = arg;
-    }
-
-    /// Get sparse constructor payload argument data for a `Pexp_construct` expression node.
-    pub fn construct_arg(&self, owner: ExprIdx) -> Option<ExprIdx> {
-        let slot = owner.0 as usize;
-        self.expr_construct_args
-            .get(slot)
-            .copied()
-            .flatten()
-            .or_else(|| match &*self.get_expr(owner).pexp_desc {
-                ExpressionDesc::Pexp_construct(_, arg) => *arg,
-                _ => None,
-            })
-    }
-
-    /// Attach sparse polymorphic variant payload argument data to a variant expression node.
-    pub fn set_variant_arg(&mut self, owner: ExprIdx, arg: Option<ExprIdx>) {
-        let slot = owner.0 as usize;
-        if slot >= self.expr_variant_args.len() {
-            self.expr_variant_args.resize(slot + 1, None);
-        }
-        self.expr_variant_args[slot] = arg;
-    }
-
-    /// Get sparse polymorphic variant payload argument data for a `Pexp_variant` expression node.
-    pub fn variant_arg(&self, owner: ExprIdx) -> Option<ExprIdx> {
-        let slot = owner.0 as usize;
-        self.expr_variant_args
-            .get(slot)
-            .copied()
-            .flatten()
-            .or_else(|| match &*self.get_expr(owner).pexp_desc {
-                ExpressionDesc::Pexp_variant(inner) => {
-                    let (_, arg) = &**inner;
-                    *arg
-                }
-                _ => None,
-            })
-    }
-
     /// Attach sparse record spread/base expression data to a record expression node.
     pub fn set_record_spread(&mut self, owner: ExprIdx, spread: Option<ExprIdx>) {
         let slot = owner.0 as usize;
@@ -3056,7 +2975,21 @@ impl ParseArena {
     /// Get a core type by index.
     #[inline]
     pub fn get_core_type(&self, idx: CoreTypeIdx) -> &CoreType {
-        self.core_types.get(idx)
+        let raw = idx.0;
+        if raw < SHARED_CORE_TYPE_BASE {
+            self.core_types.get(idx)
+        } else {
+            self.shared_core_types
+                .get((raw - SHARED_CORE_TYPE_BASE) as usize)
+                .expect("shared core type read before it was pushed")
+        }
+    }
+
+    /// Append a core type while the arena is shared.
+    pub fn push_shared_core_type(&self, typ: CoreType) -> CoreTypeIdx {
+        let slot = self.shared_core_types.len();
+        self.shared_core_types.push(Box::new(typ));
+        CoreTypeIdx(SHARED_CORE_TYPE_BASE + slot as u32)
     }
 
     /// Get a mutable core type by index.
@@ -3416,16 +3349,12 @@ mod tests {
 
         assert_eq!(arena.fun_default(owner), None);
         assert_eq!(arena.case_guard(owner, 0), None);
-        assert_eq!(arena.construct_arg(owner), None);
-        assert_eq!(arena.variant_arg(owner), None);
         assert_eq!(arena.record_spread(owner), None);
         assert_eq!(arena.if_else_branch(owner), None);
         assert_eq!(arena.coerce_from_type(owner), None);
 
         arena.set_fun_default(owner, Some(default_expr));
         arena.set_case_guards(owner, vec![None, Some(guard_expr)]);
-        arena.set_construct_arg(owner, Some(default_expr));
-        arena.set_variant_arg(owner, Some(guard_expr));
         arena.set_record_spread(owner, Some(default_expr));
         arena.set_if_else_branch(owner, Some(guard_expr));
         arena.set_coerce_from_type(owner, Some(from_type));
@@ -3434,8 +3363,6 @@ mod tests {
         assert_eq!(arena.case_guard(owner, 0), None);
         assert_eq!(arena.case_guard(owner, 1), Some(guard_expr));
         assert_eq!(arena.case_guard(owner, 2), None);
-        assert_eq!(arena.construct_arg(owner), Some(default_expr));
-        assert_eq!(arena.variant_arg(owner), Some(guard_expr));
         assert_eq!(arena.record_spread(owner), Some(default_expr));
         assert_eq!(arena.if_else_branch(owner), Some(guard_expr));
         assert_eq!(arena.coerce_from_type(owner), Some(from_type));
@@ -3490,25 +3417,6 @@ mod tests {
             pexp_attributes: Attributes::new(),
         });
 
-        let ctor_lid = Located {
-            txt: arena.push_lident("Ctor"),
-            loc: LocIdx::default(),
-        };
-        let construct_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_construct(ctor_lid, Some(default_expr))),
-            pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
-        });
-
-        let variant_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_variant(Box::new((
-                "Tag".into(),
-                Some(guard_expr),
-            )))),
-            pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
-        });
-
         let record_owner = arena.push_expr(Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((
                 vec![],
@@ -3542,8 +3450,6 @@ mod tests {
 
         assert_eq!(arena.fun_default(fun_owner), Some(default_expr));
         assert_eq!(arena.case_guard(match_owner, 0), Some(guard_expr));
-        assert_eq!(arena.construct_arg(construct_owner), Some(default_expr));
-        assert_eq!(arena.variant_arg(variant_owner), Some(guard_expr));
         assert_eq!(arena.record_spread(record_owner), Some(default_expr));
         assert_eq!(arena.if_else_branch(if_owner), Some(guard_expr));
         assert_eq!(arena.coerce_from_type(coerce_owner), Some(from_type));
@@ -3551,16 +3457,12 @@ mod tests {
         // get_expr_mut clears sparse cache entries; fallback to inline fields must preserve behavior.
         let _ = arena.get_expr_mut(fun_owner);
         let _ = arena.get_expr_mut(match_owner);
-        let _ = arena.get_expr_mut(construct_owner);
-        let _ = arena.get_expr_mut(variant_owner);
         let _ = arena.get_expr_mut(record_owner);
         let _ = arena.get_expr_mut(if_owner);
         let _ = arena.get_expr_mut(coerce_owner);
 
         assert_eq!(arena.fun_default(fun_owner), Some(default_expr));
         assert_eq!(arena.case_guard(match_owner, 0), Some(guard_expr));
-        assert_eq!(arena.construct_arg(construct_owner), Some(default_expr));
-        assert_eq!(arena.variant_arg(variant_owner), Some(guard_expr));
         assert_eq!(arena.record_spread(record_owner), Some(default_expr));
         assert_eq!(arena.if_else_branch(if_owner), Some(guard_expr));
         assert_eq!(arena.coerce_from_type(coerce_owner), Some(from_type));

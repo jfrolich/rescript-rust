@@ -21,7 +21,7 @@ the change to `compiler-rust/`, reruns the gates and commits the merge.
 | 4 | ..ebc61dd5b (50-110) | Lambda/Lam merge, curried application removal | done |
 | 5 | ..7875e74f9 (111-117) | string literal normalization, formatter | done |
 | 6 | ..0aa58d8aa (118-148) | scalar replacement, @as in the AST, sharing passes | done (Tella blocked, see log) |
-| 7 | ..162 | parser modes removed, coercions, reanalyze | |
+| 7 | ..1cec5eb9e (149-162) | constructor argument lists, parser modes removed, coercions, untagged blocks | done (Tella blocked, see step 6) |
 | 8 | ..204 | parser token inspection, regexp/ternary/braces nodes, cleanup | |
 
 ## Debug-printer conventions
@@ -264,3 +264,41 @@ parity 1895/1895, syntax tests 583/583, compiler tests green except
 `parse_inline_for` (independent), rewatch unit tests 147/147 and
 `tests/suite.sh` green. `make test-analysis` stops at `no-watcher.sh`
 (editor-tooling port in progress).
+
+### Step 7 (`1cec5eb9e`)
+
+- Constructor and polymorphic variant arguments are lists located at the
+  parentheses (`Pexp_construct`/`Ppat_construct`/`Pexp_variant`/
+  `Ppat_variant`), and `Rtag` payloads are located type groups. The parser,
+  sexp printers, marshalling (`ResImpl01307`/`ResIntf01307`), the iterators,
+  the ML and ReScript printers (`print_expression_args`,
+  `print_pattern_args`, grouped `Rtag` payloads), the comment table
+  (`walk_row_field` no longer walks payload types) and every builder were
+  moved over. The expression side tables for constructor/variant arguments
+  are gone.
+- The v0 PPX bridge encodes several arguments as a tuple with the
+  `_res.constructor_args` marker and decodes them with `decode_args`. The
+  internal Spice PPX builds its arguments the way that bridge decodes them.
+- `ParserMode` and the `-typechecker` flag are removed.
+- Typing: `normalize_constructor_pat_args`/`normalize_constructor_expr_args`
+  after disambiguation; `type_construct` types each argument with
+  `type_argument` instead of typing a synthetic tuple; polymorphic variant
+  payload groups become a tuple only in the type checker (shared arena
+  storage for the rebuilt core types); `Texp_coerce` carries the
+  head-expanded source and target types.
+- `Variant_runtime.block` is `Tagged | Untagged {tag; block_type}`:
+  `Blk_constructor` holds a tagged block, untagged constructors are erased
+  to their payload in translation, `get_block_type` rejects multi-argument
+  untagged constructors, `.cmi`/`.cmj` decoders follow the new layout
+  (`Caml1999I034`), and `Lambda.switch` decides a constant scrutinee of an
+  untagged switch by its runtime value.
+- Bigint tags print through `Bigint_utils.parse_bigint` (`@as(1_0n)` emits
+  `10n`), and `%raw` templates go through `decode_raw_template_source`.
+- Frontend: `ast_exp_apply` gives a piped constructor argument its own
+  location, `ast_derive_projector` passes one argument per parameter.
+
+Gates (release): JS output parity 640/640, typedtree parity 639/639
+(`string_unicode_test` exceeds the 10s limit in both compilers), error output
+parity 1898/1898, syntax tests 588/588, compiler tests green except
+`parse_inline_for`, rewatch unit tests 147/147, `cargo fmt` clean and
+`tests/suite.sh` green. `make test-analysis` stops at `no-watcher.sh`.

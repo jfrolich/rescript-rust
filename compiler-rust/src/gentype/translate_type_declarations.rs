@@ -466,7 +466,7 @@ fn traslate_declaration_kind_with_attribute_info(
                     let tag = match case {
                         crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
                         crate::types::VariantConstructorCase::Block(block) => {
-                            &block.runtime.tag.literal
+                            &block.tag().literal
                         }
                     };
                     let tag = tag.clone();
@@ -491,7 +491,7 @@ fn traslate_declaration_kind_with_attribute_info(
                                     || matches!(
                                         case,
                                         crate::types::VariantConstructorCase::Block(block)
-                                            if block.runtime.untagged
+                                            if block.is_untagged()
                                     ),
                                 label_declarations,
                             ),

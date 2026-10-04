@@ -1729,7 +1729,7 @@ fn add_default_value_matches(
                                         txt: some_lid,
                                         loc: empty_loc(),
                                     },
-                                    Some(some_inner_pat_idx),
+                                    ctor_args(vec![some_inner_pat_idx], empty_loc()),
                                 )),
                                 ppat_loc: empty_loc(),
                                 ppat_attributes: Attributes::new(),
@@ -1752,7 +1752,7 @@ fn add_default_value_matches(
                                         txt: none_lid,
                                         loc: empty_loc(),
                                     },
-                                    None,
+                                    ctor_args(Vec::new(), empty_loc()),
                                 )),
                                 ppat_loc: empty_loc(),
                                 ppat_attributes: Attributes::new(),
@@ -2725,6 +2725,7 @@ fn string_int_attribute_loc_in_core_type(
             RowField::Rtag(_, attrs, _, args) => string_int_attribute_loc_in_attrs(arena, attrs)
                 .or_else(|| {
                     args.iter()
+                        .flat_map(|group| group.txt.iter())
                         .find_map(|arg| string_int_attribute_loc_in_core_type(arena, arg))
                 }),
             RowField::Rinherit(typ) => string_int_attribute_loc_in_core_type(arena, typ),
@@ -3137,7 +3138,7 @@ fn unit_expr(arena: &mut ParseArena, loc: &Location) -> Expression {
                 txt: arena.push_longident(Longident::Lident(unit_str_idx)),
                 loc: loc.clone(),
             },
-            None,
+            ctor_args(Vec::new(), loc.clone()),
         )),
         pexp_loc: loc.clone(),
         pexp_attributes: Attributes::new(),
@@ -4144,22 +4145,22 @@ fn transform_expression(
                 })
                 .collect(),
         )),
-        ExpressionDesc::Pexp_construct(lid, arg) => {
-            let rw_arg = arg.map(|e| {
-                let e_expr = arena.get_expr(e).clone();
+        ExpressionDesc::Pexp_construct(lid, mut args) => {
+            for e in args.txt.iter_mut() {
+                let e_expr = arena.get_expr(*e).clone();
                 let rw = transform_expression(e_expr, config, arena);
-                arena.push_expr(rw)
-            });
-            ExpressionDesc::Pexp_construct(lid, rw_arg)
+                *e = arena.push_expr(rw);
+            }
+            ExpressionDesc::Pexp_construct(lid, args)
         }
         ExpressionDesc::Pexp_variant(inner) => {
-            let (label, arg) = *inner;
-            let transformed_arg = arg.map(|e| {
-                let e_expr = arena.get_expr(e).clone();
+            let (label, mut args) = *inner;
+            for e in args.txt.iter_mut() {
+                let e_expr = arena.get_expr(*e).clone();
                 let transformed = transform_expression(e_expr, config, arena);
-                arena.push_expr(transformed)
-            });
-            ExpressionDesc::Pexp_variant(Box::new((label, transformed_arg)))
+                *e = arena.push_expr(transformed);
+            }
+            ExpressionDesc::Pexp_variant(Box::new((label, args)))
         }
         ExpressionDesc::Pexp_record(inner) => {
             let (fields, base) = *inner;
@@ -5201,8 +5202,8 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
         ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
             items.iter().any(|item| child(*item, memo))
         }
-        ExpressionDesc::Pexp_construct(_, arg) => arg.is_some_and(|arg| child(arg, memo)),
-        ExpressionDesc::Pexp_variant(inner) => inner.1.is_some_and(|arg| child(arg, memo)),
+        ExpressionDesc::Pexp_construct(_, args) => args.txt.iter().any(|arg| child(*arg, memo)),
+        ExpressionDesc::Pexp_variant(inner) => inner.1.txt.iter().any(|arg| child(*arg, memo)),
         ExpressionDesc::Pexp_record(inner) => {
             inner.0.iter().any(|field| child(field.expr, memo))
                 || inner.1.is_some_and(|spread| child(spread, memo))

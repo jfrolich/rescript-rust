@@ -649,8 +649,9 @@ fn parser_attr_to_decl_attr(
                             "false" => crate::types::decl::AttributePayload::Bool(false),
                             _ => crate::types::decl::AttributePayload::Ident(name.to_string()),
                         }
-                    } else if let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, None) =
+                    } else if let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, args) =
                         expr.pexp_desc.as_ref()
+                        && args.txt.is_empty()
                     {
                         match arena.lident_last(lid.txt) {
                             "true" => crate::types::decl::AttributePayload::Bool(true),
@@ -6307,12 +6308,26 @@ fn get_untagged_constructor_block_type(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
     constructor: &crate::types::decl::ConstructorDeclaration,
-) -> Option<UntaggedVariantBlockType> {
+) -> TypeModResult<Option<UntaggedVariantBlockType>> {
     if !has_decl_attr(&constructor.cd_attributes, "unboxed") {
-        return None;
+        return Ok(None);
     }
 
-    match &constructor.cd_args {
+    // variant_layout.ml `get_block_type`: an untagged constructor carries at
+    // most one payload.
+    if let crate::types::decl::ConstructorArguments::CstrTuple(args) = &constructor.cd_args
+        && args.len() > 1
+    {
+        return Err(TypeModError::InvalidUntaggedVariantDefinition {
+            loc: constructor.cd_loc.clone(),
+            reason: format!(
+                "Constructor {} has more than one argument.",
+                constructor.cd_id.name()
+            ),
+        });
+    }
+
+    Ok(match &constructor.cd_args {
         crate::types::decl::ConstructorArguments::CstrTuple(args) => match args.as_slice() {
             [arg] => get_untagged_block_type_from_type(ctx, env, *arg).or_else(|| {
                 match extract_concrete_untagged_type_decl(ctx, env, *arg) {
@@ -6331,13 +6346,13 @@ fn get_untagged_constructor_block_type(
                     None => Some(UntaggedVariantBlockType::Unknown),
                 }
             }),
-            [_, _, ..] => Some(UntaggedVariantBlockType::Object),
+            [_, _, ..] => unreachable!("rejected above"),
             [] => None,
         },
         crate::types::decl::ConstructorArguments::CstrRecord(_) => {
             Some(UntaggedVariantBlockType::Object)
         }
-    }
+    })
 }
 
 fn variant_tag_literal(constructor_name: &str, tag: &Option<crate::types::VariantLiteralTag>) -> (bool, String) {
@@ -6398,7 +6413,7 @@ fn check_variant_well_formed(
         ) {
             consts.push((constructor.cd_loc.clone(), name, tag));
         } else {
-            let block_type = get_untagged_constructor_block_type(ctx, env, constructor);
+            let block_type = get_untagged_constructor_block_type(ctx, env, constructor)?;
             blocks.push((constructor.cd_loc.clone(), name, tag, block_type));
         }
     }
@@ -6581,17 +6596,16 @@ fn derive_variant_layout(
         {
             cases.push(crate::types::VariantConstructorCase::Constant(tag));
         } else {
-            cases.push(crate::types::VariantConstructorCase::Block(
-                crate::types::VariantBlock {
-                    runtime: crate::types::BlockRuntime {
-                        tag,
-                        tag_name: process_variant_tag_name(&constructor.cd_attributes)?,
-                        untagged: has_decl_attr(&constructor.cd_attributes, "unboxed"),
-                    },
-                    block_type: get_untagged_constructor_block_type(ctx, env, constructor)
-                        .map(canonical_variant_block_type),
+            // variant_layout.ml `get_block`.
+            let tag_name = process_variant_tag_name(&constructor.cd_attributes)?;
+            let block = match get_untagged_constructor_block_type(ctx, env, constructor)? {
+                Some(block_type) => crate::types::VariantBlock::Untagged {
+                    tag,
+                    block_type: canonical_variant_block_type(block_type),
                 },
-            ));
+                None => crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag, tag_name }),
+            };
+            cases.push(crate::types::VariantConstructorCase::Block(block));
         }
     }
     Ok(crate::types::VariantLayout::new(

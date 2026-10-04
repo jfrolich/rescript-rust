@@ -13,7 +13,7 @@ use super::diagnostics::DiagnosticCategory;
 use crate::location::Position;
 use super::grammar::{self, Grammar};
 use super::longident::Longident;
-use super::state::{Parser, ParserMode};
+use super::state::Parser;
 use super::token::Token;
 use crate::parse_arena::{LocIdx, Located, PatIdx, PosIdx, StrIdx};
 
@@ -94,7 +94,7 @@ fn pat(desc: PatternDesc, loc: LocIdx, attrs: Attributes) -> Pattern {
     }
 }
 
-/// `Ast_helper.Pat.construct ~loc (mkloc (Lident name) loc) None`.
+/// `Ast_helper.Pat.construct ~loc (mkloc (Lident name) loc) (mkloc [] loc)`.
 fn construct_lident(p: &mut Parser<'_>, name: &'static str, loc: LocIdx, attrs: Attributes) -> Pattern {
     let lid_idx = if name == "()" {
         p.push_lident_static("()")
@@ -102,7 +102,7 @@ fn construct_lident(p: &mut Parser<'_>, name: &'static str, loc: LocIdx, attrs: 
         let name_idx = p.arena_mut().intern_string(name);
         p.push_longident(Longident::Lident(name_idx))
     };
-    pat(PatternDesc::Ppat_construct(with_loc(lid_idx, loc), None), loc, attrs)
+    pat(PatternDesc::Ppat_construct(with_loc(lid_idx, loc), ctor_args(Vec::new(), loc)), loc, attrs)
 }
 
 /// OCaml `parse_template_constant ~start_pos ~prefix` (res_core.ml).
@@ -253,7 +253,7 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
                 parse_constructor_pattern_args(p, constr, start_pos_idx, attrs.clone())
             } else {
                 let loc = constr.loc;
-                pat(PatternDesc::Ppat_construct(constr, None), loc, attrs.clone())
+                pat(PatternDesc::Ppat_construct(constr, ctor_args(Vec::new(), loc)), loc, attrs.clone())
             }
         }
         Token::DotDotDot => {
@@ -285,7 +285,10 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
                     parse_variant_pattern_args(p, ident, start_pos_idx, attrs.clone())
                 } else {
                     pat(
-                        PatternDesc::Ppat_variant(Box::new((Cow::Owned(ident), None))),
+                        PatternDesc::Ppat_variant(Box::new((
+                            Cow::Owned(ident),
+                            Located { txt: Vec::new(), loc },
+                        ))),
                         loc,
                         attrs.clone(),
                     )
@@ -426,7 +429,7 @@ fn parse_constrained_pattern_region(p: &mut Parser<'_>) -> Option<Pattern> {
 pub fn make_unit_construct_pattern(p: &mut super::state::Parser<'_>, lid_loc: Location) -> Pattern {
     let lid_idx = p.push_lident_static("()");
     // Use ghost location for the pattern, but real location for the longident
-    ast_helper::make_construct_pat(p.arena_mut(), lid_idx, None, lid_loc, LocIdx::none())
+    ast_helper::make_construct_pat(p.arena_mut(), lid_idx, Vec::new(), lid_loc, lid_loc, LocIdx::none())
 }
 
 /// OCaml `parse_tuple_pattern ~attrs ~first ~start_pos` (res_core.ml:1602-1617).
@@ -569,44 +572,10 @@ fn parse_array_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
     pat(PatternDesc::Ppat_array(Box::new(pattern_indices)), loc, attrs)
 }
 
-/// The shared argument handling of OCaml `parse_constructor_pattern_args` and
-/// `parse_variant_pattern_args` (res_core.ml:1718-1778).
-fn pattern_args(
-    p: &mut Parser<'_>,
-    lparen: PosIdx,
-    args: Vec<Pattern>,
-) -> Option<PatIdx> {
-    let arg = match args.len() {
-        0 => {
-            let loc = p.mk_loc_idx_to_prev_end(lparen);
-            construct_lident(p, "()", loc, Attributes::new())
-        }
-        1 if matches!(*args[0].ppat_desc, PatternDesc::Ppat_tuple(_)) => {
-            if p.mode == ParserMode::ParseForTypeChecker {
-                args.into_iter().next().expect("one argument")
-            } else {
-                let loc = p.mk_loc_idx_to_end(lparen);
-                let indices = args.into_iter().map(|a| p.arena_mut().push_pat(a)).collect();
-                pat(PatternDesc::Ppat_tuple(Box::new(indices)), loc, Attributes::new())
-            }
-        }
-        1 => args.into_iter().next().expect("one argument"),
-        _ => {
-            let loc = p.mk_loc_idx_to_end(lparen);
-            let indices = args.into_iter().map(|a| p.arena_mut().push_pat(a)).collect();
-            pat(PatternDesc::Ppat_tuple(Box::new(indices)), loc, Attributes::new())
-        }
-    };
-    Some(p.arena_mut().push_pat(arg))
-}
-
-/// OCaml `parse_constructor_pattern_args` (res_core.ml:1718-1748).
-fn parse_constructor_pattern_args(
-    p: &mut Parser<'_>,
-    constr: Located<crate::parse_arena::LidentIdx>,
-    start_pos_idx: PosIdx,
-    attrs: Attributes,
-) -> Pattern {
+/// OCaml `parse_pattern_args` (res_core.ml): the parenthesized argument
+/// list of a constructor or polymorphic variant pattern, located at its
+/// parentheses. `C()` is `C(())`.
+fn parse_pattern_args(p: &mut Parser<'_>) -> Located<Vec<PatIdx>> {
     let lparen = p.start_pos_idx();
     p.expect(Token::Lparen);
     let args = super::core::parse_comma_delimited_region(
@@ -616,31 +585,39 @@ fn parse_constructor_pattern_args(
         parse_constrained_pattern_region,
     );
     p.expect(Token::Rparen);
-    let arg = pattern_args(p, lparen, args);
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    pat(PatternDesc::Ppat_construct(constr, arg), loc, attrs)
+    let loc = p.mk_loc_idx_to_prev_end(lparen);
+    let args = if args.is_empty() {
+        vec![construct_lident(p, "()", loc, Attributes::new())]
+    } else {
+        args
+    };
+    let txt = args.into_iter().map(|a| p.arena_mut().push_pat(a)).collect();
+    Located { txt, loc }
 }
 
-/// OCaml `parse_variant_pattern_args` (res_core.ml:1750-1778).
+/// OCaml `parse_constructor_pattern_args` (res_core.ml).
+fn parse_constructor_pattern_args(
+    p: &mut Parser<'_>,
+    constr: Located<crate::parse_arena::LidentIdx>,
+    start_pos_idx: PosIdx,
+    attrs: Attributes,
+) -> Pattern {
+    let args = parse_pattern_args(p);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    pat(PatternDesc::Ppat_construct(constr, Box::new(args)), loc, attrs)
+}
+
+/// OCaml `parse_variant_pattern_args` (res_core.ml).
 fn parse_variant_pattern_args(
     p: &mut Parser<'_>,
     ident: String,
     start_pos_idx: PosIdx,
     attrs: Attributes,
 ) -> Pattern {
-    let lparen = p.start_pos_idx();
-    p.expect(Token::Lparen);
-    let patterns = super::core::parse_comma_delimited_region(
-        p,
-        Grammar::PatternList,
-        Token::Rparen,
-        parse_constrained_pattern_region,
-    );
-    let arg = pattern_args(p, lparen, patterns);
-    p.expect(Token::Rparen);
+    let args = parse_pattern_args(p);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     pat(
-        PatternDesc::Ppat_variant(Box::new((Cow::Owned(ident), arg))),
+        PatternDesc::Ppat_variant(Box::new((Cow::Owned(ident), args))),
         loc,
         attrs,
     )

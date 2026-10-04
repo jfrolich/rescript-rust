@@ -385,6 +385,56 @@ fn encode_js(mode: EncodeJsMode, s: &str) -> String {
 }
 
 /// OCaml `String_literal.encode_js_string`.
+/// OCaml `String_literal.decode_raw_template_source`: the JavaScript code of a
+/// `%raw` template. Escaped `\\`, `$` and `` ` `` lose their backslash; a
+/// backslash line continuation (`\n`, `\r\n`, `\r`, U+2028, U+2029) is
+/// dropped; every other escape is kept verbatim.
+pub fn decode_raw_template_source(source: &str) -> String {
+    let bytes = bytes_of(source);
+    let utf8_native = matches!(bytes, Cow::Borrowed(_));
+    let length = bytes.len();
+    let mut buffer = Vec::with_capacity(length);
+    let mut index = 0;
+    while index < length {
+        let character = bytes[index];
+        if character == b'\\' && index + 1 < length {
+            match bytes[index + 1] {
+                escaped @ (b'\\' | b'$' | b'`') => {
+                    buffer.push(escaped);
+                    index += 2;
+                }
+                b'\n' => index += 2,
+                b'\r' => {
+                    if index + 2 < length && bytes[index + 2] == b'\n' {
+                        index += 3
+                    } else {
+                        index += 2
+                    }
+                }
+                0xe2 if index + 3 < length
+                    && bytes[index + 2] == 0x80
+                    && (bytes[index + 3] == 0xa8 || bytes[index + 3] == 0xa9) =>
+                {
+                    index += 4
+                }
+                escaped => {
+                    buffer.push(b'\\');
+                    buffer.push(escaped);
+                    index += 2;
+                }
+            }
+        } else {
+            buffer.push(character);
+            index += 1;
+        }
+    }
+    if utf8_native {
+        String::from_utf8(buffer).expect("removing escapes keeps UTF-8 boundaries")
+    } else {
+        string_of_bytes(buffer)
+    }
+}
+
 pub fn encode_js_string(s: &str) -> String {
     encode_js(EncodeJsMode::String, s)
 }

@@ -370,18 +370,23 @@ impl<'a> SigReadContext<'a> {
         match tag {
             0 => crate::types::VariantConstructorCase::Constant(self.read_variant_tag(&fields[0])),
             1 => {
-                let (_, block) = fields[0].as_block();
-                let (_, runtime) = block[0].as_block();
-                crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                    runtime: crate::types::BlockRuntime {
-                        tag: self.read_variant_tag(&runtime[0]),
-                        tag_name: self.read_string_option(&runtime[1]),
-                        untagged: runtime[2].as_bool(),
+                // `Tagged of tagged_block | Untagged of {tag; block_type}`.
+                let (block_tag, block) = fields[0].as_block();
+                let block = match block_tag {
+                    0 => {
+                        let (_, runtime) = block[0].as_block();
+                        crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
+                            tag: self.read_variant_tag(&runtime[0]),
+                            tag_name: self.read_string_option(&runtime[1]),
+                        })
+                    }
+                    1 => crate::types::VariantBlock::Untagged {
+                        tag: self.read_variant_tag(&block[0]),
+                        block_type: self.read_variant_block_type(&block[1]),
                     },
-                    block_type: block[1]
-                        .as_option()
-                        .map(|v| self.read_variant_block_type(v)),
-                })
+                    _ => panic!("invalid variant block tag {block_tag}"),
+                };
+                crate::types::VariantConstructorCase::Block(block)
             }
             _ => panic!("invalid variant constructor case tag {tag}"),
         }
@@ -415,44 +420,7 @@ impl<'a> SigReadContext<'a> {
     }
 
     fn read_variant_block_type(&mut self, value: &OcamlValue) -> crate::types::VariantBlockType {
-        use crate::types::{VariantBlockType as B, VariantInstance as I};
-        match value {
-            OcamlValue::Int(0) => B::Int,
-            OcamlValue::Int(1) => B::String,
-            OcamlValue::Int(2) => B::Float,
-            OcamlValue::Int(3) => B::Bigint,
-            OcamlValue::Int(4) => B::Boolean,
-            OcamlValue::Int(5) => B::Function,
-            OcamlValue::Int(6) => B::Object,
-            OcamlValue::Int(7) => B::Unknown,
-            OcamlValue::Block(0, fields) => B::Instance(match fields[0].as_int() {
-                0 => I::Array,
-                1 => I::ArrayBuffer,
-                2 => I::BigInt64Array,
-                3 => I::BigUint64Array,
-                4 => I::Blob,
-                5 => I::DataView,
-                6 => I::Date,
-                7 => I::File,
-                8 => I::Float32Array,
-                9 => I::Float64Array,
-                10 => I::Int16Array,
-                11 => I::Int32Array,
-                12 => I::Int8Array,
-                13 => I::Promise,
-                14 => I::RegExp,
-                15 => I::Uint16Array,
-                16 => I::Uint32Array,
-                17 => I::Uint8Array,
-                18 => I::Uint8ClampedArray,
-                19 => I::Set,
-                20 => I::Map,
-                21 => I::WeakSet,
-                22 => I::WeakMap,
-                n => panic!("invalid variant instance {n}"),
-            }),
-            _ => panic!("invalid variant block type"),
-        }
+        decode_variant_block_type(value)
     }
 
     fn read_string_option(&self, value: &OcamlValue) -> Option<String> {
@@ -1721,5 +1689,47 @@ mod tests {
             read_attribute_payload(&cmi_string_pstr("fulfilled")),
             AttributePayload::Str("fulfilled".to_string())
         );
+    }
+}
+
+/// Decode a marshalled `Variant_runtime.block_type`.
+pub(crate) fn decode_variant_block_type(value: &OcamlValue) -> crate::types::VariantBlockType {
+    use crate::types::{VariantBlockType as B, VariantInstance as I};
+    match value {
+        OcamlValue::Int(0) => B::Int,
+        OcamlValue::Int(1) => B::String,
+        OcamlValue::Int(2) => B::Float,
+        OcamlValue::Int(3) => B::Bigint,
+        OcamlValue::Int(4) => B::Boolean,
+        OcamlValue::Int(5) => B::Function,
+        OcamlValue::Int(6) => B::Object,
+        OcamlValue::Int(7) => B::Unknown,
+        OcamlValue::Block(0, fields) => B::Instance(match fields[0].as_int() {
+            0 => I::Array,
+            1 => I::ArrayBuffer,
+            2 => I::BigInt64Array,
+            3 => I::BigUint64Array,
+            4 => I::Blob,
+            5 => I::DataView,
+            6 => I::Date,
+            7 => I::File,
+            8 => I::Float32Array,
+            9 => I::Float64Array,
+            10 => I::Int16Array,
+            11 => I::Int32Array,
+            12 => I::Int8Array,
+            13 => I::Promise,
+            14 => I::RegExp,
+            15 => I::Uint16Array,
+            16 => I::Uint32Array,
+            17 => I::Uint8Array,
+            18 => I::Uint8ClampedArray,
+            19 => I::Set,
+            20 => I::Map,
+            21 => I::WeakSet,
+            22 => I::WeakMap,
+            n => panic!("invalid variant instance {n}"),
+        }),
+        _ => panic!("invalid variant block type"),
     }
 }

@@ -545,14 +545,14 @@ pub fn read_cmt(cmt_file: &str) -> InputCmt<'static> {
     // Mirrors compiler/gentype/GenTypeMain.ml:85-91. Actual CMT decoding is
     // wired later; this staged port preserves the stale-artifact error boundary.
     match std::fs::read(cmt_file) {
-        Ok(data) if data.starts_with(b"Caml1999T022") => {
+        Ok(data) if data.starts_with(b"Caml1999T037") => {
             crate::gentype::log_::item(&format!("Error loading {cmt_file}\n\n"));
             crate::gentype::log_::item(
                 "Standalone CMT decoding is not available in the Rust GenType path yet.\n",
             );
             panic!("Fatal error: exception Cmt_format.Error(_)")
         }
-        Ok(data) if data.starts_with(b"Caml1999I032") => {
+        Ok(data) if data.starts_with(b"Caml1999I034") => {
             panic!("Fatal error: exception Cmt_format.Error(_)")
         }
         _ => {

@@ -354,7 +354,7 @@ fn print_switch_cases_with_exn<W: Write>(
                 block,
             )) => f.print(format_args!(
                 "case constructor {:?}:",
-                block.runtime.tag.name
+                block.tag().name
             )),
             crate::lambda::SwitchKey::Constructor(
                 crate::types::VariantConstructorCase::Constant(_),

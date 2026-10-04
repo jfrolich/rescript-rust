@@ -355,14 +355,10 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
             TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
-                runtime: Box::new(crate::types::BlockRuntime {
-                    tag: crate::types::VariantTag {
+                runtime: Box::new(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                         name: "::".to_string(),
                         literal: None,
-                    },
-                    tag_name: None,
-                    untagged: false,
-                }),
+                    }, tag_name: None }),
             },
             Mutable::Immutable,
         ),
@@ -1108,17 +1104,10 @@ fn nested_staticcatch_switch_forwarders_to_outer_handlers_avoid_exit_temps_like_
                         (
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock {
-                                        runtime: crate::types::BlockRuntime {
-                                            tag: crate::types::VariantTag {
+                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                                 name: "Int1".to_string(),
                                                 literal: None,
-                                            },
-                                            tag_name: None,
-                                            untagged: false,
-                                        },
-                                        block_type: None,
-                                    },
+                                            }, tag_name: None }),
                                 ),
                             ),
                             Lambda::static_raise(2, Vec::new()),
@@ -1126,17 +1115,10 @@ fn nested_staticcatch_switch_forwarders_to_outer_handlers_avoid_exit_temps_like_
                         (
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock {
-                                        runtime: crate::types::BlockRuntime {
-                                            tag: crate::types::VariantTag {
+                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                                 name: "Int2".to_string(),
                                                 literal: None,
-                                            },
-                                            tag_name: None,
-                                            untagged: false,
-                                        },
-                                        block_type: None,
-                                    },
+                                            }, tag_name: None }),
                                 ),
                             ),
                             Lambda::static_raise(2, Vec::new()),
@@ -1236,17 +1218,10 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                         (
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock {
-                                        runtime: crate::types::BlockRuntime {
-                                            tag: crate::types::VariantTag {
+                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                                 name: "Int1".to_string(),
                                                 literal: None,
-                                            },
-                                            tag_name: None,
-                                            untagged: false,
-                                        },
-                                        block_type: None,
-                                    },
+                                            }, tag_name: None }),
                                 ),
                             ),
                             Lambda::static_raise(2, Vec::new()),
@@ -1254,17 +1229,10 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                         (
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock {
-                                        runtime: crate::types::BlockRuntime {
-                                            tag: crate::types::VariantTag {
+                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                                 name: "Int2".to_string(),
                                                 literal: None,
-                                            },
-                                            tag_name: None,
-                                            untagged: false,
-                                        },
-                                        block_type: None,
-                                    },
+                                            }, tag_name: None }),
                                 ),
                             ),
                             Lambda::static_raise(2, Vec::new()),
@@ -1834,17 +1802,10 @@ fn single_case_staticcatch_wrapped_untagged_object_unit_handler_keeps_negative_g
                     sw_blocks: vec![(
                         crate::lambda::SwitchKey::Constructor(
                             crate::types::VariantConstructorCase::Block(
-                                crate::types::VariantBlock {
-                                    runtime: crate::types::BlockRuntime {
-                                        tag: crate::types::VariantTag {
+                                crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                             name: "Object".to_string(),
                                             literal: None,
-                                        },
-                                        tag_name: None,
-                                        untagged: true,
-                                    },
-                                    block_type: Some(crate::types::VariantBlockType::Object),
-                                },
+                                        }, block_type: crate::types::VariantBlockType::Object },
                             ),
                         ),
                         Lambda::Lassign(seen.clone(), Box::new(Lambda::const_(Constant::int(1)))),
@@ -1908,19 +1869,12 @@ fn effectful_unit_staticcatch_handlers_keep_fail_first_guards() {
                     sw_blocks: vec![(
                         crate::lambda::SwitchKey::Constructor(
                             crate::types::VariantConstructorCase::Block(
-                                crate::types::VariantBlock {
-                                    runtime: crate::types::BlockRuntime {
-                                        tag: crate::types::VariantTag {
+                                crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                                             name: "Array".to_string(),
                                             literal: None,
-                                        },
-                                        tag_name: None,
-                                        untagged: true,
-                                    },
-                                    block_type: Some(crate::types::VariantBlockType::Instance(
+                                        }, block_type: crate::types::VariantBlockType::Instance(
                                         crate::types::VariantInstance::Array,
-                                    )),
-                                },
+                                    ) },
                             ),
                         ),
                         Lambda::let_(

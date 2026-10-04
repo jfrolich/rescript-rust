@@ -264,7 +264,7 @@ fn walk_record_fields<I: TastIterator + ?Sized>(sub: &mut I, fields: &[RecordFie
 pub fn walk_expr<I: TastIterator + ?Sized>(sub: &mut I, e: &Expression) {
     for (extra, _, _) in e.exp_extra.iter() {
         match extra {
-            ExpExtra::Texp_constraint(ct) | ExpExtra::Texp_coerce(ct) => sub.typ(ct),
+            ExpExtra::Texp_constraint(ct) | ExpExtra::Texp_coerce { target: ct, .. } => sub.typ(ct),
             ExpExtra::Texp_open(..) | ExpExtra::Texp_newtype(_) => {}
         }
     }

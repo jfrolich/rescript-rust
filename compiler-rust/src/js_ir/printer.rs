@@ -1244,8 +1244,14 @@ impl JsPrinter {
             SwitchCaseTag::String(value) => self.print_string(value),
             SwitchCaseTag::Int(value) => self.write(&value.to_string()),
             SwitchCaseTag::Float(value) => self.write(value),
+            // js_exp_make.ml `literal_tag`: `Bigint_utils.parse_bigint`,
+            // printed as `Bigint_utils.to_string`.
             SwitchCaseTag::BigInt(value) => {
-                self.write(value);
+                let (positive, digits) = crate::types::typecore::parse_bigint_literal(value);
+                if !positive {
+                    self.write("-");
+                }
+                self.write(&digits);
                 self.write("n");
             }
             SwitchCaseTag::Bool(value) => self.write(if *value { "true" } else { "false" }),
@@ -2174,14 +2180,20 @@ impl JsPrinter {
                         runtime,
                         ..
                     } if fields.len() == elements.len() => {
-                        let untagged = runtime.untagged;
-                        let tag_name = runtime.tag_name.as_deref().unwrap_or("TAG");
-                        let tag_value = variant_tag_to_switch(&runtime.tag)
-                            .unwrap_or_else(|| SwitchCaseTag::String(name.clone()));
+                        // js_dump.ml Blk_record_inlined: only a tagged block
+                        // emits its tag field.
+                        let tag_field = match &**runtime {
+                            crate::types::VariantBlock::Untagged { .. } => None,
+                            crate::types::VariantBlock::Tagged(tagged) => Some((
+                                tagged.tag_name.as_deref().unwrap_or("TAG"),
+                                variant_tag_to_switch(&tagged.tag)
+                                    .unwrap_or_else(|| SwitchCaseTag::String(name.clone())),
+                            )),
+                        };
                         self.print_object_literal(
                             level,
                             None,
-                            (if untagged {
+                            (if tag_field.is_none() {
                                 Vec::new()
                             } else {
                                 vec![(None, None)]
@@ -2200,9 +2212,11 @@ impl JsPrinter {
                             ),
                             |this, prop| match prop {
                                 (None, None) => {
+                                    let (tag_name, tag_value) =
+                                        tag_field.as_ref().expect("tag property of a tagged block");
                                     this.print_literal_property_name(tag_name);
                                     this.write(": ");
-                                    this.print_switch_case_tag(&tag_value);
+                                    this.print_switch_case_tag(tag_value);
                                 }
                                 (Some(field_name), Some(elem)) => {
                                     this.print_literal_property_name(field_name);
@@ -2250,16 +2264,12 @@ impl JsPrinter {
                                 },
                             );
                         } else {
-                            let untagged = runtime.untagged;
-                            if untagged && elements.len() == 1 {
-                                self.print_expression(&elements[0], level);
-                            } else {
+                            {
                                 let tag_name = runtime.tag_name.as_deref().unwrap_or("TAG");
                                 let tag_value = variant_tag_to_switch(&runtime.tag)
                                     .unwrap_or_else(|| SwitchCaseTag::String(name.clone()));
-                                let include_tag = !untagged;
-                                let include_debug_name =
-                                    self.debug && !untagged && name.as_str() != "::";
+                                let include_tag = true;
+                                let include_debug_name = self.debug && name.as_str() != "::";
                                 self.print_object_literal(
                                     level,
                                     None,
@@ -3054,7 +3064,7 @@ fn normalize_hex_float_literal(float_str: &str) -> Option<String> {
     Some(js_number_to_string(value))
 }
 
-fn parse_hex_float_literal(float_str: &str) -> Option<f64> {
+pub(crate) fn parse_hex_float_literal(float_str: &str) -> Option<f64> {
     let (negative, digits) = if let Some(rest) = float_str.strip_prefix('-') {
         (true, rest)
     } else if let Some(rest) = float_str.strip_prefix('+') {
@@ -5991,14 +6001,10 @@ mod tests {
             Box::new(TagInfo::RecordInlined {
                 name: "One".to_string(),
                 num_nonconst: 1,
-                runtime: Box::new(crate::types::BlockRuntime {
-                    tag: crate::types::VariantTag {
+                runtime: Box::new(crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                         name: "One".to_string(),
                         literal: None,
-                    },
-                    tag_name: None,
-                    untagged: false,
-                }),
+                    }, tag_name: None })),
                 fields: vec![("name".to_string(), false)],
                 logical_field_count: None,
                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,

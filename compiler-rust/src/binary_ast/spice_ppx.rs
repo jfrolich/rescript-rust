@@ -359,6 +359,52 @@ fn expr_array(items: Vec<Expression>, arena: &mut ParseArena) -> Expression {
     }
 }
 
+/// The constructor argument list the upstream PPX bridge
+/// (`Ast_mapper_from0.decode_args`) builds from this PPX's single v0
+/// payload: a tuple splits into arguments only for `::`; anything else is
+/// the one argument. The list is located at the payload, or at the node
+/// when there is none.
+fn bridge_expr_args(
+    split_tuple: bool,
+    arg: Option<Expression>,
+    node_loc: LocIdx,
+    arena: &mut ParseArena,
+) -> Located<Vec<ExprIdx>> {
+    match arg {
+        None => Located::new(Vec::new(), node_loc),
+        Some(arg) => {
+            let loc = arg.pexp_loc;
+            match &*arg.pexp_desc {
+                ExpressionDesc::Pexp_tuple(items) if split_tuple && arg.pexp_attributes.is_empty() => {
+                    Located::new(items.to_vec(), loc)
+                }
+                _ => Located::new(vec![arena.push_expr(arg)], loc),
+            }
+        }
+    }
+}
+
+/// `bridge_expr_args` for patterns.
+fn bridge_pat_args(
+    split_tuple: bool,
+    arg: Option<Pattern>,
+    node_loc: LocIdx,
+    arena: &mut ParseArena,
+) -> Located<Vec<PatIdx>> {
+    match arg {
+        None => Located::new(Vec::new(), node_loc),
+        Some(arg) => {
+            let loc = arg.ppat_loc;
+            match &*arg.ppat_desc {
+                PatternDesc::Ppat_tuple(items) if split_tuple && arg.ppat_attributes.is_empty() => {
+                    Located::new(items.to_vec(), loc)
+                }
+                _ => Located::new(vec![arena.push_pat(arg)], loc),
+            }
+        }
+    }
+}
+
 fn expr_construct(
     lid_idx: LidentIdx,
     arg: Option<Expression>,
@@ -373,15 +419,8 @@ fn expr_construct_with_loc(
     lid_loc: LocIdx,
     arena: &mut ParseArena,
 ) -> Expression {
-    let arg_idx = arg.map(|a| arena.push_expr(a));
-    Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
-            Located::new(lid_idx, lid_loc),
-            arg_idx,
-        )),
-        pexp_loc: arena.dummy_loc(),
-        pexp_attributes: Attributes::new(),
-    }
+    let expr_loc = arena.dummy_loc();
+    expr_construct_with_locs(lid_idx, arg, lid_loc, expr_loc, arena)
 }
 
 fn expr_construct_with_locs(
@@ -391,11 +430,12 @@ fn expr_construct_with_locs(
     expr_loc: LocIdx,
     arena: &mut ParseArena,
 ) -> Expression {
-    let arg_idx = arg.map(|a| arena.push_expr(a));
+    let split_tuple = arena.is_lident(lid_idx, "::");
+    let args = bridge_expr_args(split_tuple, arg, expr_loc, arena);
     Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
             Located::new(lid_idx, lid_loc),
-            arg_idx,
+            Box::new(args),
         )),
         pexp_loc: expr_loc,
         pexp_attributes: Attributes::new(),
@@ -407,10 +447,11 @@ fn expr_variant(
     arg: Option<Expression>,
     arena: &mut ParseArena,
 ) -> Expression {
-    let arg_idx = arg.map(|a| arena.push_expr(a));
+    let loc = arena.dummy_loc();
+    let args = bridge_expr_args(false, arg, loc, arena);
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_variant(Box::new((label, arg_idx)))),
-        pexp_loc: arena.dummy_loc(),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_variant(Box::new((label, args)))),
+        pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
 }
@@ -586,15 +627,8 @@ fn pat_array(items: Vec<Pattern>, arena: &mut ParseArena) -> Pattern {
 }
 
 fn pat_construct(lid_idx: LidentIdx, arg: Option<Pattern>, arena: &mut ParseArena) -> Pattern {
-    let arg_idx = arg.map(|a| arena.push_pat(a));
-    Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_construct(
-            Located::new(lid_idx, arena.none_loc()),
-            arg_idx,
-        )),
-        ppat_loc: arena.dummy_loc(),
-        ppat_attributes: Attributes::new(),
-    }
+    let loc = arena.none_loc();
+    pat_construct_with_loc(lid_idx, arg, loc, arena)
 }
 
 fn pat_construct_with_loc(
@@ -603,22 +637,22 @@ fn pat_construct_with_loc(
     loc: LocIdx,
     arena: &mut ParseArena,
 ) -> Pattern {
-    let arg_idx = arg.map(|a| arena.push_pat(a));
+    let pat_loc = arena.dummy_loc();
+    let split_tuple = arena.is_lident(lid_idx, "::");
+    let args = bridge_pat_args(split_tuple, arg, pat_loc, arena);
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_construct(
-            Located::new(lid_idx, loc),
-            arg_idx,
-        )),
-        ppat_loc: arena.dummy_loc(),
+        ppat_desc: Box::new(PatternDesc::Ppat_construct(Located::new(lid_idx, loc), Box::new(args))),
+        ppat_loc: pat_loc,
         ppat_attributes: Attributes::new(),
     }
 }
 
 fn pat_variant(label: Cow<'static, str>, arg: Option<Pattern>, arena: &mut ParseArena) -> Pattern {
-    let arg_idx = arg.map(|a| arena.push_pat(a));
+    let loc = arena.dummy_loc();
+    let args = bridge_pat_args(false, arg, loc, arena);
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_variant(Box::new((label, arg_idx)))),
-        ppat_loc: arena.dummy_loc(),
+        ppat_desc: Box::new(PatternDesc::Ppat_variant(Box::new((label, args)))),
+        ppat_loc: loc,
         ppat_attributes: Attributes::new(),
     }
 }
@@ -3185,15 +3219,32 @@ fn variants_generate_codecs(
     Ok((encoder, decoder))
 }
 
+/// A tag's payload groups as the v0 PPX bridge (`Ast_mapper_to0`) hands
+/// them to this PPX: a single type stays itself, several become a tuple.
+fn bridge_rtag_types(groups: &[crate::parser::ast::VariantTypeArgs], arena: &ParseArena) -> Vec<CoreType> {
+    groups
+        .iter()
+        .map(|group| match group.txt.as_slice() {
+            [typ] => arena.get_core_type(*typ).clone(),
+            types => CoreType {
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(types.to_vec()))),
+                ptyp_loc: group.loc,
+                ptyp_attributes: Attributes::new(),
+            },
+        })
+        .collect()
+}
+
 fn polyvars_get_args(
     _loc: LocIdx,
-    core_types: &[CoreTypeIdx],
+    groups: &[crate::parser::ast::VariantTypeArgs],
     arena: &ParseArena,
 ) -> SpiceResult<Vec<CoreType>> {
+    let core_types = bridge_rtag_types(groups, arena);
     match core_types.len() {
         0 => Ok(vec![]),
         1 => {
-            let ct = arena.get_core_type(core_types[0]);
+            let ct = &core_types[0];
             match &*ct.ptyp_desc {
                 CoreTypeDesc::Ptyp_tuple(types) => Ok(types
                     .iter()
@@ -3544,10 +3595,11 @@ fn polyvars_generate_unboxed_decode(
 ) -> SpiceResult<Option<Expression>> {
     match row_field {
         RowField::Rtag(tag, _, _, args) => {
+            let mut args = bridge_rtag_types(args, arena);
             if args.len() != 1 {
                 return Err(spice_error("Expected exactly one type argument"));
             }
-            let arg0 = arena.get_core_type(args[0]).clone();
+            let arg0 = args.pop().expect("one type argument");
             let (_, dec) = codecs_generate_value_codecs(settings, &arg0, arena)?;
             let decoder = match dec {
                 Some(decoder) => decoder,
@@ -4337,8 +4389,11 @@ impl<'a> LocCloner<'a> {
             RowField::Rtag(label, attrs, _, types) => {
                 self.located(label);
                 self.attributes(attrs);
-                for typ in types {
-                    self.core_type_idx(typ);
+                for group in types {
+                    self.located(group);
+                    for typ in group.txt.iter_mut() {
+                        self.core_type_idx(typ);
+                    }
                 }
             }
             RowField::Rinherit(typ) => self.core_type_idx(typ),
@@ -4440,15 +4495,17 @@ impl<'a> LocCloner<'a> {
                     self.pattern_idx(item);
                 }
             }
-            PatternDesc::Ppat_construct(lid, arg) => {
+            PatternDesc::Ppat_construct(lid, args) => {
                 self.located(lid);
-                if let Some(arg) = arg {
+                self.located(&mut **args);
+                for arg in args.txt.iter_mut() {
                     self.pattern_idx(arg);
                 }
             }
             PatternDesc::Ppat_variant(inner) => {
-                let (_, ref mut arg) = **inner;
-                if let Some(arg) = arg {
+                let (_, ref mut args) = **inner;
+                self.located(args);
+                for arg in args.txt.iter_mut() {
                     self.pattern_idx(arg);
                 }
             }
@@ -4694,15 +4751,17 @@ impl<'a> LocCloner<'a> {
                     self.expression_idx(item);
                 }
             }
-            ExpressionDesc::Pexp_construct(lid, arg) => {
+            ExpressionDesc::Pexp_construct(lid, args) => {
                 self.located(lid);
-                if let Some(expr) = arg {
+                self.located(&mut **args);
+                for expr in args.txt.iter_mut() {
                     self.expression_idx(expr);
                 }
             }
             ExpressionDesc::Pexp_variant(inner) => {
-                let (_, ref mut arg) = **inner;
-                if let Some(expr) = arg {
+                let (_, ref mut args) = **inner;
+                self.located(args);
+                for expr in args.txt.iter_mut() {
                     self.expression_idx(expr);
                 }
             }

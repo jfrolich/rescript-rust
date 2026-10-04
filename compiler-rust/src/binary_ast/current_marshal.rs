@@ -1528,24 +1528,16 @@ impl Marshal for ExpressionDesc {
                 w.write_block_header(7, 1);
                 exprs.marshal(w);
             }
-            ExpressionDesc::Pexp_construct(lid, expr) => {
-                let arg_idx = w
-                    .current_expr_idx()
-                    .and_then(|owner| w.get_arena().construct_arg(owner))
-                    .or(*expr);
+            ExpressionDesc::Pexp_construct(lid, args) => {
                 w.write_block_header(8, 2);
                 lid.marshal(w);
-                arg_idx.marshal(w);
+                args.marshal(w);
             }
             ExpressionDesc::Pexp_variant(inner) => {
-                let (ref label, ref expr) = **inner;
-                let arg_idx = w
-                    .current_expr_idx()
-                    .and_then(|owner| w.get_arena().variant_arg(owner))
-                    .or(*expr);
+                let (ref label, ref args) = **inner;
                 w.write_block_header(9, 2);
                 w.write_str(label);
-                arg_idx.marshal(w);
+                args.marshal(w);
             }
             ExpressionDesc::Pexp_record(inner) => {
                 let (ref fields, ref spread) = **inner;

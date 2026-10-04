@@ -1120,7 +1120,7 @@ impl<'a> Printtyp<'a> {
             let tag_type = layout.and_then(|layout| match layout.constructors.get(position) {
                 Some(crate::types::VariantConstructorCase::Constant(tag)) => tag.literal.clone(),
                 Some(crate::types::VariantConstructorCase::Block(block)) => {
-                    block.runtime.tag.literal.clone()
+                    block.tag().literal.clone()
                 }
                 None => None,
             });

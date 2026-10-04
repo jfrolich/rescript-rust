@@ -98,6 +98,24 @@ let has_leading_comments tbl loc =
   | None -> false
   | _ -> true
 
+(* Compact layouts print expression comments but not comments on the full
+ * labeled argument. For unlabeled arguments, leading expression comments
+ * already work in the compact layout; forcing a different layout can make
+ * comments exposed by removing parameter parentheses unstable. *)
+let argument_requires_regular_layout cmt_tbl ((lbl, arg) as argument) =
+  let loc = Parsetree_viewer.argument_loc argument in
+  let has_leading_label_comments =
+    match lbl with
+    | Asttypes.Nolabel -> false
+    | Labelled _ | Optional _ ->
+      has_leading_comments cmt_tbl loc
+      || has_leading_comments cmt_tbl arg.Parsetree.pexp_loc
+  in
+  (* Trailing comments can escape compact layouts when the body breaks. *)
+  has_leading_label_comments
+  || has_trailing_comments cmt_tbl loc
+  || has_trailing_comments cmt_tbl arg.pexp_loc
+
 let print_multiline_comment_content txt =
   (* Turns
    *         |* first line
@@ -1863,7 +1881,7 @@ and print_constructor_arguments ?(is_dot_dot_dot = false) ~state ~indent
           Doc.rparen;
         ]
     in
-    if indent then Doc.indent args else args
+    Doc.group (if indent then Doc.indent args else args)
 
 and print_label_declaration ?inline_record_definitions ~state
     (ld : Parsetree.label_declaration) cmt_tbl =
@@ -2133,19 +2151,21 @@ and print_typ_expr ?inline_record_definitions ~(state : State.t)
             if i > 0 || comment_attrs <> [] then Doc.text "| "
             else Doc.if_breaks (Doc.text "| ") Doc.nil
           in
-          let do_type t =
-            match t.Parsetree.ptyp_desc with
-            | Ptyp_tuple _ ->
-              print_typ_expr ?inline_record_definitions ~state t cmt_tbl
-            | _ ->
-              Doc.concat
-                [
-                  Doc.lparen;
-                  print_typ_expr ?inline_record_definitions ~state t cmt_tbl;
-                  Doc.rparen;
-                ]
+          let do_group {Location.txt = types} =
+            Doc.concat
+              [
+                Doc.lparen;
+                Doc.join
+                  ~sep:(Doc.concat [Doc.comma; Doc.line])
+                  (List.map
+                     (fun typ ->
+                       print_typ_expr ?inline_record_definitions ~state typ
+                         cmt_tbl)
+                     types);
+                Doc.rparen;
+              ]
           in
-          let printed_types = List.map do_type types in
+          let printed_types = List.map do_group types in
           let cases =
             Doc.join ~sep:(Doc.concat [Doc.line; Doc.text "& "]) printed_types
           in
@@ -2620,6 +2640,49 @@ and print_extension ~state ~at_module_lvl (string_loc, payload) cmt_tbl =
   in
   Doc.group (Doc.concat [ext_name; print_payload ~state payload cmt_tbl])
 
+and print_pattern_args ~state (patterns : Parsetree.pattern list) cmt_tbl =
+  match patterns with
+  | [] -> Doc.nil
+  | [{ppat_loc; ppat_desc = Ppat_construct ({txt = Longident.Lident "()"}, _)}]
+    ->
+    Doc.concat [Doc.lparen; print_comments_inside cmt_tbl ppat_loc; Doc.rparen]
+  | [{ppat_desc = Ppat_tuple []; ppat_loc = loc}] ->
+    Doc.concat [Doc.lparen; print_comments_inside cmt_tbl loc; Doc.rparen]
+  | _ :: _ :: _ ->
+    Doc.concat
+      [
+        Doc.lparen;
+        Doc.indent
+          (Doc.concat
+             [
+               Doc.soft_line;
+               Doc.join
+                 ~sep:(Doc.concat [Doc.comma; Doc.line])
+                 (List.map
+                    (fun pat -> print_pattern ~state pat cmt_tbl)
+                    patterns);
+             ]);
+        Doc.trailing_comma;
+        Doc.soft_line;
+        Doc.rparen;
+      ]
+  | [arg] ->
+    let arg_doc = print_pattern ~state arg cmt_tbl in
+    let should_hug = Parsetree_viewer.is_huggable_pattern arg in
+    Doc.concat
+      [
+        Doc.lparen;
+        (if should_hug then arg_doc
+         else
+           Doc.concat
+             [
+               Doc.indent (Doc.concat [Doc.soft_line; arg_doc]);
+               Doc.trailing_comma;
+               Doc.soft_line;
+             ]);
+        Doc.rparen;
+      ]
+
 and print_pattern ~state (p : Parsetree.pattern) cmt_tbl =
   let pattern_without_attributes =
     match p.ppat_desc with
@@ -2715,111 +2778,15 @@ and print_pattern ~state (p : Parsetree.pattern) cmt_tbl =
                   ]);
              Doc.rbrace;
            ])
-    | Ppat_construct (constr_name, constructor_args) ->
+    | Ppat_construct (constr_name, {txt = constructor_args}) ->
       let constr_name = print_longident_location constr_name cmt_tbl in
-      let args_doc =
-        match constructor_args with
-        | None -> Doc.nil
-        | Some
-            {
-              ppat_loc;
-              ppat_desc = Ppat_construct ({txt = Longident.Lident "()"}, _);
-            } ->
-          Doc.concat
-            [Doc.lparen; print_comments_inside cmt_tbl ppat_loc; Doc.rparen]
-        | Some {ppat_desc = Ppat_tuple []; ppat_loc = loc} ->
-          Doc.concat [Doc.lparen; print_comments_inside cmt_tbl loc; Doc.rparen]
-        (* Some((1, 2) *)
-        | Some {ppat_desc = Ppat_tuple [({ppat_desc = Ppat_tuple _} as arg)]} ->
-          Doc.concat [Doc.lparen; print_pattern ~state arg cmt_tbl; Doc.rparen]
-        | Some {ppat_desc = Ppat_tuple patterns} ->
-          Doc.concat
-            [
-              Doc.lparen;
-              Doc.indent
-                (Doc.concat
-                   [
-                     Doc.soft_line;
-                     Doc.join
-                       ~sep:(Doc.concat [Doc.comma; Doc.line])
-                       (List.map
-                          (fun pat -> print_pattern ~state pat cmt_tbl)
-                          patterns);
-                   ]);
-              Doc.trailing_comma;
-              Doc.soft_line;
-              Doc.rparen;
-            ]
-        | Some arg ->
-          let arg_doc = print_pattern ~state arg cmt_tbl in
-          let should_hug = Parsetree_viewer.is_huggable_pattern arg in
-          Doc.concat
-            [
-              Doc.lparen;
-              (if should_hug then arg_doc
-               else
-                 Doc.concat
-                   [
-                     Doc.indent (Doc.concat [Doc.soft_line; arg_doc]);
-                     Doc.trailing_comma;
-                     Doc.soft_line;
-                   ]);
-              Doc.rparen;
-            ]
-      in
+      let args_doc = print_pattern_args ~state constructor_args cmt_tbl in
       Doc.group (Doc.concat [constr_name; args_doc])
-    | Ppat_variant (label, None) ->
-      Doc.concat [Doc.text "#"; print_poly_var_ident label]
-    | Ppat_variant (label, variant_args) ->
+    | Ppat_variant (label, {txt = variant_args}) ->
       let variant_name =
         Doc.concat [Doc.text "#"; print_poly_var_ident label]
       in
-      let args_doc =
-        match variant_args with
-        | None -> Doc.nil
-        | Some {ppat_desc = Ppat_construct ({txt = Longident.Lident "()"}, _)}
-          ->
-          Doc.text "()"
-        | Some {ppat_desc = Ppat_tuple []; ppat_loc = loc} ->
-          Doc.concat [Doc.lparen; print_comments_inside cmt_tbl loc; Doc.rparen]
-        (* Some((1, 2) *)
-        | Some {ppat_desc = Ppat_tuple [({ppat_desc = Ppat_tuple _} as arg)]} ->
-          Doc.concat [Doc.lparen; print_pattern ~state arg cmt_tbl; Doc.rparen]
-        | Some {ppat_desc = Ppat_tuple patterns} ->
-          Doc.concat
-            [
-              Doc.lparen;
-              Doc.indent
-                (Doc.concat
-                   [
-                     Doc.soft_line;
-                     Doc.join
-                       ~sep:(Doc.concat [Doc.comma; Doc.line])
-                       (List.map
-                          (fun pat -> print_pattern ~state pat cmt_tbl)
-                          patterns);
-                   ]);
-              Doc.trailing_comma;
-              Doc.soft_line;
-              Doc.rparen;
-            ]
-        | Some arg ->
-          let arg_doc = print_pattern ~state arg cmt_tbl in
-          let should_hug = Parsetree_viewer.is_huggable_pattern arg in
-          Doc.concat
-            [
-              Doc.lparen;
-              (if should_hug then arg_doc
-               else
-                 Doc.concat
-                   [
-                     Doc.indent (Doc.concat [Doc.soft_line; arg_doc]);
-                     Doc.trailing_comma;
-                     Doc.soft_line;
-                   ]);
-              Doc.rparen;
-            ]
-      in
+      let args_doc = print_pattern_args ~state variant_args cmt_tbl in
       Doc.group (Doc.concat [variant_name; args_doc])
     | Ppat_type ident
       when Parsetree_viewer.has_res_pat_variant_spread_attribute
@@ -3065,6 +3032,51 @@ and print_expression_with_comments ~state expr cmt_tbl : Doc.t =
   let doc = print_expression ~state expr cmt_tbl in
   print_comments doc cmt_tbl expr.Parsetree.pexp_loc
 
+and print_expression_args ~state (args : Parsetree.expression list) cmt_tbl =
+  let print_arg expr =
+    let doc = print_expression_with_comments ~state expr cmt_tbl in
+    match Parens.expr expr with
+    | Parens.Parenthesized -> add_parens doc
+    | Braced braces -> print_braces doc expr braces
+    | Nothing -> doc
+  in
+  match args with
+  | [] -> Doc.nil
+  | [{pexp_desc = Pexp_construct ({txt = Longident.Lident "()"}, _)}] ->
+    Doc.text "()"
+  | _ :: _ :: _ ->
+    Doc.concat
+      [
+        Doc.lparen;
+        Doc.indent
+          (Doc.concat
+             [
+               Doc.soft_line;
+               Doc.join
+                 ~sep:(Doc.concat [Doc.comma; Doc.line])
+                 (List.map print_arg args);
+             ]);
+        Doc.trailing_comma;
+        Doc.soft_line;
+        Doc.rparen;
+      ]
+  | [arg] ->
+    let arg_doc = print_arg arg in
+    let should_hug = Parsetree_viewer.is_huggable_expression arg in
+    Doc.concat
+      [
+        Doc.lparen;
+        (if should_hug then arg_doc
+         else
+           Doc.concat
+             [
+               Doc.indent (Doc.concat [Doc.soft_line; arg_doc]);
+               Doc.trailing_comma;
+               Doc.soft_line;
+             ]);
+        Doc.rparen;
+      ]
+
 and print_if_chain ~state pexp_attributes ifs else_expr cmt_tbl =
   let if_docs =
     Doc.join ~sep:Doc.space
@@ -3282,74 +3294,9 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
              Doc.soft_line;
              Doc.rbrace;
            ])
-    | Pexp_construct (longident_loc, args) ->
+    | Pexp_construct (longident_loc, {txt = args}) ->
       let constr = print_longident_location longident_loc cmt_tbl in
-      let args =
-        match args with
-        | None -> Doc.nil
-        | Some {pexp_desc = Pexp_construct ({txt = Longident.Lident "()"}, _)}
-          ->
-          Doc.text "()"
-        (* Some((1, 2)) *)
-        | Some {pexp_desc = Pexp_tuple [({pexp_desc = Pexp_tuple _} as arg)]} ->
-          Doc.concat
-            [
-              Doc.lparen;
-              (let doc = print_expression_with_comments ~state arg cmt_tbl in
-               match Parens.expr arg with
-               | Parens.Parenthesized -> add_parens doc
-               | Braced braces -> print_braces doc arg braces
-               | Nothing -> doc);
-              Doc.rparen;
-            ]
-        | Some {pexp_desc = Pexp_tuple args} ->
-          Doc.concat
-            [
-              Doc.lparen;
-              Doc.indent
-                (Doc.concat
-                   [
-                     Doc.soft_line;
-                     Doc.join
-                       ~sep:(Doc.concat [Doc.comma; Doc.line])
-                       (List.map
-                          (fun expr ->
-                            let doc =
-                              print_expression_with_comments ~state expr cmt_tbl
-                            in
-                            match Parens.expr expr with
-                            | Parens.Parenthesized -> add_parens doc
-                            | Braced braces -> print_braces doc expr braces
-                            | Nothing -> doc)
-                          args);
-                   ]);
-              Doc.trailing_comma;
-              Doc.soft_line;
-              Doc.rparen;
-            ]
-        | Some arg ->
-          let arg_doc =
-            let doc = print_expression_with_comments ~state arg cmt_tbl in
-            match Parens.expr arg with
-            | Parens.Parenthesized -> add_parens doc
-            | Braced braces -> print_braces doc arg braces
-            | Nothing -> doc
-          in
-          let should_hug = Parsetree_viewer.is_huggable_expression arg in
-          Doc.concat
-            [
-              Doc.lparen;
-              (if should_hug then arg_doc
-               else
-                 Doc.concat
-                   [
-                     Doc.indent (Doc.concat [Doc.soft_line; arg_doc]);
-                     Doc.trailing_comma;
-                     Doc.soft_line;
-                   ]);
-              Doc.rparen;
-            ]
-      in
+      let args = print_expression_args ~state args cmt_tbl in
       Doc.group (Doc.concat [constr; args])
     | Pexp_ident path -> print_lident_path path cmt_tbl
     | Pexp_tuple exprs ->
@@ -3407,76 +3354,11 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
              Doc.soft_line;
              Doc.rbracket;
            ])
-    | Pexp_variant (label, args) ->
+    | Pexp_variant (label, {txt = args}) ->
       let variant_name =
         Doc.concat [Doc.text "#"; print_poly_var_ident label]
       in
-      let args =
-        match args with
-        | None -> Doc.nil
-        | Some {pexp_desc = Pexp_construct ({txt = Longident.Lident "()"}, _)}
-          ->
-          Doc.text "()"
-        (* #poly((1, 2) *)
-        | Some {pexp_desc = Pexp_tuple [({pexp_desc = Pexp_tuple _} as arg)]} ->
-          Doc.concat
-            [
-              Doc.lparen;
-              (let doc = print_expression_with_comments ~state arg cmt_tbl in
-               match Parens.expr arg with
-               | Parens.Parenthesized -> add_parens doc
-               | Braced braces -> print_braces doc arg braces
-               | Nothing -> doc);
-              Doc.rparen;
-            ]
-        | Some {pexp_desc = Pexp_tuple args} ->
-          Doc.concat
-            [
-              Doc.lparen;
-              Doc.indent
-                (Doc.concat
-                   [
-                     Doc.soft_line;
-                     Doc.join
-                       ~sep:(Doc.concat [Doc.comma; Doc.line])
-                       (List.map
-                          (fun expr ->
-                            let doc =
-                              print_expression_with_comments ~state expr cmt_tbl
-                            in
-                            match Parens.expr expr with
-                            | Parens.Parenthesized -> add_parens doc
-                            | Braced braces -> print_braces doc expr braces
-                            | Nothing -> doc)
-                          args);
-                   ]);
-              Doc.trailing_comma;
-              Doc.soft_line;
-              Doc.rparen;
-            ]
-        | Some arg ->
-          let arg_doc =
-            let doc = print_expression_with_comments ~state arg cmt_tbl in
-            match Parens.expr arg with
-            | Parens.Parenthesized -> add_parens doc
-            | Braced braces -> print_braces doc arg braces
-            | Nothing -> doc
-          in
-          let should_hug = Parsetree_viewer.is_huggable_expression arg in
-          Doc.concat
-            [
-              Doc.lparen;
-              (if should_hug then arg_doc
-               else
-                 Doc.concat
-                   [
-                     Doc.indent (Doc.concat [Doc.soft_line; arg_doc]);
-                     Doc.trailing_comma;
-                     Doc.soft_line;
-                   ]);
-              Doc.rparen;
-            ]
-      in
+      let args = print_expression_args ~state args cmt_tbl in
       Doc.group (Doc.concat [variant_name; args])
     | Pexp_record (rows, spread_expr) ->
       if rows = [] then
@@ -3926,7 +3808,7 @@ and print_pexp_fun ~state ~in_callback e cmt_tbl =
       match (return_expr.pexp_desc, opt_braces) with
       | _, Some _ -> true
       | ( ( Pexp_array _ | Pexp_tuple _
-          | Pexp_construct (_, Some _)
+          | Pexp_construct (_, {txt = _ :: _})
           | Pexp_record _ ),
           _ ) ->
         true
@@ -4662,47 +4544,41 @@ and print_pexp_apply ~state expr cmt_tbl =
       | Braced braces -> print_braces doc call_expr braces
       | Nothing -> doc
     in
-    if Parsetree_viewer.requires_special_callback_printing_first_arg args then
-      let args_doc =
-        print_arguments_with_callback_in_first_position ~state ~partial args
-          cmt_tbl
-      in
-      Doc.concat
-        [print_attributes ~state attrs cmt_tbl; call_expr_doc; args_doc]
-    else if Parsetree_viewer.requires_special_callback_printing_last_arg args
-    then
-      let args_doc =
-        print_arguments_with_callback_in_last_position ~state ~partial args
-          cmt_tbl
-      in
-      (*
-       * Fixes the following layout (the `[` and `]` should break):
-       *   [fn(x => {
-       *     let _ = x
-       *   }), fn(y => {
-       *     let _ = y
-       *   }), fn(z => {
-       *     let _ = z
-       *   })]
-       * See `Doc.willBreak documentation in interface file for more context.
-       * Context:
-       *  https://github.com/rescript-lang/syntax/issues/111
-       *  https://github.com/rescript-lang/syntax/issues/166
-       *)
-      let maybe_break_parent =
-        if Doc.will_break args_doc then Doc.break_parent else Doc.nil
-      in
-      Doc.concat
-        [
-          maybe_break_parent;
-          print_attributes ~state attrs cmt_tbl;
-          call_expr_doc;
-          args_doc;
-        ]
-    else
-      let args_doc = print_arguments ~state ~partial args cmt_tbl in
-      Doc.concat
-        [print_attributes ~state attrs cmt_tbl; call_expr_doc; args_doc]
+    let requires_regular_layout =
+      List.exists (argument_requires_regular_layout cmt_tbl) args
+    in
+    let args_doc, maybe_break_parent =
+      if
+        (not requires_regular_layout)
+        && Parsetree_viewer.requires_special_callback_printing_first_arg args
+      then
+        ( print_arguments_with_callback_in_first_position ~state ~partial args
+            cmt_tbl,
+          Doc.nil )
+      else if
+        (not requires_regular_layout)
+        && Parsetree_viewer.requires_special_callback_printing_last_arg args
+      then
+        let args_doc =
+          print_arguments_with_callback_in_last_position ~state ~partial args
+            cmt_tbl
+        in
+        (* Propagate breaks from the callback layout to enclosing groups, such
+         * as an array containing multiline calls. See Doc.will_break and
+         * https://github.com/rescript-lang/syntax/issues/111. *)
+        let maybe_break_parent =
+          if Doc.will_break args_doc then Doc.break_parent else Doc.nil
+        in
+        (args_doc, maybe_break_parent)
+      else (print_arguments ~state ~partial args cmt_tbl, Doc.nil)
+    in
+    Doc.concat
+      [
+        maybe_break_parent;
+        print_attributes ~state attrs cmt_tbl;
+        call_expr_doc;
+        args_doc;
+      ]
   | _ -> assert false
 
 and print_jsx_unary_tag ~state tag_name props expr_loc cmt_tbl =
@@ -5039,24 +4915,23 @@ and print_jsx_name (tag_name : Parsetree.jsx_tag_name) =
     let printed = segs |> List.map (print_ident_like ~allow_uident:true) in
     Doc.join ~sep:Doc.dot printed
 
+and print_callback_label = function
+  | Asttypes.Nolabel -> Doc.nil
+  | Asttypes.Labelled {txt} ->
+    Doc.concat [Doc.tilde; print_ident_like txt; Doc.equal]
+  | Asttypes.Optional {txt} ->
+    Doc.concat [Doc.tilde; print_ident_like txt; Doc.equal; Doc.question]
+
 and print_arguments_with_callback_in_first_position ~state ~partial args cmt_tbl
     =
-  (* Because the same subtree gets printed twice, we need to copy the cmt_tbl.
-   * consumed comments need to be marked not-consumed and reprinted…
-   * Cheng's different comment algorithm will solve this. *)
+  (* Printing consumes comments from the table. Each alternative layout needs
+   * its own copy so it can print the same subtree with all its comments. *)
   let state = State.next_custom_layout state in
   let cmt_tbl_copy = Comment_table.copy cmt_tbl in
   let callback, printed_args =
     match args with
     | (lbl, expr) :: args ->
-      let lbl_doc =
-        match lbl with
-        | Asttypes.Nolabel -> Doc.nil
-        | Asttypes.Labelled {txt} ->
-          Doc.concat [Doc.tilde; print_ident_like txt; Doc.equal]
-        | Asttypes.Optional {txt} ->
-          Doc.concat [Doc.tilde; print_ident_like txt; Doc.equal; Doc.question]
-      in
+      let lbl_doc = print_callback_label lbl in
       let callback =
         Doc.concat
           [
@@ -5127,9 +5002,8 @@ and print_arguments_with_callback_in_first_position ~state ~partial args cmt_tbl
 
 and print_arguments_with_callback_in_last_position ~state ~partial args cmt_tbl
     =
-  (* Because the same subtree gets printed twice, we need to copy the cmt_tbl.
-   * consumed comments need to be marked not-consumed and reprinted…
-   * Cheng's different comment algorithm will solve this. *)
+  (* Printing consumes comments from the table. Each alternative layout needs
+   * its own copy so it can print the same subtree with all its comments. *)
   let state = state |> State.next_custom_layout in
   let cmt_tbl_copy = Comment_table.copy cmt_tbl in
   let cmt_tbl_copy2 = Comment_table.copy cmt_tbl in
@@ -5137,14 +5011,7 @@ and print_arguments_with_callback_in_last_position ~state ~partial args cmt_tbl
     match args with
     | [] -> (lazy Doc.nil, lazy Doc.nil, lazy Doc.nil)
     | [(lbl, expr)] ->
-      let lbl_doc =
-        match lbl with
-        | Asttypes.Nolabel -> Doc.nil
-        | Asttypes.Labelled {txt} ->
-          Doc.concat [Doc.tilde; print_ident_like txt; Doc.equal]
-        | Asttypes.Optional {txt} ->
-          Doc.concat [Doc.tilde; print_ident_like txt; Doc.equal; Doc.question]
-      in
+      let lbl_doc = print_callback_label lbl in
       let callback_fits_on_one_line =
         lazy
           (let pexp_fun_doc =
@@ -5182,7 +5049,7 @@ and print_arguments_with_callback_in_last_position ~state ~partial args cmt_tbl
    *   MyModuleBlah.toList(argument)
    * )
    *)
-  let arugments_fit_on_one_line =
+  let arguments_fit_on_one_line =
     lazy
       (Doc.concat
          [
@@ -5226,7 +5093,7 @@ and print_arguments_with_callback_in_last_position ~state ~partial args cmt_tbl
     Doc.custom_layout
       [
         Lazy.force fits_on_one_line;
-        Lazy.force arugments_fit_on_one_line;
+        Lazy.force arguments_fit_on_one_line;
         Lazy.force break_all_args;
       ]
 
@@ -5259,11 +5126,22 @@ and print_arguments ~state ~partial
     in
     Doc.concat [Doc.lparen; arg_doc; Doc.rparen]
   | args ->
+    (* Flush a callback's line comment before closing the argument list, so
+     * reparsing cannot attach it to an enclosing call instead. *)
+    let force_break =
+      List.exists
+        (fun ((_, arg) as argument) ->
+          Parsetree_viewer.is_fun_expr arg
+          && (has_any_trailing_line_comment cmt_tbl
+                (Parsetree_viewer.argument_loc argument)
+             || has_any_trailing_line_comment cmt_tbl arg.pexp_loc))
+        args
+    in
     (* Avoid printing trailing comma when there is ... in function application *)
     let printed_args =
       List.map (fun arg -> print_argument ~state arg cmt_tbl) args
     in
-    Doc.group
+    Doc.breakable_group ~force_break
       (Doc.concat
          [
            Doc.lparen;
@@ -5500,7 +5378,10 @@ and print_expr_fun_parameters ~state ~in_callback ~async ~has_constraint
        lbl = Nolabel;
        default_expr = None;
        pat =
-         {ppat_desc = Ppat_construct ({txt = Longident.Lident "()"; loc}, None)};
+         {
+           ppat_desc =
+             Ppat_construct ({txt = Longident.Lident "()"; loc}, {txt = []});
+         };
      };
   ] ->
     let doc =

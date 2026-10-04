@@ -15,7 +15,9 @@ pub enum TagInfo {
     Constructor {
         name: String,
         num_nonconst: i32,
-        runtime: Box<crate::types::BlockRuntime>,
+        /// Untagged scalar constructors are erased during typedtree
+        /// translation; they cannot form Lambda or JavaScript blocks.
+        runtime: Box<crate::types::TaggedBlock>,
     },
 
     /// Inlined record (record inside a variant)
@@ -25,7 +27,7 @@ pub enum TagInfo {
         fields: Vec<(String, bool)>, // (name, optional)
         logical_field_count: Option<usize>,
         mutable_flag: MutableFlag,
-        runtime: Box<crate::types::BlockRuntime>,
+        runtime: Box<crate::types::VariantBlock>,
     },
 
     /// Tuple
@@ -102,13 +104,12 @@ impl TagInfo {
     pub fn constructor(name: impl Into<String>, num_nonconst: i32) -> Self {
         let name = name.into();
         TagInfo::Constructor {
-            runtime: Box::new(crate::types::BlockRuntime {
+            runtime: Box::new(crate::types::TaggedBlock {
                 tag: crate::types::VariantTag {
                     name: name.clone(),
                     literal: None,
                 },
                 tag_name: None,
-                untagged: false,
             }),
             name,
             num_nonconst,

@@ -3103,16 +3103,29 @@ fn decode_cmj_tag_info(value: &OcamlValue) -> Option<TagInfo> {
         }
     }
 
-    fn block_runtime(value: &OcamlValue) -> Option<crate::types::BlockRuntime> {
+    /// `Variant_runtime.tagged_block`.
+    fn tagged_block(value: &OcamlValue) -> Option<crate::types::TaggedBlock> {
         let (_, fields) = value.as_block_opt()?;
-        Some(crate::types::BlockRuntime {
+        Some(crate::types::TaggedBlock {
             tag: decode_cmj_variant_tag(fields.first()?)?,
             tag_name: fields
                 .get(1)?
                 .as_option()
                 .map(|name| name.as_string().to_string()),
-            untagged: fields.get(2)?.as_bool(),
         })
+    }
+
+    /// `Variant_runtime.block`: `Tagged of tagged_block` or the inline
+    /// record `Untagged of {tag; block_type}`.
+    fn block(value: &OcamlValue) -> Option<crate::types::VariantBlock> {
+        match value.as_block_opt()? {
+            (0, fields) => Some(crate::types::VariantBlock::Tagged(tagged_block(fields.first()?)?)),
+            (1, fields) => Some(crate::types::VariantBlock::Untagged {
+                tag: decode_cmj_variant_tag(fields.first()?)?,
+                block_type: crate::cmi::sig_reader::decode_variant_block_type(fields.get(1)?),
+            }),
+            _ => None,
+        }
     }
 
     fn record_fields(value: &OcamlValue) -> Option<Vec<(String, bool)>> {
@@ -3153,7 +3166,7 @@ fn decode_cmj_tag_info(value: &OcamlValue) -> Option<TagInfo> {
         OcamlValue::Block(0, fields) if fields.len() == 3 => Some(TagInfo::Constructor {
             name: fields[0].as_string().to_string(),
             num_nonconst: fields[1].as_int() as i32,
-            runtime: Box::new(block_runtime(&fields[2])?),
+            runtime: Box::new(tagged_block(&fields[2])?),
         }),
         OcamlValue::Block(1, fields) if fields.len() == 5 => Some(TagInfo::RecordInlined {
             name: fields[0].as_string().to_string(),
@@ -3161,7 +3174,7 @@ fn decode_cmj_tag_info(value: &OcamlValue) -> Option<TagInfo> {
             fields: record_fields(&fields[2])?,
             logical_field_count: None,
             mutable_flag: mutable_flag(&fields[3])?,
-            runtime: Box::new(block_runtime(&fields[4])?),
+            runtime: Box::new(block(&fields[4])?),
         }),
         OcamlValue::Block(2, fields) if fields.len() == 2 => Some(TagInfo::Record {
             fields: record_fields(&fields[0])?,

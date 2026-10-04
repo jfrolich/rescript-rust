@@ -193,8 +193,8 @@ let raw_as_string_exp_exn ~(kind : Js_raw_info.raw_kind) ?is_function (x : t) :
                   _ );
           };
         ] ->
-      Some
-        (source.txt, Bs_flow_ast_utils.flow_deli_offset (Some "js"), expression)
+      let source = String_literal.decode_raw_template_source source.txt in
+      Some (source, Bs_flow_ast_utils.flow_deli_offset (Some "js"), expression)
     | PStr
         [
           {
@@ -321,8 +321,8 @@ let assert_strings loc (x : t) : string list =
 
 let assert_bool_lit (e : Parsetree.expression) =
   match e.pexp_desc with
-  | Pexp_construct ({txt = Lident "true"}, None) -> true
-  | Pexp_construct ({txt = Lident "false"}, None) -> false
+  | Pexp_construct ({txt = Lident "true"}, {txt = []}) -> true
+  | Pexp_construct ({txt = Lident "false"}, {txt = []}) -> false
   | _ ->
     Location.raise_errorf ~loc:e.pexp_loc
       "expect `true` or `false` in this field"

@@ -1027,9 +1027,21 @@ fn sexp_exp_extra(
             items.push(attrs_sexp);
             Sexp::list(items)
         }
-        ExpExtra::Texp_coerce(ct2) => {
-            let ct2_sexp = sexp_core_type(arena, ctx, with_locs, dedup, ct2);
-            let mut items = vec![Sexp::atom("Texp_coerce"), ct2_sexp];
+        ExpExtra::Texp_coerce {
+            source_type,
+            target,
+            target_type,
+        } => {
+            let source_sexp = Sexp::list(vec![
+                Sexp::atom("source"),
+                sexp_type_expr(arena, ctx, dedup, *source_type),
+            ]);
+            let ct_sexp = sexp_core_type(arena, ctx, with_locs, dedup, target);
+            let target_sexp = Sexp::list(vec![
+                Sexp::atom("target"),
+                sexp_type_expr(arena, ctx, dedup, *target_type),
+            ]);
+            let mut items = vec![Sexp::atom("Texp_coerce"), source_sexp, ct_sexp, target_sexp];
             items.extend(loc_sexp);
             items.push(attrs_sexp);
             Sexp::list(items)

@@ -44,11 +44,77 @@ pub fn map_signature(arena: &mut ParseArena, sig: &[current::SignatureItem]) -> 
 /// Holds a reference to the arena for converting LocIdx values to Location.
 pub struct Mapper<'a> {
     arena: &'a mut ParseArena,
+    /// Set by a constructor or variant whose arguments were packed into a
+    /// tuple; the node being built takes the `_res.constructor_args` marker.
+    constructor_args_marker: bool,
 }
+
+/// `Ast_mapper_to0.constructor_args_attr_name`.
+const CONSTRUCTOR_ARGS_ATTR: &str = "_res.constructor_args";
 
 impl<'a> Mapper<'a> {
     pub fn new(arena: &'a mut ParseArena) -> Self {
-        Self { arena }
+        Self { arena, constructor_args_marker: false }
+    }
+
+    /// `Ast_mapper_to0.add_constructor_args_attr` for the node being built,
+    /// when its desc asked for it.
+    fn take_constructor_args_marker(&mut self, attrs: &mut pt0::Attributes) {
+        if std::mem::take(&mut self.constructor_args_marker) {
+            let attr = self.internal_attr(CONSTRUCTOR_ARGS_ATTR);
+            attrs.insert(0, attr);
+        }
+    }
+
+    /// `Ast_mapper_to0.encode_args` for patterns: no argument is `None`, one
+    /// is the payload, several are packed into a tuple located at the
+    /// argument list (see the bridge contract at
+    /// `Ast_mapper_from0.decode_args`).
+    fn encode_pat_args(
+        &mut self,
+        args: &crate::parse_arena::Located<Vec<PatIdx>>,
+        mark_args: bool,
+    ) -> Option<Box<pt0::Pattern>> {
+        let args_loc = self.loc(args.loc);
+        let mut mapped: Vec<pt0::Pattern> = args.txt.iter().map(|p| self.map_pat_idx(*p)).collect();
+        match mapped.len() {
+            0 => None,
+            1 => Some(Box::new(mapped.pop().expect("one argument"))),
+            _ => {
+                if mark_args {
+                    self.constructor_args_marker = true;
+                }
+                Some(Box::new(pt0::Pattern {
+                    ppat_desc: pt0::PatternDesc::Tuple(mapped),
+                    ppat_loc: args_loc,
+                    ppat_attributes: vec![],
+                }))
+            }
+        }
+    }
+
+    /// `Ast_mapper_to0.encode_args` for expressions.
+    fn encode_expr_args(
+        &mut self,
+        args: &crate::parse_arena::Located<Vec<ExprIdx>>,
+        mark_args: bool,
+    ) -> Option<Box<pt0::Expression>> {
+        let args_loc = self.loc(args.loc);
+        let mut mapped: Vec<pt0::Expression> = args.txt.iter().map(|e| self.map_expr_idx(*e)).collect();
+        match mapped.len() {
+            0 => None,
+            1 => Some(Box::new(mapped.pop().expect("one argument"))),
+            _ => {
+                if mark_args {
+                    self.constructor_args_marker = true;
+                }
+                Some(Box::new(pt0::Expression {
+                    pexp_desc: pt0::ExpressionDesc::Tuple(mapped),
+                    pexp_loc: args_loc,
+                    pexp_attributes: vec![],
+                }))
+            }
+        }
     }
 
     /// Intern a string to get a StrIdx (for creating synthetic Longidents)
@@ -656,12 +722,31 @@ impl<'a> Mapper<'a> {
 
     fn map_row_field(&mut self, field: &current::RowField) -> pt0::RowField {
         match field {
-            current::RowField::Rtag(label, attrs, b, types) => pt0::RowField::Rtag(
-                self.map_label_loc(label),
-                self.map_attributes(attrs),
-                *b,
-                types.iter().map(|t| self.map_core_type_idx(*t)).collect(),
-            ),
+            current::RowField::Rtag(label, attrs, b, groups) => {
+                let label = self.map_label_loc(label);
+                let attrs = self.map_attributes(attrs);
+                // ast_mapper_to0.ml T.map Rtag: a group of several types is
+                // a tuple carrying the `_res.constructor_args` marker itself.
+                let groups = groups
+                    .iter()
+                    .map(|group| {
+                        let loc = self.loc(group.loc);
+                        let mut args: Vec<pt0::CoreType> =
+                            group.txt.iter().map(|t| self.map_core_type_idx(*t)).collect();
+                        if args.len() == 1 {
+                            args.pop().expect("one type")
+                        } else {
+                            let attr = self.internal_attr(CONSTRUCTOR_ARGS_ATTR);
+                            pt0::CoreType {
+                                ptyp_desc: pt0::CoreTypeDesc::Tuple(args),
+                                ptyp_loc: loc,
+                                ptyp_attributes: vec![attr],
+                            }
+                        }
+                    })
+                    .collect();
+                pt0::RowField::Rtag(label, attrs, *b, groups)
+            }
             current::RowField::Rinherit(ty_idx) => {
                 pt0::RowField::Rinherit(self.map_core_type_idx(*ty_idx))
             }
@@ -706,8 +791,10 @@ impl<'a> Mapper<'a> {
                 ),
             );
         }
+        let ppat_desc = self.map_pattern_desc(&*pat.ppat_desc);
+        self.take_constructor_args_marker(&mut attrs);
         pt0::Pattern {
-            ppat_desc: self.map_pattern_desc(&*pat.ppat_desc),
+            ppat_desc,
             ppat_loc: self.loc(pat.ppat_loc),
             ppat_attributes: attrs,
         }
@@ -995,16 +1082,16 @@ impl<'a> Mapper<'a> {
             current::PatternDesc::Ppat_tuple(pats) => {
                 pt0::PatternDesc::Tuple(pats.iter().map(|p| self.map_pat_idx(*p)).collect())
             }
-            current::PatternDesc::Ppat_construct(lid, opt) => pt0::PatternDesc::Construct(
-                self.map_longident_loc(lid),
-                opt.as_ref().map(|p| Box::new(self.map_pat_idx(*p))),
-            ),
+            current::PatternDesc::Ppat_construct(lid, args) => {
+                let is_cons = self.arena.is_lident(lid.txt, "::");
+                let lid = self.map_longident_loc(lid);
+                let arg = self.encode_pat_args(args, !is_cons);
+                pt0::PatternDesc::Construct(lid, arg)
+            }
             current::PatternDesc::Ppat_variant(inner) => {
-                let (ref label, ref opt) = **inner;
-                pt0::PatternDesc::Variant(
-                    label.to_string(),
-                    opt.as_ref().map(|p| Box::new(self.map_pat_idx(*p))),
-                )
+                let (ref label, ref args) = **inner;
+                let arg = self.encode_pat_args(args, true);
+                pt0::PatternDesc::Variant(label.to_string(), arg)
             }
             current::PatternDesc::Ppat_record(inner) => {
                 let (ref fields, ref flag, _) = **inner;
@@ -1124,8 +1211,10 @@ impl<'a> Mapper<'a> {
             let attr = self.internal_attr("res.partial");
             attrs.insert(0, attr);
         }
+        let pexp_desc = self.map_expression_desc(&*expr.pexp_desc, expr.pexp_loc, owner_idx);
+        self.take_constructor_args_marker(&mut attrs);
         pt0::Expression {
-            pexp_desc: self.map_expression_desc(&*expr.pexp_desc, expr.pexp_loc, owner_idx),
+            pexp_desc,
             pexp_loc: self.loc(expr.pexp_loc),
             pexp_attributes: attrs,
         }
@@ -1371,24 +1460,16 @@ impl<'a> Mapper<'a> {
             current::ExpressionDesc::Pexp_tuple(exprs) => {
                 pt0::ExpressionDesc::Tuple(exprs.iter().map(|e| self.map_expr_idx(*e)).collect())
             }
-            current::ExpressionDesc::Pexp_construct(lid, opt) => {
-                let arg_idx = owner_idx
-                    .and_then(|owner| self.arena.construct_arg(owner))
-                    .or(*opt);
-                pt0::ExpressionDesc::Construct(
-                    self.map_longident_loc(lid),
-                    arg_idx.map(|e| Box::new(self.map_expr_idx(e))),
-                )
+            current::ExpressionDesc::Pexp_construct(lid, args) => {
+                let is_cons = self.arena.is_lident(lid.txt, "::");
+                let lid = self.map_longident_loc(lid);
+                let arg = self.encode_expr_args(args, !is_cons);
+                pt0::ExpressionDesc::Construct(lid, arg)
             }
             current::ExpressionDesc::Pexp_variant(inner) => {
-                let (ref label, ref opt) = **inner;
-                let arg_idx = owner_idx
-                    .and_then(|owner| self.arena.variant_arg(owner))
-                    .or(*opt);
-                pt0::ExpressionDesc::Variant(
-                    label.to_string(),
-                    arg_idx.map(|e| Box::new(self.map_expr_idx(e))),
-                )
+                let (ref label, ref args) = **inner;
+                let arg = self.encode_expr_args(args, true);
+                pt0::ExpressionDesc::Variant(label.to_string(), arg)
             }
             current::ExpressionDesc::Pexp_record(inner) => {
                 let (ref fields, ref spread) = **inner;

@@ -758,25 +758,28 @@ pub fn collect_list_expressions<'a>(
 
     loop {
         match &*current.pexp_desc {
-            ExpressionDesc::Pexp_construct(lid, None) if arena.is_lident(lid.txt, "[]") => {
+            // res_parsetree_viewer.ml `collect_list_expressions`: `::` takes
+            // its head and tail as two arguments, or as one 2-tuple.
+            ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "[]") => {
                 return (acc, None);
             }
-            ExpressionDesc::Pexp_construct(lid, Some(arg_idx))
-                if arena.is_lident(lid.txt, "::") =>
-            {
-                // The argument should be a tuple of (head, tail)
-                let arg: &Expression = arena.get_expr(*arg_idx);
-                if let ExpressionDesc::Pexp_tuple(exprs) = &*arg.pexp_desc {
-                    if exprs.len() == 2 {
-                        let head: &Expression = arena.get_expr(exprs[0]);
-                        let tail: &Expression = arena.get_expr(exprs[1]);
-                        acc.push(head);
-                        current = tail;
+            ExpressionDesc::Pexp_construct(lid, args) if arena.is_lident(lid.txt, "::") => {
+                let pair = match args.txt.as_slice() {
+                    [head, tail] => Some((*head, *tail)),
+                    [arg] => match &*arena.get_expr(*arg).pexp_desc {
+                        ExpressionDesc::Pexp_tuple(exprs) if exprs.len() == 2 => Some((exprs[0], exprs[1])),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                match pair {
+                    Some((head, tail)) => {
+                        acc.push(arena.get_expr(head));
+                        current = arena.get_expr(tail);
                         continue;
                     }
+                    None => return (acc, Some(current)),
                 }
-                // Malformed list, return what we have with spread
-                return (acc, Some(current));
             }
             _ => {
                 // Not a list constructor, this is a spread
@@ -795,15 +798,21 @@ pub fn collect_list_patterns<'a>(
     let mut acc = Vec::new();
     let mut current = pat;
     loop {
-        if let PatternDesc::Ppat_construct(lid, Some(arg_idx)) = &*current.ppat_desc {
-            if arena.is_lident(lid.txt, "::") {
-                if let PatternDesc::Ppat_tuple(pats) = &*arena.get_pat(*arg_idx).ppat_desc {
-                    if let [head, rest] = pats.as_slice() {
-                        acc.push(arena.get_pat(*head));
-                        current = arena.get_pat(*rest);
-                        continue;
-                    }
-                }
+        if let PatternDesc::Ppat_construct(lid, args) = &*current.ppat_desc
+            && arena.is_lident(lid.txt, "::")
+        {
+            let pair = match args.txt.as_slice() {
+                [head, rest] => Some((*head, *rest)),
+                [arg] => match &*arena.get_pat(*arg).ppat_desc {
+                    PatternDesc::Ppat_tuple(pats) if pats.len() == 2 => Some((pats[0], pats[1])),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some((head, rest)) = pair {
+                acc.push(arena.get_pat(head));
+                current = arena.get_pat(rest);
+                continue;
             }
         }
         return (acc, current);
