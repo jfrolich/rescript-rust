@@ -659,26 +659,25 @@ pub(crate) fn substitute(
     substitutions: &VariableSubstitution,
     node: NodeId,
 ) -> NodeId {
+    // `Lambda_traverse.subst_lambda` (lambda_traverse.ml:235-241): replace
+    // variables; `shallow_map_sharing` rebuilds through the smart
+    // constructors only the nodes whose children changed.
     match store.snapshot(node) {
         NodeSnapshot::Var(id) => substitutions.get(&id).copied().unwrap_or(node),
         NodeSnapshot::Const(_)
         | NodeSnapshot::GlobalModule(_)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => node,
-        NodeSnapshot::Apply(function, args, info, _) => {
-            let function = substitute(store, substitutions, function);
-            let args = args
-                .into_iter()
-                .map(|node| substitute(store, substitutions, node))
-                .collect();
-            // OCaml `lam_subst.ml:36-37` calls `Lam.apply` without the
-            // optional JSX argument, so substitution resets it to false.
-            append_rebuilt(store, NodeSnapshot::Apply(function, args, info, false))
-        }
         snapshot => {
+            let mut changed = false;
             let mapped = map_children(store, snapshot, |store, child| {
-                substitute(store, substitutions, child)
+                let mapped = substitute(store, substitutions, child);
+                changed |= mapped != child;
+                mapped
             });
+            if !changed {
+                return node;
+            }
             append_rebuilt(store, mapped)
         }
     }

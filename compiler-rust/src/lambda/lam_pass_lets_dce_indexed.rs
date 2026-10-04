@@ -721,22 +721,22 @@ mod tests {
         assert_eq!(
             context.storage_measurements(),
             crate::lambda::indexed::IndexedStorageMeasurements {
-                node_allocations: 24,
+                node_allocations: 21,
                 current_root_edge_visits: 7,
                 current_root_unique_nodes: 8,
                 metadata_unique_nodes: 2,
                 backend_unique_nodes: 0,
                 live_unique_nodes: 9,
-                superseded_nodes: 15,
-                hot_node_occupied_bytes: 192,
+                superseded_nodes: 12,
+                hot_node_occupied_bytes: 168,
                 hot_node_capacity_bytes: 256,
-                side_payload_shallow_occupied_bytes: 1312,
+                side_payload_shallow_occupied_bytes: 1140,
                 side_payload_shallow_capacity_bytes: 1600,
                 nested_heap_bytes_included: false,
                 current_live_side_payload_shallow_bytes: 384,
                 backend_retained_only_side_payload_shallow_bytes: 0,
                 metadata_retained_only_side_payload_shallow_bytes: 80,
-                superseded_unreachable_side_payload_shallow_bytes: 848,
+                superseded_unreachable_side_payload_shallow_bytes: 676,
             }
         );
     }

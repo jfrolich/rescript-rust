@@ -1723,22 +1723,22 @@ mod tests {
         assert_eq!(
             result.storage_measurements(),
             crate::lambda::indexed::IndexedStorageMeasurements {
-                node_allocations: 26,
+                node_allocations: 21,
                 current_root_edge_visits: 0,
                 current_root_unique_nodes: 0,
                 metadata_unique_nodes: 0,
                 backend_unique_nodes: 1,
                 live_unique_nodes: 1,
-                superseded_nodes: 25,
-                hot_node_occupied_bytes: 208,
+                superseded_nodes: 20,
+                hot_node_occupied_bytes: 168,
                 hot_node_capacity_bytes: 256,
-                side_payload_shallow_occupied_bytes: 2244,
+                side_payload_shallow_occupied_bytes: 1760,
                 side_payload_shallow_capacity_bytes: 3040,
                 nested_heap_bytes_included: false,
                 current_live_side_payload_shallow_bytes: 0,
                 backend_retained_only_side_payload_shallow_bytes: 56,
                 metadata_retained_only_side_payload_shallow_bytes: 0,
-                superseded_unreachable_side_payload_shallow_bytes: 2188,
+                superseded_unreachable_side_payload_shallow_bytes: 1704,
             }
         );
     }
@@ -2389,22 +2389,22 @@ mod tests {
         assert_eq!(
             result.storage_measurements(),
             crate::lambda::indexed::IndexedStorageMeasurements {
-                node_allocations: 14,
+                node_allocations: 11,
                 current_root_edge_visits: 0,
                 current_root_unique_nodes: 0,
                 metadata_unique_nodes: 0,
                 backend_unique_nodes: 0,
                 live_unique_nodes: 0,
-                superseded_nodes: 14,
-                hot_node_occupied_bytes: 112,
+                superseded_nodes: 11,
+                hot_node_occupied_bytes: 88,
                 hot_node_capacity_bytes: 128,
-                side_payload_shallow_occupied_bytes: 1836,
+                side_payload_shallow_occupied_bytes: 1416,
                 side_payload_shallow_capacity_bytes: 2304,
                 nested_heap_bytes_included: false,
                 current_live_side_payload_shallow_bytes: 0,
                 backend_retained_only_side_payload_shallow_bytes: 0,
                 metadata_retained_only_side_payload_shallow_bytes: 0,
-                superseded_unreachable_side_payload_shallow_bytes: 1836,
+                superseded_unreachable_side_payload_shallow_bytes: 1416,
             }
         );
     }

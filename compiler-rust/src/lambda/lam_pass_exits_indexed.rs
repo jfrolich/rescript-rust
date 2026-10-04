@@ -293,10 +293,18 @@ fn simplify(
         | NodeSnapshot::GlobalModule(_)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => node,
+        // lam_pass_exits.ml:204 `Lambda_traverse.shallow_map_sharing`:
+        // rebuild through the smart constructors only when a child changed.
         snapshot => {
+            let mut changed = false;
             let mapped = map_children(store, snapshot, |store, child| {
-                simplify(store, counts, substitutions, id_gen, child)
+                let mapped = simplify(store, counts, substitutions, id_gen, child);
+                changed |= mapped != child;
+                mapped
             });
+            if !changed {
+                return node;
+            }
             append_rebuilt(store, mapped)
         }
     }
@@ -658,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn substitution_resets_jsx_and_always_traverses_like_ocaml() {
+    fn substitution_keeps_jsx_and_shares_unchanged_nodes_like_ocaml() {
         let parameter = id("parameter", 180);
         let outer_loc = Location::new_for_error("subst.res", 20, 30);
         let inner_loc = Location::new_for_error("subst.res", 10, 15);
@@ -695,13 +703,15 @@ mod tests {
         let Lambda::Lapply(outer) = *body else {
             panic!("expected outer application")
         };
-        assert!(!outer.ap_transformed_jsx);
+        // lambda_traverse.ml `shallow_map_sharing` rebuilds a changed
+        // application with its `ap_transformed_jsx`.
+        assert!(outer.ap_transformed_jsx);
         assert_eq!(outer.ap_info.loc, outer_loc);
         assert_eq!(outer.ap_info.status, crate::lambda::ApplyStatus::InferFull);
         let [Lambda::Lapply(inner)] = outer.ap_args.as_slice() else {
             panic!("expected nested application")
         };
-        assert!(!inner.ap_transformed_jsx);
+        assert!(inner.ap_transformed_jsx);
         assert_eq!(inner.ap_info.loc, inner_loc);
         assert_eq!(inner.ap_info.status, crate::lambda::ApplyStatus::Uncurry);
 
@@ -724,11 +734,9 @@ mod tests {
         );
         let mut store = IndexedLambda::from_lambda(raw);
         let root = store.root();
+        // `subst_lambda` with nothing to replace keeps every node.
         let rewritten = substitute(&mut store, &VariableSubstitution::new(), root);
-        let result = store.materialize_node(rewritten);
-        assert!(matches!(result, Lambda::Lsequence(first, second)
-            if matches!(*first, Lambda::Lconst(Constant::JsFalse))
-                && matches!(*second, Lambda::Lapply(ref apply) if !apply.ap_transformed_jsx)));
+        assert_eq!(rewritten, root);
     }
 
     #[test]
@@ -894,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn no_catch_still_runs_reference_smart_constructors() {
+    fn no_catch_keeps_nodes_and_rebuilds_use_reference_smart_constructors() {
         let loc = Location::none();
         let not_true = || {
             Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
@@ -903,10 +911,10 @@ mod tests {
                 loc: loc.clone(),
             }))
         };
-        assert!(matches!(
-            simplify_indexed(not_true(), 0),
-            Lambda::Lconst(Constant::JsFalse)
-        ));
+        // `Lambda_traverse.shallow_map_sharing` keeps unchanged nodes, so
+        // `simplify_exits` leaves `not true` alone; a rebuild folds it.
+        assert!(matches!(simplify_indexed(not_true(), 0), Lambda::Lprim(_)));
+        assert!(matches!(rebuild_indexed(not_true()), Lambda::Lconst(Constant::JsFalse)));
         let result = simplify_indexed(
             Lambda::Lsequence(
                 Box::new(not_true()),
@@ -915,8 +923,17 @@ mod tests {
             0,
         );
         assert!(matches!(result, Lambda::Lsequence(first, second)
-            if matches!(*first, Lambda::Lconst(Constant::JsFalse))
+            if matches!(*first, Lambda::Lprim(_))
                 && matches!(*second, Lambda::LstaticRaise(99, ref args) if args.is_empty())));
+    }
+
+    /// Rebuild the root through the indexed smart constructors.
+    fn rebuild_indexed(lambda: Lambda) -> Lambda {
+        let mut store = IndexedLambda::from_lambda(lambda);
+        let root = store.root();
+        let snapshot = store.snapshot(root);
+        let rebuilt = append_rebuilt(&mut store, snapshot);
+        store.materialize_node(rebuilt)
     }
 
     #[test]
@@ -930,13 +947,12 @@ mod tests {
                 name: "C".into(),
                 literal: Some(tag_type),
             });
-            let result = simplify_indexed(
+            let result = rebuild_indexed(
                 Lambda::LifThenElse(
                     Box::new(Lambda::Lconst(condition)),
                     Box::new(Lambda::true_()),
                     Box::new(Lambda::false_()),
                 ),
-                0,
             );
             assert!(matches!(result, Lambda::LifThenElse(_, _, _)));
         }
@@ -945,7 +961,7 @@ mod tests {
             name: "One".into(),
             literal: Some(crate::types::VariantLiteralTag::Int(1)),
         };
-        let result = simplify_indexed(
+        let result = rebuild_indexed(
             Lambda::Lswitch(
                 Box::new(Lambda::Lconst(Constant::int(1))),
                 Box::new(LambdaSwitch {
@@ -962,11 +978,10 @@ mod tests {
                     sw_dispatch: SwitchDispatch::Direct,
                 }),
             ),
-            0,
         );
         assert!(matches!(result, Lambda::Lconst(Constant::JsTrue)));
 
-        let commented = simplify_indexed(
+        let commented = rebuild_indexed(
             Lambda::Lswitch(
                 Box::new(Lambda::Lconst(Constant::int_with_comment(
                     1,
@@ -989,7 +1004,6 @@ mod tests {
                     sw_dispatch: SwitchDispatch::Direct,
                 }),
             ),
-            0,
         );
         assert!(matches!(commented, Lambda::Lconst(Constant::JsFalse)));
 
@@ -1005,13 +1019,12 @@ mod tests {
                 name: "B".into(),
                 literal: None,
             });
-            let result = simplify_indexed(
+            let result = rebuild_indexed(
                 Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                     primitive: Primitive::Pintcomp(operation),
                     args: vec![Lambda::Lconst(left), Lambda::Lconst(right)],
                     loc: Location::none(),
                 })),
-                0,
             );
             assert_eq!(
                 format!("{result:?}"),
@@ -1099,8 +1112,21 @@ mod tests {
         let loc = Location::none();
         let cases = (0..32)
             .map(|case| {
+                // A dead catch in each payload makes the pass rewrite it
+                // (shallow_map_sharing only rebuilds changed nodes).
                 let args = (0..16)
-                    .map(|value| Lambda::Lconst(Constant::int(case * 16 + value)))
+                    .map(|value| {
+                        let constant = Lambda::Lconst(Constant::int(case * 16 + value));
+                        if value == 0 {
+                            Lambda::LstaticCatch(
+                                Box::new(constant),
+                                (1000 + case, vec![]),
+                                Box::new(Lambda::unit()),
+                            )
+                        } else {
+                            constant
+                        }
+                    })
                     .collect::<Vec<_>>();
                 (
                     SwitchKey::Int(case),
@@ -1253,14 +1279,15 @@ mod tests {
             first.side_payload_shallow_occupied_bytes
         );
 
-        // OCaml always walks and rebuilds smart constructors, even without a catch.
+        // Without a catch nothing changes, so `shallow_map_sharing` keeps
+        // every node.
         context.simplify_exits(&indexed_gen);
         let second = context.storage_measurements();
-        assert_eq!(second.node_allocations, 14);
+        assert_eq!(second.node_allocations, first.node_allocations);
         assert_eq!(
             second.current_root_unique_nodes,
             first.current_root_unique_nodes
         );
-        assert_eq!(second.superseded_nodes, 6);
+        assert_eq!(second.superseded_nodes, first.superseded_nodes);
     }
 }

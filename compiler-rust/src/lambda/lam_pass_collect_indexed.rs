@@ -1275,8 +1275,30 @@ mod tests {
         );
         let mut tree_meta = LamStats::new(vec![]);
         tree::collect_info(&mut tree_meta, &lambda);
-        let mut context =
-            crate::lambda::indexed::IndexedLambdaContext::from_lambda(lambda.clone(), []);
+        // `simplify_exits` only rebuilds changed nodes
+        // (lambda_traverse.ml `shallow_map_sharing`), so give every function
+        // body a dead catch for the pass to remove.
+        let rewritable = cases.iter().rev().enumerate().fold(
+            Lambda::Lconst(Constant::int(0)),
+            |body, (index, (ident, function, _))| {
+                let Lambda::Lfunction(function) = function.clone() else {
+                    panic!("expected function");
+                };
+                let mut function = *function;
+                function.body = Box::new(Lambda::LstaticCatch(
+                    function.body,
+                    (2000 + index as i32, vec![]),
+                    Box::new(Lambda::unit()),
+                ));
+                Lambda::Llet(
+                    crate::lambda::LetKind::Strict,
+                    ident.clone(),
+                    Box::new(Lambda::Lfunction(Box::new(function))),
+                    Box::new(body),
+                )
+            },
+        );
+        let mut context = crate::lambda::indexed::IndexedLambdaContext::from_lambda(rewritable, []);
         context.collect_info();
         context.simplify_exits(&crate::context::IdGenerator::with_start_stamp(100));
         let retained = context.storage_measurements();
