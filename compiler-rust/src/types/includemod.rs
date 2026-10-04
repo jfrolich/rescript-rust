@@ -2817,10 +2817,6 @@ fn substitute_value_type_paths<'a>(
     ty: TypeExprRef,
     subst: &InclusionSubst,
 ) -> TypeExprRef {
-    if subst.is_empty() {
-        return ty;
-    }
-
     // OCaml compiler/ml/includemod.ml:56-60 applies `Subst.value_description`
     // before more-general checking; compiler/ml/subst.ml:303-309 copies and
     // substitutes the value type rather than mutating the original scheme.
