@@ -278,6 +278,9 @@ fn get_unboxed_repr_rec(
 pub(crate) fn scrape_ty(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
     // OCaml `Typeopt.scrape_ty` uses `Ctype.expand_head_opt`, then checks
     // unboxed representations (compiler/ml/typeopt.ml:19-31).
+    // `Ctype.correct_levels ty` is `duplicate_type ty` (ctype.ml:650), so
+    // the expansion's unifications mutate a copy, not the typed tree.
+    let ty = crate::types::ctype::subst_identity_copy(ctx, ty);
     let ty = crate::types::ctype::expand_head_opt(ctx, env, ty);
     let path = match &*ctx.borrow_desc(ty) {
         TypeDesc::Tconstr { path, .. } => Some(path.clone()),
