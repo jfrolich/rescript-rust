@@ -1493,7 +1493,9 @@ impl JsPrinter {
         self.write("}");
     }
 
-    fn print_transformed_jsx_child(&mut self, child: &Expression) {
+    /// js_dump.ml `print_one_child`: a child prints at the level of the
+    /// enclosing JSX expression (`print_indented_list f level ...`).
+    fn print_transformed_jsx_child(&mut self, child: &Expression, level: u8) {
         let child_is_jsx = matches!(
             &child.desc,
             ExpressionDesc::Call(
@@ -1508,7 +1510,7 @@ impl JsPrinter {
         if !child_is_jsx {
             self.write("{");
         }
-        self.print_expression(child, 0);
+        self.print_expression(child, level);
         if !child_is_jsx {
             self.write("}");
         }
@@ -1596,7 +1598,7 @@ impl JsPrinter {
                 self.indent();
                 for child in children {
                     self.newline();
-                    self.print_transformed_jsx_child(child);
+                    self.print_transformed_jsx_child(child, level);
                 }
                 self.dedent();
                 self.newline();
@@ -1611,7 +1613,7 @@ impl JsPrinter {
                 self.write(">");
                 self.indent();
                 self.newline();
-                self.print_transformed_jsx_child(child);
+                self.print_transformed_jsx_child(child, level);
                 self.dedent();
                 self.newline();
                 self.write("</");

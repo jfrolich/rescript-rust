@@ -416,7 +416,7 @@ fn flatten_and_mark_dead_expression(
     substitution: &mut HashMap<Ident, Expression>,
     jsx_preserve: bool,
 ) -> Expression {
-    if let Some(rewritten) = try_substitute_caml_block_projection(&expr, substitution) {
+    if let Some(rewritten) = try_substitute_caml_block_projection(&expr, substitution, jsx_preserve) {
         return rewritten;
     }
 
@@ -547,19 +547,7 @@ fn flatten_and_mark_dead_expression(
                 jsx_preserve,
             )),
             args.into_iter()
-                .enumerate()
-                .map(|(index, arg)| {
-                    if jsx_preserve && info.call_transformed_jsx && index == 0 {
-                        flatten_and_mark_dead_transformed_jsx_tag_expression(
-                            arg,
-                            id_gen,
-                            substitution,
-                            jsx_preserve,
-                        )
-                    } else {
-                        flatten_and_mark_dead_expression(arg, id_gen, substitution, jsx_preserve)
-                    }
-                })
+                .map(|arg| flatten_and_mark_dead_expression(arg, id_gen, substitution, jsx_preserve))
                 .collect(),
             info,
         ),
@@ -742,50 +730,10 @@ fn flatten_and_mark_dead_expression(
     }
 }
 
-fn flatten_and_mark_dead_transformed_jsx_tag_expression(
-    expr: Expression,
-    id_gen: &IdGenerator,
-    substitution: &mut HashMap<Ident, Expression>,
-    jsx_preserve: bool,
-) -> Expression {
-    let Expression {
-        source_loc,
-        desc,
-        comment,
-    } = expr;
-    match desc {
-        // OCaml's js_pass_flatten_and_mark_dead preserves component `.make`
-        // projections in JSX-preserve mode so the dumper can print `<Foo.make />`.
-        ExpressionDesc::StaticIndex(target, field, Some(index)) if field == "make" => Expression {
-            source_loc,
-            desc: ExpressionDesc::StaticIndex(
-                Box::new(flatten_and_mark_dead_expression(
-                    *target,
-                    id_gen,
-                    substitution,
-                    jsx_preserve,
-                )),
-                field,
-                Some(index),
-            ),
-            comment,
-        },
-        other => flatten_and_mark_dead_expression(
-            Expression {
-                source_loc,
-                desc: other,
-                comment,
-            },
-            id_gen,
-            substitution,
-            jsx_preserve,
-        ),
-    }
-}
-
 fn try_substitute_caml_block_projection(
     expr: &Expression,
     substitution: &HashMap<Ident, Expression>,
+    jsx_preserve: bool,
 ) -> Option<Expression> {
     match &expr.desc {
         ExpressionDesc::ArrayIndex(left, right) => {
@@ -795,13 +743,13 @@ fn try_substitute_caml_block_projection(
             let ExpressionDesc::Number(Number::Int { i, .. }) = right.desc else {
                 return None;
             };
-            substituted_caml_block_item(substitution, id, None, i)
+            substituted_caml_block_item(substitution, id, None, i, jsx_preserve)
         }
         ExpressionDesc::StaticIndex(target, field, Some(index)) => {
             let ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) = &target.desc else {
                 return None;
             };
-            substituted_caml_block_item(substitution, id, Some(field), *index)
+            substituted_caml_block_item(substitution, id, Some(field), *index, jsx_preserve)
         }
         _ => None,
     }
@@ -812,8 +760,17 @@ fn substituted_caml_block_item(
     id: &Ident,
     field: Option<&str>,
     index: i32,
+    jsx_preserve: bool,
 ) -> Option<Expression> {
     let expression = substitution.get(id)?;
+    // js_pass_flatten_and_mark_dead.ml:266-270 (7432): in JSX preserve mode a
+    // block item that is the variable `make` stays a projection, so the
+    // dumper prints `<Foo.make />`.
+    let substitutable = |item: &Expression| {
+        is_simple_substituted_index_value(item)
+            && !(jsx_preserve
+                && matches!(&item.desc, ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) if id.name() == "make"))
+    };
     let ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, tag_info) = &expression.desc
     else {
         return None;
@@ -825,13 +782,13 @@ fn substituted_caml_block_item(
                     .iter()
                     .zip(fields.iter())
                     .find_map(|(item, (field_name, _))| (field_name == field).then_some(item))?;
-                return is_simple_substituted_index_value(item).then(|| item.clone());
+                return substitutable(item).then(|| item.clone());
             }
             _ => {}
         }
     }
     let item = items.get(usize::try_from(index).ok()?)?;
-    is_simple_substituted_index_value(item).then(|| item.clone())
+    substitutable(item).then(|| item.clone())
 }
 
 fn should_materialize_block_binding_items(

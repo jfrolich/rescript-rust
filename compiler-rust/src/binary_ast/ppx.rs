@@ -370,8 +370,15 @@ pub fn classify_js_exp(s: &str) -> JsExpClassification {
     let allocator = Allocator::default();
     let source_type = SourceType::default();
 
-    // Try to parse the string as a JavaScript expression
-    let parser_result = Parser::new(&allocator, s, source_type).parse_expression();
+    // Try to parse the string as a JavaScript expression. Flow's AST, which
+    // OCaml's `classify_exp` matches on, has no parenthesized-expression
+    // nodes, so `(function () {...})` is a function there too.
+    let parser_result = Parser::new(&allocator, s, source_type)
+        .with_options(oxc_parser::ParseOptions {
+            preserve_parens: false,
+            ..oxc_parser::ParseOptions::default()
+        })
+        .parse_expression();
 
     let result = match parser_result {
         Ok(expr) => {
