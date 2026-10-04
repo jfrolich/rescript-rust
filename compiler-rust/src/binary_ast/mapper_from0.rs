@@ -672,7 +672,50 @@ impl<'a> Mapper<'a> {
             let loc = self.loc(&ext.0.loc);
             self.raise(loc, "A PPX returned a regexp extension outside an expression.");
         }
-        (self.map_string_loc(&ext.0), self.map_payload(&ext.1))
+        // ast_mapper_from0.ml `extension`: `%raw`/`%ffi` string payloads keep
+        // their source spelling as `Pconst_raw_source`.
+        let payload = if matches!(ext.0.txt.as_str(), "raw" | "ffi") {
+            match self.map_raw_source_payload(&ext.1) {
+                Some(payload) => payload,
+                None => self.map_payload(&ext.1),
+            }
+        } else {
+            self.map_payload(&ext.1)
+        };
+        (self.map_string_loc(&ext.0), payload)
+    }
+
+    /// ast_mapper_from0.ml `map_raw_source_payload`.
+    fn map_raw_source_payload(&mut self, payload: &pt0::Payload) -> Option<current::Payload> {
+        let pt0::Payload::PStr(items) = payload else {
+            return None;
+        };
+        let [item] = items.as_slice() else {
+            return None;
+        };
+        let pt0::StructureItemDesc::Eval(expr, eval_attrs) = &item.pstr_desc else {
+            return None;
+        };
+        let pt0::ExpressionDesc::Constant(pt0::Constant::String(source, _)) = &expr.pexp_desc else {
+            return None;
+        };
+        let expr_loc = self.loc(&expr.pexp_loc);
+        let expr_attrs = self.map_attributes(&expr.pexp_attributes);
+        let expression = self.arena.push_expr(current::Expression {
+            pexp_desc: Box::new(current::ExpressionDesc::Pexp_constant(Box::new(
+                current::Constant::RawSource(Cow::Owned(source.clone())),
+            ))),
+            pexp_loc: expr_loc,
+            pexp_attributes: expr_attrs,
+        });
+        let eval_attrs = self.map_attributes(eval_attrs);
+        let item_loc = self.loc(&item.pstr_loc);
+        Some(current::Payload::PStr(Box::new(vec![current::StructureItem {
+            pstr_desc: Box::new(current::StructureItemDesc::Pstr_eval(Box::new((
+                expression, eval_attrs,
+            )))),
+            pstr_loc: item_loc,
+        }])))
     }
 
     fn map_payload(&mut self, payload: &pt0::Payload) -> current::Payload {
