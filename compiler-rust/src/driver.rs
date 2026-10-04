@@ -1808,6 +1808,13 @@ pub fn apply_external_structure_ppxs(
     arena.set_builtin_spice(options.builtin_spice());
     let ppxs = external_ppxs_to_run(options);
     if ppxs.is_empty() {
+        // The builtin spice mapper stands in for a configured spice PPX, and
+        // OCaml hands that PPX the Parsetree0 form and reads it back
+        // (cmd_ppx_apply.ml:97-110), so the AST still takes that round trip.
+        if options.builtin_spice() {
+            let ast0 = crate::binary_ast::mapper_to0::map_structure(arena, &structure);
+            return Ok(crate::binary_ast::mapper_from0::map_structure(arena, &ast0)?);
+        }
         return Ok(structure);
     }
     let context = ppx_context_attribute(arena, options);
@@ -1851,6 +1858,11 @@ pub fn apply_external_signature_ppxs(
     arena.set_builtin_spice(options.builtin_spice());
     let ppxs = external_ppxs_to_run(options);
     if ppxs.is_empty() {
+        // See `apply_external_structure_ppxs` (cmd_ppx_apply.ml:112-125).
+        if options.builtin_spice() {
+            let ast0 = crate::binary_ast::mapper_to0::map_signature(arena, &signature);
+            return Ok(crate::binary_ast::mapper_from0::map_signature(arena, &ast0)?);
+        }
         return Ok(signature);
     }
     let context = ppx_context_attribute(arena, options);
