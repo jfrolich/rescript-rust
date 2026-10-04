@@ -8414,12 +8414,15 @@ fn unify_row_field<'a>(
                 return Ok(());
             }
 
-            // OCaml redo branch: when fields are active/fixed/singleton and an
-            // existing link is already present, retry on the linked representatives.
-            // Match OCaml when rigid variants are enabled for this path:
-            // singleton payload arity alone should not force the redo path.
-            // `not !passive_variants && ...` (ctype.ml:2522).
-            let active = !ctx.passive_variants() && (*m1 || *m2 || fixed1 || fixed2);
+            // ctype.ml:2488-2492: `redo` when the fields are matched or
+            // fixed, or, under `expand_head_rigid`, when either side has a
+            // single conjunct.
+            let active = !ctx.passive_variants()
+                && (*m1
+                    || *m2
+                    || fixed1
+                    || fixed2
+                    || (ctx.rigid_variants() && (types1.len() == 1 || types2.len() == 1)));
             if active {
                 let mut all_types: Vec<TypeExprRef> =
                     Vec::with_capacity(types1.len() + types2.len());
@@ -10281,8 +10284,9 @@ fn equal_type_exprs_without_renaming_rec(
         }
     }
 
-    let left_expanded = ctx.repr(expand_head(ctx, env, left));
-    let right_expanded = ctx.repr(expand_head(ctx, env, right));
+    // ctype.ml:3041-3042.
+    let left_expanded = ctx.repr(expand_head_rigid(ctx, env, left));
+    let right_expanded = ctx.repr(expand_head_rigid(ctx, env, right));
     if left_expanded == right_expanded {
         return Ok(());
     }
@@ -10481,6 +10485,14 @@ fn equal_type_expr_lists_without_renaming(
     Ok(())
 }
 
+/// `Ctype.expand_head_rigid` (ctype.ml:3007-3012).
+fn expand_head_rigid(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+    let old = ctx.set_rigid_variants(true);
+    let expanded = expand_head(ctx, env, ty);
+    ctx.set_rigid_variants(old);
+    expanded
+}
+
 fn equal_rows_without_renaming(
     ctx: &TypeContext,
     env: &Env,
@@ -10488,6 +10500,16 @@ fn equal_rows_without_renaming(
     left: &RowDesc,
     right: &RowDesc,
 ) -> TypeResult<()> {
+    // ctype.ml:3147-3150 `eqtype_row`: try expanding the right row's
+    // `row_more` first (needed when called from Includecore.type_manifest).
+    let right_more = ctx.repr(expand_head_rigid(ctx, env, right.row_more));
+    let expanded_right = match &*ctx.get_desc(right_more) {
+        TypeDesc::Tvariant(row) => Some(row.clone()),
+        _ => None,
+    };
+    if let Some(expanded_right) = expanded_right {
+        return equal_rows_without_renaming(ctx, env, type_pairs, left, &expanded_right);
+    }
     let left = row_repr_ref(ctx, left);
     let right = row_repr_ref(ctx, right);
     let left = left.as_ref();
@@ -10610,7 +10632,8 @@ fn equal_object_fields_without_renaming(
         || type_pairs.pairs.contains(&(left_rest, right_rest))
         || (type_pairs.rename && type_pairs.subst.contains(&(left_rest, right_rest)));
     if !same_row {
-        let right_rest_expanded = ctx.repr(expand_head(ctx, env, right_rest));
+        // ctype.ml:3114.
+        let right_rest_expanded = ctx.repr(expand_head_rigid(ctx, env, right_rest));
         if let TypeDesc::Tobject { fields, .. } = &*ctx.get_desc(right_rest_expanded) {
             return equal_object_fields_without_renaming(ctx, env, type_pairs, left, *fields);
         }

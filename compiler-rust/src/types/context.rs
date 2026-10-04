@@ -445,6 +445,8 @@ pub struct TypeContext {
     trace_gadt_instances: Cell<bool>,
     /// `Ctype.passive_variants` (ctype.ml:2060).
     passive_variants: Cell<bool>,
+    /// `Ctype.rigid_variants` (ctype.ml:2013), set by `expand_head_rigid`.
+    rigid_variants: Cell<bool>,
 
     /// Dedicated memo ref for OCaml's simple_abbrevs (nullary, non-object
     /// abbreviations). This points to a mutable AbbrevMemo cell.
@@ -1012,6 +1014,7 @@ impl TypeContext {
             saved_levels: RefCell::new(Vec::new()),
             trace_gadt_instances: Cell::new(false),
             passive_variants: Cell::new(false),
+            rigid_variants: Cell::new(false),
             simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
             reified_var_counters: RefCell::new(crate::fast_hash::AHashMap::new()),
             previous_env_id: Cell::new(0),
@@ -4731,6 +4734,16 @@ impl TypeContext {
     /// Sets `Ctype.passive_variants`, returning the previous value.
     pub fn set_passive_variants(&self, value: bool) -> bool {
         self.passive_variants.replace(value)
+    }
+
+    /// `!Ctype.rigid_variants`.
+    pub fn rigid_variants(&self) -> bool {
+        self.rigid_variants.get()
+    }
+
+    /// Sets `Ctype.rigid_variants`, returning the previous value.
+    pub fn set_rigid_variants(&self, value: bool) -> bool {
+        self.rigid_variants.replace(value)
     }
 
     pub fn trace_gadt_instances(&self) -> bool {
