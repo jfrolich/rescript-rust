@@ -223,6 +223,28 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
         }
     }
 
+    /// lam_pass_deep_flatten.ml `regroups_binding`: whether `flatten`
+    /// restructures this binding. Every other binding is rebuilt in place.
+    fn regroups_binding(kind: LetKind, id: &Ident, arg: &Lambda) -> bool {
+        if rhs_is_beta_residue(arg) {
+            return false;
+        }
+        match arg {
+            Lambda::Llet(..) | Lambda::Lsequence(..) | Lambda::Lletrec(..) => true,
+            Lambda::Lprim(prim)
+                if matches!(prim.primitive, Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt) =>
+            {
+                !matches!(prim.args.as_slice(), [Lambda::Lvar(_)])
+            }
+            Lambda::Lprim(prim) => {
+                matches!(prim.primitive, Primitive::Pmakeblock(_, Mutable::Immutable))
+                    && matches!(id.name(), "match" | "include" | "param")
+                    && matches!(kind, LetKind::Alias | LetKind::Strict | LetKind::StrictOpt)
+            }
+            _ => false,
+        }
+    }
+
     fn flatten(acc: &mut Vec<FlattenGroup>, lam: Lambda, id_gen: &IdGenerator) -> Lambda {
         match lam {
             Lambda::Llet(kind, id, value, body) if rhs_is_beta_residue(&value) => {
@@ -365,6 +387,19 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
     /// `Lambda.seq`) only when a child changed.
     fn aux_sharing(lam: Lambda, id_gen: &IdGenerator) -> crate::lambda::lambda_traverse::Mapped {
         match lam {
+            // `Lam_util.refine_let ~original:lam ~kind:str id (aux arg) (aux body)`;
+            // OCaml evaluates the arguments right to left.
+            Lambda::Llet(kind, id, value, body) if !regroups_binding(kind, &id, &value) => {
+                let (body, body_changed) = aux_sharing(*body, id_gen);
+                let (value, value_changed) = aux_sharing(*value, id_gen);
+                crate::lambda::lam_util::refine_let_original(
+                    kind,
+                    id,
+                    value,
+                    body,
+                    !(value_changed || body_changed),
+                )
+            }
             Lambda::Llet(_, _, _, _) => {
                 let mut groups = Vec::new();
                 let result = flatten(&mut groups, lam, id_gen);
