@@ -11950,9 +11950,12 @@ impl<'a> RawLambdaConverter<'a> {
                 let [arg] = <[RawLambda; 1]>::try_from(args).expect("%identity takes one argument");
                 arg
             }
+            // lambda.ml `mk_builtin`: `Eliminated Ignore` builds
+            // `Lsequence (arg, lambda_unit)` directly, bypassing the folding
+            // `Lambda.seq`. Keep it as `Pignore` so lowering does the same.
             Primitive::Pignore => {
                 let [arg] = <[RawLambda; 1]>::try_from(args).expect("%ignore takes one argument");
-                RawLambda::seq(arg, RawLambda::unit())
+                RawLambda::prim(Primitive::Pignore, vec![arg], loc)
             }
             primitive => RawLambda::prim_folded(primitive, args, loc),
         }

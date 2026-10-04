@@ -409,7 +409,11 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                         ) =>
                     {
                         if let Some(args) = eta_args(store, &params, &inner, &args) {
-                            return store.append(NodeSnapshot::Prim(primitive, args, info.loc));
+                            // lambda.ml `apply` builds through the folding `prim`.
+                            return append_rebuilt(
+                                store,
+                                NodeSnapshot::Prim(primitive, args, info.loc),
+                            );
                         }
                     }
                     NodeSnapshot::Prim(
@@ -426,16 +430,14 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                                 store.snapshot(*inner)
                         {
                             if let Some(args) = eta_args(store, &params, &inner_args, &args) {
-                                let inner = store.append(NodeSnapshot::Prim(
-                                    inner_primitive,
-                                    args,
-                                    info.loc.clone(),
-                                ));
-                                return store.append(NodeSnapshot::Prim(
-                                    wrapper,
-                                    vec![inner],
-                                    info.loc,
-                                ));
+                                let inner = append_rebuilt(
+                                    store,
+                                    NodeSnapshot::Prim(inner_primitive, args, info.loc.clone()),
+                                );
+                                return append_rebuilt(
+                                    store,
+                                    NodeSnapshot::Prim(wrapper, vec![inner], info.loc),
+                                );
                             }
                         } else if let Some(args) = eta_args(store, &params, &wrapped, &args) {
                             return store.append(NodeSnapshot::Prim(wrapper, args, info.loc));
@@ -446,8 +448,9 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                             && matches!(store.view(second), NodeView::Const(_))
                             && let Some(args) = eta_args(store, &params, &inner, &args)
                         {
-                            let call = store.append(NodeSnapshot::Prim(primitive, args, info.loc));
-                            return store.append(NodeSnapshot::Sequence(call, second));
+                            let call =
+                                append_rebuilt(store, NodeSnapshot::Prim(primitive, args, info.loc));
+                            return append_rebuilt(store, NodeSnapshot::Sequence(call, second));
                         }
                     }
                     _ => {}
@@ -630,6 +633,23 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
             }
             _ => store.append(NodeSnapshot::Sequence(first, second)),
         },
+        // `Lambda.prim` folds a primitive over one or two constants.
+        NodeSnapshot::Prim(primitive, args, loc)
+            if matches!(args.len(), 1 | 2)
+                && args.iter().all(|arg| matches!(store.view(*arg), NodeView::Const(_))) =>
+        {
+            let consts = args
+                .iter()
+                .map(|arg| match store.view(*arg) {
+                    NodeView::Const(c) => crate::lambda::Lambda::Lconst(c.clone()),
+                    _ => unreachable!(),
+                })
+                .collect();
+            match crate::lambda::Lambda::prim(primitive.clone(), consts, loc.clone()) {
+                folded @ crate::lambda::Lambda::Lconst(_) => store.append_compat_lambda(folded),
+                _ => store.append(NodeSnapshot::Prim(primitive, args, loc)),
+            }
+        }
         node => store.append(node),
     }
 }

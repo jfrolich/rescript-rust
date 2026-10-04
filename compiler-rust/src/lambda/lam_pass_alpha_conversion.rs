@@ -297,7 +297,11 @@ impl<'a, 'r> Alpha<'a, 'r> {
             }
 
             // lam_pass_alpha_conversion.ml:118
-            Lambda::Lsequence(l1, l2) => Lambda::seq(self.simpl(l1), self.simpl(l2)),
+            // Upstream deleted this pass (eadc533b7: arity is queried where
+            // it is used), so nothing re-folds a sequence here.
+            Lambda::Lsequence(l1, l2) => {
+                Lambda::Lsequence(Box::new(self.simpl(l1)), Box::new(self.simpl(l2)))
+            }
 
             // lam_pass_alpha_conversion.ml:119
             Lambda::Lwhile(l1, l2) => Lambda::while_(self.simpl(l1), self.simpl(l2)),
@@ -413,7 +417,12 @@ impl<'a, 'r> Alpha<'a, 'r> {
                 self.simpl_owned(*l2),
                 self.simpl_owned(*l3),
             ),
-            Lambda::Lsequence(l1, l2) => Lambda::seq(self.simpl_owned(*l1), self.simpl_owned(*l2)),
+            // Upstream deleted this pass (eadc533b7: arity is queried where
+            // it is used), so nothing re-folds a sequence here.
+            Lambda::Lsequence(l1, l2) => Lambda::Lsequence(
+                Box::new(self.simpl_owned(*l1)),
+                Box::new(self.simpl_owned(*l2)),
+            ),
             Lambda::Lwhile(l1, l2) => Lambda::Lwhile(
                 map_box(l1, |inner| self.simpl_owned(inner)),
                 map_box(l2, |inner| self.simpl_owned(inner)),

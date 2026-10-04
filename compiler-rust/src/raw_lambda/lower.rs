@@ -244,9 +244,11 @@ impl<'a> LoweringContext<'a> {
                 ),
                 _ => unreachable!("PextensionSlotEq expects exactly two arguments"),
             },
+            // lambda.ml `mk_builtin`: `Lsequence (arg, lambda_unit)`, not the
+            // folding `Lambda.seq`.
             Primitive::Pignore => {
                 let arg = args.into_iter().next().unwrap_or_else(Lambda::unit);
-                Lambda::seq(arg, Lambda::unit())
+                Lambda::Lsequence(Box::new(arg), Box::new(Lambda::unit()))
             }
             Primitive::Pmakeblock(TagInfo::PolyVar(name), mutable_flag) => match args.as_slice() {
                 [_, value] => Lambda::prim(
@@ -635,23 +637,15 @@ fn eta_reduce_function_apply(
                 return None;
             };
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
-            Some(Lambda::Lprim(Box::new(PrimInfo {
-                primitive: function_primitive(function.body.as_ref())?,
-                args: vec![Lambda::Lprim(Box::new(PrimInfo {
-                    primitive: inner_call.primitive.clone(),
-                    args: eta_args,
-                    loc: ap_info.loc.clone(),
-                }))],
-                loc: ap_info.loc.clone(),
-            })))
+            // lambda.ml `apply` builds the result through the folding `prim`.
+            let wrap = function_primitive(function.body.as_ref())?;
+            let inner =
+                Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone());
+            Some(Lambda::prim(wrap, vec![inner], ap_info.loc.clone()))
         }
         Lambda::Lprim(inner_call) => {
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
-            Some(Lambda::Lprim(Box::new(PrimInfo {
-                primitive: inner_call.primitive.clone(),
-                args: eta_args,
-                loc: ap_info.loc.clone(),
-            })))
+            Some(Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone()))
         }
         Lambda::Lsequence(first, second) => {
             let Lambda::Lprim(inner_call) = first.as_ref() else {
@@ -661,13 +655,9 @@ fn eta_reduce_function_apply(
                 return None;
             };
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
-            Some(Lambda::Lsequence(
-                Box::new(Lambda::Lprim(Box::new(PrimInfo {
-                    primitive: inner_call.primitive.clone(),
-                    args: eta_args,
-                    loc: ap_info.loc.clone(),
-                }))),
-                Box::new(Lambda::Lconst(constant.clone())),
+            Some(Lambda::seq(
+                Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone()),
+                Lambda::Lconst(constant.clone()),
             ))
         }
         _ => None,
