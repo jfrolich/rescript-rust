@@ -13,7 +13,6 @@ node ./packages/main/src/Main.mjs > ./packages/main/src/output.txt
 mv ./packages/main/src/Main.res ./packages/main/src/Main2.res
 rewatch build &> ../tests/snapshots/rename-file.txt
 normalize_paths ../tests/snapshots/rename-file.txt
-normalize_incremental_count ../tests/snapshots/rename-file.txt
 mv ./packages/main/src/Main2.res ./packages/main/src/Main.res
 
 rewatch build &> /dev/null

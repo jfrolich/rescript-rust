@@ -242,22 +242,35 @@ pub fn parse_comma_delimited_region<'a, T>(
 ) -> Vec<T> {
     p.leave_breadcrumb(grammar.clone());
     let mut nodes = vec![];
+    comma_delimited_loop(p, &grammar, &closing, &mut Vec::new(), &mut nodes, &mut f);
+    p.eat_breadcrumb();
+    nodes
+}
+
+/// The `loop closing parents nodes` of OCaml
+/// `parse_comma_delimited_reversed_list`. `parents` holds the closers of the
+/// enclosing groups being recovered inside.
+fn comma_delimited_loop<'a, T>(
+    p: &mut Parser<'a>,
+    grammar: &grammar::Grammar,
+    closing: &Token<'static>,
+    parents: &mut Vec<Token<'static>>,
+    nodes: &mut Vec<T>,
+    f: &mut impl FnMut(&mut Parser<'a>) -> Option<T>,
+) {
     loop {
         match f(p) {
             Some(node) => {
                 nodes.push(node);
                 if p.token == Token::Comma {
                     p.next();
-                } else if p.token == closing || p.token == Token::Eof {
-                    break;
-                } else if grammar::is_list_element(&grammar, &p.token) {
+                } else if p.token == *closing || p.token == Token::Eof {
+                    return;
+                } else if grammar::is_list_element(grammar, &p.token) {
                     // Missing comma, but the next token starts another element.
                     p.expect(Token::Comma);
                 } else {
-                    if !(p.token == Token::Eof
-                        || p.token == closing
-                        || recover::should_abort_list_parse(p))
-                    {
+                    if !recover::should_abort_list_parse(p) {
                         p.expect(Token::Comma);
                     }
                     if p.token == Token::Semicolon {
@@ -266,19 +279,39 @@ pub fn parse_comma_delimited_region<'a, T>(
                 }
             }
             None => {
-                if p.token == Token::Eof
-                    || p.token == closing
-                    || recover::should_abort_list_parse(p)
-                {
-                    break;
+                if p.token == Token::Eof || p.token == *closing {
+                    return;
                 }
-                p.err_unexpected();
-                p.next();
+                match p.token {
+                    // Keep unexpected delimiters paired, so their closer does
+                    // not escape into an enclosing grammar. Retain recoverable
+                    // list elements.
+                    Token::Lparen | Token::Lbrace | Token::Lbracket | Token::LessThan => {
+                        let opening = p.token.clone().into_owned();
+                        p.err_unexpected();
+                        p.next();
+                        let nested_closing = get_closing_token(&opening);
+                        parents.push(closing.clone());
+                        comma_delimited_loop(p, grammar, &nested_closing, parents, nodes, f);
+                        parents.pop();
+                        p.expect(nested_closing);
+                    }
+                    // Return only closers belonging to a group we are
+                    // recovering inside.
+                    Token::Rparen | Token::Rbrace | Token::Rbracket | Token::GreaterThan
+                        if parents.contains(&p.token.clone().into_owned()) =>
+                    {
+                        return;
+                    }
+                    _ if recover::should_abort_list_parse(p) => return,
+                    _ => {
+                        p.err_unexpected();
+                        p.next();
+                    }
+                }
             }
         }
     }
-    p.eat_breadcrumb();
-    nodes
 }
 
 /// OCaml `parse_comma_delimited_reversed_list`
@@ -344,6 +377,8 @@ pub mod error_messages {
     /// Error message for string interpolation in pattern.
     pub const STRING_INTERPOLATION_IN_PATTERN: &str =
         "String interpolation is not supported in pattern matching.";
+
+    pub const TAGGED_TEMPLATE_IN_PATTERN: &str = "Tagged template literals are not supported in patterns";
 
     /// Error message for type definition in function.
     pub const TYPE_DEFINITION_IN_FUNCTION: &str = "Type definitions are not allowed inside functions.\n  Move this `type` declaration to the top level or into a module.";
@@ -579,12 +614,6 @@ pub fn parse_ident(p: &mut Parser<'_>, msg: &str, start_pos_idx: PosIdx) -> (Str
 // Special Attributes
 // ============================================================================
 
-/// Create the ternary attribute `@res.ternary`.
-pub fn ternary_attr(arena: &mut ParseArena) -> Attribute {
-    let str_idx = arena.intern("res.ternary");
-    (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
-}
-
 /// Create the if-let attribute `@res.iflet`.
 pub fn if_let_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.iflet");
@@ -595,18 +624,6 @@ pub fn if_let_attr(arena: &mut ParseArena) -> Attribute {
 pub fn make_await_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
     let str_idx = arena.intern("res.await");
     (with_loc(str_idx, loc), Payload::PStr(Box::new(vec![])))
-}
-
-/// Create the braces attribute `@res.braces` with location.
-pub fn make_braces_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
-    let str_idx = arena.intern("res.braces");
-    (with_loc(str_idx, loc), Payload::PStr(Box::new(vec![])))
-}
-
-/// Create the template literal attribute `@res.template`.
-pub fn template_literal_attr(arena: &mut ParseArena) -> Attribute {
-    let str_idx = arena.intern("res.template");
-    (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
 }
 
 /// Create the spread attribute `@res.spread`.
@@ -624,12 +641,6 @@ pub fn dict_spread_attr(arena: &mut ParseArena) -> Attribute {
 /// Create the pattern variant spread attribute.
 pub fn make_pat_variant_spread_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.patVariantSpread");
-    (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
-}
-
-/// Create the tagged template literal attribute.
-pub fn tagged_template_literal_attr(arena: &mut ParseArena) -> Attribute {
-    let str_idx = arena.intern("res.taggedTemplate");
     (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
 }
 
@@ -674,6 +685,17 @@ pub fn get_closing_token(token: &Token<'_>) -> Token<'static> {
 /// Skip to the closing token, handling nested brackets.
 pub fn go_to_closing(closing_token: &Token<'_>, p: &mut Parser<'_>) {
     loop {
+        // A `<`/`>` that extends into a shift or comparison operator is
+        // skipped like any other token, unless `>` is the closing token.
+        let is_closing_gt =
+            matches!(p.token, Token::GreaterThan) && *closing_token == Token::GreaterThan;
+        if matches!(p.token, Token::LessThan | Token::GreaterThan) && !is_closing_gt {
+            let token = p.token.clone().into_owned();
+            if *closing_token != Token::GreaterThan && p.peek_binary_operator() != token {
+                p.next();
+                continue;
+            }
+        }
         match (&p.token, closing_token) {
             (Token::Rparen, Token::Rparen)
             | (Token::Rbrace, Token::Rbrace)
@@ -721,9 +743,8 @@ pub fn doc_comment_to_attribute(
     let str_idx = arena.intern("res.doc");
     let name = with_loc(str_idx, loc);
     let expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
-            Cow::Owned(content.into()),
-            None,
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(
+            &content.into(),
         )))),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
@@ -843,7 +864,7 @@ pub mod ast_helper {
     pub fn make_unit(p: &mut Parser<'_>, loc: Location) -> Expression {
         let lid_idx = p.push_lident_static("()");
         make_expr(
-            ExpressionDesc::Pexp_construct(with_loc(lid_idx, loc), None),
+            ExpressionDesc::Pexp_construct(with_loc(lid_idx, loc), ctor_args(Vec::new(), loc)),
             loc,
         )
     }
@@ -928,12 +949,14 @@ pub mod ast_helper {
     pub fn make_construct_pat(
         arena: &mut ParseArena,
         lid_idx: crate::parse_arena::LidentIdx,
-        arg: Option<Pattern>,
+        args: Vec<Pattern>,
+        args_loc: Location,
         lid_loc: Location,
         ppat_loc: Location,
     ) -> Pattern {
+        let args = args.into_iter().map(|p| arena.push_pat(p)).collect();
         make_pat(
-            PatternDesc::Ppat_construct(with_loc(lid_idx, lid_loc), arg.map(|p| arena.push_pat(p))),
+            PatternDesc::Ppat_construct(with_loc(lid_idx, lid_loc), ctor_args(args, args_loc)),
             ppat_loc,
         )
     }
@@ -957,7 +980,7 @@ pub mod ast_helper {
                 // This matches OCaml's behavior: Location { loc_ghost: true, ..loc }
                 let nil_loc = p.arena_mut().mk_ghost_loc(loc);
                 let nil = with_loc(nil_idx, nil_loc);
-                make_pat(PatternDesc::Ppat_construct(nil, None), nil_loc)
+                make_pat(PatternDesc::Ppat_construct(nil, ctor_args(Vec::new(), nil_loc)), nil_loc)
             }
         };
 
@@ -966,17 +989,15 @@ pub mod ast_helper {
             // Reuse the existing PosIdx from item.ppat_loc and result.ppat_loc to match OCaml's sharing
             let start_idx = p.loc_start_idx(item.ppat_loc);
             let end_idx = p.loc_end_idx(result.ppat_loc);
-            let tuple_loc = p.mk_loc_idx_full(start_idx, end_idx);
-            let cons_loc = tuple_loc;
+            // res_core.ml `make_list_pattern`: `{txt = [p1; pat_pl]; loc}`.
+            let cons_loc = p.mk_loc_idx_full(start_idx, end_idx);
             let item_idx = p.arena_mut().push_pat(item);
             let result_idx = p.arena_mut().push_pat(result);
-            let tuple = make_pat(
-                PatternDesc::Ppat_tuple(Box::new(vec![item_idx, result_idx])),
-                tuple_loc,
-            );
-            let tuple_idx = p.arena_mut().push_pat(tuple);
             let cons = with_loc(cons_idx, cons_loc);
-            result = make_pat(PatternDesc::Ppat_construct(cons, Some(tuple_idx)), cons_loc);
+            result = make_pat(
+                PatternDesc::Ppat_construct(cons, ctor_args(vec![item_idx, result_idx], cons_loc)),
+                cons_loc,
+            );
         }
 
         // The outermost pattern uses the full list{...} location
@@ -1172,10 +1193,8 @@ pub fn is_es6_arrow_expression(p: &mut Parser<'_>, in_ternary: bool) -> bool {
                                     Token::Lident(_) => {
                                         state.next();
                                         if state.token == Token::LessThan {
-                                            state.set_diamond_mode();
                                             state.next();
                                             go_to_closing(&Token::GreaterThan, state);
-                                            state.pop_diamond_mode();
                                         }
                                         matches!(state.token, Token::EqualGreater)
                                     }
@@ -1445,22 +1464,6 @@ mod tests {
     fn test_expr_context_default() {
         let ctx = ExprContext::default();
         assert_eq!(ctx, ExprContext::Ordinary);
-    }
-
-    #[test]
-    fn test_ternary_attr() {
-        use crate::parse_arena::ParseArena;
-        let mut arena = ParseArena::new();
-        let attr = ternary_attr(&mut arena);
-        assert_eq!(arena.get_string(attr.0.txt), "res.ternary");
-    }
-
-    #[test]
-    fn test_template_literal_attr() {
-        use crate::parse_arena::ParseArena;
-        let mut arena = ParseArena::new();
-        let attr = template_literal_attr(&mut arena);
-        assert_eq!(arena.get_string(attr.0.txt), "res.template");
     }
 
     #[test]

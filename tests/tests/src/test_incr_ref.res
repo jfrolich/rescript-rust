@@ -1,7 +1,7 @@
 include (
   {
     let u = ref(0)
-    let v = Int.Ref.increment(u)
+    let v = u.contents = u.contents + 1
   }: {
     let v: unit
   }

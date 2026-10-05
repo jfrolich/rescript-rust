@@ -80,9 +80,13 @@ module T = struct
   (* Type expressions for the core language *)
 
   let row_field sub = function
-    | Rtag (_, attrs, _, tl) ->
+    | Rtag (_, attrs, _, groups) ->
       sub.attributes sub attrs;
-      List.iter (sub.typ sub) tl
+      List.iter
+        (fun {loc; txt} ->
+          sub.location sub loc;
+          List.iter (sub.typ sub) txt)
+        groups
     | Rinherit t -> sub.typ sub t
 
   let object_field sub = function
@@ -284,6 +288,9 @@ module E = struct
     sub.location sub loc;
     sub.attributes sub attrs;
     match desc with
+    | Pexp_braces {expr; braces_loc} ->
+      sub.location sub braces_loc;
+      sub.expr sub expr
     | Pexp_ident x -> iter_loc sub x
     | Pexp_constant _ -> ()
     | Pexp_let (_r, vbs, e) ->
@@ -311,10 +318,13 @@ module E = struct
       sub.expr sub e;
       sub.cases sub pel
     | Pexp_tuple el -> List.iter (sub.expr sub) el
-    | Pexp_construct (lid, arg) ->
+    | Pexp_construct (lid, {txt = args; loc = args_loc}) ->
       iter_loc sub lid;
-      iter_opt (sub.expr sub) arg
-    | Pexp_variant (_lab, eo) -> iter_opt (sub.expr sub) eo
+      sub.location sub args_loc;
+      List.iter (sub.expr sub) args
+    | Pexp_variant (_lab, {txt = args; loc = args_loc}) ->
+      sub.location sub args_loc;
+      List.iter (sub.expr sub) args
     | Pexp_record (l, eo) ->
       List.iter
         (fun {lid; x = exp} ->
@@ -334,6 +344,10 @@ module E = struct
       sub.expr sub e1;
       sub.expr sub e2;
       iter_opt (sub.expr sub) e3
+    | Pexp_ternary (e1, e2, e3) ->
+      sub.expr sub e1;
+      sub.expr sub e2;
+      sub.expr sub e3
     | Pexp_sequence (e1, e2) ->
       sub.expr sub e1;
       sub.expr sub e2
@@ -360,7 +374,16 @@ module E = struct
     | Pexp_constraint (e, t) ->
       sub.expr sub e;
       sub.typ sub t
-    | Pexp_send (e, _s) -> sub.expr sub e
+    | Pexp_object_get (e, _s) -> sub.expr sub e
+    | Pexp_object_set (e, _s, v) ->
+      sub.expr sub e;
+      sub.expr sub v
+    | Pexp_object_literal fields ->
+      List.iter
+        (fun (s, e) ->
+          iter_loc sub s;
+          sub.expr sub e)
+        fields
     | Pexp_letmodule (s, me, e) ->
       iter_loc sub s;
       sub.module_expr sub me;
@@ -374,6 +397,11 @@ module E = struct
       iter_loc sub lid;
       sub.expr sub e
     | Pexp_extension x -> sub.extension sub x
+    | Pexp_regexp _ -> ()
+    | Pexp_template {values} -> List.iter (sub.expr sub) values
+    | Pexp_tagged_template {tag; values} ->
+      sub.expr sub tag;
+      List.iter (sub.expr sub) values
     | Pexp_await e -> sub.expr sub e
     | Pexp_jsx_element (Jsx_fragment {jsx_fragment_children = children}) ->
       iter_jsx_children sub children
@@ -410,10 +438,13 @@ module P = struct
     | Ppat_constant _ -> ()
     | Ppat_interval _ -> ()
     | Ppat_tuple pl -> List.iter (sub.pat sub) pl
-    | Ppat_construct (l, p) ->
+    | Ppat_construct (l, {txt = args; loc = args_loc}) ->
       iter_loc sub l;
-      iter_opt (sub.pat sub) p
-    | Ppat_variant (_l, p) -> iter_opt (sub.pat sub) p
+      sub.location sub args_loc;
+      List.iter (sub.pat sub) args
+    | Ppat_variant (_l, {txt = args; loc = args_loc}) ->
+      sub.location sub args_loc;
+      List.iter (sub.pat sub) args
     | Ppat_record (lpl, _cf, rest) ->
       List.iter
         (fun {lid; x = pat} ->
@@ -436,9 +467,6 @@ module P = struct
     | Ppat_unpack s -> iter_loc sub s
     | Ppat_exception p -> sub.pat sub p
     | Ppat_extension x -> sub.extension sub x
-    | Ppat_open (lid, p) ->
-      iter_loc sub lid;
-      sub.pat sub p
 end
 
 (* Now, a generic AST mapper, to be extended to cover all kinds and

@@ -22,10 +22,10 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA. *)
 
-let local_external_apply loc ?(pval_attributes = []) ~(pval_prim : string list)
-    ~(pval_type : Parsetree.core_type) ?(local_module_name = "J")
-    ?(local_fun_name = "unsafe_expr") (args : Parsetree.expression list) :
-    Parsetree.expression_desc =
+let local_external_apply loc ?(pval_attributes = [])
+    ~(pval_prim : Parsetree.primitive_repr) ~(pval_type : Parsetree.core_type)
+    ?(local_module_name = "J") ?(local_fun_name = "unsafe_expr")
+    (args : Parsetree.expression list) : Parsetree.expression_desc =
   Pexp_letmodule
     ( {txt = local_module_name; loc},
       Ast_helper.Mod.structure ~loc
@@ -35,7 +35,7 @@ let local_external_apply loc ?(pval_attributes = []) ~(pval_prim : string list)
               pval_name = {txt = local_fun_name; loc};
               pval_type;
               pval_loc = loc;
-              pval_prim;
+              pval_prim = Some pval_prim;
               pval_attributes;
             };
         ],
@@ -44,24 +44,18 @@ let local_external_apply loc ?(pval_attributes = []) ~(pval_prim : string list)
            {txt = Ldot (Lident local_module_name, local_fun_name); loc})
         (Ext_list.map args (fun x -> (Asttypes.Nolabel, x))) )
 
-let local_external_obj loc ?(pval_attributes = []) ~pval_prim ~pval_type
-    ?(local_module_name = "J") ?(local_fun_name = "unsafe_expr") args :
-    Parsetree.expression_desc =
-  Pexp_letmodule
-    ( {txt = local_module_name; loc},
-      Ast_helper.Mod.structure ~loc
-        [
-          Ast_helper.Str.primitive ~loc
-            {
-              pval_name = {txt = local_fun_name; loc};
-              pval_type;
-              pval_loc = loc;
-              pval_prim;
-              pval_attributes;
-            };
-        ],
-      Ast_helper.Exp.apply ~loc
-        (Ast_helper.Exp.ident ~loc
-           {txt = Ldot (Lident local_module_name, local_fun_name); loc})
-        (Ext_list.map args (fun (l, a) ->
-             (Asttypes.Labelled {txt = l; loc = Location.none}, a))) )
+let inline_const (c : External_ffi_types.inline_const) :
+    Parsetree.primitive_repr =
+  Prim_inline_const c
+
+let inline_string semantic = inline_const (Const_string semantic)
+
+let inline_bool b = inline_const (Const_bool b)
+
+let inline_int i = inline_const (Const_int i)
+
+let inline_bigint s =
+  let negative, digits = Bigint_utils.parse_bigint s in
+  inline_const (Const_bigint {negative; digits})
+
+let inline_float s = inline_const (Const_float s)

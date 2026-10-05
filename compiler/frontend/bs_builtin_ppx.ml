@@ -32,16 +32,16 @@
    ]}
    will be desugared into
    {[
-     let module Js =
-     struct unsafe_js : string -> 'a end
-     in Js.unsafe_js {| blabla |}
+     let module J =
+     struct external unsafe_expr : _ -> _ = "#raw_expr" end
+     in J.unsafe_expr {| blabla |}
    ]}
    The major benefit is to better error reporting (with locations).
    Otherwise
 
    {[
 
-     let f u = Js.unsafe_js u
+     let f u = J.unsafe_expr u
      let _ = f (1 + 2)
    ]}
    And if it is inlined some where
@@ -88,14 +88,24 @@ let default_expr_mapper (self : mapper) (e : Parsetree.expression) =
       pexp_attributes = self.attributes self e.pexp_attributes;
     }
   | _ -> Ast_mapper.default_mapper.expr self e
+
+let rec add_this_to_braced_function attrs (e : Parsetree.expression) =
+  match e.pexp_desc with
+  | Pexp_fun _ -> Some {e with pexp_attributes = attrs @ e.pexp_attributes}
+  | Pexp_braces {expr; braces_loc} ->
+    Option.map
+      (fun expr -> {e with pexp_desc = Pexp_braces {expr; braces_loc}})
+      (add_this_to_braced_function attrs expr)
+  | _ -> None
 let default_pat_mapper = Ast_mapper.default_mapper.pat
 
 let pat_mapper (self : mapper) (p : Parsetree.pattern) =
   match p.ppat_desc with
   | Ppat_constant (Pconst_integer (s, Some 'l')) ->
     {p with ppat_desc = Ppat_constant (Pconst_integer (s, None))}
-  | Ppat_constant (Pconst_string (s, Some delim)) ->
-    Ast_utf8_string_interp.transform_pat p s delim
+  | Ppat_constant (Pconst_json _) ->
+    Location.raise_errorf ~loc:p.ppat_loc
+      "Tagged template literals are not supported in patterns"
   | _ -> default_pat_mapper self p
 
 (* Unpack requires core_type package for type inference:
@@ -111,13 +121,45 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
   in_function_def := false;
   match e.pexp_desc with
   (* Its output should not be rewritten anymore *)
+  | Pexp_regexp {pattern; flags} ->
+    let loc = e.pexp_loc in
+    let source = "/" ^ pattern ^ "/" ^ flags in
+    Ast_payload.validate_raw_source ~kind:Raw_re ~loc ~offset:0 source;
+    let raw =
+      Ast_external_mk.local_external_apply loc
+        ~pval_prim:(Prim_name "#raw_expr")
+        ~pval_type:
+          (Ast_helper.Typ.arrow
+             [{attrs = []; lbl = Nolabel; typ = Ast_helper.Typ.any ()}]
+             (Ast_helper.Typ.any ()))
+        [Ast_helper.Exp.constant ~loc (Pconst_raw_source source)]
+    in
+    Ast_helper.Exp.constraint_ ~loc
+      ~attrs:(self.attributes self e.pexp_attributes)
+      {e with pexp_desc = raw; pexp_attributes = []}
+      (Ast_comb.to_regexp_type loc)
   | Pexp_extension extension ->
     Ast_exp_extension.handle_extension e self extension
-  | Pexp_constant (Pconst_string (s, Some delim)) ->
-    Ast_utf8_string_interp.transform_exp e s delim
   | Pexp_constant (Pconst_integer (s, Some 'l')) ->
     {e with pexp_desc = Pexp_constant (Pconst_integer (s, None))}
   (* End rewriting *)
+  | Pexp_braces {expr; braces_loc} -> (
+    (* The method callback rewrite runs on Pexp_fun, so forward @this through
+       braces before mapping the function. Keep unrelated attributes here. *)
+    let this_attrs, other_attrs =
+      List.partition (fun ({Location.txt}, _) -> txt = "this") e.pexp_attributes
+    in
+    if this_attrs = [] then default_expr_mapper self e
+    else
+      match add_this_to_braced_function this_attrs expr with
+      | Some expr ->
+        default_expr_mapper self
+          {
+            e with
+            pexp_desc = Pexp_braces {expr; braces_loc};
+            pexp_attributes = other_attrs;
+          }
+      | None -> default_expr_mapper self e)
   | Pexp_fun {newtypes; params; body; async} -> (
     match Ast_attributes.process_attributes_rev e.pexp_attributes with
     | Nothing, _ ->
@@ -165,12 +207,14 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
       ( b,
         [
           {
-            pc_lhs = {ppat_desc = Ppat_construct ({txt = Lident "true"}, None)};
+            pc_lhs =
+              {ppat_desc = Ppat_construct ({txt = Lident "true"}, {txt = []})};
             pc_guard = None;
             pc_rhs = t_exp;
           };
           {
-            pc_lhs = {ppat_desc = Ppat_construct ({txt = Lident "false"}, None)};
+            pc_lhs =
+              {ppat_desc = Ppat_construct ({txt = Lident "false"}, {txt = []})};
             pc_guard = None;
             pc_rhs = f_exp;
           };
@@ -179,12 +223,14 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
       ( b,
         [
           {
-            pc_lhs = {ppat_desc = Ppat_construct ({txt = Lident "false"}, None)};
+            pc_lhs =
+              {ppat_desc = Ppat_construct ({txt = Lident "false"}, {txt = []})};
             pc_guard = None;
             pc_rhs = f_exp;
           };
           {
-            pc_lhs = {ppat_desc = Ppat_construct ({txt = Lident "true"}, None)};
+            pc_lhs =
+              {ppat_desc = Ppat_construct ({txt = Lident "true"}, {txt = []})};
             pc_guard = None;
             pc_rhs = t_exp;
           };
@@ -205,13 +251,13 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
               {
                 ppat_desc =
                   ( Ppat_construct
-                      ({txt = Lident ("Ok" as variant_name)}, Some _)
+                      ({txt = Lident ("Ok" as variant_name)}, {txt = _ :: _})
                   | Ppat_construct
-                      ({txt = Lident ("Error" as variant_name)}, Some _)
+                      ({txt = Lident ("Error" as variant_name)}, {txt = _ :: _})
                   | Ppat_construct
-                      ({txt = Lident ("Some" as variant_name)}, Some _)
+                      ({txt = Lident ("Some" as variant_name)}, {txt = _ :: _})
                   | Ppat_construct
-                      ({txt = Lident ("None" as variant_name)}, None) );
+                      ({txt = Lident ("None" as variant_name)}, {txt = []}) );
               } as pvb_pat;
             pvb_expr;
             pvb_constraint = None;
@@ -231,7 +277,7 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
       | "Some" -> `Option_Some
       | _ -> `Option_None
     in
-    match pvb_expr.pexp_desc with
+    match (Ast_payload.unwrap_braces pvb_expr).pexp_desc with
     | Pexp_pack _ -> default_expr_mapper self e
     | _ ->
       let cont_case =
@@ -246,7 +292,7 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
       (* Extract the variable name from the pattern (e.g., myVar from Some(myVar)) *)
       let var_name =
         match pvb_pat.ppat_desc with
-        | Ppat_construct (_, Some inner_pat) -> (
+        | Ppat_construct (_, {txt = [inner_pat]}) -> (
           match Ast_pat.is_single_variable_pattern_conservative inner_pat with
           | Some name when name <> "" -> name
           | _ -> "x")
@@ -262,7 +308,7 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
               Ast_helper.Pat.alias
                 (Ast_helper.Pat.construct ~loc
                    {txt = Lident "Error"; loc}
-                   (Some (Ast_helper.Pat.any ~loc ())))
+                   (Location.mkloc [Ast_helper.Pat.any ~loc ()] loc))
                 {txt = var_name; loc};
             pc_guard = None;
             pc_rhs = Ast_helper.Exp.ident ~loc {txt = Lident var_name; loc};
@@ -274,7 +320,7 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
             pc_lhs =
               Ast_helper.Pat.alias
                 (Ast_helper.Pat.construct ~loc {txt = Lident "Ok"; loc}
-                   (Some (Ast_helper.Pat.any ~loc ())))
+                   (Location.mkloc [Ast_helper.Pat.any ~loc ()] loc))
                 {txt = var_name; loc};
             pc_guard = None;
             pc_rhs = Ast_helper.Exp.ident ~loc {txt = Lident var_name; loc};
@@ -285,7 +331,8 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
             Parsetree.pc_bar = None;
             pc_lhs =
               Ast_helper.Pat.alias
-                (Ast_helper.Pat.construct ~loc {txt = Lident "None"; loc} None)
+                (Ast_helper.Pat.construct ~loc {txt = Lident "None"; loc}
+                   (Location.mkloc [] loc))
                 {txt = var_name; loc};
             pc_guard = None;
             pc_rhs = Ast_helper.Exp.ident ~loc {txt = Lident var_name; loc};
@@ -297,7 +344,7 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
             pc_lhs =
               Ast_helper.Pat.alias
                 (Ast_helper.Pat.construct ~loc {txt = Lident "Some"; loc}
-                   (Some (Ast_helper.Pat.any ~loc ())))
+                   (Location.mkloc [Ast_helper.Pat.any ~loc ()] loc))
                 {txt = var_name; loc};
             pc_guard = None;
             pc_rhs = Ast_helper.Exp.ident ~loc {txt = Lident var_name; loc};
@@ -333,7 +380,7 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
           };
         ],
         body ) -> (
-    match pvb_expr.pexp_desc with
+    match (Ast_payload.unwrap_braces pvb_expr).pexp_desc with
     | Pexp_pack _ -> default_expr_mapper self e
     | _ ->
       default_expr_mapper self
@@ -442,9 +489,15 @@ let signature_item_mapper (self : mapper) (sigi : Parsetree.signature_item) :
       Ast_external.handle_external_in_sig self value_desc sigi
     else
       match Ast_attributes.has_inline_payload pval_attributes with
-      | Some ((_, PStr [{pstr_desc = Pstr_eval ({pexp_desc}, _)}]) as attr) -> (
-        match pexp_desc with
-        | Pexp_constant (Pconst_string (s, dec)) ->
+      | Some ((_, PStr [{pstr_desc = Pstr_eval (expression, _)}]) as attr) -> (
+        match (Ast_payload.unwrap_braces expression).pexp_desc with
+        | Pexp_constant (Pconst_string _)
+        | Pexp_template {source_segments = [_]; values = []} ->
+          let semantic =
+            match Ast_payload.semantic_string_of_expression expression with
+            | Some semantic -> semantic
+            | None -> assert false
+          in
           succeed attr pval_attributes;
           {
             sigi with
@@ -452,7 +505,7 @@ let signature_item_mapper (self : mapper) (sigi : Parsetree.signature_item) :
               Psig_value
                 {
                   value_desc with
-                  pval_prim = External_ffi_types.inline_string_primitive s dec;
+                  pval_prim = Some (Ast_external_mk.inline_string semantic);
                   pval_attributes = [];
                 };
           }
@@ -465,7 +518,7 @@ let signature_item_mapper (self : mapper) (sigi : Parsetree.signature_item) :
               Psig_value
                 {
                   value_desc with
-                  pval_prim = External_ffi_types.inline_int_primitive s;
+                  pval_prim = Some (Ast_external_mk.inline_int s);
                   pval_attributes = [];
                 };
           }
@@ -477,7 +530,7 @@ let signature_item_mapper (self : mapper) (sigi : Parsetree.signature_item) :
               Psig_value
                 {
                   value_desc with
-                  pval_prim = External_ffi_types.inline_bigint_primitive s;
+                  pval_prim = Some (Ast_external_mk.inline_bigint s);
                   pval_attributes = [];
                 };
           }
@@ -489,11 +542,12 @@ let signature_item_mapper (self : mapper) (sigi : Parsetree.signature_item) :
               Psig_value
                 {
                   value_desc with
-                  pval_prim = External_ffi_types.inline_float_primitive s;
+                  pval_prim = Some (Ast_external_mk.inline_float s);
                   pval_attributes = [];
                 };
           }
-        | Pexp_construct ({txt = Lident (("true" | "false") as txt)}, None) ->
+        | Pexp_construct ({txt = Lident (("true" | "false") as txt)}, {txt = []})
+          ->
           succeed attr pval_attributes;
           {
             sigi with
@@ -501,8 +555,7 @@ let signature_item_mapper (self : mapper) (sigi : Parsetree.signature_item) :
               Psig_value
                 {
                   value_desc with
-                  pval_prim =
-                    External_ffi_types.inline_bool_primitive (txt = "true");
+                  pval_prim = Some (Ast_external_mk.inline_bool (txt = "true"));
                   pval_attributes = [];
                 };
           }
@@ -555,8 +608,20 @@ let structure_item_mapper (self : mapper) (str : Parsetree.structure_item) :
     let has_inline_property =
       Ast_attributes.has_inline_payload pvb_attributes
     in
-    match (has_inline_property, pvb_expr.pexp_desc) with
-    | Some attr, Pexp_constant (Pconst_string (s, dec)) ->
+    Option.iter
+      (fun (_, payload) -> Ast_payload.reject_json_literal_payload payload)
+      has_inline_property;
+    match
+      (has_inline_property, (Ast_payload.unwrap_braces pvb_expr).pexp_desc)
+    with
+    | ( Some attr,
+        ( Pexp_constant (Pconst_string _)
+        | Pexp_template {source_segments = [_]; values = []} ) ) ->
+      let semantic =
+        match Ast_payload.semantic_string_of_expression pvb_expr with
+        | Some semantic -> semantic
+        | None -> assert false
+      in
       succeed attr pvb_attributes;
       {
         str with
@@ -567,7 +632,7 @@ let structure_item_mapper (self : mapper) (str : Parsetree.structure_item) :
               pval_type = Ast_literal.type_string ();
               pval_loc = pvb_loc;
               pval_attributes = [];
-              pval_prim = External_ffi_types.inline_string_primitive s dec;
+              pval_prim = Some (Ast_external_mk.inline_string semantic);
             };
       }
     | Some attr, Pexp_constant (Pconst_integer (s, None)) ->
@@ -582,7 +647,7 @@ let structure_item_mapper (self : mapper) (str : Parsetree.structure_item) :
               pval_type = Ast_literal.type_int ();
               pval_loc = pvb_loc;
               pval_attributes = [];
-              pval_prim = External_ffi_types.inline_int_primitive s;
+              pval_prim = Some (Ast_external_mk.inline_int s);
             };
       }
     | Some attr, Pexp_constant (Pconst_float (s, None)) ->
@@ -596,11 +661,12 @@ let structure_item_mapper (self : mapper) (str : Parsetree.structure_item) :
               pval_type = Ast_literal.type_float;
               pval_loc = pvb_loc;
               pval_attributes = [];
-              pval_prim = External_ffi_types.inline_float_primitive s;
+              pval_prim = Some (Ast_external_mk.inline_float s);
             };
       }
     | ( Some attr,
-        Pexp_construct ({txt = Lident (("true" | "false") as txt)}, None) ) ->
+        Pexp_construct ({txt = Lident (("true" | "false") as txt)}, {txt = []})
+      ) ->
       succeed attr pvb_attributes;
       {
         str with
@@ -611,7 +677,7 @@ let structure_item_mapper (self : mapper) (str : Parsetree.structure_item) :
               pval_type = Ast_literal.type_bool ();
               pval_loc = pvb_loc;
               pval_attributes = [];
-              pval_prim = External_ffi_types.inline_bool_primitive (txt = "true");
+              pval_prim = Some (Ast_external_mk.inline_bool (txt = "true"));
             };
       }
     | _ ->
@@ -778,9 +844,12 @@ let rec structure_mapper ~await_context (self : mapper) (stru : Ast_structure.t)
                        ~typ:(Mty.typeof_ ~loc me)))
                 :: aux expr)
             | Pexp_let (_, vbs, expr) -> aux expr @ spelunk_vbs acc vbs
+            | Pexp_braces {expr} -> aux expr
             | Pexp_ifthenelse (_, then_expr, Some else_expr) ->
               aux then_expr @ aux else_expr
-            | Pexp_construct (_, Some expr) -> aux expr
+            | Pexp_ternary (_, consequent, alternate) ->
+              aux consequent @ aux alternate
+            | Pexp_construct (_, {txt = [expr]}) -> aux expr
             | Pexp_fun {body = expr} -> aux expr
             | Pexp_constraint (expr, _) -> aux expr
             | Pexp_match (expr, cases) ->

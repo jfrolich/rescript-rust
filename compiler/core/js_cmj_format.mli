@@ -49,7 +49,8 @@ type arity = Single of Lam_arity.t | Submodule of Lam_arity.t array
 
 type cmj_value = {
   arity: arity;
-  persistent_closed_lambda: Lam.t option; (* Either constant or closed functor *)
+  persistent_closed_lambda: Lambda.t option;
+      (* Either constant or closed functor *)
 }
 
 type effect_ = string option
@@ -57,13 +58,17 @@ type effect_ = string option
 type keyed_cmj_value = {
   name: string;
   arity: arity;
-  persistent_closed_lambda: Lam.t option;
+  persistent_closed_lambda: Lambda.t option;
 }
 
 type hoisted_export = {
   path: string list;  (** Exact source-level module path segments. *)
   export_name: string;
-      (** Flat compiler identifier used for the public JS export. *)
+      (** Flattened compiler name for the export, before JS identifier
+          conversion: the emitted export applies [Ext_ident.convert] to it
+          (a hoisted [Operator.\"+"] is stored as [Operator$+] and exported
+          as [Operator$$plus]), and so must any consumer that reconstructs
+          the JS export name. *)
 }
 
 type t = {
@@ -89,8 +94,6 @@ val find_hoisted_export : t -> string list -> string option
 val single_na : arity
 
 val from_file : string -> t
-
-val from_string : string -> t
 
 (*
    Note writing the file if its content is not changed

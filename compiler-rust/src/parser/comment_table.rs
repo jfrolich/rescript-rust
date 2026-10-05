@@ -51,6 +51,18 @@ impl PosRange {
         }
     }
 
+    /// `Res_parsetree_viewer.argument_loc`: the full span of an application
+    /// argument, from its label (if any) to the end of its expression.
+    pub fn argument(arena: &ParseArena, lbl: &ArgLabel, expr: &Expression) -> Self {
+        match lbl {
+            ArgLabel::Labelled(lbl_loc) | ArgLabel::Optional(lbl_loc) => Self {
+                start: arena.loc_start(lbl_loc.loc).cnum,
+                end: arena.loc_end(expr.pexp_loc).cnum,
+            },
+            ArgLabel::Nolabel => Self::from_loc(expr.pexp_loc, arena),
+        }
+    }
+
     /// Special "none" range for file-level comments
     pub fn none() -> Self {
         Self { start: -1, end: -1 }
@@ -173,6 +185,23 @@ impl CommentTable {
     pub fn has_trailing_comments(&self, loc: LocIdx, arena: &ParseArena) -> bool {
         let pos_range = PosRange::from_loc(loc, arena);
         self.trailing.contains_key(&pos_range)
+    }
+
+    /// `has_leading_comments` for a computed location.
+    pub fn has_leading_comments_at(&self, range: PosRange) -> bool {
+        self.leading.contains_key(&range)
+    }
+
+    /// `has_trailing_comments` for a computed location.
+    pub fn has_trailing_comments_at(&self, range: PosRange) -> bool {
+        self.trailing.contains_key(&range)
+    }
+
+    /// res_printer.ml `has_any_trailing_line_comment`.
+    pub fn has_any_trailing_line_comment_at(&self, range: PosRange) -> bool {
+        self.trailing
+            .get(&range)
+            .is_some_and(|comments| comments.iter().any(|c| c.is_single_line()))
     }
 
     /// Check if there are inside comments for a location.
@@ -319,6 +348,33 @@ pub fn partition_adjacent_trailing(
     (after_loc, remaining)
 }
 
+/// Like `partition_adjacent_trailing`, and also keeps the comments that
+/// follow a `?` token placed right after `loc`, as in the `=?` of an optional
+/// parameter without a default: `(~x /* before */ =? /* after */, ~y)`. Both
+/// comments trail the parameter `~x`
+/// (res_comments_table.ml `partition_adjacent_trailing_through_question`).
+pub fn partition_adjacent_trailing_through_question(
+    loc: LocIdx,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) -> (Vec<Comment>, Vec<Comment>) {
+    let (mut after_loc, rest) = partition_adjacent_trailing(loc, comments, arena);
+    match rest.first() {
+        Some(first)
+            if first.prev_tok_is_question()
+                && first.prev_tok_end_pos().cnum > arena.loc_end(loc).cnum =>
+        {
+            let mut extended = arena.to_location(loc);
+            extended.loc_end = first.prev_tok_end_pos().clone();
+            let extended = arena.from_location(&extended);
+            let (after_question, rest) = partition_adjacent_trailing(extended, rest, arena);
+            after_loc.extend(after_question);
+            (after_loc, rest)
+        }
+        _ => (after_loc, rest),
+    }
+}
+
 /// Splits comments that follow a location but come before another token on the same line.
 pub fn partition_adjacent_trailing_before_next_token_on_same_line(
     loc: LocIdx,
@@ -422,8 +478,8 @@ impl<'a> Node<'a> {
                 let pc_lhs = arena.get_pat(case.pc_lhs);
                 let pc_rhs = arena.get_expr(case.pc_rhs);
                 let start = arena.loc_start(pc_lhs.ppat_loc);
-                let end = match parsetree_viewer::process_braces_attr(arena, pc_rhs) {
-                    Some(attr) => arena.loc_end(attr.0.loc),
+                let end = match parsetree_viewer::process_braces(arena, pc_rhs).0 {
+                    Some(braces_loc) => arena.loc_end(braces_loc),
                     None => arena.loc_end(pc_rhs.pexp_loc),
                 };
                 arena.from_location(&Location::from_positions(start.clone(), end.clone()))
@@ -431,25 +487,16 @@ impl<'a> Node<'a> {
             Node::CoreType(ct) => ct.ptyp_loc,
             Node::CoreTypeIdx(idx) => arena.get_core_type(*idx).ptyp_loc,
             Node::ExprArgument { loc, .. } => *loc,
-            Node::Expression(e) => {
-                // Check for braces attribute
-                for attr in &e.pexp_attributes {
-                    let attr_name = arena.get_string(attr.0.txt);
-                    if attr_name == "res.braces" || attr_name == "ns.braces" {
-                        return attr.0.loc;
-                    }
-                }
-                e.pexp_loc
-            }
+            Node::Expression(e) => match parsetree_viewer::process_braces(arena, e).0 {
+                Some(braces_loc) => braces_loc,
+                None => e.pexp_loc,
+            },
             Node::ExpressionIdx(idx) => {
                 let e = arena.get_expr(*idx);
-                for attr in &e.pexp_attributes {
-                    let attr_name = arena.get_string(attr.0.txt);
-                    if attr_name == "res.braces" || attr_name == "ns.braces" {
-                        return attr.0.loc;
-                    }
+                match parsetree_viewer::process_braces(arena, e).0 {
+                    Some(braces_loc) => braces_loc,
+                    None => e.pexp_loc,
                 }
-                e.pexp_loc
             }
             Node::ExprRecordRow(li, expr_idx) => {
                 let e = arena.get_expr(*expr_idx);
@@ -526,6 +573,7 @@ fn is_block_expr_idx(arena: &ParseArena, idx: ExprIdx) -> bool {
 
 fn is_block_expr(arena: &ParseArena, expr: &Expression) -> bool {
     match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_braces(braces) => is_block_expr_idx(arena, braces.expr),
         ExpressionDesc::Pexp_letmodule(..)
         | ExpressionDesc::Pexp_letexception(..)
         | ExpressionDesc::Pexp_let(..)
@@ -546,9 +594,13 @@ fn is_block_expr(arena: &ParseArena, expr: &Expression) -> bool {
     }
 }
 
-/// Check if an expression is an if-then-else.
-fn is_if_then_else_expr(expr: &Expression) -> bool {
-    matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_ifthenelse(..))
+/// Check if an expression is an if-then-else or a ternary
+/// (res_comments_table.ml `is_conditional_expr`).
+fn is_conditional_expr(expr: &Expression) -> bool {
+    matches!(
+        &*expr.pexp_desc,
+        ExpressionDesc::Pexp_ifthenelse(..) | ExpressionDesc::Pexp_ternary(..)
+    )
 }
 
 /// Collect list patterns from a cons pattern.
@@ -558,21 +610,25 @@ fn collect_list_patterns(arena: &ParseArena, pattern: &Pattern) -> Vec<Pattern> 
 
     loop {
         match &*current.ppat_desc {
-            PatternDesc::Ppat_construct(name, Some(args_idx))
-                if arena.is_lident(name.txt, "::") =>
-            {
-                let args = arena.get_pat(*args_idx);
-                if let PatternDesc::Ppat_tuple(tuple) = &*args.ppat_desc {
-                    if tuple.len() == 2 {
-                        acc.push(arena.get_pat(tuple[0]).clone());
-                        current = arena.get_pat(tuple[1]);
-                        continue;
-                    }
+            // `::` takes its head and rest as two arguments, or as one 2-tuple.
+            PatternDesc::Ppat_construct(name, args) if arena.is_lident(name.txt, "::") => {
+                let pair = match args.txt.as_slice() {
+                    [pat, rest] => Some((*pat, *rest)),
+                    [arg] => match &*arena.get_pat(*arg).ppat_desc {
+                        PatternDesc::Ppat_tuple(tuple) if tuple.len() == 2 => Some((tuple[0], tuple[1])),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some((pat, rest)) = pair {
+                    acc.push(arena.get_pat(pat).clone());
+                    current = arena.get_pat(rest);
+                    continue;
                 }
                 acc.push(current.clone());
                 break;
             }
-            PatternDesc::Ppat_construct(name, None) if arena.is_lident(name.txt, "[]") => {
+            PatternDesc::Ppat_construct(name, args) if arena.is_lident(name.txt, "[]") && args.txt.is_empty() => {
                 break;
             }
             _ => {
@@ -592,16 +648,20 @@ fn collect_list_exprs(arena: &ParseArena, expr: &Expression) -> Vec<Expression> 
 
     loop {
         match &*current.pexp_desc {
-            ExpressionDesc::Pexp_construct(name, Some(args_idx))
-                if arena.is_lident(name.txt, "::") =>
-            {
-                let args = arena.get_expr(*args_idx);
-                if let ExpressionDesc::Pexp_tuple(tuple) = &*args.pexp_desc {
-                    if tuple.len() == 2 {
-                        acc.push(arena.get_expr(tuple[0]).clone());
-                        current = arena.get_expr(tuple[1]);
-                        continue;
-                    }
+            // `::` takes its head and rest as two arguments, or as one 2-tuple.
+            ExpressionDesc::Pexp_construct(name, args) if arena.is_lident(name.txt, "::") => {
+                let pair = match args.txt.as_slice() {
+                    [expr, rest] => Some((*expr, *rest)),
+                    [arg] => match &*arena.get_expr(*arg).pexp_desc {
+                        ExpressionDesc::Pexp_tuple(tuple) if tuple.len() == 2 => Some((tuple[0], tuple[1])),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some((expr, rest)) = pair {
+                    acc.push(arena.get_expr(expr).clone());
+                    current = arena.get_expr(rest);
+                    continue;
                 }
                 acc.push(current.clone());
                 break;
@@ -1491,7 +1551,19 @@ fn walk_expression(
     }
 
     match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_braces(braces) if is_block_expr_idx(arena, braces.expr) => {
+            let inner = arena.get_expr(braces.expr).clone();
+            walk_expression(&inner, t, comments, arena);
+        }
+        ExpressionDesc::Pexp_braces(braces) => {
+            let inner = arena.get_expr(braces.expr).clone();
+            let (before, inside, after) = partition_by_loc(comments, inner.pexp_loc, arena);
+            t.attach_leading(inner.pexp_loc, before, arena);
+            walk_expression(&inner, t, inside, arena);
+            t.attach_trailing(inner.pexp_loc, after, arena);
+        }
         ExpressionDesc::Pexp_constant { .. }
+        | ExpressionDesc::Pexp_regexp(_)
         | ExpressionDesc::Pexp_break
         | ExpressionDesc::Pexp_continue => {
             let (leading, trailing) = partition_leading_trailing(comments, expr.pexp_loc, arena);
@@ -1508,7 +1580,7 @@ fn walk_expression(
             // Safety: arena is append-only, expression won't be invalidated
             let body = arena.get_expr(*body_idx).clone();
             // Check if body is unit
-            let body_is_unit = matches!(&*body.pexp_desc, ExpressionDesc::Pexp_construct(name, None) if arena.is_lident(name.txt, "()"));
+            let body_is_unit = matches!(&*body.pexp_desc, ExpressionDesc::Pexp_construct(name, args) if arena.is_lident(name.txt, "()") && args.txt.is_empty());
             if body_is_unit {
                 walk_value_bindings(bindings, t, comments, arena);
             } else {
@@ -1600,30 +1672,21 @@ fn walk_expression(
                 t.attach_trailing(body.pexp_loc, trailing, arena);
             }
         }
-        ExpressionDesc::Pexp_extension(ext) => {
-            // Check for %obj extension
-            if arena.get_string(ext.0.txt) == "obj" {
-                if let PStr(items) = &ext.1 {
-                    if items.len() == 1 {
-                        if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
-                            let (ref inner_idx, _) = **eval_inner;
-                            let inner = arena.get_expr(*inner_idx);
-                            if let ExpressionDesc::Pexp_record(rec_inner) = &*inner.pexp_desc {
-                                let (ref fields, _) = **rec_inner;
-                                let record_fields = fields.clone();
-                                let nodes: Vec<Node<'_>> = record_fields
-                                    .iter()
-                                    .map(|f| Node::ExprRecordRow(&f.lid, f.expr))
-                                    .collect();
-                                walk_list(&nodes, t, comments, arena);
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-            walk_extension(ext, t, comments, arena);
+        ExpressionDesc::Pexp_object_literal(fields) => {
+            // `ExprRecordRow (Location.mkloc (Longident.Lident s.txt) s.loc, e)`
+            let rows: Vec<(Loc<LidentIdx>, ExprIdx)> = fields
+                .iter()
+                .map(|(name, e)| {
+                    let name_idx = arena.intern(&name.txt);
+                    let lid = arena.push_longident(Longident::Lident(name_idx));
+                    (Loc { txt: lid, loc: name.loc }, *e)
+                })
+                .collect();
+            let nodes: Vec<Node<'_>> =
+                rows.iter().map(|(lid, e)| Node::ExprRecordRow(lid, *e)).collect();
+            walk_list(&nodes, t, comments, arena);
         }
+        ExpressionDesc::Pexp_extension(ext) => walk_extension(ext, t, comments, arena),
         ExpressionDesc::Pexp_letexception(inner) => {
             let (ref ext, ref body_idx) = **inner;
             // Safety: arena is append-only, expression won't be invalidated
@@ -1746,10 +1809,10 @@ fn walk_expression(
         ExpressionDesc::Pexp_array(exprs) if exprs.is_empty() => {
             t.attach_inside(expr.pexp_loc, comments, arena);
         }
-        ExpressionDesc::Pexp_construct(name, None) if arena.is_lident(name.txt, "[]") => {
+        ExpressionDesc::Pexp_construct(name, _) if arena.is_lident(name.txt, "[]") => {
             t.attach_inside(expr.pexp_loc, comments, arena);
         }
-        ExpressionDesc::Pexp_construct(name, Some(_)) if arena.is_lident(name.txt, "::") => {
+        ExpressionDesc::Pexp_construct(name, _) if arena.is_lident(name.txt, "::") => {
             let list_exprs = collect_list_exprs(arena, expr);
             let nodes: Vec<Node<'_>> = list_exprs.iter().map(|e| Node::Expression(e)).collect();
             walk_list(&nodes, t, comments, arena);
@@ -1758,27 +1821,18 @@ fn walk_expression(
             let (leading, trailing) = partition_leading_trailing(comments, name.loc, arena);
             t.attach_leading(name.loc, leading, arena);
 
-            match args {
-                Some(arg_expr_idx) => {
-                    let (after_longident, rest) =
-                        partition_adjacent_trailing(name.loc, trailing, arena);
-                    t.attach_trailing(name.loc, after_longident, arena);
-                    // Safety: arena is append-only, expression won't be invalidated
-                    let arg_expr = arena.get_expr(*arg_expr_idx).clone();
-                    walk_expression(&arg_expr, t, rest, arena);
-                }
-                None => {
-                    t.attach_trailing(name.loc, trailing, arena);
-                }
+            if args.txt.is_empty() {
+                t.attach_trailing(name.loc, trailing, arena);
+            } else {
+                let (after_longident, rest) = partition_adjacent_trailing(name.loc, trailing, arena);
+                t.attach_trailing(name.loc, after_longident, arena);
+                let nodes: Vec<Node<'_>> = args.txt.iter().map(|e| Node::ExpressionIdx(*e)).collect();
+                walk_list(&nodes, t, rest, arena);
             }
         }
         ExpressionDesc::Pexp_variant(inner) => {
-            let (_, ref opt_arg_idx) = **inner;
-            if let Some(arg_idx) = opt_arg_idx {
-                // Safety: arena is append-only, expression won't be invalidated
-                let arg = arena.get_expr(*arg_idx).clone();
-                walk_expression(&arg, t, comments, arena);
-            }
+            let nodes: Vec<Node<'_>> = inner.1.txt.iter().map(|e| Node::ExpressionIdx(*e)).collect();
+            walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_array(exprs) | ExpressionDesc::Pexp_tuple(exprs) => {
             let nodes: Vec<Node<'_>> = exprs.iter().map(|e| Node::ExpressionIdx(*e)).collect();
@@ -1881,8 +1935,12 @@ fn walk_expression(
                 t.attach_trailing(value.pexp_loc, trailing, arena);
             }
         }
-        ExpressionDesc::Pexp_ifthenelse(inner) => {
-            let (ref cond_idx, ref then_idx, ref else_idx) = **inner;
+        ExpressionDesc::Pexp_ifthenelse(_) | ExpressionDesc::Pexp_ternary(_) => {
+            let (cond_idx, then_idx, else_idx) = match &*expr.pexp_desc {
+                ExpressionDesc::Pexp_ifthenelse(inner) => (&inner.0, &inner.1, inner.2),
+                ExpressionDesc::Pexp_ternary(inner) => (&inner.0, &inner.1, Some(inner.2)),
+                _ => unreachable!(),
+            };
             // Safety: arena is append-only, expressions won't be invalidated
             let cond = arena.get_expr(*cond_idx).clone();
             let then_branch = arena.get_expr(*then_idx).clone();
@@ -1934,8 +1992,8 @@ fn walk_expression(
 
             if let Some(else_expr_idx) = else_idx {
                 // Safety: arena is append-only
-                let else_expr = arena.get_expr(*else_expr_idx).clone();
-                if is_block_expr(arena, &else_expr) || is_if_then_else_expr(&else_expr) {
+                let else_expr = arena.get_expr(else_expr_idx).clone();
+                if is_block_expr(arena, &else_expr) || is_conditional_expr(&else_expr) {
                     walk_expression(&else_expr, t, comments, arena);
                 } else {
                     let (leading, inside, trailing) =
@@ -2424,7 +2482,7 @@ fn walk_expression(
                         let curr_resolved = arena.to_location(param_loc);
                         if prev_resolved.loc_end.line == curr_resolved.loc_start.line {
                             let (after_prev, before_curr) =
-                                partition_adjacent_trailing(prev, leading, arena);
+                                partition_adjacent_trailing_through_question(prev, leading, arena);
                             t.attach_trailing(prev, after_prev, arena);
                             t.attach_leading(param_loc, before_curr, arena);
                         } else {
@@ -2480,7 +2538,8 @@ fn walk_expression(
 
             // Handle trailing comments after last parameter
             if let Some(prev) = prev_loc {
-                let (after_prev, rest) = partition_adjacent_trailing(prev, comments, arena);
+                let (after_prev, rest) =
+                    partition_adjacent_trailing_through_question(prev, comments, arena);
                 t.attach_trailing(prev, after_prev, arena);
                 comments = rest;
             }
@@ -2526,10 +2585,39 @@ fn walk_expression(
                 }
             }
         }
-        ExpressionDesc::Pexp_send(inner) => {
+        ExpressionDesc::Pexp_object_get(inner) => {
             // Safety: arena is append-only, expression won't be invalidated
             let send_expr = arena.get_expr(inner.0).clone();
             walk_expression(&send_expr, t, comments, arena);
+        }
+        ExpressionDesc::Pexp_object_set(inner) => {
+            let e1 = arena.get_expr(inner.0).clone();
+            let e2 = arena.get_expr(inner.2).clone();
+            let (leading, inside, trailing) = partition_by_loc(comments, e1.pexp_loc, arena);
+            t.attach_leading(e1.pexp_loc, leading, arena);
+            walk_expression(&e1, t, inside, arena);
+            let (after_lhs, rest) = partition_adjacent_trailing(e1.pexp_loc, trailing, arena);
+            t.attach_trailing(e1.pexp_loc, after_lhs, arena);
+            let (before, inside, after) = partition_by_loc(rest, e2.pexp_loc, arena);
+            t.attach_leading(e2.pexp_loc, before, arena);
+            walk_expression(&e2, t, inside, arena);
+            t.attach_trailing(e2.pexp_loc, after, arena);
+        }
+        // res_comments_table.ml: template values (after the tag of a
+        // tagged template) are walked as a list.
+        ExpressionDesc::Pexp_tagged_template(template) => {
+            let exprs: Vec<Expression> = std::iter::once(template.tag)
+                .chain(template.values.iter().copied())
+                .map(|idx| arena.get_expr(idx).clone())
+                .collect();
+            let nodes: Vec<Node<'_>> = exprs.iter().map(Node::Expression).collect();
+            walk_list(&nodes, t, comments, arena);
+        }
+        ExpressionDesc::Pexp_template(template) => {
+            let exprs: Vec<Expression> =
+                template.values.iter().map(|idx| arena.get_expr(*idx).clone()).collect();
+            let nodes: Vec<Node<'_>> = exprs.iter().map(Node::Expression).collect();
+            walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_await(inner_idx) => {
             // Safety: arena is append-only, expression won't be invalidated
@@ -3040,7 +3128,7 @@ fn walk_pattern(
             // Unit and empty list get comments inside (like OCaml reference)
             t.attach_inside(pattern.ppat_loc, comments, arena);
         }
-        PatternDesc::Ppat_construct(name, Some(_)) if arena.is_lident(name.txt, "::") => {
+        PatternDesc::Ppat_construct(name, _) if arena.is_lident(name.txt, "::") => {
             let list_pats = collect_list_patterns(arena, pattern);
             let nodes: Vec<Node<'_>> = list_pats.iter().map(|p| Node::Pattern(p)).collect();
             walk_list(&nodes, t, comments, arena);
@@ -3049,27 +3137,30 @@ fn walk_pattern(
             let (leading, trailing) = partition_leading_trailing(comments, name.loc, arena);
             t.attach_leading(name.loc, leading, arena);
 
-            match args {
-                Some(arg_pat_idx) => {
+            match args.txt.as_slice() {
+                [] => t.attach_trailing(name.loc, trailing, arena),
+                [arg_pat_idx] => {
                     let (after_longident, rest) =
                         partition_adjacent_trailing(name.loc, trailing, arena);
                     t.attach_trailing(name.loc, after_longident, arena);
-                    // Safety: arena is append-only, pattern won't be invalidated
                     let arg_pat = arena.get_pat(*arg_pat_idx).clone();
-                    walk_pattern(&arg_pat, t, rest, arena);
+                    let (leading, inside, trailing) = partition_by_loc(rest, arg_pat.ppat_loc, arena);
+                    t.attach_leading(arg_pat.ppat_loc, leading, arena);
+                    walk_pattern(&arg_pat, t, inside, arena);
+                    t.attach_trailing(arg_pat.ppat_loc, trailing, arena);
                 }
-                None => {
-                    t.attach_trailing(name.loc, trailing, arena);
+                pats => {
+                    let (after_longident, rest) =
+                        partition_adjacent_trailing(name.loc, trailing, arena);
+                    t.attach_trailing(name.loc, after_longident, arena);
+                    let nodes: Vec<Node<'_>> = pats.iter().map(|p| Node::PatternIdx(*p)).collect();
+                    walk_list(&nodes, t, rest, arena);
                 }
             }
         }
         PatternDesc::Ppat_variant(inner) => {
-            let (_, ref opt_arg_idx) = **inner;
-            if let Some(arg_idx) = opt_arg_idx {
-                // Safety: arena is append-only, pattern won't be invalidated
-                let arg = arena.get_pat(*arg_idx).clone();
-                walk_pattern(&arg, t, comments, arena);
-            }
+            let nodes: Vec<Node<'_>> = inner.1.txt.iter().map(|p| Node::PatternIdx(*p)).collect();
+            walk_list(&nodes, t, comments, arena);
         }
         PatternDesc::Ppat_tuple(pats) | PatternDesc::Ppat_array(pats) => {
             let nodes: Vec<Node<'_>> = pats.iter().map(|p| Node::PatternIdx(*p)).collect();
@@ -3131,17 +3222,6 @@ fn walk_pattern(
         }
         PatternDesc::Ppat_extension(ext) => {
             walk_extension(ext, t, comments, arena);
-        }
-        PatternDesc::Ppat_open(lid, pat_idx) => {
-            let (leading, trailing) = partition_leading_trailing(comments, lid.loc, arena);
-            t.attach_leading(lid.loc, leading, arena);
-
-            let (after_lid, rest) = partition_adjacent_trailing(lid.loc, trailing, arena);
-            t.attach_trailing(lid.loc, after_lid, arena);
-
-            // Safety: arena is append-only, pattern won't be invalidated
-            let pat = arena.get_pat(*pat_idx).clone();
-            walk_pattern(&pat, t, rest, arena);
         }
     }
 }
@@ -3422,36 +3502,14 @@ fn walk_row_field(
     arena: &mut ParseArena,
 ) {
     match field {
-        RowField::Rtag(tag, _attrs, _flag, args) => {
-            let (leading, trailing) = partition_leading_trailing(comments, tag.loc, arena);
-            t.attach_leading(tag.loc, leading, arena);
-
-            if args.is_empty() {
-                t.attach_trailing(tag.loc, trailing, arena);
-            } else {
-                let (after_tag, rest) = partition_adjacent_trailing(tag.loc, trailing, arena);
-                t.attach_trailing(tag.loc, after_tag, arena);
-
-                visit_list_but_continue_with_remaining_comments(
-                    args,
-                    |arg, arena| arena.get_core_type(*arg).ptyp_loc,
-                    |arg, t, comments, arena| {
-                        // Safety: arena is append-only, core type won't be invalidated
-                        let ct = arena.get_core_type(*arg).clone();
-                        walk_core_type(&ct, t, comments, arena);
-                    },
-                    t,
-                    rest,
-                    false,
-                    arena,
-                );
-            }
+        // res_comments_table.ml `walk_row_field`: comments around a tag
+        // attach to the tag; its payload types are not walked.
+        RowField::Rtag(tag, _attrs, _flag, _args) => {
+            let (before, after) = partition_leading_trailing(comments, tag.loc, arena);
+            t.attach_leading(tag.loc, before, arena);
+            t.attach_trailing(tag.loc, after, arena);
         }
-        RowField::Rinherit(typ) => {
-            // Safety: arena is append-only, core type won't be invalidated
-            let typ = arena.get_core_type(*typ).clone();
-            walk_core_type(&typ, t, comments, arena);
-        }
+        RowField::Rinherit(_) => {}
     }
 }
 
@@ -3978,7 +4036,7 @@ fn visit_list_impl<'a, T>(
                 let (after_prev, rest) = if newline_delimited {
                     partition_by_on_same_line(loc, comments, arena)
                 } else {
-                    partition_adjacent_trailing(loc, comments, arena)
+                    partition_adjacent_trailing_through_question(loc, comments, arena)
                 };
                 t.attach_trailing(loc, after_prev, arena);
                 rest
@@ -4006,7 +4064,7 @@ fn visit_list_impl<'a, T>(
             // Check if on same line
             if prev_loc_resolved.loc_end.line == curr_loc_resolved.loc_start.line {
                 let (after_prev, before_curr) =
-                    partition_adjacent_trailing(*prev_loc_idx, leading, arena);
+                    partition_adjacent_trailing_through_question(*prev_loc_idx, leading, arena);
                 t.attach_trailing(*prev_loc_idx, after_prev, arena);
                 t.attach_leading(curr_loc, before_curr, arena);
             } else {

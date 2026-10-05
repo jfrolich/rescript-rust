@@ -61,7 +61,7 @@ pub(crate) fn hit_variables(store: &IndexedLambda, targets: &[Ident], node: Node
             | NodeView::While(a, b)
             | NodeView::ForOf(_, a, b)
             | NodeView::ForAwaitOf(_, a, b) => hit(store, targets, a) || hit(store, targets, b),
-            NodeView::GlobalModule(_, _)
+            NodeView::GlobalModule(_)
             | NodeView::Const(_)
             | NodeView::Break
             | NodeView::Continue => false,
@@ -75,7 +75,7 @@ pub(crate) fn no_side_effects(store: &IndexedLambda, node: NodeId) -> bool {
         NodeView::Var(_)
         | NodeView::Const(_)
         | NodeView::Function(_, _, _, _)
-        | NodeView::GlobalModule(_, _) => true,
+        | NodeView::GlobalModule(_) => true,
         NodeView::Prim(primitive, args, _) => {
             args.iter().all(|node| no_side_effects(store, *node))
                 && is_pure_primitive(
@@ -277,7 +277,7 @@ pub(crate) fn is_closed_with_map(
                 iter(store, a, Position::Sink, stats, local);
                 iter(store, b, Position::Sink, stats, local);
             }
-            NodeView::GlobalModule(_, _)
+            NodeView::GlobalModule(_)
             | NodeView::Const(_)
             | NodeView::Break
             | NodeView::Continue => {}

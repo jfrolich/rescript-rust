@@ -554,7 +554,7 @@ fn pass_free_variables(store: &IndexedLambda, root: NodeId) -> Vec<Ident> {
                 visit(store, body, free);
                 set_remove(free, id);
             }
-            NodeView::GlobalModule(_, _)
+            NodeView::GlobalModule(_)
             | NodeView::Const(_)
             | NodeView::Break
             | NodeView::Continue => {}
@@ -991,11 +991,11 @@ fn collect_required_modules(
     roots: impl IntoIterator<Item = NodeId>,
 ) -> AHashSet<ModuleId> {
     fn visit(store: &IndexedLambda, node: NodeId, modules: &mut AHashSet<ModuleId>) {
-        if let NodeView::GlobalModule(id, dynamic_import) = store.view(node) {
+        if let NodeView::GlobalModule(id) = store.view(node) {
             modules.insert(ModuleId {
                 id: id.clone(),
                 kind: Kind::Ml,
-                dynamic_import,
+                dynamic_import: false,
             });
             return;
         }
@@ -1067,7 +1067,7 @@ fn collect_required_modules(
             }
             NodeView::Assign(_, value) => visit(store, value, modules),
             NodeView::Var(_)
-            | NodeView::GlobalModule(_, _)
+            | NodeView::GlobalModule(_)
             | NodeView::Const(_)
             | NodeView::Break
             | NodeView::Continue => {}
@@ -1280,8 +1280,8 @@ mod tests {
         hoisted: &[HoistedFunction],
         generator: Arc<IdGenerator>,
     ) -> Result<IndexedPreJsBackend, IndexedPreJsError> {
-        let mut inline = |_: &Ident, _: bool, _: &str| None;
-        let mut arity = |_: &Ident, _: bool, _: &str| None;
+        let mut inline = |_: &Ident, _: &str| None;
+        let mut arity = |_: &Ident, _: &str| None;
         let exports = extract_export_idents(&lambda);
         optimize_for_pre_js_indexed(
             lambda,
@@ -1532,7 +1532,7 @@ mod tests {
         );
         context.collect_info();
         let generator = IdGenerator::with_start_stamp(100);
-        let mut arity = |_: &Ident, _: bool, _: &str| None;
+        let mut arity = |_: &Ident, _: &str| None;
         let (_, export_map) = coerce_and_group(&mut context, &generator, &mut arity).unwrap();
         assert_eq!(
             context
@@ -1583,8 +1583,8 @@ mod tests {
             vec![Lambda::const_(Constant::int(4))],
             Location::none(),
         );
-        let mut inline = |_: &Ident, _: bool, _: &str| None;
-        let mut arity = |_: &Ident, _: bool, _: &str| None;
+        let mut inline = |_: &Ident, _: &str| None;
+        let mut arity = |_: &Ident, _: &str| None;
         let result = optimize_for_pre_js_indexed(
             input,
             vec![export],
@@ -1682,14 +1682,14 @@ mod tests {
     }
 
     #[test]
-    fn required_modules_include_dynamic_and_metadata_only_roots() {
+    fn required_modules_include_global_and_metadata_only_roots() {
         let export = id("value", 1);
         let dead = id("deadModuleAlias", 2);
         let dep = id("Dep", 0);
         let input = Lambda::let_(
             LetKind::Alias,
             dead,
-            Lambda::global_module(dep.clone(), true),
+            Lambda::global_module(dep.clone()),
             module_export(vec![export], vec![Lambda::unit()]),
         );
         let extra = ModuleId {
@@ -1699,8 +1699,8 @@ mod tests {
         };
         let mut extras = AHashSet::new();
         extras.insert(extra.clone());
-        let mut inline = |_: &Ident, _: bool, _: &str| None;
-        let mut arity = |_: &Ident, _: bool, _: &str| None;
+        let mut inline = |_: &Ident, _: &str| None;
+        let mut arity = |_: &Ident, _: &str| None;
         let exports = extract_export_idents(&input);
         let result = optimize_for_pre_js_indexed(
             input,
@@ -1718,27 +1718,27 @@ mod tests {
             result
                 .possible_required_modules()
                 .iter()
-                .any(|module| module.id.same(&dep) && module.dynamic_import)
+                .any(|module| module.id.same(&dep) && !module.dynamic_import)
         );
         assert_eq!(
             result.storage_measurements(),
             crate::lambda::indexed::IndexedStorageMeasurements {
-                node_allocations: 26,
+                node_allocations: 21,
                 current_root_edge_visits: 0,
                 current_root_unique_nodes: 0,
                 metadata_unique_nodes: 0,
                 backend_unique_nodes: 1,
                 live_unique_nodes: 1,
-                superseded_nodes: 25,
-                hot_node_occupied_bytes: 208,
+                superseded_nodes: 20,
+                hot_node_occupied_bytes: 168,
                 hot_node_capacity_bytes: 256,
-                side_payload_shallow_occupied_bytes: 2252,
-                side_payload_shallow_capacity_bytes: 3072,
+                side_payload_shallow_occupied_bytes: 1760,
+                side_payload_shallow_capacity_bytes: 3040,
                 nested_heap_bytes_included: false,
                 current_live_side_payload_shallow_bytes: 0,
                 backend_retained_only_side_payload_shallow_bytes: 56,
                 metadata_retained_only_side_payload_shallow_bytes: 0,
-                superseded_unreachable_side_payload_shallow_bytes: 2196,
+                superseded_unreachable_side_payload_shallow_bytes: 1704,
             }
         );
     }
@@ -1765,7 +1765,7 @@ mod tests {
             ],
         );
         let mut result = run(input, &[], Arc::new(IdGenerator::with_start_stamp(20))).unwrap();
-        let mut resolver = |_: &Ident, _: bool, _: &str| None;
+        let mut resolver = |_: &Ident, _: &str| None;
         let disabled = result.collect_cmj_exports(false, &mut resolver);
         assert_eq!(
             disabled.constants.get("nullValue"),
@@ -1807,13 +1807,13 @@ mod tests {
                 ),
                 Lambda::const_(Constant::Constructor(crate::types::VariantTag {
                     name: "Done".into(),
-                    tag_type: None,
+                    literal: None,
                 })),
                 Lambda::const_(Constant::JsNull),
             ],
         );
         let mut result = run(input, &[], Arc::new(IdGenerator::with_start_stamp(20))).unwrap();
-        let mut resolver = |_: &Ident, _: bool, _: &str| None;
+        let mut resolver = |_: &Ident, _: &str| None;
         let disabled = result.collect_cmj_exports(false, &mut resolver);
         assert_eq!(
             disabled.arities.keys().cloned().collect::<AHashSet<_>>(),
@@ -1836,7 +1836,7 @@ mod tests {
         let field = |module: Ident, dynamic, name: &str| {
             Lambda::prim(
                 Primitive::Pfield(0, FieldDbgInfo::Module { name: name.into() }),
-                vec![Lambda::global_module(module, dynamic)],
+                vec![Lambda::global_module(module)],
                 Location::none(),
             )
         };
@@ -1860,7 +1860,7 @@ mod tests {
         let mut context = IndexedLambdaContext::from_lambda(input, vec![export]);
         context.collect_info();
         let generator = Arc::new(IdGenerator::with_start_stamp(10));
-        let mut ignored = |_: &Ident, _: bool, _: &str| None;
+        let mut ignored = |_: &Ident, _: &str| None;
         let (groups, export_map) =
             coerce_and_group(&mut context, &generator, &mut ignored).unwrap();
         let roots = groups
@@ -1883,8 +1883,8 @@ mod tests {
         };
         let mut trace = Vec::new();
         let values = {
-            let mut resolver = |module: &Ident, dynamic: bool, field: &str| {
-                trace.push((module.name().to_string(), dynamic, field.to_string()));
+            let mut resolver = |module: &Ident, field: &str| {
+                trace.push((module.name().to_string(), field.to_string()));
                 Some(
                     crate::lambda::lam_compile_context::ExternalArityInfo::Single(
                         crate::lambda::lam_arity::Arity::info(vec![1], false),
@@ -1899,14 +1899,14 @@ mod tests {
         assert_eq!(
             trace,
             vec![
-                ("First".into(), false, "a".into()),
-                ("Second".into(), true, "b".into())
+                ("First".into(), "a".into()),
+                ("Second".into(), "b".into())
             ]
         );
         trace.clear();
         {
-            let mut resolver = |module: &Ident, dynamic: bool, field: &str| {
-                trace.push((module.name().to_string(), dynamic, field.to_string()));
+            let mut resolver = |module: &Ident, field: &str| {
+                trace.push((module.name().to_string(), field.to_string()));
                 None
             };
             let _ = backend.collect_cmj_exports(false, &mut resolver);
@@ -2001,8 +2001,8 @@ mod tests {
         };
         let compile = |config: &WarningConfig, observer: &mut Observer| {
             let input = module_export(vec![id("value", 1)], vec![Lambda::unit()]);
-            let mut inline = |_: &Ident, _: bool, _: &str| None;
-            let mut arity = |_: &Ident, _: bool, _: &str| None;
+            let mut inline = |_: &Ident, _: &str| None;
+            let mut arity = |_: &Ident, _: &str| None;
             optimize_for_pre_js_indexed_with_diagnostics(
                 input,
                 vec![id("value", 1)],
@@ -2289,8 +2289,8 @@ mod tests {
             }
         }
         let input = module_export(vec![id("value", 1)], vec![Lambda::unit()]);
-        let mut inline = |_: &Ident, _: bool, _: &str| None;
-        let mut arity = |_: &Ident, _: bool, _: &str| None;
+        let mut inline = |_: &Ident, _: &str| None;
+        let mut arity = |_: &Ident, _: &str| None;
         let mut observer = Observer::default();
         optimize_for_pre_js_indexed_with_diagnostics(
             input,
@@ -2389,22 +2389,22 @@ mod tests {
         assert_eq!(
             result.storage_measurements(),
             crate::lambda::indexed::IndexedStorageMeasurements {
-                node_allocations: 14,
+                node_allocations: 11,
                 current_root_edge_visits: 0,
                 current_root_unique_nodes: 0,
                 metadata_unique_nodes: 0,
                 backend_unique_nodes: 0,
                 live_unique_nodes: 0,
-                superseded_nodes: 14,
-                hot_node_occupied_bytes: 112,
+                superseded_nodes: 11,
+                hot_node_occupied_bytes: 88,
                 hot_node_capacity_bytes: 128,
-                side_payload_shallow_occupied_bytes: 1836,
+                side_payload_shallow_occupied_bytes: 1416,
                 side_payload_shallow_capacity_bytes: 2304,
                 nested_heap_bytes_included: false,
                 current_live_side_payload_shallow_bytes: 0,
                 backend_retained_only_side_payload_shallow_bytes: 0,
                 metadata_retained_only_side_payload_shallow_bytes: 0,
-                superseded_unreachable_side_payload_shallow_bytes: 1836,
+                superseded_unreachable_side_payload_shallow_bytes: 1416,
             }
         );
     }

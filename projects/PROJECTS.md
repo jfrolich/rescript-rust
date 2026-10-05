@@ -4,6 +4,14 @@ This directory organizes all planning, progress, and design documents by project
 
 ## Active Projects
 
+### [editor-tooling-rust](./editor-tooling-rust/)
+
+Port the editor tooling (analysis, reanalyze, rescript-tools) to Rust and run it inside `rescript watch` on the Rust typed tree, with no `.cmt`/`.cmi` files.
+
+| Document | Description |
+|----------|-------------|
+| [PLAN.md](./editor-tooling-rust/PLAN.md) | Architecture, design rules, status per command |
+
 ### [compiler-rewrite](./compiler-rewrite/)
 
 OCaml-to-Rust rewrite of the full ReScript compiler (~135K lines across 653 files). Phased migration with FFI boundaries, covering parser, type checker, Lambda/JS IR, and frontend integration. Currently in Phase 2 (Parser) and Phase 3 (Lambda IR).

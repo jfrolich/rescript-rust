@@ -11,10 +11,11 @@ use crate::parser::longident::Longident;
 // Expression Analysis
 // ============================================================================
 
-/// Check if an expression is a "block" expression (let, sequence, etc.)
-pub fn is_block_expr(expr: &Expression) -> bool {
+/// Check if an expression is a "block" expression (let, sequence, etc.),
+/// looking through explicit braces (res_parsetree_viewer.ml `is_block_expr`).
+pub fn is_block_expr(arena: &ParseArena, expr: &Expression) -> bool {
     matches!(
-        &*expr.pexp_desc,
+        &*unwrap_braces(arena, expr).pexp_desc,
         ExpressionDesc::Pexp_letmodule(_)
             | ExpressionDesc::Pexp_letexception(_)
             | ExpressionDesc::Pexp_let(_)
@@ -23,50 +24,42 @@ pub fn is_block_expr(expr: &Expression) -> bool {
     )
 }
 
-/// Check if an expression has braces attribute.
-pub fn is_braced_expr(arena: &ParseArena, expr: &Expression) -> bool {
-    process_braces_attr(arena, expr).is_some()
+/// Check if an expression is an explicit braces node.
+pub fn is_braced_expr(expr: &Expression) -> bool {
+    matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_braces(_))
 }
 
-/// Check if expression has the "res.braces" attribute and return it.
-pub fn process_braces_attr<'a>(arena: &ParseArena, expr: &'a Expression) -> Option<&'a Attribute> {
-    expr.pexp_attributes
-        .iter()
-        .find(|attr| arena.get_string(attr.0.txt) == "res.braces")
+/// res_parsetree_viewer.ml `process_braces`: the braces location and the
+/// enclosed expression of an explicit braces node.
+pub fn process_braces<'a>(arena: &'a ParseArena, expr: &'a Expression) -> (Option<LocIdx>, &'a Expression) {
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_braces(braces) => (Some(braces.braces_loc), arena.get_expr(braces.expr)),
+        _ => (None, expr),
+    }
 }
 
-/// Check if an expression is a template literal.
-pub fn is_template_literal(arena: &ParseArena, expr: &Expression) -> bool {
-    has_template_literal_attr(arena, &expr.pexp_attributes)
+/// res_parsetree_viewer.ml `unwrap_braces`.
+pub fn unwrap_braces<'a>(arena: &'a ParseArena, expr: &'a Expression) -> &'a Expression {
+    let mut expr = expr;
+    while let ExpressionDesc::Pexp_braces(braces) = &*expr.pexp_desc {
+        expr = arena.get_expr(braces.expr);
+    }
+    expr
 }
 
-/// Check if attributes contain template literal marker.
-pub fn has_template_literal_attr(arena: &ParseArena, attrs: &[Attribute]) -> bool {
-    attrs
-        .iter()
-        .any(|attr| arena.get_string(attr.0.txt) == "res.template")
+/// OCaml `is_template_literal`.
+pub fn is_template_literal(expr: &Expression) -> bool {
+    matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_template(_))
 }
 
-/// Check if an expression has the ternary attribute.
-pub fn has_ternary_attribute(arena: &ParseArena, attrs: &Attributes) -> bool {
-    attrs
-        .iter()
-        .any(|attr| arena.get_string(attr.0.txt) == "res.ternary")
-}
-
-/// Check if an expression has the tagged template attribute.
-pub fn has_tagged_template_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
-    attrs
-        .iter()
-        .any(|attr| arena.get_string(attr.0.txt) == "res.taggedTemplate")
+/// OCaml `is_tagged_template_literal`.
+pub fn is_tagged_template_literal(expr: &Expression) -> bool {
+    matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_tagged_template(_))
 }
 
 /// Check if an expression is a ternary expression.
-/// This checks for the res.ternary attribute which is added by the parser
-/// for expressions like `cond ? a : b` (as opposed to `if cond { a } else { b }`).
-pub fn is_ternary_expr(arena: &ParseArena, expr: &Expression) -> bool {
-    // Check for res.ternary attribute - this distinguishes ternary from if-then-else
-    has_ternary_attribute(arena, &expr.pexp_attributes)
+pub fn is_ternary_expr(expr: &Expression) -> bool {
+    matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_ternary(_))
 }
 
 /// Collect the parts of a ternary expression chain.
@@ -80,34 +73,16 @@ pub fn collect_ternary_parts<'a>(
 
     loop {
         match &*current.pexp_desc {
-            ExpressionDesc::Pexp_ifthenelse(inner)
-                if has_ternary_attribute(arena, &current.pexp_attributes) =>
-            {
-                let (ref condition, ref consequent, ref opt_alternate) = **inner;
-                let condition_expr: &Expression = arena.get_expr(*condition);
-                let consequent_expr: &Expression = arena.get_expr(*consequent);
-                parts.push((condition_expr, consequent_expr));
-                match opt_alternate {
-                    Some(alternate) => current = arena.get_expr(*alternate),
-                    None => break,
-                }
+            ExpressionDesc::Pexp_ternary(inner) => {
+                let (condition, consequent, alternate) = **inner;
+                parts.push((arena.get_expr(condition), arena.get_expr(consequent)));
+                current = arena.get_expr(alternate);
             }
             _ => break,
         }
     }
 
     (parts, current)
-}
-
-/// Filter out ternary attributes from a list of attributes.
-pub fn filter_ternary_attributes<'a>(
-    arena: &ParseArena,
-    attrs: &'a Attributes,
-) -> Vec<&'a Attribute> {
-    attrs
-        .iter()
-        .filter(|attr| arena.get_string(attr.0.txt) != "res.ternary")
-        .collect()
 }
 
 /// Check if an expression is a if-then-else (any form).
@@ -212,8 +187,8 @@ pub fn collect_if_expressions<'a>(
 }
 
 /// Check if an expression is a simple "single expression" (not a block).
-pub fn is_single_expression(expr: &Expression) -> bool {
-    !is_block_expr(expr)
+pub fn is_single_expression(arena: &ParseArena, expr: &Expression) -> bool {
+    !is_block_expr(arena, expr)
 }
 
 /// Check if expression is a binary expression.
@@ -365,10 +340,11 @@ pub fn is_underscore_apply_sugar(arena: &ParseArena, expr: &Expression) -> bool 
     }
 }
 
-/// Check if expression is a function or newtype.
-pub fn is_fun_newtype(expr: &Expression) -> bool {
+/// Check if expression is a function or newtype, looking through explicit
+/// braces (res_parsetree_viewer.ml `is_fun_expr`).
+pub fn is_fun_newtype(arena: &ParseArena, expr: &Expression) -> bool {
     matches!(
-        &*expr.pexp_desc,
+        &*unwrap_braces(arena, expr).pexp_desc,
         ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_)
     )
 }
@@ -408,7 +384,7 @@ pub fn requires_special_callback_printing_last_arg(
         if is_underscore_apply_sugar(arena, expr) {
             continue;
         }
-        if is_fun_newtype(expr) {
+        if is_fun_newtype(arena, expr) {
             // If this is the last element, return true
             // Otherwise (function in non-last position), return false
             return iter.peek().is_none();
@@ -430,7 +406,7 @@ pub fn requires_special_callback_printing_first_arg(
     // Helper: is it a real callback (not underscore apply sugar)
     let is_real_callback = |expr_idx: &ExprIdx| -> bool {
         let expr = arena.get_expr(*expr_idx);
-        is_fun_newtype(expr) && !is_underscore_apply_sugar(arena, expr)
+        is_fun_newtype(arena, expr) && !is_underscore_apply_sugar(arena, expr)
     };
     match args {
         // Single argument callback - use normal printing (a partial
@@ -451,22 +427,20 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         ExpressionDesc::Pexp_array(_)
         | ExpressionDesc::Pexp_tuple(_)
         | ExpressionDesc::Pexp_record(_) => true,
-        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(_, Some(_))) => true,
+        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::Json(_) | Constant::Char { .. }) => true,
+        ExpressionDesc::Pexp_template(template) if template.values.is_empty() => true,
         ExpressionDesc::Pexp_construct(lid, _)
             if arena.is_lident(lid.txt, "::") || arena.is_lident(lid.txt, "[]") =>
         {
             true
         }
-        ExpressionDesc::Pexp_extension(ext) if arena.get_string(ext.0.txt) == "obj" => true,
-        _ if is_block_expr(expr) => true,
-        _ if is_braced_expr(arena, expr) => true,
-        ExpressionDesc::Pexp_constant(c) => {
-            if let Constant::String(txt, None) = &**c {
-                is_multiline_text(txt)
-            } else {
-                false
-            }
-        }
+        ExpressionDesc::Pexp_object_literal(_) | ExpressionDesc::Pexp_braces(_) => true,
+        _ if is_block_expr(arena, expr) => true,
+        ExpressionDesc::Pexp_constant(c) => match &**c {
+            Constant::String(payload) => is_multiline_text(payload.source()),
+            Constant::RawSource(source) => is_multiline_text(source),
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -497,8 +471,7 @@ pub fn is_huggable_rhs(arena: &ParseArena, expr: &Expression) -> bool {
         ExpressionDesc::Pexp_array(_)
         | ExpressionDesc::Pexp_tuple(_)
         | ExpressionDesc::Pexp_record(_) => true,
-        ExpressionDesc::Pexp_extension(ext) if arena.get_string(ext.0.txt) == "obj" => true,
-        _ if is_braced_expr(arena, expr) => true,
+        ExpressionDesc::Pexp_object_literal(_) | ExpressionDesc::Pexp_braces(_) => true,
         _ => false,
     }
 }
@@ -603,9 +576,9 @@ pub fn is_unary_operator(arena: &crate::parse_arena::ParseArena, lid: &Longident
 /// - Pexp_for, Pexp_while, Pexp_try: inline
 /// - Pexp_array, Pexp_record: inline
 /// Note: Pexp_match (switch) is NOT in this list, so it will NOT inline
-pub fn should_inline_rhs_binary_expr(expr: &Expression) -> bool {
+pub fn should_inline_rhs_binary_expr(arena: &ParseArena, expr: &Expression) -> bool {
     matches!(
-        &*expr.pexp_desc,
+        &*unwrap_braces(arena, expr).pexp_desc,
         ExpressionDesc::Pexp_constant(_)
             | ExpressionDesc::Pexp_let(_)
             | ExpressionDesc::Pexp_letmodule(_)
@@ -613,6 +586,7 @@ pub fn should_inline_rhs_binary_expr(expr: &Expression) -> bool {
             | ExpressionDesc::Pexp_sequence(_, _)
             | ExpressionDesc::Pexp_open(_)
             | ExpressionDesc::Pexp_ifthenelse(_)
+            | ExpressionDesc::Pexp_ternary(_)
             | ExpressionDesc::Pexp_for(_)
             | ExpressionDesc::Pexp_for_of(_)
             | ExpressionDesc::Pexp_for_await_of(_)
@@ -768,25 +742,28 @@ pub fn collect_list_expressions<'a>(
 
     loop {
         match &*current.pexp_desc {
-            ExpressionDesc::Pexp_construct(lid, None) if arena.is_lident(lid.txt, "[]") => {
+            // res_parsetree_viewer.ml `collect_list_expressions`: `::` takes
+            // its head and tail as two arguments, or as one 2-tuple.
+            ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "[]") => {
                 return (acc, None);
             }
-            ExpressionDesc::Pexp_construct(lid, Some(arg_idx))
-                if arena.is_lident(lid.txt, "::") =>
-            {
-                // The argument should be a tuple of (head, tail)
-                let arg: &Expression = arena.get_expr(*arg_idx);
-                if let ExpressionDesc::Pexp_tuple(exprs) = &*arg.pexp_desc {
-                    if exprs.len() == 2 {
-                        let head: &Expression = arena.get_expr(exprs[0]);
-                        let tail: &Expression = arena.get_expr(exprs[1]);
-                        acc.push(head);
-                        current = tail;
+            ExpressionDesc::Pexp_construct(lid, args) if arena.is_lident(lid.txt, "::") => {
+                let pair = match args.txt.as_slice() {
+                    [head, tail] => Some((*head, *tail)),
+                    [arg] => match &*arena.get_expr(*arg).pexp_desc {
+                        ExpressionDesc::Pexp_tuple(exprs) if exprs.len() == 2 => Some((exprs[0], exprs[1])),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                match pair {
+                    Some((head, tail)) => {
+                        acc.push(arena.get_expr(head));
+                        current = arena.get_expr(tail);
                         continue;
                     }
+                    None => return (acc, Some(current)),
                 }
-                // Malformed list, return what we have with spread
-                return (acc, Some(current));
             }
             _ => {
                 // Not a list constructor, this is a spread
@@ -805,15 +782,21 @@ pub fn collect_list_patterns<'a>(
     let mut acc = Vec::new();
     let mut current = pat;
     loop {
-        if let PatternDesc::Ppat_construct(lid, Some(arg_idx)) = &*current.ppat_desc {
-            if arena.is_lident(lid.txt, "::") {
-                if let PatternDesc::Ppat_tuple(pats) = &*arena.get_pat(*arg_idx).ppat_desc {
-                    if let [head, rest] = pats.as_slice() {
-                        acc.push(arena.get_pat(*head));
-                        current = arena.get_pat(*rest);
-                        continue;
-                    }
-                }
+        if let PatternDesc::Ppat_construct(lid, args) = &*current.ppat_desc
+            && arena.is_lident(lid.txt, "::")
+        {
+            let pair = match args.txt.as_slice() {
+                [head, rest] => Some((*head, *rest)),
+                [arg] => match &*arena.get_pat(*arg).ppat_desc {
+                    PatternDesc::Ppat_tuple(pats) if pats.len() == 2 => Some((pats[0], pats[1])),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some((head, rest)) = pair {
+                acc.push(arena.get_pat(head));
+                current = arena.get_pat(rest);
+                continue;
             }
         }
         return (acc, current);
@@ -1033,7 +1016,7 @@ pub fn filter_fragile_match_attributes<'a>(
             !matches!(
                 &*arena.get_expr(inner.0).pexp_desc,
                 ExpressionDesc::Pexp_constant(constant)
-                    if matches!(&**constant, Constant::String(s, _) if s.as_ref() == "-4")
+                    if matches!(&**constant, Constant::String(s) if s.semantic() == "-4")
             )
         })
         .collect()
@@ -1091,17 +1074,12 @@ pub fn filter_parsing_attrs_slice<'a>(
         .filter(|attr| {
             !matches!(
                 arena.get_string(attr.0.txt),
-                "res.braces"
-                    | "ns.braces"
-                    | "res.iflet"
+                "res.iflet"
                     | "res.ternary"
                     | "res.await"
-                    | "res.template"
-                    | "res.taggedTemplate"
                     | "res.patVariantSpread"
                     | "res.dictPattern"
                     | "res.dictSpread"
-                    | "res.inlineRecordDefinition"
             )
         })
         .collect()
@@ -1111,15 +1089,7 @@ pub fn filter_parsing_attrs_slice<'a>(
 pub fn is_printable_attribute(arena: &ParseArena, attr: &Attribute) -> bool {
     !matches!(
         arena.get_string(attr.0.txt),
-        "res.iflet"
-            | "res.braces"
-            | "ns.braces"
-            | "res.await"
-            | "res.template"
-            | "res.taggedTemplate"
-            | "res.ternary"
-            | "res.inlineRecordDefinition"
-            | "res.dictPattern"
+        "res.iflet" | "res.await" | "res.ternary" | "res.dictPattern"
     )
 }
 
@@ -1161,16 +1131,7 @@ pub fn partition_printable_attributes<'a>(
 pub fn has_attributes(arena: &ParseArena, attrs: &Attributes) -> bool {
     attrs.iter().any(|attr| {
         let name = arena.get_string(attr.0.txt);
-        if matches!(
-            name,
-            "res.braces"
-                | "ns.braces"
-                | "res.iflet"
-                | "res.ternary"
-                | "res.await"
-                | "res.template"
-                | "res.inlineRecordDefinition"
-        ) {
+        if matches!(name, "res.iflet" | "res.ternary" | "res.await") {
             return false;
         }
         // res_parsetree_viewer.ml:395-405: the fragile-match warning of an
@@ -1196,15 +1157,8 @@ fn is_fragile_match_warning_payload(arena: &ParseArena, payload: &Payload) -> bo
     matches!(
         &*arena.get_expr(inner.0).pexp_desc,
         ExpressionDesc::Pexp_constant(constant)
-            if matches!(&**constant, Constant::String(s, None) if s.as_ref() == "-4")
+            if matches!(&**constant, Constant::String(s) if s.semantic() == "-4")
     )
-}
-
-/// Check if an attribute is the inline record definition marker.
-pub fn has_inline_record_definition_attribute(arena: &ParseArena, attrs: &Attributes) -> bool {
-    attrs
-        .iter()
-        .any(|attr| arena.get_string(attr.0.txt) == "res.inlineRecordDefinition")
 }
 
 // ============================================================================
@@ -1293,9 +1247,6 @@ pub fn should_indent_binary_expr(
                     if is_binary_operator_str(op) {
                         // Check the three conditions
                         if is_equality_operator(op) {
-                            return true;
-                        }
-                        if op == ":=" {
                             return true;
                         }
                         // Check if LHS is NOT a same-precedence sub-expression

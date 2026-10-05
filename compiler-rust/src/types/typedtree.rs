@@ -147,8 +147,9 @@ pub enum Constant {
     Int(i64),
     /// Character constant (Unicode codepoint).
     Char(i32),
-    /// String constant with optional delimiter.
-    String(String, Option<String>),
+    /// The decoded runtime value of an ordinary string literal; source
+    /// spelling has been discarded after type checking.
+    String(String),
     /// Float constant (as string to preserve precision).
     Float(String),
     /// BigInt constant (sign, digits).
@@ -196,8 +197,6 @@ pub enum PatExtra {
     Tpat_constraint(TypedCoreType),
     /// Type pattern: `#tconst`.
     Tpat_type(Path, Loc<LidentIdx>),
-    /// Open pattern: `M.(P)`.
-    Tpat_open(Path, Loc<LidentIdx>, EnvRef),
     /// Unpack pattern: `(module P)`.
     Tpat_unpack,
 }
@@ -286,8 +285,15 @@ pub struct Expression {
 pub enum ExpExtra {
     /// Type constraint: `E : T`.
     Texp_constraint(TypedCoreType),
-    /// Coercion: `(E :> T)`.
-    Texp_coerce(TypedCoreType),
+    /// Coercion: `(E :> T)`. `target` is T as written; `source_type` is the
+    /// inferred type of E and `target_type` the type of T, both
+    /// head-expanded so a consumer without a typing environment can still
+    /// relate them.
+    Texp_coerce {
+        source_type: TypeExprRef,
+        target: TypedCoreType,
+        target_type: TypeExprRef,
+    },
     /// Open: `let open M in E`.
     Texp_open(OverrideFlag, Path, Loc<LidentIdx>, EnvRef),
     /// Newtype: `fun (type t) -> E`.
@@ -432,8 +438,31 @@ pub enum ExpressionDesc {
         Box<Expression>,
     ),
 
-    /// Send: `E#m` (object method call).
-    Texp_send(Box<Expression>, MethKind, Option<Box<Expression>>),
+    /// A typed JavaScript tagged template: the typed `tag`, the exact raw
+    /// segment sources (which may contain invalid escapes), and the typed
+    /// interpolated values. There is always one more raw source than value.
+    Texp_tagged_template {
+        tag: Box<Expression>,
+        raw_sources: Vec<String>,
+        values: Vec<Expression>,
+    },
+
+    /// A typed ordinary backquoted template: validated segments carrying
+    /// source and semantic forms, and the typed interpolated values. There is
+    /// always one more segment than value.
+    Texp_template {
+        segments: Vec<crate::string_literal::TemplateSegment>,
+        values: Vec<Expression>,
+    },
+
+    /// Object property read: `E["name"]`.
+    Texp_object_get(Box<Expression>, Loc<String>),
+
+    /// Object property write: `E["name"] = V`.
+    Texp_object_set(Box<Expression>, Loc<String>, Box<Expression>),
+
+    /// Object literal: `{"a": E, ...}`, fields in source order.
+    Texp_object_literal(Vec<(Loc<String>, Expression)>),
 
     /// Let module: `let module M = ME in E`.
     Texp_letmodule(Ident, Loc<String>, Box<ModuleExpr>, Box<Expression>),
@@ -452,15 +481,6 @@ pub enum ExpressionDesc {
 }
 
 // DirectionFlag and Arity are re-exported from parser::ast
-
-/// Method kind for object method calls.
-#[derive(Debug, Clone)]
-pub enum MethKind {
-    /// Direct method with known type.
-    Tmeth_name(String),
-    /// Virtual method (looked up at runtime).
-    Tmeth_val(Ident),
-}
 
 /// Record label definition in a record expression.
 #[derive(Debug, Clone)]
@@ -506,6 +526,10 @@ pub struct FunctionParam {
     pub fp_pat: Pattern,
     /// Whether the parameter pattern is exhaustive.
     pub fp_partial: Partial,
+    /// Optional parameter with a default value: `fp_pat` binds the option
+    /// carrier directly to `fp_param`, a fresh ident named after the label,
+    /// and the user's pattern is bound by a let at the head of the body.
+    pub fp_has_default: bool,
 }
 
 // ============================================================================
@@ -926,6 +950,8 @@ pub struct TypedConstructorDeclaration {
     pub cd_id: Ident,
     /// Constructor name with location.
     pub cd_name: Loc<String>,
+    /// The decoded `@as` tag (OCaml `cd_runtime_tag`).
+    pub cd_runtime_tag: Option<super::variant_runtime::LiteralTag>,
     /// Constructor arguments.
     pub cd_args: TypedConstructorArguments,
     /// Result type (for GADTs).
@@ -952,6 +978,8 @@ pub struct TypedLabelDeclaration {
     pub ld_id: Ident,
     /// Label name with location.
     pub ld_name: Loc<String>,
+    /// The `@as` rename (OCaml `ld_runtime_name`).
+    pub ld_runtime_name: Option<String>,
     /// Whether the label is mutable.
     pub ld_mutable: MutableFlag,
     /// Whether the label is optional.
@@ -962,6 +990,12 @@ pub struct TypedLabelDeclaration {
     pub ld_loc: LocIdx,
     /// Attributes.
     pub ld_attributes: Attributes,
+    /// For a label built from a `Types.label_declaration` (record spreads,
+    /// `Record_type_spread.mk_lbl` in compiler/ml/record_type_spread.ml:110-121),
+    /// OCaml reuses `l.ld_attributes` verbatim. That declaration may belong to
+    /// another compilation unit, so its payloads are kept in portable form here
+    /// and writers emit them instead of `ld_attributes`.
+    pub ld_types_attributes: Option<Box<[crate::types::decl::Attribute]>>,
 }
 
 /// A type extension.
@@ -1049,7 +1083,7 @@ pub struct TypedValueDescription {
     /// Typed core type (the annotated type).
     pub val_desc: TypedCoreType,
     /// Primitive names.
-    pub val_prim: Vec<String>,
+    pub val_prim: Option<crate::parser::ast::PrimitiveRepr>,
     /// `val_val.val_kind` (compiler/ml/typedtree.mli `value_description`):
     /// the kind `Typedecl.transl_value_decl` computed (typedecl.ml:1878-1915),
     /// including a primitive's arity from `parse_arity`.
@@ -1109,6 +1143,8 @@ pub struct LabelDeclaration {
     pub ld_id: Ident,
     /// Label name with location.
     pub ld_name: Loc<String>,
+    /// The `@as` rename (OCaml `ld_runtime_name`).
+    pub ld_runtime_name: Option<String>,
     /// Whether the label is mutable.
     pub ld_mutable: MutableFlag,
     /// Whether the label is optional.
@@ -1235,8 +1271,8 @@ mod tests {
         let c = Constant::Int(42);
         assert_eq!(c, Constant::Int(42));
 
-        let s = Constant::String("hello".to_string(), None);
-        assert!(matches!(s, Constant::String(_, None)));
+        let s = Constant::String("hello".to_string());
+        assert!(matches!(s, Constant::String(_)));
     }
 
     #[test]

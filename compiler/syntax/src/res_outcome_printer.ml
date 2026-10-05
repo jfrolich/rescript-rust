@@ -142,7 +142,6 @@ let rec print_out_type_doc (out_type : Outcometree.out_type) =
   | Otyp_var (ng, s) ->
     Doc.concat [Doc.text ("'" ^ if ng then "_" else ""); Doc.text s]
   | Otyp_object (fields, rest) -> print_object_fields fields rest
-  | Otyp_class _ -> Doc.nil
   | Otyp_attribute (typ, attribute) ->
     Doc.group
       (Doc.concat
@@ -357,10 +356,11 @@ and print_object_fields fields rest =
                 Doc.join
                   ~sep:(Doc.concat [Doc.comma; Doc.line])
                   (List.map
-                     (fun (lbl, out_type) ->
+                     (fun (lbl, mut, out_type) ->
                        Doc.group
                          (Doc.concat
                             [
+                              (if mut then Doc.text "@set " else Doc.nil);
                               Doc.text ("\"" ^ lbl ^ "\": ");
                               print_out_type_doc out_type;
                             ]))
@@ -478,46 +478,174 @@ let print_type_parameter_doc (typ, (co, cn)) =
       (if typ = "_" then Doc.text "_" else Doc.text ("'" ^ typ));
     ]
 
+(* Print a digested FFI declaration as the surface attributes the user
+   wrote; the stored form is the declaration itself. *)
+let print_string_literal_doc s = Doc.text ("\"" ^ String.escaped s ^ "\"")
+
+let print_inline_const_doc (c : External_ffi_types.inline_const) =
+  match c with
+  | Const_string s -> print_string_literal_doc s
+  | Const_bool b -> Doc.text (if b then "true" else "false")
+  | Const_int i -> Doc.text (Int32.to_string i)
+  | Const_bigint {negative; digits} ->
+    Doc.text ((if negative then "-" else "") ^ digits ^ "n")
+  | Const_float f -> Doc.text f
+
+let print_external_module_doc (emn : External_ffi_types.external_module_name) =
+  let payload =
+    match (emn.module_bind_name, emn.import_attributes) with
+    | Phint_nothing, None -> print_string_literal_doc emn.bundle
+    | Phint_name hint, None ->
+      Doc.concat
+        [
+          Doc.text "(";
+          print_string_literal_doc emn.bundle;
+          Doc.text ", ";
+          print_string_literal_doc hint;
+          Doc.text ")";
+        ]
+    | bind_name, Some import_attributes ->
+      (* @module({from: "x", with: {k: "v"}}) record payload *)
+      let with_fields =
+        import_attributes
+        |> List.map (fun (k, v) ->
+            (* digestion stores the source key [type_] as [type]; other
+                  keys are stored as written, including exotic ones from
+                  escaped idents (\"some-identifier"), which must print
+                  escaped again to be writable source *)
+            let key =
+              if k = "type" then Doc.text "type_"
+              else Res_printer.print_ident_like k
+            in
+            Doc.concat [key; Doc.text ": "; print_string_literal_doc v])
+      in
+      Doc.concat
+        [
+          Doc.text "{from: ";
+          print_string_literal_doc emn.bundle;
+          (match bind_name with
+          | Phint_nothing -> Doc.nil
+          | Phint_name hint ->
+            Doc.concat [Doc.text ", as: "; print_string_literal_doc hint]);
+          Doc.text ", with: {";
+          Doc.join ~sep:(Doc.text ", ") with_fields;
+          Doc.text "}}";
+        ]
+  in
+  Doc.concat [Doc.text "@module("; payload; Doc.text ") "]
+
+let print_scopes_doc (scopes : string list) =
+  match scopes with
+  | [] -> Doc.nil
+  | [s] ->
+    Doc.concat [Doc.text "@scope("; print_string_literal_doc s; Doc.text ") "]
+  | _ ->
+    Doc.concat
+      [
+        Doc.text "@scope((";
+        Doc.join ~sep:(Doc.text ", ") (List.map print_string_literal_doc scopes);
+        Doc.text ")) ";
+      ]
+
+let print_variadic_doc splice =
+  if splice then Doc.text "@variadic " else Doc.nil
+
+let print_return_wrapper_doc (w : External_ffi_types.return_wrapper) =
+  match w with
+  | Return_unset -> Doc.nil
+  | Return_identity -> Doc.text "@return(identity) "
+  | Return_null_to_opt -> Doc.text "@return(null_to_opt) "
+  | Return_null_undefined_to_opt -> Doc.text "@return(nullable) "
+
+let print_decl_kind_doc (kind : External_ffi_types.decl_kind)
+    (module_ : External_ffi_types.module_source option) ~prim_name =
+  (* the attribute payload names the JS entity when it differs from the
+     external's primitive string; print it back, or two declarations
+     differing only in payload would display identically *)
+  let with_payload attr name =
+    if name = prim_name then Doc.text ("@" ^ attr ^ " ")
+    else
+      Doc.concat
+        [
+          Doc.text ("@" ^ attr ^ "(");
+          print_string_literal_doc name;
+          Doc.text ") ";
+        ]
+  in
+  match kind with
+  | Decl_val {name} -> (
+    (* [@val] conflicts with bare [@module]; elsewhere it is the default and
+       always legal to write *)
+    match module_ with
+    | Some Module_itself -> Doc.nil
+    | _ -> with_payload "val" name)
+  | Decl_send {name} -> with_payload "send" name
+  | Decl_new {name} -> with_payload "new" name
+  | Decl_get {name} -> with_payload "get" name
+  | Decl_set {name} -> with_payload "set" name
+  | Decl_get_index -> Doc.text "@get_index "
+  | Decl_set_index -> Doc.text "@set_index "
+
+let print_module_source_doc (module_ : External_ffi_types.module_source option)
+    =
+  match module_ with
+  | None -> Doc.nil
+  | Some Module_itself -> Doc.text "@module "
+  | Some (Module_named emn) -> print_external_module_doc emn
+
+let print_external_decl_attrs_doc (decl : External_ffi_types.external_decl)
+    (return_wrapper : External_ffi_types.return_wrapper) ~prim_name =
+  Doc.concat
+    [
+      print_decl_kind_doc decl.kind decl.module_ ~prim_name;
+      print_module_source_doc decl.module_;
+      print_scopes_doc decl.scopes;
+      print_variadic_doc decl.variadic;
+      print_return_wrapper_doc return_wrapper;
+    ]
+
 let rec print_out_sig_item_doc ?(print_name_as_is = false)
     (out_sig_item : Outcometree.out_sig_item) =
   match out_sig_item with
-  | Osig_class _ | Osig_class_type _ -> Doc.nil
   | Osig_ellipsis -> Doc.dotdotdot
   | Osig_value value_decl ->
+    let ffi_attrs, keyword, prim_name =
+      match value_decl.oval_prim with
+      | None -> (Doc.nil, "let ", None)
+      | Some (Prim_name s) -> (Doc.nil, "external ", Some s)
+      | Some (Prim_inline_const c) ->
+        (* surface syntax: [@inline("hello") let f: string] *)
+        ( Doc.concat
+            [Doc.text "@inline("; print_inline_const_doc c; Doc.text ") "],
+          "let ",
+          None )
+      | Some (Prim_ffi {name; spec}) -> (
+        match spec with
+        | Ffi_obj_create _ -> (Doc.text "@obj ", "external ", Some name)
+        | Ffi_bs (_params, return_wrapper, decl) ->
+          ( print_external_decl_attrs_doc decl return_wrapper ~prim_name:name,
+            "external ",
+            Some name ))
+    in
     Doc.group
       (Doc.concat
          [
            print_out_attributes_doc value_decl.oval_attributes;
-           Doc.text
-             (match value_decl.oval_prims with
-             | [] -> "let "
-             | _ -> "external ");
+           ffi_attrs;
+           Doc.text keyword;
            Doc.text value_decl.oval_name;
            Doc.text ":";
            Doc.space;
            print_out_type_doc value_decl.oval_type;
-           (match value_decl.oval_prims with
-           | [] -> Doc.nil
-           | primitives ->
+           (match prim_name with
+           | None -> Doc.nil
+           | Some prim ->
              Doc.indent
                (Doc.concat
                   [
                     Doc.text " =";
                     Doc.line;
-                    Doc.group
-                      (Doc.join ~sep:Doc.line
-                         (List.map
-                            (fun prim ->
-                              let prim =
-                                if
-                                  prim <> ""
-                                  && (prim.[0] [@doesNotRaise]) = '\132'
-                                then "#rescript-external"
-                                else prim
-                              in
-                              (* not display those garbage '\132' is a magic number for marshal *)
-                              Doc.text ("\"" ^ prim ^ "\""))
-                            primitives));
+                    Doc.group (Doc.text ("\"" ^ prim ^ "\""));
                   ]));
          ])
   | Osig_typext (out_extension_constructor, _outExtStatus) ->

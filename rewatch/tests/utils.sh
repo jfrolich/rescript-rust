@@ -1,5 +1,4 @@
 #!/bin/bash
-overwrite() { echo -e "\r\033[1A\033[0K$@"; }
 success() { echo -e "- ✅ \033[32m$1\033[0m"; }
 error() { echo -e "- 🛑 \033[31m$1\033[0m"; }
 bold() { echo -e "\033[1m$1\033[0m"; }
@@ -9,6 +8,25 @@ rewatch_bg() { RUST_BACKTRACE=1 nohup $REWATCH_EXECUTABLE $@; }
 # Detect if running on Windows
 is_windows() {
   [[ $OSTYPE == 'msys'* || $OSTYPE == 'cygwin'* || $OSTYPE == 'win'* ]];
+}
+
+platform_timeout() {
+  local timeout="$1"
+  if is_windows; then
+    echo $((timeout * 4))
+  else
+    echo "$timeout"
+  fi
+}
+
+process_is_running() {
+  local pid="$1"
+  if is_windows; then
+    WATCH_PID="$pid" powershell.exe -NoProfile -NonInteractive -Command \
+      'if (Get-Process -Id ([int]$env:WATCH_PID) -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }'
+  else
+    kill -0 "$pid" 2> /dev/null
+  fi
 }
 
 # get pwd with forward slashes
@@ -42,23 +60,6 @@ normalize_paths() {
   fi
 }
 
-# Rename/error snapshots verify diagnostics, not scheduler-dependent counts.
-# Still reject a rebuild of the full graph.
-normalize_incremental_count() {
-  local count
-  count=$(grep -o 'Compiled [0-9]* modules' "$1" | head -1 | grep -o '[0-9]*')
-  if [ -z "$count" ] || [ "$count" -gt 20 ]; then
-    error "Unexpected incremental compile count: $count"
-    return 1
-  fi
-  node -e 'const fs = require("fs"); const p = process.argv[1]; fs.writeFileSync(p, fs.readFileSync(p, "utf8").replaceAll("\x1b[2K\r", "\x1b[2K\n"))' "$1"
-  if [[ $OSTYPE == 'darwin'* ]]; then
-    sed -i '' 's/Compiled [0-9][0-9]* modules/Compiled incremental modules/' "$1"
-  else
-    sed -i 's/Compiled [0-9][0-9]* modules/Compiled incremental modules/' "$1"
-  fi
-}
-
 replace() {
   if [[ $OSTYPE == 'darwin'* ]];
   then
@@ -69,12 +70,13 @@ replace() {
 }
 
 wait_for_pid_gone() {
-  local pid="$1"; local timeout="${2:-10}"
-  while kill -0 "$pid" 2> /dev/null && [ "$timeout" -gt 0 ]; do
+  local pid="$1"; local timeout
+  timeout=$(platform_timeout "${2:-10}")
+  while process_is_running "$pid" && [ "$timeout" -gt 0 ]; do
     sleep 1
     timeout=$((timeout - 1))
   done
-  ! kill -0 "$pid" 2> /dev/null
+  ! process_is_running "$pid"
 }
 
 exit_watcher() {
@@ -98,7 +100,8 @@ clear_locks() {
 }
 
 wait_for_file() {
-  local file="$1"; local timeout="${2:-30}"
+  local file="$1"; local timeout
+  timeout=$(platform_timeout "${2:-30}")
   while [ "$timeout" -gt 0 ]; do
     [ -f "$file" ] && return 0
     sleep 1
@@ -107,8 +110,47 @@ wait_for_file() {
   return 1
 }
 
+wait_for_pattern() {
+  local file="$1"; local pattern="$2"; local timeout
+  timeout=$(platform_timeout "${3:-30}")
+  while [ "$timeout" -gt 0 ]; do
+    grep -q "$pattern" "$file" 2>/dev/null && return 0
+    sleep 1
+    timeout=$((timeout - 1))
+  done
+  return 1
+}
+
+wait_for_pattern_count() {
+  local file="$1"; local pattern="$2"; local expected="$3"; local timeout
+  timeout=$(platform_timeout "${4:-30}")
+  while [ "$timeout" -gt 0 ]; do
+    local current_count
+    current_count=$(grep -c "$pattern" "$file" 2>/dev/null || true)
+    current_count=${current_count:-0}
+    [ "$current_count" -ge "$expected" ] && return 0
+    sleep 1
+    timeout=$((timeout - 1))
+  done
+  return 1
+}
+
+wait_for_pattern_gone() {
+  local file="$1"; local pattern="$2"; local timeout
+  timeout=$(platform_timeout "${3:-30}")
+  while [ "$timeout" -gt 0 ]; do
+    if [ -f "$file" ] && ! grep -q "$pattern" "$file" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+    timeout=$((timeout - 1))
+  done
+  return 1
+}
+
 wait_for_file_gone() {
-  local file="$1"; local timeout="${2:-30}"
+  local file="$1"; local timeout
+  timeout=$(platform_timeout "${2:-30}")
   while [ "$timeout" -gt 0 ]; do
     [ ! -f "$file" ] && return 0
     sleep 1

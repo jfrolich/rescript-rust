@@ -42,13 +42,15 @@ pub(crate) fn append_refine_let(
     fn safe_to_alias(store: &IndexedLambda, node: NodeId) -> bool {
         match store.view(node) {
             NodeView::Var(_) | NodeView::Const(_) => true,
+            // lam_util.ml: a template without interpolations is a literal.
+            NodeView::Prim(Primitive::Ptemplate(segments), [], _) if segments.len() == 1 => true,
             NodeView::Prim(
                 Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { .. }),
                 [base],
                 _,
             ) if matches!(
                 store.view(*base),
-                NodeView::GlobalModule(_, _) | NodeView::Var(_)
+                NodeView::GlobalModule(_) | NodeView::Var(_)
             ) =>
             {
                 true
@@ -80,7 +82,7 @@ fn list_eq_approx(store: &IndexedLambda, left: &[NodeId], right: &[NodeId]) -> b
 
 fn eq_approx(store: &IndexedLambda, left: NodeId, right: NodeId) -> bool {
     match (store.view(left), store.view(right)) {
-        (NodeView::GlobalModule(a, ad), NodeView::GlobalModule(b, bd)) => a.same(b) && ad == bd,
+        (NodeView::GlobalModule(a), NodeView::GlobalModule(b)) => a.same(b),
         (NodeView::Var(a), NodeView::Var(b)) => a.same(b),
         (NodeView::Const(a), NodeView::Const(b)) => a.eq_approx(b),
         (NodeView::Apply(af, aa, _, _), NodeView::Apply(bf, ba, _, _)) => {
@@ -124,7 +126,6 @@ fn boolean_location(store: &IndexedLambda, node: NodeId) -> Option<crate::locati
             Primitive::Pnot
             | Primitive::Psequand
             | Primitive::Psequor
-            | Primitive::Pisout(_)
             | Primitive::PisNotNone
             | Primitive::Pobjcomp(_)
             | Primitive::Pboolcomp(_)
@@ -167,16 +168,6 @@ fn append_not(store: &mut IndexedLambda, loc: crate::location::Location, node: N
     }
 }
 
-fn complete_range(cases: &[(crate::lambda::SwitchKey, NodeId)], start: i32, finish: i32) -> bool {
-    match cases.split_first() {
-        None => finish < start,
-        Some(((crate::lambda::SwitchKey::Int(value), _), rest)) => {
-            start <= finish && *value == start && complete_range(rest, start + 1, finish)
-        }
-        Some(_) => false,
-    }
-}
-
 fn append_if(
     store: &mut IndexedLambda,
     condition: NodeId,
@@ -192,7 +183,7 @@ fn append_if(
             | Constant::ModuleAlias
             | Constant::JsUndefined { .. } => Some(false),
             Constant::JsTrue
-            | Constant::String { .. }
+            | Constant::String(_)
             | Constant::ImmString(_)
             | Constant::Pointer(_)
             | Constant::Float(_)
@@ -209,27 +200,26 @@ fn append_if(
                         | Constant::ModuleAlias
                         | Constant::JsUndefined { .. } => Some(false),
                         Constant::JsTrue
-                        | Constant::String { .. }
+                        | Constant::String(_)
                         | Constant::ImmString(_)
                         | Constant::Pointer(_)
                         | Constant::Float(_)
                         | Constant::BigInt { .. }
                         | Constant::Block { .. } => Some(true),
-                        Constant::Constructor(tag) => match &tag.tag_type {
+                        Constant::Constructor(tag) => match &tag.literal {
                             None => Some(tag.name != "[]"),
-                            Some(crate::types::VariantTagType::String(value)) => {
+                            Some(crate::types::VariantLiteralTag::String(value)) => {
                                 Some(!value.is_empty())
                             }
-                            Some(crate::types::VariantTagType::Int(value)) => Some(*value != 0),
-                            Some(crate::types::VariantTagType::Bool(value)) => Some(*value),
+                            Some(crate::types::VariantLiteralTag::Int(value)) => Some(*value != 0),
+                            Some(crate::types::VariantLiteralTag::Bool(value)) => Some(*value),
                             Some(
-                                crate::types::VariantTagType::Null
-                                | crate::types::VariantTagType::Undefined,
+                                crate::types::VariantLiteralTag::Null
+                                | crate::types::VariantLiteralTag::Undefined,
                             ) => Some(false),
                             Some(
-                                crate::types::VariantTagType::Float(_)
-                                | crate::types::VariantTagType::BigInt(_)
-                                | crate::types::VariantTagType::Untagged(_),
+                                crate::types::VariantLiteralTag::Float(_)
+                                | crate::types::VariantLiteralTag::BigInt(_),
                             ) => None,
                         },
                         Constant::NativeInt { .. } => None,
@@ -237,18 +227,17 @@ fn append_if(
                 }
                 inner_truthy(inner)
             }
-            Constant::Constructor(tag) => match &tag.tag_type {
+            Constant::Constructor(tag) => match &tag.literal {
                 None => Some(tag.name != "[]"),
-                Some(crate::types::VariantTagType::String(value)) => Some(!value.is_empty()),
-                Some(crate::types::VariantTagType::Int(value)) => Some(*value != 0),
-                Some(crate::types::VariantTagType::Bool(value)) => Some(*value),
+                Some(crate::types::VariantLiteralTag::String(value)) => Some(!value.is_empty()),
+                Some(crate::types::VariantLiteralTag::Int(value)) => Some(*value != 0),
+                Some(crate::types::VariantLiteralTag::Bool(value)) => Some(*value),
                 Some(
-                    crate::types::VariantTagType::Null | crate::types::VariantTagType::Undefined,
+                    crate::types::VariantLiteralTag::Null | crate::types::VariantLiteralTag::Undefined,
                 ) => Some(false),
                 Some(
-                    crate::types::VariantTagType::Float(_)
-                    | crate::types::VariantTagType::BigInt(_)
-                    | crate::types::VariantTagType::Untagged(_),
+                    crate::types::VariantLiteralTag::Float(_)
+                    | crate::types::VariantLiteralTag::BigInt(_),
                 ) => None,
             },
             // OCaml Lambda has no native-int constant in this branch.
@@ -292,39 +281,6 @@ fn append_if(
         };
     }
     match store.snapshot(condition) {
-        NodeSnapshot::Prim(Primitive::Pisout(offset), args, loc) => {
-            if let [range_node, variable_node] = args.as_slice()
-                && let NodeView::Const(Constant::Int { i: range, .. }) = store.view(*range_node)
-                && let NodeView::Var(variable) = store.view(*variable_node)
-                && let NodeSnapshot::Switch {
-                    scrutinee,
-                    consts_full: _,
-                    consts,
-                    blocks_full,
-                    blocks,
-                    fail_action,
-                    dispatch,
-                } = store.snapshot(else_node)
-                && let NodeView::Var(other) = store.view(scrutinee)
-                && blocks.is_empty()
-                && blocks_full
-                && fail_action.is_none()
-                && variable.same(other)
-                && complete_range(&consts, -offset, *range - offset)
-            {
-                return store.append(NodeSnapshot::Switch {
-                    scrutinee,
-                    consts_full: false,
-                    consts,
-                    blocks_full,
-                    blocks,
-                    fail_action: Some(then_node),
-                    dispatch,
-                });
-            }
-            let condition = store.append(NodeSnapshot::Prim(Primitive::Pisout(offset), args, loc));
-            store.append(NodeSnapshot::IfThenElse(condition, then_node, else_node))
-        }
         NodeSnapshot::Prim(Primitive::Pisint, args, loc) => {
             append_pisint_if(store, args, loc, then_node, else_node)
         }
@@ -453,7 +409,11 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                         ) =>
                     {
                         if let Some(args) = eta_args(store, &params, &inner, &args) {
-                            return store.append(NodeSnapshot::Prim(primitive, args, info.loc));
+                            // lambda.ml `apply` builds through the folding `prim`.
+                            return append_rebuilt(
+                                store,
+                                NodeSnapshot::Prim(primitive, args, info.loc),
+                            );
                         }
                     }
                     NodeSnapshot::Prim(
@@ -470,16 +430,14 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                                 store.snapshot(*inner)
                         {
                             if let Some(args) = eta_args(store, &params, &inner_args, &args) {
-                                let inner = store.append(NodeSnapshot::Prim(
-                                    inner_primitive,
-                                    args,
-                                    info.loc.clone(),
-                                ));
-                                return store.append(NodeSnapshot::Prim(
-                                    wrapper,
-                                    vec![inner],
-                                    info.loc,
-                                ));
+                                let inner = append_rebuilt(
+                                    store,
+                                    NodeSnapshot::Prim(inner_primitive, args, info.loc.clone()),
+                                );
+                                return append_rebuilt(
+                                    store,
+                                    NodeSnapshot::Prim(wrapper, vec![inner], info.loc),
+                                );
                             }
                         } else if let Some(args) = eta_args(store, &params, &wrapped, &args) {
                             return store.append(NodeSnapshot::Prim(wrapper, args, info.loc));
@@ -490,8 +448,9 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                             && matches!(store.view(second), NodeView::Const(_))
                             && let Some(args) = eta_args(store, &params, &inner, &args)
                         {
-                            let call = store.append(NodeSnapshot::Prim(primitive, args, info.loc));
-                            return store.append(NodeSnapshot::Sequence(call, second));
+                            let call =
+                                append_rebuilt(store, NodeSnapshot::Prim(primitive, args, info.loc));
+                            return append_rebuilt(store, NodeSnapshot::Sequence(call, second));
                         }
                     }
                     _ => {}
@@ -519,7 +478,7 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                         [source],
                         _,
                     ) if name == &fields[0] => match store.view(*source) {
-                        NodeView::Var(id) | NodeView::GlobalModule(id, _) => {
+                        NodeView::Var(id) | NodeView::GlobalModule(id) => {
                             Some((*source, id.clone()))
                         }
                         _ => None,
@@ -530,7 +489,7 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                 args.iter().zip(fields.iter()).enumerate().all(|(index, (arg, expected_name))| {
                     matches!(store.view(*arg), NodeView::Prim(Primitive::Pfield(position, crate::lambda::FieldDbgInfo::Module { name }), [base], _)
                         if *position as usize == index && name == expected_name
-                            && matches!(store.view(*base), NodeView::Var(id) | NodeView::GlobalModule(id, _) if id.same(source_id)))
+                            && matches!(store.view(*base), NodeView::Var(id) | NodeView::GlobalModule(id) if id.same(source_id)))
                 })
             });
             if reconstructs_source {
@@ -558,8 +517,8 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                     NodeView::Const(Constant::Constructor(left)),
                     NodeView::Const(Constant::Constructor(right)),
                 ) = (store.view(*left), store.view(*right))
-                && left.tag_type.is_none()
-                && right.tag_type.is_none()
+                && left.literal.is_none()
+                && right.literal.is_none()
             {
                 let equal = left.name == right.name;
                 let result = match operation {
@@ -607,15 +566,16 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                         || comment.is_none() && matches!(key,
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Constant(tag)
-                            ) if matches!(tag.tag_type, Some(crate::types::VariantTagType::Int(value)) if value == *i)
+                            ) if matches!(tag.literal, Some(crate::types::VariantLiteralTag::Int(value)) if value == *i)
                         )
                 }).map(|(_, node)| *node),
                 NodeView::Const(Constant::Block { tag_info, .. }) => {
                     let runtime = match &**tag_info {
-                        crate::lambda::TagInfo::Constructor { runtime, .. } | crate::lambda::TagInfo::RecordInlined { runtime, .. } => Some(runtime),
+                        crate::lambda::TagInfo::Constructor { runtime, .. } => Some(crate::types::VariantBlock::Tagged((**runtime).clone())),
+                        crate::lambda::TagInfo::RecordInlined { runtime, .. } => Some((**runtime).clone()),
                         _ => None,
                     };
-                    blocks.iter().find(|(key, _)| matches!((key, runtime), (crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)), Some(runtime)) if &candidate.runtime == &**runtime)).map(|(_, node)| *node)
+                    blocks.iter().find(|(key, _)| matches!((key, runtime.as_ref()), (crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)), Some(runtime)) if candidate == runtime)).map(|(_, node)| *node)
                 }
                 _ => None,
             };
@@ -637,16 +597,10 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
         NodeSnapshot::StringSwitch(scrutinee, cases, default) => {
             let known_constant = matches!(
                 store.view(scrutinee),
-                NodeView::Const(Constant::String {
-                    delim: None | Some(crate::lambda::lam_constant::StringDelim::NoQuotes),
-                    ..
-                }) | NodeView::Const(Constant::ImmString(_))
+                NodeView::Const(Constant::String(_)) | NodeView::Const(Constant::ImmString(_))
             );
             let selected = match store.view(scrutinee) {
-                NodeView::Const(Constant::String {
-                    s,
-                    delim: None | Some(crate::lambda::lam_constant::StringDelim::NoQuotes),
-                })
+                NodeView::Const(Constant::String(s))
                 | NodeView::Const(Constant::ImmString(s)) => cases
                     .iter()
                     .find(|(key, _)| key == s)
@@ -679,6 +633,23 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
             }
             _ => store.append(NodeSnapshot::Sequence(first, second)),
         },
+        // `Lambda.prim` folds a primitive over one or two constants.
+        NodeSnapshot::Prim(primitive, args, loc)
+            if matches!(args.len(), 1 | 2)
+                && args.iter().all(|arg| matches!(store.view(*arg), NodeView::Const(_))) =>
+        {
+            let consts = args
+                .iter()
+                .map(|arg| match store.view(*arg) {
+                    NodeView::Const(c) => crate::lambda::Lambda::Lconst(c.clone()),
+                    _ => unreachable!(),
+                })
+                .collect();
+            match crate::lambda::Lambda::prim(primitive.clone(), consts, loc.clone()) {
+                folded @ crate::lambda::Lambda::Lconst(_) => store.append_compat_lambda(folded),
+                _ => store.append(NodeSnapshot::Prim(primitive, args, loc)),
+            }
+        }
         node => store.append(node),
     }
 }
@@ -688,26 +659,25 @@ pub(crate) fn substitute(
     substitutions: &VariableSubstitution,
     node: NodeId,
 ) -> NodeId {
+    // `Lambda_traverse.subst_lambda` (lambda_traverse.ml:235-241): replace
+    // variables; `shallow_map_sharing` rebuilds through the smart
+    // constructors only the nodes whose children changed.
     match store.snapshot(node) {
         NodeSnapshot::Var(id) => substitutions.get(&id).copied().unwrap_or(node),
         NodeSnapshot::Const(_)
-        | NodeSnapshot::GlobalModule(_, _)
+        | NodeSnapshot::GlobalModule(_)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => node,
-        NodeSnapshot::Apply(function, args, info, _) => {
-            let function = substitute(store, substitutions, function);
-            let args = args
-                .into_iter()
-                .map(|node| substitute(store, substitutions, node))
-                .collect();
-            // OCaml `lam_subst.ml:36-37` calls `Lam.apply` without the
-            // optional JSX argument, so substitution resets it to false.
-            append_rebuilt(store, NodeSnapshot::Apply(function, args, info, false))
-        }
         snapshot => {
+            let mut changed = false;
             let mapped = map_children(store, snapshot, |store, child| {
-                substitute(store, substitutions, child)
+                let mapped = substitute(store, substitutions, child);
+                changed |= mapped != child;
+                mapped
             });
+            if !changed {
+                return node;
+            }
             append_rebuilt(store, mapped)
         }
     }

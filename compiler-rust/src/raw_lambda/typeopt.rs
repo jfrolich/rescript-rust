@@ -42,7 +42,7 @@ pub(crate) fn constructor_payload_is_unboxed(
 ) -> bool {
     matches!(
         constructor_case(ctx, cstr),
-        Some(crate::types::VariantConstructorCase::Block(block)) if block.runtime.untagged
+        Some(crate::types::VariantConstructorCase::Block(block)) if block.is_untagged()
     )
 }
 
@@ -103,19 +103,16 @@ fn type_cannot_contain_undefined_rec(
                                 case,
                                 Some(crate::types::VariantConstructorCase::Constant(
                                     crate::types::VariantTag {
-                                        tag_type: Some(crate::types::VariantTagType::Undefined),
+                                        literal: Some(crate::types::VariantLiteralTag::Undefined),
                                         ..
                                     }
                                 ))
                             ) || case.is_none()
-                                && has_undefined_literal(&cd.cd_attributes);
+                                && cd.cd_runtime_tag == Some(crate::types::VariantLiteralTag::Undefined);
                             let untagged = matches!(
                                 case,
                                 Some(crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock {
-                                        runtime: crate::types::BlockRuntime { untagged: true, .. },
-                                        ..
-                                    }
+                                    crate::types::VariantBlock::Untagged { .. }
                                 ))
                             ) || case.is_none()
                                 && has_untagged(&decl.type_attributes);
@@ -281,6 +278,9 @@ fn get_unboxed_repr_rec(
 pub(crate) fn scrape_ty(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
     // OCaml `Typeopt.scrape_ty` uses `Ctype.expand_head_opt`, then checks
     // unboxed representations (compiler/ml/typeopt.ml:19-31).
+    // `Ctype.correct_levels ty` is `duplicate_type ty` (ctype.ml:650), so
+    // the expansion's unifications mutate a copy, not the typed tree.
+    let ty = crate::types::ctype::subst_identity_copy(ctx, ty);
     let ty = crate::types::ctype::expand_head_opt(ctx, env, ty);
     let path = match &*ctx.borrow_desc(ty) {
         TypeDesc::Tconstr { path, .. } => Some(path.clone()),
@@ -467,17 +467,6 @@ pub(crate) fn has_untagged(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| attr.attr_name.txt == UNTAGGED_ATTR)
 }
 
-fn has_undefined_literal(attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|attr| {
-        attr.attr_name.txt == "as"
-            && matches!(
-                attr.attr_payload,
-                crate::types::decl::AttributePayload::Ident(ref ident)
-                    if ident == "undefined"
-            )
-    })
-}
-
 pub(crate) fn type_is_builtin_object(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
     ctx.typeopt_answer(env.id(), ty, TYPEOPT_BUILTIN_OBJECT, || {
         type_is_builtin_object_uncached(ctx, env, ty)
@@ -514,7 +503,7 @@ mod tests {
         let id_gen = IdGenerator::new();
         let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let fields = ctx.new_type(TypeDesc::Tnil);
-        let object = ctx.new_type(TypeDesc::Tobject { fields, name: None });
+        let object = ctx.new_type(TypeDesc::Tobject { fields });
 
         assert!(type_is_builtin_object(&ctx, &Env::empty(), object));
     }

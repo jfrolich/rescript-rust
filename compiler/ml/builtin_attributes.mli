@@ -20,7 +20,6 @@
    ocaml.ppwarning
    ocaml.warning
    ocaml.warnerror
-   ocaml.explicit_arity (for camlp4/camlp5)
    ocaml.warn_on_literal_pattern
    ocaml.deprecated_mutable
    ocaml.immediate
@@ -56,15 +55,6 @@ val check_deprecated_mutable_inclusion :
   string ->
   unit
 
-val check_bs_attributes_inclusion :
-  (Parsetree.attributes ->
-  Parsetree.attributes ->
-  string ->
-  (string * string) option)
-  ref
-
-val check_duplicated_labels :
-  (Parsetree.label_declaration list -> string Asttypes.loc option) ref
 val error_of_extension : Parsetree.extension -> Location.error
 
 val warning_attribute : ?ppwarning:bool -> Parsetree.attribute -> unit
@@ -89,7 +79,6 @@ val warning_scope :
   *)
 
 val warn_on_literal_pattern : Parsetree.attributes -> bool
-val explicit_arity : Parsetree.attributes -> bool
 
 val immediate : Parsetree.attributes -> bool
 

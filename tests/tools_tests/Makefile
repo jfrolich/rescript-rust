@@ -3,8 +3,9 @@ SHELL = /bin/bash
 build:
 	yarn build
 
+# In-process builds write no .cmt files: the doc command reads them from a watcher.
 test: build
-	./test.sh
+	../analysis_tests/with-watcher.sh ./test.sh
 	yarn build
 
 clean:

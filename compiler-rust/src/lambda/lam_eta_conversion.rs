@@ -100,7 +100,7 @@ fn is_safe_to_share(lam: &Lambda) -> bool {
             c,
             Constant::Int { .. }
                 | Constant::Char(_)
-                | Constant::String { .. }
+                | Constant::String(_)
                 | Constant::ImmString(_)
                 | Constant::Float(_)
                 | Constant::BigInt { .. }

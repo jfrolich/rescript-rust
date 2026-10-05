@@ -61,11 +61,12 @@ pub mod lam_pass_count;
 pub(crate) mod lam_pass_count_indexed;
 pub mod lam_pass_deep_flatten;
 pub(crate) mod lam_pass_deep_flatten_indexed;
-pub mod lam_pass_eliminate_ref;
 pub(crate) mod lam_pass_eliminate_ref_indexed;
 pub mod lam_pass_exits;
 pub mod lam_pass_exits_indexed;
 pub mod lam_pass_lets_dce;
+pub mod lam_pass_sroa;
+pub mod lambda_traverse;
 pub(crate) mod lam_pass_lets_dce_indexed;
 pub mod lam_pass_remove_alias;
 pub(crate) mod lam_pass_remove_alias_indexed;
@@ -80,7 +81,6 @@ use crate::ident::Ident;
 use crate::location::Location;
 pub use lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 pub use lam_constant::Constant;
-use lam_constant::StringDelim;
 pub use lam_primitive::Primitive;
 pub use lam_tag_info::TagInfo;
 
@@ -180,7 +180,161 @@ impl std::fmt::Display for SwitchKey {
                 write!(f, "constructor {:?}", tag.name)
             }
             Self::Constructor(crate::types::VariantConstructorCase::Block(block)) => {
-                write!(f, "constructor {:?}", block.runtime.tag.name)
+                write!(f, "constructor {:?}", block.tag().name)
+            }
+        }
+    }
+}
+
+/// lambda.ml `value_kind`: constants classified by the JavaScript value
+/// emitted for them, not by their source constructor.
+enum ValueKind {
+    IsLiteral(crate::types::VariantLiteralTag),
+    IsObject,
+    IsArray,
+    UnknownValue,
+}
+
+/// lambda.ml `runtime_value_kind`.
+fn runtime_value_kind(c: &Constant) -> ValueKind {
+    use crate::types::VariantLiteralTag as L;
+    match c {
+        Constant::String(s) | Constant::ImmString(s) => ValueKind::IsLiteral(L::String(s.clone())),
+        Constant::Int { i, .. } => ValueKind::IsLiteral(L::Int(*i)),
+        Constant::NativeInt { i, .. } => ValueKind::IsLiteral(L::Int(*i as i32)),
+        Constant::Float(f) => ValueKind::IsLiteral(L::Float(f.clone())),
+        Constant::JsTrue => ValueKind::IsLiteral(L::Bool(true)),
+        Constant::JsFalse => ValueKind::IsLiteral(L::Bool(false)),
+        Constant::JsNull => ValueKind::IsLiteral(L::Null),
+        Constant::JsUndefined { .. } => ValueKind::IsLiteral(L::Undefined),
+        Constant::Pointer(name) => ValueKind::IsLiteral(L::String(name.clone())),
+        Constant::Constructor(tag) => match &tag.literal {
+            None if tag.name == "[]" => ValueKind::IsLiteral(L::Int(0)),
+            None => ValueKind::IsLiteral(L::String(tag.name.clone())),
+            Some(L::BigInt(_)) => ValueKind::UnknownValue,
+            Some(literal) => ValueKind::IsLiteral(literal.clone()),
+        },
+        Constant::Block { tag_info, .. } => match &**tag_info {
+            TagInfo::Tuple => ValueKind::IsArray,
+            TagInfo::Record { fields, .. } => {
+                if !fields.is_empty()
+                    && fields.iter().enumerate().all(|(i, (name, _))| i.to_string() == *name)
+                {
+                    ValueKind::IsArray
+                } else {
+                    ValueKind::IsObject
+                }
+            }
+            _ => ValueKind::IsObject,
+        },
+        Constant::Char(_) | Constant::BigInt { .. } | Constant::Some(_) | Constant::ModuleAlias => {
+            ValueKind::UnknownValue
+        }
+    }
+}
+
+/// OCaml `float_of_string` for the spellings a literal tag can carry.
+fn ocaml_float_of_string(s: &str) -> Option<f64> {
+    if let Some(value) = crate::js_ir::printer::parse_hex_float_literal(s) {
+        return Some(value);
+    }
+    s.replace('_', "").parse::<f64>().ok()
+}
+
+/// lambda.ml `literal_denotes_same`: runtime equality rather than equality
+/// of tags; bigint spellings are not compared.
+fn literal_denotes_same(a: &crate::types::VariantLiteralTag, b: &crate::types::VariantLiteralTag) -> bool {
+    use crate::types::VariantLiteralTag as L;
+    match (a, b) {
+        (L::String(x), L::String(y)) => x == y,
+        (L::Int(x), L::Int(y)) => x == y,
+        (L::Float(x), L::Float(y)) => {
+            matches!((ocaml_float_of_string(x), ocaml_float_of_string(y)), (Some(x), Some(y)) if x == y)
+        }
+        (L::Int(x), L::Float(y)) | (L::Float(y), L::Int(x)) => {
+            ocaml_float_of_string(y).is_some_and(|y| *x as f64 == y)
+        }
+        (L::Bool(x), L::Bool(y)) => x == y,
+        (L::Null, L::Null) | (L::Undefined, L::Undefined) => true,
+        _ => false,
+    }
+}
+
+/// lambda.ml `value_has_block_type`, mirroring `Dynamic_checks`.
+fn value_has_block_type(
+    block_types: &[crate::types::VariantBlockType],
+    kind: &ValueKind,
+    block_type: &crate::types::VariantBlockType,
+) -> bool {
+    use crate::types::{VariantBlockType as B, VariantInstance as I, VariantLiteralTag as L};
+    match (block_type, kind) {
+        (B::Int | B::Float, ValueKind::IsLiteral(L::Int(_) | L::Float(_))) => true,
+        (B::String, ValueKind::IsLiteral(L::String(_))) => true,
+        (B::Boolean, ValueKind::IsLiteral(L::Bool(_))) => true,
+        (B::Object, ValueKind::IsObject) => true,
+        (B::Instance(I::Array), ValueKind::IsArray) => true,
+        (B::Object, ValueKind::IsArray) => !block_types.contains(&B::Instance(I::Array)),
+        (B::Unknown, ValueKind::IsLiteral(_) | ValueKind::IsObject | ValueKind::IsArray) => true,
+        _ => false,
+    }
+}
+
+enum UntaggedAction {
+    /// The case decided by the constant (`None`: no case of the switch).
+    Case(Option<Lambda>),
+    /// The constant's runtime shape cannot be named here.
+    Undecided,
+}
+
+/// lambda.ml `switch`'s `untagged_action`.
+fn untagged_action(
+    facts: &crate::types::VariantMatchingFacts,
+    cst: &Constant,
+    switch: &LambdaSwitch,
+) -> UntaggedAction {
+    let literal_of_tag = |tag: &crate::types::VariantTag| match &tag.literal {
+        Some(literal) => literal.clone(),
+        None => crate::types::VariantLiteralTag::String(tag.name.clone()),
+    };
+    let kind = runtime_value_kind(cst);
+    match &kind {
+        ValueKind::UnknownValue => UntaggedAction::Undecided,
+        ValueKind::IsLiteral(literal)
+            if facts.literal_tags.iter().any(|tag| literal_denotes_same(literal, tag)) =>
+        {
+            // The literal side wins, exactly as it does at runtime.
+            UntaggedAction::Case(
+                switch
+                    .sw_consts
+                    .iter()
+                    .find(|(key, _)| match key {
+                        SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(tag)) => {
+                            literal_denotes_same(literal, &literal_of_tag(tag))
+                        }
+                        _ => false,
+                    })
+                    .map(|(_, action)| action.clone()),
+            )
+        }
+        _ => {
+            // Not a declared literal, so the payload's runtime shape decides.
+            let matches_block =
+                |block_type: &crate::types::VariantBlockType| value_has_block_type(&facts.block_types, &kind, block_type);
+            if facts.block_types.iter().any(matches_block) {
+                UntaggedAction::Case(
+                    switch
+                        .sw_blocks
+                        .iter()
+                        .find(|(key, _)| match key {
+                            SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+                                crate::types::VariantBlock::Untagged { block_type, .. },
+                            )) => matches_block(block_type),
+                            _ => false,
+                        })
+                        .map(|(_, action)| action.clone()),
+                )
+            } else {
+                UntaggedAction::Undecided
             }
         }
     }
@@ -290,7 +444,7 @@ pub enum Lambda {
     Lvar(Ident),
 
     /// Global module reference (with dynamic import flag)
-    LglobalModule(Ident, bool),
+    LglobalModule(Ident),
 
     /// Constant value
     Lconst(Constant),
@@ -370,8 +524,8 @@ impl Lambda {
     }
 
     /// Create a global module reference
-    pub fn global_module(id: Ident, dynamic_import: bool) -> Self {
-        Lambda::LglobalModule(id, dynamic_import)
+    pub fn global_module(id: Ident) -> Self {
+        Lambda::LglobalModule(id)
     }
 
     /// Create a constant
@@ -451,9 +605,10 @@ impl Lambda {
                     Err(_) => default(primitive, args, loc),
                 },
                 // lam.ml:491-492 — Pstringlength on bare string literal.
-                (Primitive::Pstringlength, Constant::String { s, delim: None }) => {
-                    Lambda::Lconst(Constant::int(s.len() as i32))
-                }
+                (Primitive::Pstringlength, Constant::String(s)) => Lambda::Lconst(Constant::int(
+                    crate::string_literal::utf16_length(s).expect("String_literal.utf16_length: Invalid_utf8")
+                        as i32,
+                )),
                 // lam.ml:496-497
                 (Primitive::Pnot, Constant::JsTrue) => Lambda::false_(),
                 (Primitive::Pnot, Constant::JsFalse) => Lambda::true_(),
@@ -562,26 +717,17 @@ impl Lambda {
                 // lam.ml:539-542
                 (
                     Primitive::Pstringadd,
-                    Constant::String {
-                        s: a_s,
-                        delim: None,
-                    },
-                    Constant::String {
-                        s: b_s,
-                        delim: None,
-                    },
-                ) => Lambda::Lconst(Constant::String {
-                    s: format!("{}{}", a_s, b_s),
-                    delim: None,
-                }),
+                    Constant::String(a_s),
+                    Constant::String(b_s),
+                ) => Lambda::Lconst(Constant::String(format!("{}{}", a_s, b_s))),
                 // lam.ml:543-547 — Pstringrefs / Pstringrefu on (String, Int).
                 (
                     Primitive::Pstringrefs | Primitive::Pstringrefu,
-                    Constant::String { s, delim: None },
+                    Constant::String(s),
                     Constant::Int { i: idx, .. },
-                ) => match s.as_bytes().get(*idx as usize) {
-                    Some(byte) => Lambda::Lconst(Constant::Char(*byte as i32)),
-                    None => default(primitive, args, loc),
+                ) => match crate::string_literal::code_point_at_utf16_index(s, *idx as i64) {
+                    Ok(Some(codepoint)) => Lambda::Lconst(Constant::Char(codepoint as i32)),
+                    _ => default(primitive, args, loc),
                 },
                 _ => default(primitive, args, loc),
             },
@@ -600,6 +746,20 @@ impl Lambda {
 
     /// Create a switch using OCaml's `Lam.switch` smart constructor.
     pub fn switch(scrutinee: Lambda, switch: LambdaSwitch) -> Self {
+        // lambda.ml `switch`: an untagged variant is dispatched on the value,
+        // so a constant scrutinee is decided here rather than by the
+        // constructor it was written with. Undecided keeps the switch.
+        if let Lambda::Lconst(cst) = &scrutinee
+            && let SwitchDispatch::Variant(facts) = &switch.sw_dispatch
+            && !facts.block_types.is_empty()
+        {
+            return match untagged_action(facts, cst, &switch) {
+                UntaggedAction::Case(action) => action
+                    .or_else(|| switch.sw_failaction.as_deref().cloned())
+                    .unwrap_or_else(|| Lambda::Lswitch(Box::new(scrutinee), Box::new(switch))),
+                UntaggedAction::Undecided => Lambda::Lswitch(Box::new(scrutinee), Box::new(switch)),
+            };
+        }
         match scrutinee {
             Lambda::Lconst(Constant::Constructor(tag)) => {
                 let action = switch.sw_consts.iter().find(|(key, _)| matches!(
@@ -626,8 +786,10 @@ impl Lambda {
                 .unwrap_or_else(|| Lambda::Lswitch(Box::new(Lambda::Lconst(constant)), Box::new(switch))),
             Lambda::Lconst(Constant::Block { tag_info, elements }) => {
                 let runtime = match &*tag_info {
-                    TagInfo::Constructor { runtime, .. }
-                    | TagInfo::RecordInlined { runtime, .. } => Some(runtime.clone()),
+                    TagInfo::Constructor { runtime, .. } => {
+                        Some(crate::types::VariantBlock::Tagged((**runtime).clone()))
+                    }
+                    TagInfo::RecordInlined { runtime, .. } => Some((**runtime).clone()),
                     _ => None,
                 };
                 switch
@@ -638,7 +800,7 @@ impl Lambda {
                         (
                             SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)),
                             Some(runtime)
-                        ) if &candidate.runtime == &**runtime
+                        ) if candidate == runtime
                     ))
                     .map(|(_, branch)| branch.clone())
                     .or_else(|| switch.sw_failaction.as_deref().cloned())
@@ -669,10 +831,7 @@ impl Lambda {
 
         match scrutinee {
             Lambda::Lconst(
-                ref constant @ Constant::String {
-                    ref s,
-                    delim: None | Some(StringDelim::NoQuotes),
-                },
+                ref constant @ Constant::String(ref s),
             ) => matched(s).unwrap_or_else(|| {
                 Lambda::LstringSwitch(Box::new(Lambda::Lconst(constant.clone())), cases, default)
             }),
@@ -834,46 +993,6 @@ impl Lambda {
 
                 match cond {
                     Lambda::Lprim(prim_info) => match *prim_info {
-                        PrimInfo {
-                            primitive: Primitive::Pisout(offset),
-                            args,
-                            loc,
-                        } => {
-                            if let [
-                                Lambda::Lconst(Constant::Int { i: range, .. }),
-                                Lambda::Lvar(xx),
-                            ] = args.as_slice()
-                            {
-                                if let Lambda::Lswitch(switch_arg, body) = &else_ {
-                                    if let Lambda::Lvar(yy) = switch_arg.as_ref() {
-                                        if body.sw_blocks.is_empty()
-                                            && body.sw_blocks_full
-                                            && body.sw_failaction.is_none()
-                                            && xx.same(yy)
-                                            && complete_range(
-                                                &body.sw_consts,
-                                                -offset,
-                                                *range - offset,
-                                            )
-                                        {
-                                            let mut body = body.clone();
-                                            body.sw_failaction = Some(Box::new(then_));
-                                            body.sw_consts_full = false;
-                                            return Lambda::Lswitch(switch_arg.clone(), body);
-                                        }
-                                    }
-                                }
-                            }
-                            make_if(
-                                Lambda::Lprim(Box::new(PrimInfo {
-                                    primitive: Primitive::Pisout(offset),
-                                    args,
-                                    loc,
-                                })),
-                                then_,
-                                else_,
-                            )
-                        }
                         PrimInfo {
                             primitive: Primitive::Pisint,
                             args,
@@ -1137,23 +1256,15 @@ fn eta_reduce_function_apply(
                 return None;
             };
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
-            Some(Lambda::Lprim(Box::new(PrimInfo {
-                primitive: function_primitive(function.body.as_ref())?,
-                args: vec![Lambda::Lprim(Box::new(PrimInfo {
-                    primitive: inner_call.primitive.clone(),
-                    args: eta_args,
-                    loc: ap_info.loc.clone(),
-                }))],
-                loc: ap_info.loc.clone(),
-            })))
+            // lambda.ml `apply` builds the result through the folding `prim`.
+            let wrap = function_primitive(function.body.as_ref())?;
+            let inner =
+                Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone());
+            Some(Lambda::prim(wrap, vec![inner], ap_info.loc.clone()))
         }
         Lambda::Lprim(inner_call) => {
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
-            Some(Lambda::Lprim(Box::new(PrimInfo {
-                primitive: inner_call.primitive.clone(),
-                args: eta_args,
-                loc: ap_info.loc.clone(),
-            })))
+            Some(Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone()))
         }
         Lambda::Lsequence(first, second) => {
             let Lambda::Lprim(inner_call) = first.as_ref() else {
@@ -1163,13 +1274,9 @@ fn eta_reduce_function_apply(
                 return None;
             };
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
-            Some(Lambda::Lsequence(
-                Box::new(Lambda::Lprim(Box::new(PrimInfo {
-                    primitive: inner_call.primitive.clone(),
-                    args: eta_args,
-                    loc: ap_info.loc.clone(),
-                }))),
-                Box::new(Lambda::Lconst(constant.clone())),
+            Some(Lambda::seq(
+                Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone()),
+                Lambda::Lconst(constant.clone()),
             ))
         }
         _ => None,
@@ -1271,7 +1378,7 @@ fn fold_makeblock_module_alias(primitive: &Primitive, args: &[Lambda]) -> Option
         return None;
     }
     let source_ident = match &first_args[0] {
-        Lambda::LglobalModule(v, _) => v.clone(),
+        Lambda::LglobalModule(v) => v.clone(),
         Lambda::Lvar(v) => v.clone(),
         _ => return None,
     };
@@ -1299,7 +1406,7 @@ fn fold_makeblock_module_alias(primitive: &Primitive, args: &[Lambda]) -> Option
             return None;
         }
         let inner_same = match &inner_args[0] {
-            Lambda::LglobalModule(v, _) | Lambda::Lvar(v) => v.same(&source_ident),
+            Lambda::LglobalModule(v) | Lambda::Lvar(v) => v.same(&source_ident),
             _ => false,
         };
         if !inner_same {
@@ -1341,7 +1448,6 @@ fn has_boolean_type(lam: &Lambda) -> Option<Location> {
                 Primitive::Pnot
                 | Primitive::Psequand
                 | Primitive::Psequor
-                | Primitive::Pisout(_)
                 | Primitive::PisNotNone
                 | Primitive::Pobjcomp(_)
                 | Primitive::Pboolcomp(_)
@@ -1357,7 +1463,6 @@ fn has_boolean_type(lam: &Lambda) -> Option<Location> {
                 Primitive::Pnot
                 | Primitive::Psequand
                 | Primitive::Psequor
-                | Primitive::Pisout(_)
                 | Primitive::PisNotNone
                 | Primitive::Pobjcomp(_)
                 | Primitive::Pboolcomp(_)
@@ -1376,19 +1481,9 @@ fn has_boolean_type(lam: &Lambda) -> Option<Location> {
     }
 }
 
-fn complete_range(sw_consts: &[(SwitchKey, Lambda)], start: i32, finish: i32) -> bool {
-    match sw_consts.split_first() {
-        None => finish < start,
-        Some(((SwitchKey::Int(value), _), rest)) => {
-            start <= finish && *value == start && complete_range(rest, start + 1, finish)
-        }
-        Some(((SwitchKey::Constructor(_), _), _)) => false,
-    }
-}
-
 fn lambda_eq_approx(lhs: &Lambda, rhs: &Lambda) -> bool {
     match (lhs, rhs) {
-        (Lambda::LglobalModule(i1, b1), Lambda::LglobalModule(i2, b2)) => i1.same(i2) && b1 == b2,
+        (Lambda::LglobalModule(i1), Lambda::LglobalModule(i2)) => i1.same(i2),
         (Lambda::Lvar(i1), Lambda::Lvar(i2)) => i1.same(i2),
         (Lambda::Lconst(c1), Lambda::Lconst(c2)) => c1.eq_approx(c2),
         (Lambda::Lapply(app1), Lambda::Lapply(app2)) => {

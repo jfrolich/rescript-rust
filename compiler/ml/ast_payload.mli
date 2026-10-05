@@ -31,17 +31,44 @@ type lid = string Asttypes.loc
 
 type action = lid * Parsetree.expression option
 
-val is_single_string : t -> (string * string option) option
+val json_literal_outside_external_message : string
+val reject_json_literal : loc:Location.t -> 'a
+val reject_json_literal_payload : t -> unit
+
+val unwrap_braces : Parsetree.expression -> Parsetree.expression
+(** Ignore explicit brace wrappers when interpreting an attribute payload. *)
+
+val unwrap_payload_expression : t -> t
+(** Unwrap the single expression in a payload while retaining its metadata. *)
+
+val semantic_string_of_expression : Parsetree.expression -> string option
+(** Return the decoded value when the expression is an ordinary string or a
+    non-interpolated backquoted string. *)
+
+val string_literal_of_payload : t -> String_literal.string_literal option
+(** Return the string payload of an attribute that denotes a name, keeping its
+    source spelling. A backquoted payload is given canonical quoted spelling,
+    since it is the same name written differently. *)
+
+val semantic_string_of_payload : t -> string option
+(** Return the decoded value of an ordinary or non-interpolated backquoted string.
+    Other prefixed literals, such as [json], are not semantic strings. *)
 
 val is_single_int : t -> int option
 
-val is_single_float : t -> string option
+val constructor_tag_of_payload : t -> Parsetree.constructor_tag option
+(** The literal denoted by a valid variant-constructor [@as] payload. *)
 
-val is_single_bigint : t -> string option
+val validate_raw_source :
+  kind:Js_raw_info.raw_kind ->
+  ?is_function:int option ref ->
+  loc:Location.t ->
+  offset:int ->
+  string ->
+  unit
 
-val is_single_bool : t -> bool option
-
-val is_single_ident : t -> Longident.t option
+(** Validate JavaScript source using the same rules as raw extensions.
+    [offset] accounts for delimiters preceding the source in its location. *)
 
 val raw_as_string_exp_exn :
   kind:Js_raw_info.raw_kind ->

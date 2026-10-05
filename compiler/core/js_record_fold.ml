@@ -60,9 +60,6 @@ let module_id : 'a. ('a, module_id) fn =
   let st = _self.ident _self st _x0 in
   st
 
-let required_modules : 'a. ('a, required_modules) fn =
- fun _self st arg -> list _self.module_id _self st arg
-
 let vident : 'a. ('a, vident) fn =
  fun _self st -> function
   | Id _x0 ->
@@ -124,19 +121,15 @@ let expression_desc : 'a. ('a, expression_desc) fn =
     let st = _self.expression _self st _x1 in
     let st = _self.expression _self st _x2 in
     st
-  | FlatCall (_x0, _x1) ->
-    let st = _self.expression _self st _x0 in
-    let st = _self.expression _self st _x1 in
-    st
   | Call (_x0, _x1, _x2) ->
     let st = _self.expression _self st _x0 in
     let st = list _self.expression _self st _x1 in
     st
   | Tagged_template (_xo, _x1, _x2) ->
     let st = _self.expression _self st _xo in
-    let st = list _self.expression _self st _x1 in
     let st = list _self.expression _self st _x2 in
     st
+  | Interpolated_template {values} -> list _self.expression _self st values
   | String_index (_x0, _x1) ->
     let st = _self.expression _self st _x0 in
     let st = _self.expression _self st _x1 in
@@ -159,6 +152,8 @@ let expression_desc : 'a. ('a, expression_desc) fn =
     let st = _self.block _self st body in
     st
   | Str _ -> st
+  | Template_literal _ -> st
+  | Json_literal _ -> st
   | Raw_js_code _ -> st
   | Array _x0 -> list _self.expression _self st _x0
   | Optional_block (_x0, _x1) ->
@@ -300,12 +295,6 @@ let block : 'a. ('a, block) fn =
 let program : 'a. ('a, program) fn =
  fun _self st {block = _x0; exports = _x1; export_set = _x2} ->
   let st = _self.block _self st _x0 in
-  st
-
-let deps_program : 'a. ('a, deps_program) fn =
- fun _self st {program = _x0; modules = _x1; side_effect = _x2} ->
-  let st = _self.program _self st _x0 in
-  let st = required_modules _self st _x1 in
   st
 
 let super : 'state iter =

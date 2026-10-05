@@ -370,6 +370,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             p.next();
             let id = parse_extension_id(p, ext_start_idx);
             let payload = parse_payload_region(p);
+            let payload = raw_source_extension_payload(p, &id, payload);
             parse_newline_or_semicolon_structure(p);
             Some(StructureItemDesc::Pstr_extension(Box::new((
                 (id, payload),
@@ -526,7 +527,6 @@ fn parse_type_params(p: &mut Parser<'_>, parent: &[String]) -> Vec<(CoreTypeIdx,
     {
         return vec![];
     }
-    p.set_diamond_mode();
     let opening_start = p.start_pos.clone();
     p.leave_breadcrumb(Grammar::TypeParams);
     p.next();
@@ -563,7 +563,6 @@ fn parse_type_params(p: &mut Parser<'_>, parent: &[String]) -> Vec<(CoreTypeIdx,
     } else {
         p.expect(Token::GreaterThan);
     }
-    p.pop_diamond_mode();
     p.eat_breadcrumb();
     params
 }
@@ -586,8 +585,6 @@ fn parse_type_definitions(
     let ctx = inline_ctx.into_inner();
     let has_inline_types = !ctx.found_inline_types.is_empty();
     if has_inline_types {
-        let inline_str_idx = p.arena_mut().intern("res.inlineRecordDefinition");
-        let inline_attr: Attribute = (mknoloc(inline_str_idx), Payload::PStr(Box::new(vec![])));
         for (inline_name_idx, loc, type_kind, params) in ctx.found_inline_types.iter() {
             decls.push(TypeDeclaration {
                 ptype_name: with_loc(*inline_name_idx, ctx.outer_name_loc.clone()),
@@ -596,7 +593,8 @@ fn parse_type_definitions(
                 ptype_kind: type_kind.clone(),
                 ptype_private: PrivateFlag::Public,
                 ptype_manifest: None,
-                ptype_attributes: Attributes::from_vec(vec![inline_attr.clone()]),
+                ptype_origin: TypeDeclarationOrigin::Inline_record_definition,
+                ptype_attributes: Attributes::new(),
                 ptype_loc: loc.clone(),
             });
         }
@@ -1853,6 +1851,7 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
                 ptype_kind: TypeKind::Ptype_abstract,
                 ptype_private: private,
                 ptype_manifest: Some(typ_idx),
+                ptype_origin: TypeDeclarationOrigin::Declared,
                 ptype_attributes: Attributes::new(),
                 ptype_loc: type_loc,
             };
@@ -1899,6 +1898,7 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
                 ptype_kind: TypeKind::Ptype_abstract,
                 ptype_private: PrivateFlag::Public,
                 ptype_manifest: Some(typ_idx),
+                ptype_origin: TypeDeclarationOrigin::Declared,
                 ptype_attributes: Attributes::new(),
                 ptype_loc: LocIdx::none(),
             };
@@ -2258,6 +2258,7 @@ fn parse_type_declaration_body(
         ptype_kind: kind,
         ptype_private: private,
         ptype_manifest: manifest,
+        ptype_origin: TypeDeclarationOrigin::Declared,
         ptype_attributes: attrs,
         ptype_loc: loc,
     })
@@ -2661,13 +2662,16 @@ fn parse_constructors_without_leading_bar(p: &mut Parser<'_>) -> Vec<Constructor
     let n_idx = p.arena_mut().push_interned_string(&n);
     let (args, res) = parse_constr_decl_args(p);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    let mut constructors = vec![ConstructorDeclaration {
-        pcd_name: with_loc(n_idx, name_loc),
-        pcd_args: args,
-        pcd_res: res,
-        pcd_loc: loc,
-        pcd_attributes: Attributes::new(),
-    }];
+    let first = crate::ast_helper_type::constructor(
+        p.arena_mut(),
+        loc,
+        Attributes::new(),
+        args,
+        res,
+        None,
+        with_loc(n_idx, name_loc),
+    );
+    let mut constructors = vec![first];
     parse_constructor_declarations_with_bar(p, &mut constructors);
     constructors
 }
@@ -2698,13 +2702,15 @@ fn parse_constructor_impl(
         let loc = p.mk_loc_idx_to_end_of(start_pos_idx, spread_type.ptyp_loc);
         let spread_type_idx = p.arena_mut().push_core_type(spread_type);
         let ellipsis_idx = p.arena_mut().intern("...");
-        return Some(ConstructorDeclaration {
-            pcd_name: with_loc(ellipsis_idx, name_loc),
-            pcd_args: ConstructorArguments::Pcstr_tuple(vec![spread_type_idx]),
-            pcd_res: None,
-            pcd_loc: loc,
-            pcd_attributes: attrs,
-        });
+        return Some(crate::ast_helper_type::constructor(
+            p.arena_mut(),
+            loc,
+            attrs,
+            ConstructorArguments::Pcstr_tuple(vec![spread_type_idx]),
+            None,
+            None,
+            with_loc(ellipsis_idx, name_loc),
+        ));
     }
 
     let name = match &p.token {
@@ -2718,26 +2724,23 @@ fn parse_constructor_impl(
         _ => {
             p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
             let error_idx = p.arena_mut().intern("_");
-            return Some(ConstructorDeclaration {
-                pcd_name: mknoloc(error_idx),
-                pcd_args: ConstructorArguments::Pcstr_tuple(vec![]),
-                pcd_res: None,
-                pcd_loc: p.none_loc(),
-                pcd_attributes: Attributes::new(),
-            });
+            let loc = p.none_loc();
+            return Some(crate::ast_helper_type::constructor(
+                p.arena_mut(),
+                loc,
+                Attributes::new(),
+                ConstructorArguments::Pcstr_tuple(vec![]),
+                None,
+                None,
+                mknoloc(error_idx),
+            ));
         }
     };
 
     let (args, res) = parse_constr_decl_args(p);
     p.eat_breadcrumb();
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    Some(ConstructorDeclaration {
-        pcd_name: name,
-        pcd_args: args,
-        pcd_res: res,
-        pcd_loc: loc,
-        pcd_attributes: attrs,
-    })
+    Some(crate::ast_helper_type::constructor(p.arena_mut(), loc, attrs, args, res, None, name))
 }
 
 
@@ -2773,14 +2776,7 @@ fn label_declaration(
 ) -> LabelDeclaration {
     let loc = p.mk_loc_idx_to_end_of(start_pos_idx, typ.ptyp_loc);
     let typ_idx = p.arena_mut().push_core_type(typ);
-    LabelDeclaration {
-        pld_name: name,
-        pld_mutable: mutable,
-        pld_type: typ_idx,
-        pld_loc: loc,
-        pld_attributes: attrs,
-        pld_optional: optional,
-    }
+    crate::ast_helper_type::field(p.arena_mut(), loc, attrs, mutable, optional, None, name, typ_idx)
 }
 
 /// `Ast_helper.Typ.constr ~loc:name.loc ?attrs {name with txt = Lident name.txt} []`.
@@ -2804,14 +2800,18 @@ fn mutable_flag(p: &mut Parser<'_>) -> MutableFlag {
     }
 }
 
-/// OCaml `parse_field_declaration` (res_core.ml:5227-5260).
+/// OCaml `parse_field_declaration ?extra_attrs` (res_core.ml:5223-5260).
+/// `extra_attrs` are the attributes of the first field, already consumed by
+/// the caller.
 fn parse_field_declaration(
     p: &mut Parser<'_>,
     ctx: InlineCtx<'_>,
     path: Option<&Vec<StrIdx>>,
+    extra_attrs: Attributes,
 ) -> LabelDeclaration {
     let start_pos_idx = p.start_pos_idx();
-    let attrs = parse_attributes(p);
+    let mut attrs = extra_attrs;
+    attrs.extend(parse_attributes(p).into_vec());
     let mutable = mutable_flag(p);
     let (lident, lident_loc) = super::core::parse_lident(p);
     let optional = p.optional(&Token::Question);
@@ -2997,14 +2997,15 @@ fn parse_field_declarations_tracking_objects(
 
 /// OCaml's conversion of spread-record fields into object fields when a string
 /// field was found (res_core.ml:5896-5906, 5981-5986).
-fn object_fields_of_labels(fields: Vec<LabelDeclaration>, p: &Parser<'_>) -> Vec<ObjectField> {
+fn object_fields_of_labels(fields: Vec<LabelDeclaration>, p: &mut Parser<'_>) -> Vec<ObjectField> {
     fields
         .into_iter()
         .map(|ld| {
             if p.arena().get_string(ld.pld_name.txt) == "..." {
                 ObjectField::Oinherit(ld.pld_type)
             } else {
-                ObjectField::Otag(ld.pld_name, ld.pld_attributes, ld.pld_type)
+                let attrs = crate::ast_helper_type::field_attributes_owned(p.arena_mut(), &ld);
+                ObjectField::Otag(ld.pld_name, attrs, ld.pld_type)
             }
         })
         .collect()
@@ -3026,14 +3027,16 @@ fn spread_field(
     typ: CoreTypeIdx,
 ) -> LabelDeclaration {
     let name_idx = p.arena_mut().intern("...");
-    LabelDeclaration {
-        pld_name: with_loc(name_idx, name_loc),
-        pld_mutable: MutableFlag::Immutable,
-        pld_type: typ,
-        pld_loc: loc,
-        pld_attributes: Attributes::new(),
-        pld_optional: false,
-    }
+    crate::ast_helper_type::field(
+        p.arena_mut(),
+        loc,
+        Attributes::new(),
+        MutableFlag::Immutable,
+        false,
+        None,
+        with_loc(name_idx, name_loc),
+        typ,
+    )
 }
 
 /// Object fields after `{` and optional leading attributes on the first
@@ -3175,14 +3178,13 @@ fn parse_record_or_object_decl(
                 )
             } else {
                 let first_attr_start = p.loc_start_idx(attrs.as_slice()[0].0.loc);
-                let mut first = parse_field_declaration(p, ctx, path);
+                let mut first = parse_field_declaration(p, ctx, path, attrs);
                 p.optional(&Token::Comma);
                 let field_loc_end = p.loc_end_idx(first.pld_loc);
                 let field_loc_ghost = p.loc_ghost(first.pld_loc);
                 first.pld_loc = p
                     .arena_mut()
                     .push_loc(first_attr_start, field_loc_end, field_loc_ghost);
-                first.pld_attributes = attrs;
                 let mut fields = vec![first];
                 fields.extend(super::core::parse_comma_delimited_region(
                     p,
@@ -3320,8 +3322,7 @@ fn parse_constr_decl_args(p: &mut Parser<'_>) -> (ConstructorArguments, Option<C
                                 |p| parse_field_declaration_region(p, None, None, None),
                             )
                         } else {
-                            let mut first = parse_field_declaration(p, None, None);
-                            first.pld_attributes = attrs;
+                            let first = parse_field_declaration(p, None, None, attrs);
                             if p.token == Token::Rbrace {
                                 vec![first]
                             } else {
@@ -3498,7 +3499,7 @@ fn parse_external_value_description(
         Token::String(s) => {
             let s = s.clone();
             p.next();
-            vec![p.arena_mut().push_interned_string(&s)]
+            Some(PrimitiveRepr::PrimName(p.arena_mut().push_interned_string(&s)))
         }
         _ => {
             let msg = format!(
@@ -3506,7 +3507,7 @@ fn parse_external_value_description(
                 name_text
             );
             p.err_at(equal_start, equal_end, DiagnosticCategory::Message(msg));
-            vec![]
+            None
         }
     };
 
@@ -3519,8 +3520,6 @@ fn parse_external_value_description(
         pval_loc: loc,
     };
 
-    let inline_attr_name = p.arena_mut().intern("res.inlineRecordDefinition");
-    let inline_attr: Attribute = (mknoloc(inline_attr_name), Payload::PStr(Box::new(vec![])));
     let inline_types = inline_types_found
         .into_iter()
         .map(|(inline_name_idx, loc, kind, params)| TypeDeclaration {
@@ -3530,7 +3529,8 @@ fn parse_external_value_description(
             ptype_kind: kind,
             ptype_private: PrivateFlag::Public,
             ptype_manifest: None,
-            ptype_attributes: Attributes::from_vec(vec![inline_attr.clone()]),
+            ptype_origin: TypeDeclarationOrigin::Inline_record_definition,
+            ptype_attributes: Attributes::new(),
             ptype_loc: loc,
         })
         .collect();
@@ -3552,7 +3552,7 @@ fn parse_sign_let_desc(p: &mut Parser<'_>, attrs: Attributes) -> ValueDescriptio
     ValueDescription {
         pval_name: name,
         pval_type: typ,
-        pval_prim: vec![],
+        pval_prim: None,
         pval_attributes: attrs,
         pval_loc: loc,
     }
@@ -4128,8 +4128,43 @@ pub(super) fn parse_extension(p: &mut Parser<'_>, module_language: bool) -> Exte
     let id = parse_extension_id(p, id_start_idx);
 
     let payload = parse_payload_region(p);
+    let payload = raw_source_extension_payload(p, &id, payload);
 
     (id, payload)
+}
+
+/// The tail of OCaml `parse_extension` (res_core.ml): a `raw` or `ffi`
+/// extension whose payload is a single string expression carries that
+/// string's source spelling as JavaScript source.
+pub(super) fn raw_source_extension_payload(p: &mut Parser<'_>, id: &StringLoc, payload: Payload) -> Payload {
+    if p.arena().get_string(id.txt) == "re" {
+        let start = p.loc_start(id.loc);
+        let end = p.loc_end(id.loc);
+        p.err_at(
+            start,
+            end,
+            DiagnosticCategory::message(
+                "The %re extension has been removed. Use a regexp literal such as /abc/i.",
+            ),
+        );
+    }
+    if !matches!(p.arena().get_string(id.txt), "raw" | "ffi") {
+        return payload;
+    }
+    if let Payload::PStr(items) = &payload
+        && let [item] = items.as_slice()
+        && let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc
+    {
+        let expr_idx = eval.0;
+        let expr = p.arena_mut().get_expr_mut(expr_idx);
+        if let ExpressionDesc::Pexp_constant(constant) = &mut *expr.pexp_desc
+            && let Constant::String(literal) = &**constant
+        {
+            let source = literal.source().to_string();
+            **constant = Constant::RawSource(Cow::Owned(source));
+        }
+    }
+    payload
 }
 
 // ============================================================================

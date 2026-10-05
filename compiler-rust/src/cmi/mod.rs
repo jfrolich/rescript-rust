@@ -12,7 +12,7 @@
 //! - `persistent_env`: Caches loaded modules and provides lookup functions
 
 pub mod cmi_format;
-pub mod cmt_writer;
+pub mod ffi_decode;
 pub mod marshal_reader;
 pub mod persistent_env;
 pub mod portable_types;

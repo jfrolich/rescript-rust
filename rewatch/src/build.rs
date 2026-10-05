@@ -9,6 +9,7 @@ pub mod packages;
 pub mod parse;
 pub mod qos;
 pub mod read_compile_state;
+pub mod tooling;
 
 use self::parse::parser_args;
 use crate::build::compile::{mark_modules_with_deleted_deps_dirty, mark_modules_with_expired_deps_dirty};
@@ -54,6 +55,13 @@ fn is_dirty(module: &Module) -> bool {
 }
 
 fn mark_all_modules_dirty(build_state: &mut BuildCommandState) {
+    mark_modules_dirty(build_state, true);
+}
+
+/// Mark every module for parsing and compilation. Namespace maps are only
+/// reparsed when `namespaces` is set: they are not source files, and a build
+/// that has to compile every module does not otherwise report them as parsed.
+fn mark_modules_dirty(build_state: &mut BuildCommandState, namespaces: bool) {
     for module in build_state.modules.values_mut() {
         module.compile_dirty = true;
         match &mut module.source_type {
@@ -63,13 +71,17 @@ fn mark_all_modules_dirty(build_state: &mut BuildCommandState) {
                     interface.parse_dirty = true;
                 }
             }
-            SourceType::MlMap(mlmap) => mlmap.parse_dirty = true,
+            SourceType::MlMap(mlmap) => {
+                if namespaces {
+                    mlmap.parse_dirty = true;
+                }
+            }
         }
     }
 }
 
 #[derive(Serialize, Debug, Clone)]
-pub struct CompilerArgs {
+struct CompilerArgs {
     pub compiler_args: Vec<String>,
     pub parser_args: Vec<String>,
 }
@@ -209,7 +221,6 @@ pub fn initialize_build(
     plain_output: bool,
     warn_error: Option<String>,
     build_mode: BuildMode,
-    subprocess: bool,
     dump_typed_sexp: bool,
     prod: bool,
     features: Option<Vec<String>>,
@@ -219,7 +230,6 @@ pub fn initialize_build(
         "build.initialize",
         working_dir = %path.display(),
         in_process = build_mode.is_in_process(),
-        subprocess,
         prod
     )
     .entered();
@@ -255,7 +265,6 @@ pub fn initialize_build(
         compiler,
         warn_error,
         build_mode,
-        subprocess,
         dump_typed_sexp,
         features,
         source_map_command,
@@ -420,13 +429,12 @@ pub fn incremental_build_without_lock(
         mark_all_modules_dirty(build_state);
     }
 
-
     // A fresh in-process build has nothing compiled in memory, so every
     // module compiles (in-process builds keep no artifacts on disk).
     let fresh_in_process =
         build_state.build_mode().is_in_process() && build_state.module_registry.lock().unwrap().is_empty();
     if fresh_in_process {
-        mark_all_modules_dirty(build_state);
+        mark_modules_dirty(build_state, false);
     }
 
     let num_dirty_modules = build_state.modules.values().filter(|m| is_dirty(m)).count() as u64;
@@ -800,7 +808,6 @@ pub fn build(
     plain_output: bool,
     warn_error: Option<String>,
     build_mode: BuildMode,
-    subprocess: bool,
     dump_typed_sexp: bool,
     prod: bool,
     features: Option<Vec<String>>,
@@ -809,7 +816,6 @@ pub fn build(
         "rewatch.build",
         working_dir = %path.display(),
         in_process = build_mode.is_in_process(),
-        subprocess,
         prod
     )
     .entered();
@@ -829,7 +835,6 @@ pub fn build(
             plain_output,
             warn_error,
             build_mode,
-            subprocess,
             dump_typed_sexp,
             prod,
             features,
@@ -952,8 +957,7 @@ mod tests {
                 false,
                 true,
                 None,
-                BuildMode::Default,
-                false,
+                BuildMode::ExternalBsc,
                 false,
                 false,
                 None,

@@ -6,12 +6,12 @@ type variant_runtime_representation_issue =
   | Mismatched_as_payload of {
       constructor_name: string;
       expected_typename: Path.t;
-      as_payload: Variant_runtime.tag_type option;
+      as_payload: Variant_runtime.literal_tag option;
     }
   | As_payload_not_elgible_for_coercion of {
       constructor_name: string;
       expected_typename: Path.t;
-      as_payload: Variant_runtime.tag_type;
+      as_payload: Variant_runtime.literal_tag;
     }
   | Inline_record_cannot_be_coerced of {constructor_name: string}
   | Cannot_coerce_non_unboxed_with_payload of {
@@ -72,48 +72,27 @@ let variant_has_same_runtime_representation_as_target ~(target_path : Path.t)
     | Cstr_tuple [] -> (
       (* Check that @as payloads match with the target path to coerce to.
            No @as means the default encoding, which is string *)
-      match as_payload with
-      | None | Some (String _) ->
-        if Path.same target_path Predef.path_string then None
-        else
-          Some
-            (Mismatched_as_payload
-               {
-                 constructor_name = Ident.name c.cd_id;
-                 expected_typename = target_path;
-                 as_payload;
-               })
-      | Some (Int _) ->
-        if Path.same target_path Predef.path_int then None
-        else
-          Some
-            (Mismatched_as_payload
-               {
-                 constructor_name = Ident.name c.cd_id;
-                 expected_typename = target_path;
-                 as_payload;
-               })
-      | Some (Float _) ->
-        if Path.same target_path Predef.path_float then None
-        else
-          Some
-            (Mismatched_as_payload
-               {
-                 constructor_name = Ident.name c.cd_id;
-                 expected_typename = target_path;
-                 as_payload;
-               })
-      | Some (BigInt _) ->
-        if Path.same target_path Predef.path_bigint then None
-        else
-          Some
-            (Mismatched_as_payload
-               {
-                 constructor_name = Ident.name c.cd_id;
-                 expected_typename = target_path;
-                 as_payload;
-               })
-      | Some ((Null | Undefined | Bool _ | Untagged _) as as_payload) ->
+      (* Each literal kind coerces to exactly one predefined type; the kinds
+         with no such type cannot be coerced at all. *)
+      let coercion =
+        match as_payload with
+        | None | Some (String _) -> `Coerces_to Predef.path_string
+        | Some (Int _) -> `Coerces_to Predef.path_int
+        | Some (Float _) -> `Coerces_to Predef.path_float
+        | Some (BigInt _) -> `Coerces_to Predef.path_bigint
+        | Some ((Null | Undefined | Bool _) as payload) -> `Not_eligible payload
+      in
+      match coercion with
+      | `Coerces_to path when Path.same target_path path -> None
+      | `Coerces_to _ ->
+        Some
+          (Mismatched_as_payload
+             {
+               constructor_name = Ident.name c.cd_id;
+               expected_typename = target_path;
+               as_payload;
+             })
+      | `Not_eligible as_payload ->
         Some
           (As_payload_not_elgible_for_coercion
              {
@@ -256,10 +235,10 @@ let can_coerce_polyvariant_to_variant ~row_fields ~variant_constructors ~layout
   let polyvariant_runtime_representations =
     row_fields
     |> List.filter_map (fun (label, (field : Types.row_field)) ->
-           (* Check that there's no payload in the polyvariant *)
-           match field with
-           | Rpresent None -> Some label
-           | _ -> None)
+        (* Check that there's no payload in the polyvariant *)
+        match field with
+        | Rpresent None -> Some label
+        | _ -> None)
   in
   if List.length polyvariant_runtime_representations <> List.length row_fields
   then
@@ -270,25 +249,25 @@ let can_coerce_polyvariant_to_variant ~row_fields ~variant_constructors ~layout
       (fun polyvariant_value ->
         variant_constructors
         |> List.mapi (fun position (c : Types.constructor_declaration) ->
-               let constructor_name = Ident.name c.cd_id in
-               match Variant_runtime.constructor_tag layout position with
-               | Some (String as_runtime_string) ->
-                 (* `@as("")`, does the configured string match the polyvariant value? *)
-                 as_runtime_string = polyvariant_value
-               | Some _ ->
-                 (* Any other `@as` can't match since it's by definition not a string *)
-                 false
-               | None -> (
-                 (* No `@as` means the runtime representation will be the constructor
+            let constructor_name = Ident.name c.cd_id in
+            match Variant_runtime.constructor_tag layout position with
+            | Some (String as_runtime_string) ->
+              (* `@as("")`, does the configured string match the polyvariant value? *)
+              as_runtime_string = polyvariant_value
+            | Some _ ->
+              (* Any other `@as` can't match since it's by definition not a string *)
+              false
+            | None -> (
+              (* No `@as` means the runtime representation will be the constructor
                       name as a string.
 
                       However, there's a special case with unboxed types where there's a
                       string catch-all case. In that case, any polyvariant will match,
                       since the catch-all case will match any string. *)
-                 match (unboxed, c.cd_args) with
-                 | true, Cstr_tuple [{desc = Tconstr (p, _, _)}] ->
-                   Path.same p Predef.path_string
-                 | _ -> polyvariant_value = constructor_name))
+              match (unboxed, c.cd_args) with
+              | true, Cstr_tuple [{desc = Tconstr (p, _, _)}] ->
+                Path.same p Predef.path_string
+              | _ -> polyvariant_value = constructor_name))
         |> List.exists Fun.id)
       polyvariant_runtime_representations
   then Ok ()
@@ -302,5 +281,5 @@ let type_is_variant (typ : (Path.t * Path.t * Types.type_declaration) option) =
 let has_res_pat_variant_spread_attribute attrs =
   attrs
   |> List.find_opt (fun (({txt}, _) : Parsetree.attribute) ->
-         txt = "res.patVariantSpread")
+      txt = "res.patVariantSpread")
   |> Option.is_some

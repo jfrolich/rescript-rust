@@ -37,12 +37,7 @@ let warn_unused_attribute ((({txt; loc} as sloc), _) : Parsetree.attribute) =
   if
     is_checked_attribute txt && (not loc.loc_ghost)
     && not (Used_attributes.is_used_attribute sloc)
-  then
-    (*
-         dump_used_attributes Format.err_formatter;
-       dump_attribute Format.err_formatter attr ;
-    *)
-    Location.prerr_warning loc (Bs_unused_attribute txt)
+  then Location.prerr_warning loc (Bs_unused_attribute txt)
 
 let warn_discarded_unused_attributes (attrs : Parsetree.attributes) =
   if attrs <> [] then Ext_list.iter attrs warn_unused_attribute
@@ -91,26 +86,24 @@ let emit_external_warnings : iterator =
       (fun self ({pexp_loc = loc} as a) ->
         match a.pexp_desc with
         | Pexp_constant const -> check_constant loc const
-        | Pexp_variant (s, None) when Ext_string.is_valid_hash_number s -> (
-          try ignore (Ext_string.hash_number_as_i32_exn s : int32)
-          with _ ->
-            Location.raise_errorf ~loc
-              "Integer literal exceeds int32 range. Use float or BigInt if \
-               larger values are required.")
         | _ -> super.expr self a);
     label_declaration =
       (fun self lbl ->
-        Ext_list.iter lbl.pld_attributes (fun attr ->
-            match attr with
-            | {txt = "as"}, _ -> Used_attributes.mark_used_attribute attr
-            | _ -> ());
+        (* A field's [@as] is taken out of its attributes when it names the
+           field, so one still here is either a second one, which the type
+           checker rejects, or a payload that is not a name. The first is
+           reported already; the second is reported by nothing else, so let it
+           warn as the unused attribute it is. *)
+        Ext_list.iter lbl.pld_attributes
+          (fun (({txt}, payload) as attr : Parsetree.attribute) ->
+            if
+              txt = "as"
+              && Ast_payload.string_literal_of_payload payload <> None
+            then Used_attributes.mark_used_attribute attr);
         super.label_declaration self lbl);
     constructor_declaration =
       (fun self ({pcd_name = {txt; loc}} as ctr) ->
-        let _ =
-          Ast_untagged_variants.process_tag_type
-            ctr.pcd_attributes (* mark @as used in variant cases *)
-        in
+        ignore (Ast_untagged_variants.process_constructor_tag ctr);
         (match txt with
         | "false" | "true" | "()" ->
           Location.raise_errorf ~loc "%s can not be redefined " txt
@@ -119,7 +112,7 @@ let emit_external_warnings : iterator =
     value_description =
       (fun self v ->
         match v with
-        | ({pval_loc; pval_prim = [byte_name]; pval_type} :
+        | ({pval_loc; pval_prim = Some (Prim_name byte_name); pval_type} :
             Parsetree.value_description) -> (
           match byte_name with
           | ("%identity" | "%component_identity")

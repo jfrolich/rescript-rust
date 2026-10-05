@@ -83,7 +83,7 @@ pub(crate) fn move_same_name_export_alias_to_export_tail(
         let binding_is_direct_literal = matches!(
             &initializer.desc,
             ExpressionDesc::Number(_)
-                | ExpressionDesc::Str { .. }
+                | ExpressionDesc::Str(_)
                 | ExpressionDesc::Bool(_)
                 | ExpressionDesc::Undefined { .. }
                 | ExpressionDesc::Null
@@ -281,7 +281,7 @@ fn same_name_export_initializer_kind_ref(
 ) -> TailMoveInitializerKind {
     match &initializer.desc {
         ExpressionDesc::Number(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
         | ExpressionDesc::Bool(_)
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null => TailMoveInitializerKind::Literal,
@@ -354,7 +354,7 @@ pub(crate) fn resolve_tail_move_replacement_expression(
                 current = next.clone();
             }
             ExpressionDesc::Number(_)
-            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Str(_)
             | ExpressionDesc::Bool(_)
             | ExpressionDesc::Undefined { .. }
             | ExpressionDesc::Null => {
@@ -428,7 +428,7 @@ fn resolve_tail_move_replacement_expression_ref(
                 current = next.clone();
             }
             ExpressionDesc::Number(_)
-            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Str(_)
             | ExpressionDesc::Bool(_)
             | ExpressionDesc::Undefined { .. }
             | ExpressionDesc::Null => {
@@ -514,7 +514,7 @@ pub(crate) fn resolve_tail_move_initializer_kind(
                 return Some(TailMoveInitializerKind::Qualified);
             }
             ExpressionDesc::Number(_)
-            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Str(_)
             | ExpressionDesc::Bool(_)
             | ExpressionDesc::Undefined { .. }
             | ExpressionDesc::Null => return Some(TailMoveInitializerKind::Literal),
@@ -556,7 +556,7 @@ fn resolve_tail_move_initializer_kind_ref(
                 return Some(TailMoveInitializerKind::Qualified);
             }
             ExpressionDesc::Number(_)
-            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Str(_)
             | ExpressionDesc::Bool(_)
             | ExpressionDesc::Undefined { .. }
             | ExpressionDesc::Null => return Some(TailMoveInitializerKind::Literal),
@@ -778,7 +778,9 @@ fn expression_uses_ident_only_in_tail_move_safe_positions(
         }
         ExpressionDesc::Var(VIdent::Qualified(_, _))
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
@@ -855,18 +857,21 @@ fn expression_uses_ident_only_in_tail_move_safe_positions(
                 )
             })
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             expression_uses_ident_only_in_tail_move_safe_positions(
                 tag,
                 target,
                 TailMoveUseContext::CallCallee,
-            ) && strings.iter().all(|expr| {
+            ) && values.iter().all(|expr| {
                 expression_uses_ident_only_in_tail_move_safe_positions(
                     expr,
                     target,
                     TailMoveUseContext::Other,
                 )
-            }) && values.iter().all(|expr| {
+            })
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
+            values.iter().all(|expr| {
                 expression_uses_ident_only_in_tail_move_safe_positions(
                     expr,
                     target,
@@ -1012,7 +1017,9 @@ fn expression_mentions_ident_outside_nested_functions(expr: &Expression, target:
         ExpressionDesc::Var(VIdent::Id(ident)) => ident.same(target),
         ExpressionDesc::Var(VIdent::Qualified(_, _))
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
@@ -1052,12 +1059,14 @@ fn expression_mentions_ident_outside_nested_functions(expr: &Expression, target:
                     .iter()
                     .any(|arg| expression_mentions_ident_outside_nested_functions(arg, target))
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             expression_mentions_ident_outside_nested_functions(tag, target)
-                || strings
+                || values
                     .iter()
                     .any(|expr| expression_mentions_ident_outside_nested_functions(expr, target))
-                || values
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
+            values
                     .iter()
                     .any(|expr| expression_mentions_ident_outside_nested_functions(expr, target))
         }
@@ -1197,7 +1206,9 @@ fn substitute_export_alias_use_in_expression(
         ExpressionDesc::Var(VIdent::Id(_))
         | ExpressionDesc::Var(VIdent::Qualified(_, _))
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
@@ -1237,11 +1248,13 @@ fn substitute_export_alias_use_in_expression(
                 substitute_export_alias_use_in_expression(arg, target, replacement);
             }
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             substitute_export_alias_use_in_expression(tag, target, replacement);
-            for string in strings {
-                substitute_export_alias_use_in_expression(string, target, replacement);
+            for value in values {
+                substitute_export_alias_use_in_expression(value, target, replacement);
             }
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
             for value in values {
                 substitute_export_alias_use_in_expression(value, target, replacement);
             }
@@ -1377,7 +1390,9 @@ fn expression_mentions_ident_anywhere(expr: &Expression, target: &Ident) -> bool
         ExpressionDesc::Var(VIdent::Id(ident)) => ident.same(target),
         ExpressionDesc::Var(VIdent::Qualified(_, _))
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
@@ -1415,12 +1430,14 @@ fn expression_mentions_ident_anywhere(expr: &Expression, target: &Ident) -> bool
                     .iter()
                     .any(|arg| expression_mentions_ident_anywhere(arg, target))
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             expression_mentions_ident_anywhere(tag, target)
-                || strings
+                || values
                     .iter()
                     .any(|expr| expression_mentions_ident_anywhere(expr, target))
-                || values
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
+            values
                     .iter()
                     .any(|expr| expression_mentions_ident_anywhere(expr, target))
         }
@@ -1751,7 +1768,9 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Number(_) => {}
         ExpressionDesc::Length(inner, _)
@@ -1785,11 +1804,13 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
                 collect_expression_idents(arg, stats);
             }
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             collect_expression_idents(tag, stats);
-            for string in strings {
-                collect_expression_idents(string, stats);
+            for value in values {
+                collect_expression_idents(value, stats);
             }
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
             for value in values {
                 collect_expression_idents(value, stats);
             }

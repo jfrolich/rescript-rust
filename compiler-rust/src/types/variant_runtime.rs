@@ -77,8 +77,11 @@ pub enum BlockType {
     Unknown,
 }
 
+/// OCaml `Variant_runtime.literal_tag`: the literal value a constructor is
+/// represented by, what `@as` states (or the constructor's own name when it
+/// states nothing). It never describes an inferred untagged payload shape.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum TagType {
+pub enum LiteralTag {
     String(String),
     Int(i32),
     Float(String),
@@ -86,26 +89,77 @@ pub enum TagType {
     Bool(bool),
     Null,
     Undefined,
-    Untagged(BlockType),
 }
 
+/// OCaml `Variant_runtime.tag_type`: information used to recognize a
+/// constructor during matching. A literal identifies a constant or an
+/// object's tag; a payload shape identifies a value represented directly by
+/// its payload.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TagType {
+    Literal(LiteralTag),
+    PayloadShape(BlockType),
+}
+
+/// OCaml `Variant_runtime.tag`: a constructor's name and its optional
+/// explicitly declared runtime literal.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Tag {
+    pub name: String,
+    pub literal: Option<LiteralTag>,
+}
+
+/// OCaml `Variant_runtime.matchable_tag`: a tag widened for matching, where
+/// an untagged payload shape can take part alongside declared literals.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MatchableTag {
     pub name: String,
     pub tag_type: Option<TagType>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct BlockRuntime {
-    pub tag: Tag,
-    pub tag_name: Option<String>,
-    pub untagged: bool,
+/// OCaml `Variant_runtime.to_matchable_tag`.
+pub fn to_matchable_tag(tag: &Tag) -> MatchableTag {
+    MatchableTag {
+        name: tag.name.clone(),
+        tag_type: tag.literal.clone().map(TagType::Literal),
+    }
 }
 
+/// OCaml `Variant_runtime.tagged_block`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Block {
-    pub runtime: BlockRuntime,
-    pub block_type: Option<BlockType>,
+pub struct TaggedBlock {
+    pub tag: Tag,
+    pub tag_name: Option<String>,
+}
+
+/// OCaml `Variant_runtime.block`: an untagged payload always carries the
+/// runtime shape used for dispatch. Only tagged blocks have an emitted tag
+/// field.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Block {
+    Tagged(TaggedBlock),
+    Untagged { tag: Tag, block_type: BlockType },
+}
+
+impl Block {
+    /// `Tagged {tag} | Untagged {tag}`.
+    pub fn tag(&self) -> &Tag {
+        match self {
+            Block::Tagged(TaggedBlock { tag, .. }) | Block::Untagged { tag, .. } => tag,
+        }
+    }
+
+    pub fn is_untagged(&self) -> bool {
+        matches!(self, Block::Untagged { .. })
+    }
+
+    /// The payload shape an untagged block is dispatched on.
+    pub fn block_type(&self) -> Option<&BlockType> {
+        match self {
+            Block::Untagged { block_type, .. } => Some(block_type),
+            Block::Tagged(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -124,7 +178,7 @@ pub struct Configuration {
 pub struct MatchingFacts {
     pub tag_name: Option<String>,
     pub block_types: Vec<BlockType>,
-    pub literal_tags: Vec<TagType>,
+    pub literal_tags: Vec<LiteralTag>,
     pub has_null: bool,
     pub has_undefined: bool,
     pub has_other_literal: bool,
@@ -229,19 +283,20 @@ impl Layout {
         for case in &constructors {
             match case {
                 ConstructorCase::Constant(tag) => {
-                    let tag = tag
-                        .tag_type
+                    // Without an `@as`, a nullary constructor is its own name.
+                    let literal = tag
+                        .literal
                         .clone()
-                        .unwrap_or_else(|| TagType::String(tag.name.clone()));
-                    match tag {
-                        TagType::Null => has_null = true,
-                        TagType::Undefined => has_undefined = true,
+                        .unwrap_or_else(|| LiteralTag::String(tag.name.clone()));
+                    match literal {
+                        LiteralTag::Null => has_null = true,
+                        LiteralTag::Undefined => has_undefined = true,
                         _ => has_other_literal = true,
                     }
-                    literal_tags.insert(0, tag);
+                    literal_tags.insert(0, literal);
                 }
                 ConstructorCase::Block(block) => {
-                    if let Some(block_type) = &block.block_type {
+                    if let Block::Untagged { block_type, .. } = block {
                         block_types.insert(0, block_type.clone());
                     }
                 }
@@ -306,19 +361,9 @@ pub fn plain_layout(
     let constructors = cases
         .into_iter()
         .map(|(name, has_payload)| {
-            let tag = Tag {
-                name,
-                tag_type: None,
-            };
+            let tag = Tag { name, literal: None };
             if has_payload {
-                ConstructorCase::Block(Block {
-                    runtime: BlockRuntime {
-                        tag,
-                        tag_name: None,
-                        untagged: false,
-                    },
-                    block_type: None,
-                })
+                ConstructorCase::Block(Block::Tagged(TaggedBlock { tag, tag_name: None }))
             } else {
                 ConstructorCase::Constant(tag)
             }

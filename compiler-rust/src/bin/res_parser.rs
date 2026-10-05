@@ -16,13 +16,12 @@
 //!   -jsx-version <n>        JSX version (3 or 4)
 //!   -jsx-module <mod>       JSX module (default: react)
 //!   -test-ast-conversion    Test AST conversion roundtrip (parsetree -> parsetree0 -> parsetree)
-//!   -typechecker            Parse for typechecker (not printer)
 
 use clap::Parser as ClapParser;
 use rescript_compiler::binary_ast::{Marshal, MarshalWriter, mapper_from0, mapper_to0, ppx};
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::{
-    Comment, Parser, ParserMode, ParserWarning, Scanner, SignatureItem, Structure, code_frame,
+    Comment, Parser, ParserWarning, Scanner, SignatureItem, Structure, code_frame,
     jsx_ppx, ml_printer, module, printer, sexp, sexp_locs, sexp_locs0,
 };
 use rescript_compiler::source_text::latin1_bytes_to_string;
@@ -102,9 +101,6 @@ struct Args {
     #[arg(long = "jsx-module", default_value = "react")]
     jsx_module: String,
 
-    /// Parse for typechecker (not printer)
-    #[arg(long = "typechecker")]
-    typechecker: bool,
 
     /// Test AST conversion
     #[arg(long = "test-ast-conversion")]
@@ -125,7 +121,6 @@ fn normalize_args() -> Vec<String> {
                 "-width" => "--width".to_string(),
                 "-jsx-version" => "--jsx-version".to_string(),
                 "-jsx-module" => "--jsx-module".to_string(),
-                "-typechecker" => "--typechecker".to_string(),
                 "-test-ast-conversion" => "--test-ast-conversion".to_string(),
                 _ => arg,
             }
@@ -169,18 +164,7 @@ fn run() {
     // Determine if we're parsing an interface
     let is_interface = args.interface || filename.ends_with(".resi") || filename.ends_with(".mli");
 
-    // Determine parser mode based on output format
-    // For sexp/res output (printer), use Default mode where strings get None delimiter
-    // For ML output and type checking, use ParseForTypeChecker mode where strings get Some("js") delimiter
-    // This matches OCaml's for_printer flag behavior
-    let mode = match args.print.as_str() {
-        // res_cli.ml: `for_printer` only for res / sexp / sexp-locs.
-        "sexp" | "sexp-locs" | "res" if !args.typechecker => ParserMode::Default,
-        _ => ParserMode::ParseForTypeChecker,
-    };
-
-    // Parse the file
-    let mut parser = Parser::with_mode(&filename, &source, mode);
+    let mut parser = Parser::new(&filename, &source);
 
     // Parse structure or signature
     if is_interface {
@@ -207,7 +191,10 @@ fn run() {
             // JSX transform.
             let signature = if args.test_ast_conversion {
                 let tree0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
-                mapper_from0::map_signature(parser.arena_mut(), &tree0)
+                mapper_from0::map_signature(parser.arena_mut(), &tree0).unwrap_or_else(|error| {
+                    eprintln!("{error}");
+                    std::process::exit(2)
+                })
             } else {
                 signature
             };
@@ -215,6 +202,7 @@ fn run() {
             let (signature, jsx_warnings) = match jsx_ppx::transform_signature_with_warnings_result(
                 signature,
                 args.jsx_version,
+                &args.jsx_module,
                 parser.arena_mut(),
             ) {
                 Ok(result) => result,
@@ -274,7 +262,7 @@ fn run() {
                 // 3. Marshaled signature (using output_value)
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResIntf01300");
+                let _ = io::stdout().write_all(b"ResIntf01311");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -295,7 +283,7 @@ fn run() {
                 let sig0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResIntf01300");
+                let _ = io::stdout().write_all(b"ResIntf01311");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -339,7 +327,10 @@ fn run() {
             // JSX transform.
             let structure = if args.test_ast_conversion {
                 let tree0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
-                mapper_from0::map_structure(parser.arena_mut(), &tree0)
+                mapper_from0::map_structure(parser.arena_mut(), &tree0).unwrap_or_else(|error| {
+                    eprintln!("{error}");
+                    std::process::exit(2)
+                })
             } else {
                 structure
             };
@@ -347,6 +338,7 @@ fn run() {
             let (structure, jsx_warnings) = match jsx_ppx::transform_structure_with_warnings_result(
                 structure,
                 args.jsx_version,
+                &args.jsx_module,
                 parser.arena_mut(),
             ) {
                 Ok(result) => result,
@@ -415,7 +407,7 @@ fn run() {
                 // 3. Marshaled structure (using output_value)
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResImpl01300");
+                let _ = io::stdout().write_all(b"ResImpl01311");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -436,7 +428,7 @@ fn run() {
                 let str0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResImpl01300");
+                let _ = io::stdout().write_all(b"ResImpl01311");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();

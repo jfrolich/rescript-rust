@@ -84,7 +84,7 @@ module Token = struct
     let sorted_tokens =
       e.tokens
       |> List.sort (fun (l1, c1, _, _) (l2, c2, _, _) ->
-             if l1 = l2 then compare c1 c2 else compare l1 l2)
+          if l1 = l2 then compare c1 c2 else compare l1 l2)
     in
     let arrays =
       sorted_tokens |> List.filter_map (fun t -> e |> emit_token t)
@@ -288,7 +288,7 @@ let command ~debug ~emitter ~source ~kind_file =
           - Here we handle `<` and `>`
 
          Component names:
-          - handled like other Longitent.t, except lowercase id is marked Token.JsxLowercase
+          - handled like other Longident.t, except lowercase id is marked Token.JsxLowercase
       *)
       emitter (* --> <div... *)
       |> emit_jsx_tag ~debug ~name:"<" ~pos:(Loc.start e.pexp_loc);
@@ -357,6 +357,15 @@ let command ~debug ~emitter ~source ~kind_file =
       if debug then
         Printf.printf "Binary operator %s %s\n" op (Loc.to_string loc);
       emitter |> emit_from_loc ~loc ~type_:Operator;
+      Ast_iterator.default_iterator.expr iterator e
+    | Pexp_object_literal fields ->
+      fields
+      |> List.iter (fun ((s : string Asttypes.loc), _) ->
+          if not (Utils.is_first_char_uppercase s.txt) then
+            emitter
+            |> emit_record_label
+                 ~label:{Asttypes.txt = Longident.Lident s.txt; loc = s.loc}
+                 ~debug);
       Ast_iterator.default_iterator.expr iterator e
     | Pexp_record (cases, _) ->
       Ext_list.filter_map cases (fun {lid} ->
@@ -489,19 +498,14 @@ let command ~debug ~emitter ~source ~kind_file =
   in
 
   if kind_file = Files.Res then (
-    let parser =
-      Res_driver.parsing_engine.parse_implementation_from_source
-        ~for_printer:false
-    in
+    let parser = Res_driver.parsing_engine.parse_implementation_from_source in
     let {Res_driver.parsetree = structure; diagnostics} = parser ~source in
     if debug then
       Printf.printf "structure items:%d diagnostics:%d\n"
         (List.length structure) (List.length diagnostics);
     iterator.structure iterator structure |> ignore)
   else
-    let parser =
-      Res_driver.parsing_engine.parse_interface_from_source ~for_printer:false
-    in
+    let parser = Res_driver.parsing_engine.parse_interface_from_source in
     let {Res_driver.parsetree = signature; diagnostics} = parser ~source in
     if debug then
       Printf.printf "signature items:%d diagnostics:%d\n"

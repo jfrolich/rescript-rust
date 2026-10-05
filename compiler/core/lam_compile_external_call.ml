@@ -26,33 +26,14 @@
 
 module E = Js_exp_make
 
-(** 
-   [bind_name] is a hint to the compiler to generate 
-   better names for external module 
-*)
-(* let handle_external
-    ({bundle ; module_bind_name} : External_ffi_types.external_module_name)
-   : Ident.t * string
-   =
-   Lam_compile_env.add_js_module module_bind_name bundle ,
-   bundle *)
-
 let external_var
     ({bundle; module_bind_name; import_attributes} :
-      External_ffi_types.external_module_name) ~dynamic_import =
+      External_ffi_types.external_module_name) =
   let id =
     Lam_compile_env.add_js_module ?import_attributes module_bind_name bundle
-      false ~dynamic_import
+      false ~dynamic_import:false
   in
   E.external_var ?import_attributes ~external_name:bundle id
-
-(* let handle_external_opt
-    (module_name : External_ffi_types.external_module_name option)
-   : (Ident.t * string) option =
-   match module_name with
-   | Some module_name -> Some (handle_external module_name)
-   | None -> None
-*)
 
 type arg_expression = Js_of_lam_variant.arg_expression =
   | Splice0
@@ -98,7 +79,7 @@ let ocaml_to_js_eff ~(arg_label : External_arg_spec.label_noname)
   in
   match arg_type with
   | Arg_cst _ -> assert false
-  (* has to be preprocessed by {!Lam} module first *)
+  (* has to be preprocessed by {!Lambda} first *)
   | Extern_unit ->
     ( (if arg_label = Arg_empty then Splice0 else Splice1 E.unit),
       if Js_analyzer.no_side_effect_expression arg then [] else [arg] )
@@ -229,7 +210,7 @@ let assemble_args_has_splice (arg_types : specs) (args : exprs) :
 
 let translate_scoped_module_val
     (module_name : External_ffi_types.external_module_name option) (fn : string)
-    (scopes : string list) ~dynamic_import =
+    (scopes : string list) =
   match module_name with
   | Some {bundle; module_bind_name; import_attributes} -> (
     match scopes with
@@ -237,7 +218,7 @@ let translate_scoped_module_val
       let default = fn = "default" in
       let id =
         Lam_compile_env.add_js_module ?import_attributes module_bind_name bundle
-          default ~dynamic_import
+          default ~dynamic_import:false
       in
       E.external_var_field ?import_attributes ~external_name:bundle ~field:fn
         ~default id
@@ -246,7 +227,7 @@ let translate_scoped_module_val
       let default = false in
       let id =
         Lam_compile_env.add_js_module ?import_attributes module_bind_name bundle
-          default ~dynamic_import
+          default ~dynamic_import:false
       in
       let start =
         E.external_var_field ?import_attributes ~external_name:bundle ~field:x
@@ -267,31 +248,36 @@ let translate_scoped_access scopes obj =
   | x :: xs -> Ext_list.fold_left xs (E.dot obj x) E.dot
 
 let translate_ffi ?(transformed_jsx = false) (cxt : Lam_compile_context.t)
-    arg_types (ffi : External_ffi_types.external_spec)
-    (args : J.expression list) ~dynamic_import =
-  match ffi with
-  | Js_call {external_module_name = module_name; name = fn; splice; scopes} ->
-    let fn =
-      translate_scoped_module_val module_name fn scopes ~dynamic_import
-    in
-    if splice then
-      let args, eff, dynamic = assemble_args_has_splice arg_types args in
-      let args = if dynamic then E.variadic_args args else args in
-      add_eff eff
-        (E.call ~info:(Js_call_info.na_full_call transformed_jsx) fn args)
-    else
-      let args, eff = assemble_args_no_splice arg_types args in
-      add_eff eff
-      @@ E.call
-           ~info:
-             {
-               arity = Full;
-               call_info = Call_na;
-               call_transformed_jsx = transformed_jsx;
-             }
-           fn args
-  | Js_module_as_fn {external_module_name; splice} ->
-    let fn = external_var external_module_name ~dynamic_import in
+    arg_types ~(prim_name : string) (decl : External_ffi_types.external_decl)
+    (args : J.expression list) =
+  let {External_ffi_types.kind; module_; scopes; variadic = splice; _} = decl in
+  (* a bare [@module] binds the module itself under the primitive name *)
+  let module_itself_name () : External_ffi_types.external_module_name =
+    {
+      bundle = prim_name;
+      module_bind_name = Phint_nothing;
+      import_attributes = None;
+    }
+  in
+  let named_module : External_ffi_types.external_module_name option =
+    match module_ with
+    | Some (Module_named emn) -> Some emn
+    | Some Module_itself | None -> None
+  in
+  let mark_new_object () =
+    (* handle [@@new]: mark the bound identifier (if any) as an object;
+       order matters, since the property affects later code generation *)
+    match cxt.continuation with
+    | Declare (_, id) | Assign id -> Ext_ident.make_js_object id
+    | EffectCall _ | NeedValue _ -> ()
+  in
+  match (kind, module_) with
+  | Decl_val _, Some Module_itself when decl.effective_arity = 0 ->
+    (* the module itself, as a value *)
+    external_var (module_itself_name ())
+  | Decl_val _, Some Module_itself ->
+    (* the module itself, called as a function *)
+    let fn = external_var (module_itself_name ()) in
     if splice then
       let args, eff, dynamic = assemble_args_has_splice arg_types args in
       let args = if dynamic then E.variadic_args args else args in
@@ -302,41 +288,51 @@ let translate_ffi ?(transformed_jsx = false) (cxt : Lam_compile_context.t)
       (* TODO: fix in rest calling convention *)
       add_eff eff
         (E.call ~info:(Js_call_info.na_full_call transformed_jsx) fn args)
-  | Js_new {external_module_name = module_name; name = fn; splice; scopes} ->
-    (* handle [@@new]*)
-    (* This has some side effect, it will
-       mark its identifier (If it has) as an object,
-       ATTENTION:
-       order also matters here, since we mark its jsobject property,
-       it  will affect the code gen later
-       TODO: we should propagate this property
-       as much as we can(in alias table)
-    *)
-    let mark () =
-      match cxt.continuation with
-      | Declare (_, id) | Assign id ->
-        (* Format.fprintf Format.err_formatter "%a@."Ident.print  id; *)
-        Ext_ident.make_js_object id
-      | EffectCall _ | NeedValue _ -> ()
-    in
+  | Decl_new _, Some Module_itself ->
+    (* the module itself, as a class *)
+    let fn = external_var (module_itself_name ()) in
+    let args, eff = assemble_args_no_splice arg_types args in
+    (* TODO: fix in rest calling convention *)
+    add_eff eff
+      (mark_new_object ();
+       E.new_ fn args)
+  | ( (Decl_send _ | Decl_get _ | Decl_set _ | Decl_get_index | Decl_set_index),
+      Some Module_itself ) ->
+    assert false (* rejected during digestion *)
+  | Decl_val {name}, _ when decl.effective_arity = 0 ->
+    (* a global value *)
+    let e = translate_scoped_module_val named_module name scopes in
+    if args = [] then e
+    else E.call ~info:(Js_call_info.na_full_call transformed_jsx) e args
+  | Decl_val {name = fn}, _ ->
+    (* a global (possibly module-scoped) function call *)
+    let fn = translate_scoped_module_val named_module fn scopes in
     if splice then
       let args, eff, dynamic = assemble_args_has_splice arg_types args in
       let args = if dynamic then E.variadic_args args else args in
-      let fn =
-        translate_scoped_module_val module_name fn scopes ~dynamic_import
-      in
       add_eff eff
-        (mark ();
+        (E.call ~info:(Js_call_info.na_full_call transformed_jsx) fn args)
+    else
+      let args, eff = assemble_args_no_splice arg_types args in
+      add_eff eff
+      @@ E.call
+           ~info:{call_info = Call_na; call_transformed_jsx = transformed_jsx}
+           fn args
+  | Decl_new {name = fn}, _ ->
+    if splice then
+      let args, eff, dynamic = assemble_args_has_splice arg_types args in
+      let args = if dynamic then E.variadic_args args else args in
+      let fn = translate_scoped_module_val named_module fn scopes in
+      add_eff eff
+        (mark_new_object ();
          E.new_ fn args)
     else
       let args, eff = assemble_args_no_splice arg_types args in
-      let fn =
-        translate_scoped_module_val module_name fn scopes ~dynamic_import
-      in
+      let fn = translate_scoped_module_val named_module fn scopes in
       add_eff eff
-        (mark ();
+        (mark_new_object ();
          E.new_ fn args)
-  | Js_send {splice; name; js_send_scopes} -> (
+  | Decl_send {name}, _ -> (
     match args with
     | self :: args ->
       (* PR2162 [self_type] more checks in syntax:
@@ -346,48 +342,19 @@ let translate_ffi ?(transformed_jsx = false) (cxt : Lam_compile_context.t)
         let args, eff, dynamic = assemble_args_has_splice arg_types args in
         let args = if dynamic then E.variadic_args args else args in
         add_eff eff
-          (let self = translate_scoped_access js_send_scopes self in
+          (let self = translate_scoped_access scopes self in
            E.call
-             ~info:
-               {
-                 arity = Full;
-                 call_info = Call_na;
-                 call_transformed_jsx = transformed_jsx;
-               }
+             ~info:{call_info = Call_na; call_transformed_jsx = transformed_jsx}
              (E.dot self name) args)
       else
         let args, eff = assemble_args_no_splice arg_types args in
         add_eff eff
-          (let self = translate_scoped_access js_send_scopes self in
+          (let self = translate_scoped_access scopes self in
            E.call
              ~info:(Js_call_info.na_full_call transformed_jsx)
              (E.dot self name) args)
     | _ -> assert false)
-  | Js_module_as_var module_name -> external_var module_name ~dynamic_import
-  | Js_var {name; external_module_name; scopes} ->
-    (* TODO #11
-       1. check args -- error checking
-       2. support [@@scope "window"]
-       we need know whether we should call [add_js_module] or not
-    *)
-    let e =
-      translate_scoped_module_val external_module_name name scopes
-        ~dynamic_import
-    in
-    if args = [] then e
-    else E.call ~info:(Js_call_info.na_full_call transformed_jsx) e args
-  | Js_module_as_class module_name ->
-    let fn = external_var module_name ~dynamic_import in
-    let args, eff = assemble_args_no_splice arg_types args in
-    (* TODO: fix in rest calling convention *)
-    add_eff eff
-      ((match cxt.continuation with
-       | Declare (_, id) | Assign id ->
-         (* Format.fprintf Format.err_formatter "%a@."Ident.print  id; *)
-         Ext_ident.make_js_object id
-       | EffectCall _ | NeedValue _ -> ());
-       E.new_ fn args)
-  | Js_get {js_get_name = name; js_get_scopes = scopes} -> (
+  | Decl_get {name}, _ -> (
     let args, cur_eff = assemble_args_no_splice arg_types args in
     add_eff cur_eff
     @@
@@ -401,8 +368,7 @@ let translate_ffi ?(transformed_jsx = false) (cxt : Lam_compile_context.t)
         "Internal compiler error: @get external called with wrong number of \
          arguments. Expected exactly one object argument."
     (* Note these assertion happens in call site *))
-  | Js_set {js_set_name = name; js_set_scopes = scopes} -> (
-    (* assert (js_splice = false) ;  *)
+  | Decl_set {name}, _ -> (
     let args, cur_eff = assemble_args_no_splice arg_types args in
     add_eff cur_eff
     @@
@@ -411,7 +377,7 @@ let translate_ffi ?(transformed_jsx = false) (cxt : Lam_compile_context.t)
       let obj = translate_scoped_access scopes obj in
       E.assign (E.dot obj name) v
     | _ -> assert false)
-  | Js_get_index {js_get_index_scopes = scopes} -> (
+  | Decl_get_index, _ -> (
     let args, cur_eff = assemble_args_no_splice arg_types args in
     add_eff cur_eff
     @@
@@ -419,7 +385,7 @@ let translate_ffi ?(transformed_jsx = false) (cxt : Lam_compile_context.t)
     | [obj; v] ->
       Js_of_lam_array.ref_array (translate_scoped_access scopes obj) v
     | _ -> assert false)
-  | Js_set_index {js_set_index_scopes = scopes} -> (
+  | Decl_set_index, _ -> (
     let args, cur_eff = assemble_args_no_splice arg_types args in
     add_eff cur_eff
     @@

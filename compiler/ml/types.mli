@@ -53,8 +53,6 @@ type type_expr = {mutable desc: type_desc; mutable level: int; id: int}
     all other known types.
     Whereas [type_expr] is a pure construct which allows referring to existing
     types.
-
-    Note on mutability: TBD.
  *)
 
 and arg = {lbl: arg_label; typ: type_expr}
@@ -72,25 +70,19 @@ and type_desc =
   | Tconstr of Path.t * type_expr list * abbrev_memo ref
       (** [Tconstr (`A.B.t', [t1;...;tn], _)] ==> [(t1,...,tn) A.B.t]
       The last parameter keep tracks of known expansions, see [abbrev_memo]. *)
-  | Tobject of type_expr * (Path.t * type_expr list) option ref
-      (** [Tobject (`f1:t1;...;fn: tn', `None')] ==> [< f1: t1; ...; fn: tn >]
+  | Tobject of type_expr
+      (** [Tobject `f1:t1;...;fn: tn'] ==> [{"f1": t1, ..., "fn": tn}]
       f1, fn are represented as a linked list of types using Tfield and Tnil
-      constructors.
-
-      [Tobject (_, `Some (`A.ct', [t1;...;tn]')] ==> [(t1, ..., tn) A.ct].
-      where A.ct is the type of some class.
-
-      There are also special cases for so-called "class-types", cf. [Typeclass]:
-
-        [Tobject (Tfield(_,_,...(Tfield(_,_,rv)...),
-                         Some(`A.#ct`, [rv;t1;...;tn])]
-             ==> [(t1, ..., tn) #A.ct]
-        [Tobject (_, Some(`A.#ct`, [Tnil;t1;...;tn])] ==> [(t1, ..., tn) A.ct]
-
-      where [rv] is the hidden row variable.
-  *)
-  | Tfield of string * field_kind * type_expr * type_expr
-      (** [Tfield ("foo", Fpresent, t, ts)] ==> [<...; foo : t; ts>] *)
+      constructors, terminated by a row variable when the row is open. *)
+  | Tfield of {
+      name: string;
+      mutability: field_mutability ref;
+      typ: type_expr;
+      rest: type_expr;
+    }
+      (** [Tfield {name = "foo"; mutability; typ; rest}]
+      ==> [{.. "foo": typ, rest}]. [mutability] is a shared cell; inspect its
+      semantic value with [Btype.mutability_repr]. *)
   | Tnil  (** [Tnil] ==> [<...; >] *)
   | Tlink of type_expr  (** Indirection used by unification engine. *)
   | Tsubst of type_expr (* for copying *)
@@ -177,7 +169,15 @@ and abbrev_memo =
   | Mlink of abbrev_memo ref
       (** Abbreviations can be found after this indirection *)
 
-and field_kind = Fvar of field_kind option ref | Fpresent | Fabsent
+(** Assignment capability of an object field.
+
+    The semantic value is [Immutable] or [Mutable]. [Mutability_link] is an
+    internal edge between cells which have the same capability, not a third
+    value. Code making a semantic decision must use [Btype.mutability_repr]
+    rather than inspect a cell directly. *)
+and field_mutability =
+  | Mutability_value of Asttypes.mutable_flag
+  | Mutability_link of field_mutability ref
 
 module Type_ops : sig
   type t = type_expr
@@ -186,9 +186,6 @@ module Type_ops : sig
   val hash : t -> int
 end
 
-(* Maps of methods and instance variables *)
-
-module Meths : Map.S with type key = string
 module Vars : Map.S with type key = string
 
 (* Value descriptions *)
@@ -266,6 +263,15 @@ and record_representation =
 
 and label_declaration = {
   ld_id: Ident.t;
+  ld_runtime_name: string option;
+      (* The name the field has at run time, when it differs from [ld_id].
+         Comes from [@as] on the declaration, as its decoded value: two
+         spellings of one name are one name, so this compares by [=] and is
+         stable in the cmi. Note the asymmetry with [ld_attributes] below,
+         which still carries whole parsetree attributes, source spelling
+         included. That is safe only because every reader of an attribute
+         payload goes through a semantic accessor; anything comparing
+         attributes structurally would be comparing keystrokes. *)
   ld_mutable: mutable_flag;
   ld_optional: bool;
   ld_type: type_expr;
@@ -275,6 +281,8 @@ and label_declaration = {
 
 and constructor_declaration = {
   cd_id: Ident.t;
+  cd_runtime_tag: Variant_runtime.literal_tag option;
+      (* The decoded [@as] value of the constructor. *)
   cd_args: constructor_arguments;
   cd_res: type_expr option;
   cd_loc: Location.t;
@@ -383,6 +391,10 @@ val may_equal_constr :
 
 type label_description = {
   lbl_name: string; (* Short name *)
+  lbl_runtime_name: string;
+      (* The name the field has at run time: its [@as] payload when it has
+         one, otherwise [lbl_name]. Decided once when the declaration is
+         typed, so no consumer re-reads the attribute. *)
   lbl_res: type_expr; (* Type of the result *)
   lbl_arg: type_expr; (* Type of the argument *)
   lbl_mut: mutable_flag; (* Is this a mutable field? *)

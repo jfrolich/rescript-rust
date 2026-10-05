@@ -7,4 +7,4 @@
 
   Did you forget to close this template expression with a backtick?
 
-let value = (({js|unterminated|js})[@res.template ])
+let value = `unterminated`

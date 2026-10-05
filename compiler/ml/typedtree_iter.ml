@@ -182,7 +182,6 @@ end = struct
         match cstr with
         | Tpat_type _ -> ()
         | Tpat_unpack -> ()
-        | Tpat_open _ -> ()
         | Tpat_constraint ct -> iter_core_type ct)
       pat.pat_extra;
     (match pat.pat_desc with
@@ -216,7 +215,7 @@ end = struct
         | cstr, _, _attrs -> (
           match cstr with
           | Texp_constraint ct -> iter_core_type ct
-          | Texp_coerce cty2 -> iter_core_type cty2
+          | Texp_coerce {target} -> iter_core_type target
           | Texp_open _ -> ()))
       exp.exp_extra;
     (match exp.exp_desc with
@@ -286,11 +285,16 @@ end = struct
     | Texp_for_await_of (_id, _, exp1, exp2) ->
       iter_expression exp1;
       iter_expression exp2
-    | Texp_send (exp, _meth, expo) -> (
+    | Texp_template {values} -> List.iter iter_expression values
+    | Texp_tagged_template {tag; values} ->
+      iter_expression tag;
+      List.iter iter_expression values
+    | Texp_object_get (exp, _) -> iter_expression exp
+    | Texp_object_set (exp, _, v) ->
       iter_expression exp;
-      match expo with
-      | None -> ()
-      | Some exp -> iter_expression exp)
+      iter_expression v
+    | Texp_object_literal fields ->
+      List.iter (fun (_, e) -> iter_expression e) fields
     | Texp_letmodule (_id, _, mexpr, exp) ->
       iter_module_expr mexpr;
       iter_expression exp

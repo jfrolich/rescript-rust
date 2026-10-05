@@ -68,11 +68,8 @@ let constant c =
   match c with
   | Const_int i -> Sexp.list [Sexp.atom "Const_int"; Sexp.atom (string_of_int i)]
   | Const_char c -> Sexp.list [Sexp.atom "Const_char"; Sexp.atom (Printf.sprintf "%d" c)]
-  | Const_string (s, delim) ->
-    Sexp.list [Sexp.atom "Const_string"; string s; opt string delim]
+  | Const_string s -> Sexp.list [Sexp.atom "Const_string"; string s]
   | Const_float s -> Sexp.list [Sexp.atom "Const_float"; string s]
-  | Const_int32 i -> Sexp.list [Sexp.atom "Const_int32"; Sexp.atom (Int32.to_string i)]
-  | Const_int64 i -> Sexp.list [Sexp.atom "Const_int64"; Sexp.atom (Int64.to_string i)]
   | Const_bigint (positive, s) ->
     let sign_str = if positive then "+" else "-" in
     Sexp.list [Sexp.atom "Const_bigint"; Sexp.atom sign_str; string s]
@@ -215,18 +212,19 @@ and type_expr_body_inline state te =
   | Tconstr (p, args, _) ->
     let arg_sexps = List.map (type_expr_inline state) args in
     Sexp.list [Sexp.atom "Tconstr"; path p; Sexp.list arg_sexps]
-  | Tobject (ty, _) ->
+  | Tobject ty ->
     let ty_sexp = type_expr_inline state ty in
     Sexp.list [Sexp.atom "Tobject"; ty_sexp]
-  | Tfield (name, kind, ty1, ty2) ->
-    let kind_str = match Btype.field_kind_repr kind with
-      | Fpresent -> "Fpresent"
-      | Fabsent -> "Fabsent"
-      | Fvar _ -> "Fvar"
+  | Tfield {name; mutability; typ = ty1; rest = ty2} ->
+    let mutability_str =
+      match Btype.mutability_repr mutability with
+      | Immutable -> "Immutable"
+      | Mutable -> "Mutable"
     in
     let ty1_sexp = type_expr_inline state ty1 in
     let ty2_sexp = type_expr_inline state ty2 in
-    Sexp.list [Sexp.atom "Tfield"; string name; Sexp.atom kind_str; ty1_sexp; ty2_sexp]
+    Sexp.list
+      [Sexp.atom "Tfield"; string name; Sexp.atom mutability_str; ty1_sexp; ty2_sexp]
   | Tnil -> Sexp.atom "Tnil"
   | Tlink _ -> Sexp.atom "Tlink"  (* Should not happen after Btype.repr *)
   | Tsubst ty ->
@@ -297,8 +295,6 @@ and pat_extra ~with_locs extra loc attrs =
     Sexp.list ([Sexp.atom "Tpat_constraint"; ct_sexp] @ loc_sexp @ [attrs_sexp])
   | Tpat_type (p, _) ->
     Sexp.list ([Sexp.atom "Tpat_type"; path p] @ loc_sexp @ [attrs_sexp])
-  | Tpat_open (p, _, _) ->
-    Sexp.list ([Sexp.atom "Tpat_open"; path p] @ loc_sexp @ [attrs_sexp])
   | Tpat_unpack ->
     Sexp.list ([Sexp.atom "Tpat_unpack"] @ loc_sexp @ [attrs_sexp])
 
@@ -359,9 +355,13 @@ and exp_extra ~with_locs extra loc attrs =
   | Texp_constraint ct ->
     let ct_sexp = core_type ~with_locs ct in
     Sexp.list ([Sexp.atom "Texp_constraint"; ct_sexp] @ loc_sexp @ [attrs_sexp])
-  | Texp_coerce ct ->
-    let ct_sexp = core_type ~with_locs ct in
-    Sexp.list ([Sexp.atom "Texp_coerce"; ct_sexp] @ loc_sexp @ [attrs_sexp])
+  | Texp_coerce {source_type; target; target_type} ->
+    let source_sexp = Sexp.list [Sexp.atom "source"; type_expr source_type] in
+    let ct_sexp = core_type ~with_locs target in
+    let target_sexp = Sexp.list [Sexp.atom "target"; type_expr target_type] in
+    Sexp.list
+      ([Sexp.atom "Texp_coerce"; source_sexp; ct_sexp; target_sexp]
+      @ loc_sexp @ [attrs_sexp])
   | Texp_open (flag, p, _, _) ->
     Sexp.list ([Sexp.atom "Texp_open"; override_flag flag; path p] @ loc_sexp @ [attrs_sexp])
 
@@ -489,10 +489,20 @@ and expression_desc ~with_locs desc =
     let e2_sexp = expression ~with_locs e2 in
     let e3_sexp = expression ~with_locs e3 in
     Sexp.list [Sexp.atom "Texp_for"; ident id; e1_sexp; e2_sexp; direction_flag flag; e3_sexp]
-  | Texp_send (e, Tmeth_name name, arg) ->
+  | Texp_object_get (e, {txt = name; _}) ->
     let e_sexp = expression ~with_locs e in
-    let arg_sexp = opt (expression ~with_locs) arg in
-    Sexp.list [Sexp.atom "Texp_send"; e_sexp; string name; arg_sexp]
+    Sexp.list [Sexp.atom "Texp_object_get"; e_sexp; string name]
+  | Texp_object_set (e1, {txt = name; _}, e2) ->
+    let e1_sexp = expression ~with_locs e1 in
+    let e2_sexp = expression ~with_locs e2 in
+    Sexp.list [Sexp.atom "Texp_object_set"; e1_sexp; string name; e2_sexp]
+  | Texp_object_literal fields ->
+    Sexp.list
+      (Sexp.atom "Texp_object_literal"
+      :: List.map
+           (fun ((s : string Asttypes.loc), e) ->
+             Sexp.list [string s.txt; expression ~with_locs e])
+           fields)
   | Texp_letmodule (id, _, me, e) ->
     let me_sexp = module_expr ~with_locs me in
     let e_sexp = expression ~with_locs e in
@@ -513,6 +523,32 @@ and expression_desc ~with_locs desc =
   | Texp_continue -> Sexp.list [Sexp.atom "Texp_continue"]
   | Texp_for_of _ -> Sexp.list [Sexp.atom "Texp_for_of"]
   | Texp_for_await_of _ -> Sexp.list [Sexp.atom "Texp_for_await_of"]
+  | Texp_tagged_template {tag; raw_sources; values} ->
+    let tag_sexp = expression ~with_locs tag in
+    let values_sexp = List.map (expression ~with_locs) values in
+    Sexp.list
+      [
+        Sexp.atom "Texp_tagged_template";
+        tag_sexp;
+        Sexp.list (List.map string raw_sources);
+        Sexp.list values_sexp;
+      ]
+  | Texp_template {segments; values} ->
+    let values_sexp = List.map (expression ~with_locs) values in
+    Sexp.list
+      [
+        Sexp.atom "Texp_template";
+        Sexp.list
+          (List.map
+             (fun segment ->
+               Sexp.list
+                 [
+                   string (String_literal.template_source segment);
+                   string (String_literal.template_semantic segment);
+                 ])
+             segments);
+        Sexp.list values_sexp;
+      ]
 
 and case ~with_locs c =
   let lhs_sexp = pattern ~with_locs c.c_lhs in
@@ -769,7 +805,12 @@ and value_description ~with_locs vd =
     string vd.val_name.txt;
   ] @ loc @ [
     ct_sexp;
-    Sexp.list (Sexp.atom "prim" :: List.map string vd.val_prim);
+    Sexp.list
+      (Sexp.atom "prim"
+      :: List.map string
+           (match vd.val_prim with
+           | None -> []
+           | Some prim -> Ffi_debug.primitive_repr prim));
     attrs_sexp;
   ])
 

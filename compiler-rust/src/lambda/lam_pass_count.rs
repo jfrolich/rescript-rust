@@ -211,7 +211,7 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
             Lambda::Lassign(_, l) => count(occ, bv, l),
 
             // Lglobal_module: nothing to count (lam_pass_count.ml:140).
-            Lambda::LglobalModule(_, _) => {}
+            Lambda::LglobalModule(_) => {}
 
             // Lprim: count each arg (lam_pass_count.ml:141).
             Lambda::Lprim(prim) => {

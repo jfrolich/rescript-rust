@@ -218,7 +218,7 @@ pub(crate) fn collect_occurs(
                 count(store, occ, local, a, hash_capacity);
                 count(store, occ, local, b, hash_capacity);
             }
-            NodeSnapshot::GlobalModule(_, _)
+            NodeSnapshot::GlobalModule(_)
             | NodeSnapshot::Const(_)
             | NodeSnapshot::Break
             | NodeSnapshot::Continue => {}

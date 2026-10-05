@@ -22,7 +22,8 @@ use crate::types::decl::{
     ValueDescription, ValueKind,
 };
 use crate::types::env::Env;
-use crate::types::type_expr::{FieldKind, RowDesc, RowField, TypeDesc};
+use crate::types::asttypes::MutableFlag as FieldKind;
+use crate::types::type_expr::{RowDesc, RowField, TypeDesc};
 use crate::types::typedtree::ModuleCoercion;
 use crate::types::{TypeContext, TypeExprRef};
 use crate::{parser::code_frame, types::ArgLabel};
@@ -345,7 +346,7 @@ fn push_module_types_symptom(
     let actual_text = format_module_type(type_ctx, actual);
     let expected_text = format_module_type(type_ctx, expected);
     if should_elide_module_mismatch(&actual_text, &expected_text)
-        || should_elide_type_declaration_module_mismatch(error, &actual_text, &expected_text)
+        || should_elide_type_declaration_module_mismatch(error)
     {
         output.push_str("  ...\n");
     } else if is_compact_type_declaration_mismatch(error) {
@@ -660,15 +661,11 @@ fn should_elide_module_mismatch(actual: &str, expected: &str) -> bool {
     actual.len() + expected.len() > 120
 }
 
-fn should_elide_type_declaration_module_mismatch(
-    error: &IncludeModError,
-    actual: &str,
-    expected: &str,
-) -> bool {
+fn should_elide_type_declaration_module_mismatch(error: &IncludeModError) -> bool {
     // OCaml includemod.ml:637-655 bounds the structured `Module_types`
     // symptom, whose declarations still carry @tag attributes even though
-    // Printtyp omits them. Preserve that distinction after the semantic
-    // layout migration rather than inferring it from rendered text.
+    // Printtyp omits them. `@as` no longer counts: it is decided at typedecl
+    // into `cd_runtime_tag`/`ld_runtime_name` and leaves the attributes.
     let has_hidden_tag_layout = matches!(
         error,
         IncludeModError::TypeDeclarationMismatch {
@@ -678,7 +675,7 @@ fn should_elide_type_declaration_module_mismatch(
     );
     matches!(error, IncludeModError::TypeDeclarationMismatch { .. })
         && !is_compact_type_declaration_mismatch(error)
-        && (has_hidden_tag_layout || actual.len() + expected.len() > 80)
+        && has_hidden_tag_layout
 }
 
 /// Whether an `@[<hv>` box at column 2 holding `parts` separated by break
@@ -2171,10 +2168,10 @@ fn value_descriptions<'a>(
     match (&impl_desc.val_kind, &sig_desc.val_kind) {
         (ValueKind::ValPrim(p1), ValueKind::ValPrim(p2)) => {
             // includecore.ml:49-52: normalize both primitives against their
-            // types, then `!Primitive.coerce`.
+            // types, then `Primitive.coercible`.
             let p1 = normalize_primitive(type_ctx, env, impl_desc.val_type, p1);
             let p2 = normalize_primitive(type_ctx, env, expected_ty, p2);
-            if primitive_coerce(&p1, &p2) {
+            if primitive_coercible(&p1, &p2) {
                 Ok(ModuleCoercion::Tcoerce_none)
             } else {
                 dont_match()
@@ -2217,71 +2214,24 @@ fn normalize_primitive(
     }
 }
 
-/// `Primitive.coerce` as set by External_ffi_types (external_ffi_types.ml:237-270).
-fn primitive_coerce(
-    p1: &crate::types::decl::PrimitiveDescription,
-    p2: &crate::types::decl::PrimitiveDescription,
+/// `Primitive.coercible impl intf` (primitive.ml:41-52): can an
+/// implementation's primitive satisfy an interface's during signature
+/// inclusion? The specs must be equal, up to the widening rule in
+/// `External_ffi_types.inclusion_compatible`.
+fn primitive_coercible(
+    impl_: &crate::types::decl::PrimitiveDescription,
+    intf: &crate::types::decl::PrimitiveDescription,
 ) -> bool {
-    use crate::cmi::marshal_reader::OcamlValue;
-    if p1.prim_name == p2.prim_name
-        && p1.prim_arity == p2.prim_arity
-        && p1.prim_native_name == p2.prim_native_name
-    {
-        return true;
-    }
-    fn ffi(native: &str) -> Option<std::rc::Rc<OcamlValue>> {
-        if crate::raw_lambda::convert::is_bs_primitive(native) {
-            crate::raw_lambda::convert::decode_marshaled_ffi_type(native)
-        } else {
-            None
-        }
-    }
-    fn list(value: &OcamlValue) -> Vec<&OcamlValue> {
-        let mut items = Vec::new();
-        let mut current = value;
-        while let Some((0, [head, tail])) = current.as_block_opt() {
-            items.push(head);
-            current = tail;
-        }
-        items
-    }
-    fn same(a: &OcamlValue, b: &OcamlValue) -> bool {
-        match (a, b) {
-            (OcamlValue::Int(x), OcamlValue::Int(y)) => x == y,
-            (OcamlValue::String(x), OcamlValue::String(y)) => x == y,
-            (OcamlValue::Float(x), OcamlValue::Float(y)) => x == y,
-            (OcamlValue::Block(t1, f1), OcamlValue::Block(t2, f2)) => {
-                t1 == t2 && f1.len() == f2.len() && f1.iter().zip(f2.iter()).all(|(x, y)| same(x, y))
+    use crate::types::decl::PrimKind;
+    (impl_.prim_name == intf.prim_name
+        && impl_.prim_arity == intf.prim_arity
+        && impl_.prim_kind == intf.prim_kind)
+        || match (&impl_.prim_kind, &intf.prim_kind) {
+            (PrimKind::KindExternal(impl_ffi), PrimKind::KindExternal(intf_ffi)) => {
+                crate::types::external_ffi_types::inclusion_compatible(impl_ffi, intf_ffi)
             }
             _ => false,
         }
-    }
-    // `Ffi_obj_create` is tag 1 with the parameter list.
-    let (Some(v1), Some(v2)) = (ffi(&p1.prim_native_name), ffi(&p2.prim_native_name)) else {
-        return false;
-    };
-    let (Some((1, [params1])), Some((1, [params2]))) = (v1.as_block_opt(), v2.as_block_opt())
-    else {
-        return false;
-    };
-    let (params1, params2) = (list(params1), list(params2));
-    params1.len() == params2.len()
-        && params1.iter().zip(params2.iter()).all(|(a, b)| {
-            let (Some((0, [a_type, a_label])), Some((0, [b_type, b_label]))) =
-                (a.as_block_opt(), b.as_block_opt())
-            else {
-                return false;
-            };
-            same(a_type, b_type)
-                && (same(a_label, b_label)
-                    // `Obj_optional {name; for_sure_no_nested_option}` (tag 1).
-                    || match (a_label.as_block_opt(), b_label.as_block_opt()) {
-                        (Some((1, [a_name, a_sure])), Some((1, [b_name, b_sure]))) => {
-                            same(a_name, b_name) && a_sure.as_int() <= b_sure.as_int()
-                        }
-                        _ => false,
-                    })
-        })
 }
 
 pub(crate) fn add_sig_item_to_env(item: &SignatureItem, env: &mut Env) {
@@ -2876,10 +2826,6 @@ fn substitute_value_type_paths<'a>(
     ty: TypeExprRef,
     subst: &InclusionSubst,
 ) -> TypeExprRef {
-    if subst.is_empty() {
-        return ty;
-    }
-
     // OCaml compiler/ml/includemod.ml:56-60 applies `Subst.value_description`
     // before more-general checking; compiler/ml/subst.ml:303-309 copies and
     // substitutes the value type rather than mutating the original scheme.
@@ -3609,6 +3555,15 @@ fn fixed_private_object_manifest_for_inclusion(
     if !sig_only.is_empty() {
         return false;
     }
+    // The signature must not grant write capability the implementation
+    // lacks; an implementation's settable field may be abstracted to a
+    // read-only one.
+    if !pairs.iter().all(|(_, impl_mut, _, sig_mut, _)| match sig_mut {
+        FieldKind::Mutable => *impl_mut == FieldKind::Mutable,
+        FieldKind::Immutable => true,
+    }) {
+        return false;
+    }
 
     let mut impl_types = impl_params.to_vec();
     let mut sig_types = sig_params.to_vec();
@@ -3836,11 +3791,11 @@ fn compare_variant_declarations(
 
         if constructor_is_nullary(impl_constructor) && {
             let impl_tag = match &impl_layout.constructors[index] {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
                 crate::types::VariantConstructorCase::Block(_) => unreachable!(),
             };
             let sig_tag = match &sig_layout.constructors[index] {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
                 crate::types::VariantConstructorCase::Block(_) => unreachable!(),
             };
             impl_tag != sig_tag
@@ -3871,19 +3826,12 @@ fn compare_variant_declarations(
 }
 
 pub(crate) fn label_declaration_runtime_name(label: &LabelDeclaration) -> String {
-    label_declaration_as_name(label).unwrap_or_else(|| label.ld_id.name().to_string())
+    // `Record_runtime.declaration_name`.
+    label.declaration_name()
 }
 
 fn label_declaration_as_name(label: &LabelDeclaration) -> Option<String> {
-    label.ld_attributes.iter().find_map(|attr| {
-        if attr.attr_name.txt == "as"
-            && let AttributePayload::Str(value) = &attr.attr_payload
-        {
-            Some(value.clone())
-        } else {
-            None
-        }
-    })
+    label.ld_runtime_name.clone()
 }
 
 fn constructor_is_nullary(constructor: &ConstructorDeclaration) -> bool {
@@ -4291,11 +4239,11 @@ fn flatten_object_fields_for_inclusion(
         match &*desc {
             TypeDesc::Tfield {
                 name,
-                kind,
+                mutability,
                 typ,
                 rest,
             } => {
-                flattened.push((name.clone(), kind.clone(), *typ));
+                flattened.push((name.clone(), type_ctx.mutability_repr(*mutability), *typ));
                 let next = type_ctx.repr(*rest);
                 drop(desc);
                 current = next;
@@ -4358,10 +4306,8 @@ fn associate_object_fields_for_inclusion(
 }
 
 fn object_field_kinds_equal_for_inclusion(left: &FieldKind, right: &FieldKind) -> bool {
-    matches!(
-        (left, right),
-        (FieldKind::Fvar(_), FieldKind::Fvar(_)) | (FieldKind::Fpresent, FieldKind::Fpresent)
-    )
+    // ctype.ml eqtype_fields: the mutabilities must agree.
+    left == right
 }
 
 fn object_fields_equal_for_inclusion(

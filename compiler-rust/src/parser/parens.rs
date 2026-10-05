@@ -21,7 +21,7 @@ pub enum ParenKind {
 
 #[inline]
 fn braces_from_attr(arena: &ParseArena, expr: &Expression) -> Option<ParenKind> {
-    parsetree_viewer::process_braces_attr(arena, expr).map(|attr| ParenKind::Braced(attr.0.loc))
+    parsetree_viewer::process_braces(arena, expr).0.map(ParenKind::Braced)
 }
 
 #[inline]
@@ -39,17 +39,28 @@ fn is_module_pack_constraint(arena: &ParseArena, expr: &Expression) -> bool {
     }
 }
 
-/// Check if an expression needs parentheses/braces.
-pub fn expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
+/// res_parens.ml `expr_with_coercion_kind`.
+fn expr_with_coercion_kind(arena: &ParseArena, coercion_kind: ParenKind, expr: &Expression) -> ParenKind {
     if let Some(kind) = braces_from_attr(arena, expr) {
         return kind;
     }
 
     match &*expr.pexp_desc {
         _ if is_module_pack_constraint(arena, expr) => ParenKind::Nothing,
+        ExpressionDesc::Pexp_coerce(_) => coercion_kind,
         ExpressionDesc::Pexp_constraint(_) => ParenKind::Parenthesized,
         _ => ParenKind::Nothing,
     }
+}
+
+/// Check if an expression needs parentheses/braces.
+pub fn expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
+    expr_with_coercion_kind(arena, ParenKind::Parenthesized, expr)
+}
+
+/// res_parens.ml `expr_allowing_coercion`.
+pub fn expr_allowing_coercion(arena: &ParseArena, expr: &Expression) -> ParenKind {
+    expr_with_coercion_kind(arena, ParenKind::Nothing, expr)
 }
 
 /// Check if expression record row RHS needs parentheses.
@@ -57,7 +68,7 @@ pub fn expr_record_row_rhs(arena: &ParseArena, optional: bool, e: &Expression) -
     let kind = expr(arena, e);
     match kind {
         ParenKind::Nothing if optional => match &*e.pexp_desc {
-            ExpressionDesc::Pexp_ifthenelse(_) | ExpressionDesc::Pexp_fun(_) => {
+            ExpressionDesc::Pexp_ifthenelse(_) | ExpressionDesc::Pexp_ternary(_) | ExpressionDesc::Pexp_fun(_) => {
                 ParenKind::Parenthesized
             }
             _ if parsetree_viewer::is_binary_expression(arena, e) => ParenKind::Parenthesized,
@@ -94,6 +105,7 @@ pub fn call_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
         | ExpressionDesc::Pexp_fun(_)
         | ExpressionDesc::Pexp_newtype(_)
         | ExpressionDesc::Pexp_constraint(_)
+        | ExpressionDesc::Pexp_coerce(_)
         | ExpressionDesc::Pexp_setfield(_)
         | ExpressionDesc::Pexp_match(_)
         | ExpressionDesc::Pexp_try(_)
@@ -101,7 +113,8 @@ pub fn call_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
         | ExpressionDesc::Pexp_for(_)
         | ExpressionDesc::Pexp_for_of(_)
         | ExpressionDesc::Pexp_for_await_of(_)
-        | ExpressionDesc::Pexp_ifthenelse(_) => ParenKind::Parenthesized,
+        | ExpressionDesc::Pexp_ifthenelse(_)
+        | ExpressionDesc::Pexp_ternary(_) => ParenKind::Parenthesized,
         _ if parsetree_viewer::expr_is_uncurried_fun(arena, expr) => ParenKind::Parenthesized,
         _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
         _ => ParenKind::Nothing,
@@ -120,7 +133,7 @@ pub fn structure_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
             ParenKind::Parenthesized
         }
         _ if is_module_pack_constraint(arena, expr) => ParenKind::Nothing,
-        ExpressionDesc::Pexp_constraint(_) => ParenKind::Parenthesized,
+        ExpressionDesc::Pexp_constraint(_) | ExpressionDesc::Pexp_coerce(_) => ParenKind::Parenthesized,
         _ => ParenKind::Nothing,
     }
 }
@@ -151,15 +164,19 @@ pub fn unary_expr_operand(arena: &ParseArena, expr: &Expression) -> ParenKind {
         | ExpressionDesc::Pexp_fun(_)
         | ExpressionDesc::Pexp_newtype(_)
         | ExpressionDesc::Pexp_constraint(_)
+        | ExpressionDesc::Pexp_coerce(_)
         | ExpressionDesc::Pexp_setfield(_)
         | ExpressionDesc::Pexp_extension(_)
+        | ExpressionDesc::Pexp_object_literal(_)
+        | ExpressionDesc::Pexp_object_set(_)
         | ExpressionDesc::Pexp_match(_)
         | ExpressionDesc::Pexp_try(_)
         | ExpressionDesc::Pexp_while(_, _)
         | ExpressionDesc::Pexp_for(_)
         | ExpressionDesc::Pexp_for_of(_)
         | ExpressionDesc::Pexp_for_await_of(_)
-        | ExpressionDesc::Pexp_ifthenelse(_) => ParenKind::Parenthesized,
+        | ExpressionDesc::Pexp_ifthenelse(_)
+        | ExpressionDesc::Pexp_ternary(_) => ParenKind::Parenthesized,
         _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
         _ => ParenKind::Nothing,
     }
@@ -177,11 +194,12 @@ pub fn binary_expr_operand(arena: &ParseArena, is_lhs: bool, expr: &Expression) 
             ParenKind::Nothing
         }
         ExpressionDesc::Pexp_constraint(_)
+        | ExpressionDesc::Pexp_coerce(_)
         | ExpressionDesc::Pexp_fun(_)
         | ExpressionDesc::Pexp_newtype(_) => ParenKind::Parenthesized,
         _ if parsetree_viewer::expr_is_uncurried_fun(arena, expr) => ParenKind::Parenthesized,
         _ if parsetree_viewer::is_binary_expression(arena, expr) => ParenKind::Parenthesized,
-        _ if parsetree_viewer::is_ternary_expr(arena, expr) => ParenKind::Parenthesized,
+        _ if parsetree_viewer::is_ternary_expr(expr) => ParenKind::Parenthesized,
         ExpressionDesc::Pexp_assert(_) if is_lhs => ParenKind::Parenthesized,
         _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
         _ if parsetree_viewer::has_printable_attributes(arena, &expr.pexp_attributes) => {
@@ -297,8 +315,9 @@ pub fn flatten_operand_rhs(
         }
         ExpressionDesc::Pexp_newtype(_)
         | ExpressionDesc::Pexp_setfield(_)
-        | ExpressionDesc::Pexp_constraint(_) => true,
-        _ if parsetree_viewer::is_ternary_expr(arena, rhs) => true,
+        | ExpressionDesc::Pexp_constraint(_)
+        | ExpressionDesc::Pexp_coerce(_) => true,
+        _ if parsetree_viewer::is_ternary_expr(rhs) => true,
         _ => false,
     }
 }
@@ -362,8 +381,9 @@ pub fn flatten_operand_rhs_without_attrs(
         }
         ExpressionDesc::Pexp_newtype(_)
         | ExpressionDesc::Pexp_setfield(_)
-        | ExpressionDesc::Pexp_constraint(_) => true,
-        _ if parsetree_viewer::is_ternary_expr(arena, rhs) => true,
+        | ExpressionDesc::Pexp_constraint(_)
+        | ExpressionDesc::Pexp_coerce(_) => true,
+        _ if parsetree_viewer::is_ternary_expr(rhs) => true,
         _ => false,
     }
 }
@@ -382,17 +402,6 @@ pub fn assert_or_await_expr_rhs(
     if let Some(kind) = braces_from_attr(arena, expr) {
         return kind;
     }
-    assert_or_await_expr_rhs_inner(arena, in_await, expr)
-}
-
-/// Check if await expression RHS needs parens, but IGNORE the res.braces attribute.
-/// OCaml's await printing filters out @res.braces before checking, so `await {x}` prints as `await x`.
-pub fn assert_or_await_expr_rhs_ignore_braces(
-    arena: &ParseArena,
-    in_await: bool,
-    expr: &Expression,
-) -> ParenKind {
-    // Ignore the braces attribute - just check the expression structure
     assert_or_await_expr_rhs_inner(arena, in_await, expr)
 }
 
@@ -430,6 +439,7 @@ fn assert_or_await_expr_rhs_inner(
         | ExpressionDesc::Pexp_fun(_)
         | ExpressionDesc::Pexp_newtype(_)
         | ExpressionDesc::Pexp_constraint(_)
+        | ExpressionDesc::Pexp_coerce(_)
         | ExpressionDesc::Pexp_setfield(_)
         | ExpressionDesc::Pexp_match(_)
         | ExpressionDesc::Pexp_try(_)
@@ -437,7 +447,8 @@ fn assert_or_await_expr_rhs_inner(
         | ExpressionDesc::Pexp_for(_)
         | ExpressionDesc::Pexp_for_of(_)
         | ExpressionDesc::Pexp_for_await_of(_)
-        | ExpressionDesc::Pexp_ifthenelse(_) => ParenKind::Parenthesized,
+        | ExpressionDesc::Pexp_ifthenelse(_)
+        | ExpressionDesc::Pexp_ternary(_) => ParenKind::Parenthesized,
         _ if !in_await && parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
         _ => ParenKind::Nothing,
     }
@@ -479,9 +490,12 @@ pub fn field_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
         }
         ExpressionDesc::Pexp_assert(_)
         | ExpressionDesc::Pexp_extension(_)
+        | ExpressionDesc::Pexp_regexp(_)
+        | ExpressionDesc::Pexp_object_literal(_)
         | ExpressionDesc::Pexp_fun(_)
         | ExpressionDesc::Pexp_newtype(_)
         | ExpressionDesc::Pexp_constraint(_)
+        | ExpressionDesc::Pexp_coerce(_)
         | ExpressionDesc::Pexp_setfield(_)
         | ExpressionDesc::Pexp_match(_)
         | ExpressionDesc::Pexp_try(_)
@@ -489,21 +503,9 @@ pub fn field_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
         | ExpressionDesc::Pexp_for(_)
         | ExpressionDesc::Pexp_for_of(_)
         | ExpressionDesc::Pexp_for_await_of(_)
-        | ExpressionDesc::Pexp_ifthenelse(_) => ParenKind::Parenthesized,
+        | ExpressionDesc::Pexp_ifthenelse(_)
+        | ExpressionDesc::Pexp_ternary(_) => ParenKind::Parenthesized,
         _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
-        _ => ParenKind::Nothing,
-    }
-}
-
-/// Check if set field expression RHS needs parentheses/braces.
-pub fn set_field_expr_rhs(arena: &ParseArena, expr: &Expression) -> ParenKind {
-    if let Some(kind) = braces_from_attr(arena, expr) {
-        return kind;
-    }
-
-    match &*expr.pexp_desc {
-        _ if is_module_pack_constraint(arena, expr) => ParenKind::Nothing,
-        ExpressionDesc::Pexp_constraint(_) => ParenKind::Parenthesized,
         _ => ParenKind::Nothing,
     }
 }
@@ -516,11 +518,12 @@ pub fn ternary_operand(arena: &ParseArena, expr: &Expression) -> ParenKind {
 
     match &*expr.pexp_desc {
         _ if is_module_pack_constraint(arena, expr) => ParenKind::Nothing,
-        ExpressionDesc::Pexp_constraint(_) => ParenKind::Parenthesized,
-        _ if parsetree_viewer::is_fun_newtype(expr) => {
+        ExpressionDesc::Pexp_ternary(_) => ParenKind::Parenthesized,
+        ExpressionDesc::Pexp_constraint(_) | ExpressionDesc::Pexp_coerce(_) => ParenKind::Parenthesized,
+        _ if parsetree_viewer::is_fun_newtype(arena, expr) => {
             let (_, _, return_expr) = parsetree_viewer::fun_expr(arena, expr);
             match &*return_expr.pexp_desc {
-                ExpressionDesc::Pexp_constraint(_) => ParenKind::Parenthesized,
+                ExpressionDesc::Pexp_constraint(_) | ExpressionDesc::Pexp_coerce(_) => ParenKind::Parenthesized,
                 _ => ParenKind::Nothing,
             }
         }
@@ -541,6 +544,11 @@ pub fn jsx_prop_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
         | ExpressionDesc::Pexp_letexception(_)
         | ExpressionDesc::Pexp_letmodule(_)
         | ExpressionDesc::Pexp_open(_) => ParenKind::Nothing,
+        ExpressionDesc::Pexp_braces(braces)
+            if parsetree_viewer::is_block_expr(arena, arena.get_expr(braces.expr)) =>
+        {
+            ParenKind::Nothing
+        }
         _ => {
             if let Some(kind) = braces_from_attr(arena, expr) {
                 return kind;
@@ -563,6 +571,7 @@ pub fn jsx_prop_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
                 | ExpressionDesc::Pexp_pack(_)
                 | ExpressionDesc::Pexp_record { .. }
                 | ExpressionDesc::Pexp_extension(_)
+                | ExpressionDesc::Pexp_object_literal(_)
                 | ExpressionDesc::Pexp_letmodule(_)
                 | ExpressionDesc::Pexp_letexception(_)
                 | ExpressionDesc::Pexp_open(_)
@@ -590,6 +599,11 @@ pub fn jsx_child_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
         | ExpressionDesc::Pexp_letexception(_)
         | ExpressionDesc::Pexp_letmodule(_)
         | ExpressionDesc::Pexp_open(_) => ParenKind::Nothing,
+        ExpressionDesc::Pexp_braces(braces)
+            if parsetree_viewer::is_block_expr(arena, arena.get_expr(braces.expr)) =>
+        {
+            ParenKind::Nothing
+        }
         _ => {
             if let Some(kind) = braces_from_attr(arena, expr) {
                 return kind;
@@ -612,12 +626,14 @@ pub fn jsx_child_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
                 | ExpressionDesc::Pexp_pack(_)
                 | ExpressionDesc::Pexp_record { .. }
                 | ExpressionDesc::Pexp_extension(_)
+                | ExpressionDesc::Pexp_object_literal(_)
                 | ExpressionDesc::Pexp_letmodule(_)
                 | ExpressionDesc::Pexp_letexception(_)
                 | ExpressionDesc::Pexp_open(_)
                 | ExpressionDesc::Pexp_sequence(_, _)
                 | ExpressionDesc::Pexp_let(_)
                 | ExpressionDesc::Pexp_jsx_element(_)
+                | ExpressionDesc::Pexp_regexp(_)
                     if expr.pexp_attributes.is_empty() =>
                 {
                     ParenKind::Nothing
@@ -668,7 +684,7 @@ pub fn mod_expr_functor_constraint(mod_type: &ModuleType) -> bool {
 
 /// Check if braced expression needs explicit braces.
 pub fn braced_expr(arena: &ParseArena, expr: &Expression) -> bool {
-    match &*expr.pexp_desc {
+    match &*parsetree_viewer::unwrap_braces(arena, expr).pexp_desc {
         ExpressionDesc::Pexp_constraint(inner) => {
             let (ref inner_expr_idx, ref typ) = **inner;
             let inner_expr = arena.get_expr(*inner_expr_idx);

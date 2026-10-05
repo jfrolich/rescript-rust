@@ -269,16 +269,16 @@ pub(crate) fn max_ident_stamp_in_expression(expr: &Expression) -> i32 {
             .fold(max_ident_stamp_in_expression(func), |max_stamp, arg| {
                 max_stamp.max(max_ident_stamp_in_expression(arg))
             }),
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             let mut max_stamp = max_ident_stamp_in_expression(tag);
-            for string in strings {
-                max_stamp = max_stamp.max(max_ident_stamp_in_expression(string));
-            }
             for value in values {
                 max_stamp = max_stamp.max(max_ident_stamp_in_expression(value));
             }
             max_stamp
         }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => values
+            .iter()
+            .fold(0, |max_stamp, value| max_stamp.max(max_ident_stamp_in_expression(value))),
         ExpressionDesc::StaticIndex(target, _, _) => max_ident_stamp_in_expression(target),
         ExpressionDesc::New(target, args) => {
             let mut max_stamp = max_ident_stamp_in_expression(target);
@@ -311,7 +311,9 @@ pub(crate) fn max_ident_stamp_in_expression(expr: &Expression) -> i32 {
             max_stamp
         }
         ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Undefined { .. }
@@ -425,7 +427,7 @@ pub(crate) fn insert_rebound_export_before_equivalent_later_binding(
     if !matches!(
         value.desc,
         ExpressionDesc::Number(_)
-            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Str(_)
             | ExpressionDesc::Bool(_)
             | ExpressionDesc::Undefined { .. }
             | ExpressionDesc::Null

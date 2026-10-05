@@ -68,7 +68,7 @@ pub fn parse_with_default() -> Result<Cli, clap::Error> {
 }
 
 /// Parse the provided argv while applying the implicit `build` defaulting rules.
-pub fn parse_with_default_from(raw_args: &[OsString]) -> Result<Cli, clap::Error> {
+fn parse_with_default_from(raw_args: &[OsString]) -> Result<Cli, clap::Error> {
     match Cli::try_parse_from(raw_args) {
         Ok(cli) => Ok(cli),
         Err(err) => {
@@ -203,50 +203,31 @@ pub struct WarnErrorArg {
 }
 
 #[derive(Args, Debug, Clone, Copy)]
-pub struct RustParserArg {
-    /// Development only: parse with the Rust parser but compile with a bsc
-    /// subprocess (file-backed artifacts).
-    #[arg(long, default_value_t = false, num_args = 0..=1, hide = true)]
-    pub rust: bool,
-}
-
-#[derive(Args, Debug, Clone, Copy)]
-pub struct SubprocessArg {
-    /// Development only: run bsc as a subprocess with timeout (use with --rust).
-    #[arg(long, hide = true)]
-    pub subprocess: bool,
-}
-
-#[derive(Args, Debug, Clone, Copy)]
 pub struct InProcessArg {
     /// Accepted for compatibility: builds always compile in-process.
     #[arg(long, hide = true)]
     pub in_process: bool,
 }
 
-/// Environment variable that selects the legacy bsc subprocess build. Only
-/// tooling that drives an external compiler (e.g. the OCaml reference bsc in
-/// parity scripts) should set it.
+/// Test-only environment variable that builds with an external compiler
+/// executable (`RESCRIPT_BSC_EXE`) instead of the in-process compiler. It
+/// exists so parity scripts can build their OCaml reference outputs with the
+/// same build system; it is not a user-facing build mode.
 pub const SUBPROCESS_BUILD_ENV: &str = "RESCRIPT_SUBPROCESS_BUILD";
 
 fn subprocess_build_requested() -> bool {
     std::env::var(SUBPROCESS_BUILD_ENV).is_ok_and(|value| !value.is_empty() && value != "0")
 }
 
-/// Derive the build mode. Builds compile in-process; `--rust` (development)
-/// and `RESCRIPT_SUBPROCESS_BUILD=1` select the file-backed bsc subprocess
-/// modes. Errors if `--rust` and `--in-process` are both set.
-pub fn resolve_build_mode(
-    rust: bool,
-    in_process: bool,
-) -> Result<crate::build::build_types::BuildMode, String> {
+/// Derive the build mode. Builds always compile in-process; only the
+/// test-only [`SUBPROCESS_BUILD_ENV`] selects an external compiler.
+/// `--in-process` is accepted for compatibility.
+pub fn resolve_build_mode(in_process: bool) -> crate::build::build_types::BuildMode {
     use crate::build::build_types::BuildMode;
-    match (rust, in_process) {
-        (true, true) => Err("--rust and --in-process are mutually exclusive".to_string()),
-        (_, true) => Ok(BuildMode::InProcess),
-        (true, false) => Ok(BuildMode::Rust),
-        (false, false) if subprocess_build_requested() => Ok(BuildMode::Default),
-        (false, false) => Ok(BuildMode::InProcess),
+    if !in_process && subprocess_build_requested() {
+        BuildMode::ExternalBsc
+    } else {
+        BuildMode::InProcess
     }
 }
 
@@ -306,13 +287,7 @@ pub struct BuildArgs {
     pub warn_error: WarnErrorArg,
 
     #[command(flatten)]
-    pub rust: RustParserArg,
-
-    #[command(flatten)]
     pub in_process: InProcessArg,
-
-    #[command(flatten)]
-    pub subprocess: SubprocessArg,
 
     #[command(flatten)]
     pub dump_typed_sexp_arg: DumpTypedSexpArg,
@@ -415,16 +390,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn build_rust_flag_is_parsed_normally() {
-        let cli = parse(&["rescript", "build", "--rust"]).expect("expected build command");
-
-        match cli.command {
-            Command::Build(build_args) => assert!(build_args.rust.rust),
-            other => panic!("expected build command, got {other:?}"),
-        }
-    }
-
     // Subcommand flag handling.
     #[test]
     fn respects_global_flag_before_subcommand() {
@@ -437,16 +402,6 @@ mod tests {
     fn invalid_option_for_subcommand_does_not_fallback() {
         let err = parse(&["rescript", "watch", "--no-timing"]).expect_err("expected watch parse failure");
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn watch_rust_flag_is_parsed_normally() {
-        let cli = parse(&["rescript", "watch", "--rust"]).expect("expected watch command");
-
-        match cli.command {
-            Command::Watch(watch_args) => assert!(watch_args.rust.rust),
-            other => panic!("expected watch command, got {other:?}"),
-        }
     }
 
     // Version/help flag handling.
@@ -593,21 +548,6 @@ mod tests {
     }
 
     #[test]
-    fn features_flag_round_trips_through_build_to_watch_args() {
-        let cli = parse(&["rescript", "build", "--features", "a,b"]).expect("expected build command");
-        match cli.command {
-            Command::Build(build_args) => {
-                let watch_args: WatchArgs = build_args.into();
-                assert_eq!(
-                    watch_args.features.parsed(),
-                    Some(vec!["a".to_string(), "b".to_string()])
-                );
-            }
-            other => panic!("expected build command, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn build_features_flag_strips_whitespace() {
         let cli = parse(&["rescript", "build", "--features", " native , experimental "])
             .expect("expected build command");
@@ -636,13 +576,7 @@ pub struct WatchArgs {
     pub warn_error: WarnErrorArg,
 
     #[command(flatten)]
-    pub rust: RustParserArg,
-
-    #[command(flatten)]
     pub in_process: InProcessArg,
-
-    #[command(flatten)]
-    pub subprocess: SubprocessArg,
 
     #[command(flatten)]
     pub dump_typed_sexp_arg: DumpTypedSexpArg,
@@ -657,24 +591,6 @@ pub struct WatchArgs {
     /// Skip dev-dependencies and dev sources (type: "dev")
     #[arg(long, default_value_t = false)]
     pub prod: bool,
-}
-
-impl From<BuildArgs> for WatchArgs {
-    fn from(build_args: BuildArgs) -> Self {
-        Self {
-            folder: build_args.folder,
-            filter: build_args.filter,
-            after_build: build_args.after_build,
-            warn_error: build_args.warn_error,
-            rust: build_args.rust,
-            in_process: build_args.in_process,
-            subprocess: build_args.subprocess,
-            dump_typed_sexp_arg: build_args.dump_typed_sexp_arg,
-            features: build_args.features,
-            clear_screen: false,
-            prod: build_args.prod,
-        }
-    }
 }
 
 #[derive(Subcommand, Clone, Debug)]
@@ -718,6 +634,14 @@ pub enum Command {
         #[command()]
         path: String,
     },
+    /// Run an editor tooling command in the project's running `rescript watch`.
+    ///
+    /// Exits with 69 when no watcher serves the project.
+    Analysis {
+        /// The command and its arguments, as for `rescript-editor-analysis`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        args: Vec<String>,
+    },
 }
 
 impl Deref for FolderArg {
@@ -755,14 +679,6 @@ impl Deref for WarnErrorArg {
 
     fn deref(&self) -> &Self::Target {
         &self.warn_error
-    }
-}
-
-impl Deref for RustParserArg {
-    type Target = bool;
-
-    fn deref(&self) -> &Self::Target {
-        &self.rust
     }
 }
 

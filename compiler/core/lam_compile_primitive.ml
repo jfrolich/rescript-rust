@@ -36,12 +36,6 @@ let ensure_value_unit (st : Lam_compile_context.continuation) e : E.t =
   | EffectCall Not_tail -> e
 (* NeedValue should return a meaningful expression*)
 
-let module_of_expression = function
-  | J.Var (J.Qualified (module_id, value)) -> [(module_id, value)]
-  | J.Call ({expression_desc = J.Var (J.Qualified (module_id, value))}, _, _) ->
-    [(module_id, value)]
-  | _ -> []
-
 let get_module_system () =
   let package_info = Js_packages_state.get_packages_info () in
   let module_system =
@@ -54,56 +48,45 @@ let get_module_system () =
   | [module_system] -> module_system
   | _ -> Commonjs
 
-let call_info =
-  {Js_call_info.arity = Full; call_info = Call_na; call_transformed_jsx = false}
+let call_info = {Js_call_info.call_info = Call_na; call_transformed_jsx = false}
 
 let import_of_path path =
   E.call ~info:call_info (E.js_global "import") [E.str path]
 
-let wrap_then import value =
+(* [import(...).then(m => m.<p0>.<p1>...)] *)
+let wrap_then_path import (path : string list) =
   let arg = Ident.create "m" in
   E.call ~info:call_info (E.dot import "then")
     [
       E.ocaml_fun ~return_unit:false ~async:false ~one_unit_arg:false [arg]
         [
           {
-            statement_desc = J.Return (E.dot (E.var arg) value);
+            statement_desc = J.Return (Ext_list.fold_left path (E.var arg) E.dot);
             comment = None;
             source_loc = None;
           };
         ];
     ]
 
+let wrap_then import value = wrap_then_path import [value]
+
 let translate output_prefix loc (cxt : Lam_compile_context.t)
-    (prim : Lam_primitive.t) (args : J.expression list) : J.expression =
+    (prim : Lambda.primitive) (args : J.expression list) : J.expression =
   match prim with
   | Pis_not_none -> Js_of_lam_option.is_not_none (Ext_list.singleton_exn args)
   | Pcreate_extension s -> E.make_exception s
-  | Pwrap_exn ->
-    E.runtime_call Primitive_modules.exceptions "internalToException" args
   | Praw_js_code {code; code_info} -> E.raw_js_code code_info code
   (* FIXME: save one allocation
      trim can not be done before syntax checking
      otherwise location is incorrect
   *)
-  | Pjs_runtime_apply -> (
+  | Ptagged_template strings -> (
+    (* [tag; value0; ...] plus raw source segments -> tag`...` *)
     match args with
-    | [f; args] -> E.flat_call f args
-    | _ -> assert false)
-  | Pjs_apply -> (
-    match args with
-    | fn :: rest -> E.call ~info:call_info fn rest
-    | _ -> assert false)
-  | Ptagged_template -> (
-    (* [tag; strings_array; values_array] -> tag`...` *)
-    match args with
-    | [
-     fn;
-     {expression_desc = Array strings; _};
-     {expression_desc = Array values; _};
-    ] ->
-      E.tagged_template fn strings values
-    | _ -> assert false)
+    | fn :: values -> E.tagged_template fn strings values
+    | [] -> assert false)
+  | Ptemplate [segment] when args = [] -> E.template_literal segment
+  | Ptemplate segments -> E.interpolated_template segments args
   | Pnull_to_opt -> (
     match args with
     | [e] -> (
@@ -118,44 +101,67 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
       | Var _ | Undefined _ | Null -> Js_of_lam_option.null_undef_to_opt e
       | _ -> E.runtime_call Primitive_modules.option "fromNullable" args)
     | _ -> assert false)
-  (* Compile %import: The module argument for dynamic import is represented as a path,
-     and the module value is expressed through wrapping it with promise.then *)
-  | Pimport -> (
-    match args with
-    | [e] -> (
-      let output_dir = Filename.dirname output_prefix in
-
-      let module_id, module_value =
-        match module_of_expression e.expression_desc with
-        | [module_] -> module_
-        | _ ->
+  (* Compile a dynamic import from its translation-resolved source: the
+     module is registered as a dynamic dependency here, the single place
+     that knows about it, and the emitted form is
+     [import("path")[.then(m => m.<name>)]]. *)
+  | Pimport source -> (
+    let output_dir = Filename.dirname output_prefix in
+    let module_system = get_module_system () in
+    let import_path (module_id : Lam_module_ident.t) =
+      Js_name_of_module_id.string_of_module_id module_id ~output_dir
+        module_system
+    in
+    match source with
+    | Import_module {module_; path} -> (
+      let oid = Lam_module_ident.of_ml ~dynamic_import:true module_ in
+      Lam_compile_env.register_ml_module ~dynamic_import:true module_;
+      let import = import_of_path (import_path oid) in
+      (* the single source of truth for ML export names: a binding named
+         [case] is exported as [$$case], and a hoisted [Operator.\"+"] whose
+         cmj metadata stores the raw flattened name [Operator$+] is
+         exported as [Operator$$plus] *)
+      let ml_export_name = Js_dump_import_export.js_export_name in
+      match path with
+      | [] -> import
+      | [name] -> wrap_then import (ml_export_name name)
+      | _ :: _ :: _ -> (
+        (* a nested path is importable when the target is a hoisted
+           root-level export; the cmj knows *)
+        match
+          Lam_compile_env.find_hoisted_external_export ~dynamic_import:true
+            module_ path
+        with
+        | Some hoisted_name -> wrap_then import (ml_export_name hoisted_name)
+        | None ->
           Location.raise_errorf ~loc
             "Invalid argument: Dynamic import requires a module or module \
              value that is a file as argument. Passing a value or local module \
-             is not allowed."
+             is not allowed."))
+    | Import_external
+        {module_ = {bundle; module_bind_name; import_attributes}; path} -> (
+      let default = path = ["default"] in
+      let id =
+        Lam_compile_env.add_js_module ?import_attributes module_bind_name bundle
+          default ~dynamic_import:true
       in
-
-      let path =
-        let module_system = get_module_system () in
-        Js_name_of_module_id.string_of_module_id
-          {module_id with dynamic_import = true}
-          ~output_dir module_system
+      let oid : Lam_module_ident.t =
+        {
+          id;
+          kind = External {name = bundle; default; import_attributes};
+          dynamic_import = true;
+        }
       in
-
-      match module_value with
-      | Some value -> wrap_then (import_of_path path) value
-      | None -> import_of_path path)
-    | [] | _ ->
-      Location.raise_errorf ~loc
-        "Invalid argument: Dynamic import must take a single module or module \
-         value as its argument.")
-  | Pfn_arity -> E.function_length (Ext_list.singleton_exn args)
+      let import = import_of_path (import_path oid) in
+      match path with
+      | [] -> import
+      | _ :: _ -> wrap_then_path import path))
   | Pobjsize -> E.obj_length (Ext_list.singleton_exn args)
   | Pis_null -> E.is_null (Ext_list.singleton_exn args)
   | Pis_undefined -> E.is_undef (Ext_list.singleton_exn args)
   | Pis_null_undefined -> E.is_null_undefined (Ext_list.singleton_exn args)
   | Ptypeof -> E.typeof (Ext_list.singleton_exn args)
-  | Pjs_unsafe_downgrade _ | Pdebugger | Pjs_fn_method ->
+  | Pjs_object_get _ | Pjs_object_set _ | Pdebugger | Pjs_fn_method ->
     assert false (* already handled by {!Lam_compile} *)
   | Pstringadd -> (
     match args with
@@ -166,7 +172,8 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
   | Psome -> (
     let arg = Ext_list.singleton_exn args in
     match arg.expression_desc with
-    | Null | Object _ | Number _ | Caml_block _ | Array _ | Str _ ->
+    | Null | Object _ | Number _ | Caml_block _ | Array _ | Str _
+    | Template_literal _ ->
       (* This makes sense when type info
          is not available at the definition
          site, and inline recovered it
@@ -174,7 +181,8 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
       E.optional_not_nest_block arg
     | _ -> E.optional_block arg)
   | Psome_not_nest -> E.optional_not_nest_block (Ext_list.singleton_exn args)
-  | Pmakeblock (tag_info, mutable_flag) ->
+  | Pmakeblock tag_info ->
+    let mutable_flag = Lambda.mutable_flag_of_tag_info tag_info in
     (* RUNTIME *)
     Js_of_lam_block.make_block
       (Js_op_util.of_lam_mutable_flag mutable_flag)
@@ -353,14 +361,6 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
     | _ -> assert false)
   | Pfloatofint -> Ext_list.singleton_exn args
   | Pnot -> E.not (Ext_list.singleton_exn args)
-  | Poffsetint n -> E.offset (Ext_list.singleton_exn args) n
-  | Poffsetref n ->
-    let v =
-      Js_of_lam_block.field Lambda.ref_field_info
-        (Ext_list.singleton_exn args)
-        0l
-    in
-    E.seq (E.assign v (E.offset v n)) E.unit
   | Psequand -> (
     (* TODO: rhs is possibly a tail call *)
     match args with
@@ -370,20 +370,6 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
     (* TODO: rhs is possibly a tail call *)
     match args with
     | [e1; e2] -> E.or_ e1 e2
-    | _ -> assert false)
-  | Pisout off -> (
-    match args with
-    (* predicate: [x > range  or x < 0 ]
-       can be simplified if x is positive , x > range
-       if x is negative, fine, its uint is for sure larger than range,
-       the output is not readable, we might change it back.
-
-       Note that if range is small like [1], then the negative of
-       it can be more precise (given integer)
-       a normal case of the compiler is  that it will do a shift
-       in the first step [ (x - 1) > 1 or ( x - 1 ) < 0 ]
-    *)
-    | [range; e] -> E.is_out (E.offset e off) range
     | _ -> assert false)
   | Pstringlength -> E.string_length (Ext_list.singleton_exn args)
   | Pstringrefs | Pstringrefu -> (
@@ -535,7 +521,10 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
     | _ -> assert false)
   | Pstringmin -> (
     match args with
-    | [({expression_desc = Str _} as a); ({expression_desc = Str _} as b)]
+    | [
+     ({expression_desc = Str _ | Template_literal _} as a);
+     ({expression_desc = Str _ | Template_literal _} as b);
+    ]
       when Js_analyzer.is_okay_to_duplicate a
            && Js_analyzer.is_okay_to_duplicate b ->
       E.econd (E.js_comp Clt a b) a b
@@ -543,7 +532,10 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
     | _ -> assert false)
   | Pstringmax -> (
     match args with
-    | [({expression_desc = Str _} as a); ({expression_desc = Str _} as b)]
+    | [
+     ({expression_desc = Str _ | Template_literal _} as a);
+     ({expression_desc = Str _ | Template_literal _} as b);
+    ]
       when Js_analyzer.is_okay_to_duplicate a
            && Js_analyzer.is_okay_to_duplicate b ->
       E.econd (E.js_comp Cgt a b) a b
@@ -575,7 +567,7 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
          {
            name = "::";
            num_nonconst = 1;
-           runtime = Ast_untagged_variants.block_runtime ~name:"::" [];
+           runtime = Ast_untagged_variants.generated_block_runtime ~name:"::";
          })
       args
   | Pmakedict -> (
@@ -584,10 +576,10 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
       E.obj
         (items
         |> List.filter_map (fun (exp : J.expression) ->
-               match exp.expression_desc with
-               | Caml_block ([{expression_desc = Str {txt}}; expr], _, _) ->
-                 Some (Js_op.Lit txt, expr)
-               | _ -> None))
+            match exp.expression_desc with
+            | Caml_block ([{expression_desc = Str txt}; expr], _, _) ->
+              Some (Js_op.Lit txt, expr)
+            | _ -> None))
     | _ -> assert false)
   | Pdict_has -> (
     match args with
@@ -606,12 +598,11 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
     match args with
     | [e] -> {e with expression_desc = Await e}
     | _ -> assert false)
-  (* Lam_compile_external_call.translate loc cxt prim args *)
   (* Test if the argument is a block or an immediate integer *)
   | Pjs_object_create _ -> assert false
-  | Pjs_call {arg_types; ffi; dynamic_import; transformed_jsx} ->
-    Lam_compile_external_call.translate_ffi cxt arg_types ffi args
-      ~dynamic_import ~transformed_jsx
+  | Pjs_call {prim_name; arg_types; ffi; transformed_jsx} ->
+    Lam_compile_external_call.translate_ffi cxt arg_types ~prim_name ffi args
+      ~transformed_jsx
   (* FIXME, this can be removed later *)
   | Pisint -> E.is_type_number (Ext_list.singleton_exn args)
   | Pis_poly_var_block -> E.is_type_object (Ext_list.singleton_exn args)

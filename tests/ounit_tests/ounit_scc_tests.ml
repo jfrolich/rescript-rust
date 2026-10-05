@@ -208,26 +208,6 @@ let handle_lines tiny_test_cases =
     node_array
   | _ -> assert false
 
-let read_file file =
-  let in_chan = open_in_bin file in
-  let nodes_sum = int_of_string (input_line in_chan) in
-  let node_array = Array.init nodes_sum (fun _ -> Vec_int.empty ()) in
-  let rec aux () =
-    match input_line in_chan with
-    | exception End_of_file -> ()
-    | x ->
-      (match Ext_string.split x ' ' with
-      | [a; b] ->
-        let a, b = (int_of_string a, int_of_string b) in
-        Vec_int.push node_array.(a) b
-      | _ -> (* assert false  *) ());
-      aux ()
-  in
-  print_endline "read data into memory";
-  aux ();
-  fst (Ext_scc.graph_check node_array)
-(* 25 *)
-
 let test (input : (string * string list) list) =
   (* string -> int mapping 
   *)
@@ -243,10 +223,10 @@ let test (input : (string * string list) list) =
   let node_array = Array.init nodes_num (fun _ -> Vec_int.empty ()) in
   input
   |> List.iter (fun (x, others) ->
-         let idx = String_hash.find_exn tbl x in
-         others
-         |> List.iter (fun y ->
-                Vec_int.push node_array.(idx) (String_hash.find_exn tbl y)));
+      let idx = String_hash.find_exn tbl x in
+      others
+      |> List.iter (fun y ->
+          Vec_int.push node_array.(idx) (String_hash.find_exn tbl y)));
   Ext_scc.graph_check node_array
 
 let test2 (input : (string * string list) list) =
@@ -267,14 +247,14 @@ let test2 (input : (string * string list) list) =
   let node_array = Array.init nodes_num (fun _ -> Vec_int.empty ()) in
   input
   |> List.iter (fun (x, others) ->
-         let idx = String_hash.find_exn tbl x in
-         others
-         |> List.iter (fun y ->
-                Vec_int.push node_array.(idx) (String_hash.find_exn tbl y)));
+      let idx = String_hash.find_exn tbl x in
+      others
+      |> List.iter (fun y ->
+          Vec_int.push node_array.(idx) (String_hash.find_exn tbl y)));
   let output = Ext_scc.graph node_array in
   output
   |> Int_vec_vec.map_into_array (fun int_vec ->
-         Vec_int.map_into_array (fun i -> other_mapping.(i)) int_vec)
+      Vec_int.map_into_array (fun i -> other_mapping.(i)) int_vec)
 
 let suites =
   __FILE__
@@ -366,11 +346,6 @@ let suites =
                   ("3", ["4"]);
                 ])
              (3, [3; 1; 1]) );
-         (* http://algs4.cs.princeton.edu/42digraph/largeDG.txt *)
-         (* __LOC__ >:: begin fun _ -> *)
-         (*   OUnit.assert_equal (read_file "largeDG.txt") 25 *)
-         (* end *)
-         (* ; *)
          ( __LOC__ >:: fun _ ->
            OUnit.assert_equal
              (test2

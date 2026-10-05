@@ -24,12 +24,40 @@ type constant =
      Suffixes [g-z][G-Z] are accepted by the parser.
      Suffixes except 'l', 'L' are rejected by the typechecker
   *)
-  | Pconst_char of int
-  (* 'c' *)
-  | Pconst_string of string * string option
-  (* "constant"
-     {delim|other constant|delim}
-  *)
+  | Pconst_char of {source: string; semantic: int}
+  (* An ordinary character literal.
+
+     [source] is the text between the single quotes, as produced by the scanner,
+     and is retained for printing. [semantic] is the decoded Unicode code point
+     used by typing and matching. For example, ['\u{1F600}'] produces
+     [{source = "\\u{1F600}"; semantic = 0x1F600}].
+
+     Compiler-created literals use [String_literal.encode_char_source] to derive
+     a canonical [source] from [semantic]. *)
+  | Pconst_string of String_literal.string_literal
+  (* An ordinary double-quoted string literal.
+
+     [source] is the text between the quotes, as produced by the scanner, and is
+     retained for printing. [semantic] is the decoded runtime string used by
+     typing, matching, and optimizations. For example, ["a\\n"] produces
+     a payload whose source is ["a\\n"] and whose semantic value contains an
+     actual newline.
+
+     The scanner preserves user-written escape spelling except that it rewrites
+     legacy three-digit decimal escapes to hexadecimal escapes. Compiler-created
+     Payloads are constructed through [String_literal], which validates this
+     relationship. *)
+  | Pconst_json of string
+  (* The JavaScript source inside a non-interpolated [json`...`] literal. For
+     example, [@as(json`{"ok": true}`)] stores ["{\"ok\": true}"]. Built-in
+     FFI processing consumes this form in supported external attributes;
+     otherwise the frontend rejects it. The string is JavaScript source, not a
+     decoded ReScript string value. *)
+  | Pconst_raw_source of string
+  (* JavaScript source carried by a compiler extension such as [raw] or [ffi].
+     For example, [%raw("x + 1")] stores ["x + 1"]. The extension
+     interprets the string as JavaScript source rather than as a ReScript
+     runtime string value. *)
   | Pconst_float of string * char option
 (* 3.4 2e5 1.4e-4
 
@@ -134,21 +162,27 @@ and package_type = Longident.t loc * (Longident.t loc * core_type) list
        *)
 
 and row_field =
-  | Rtag of label loc * attributes * bool * core_type list
+  | Rtag of label loc * attributes * bool * variant_type_args list
     (* [`A]                   ( true,  [] )
-        [`A of T]              ( false, [T] )
-        [`A of T1 & .. & Tn]   ( false, [T1;...Tn] )
-        [`A of & T1 & .. & Tn] ( true,  [T1;...Tn] )
+        [`A of T]              ( false, [{txt = [T]}] )
+        [`A of T1 & .. & Tn]   ( false, [{txt = [T1]};...;{txt = [Tn]}] )
+        [`A of & T1 & .. & Tn] ( true,  [{txt = [T1]};...;{txt = [Tn]}] )
+
+       Each inner list records the syntactic arity of one payload group:
+       #A(T1, ..., Tn)         [T1; ...; Tn]
+       #A((T1, ..., Tn))       [Ptyp_tuple [T1; ...; Tn]]
 
        - The 2nd field is true if the tag contains a
          constant (empty) constructor.
        - '&' occurs when several types are used for the same constructor
          (see 4.2 in the manual)
 
-       - TODO: switch to a record representation, and keep location
+       - TODO: switch to a record representation
     *)
   | Rinherit of core_type
 (* [ T ] *)
+
+and variant_type_args = core_type list loc
 
 and object_field =
   | Otag of label loc * attributes * core_type
@@ -181,14 +215,27 @@ and pattern_desc =
 
        Invariant: n >= 2
     *)
-  | Ppat_construct of Longident.t loc * pattern option
-    (* C                None
-       C P              Some P
-       C (P1, ..., Pn)  Some (Ppat_tuple [P1; ...; Pn])
+  | Ppat_construct of Longident.t loc * pattern list loc
+    (* C                  []
+       C(P)               [P]
+       C(P1, ..., Pn)     [P1; ...; Pn]
+       C((P1, ..., Pn))   [Ppat_tuple [P1; ...; Pn]]
+
+       The list's location spans the argument parentheses, including both
+       delimiters. For constructors without parentheses or generated nodes,
+       use the enclosing node's location. The v0 bridge uses the payload's
+       location when the original parentheses span is unavailable.
+
+       This list preserves syntax, not the declared constructor arity.
+       Type checking normalizes tuple grouping using the resolved constructor.
     *)
-  | Ppat_variant of label * pattern option
-    (* `A             (None)
-       `A P           (Some P)
+  | Ppat_variant of label * pattern list loc
+    (* #A                  []
+       #A(P)               [P]
+       #A(P1, ..., Pn)     [P1; ...; Pn]
+       #A((P1, ..., Pn))   [Ppat_tuple [P1; ...; Pn]]
+
+       Argument locations follow Ppat_construct.
     *)
   | Ppat_record of
       pattern record_element list * closed_flag * record_pat_rest option
@@ -210,20 +257,18 @@ and pattern_desc =
     *)
   | Ppat_exception of pattern (* exception P *)
   | Ppat_extension of extension (* [%id] *)
-  | Ppat_open of Longident.t loc * pattern
-(* M.(P) *)
-
-and pat_record_label = Longident.t loc * pattern * bool (* optional *)
 
 (* Value expressions *)
 and expression = {
   pexp_desc: expression_desc;
   pexp_loc: Location.t;
-  (* Hack: made pexp_attributes mutable for use in analysis exe. Please do not use elsewhere! *)
-  mutable pexp_attributes: attributes; (* ... [@id1] [@id2] *)
+  pexp_attributes: attributes; (* ... [@id1] [@id2] *)
 }
 
 and expression_desc =
+  | Pexp_braces of {expr: expression; braces_loc: Location.t}
+    (* Explicit braces around an expression. [pexp_loc] stays on the enclosed
+       expression; [braces_loc] covers the delimiters for printing. *)
   | Pexp_ident of Longident.t loc (* x
        M.x
     *)
@@ -270,14 +315,24 @@ and expression_desc =
 
        Invariant: n >= 2
     *)
-  | Pexp_construct of Longident.t loc * expression option
-    (* C                None
-       C E              Some E
-       C (E1, ..., En)  Some (Pexp_tuple[E1;...;En])
+  | Pexp_construct of Longident.t loc * expression list loc
+    (* C                  []
+       C(E)               [E]
+       C(E1, ..., En)     [E1; ...; En]
+       C((E1, ..., En))   [Pexp_tuple [E1; ...; En]]
+
+       Argument locations follow Ppat_construct.
+
+       This list preserves syntax, not the declared constructor arity.
+       Type checking normalizes tuple grouping using the resolved constructor.
     *)
-  | Pexp_variant of label * expression option
-    (* `A             (None)
-       `A E           (Some E)
+  | Pexp_variant of label * expression list loc
+    (* #A                  []
+       #A(E)               [E]
+       #A(E1, ..., En)     [E1; ...; En]
+       #A((E1, ..., En))   [Pexp_tuple [E1; ...; En]]
+
+       Argument locations follow Ppat_construct.
     *)
   | Pexp_record of expression record_element list * expression option
     (* { l1=P1; ...; ln=Pn }     (None)
@@ -290,6 +345,8 @@ and expression_desc =
   | Pexp_array of expression list (* [| E1; ...; En |] *)
   | Pexp_ifthenelse of expression * expression * expression option
     (* if E1 then E2 else E3 *)
+  | Pexp_ternary of expression * expression * expression
+    (* E1 ? E2 : E3. All three operands are required. *)
   | Pexp_sequence of expression * expression (* E1; E2 *)
   | Pexp_break (* break *)
   | Pexp_continue (* continue *)
@@ -302,7 +359,10 @@ and expression_desc =
   | Pexp_coerce of expression * unit * core_type
     (* (E :> T)        (None, T)
          *)
-  | Pexp_send of expression * label loc (*  E # m *)
+  | Pexp_object_get of expression * label loc (* obj["x"] *)
+  | Pexp_object_set of expression * label loc * expression (* obj["x"] = v *)
+  | Pexp_object_literal of (label loc * expression) list
+    (* {"a": 1, "b": true} *)
   | Pexp_letmodule of string loc * module_expr * expression
     (* let module M = ME in E *)
   | Pexp_letexception of extension_constructor * expression
@@ -328,7 +388,29 @@ and expression_desc =
   | Pexp_for_of of pattern * expression * expression
     (* for pattern of array_expr do body_expr *)
   | Pexp_for_await_of of pattern * expression * expression
-(* for await pattern of iterable_expr do body_expr *)
+  (* for await pattern of iterable_expr do body_expr *)
+  | Pexp_regexp of {pattern: string; flags: string}
+  (* Literal source without delimiters; escapes and flag order are preserved.
+     Validation happens during frontend lowering, not AST construction. *)
+  | Pexp_template of {source_segments: string loc list; values: expression list}
+  (* An ordinary backquoted expression. [source_segments] contains the validated
+     text between and around the interpolations, including escape spelling;
+     [values] contains the interpolated expressions. For example, [`plain`]
+     produces [{source_segments = [{txt = "plain"; loc}]; values = []}], while
+     [`hello ${name}!`] produces
+     [{source_segments = [{txt = "hello "; loc}; {txt = "!"; loc}]; values =
+     [name]}]. Each segment retains its source location, and there is always one
+     more source segment than value. *)
+  | Pexp_tagged_template of {
+      tag: expression;
+      raw_sources: string loc list;
+      values: expression list;
+    }
+(* A JavaScript tagged template. For example, [sql`id = ${id}`] produces the
+   expression [sql] as [tag], located strings ["id = "; ""] as [raw_sources],
+   and [values = [id]]. There is always one more raw source than value. Each raw
+   source keeps its exact escape spelling and source location, and may contain
+   an invalid escape, as JavaScript permits for tagged templates. *)
 
 (* an element of a record pattern or expression *)
 and 'a record_element = {lid: Longident.t loc; x: 'a; opt: bool (* optional *)}
@@ -417,15 +499,26 @@ and fun_param = {
 and value_description = {
   pval_name: string loc;
   pval_type: core_type;
-  pval_prim: string list;
+  pval_prim: primitive_repr option;
   pval_attributes: attributes; (* ... [@@id1] [@@id2] *)
   pval_loc: Location.t;
 }
 
 (*
-  val x: T                            (prim = [])
-  external x: T = "s1" ... "sn"       (prim = ["s1";..."sn"])
+  val x: T                            (prim = None)
+  external x: T = "s"                 (prim = Some _)
 *)
+and primitive_repr =
+  | Prim_name of string
+    (* as written in the source: an intrinsic ("%identity", "#raw_expr")
+         or the not-yet-digested JS name of an FFI external *)
+  | Prim_ffi of {name: string; spec: External_ffi_types.t}
+    (* produced by the frontend digestion of an FFI external's
+       attributes; never observed by external PPXes, which run before
+       digestion *)
+  | Prim_inline_const of External_ffi_types.inline_const
+(* an [@inline(<literal>)] value declaration: a compile-time constant,
+   not an FFI; produced by digestion like [Prim_ffi] *)
 
 (* Type declarations *)
 and type_declaration = {
@@ -437,9 +530,14 @@ and type_declaration = {
   ptype_kind: type_kind;
   ptype_private: private_flag; (* = private ... *)
   ptype_manifest: core_type option; (* = T *)
+  ptype_origin: type_declaration_origin;
   ptype_attributes: attributes; (* ... [@@id1] [@@id2] *)
   ptype_loc: Location.t;
 }
+
+(* Inline records in field and external types are lifted to named declarations
+   for type checking. Keep their source origin separate from user attributes. *)
+and type_declaration_origin = Declared | Inline_record_definition
 
 (*
   type t                     (abstract, no manifest)
@@ -459,6 +557,12 @@ and type_kind =
 
 and label_declaration = {
   pld_name: string loc;
+  pld_runtime_name: String_literal.string_literal loc option;
+      (* The [@as("...")] rename, taken out of the attributes when the field is
+         built. The attribute is the surface syntax; this is what it means.
+         The literal keeps its source spelling, and the location is the
+         attribute's own, so the printer can put it back exactly as it was
+         written. *)
   pld_mutable: mutable_flag;
   pld_optional: bool;
   pld_type: core_type;
@@ -473,11 +577,24 @@ and label_declaration = {
 *)
 and constructor_declaration = {
   pcd_name: string loc;
+  pcd_runtime_tag: constructor_tag loc option;
+      (* The [@as(...)] runtime tag, taken out of the attributes when the
+         constructor is built. The literal retains the source information
+         needed to print the attribute back where it was written. *)
   pcd_args: constructor_arguments;
   pcd_res: core_type option;
   pcd_loc: Location.t;
   pcd_attributes: attributes; (* C of ... [@id1] [@id2] *)
 }
+
+and constructor_tag =
+  | Pct_string of String_literal.string_literal
+  | Pct_int of string
+  | Pct_float of string
+  | Pct_bigint of string
+  | Pct_bool of bool
+  | Pct_null
+  | Pct_undefined
 
 and constructor_arguments =
   | Pcstr_tuple of core_type list

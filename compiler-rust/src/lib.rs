@@ -37,6 +37,7 @@
 #![warn(rust_2018_idioms)]
 #![allow(clippy::uninlined_format_args)] // Style preference, not a correctness issue
 
+pub mod analysis;
 pub mod arena;
 pub mod binary_ast;
 pub mod cache;
@@ -67,6 +68,9 @@ pub mod process_cwd;
 pub mod raw_lambda;
 /// Source text decoding helpers.
 pub mod source_text;
+pub mod string_literal;
+pub mod ast_payload;
+pub mod ast_helper_type;
 /// Optional aggregate compiler phase timings.
 pub mod timing;
 pub mod types;

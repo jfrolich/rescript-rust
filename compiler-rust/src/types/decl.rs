@@ -39,6 +39,14 @@ pub enum ValueKind {
     ValPrim(PrimitiveDescription),
 }
 
+/// `Primitive.prim_kind`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PrimKind {
+    KindIntrinsic,
+    KindExternal(Box<crate::types::external_ffi_types::ExternalFfi>),
+    KindInlineConst(Box<crate::types::external_ffi_types::InlineConst>),
+}
+
 /// Description of a primitive operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrimitiveDescription {
@@ -46,8 +54,9 @@ pub struct PrimitiveDescription {
     pub prim_name: String,
     /// Arity
     pub prim_arity: i32,
-    /// Native name (if different)
-    pub prim_native_name: String,
+    /// What the primitive is: an intrinsic, a digested external or an inline
+    /// constant (`Primitive.prim_kind`).
+    pub prim_kind: PrimKind,
     /// Native float flag
     pub prim_native_float: bool,
     /// Is it from a type constructor instead of a concrete function type?
@@ -274,6 +283,9 @@ pub enum TypeRepresentation {
 pub struct LabelDeclaration {
     /// Label identifier
     pub ld_id: Ident,
+    /// The name the field has at run time when an `@as` renames it, as its
+    /// decoded value (OCaml `ld_runtime_name`).
+    pub ld_runtime_name: Option<String>,
     /// Is the field mutable?
     pub ld_mutable: MutableFlag,
     /// Is the field optional?
@@ -286,11 +298,24 @@ pub struct LabelDeclaration {
     pub ld_attributes: Vec<Attribute>,
 }
 
+impl LabelDeclaration {
+    /// OCaml `Record_runtime.declaration_name`: the field's runtime name,
+    /// its `@as` rename or else its declared name.
+    pub fn declaration_name(&self) -> String {
+        match &self.ld_runtime_name {
+            Some(name) => name.clone(),
+            None => self.ld_id.name().to_string(),
+        }
+    }
+}
+
 /// A constructor declaration in a variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstructorDeclaration {
     /// Constructor identifier
     pub cd_id: Ident,
+    /// The decoded `@as` value of the constructor (OCaml `cd_runtime_tag`).
+    pub cd_runtime_tag: Option<super::variant_runtime::LiteralTag>,
     /// Constructor arguments
     pub cd_args: ConstructorArguments,
     /// Result type (for GADTs)
@@ -402,6 +427,9 @@ pub fn may_equal_constructor(c1: &ConstructorDescription, c2: &ConstructorDescri
 pub struct LabelDescription {
     /// Short name
     pub lbl_name: String,
+    /// The name the field has at run time: its `@as` payload when it has
+    /// one, otherwise `lbl_name` (OCaml `lbl_runtime_name`).
+    pub lbl_runtime_name: String,
     /// Result type (the record type)
     pub lbl_res: TypeExprRef,
     /// Argument type (the field type)
@@ -608,6 +636,34 @@ pub struct Attribute {
     pub attr_payload: AttributePayload,
     /// Source location
     pub attr_loc: Location,
+    /// The complete `Parsetree.payload`. OCaml `Types` attributes are
+    /// `Parsetree.attributes` (compiler/ml/types.mli), so declarations keep
+    /// the parser payload verbatim and `.cmi`/`.cmt` files marshal it back.
+    /// `None` only for attributes the compiler synthesizes without a source
+    /// payload.
+    #[serde(default)]
+    pub attr_payload_raw: Option<Box<PayloadValue>>,
+}
+
+/// A `Parsetree.payload` in its marshalled shape, independent of any
+/// compilation's `ParseArena` so it can cross compilation units like the
+/// rest of a `Types` signature. `Lexing.position` records are explicit so
+/// writers share them like every other position they emit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PayloadValue {
+    /// An immediate (`int`, constant constructor, `bool`, `unit`, ...).
+    Int(i64),
+    /// A string.
+    Str(String),
+    /// A block with its tag and fields.
+    Block(u8, Vec<PayloadValue>),
+    /// A `Lexing.position` (`{pos_fname; pos_lnum; pos_bol; pos_cnum}`).
+    Position {
+        file: String,
+        line: i32,
+        bol: i32,
+        cnum: i32,
+    },
 }
 
 /// Attribute payload.
@@ -644,36 +700,58 @@ pub enum AttributePayload {
     Structure(Vec<(String, String)>),
 }
 
+/// Visitor over the locations of a signature (see [`walk_signature_locations`]).
+pub trait SignatureLocationVisitor {
+    /// A declaration or attribute-name location.
+    fn location(&mut self, loc: &mut Location);
+    /// An attribute: by default its own locations.
+    fn attribute(&mut self, attr: &mut Attribute) {
+        self.location(&mut attr.attr_loc);
+        self.location(&mut attr.attr_name.loc);
+    }
+}
+
 /// Visit every `Location` of a signature: declaration locations and the
 /// locations of their attributes, recursively through module types.
 pub fn for_each_signature_location(sig: &mut [SignatureItem], f: &mut dyn FnMut(&mut Location)) {
-    fn attrs(attrs: &mut [Attribute], f: &mut dyn FnMut(&mut Location)) {
+    struct Locations<'a>(&'a mut dyn FnMut(&mut Location));
+    impl SignatureLocationVisitor for Locations<'_> {
+        fn location(&mut self, loc: &mut Location) {
+            (self.0)(loc);
+        }
+    }
+    walk_signature_locations(sig, &mut Locations(f));
+}
+
+/// Walk the declarations of a signature, recursively through module types,
+/// reporting their locations and attributes to `v`.
+pub fn walk_signature_locations(sig: &mut [SignatureItem], v: &mut dyn SignatureLocationVisitor) {
+    fn attrs(attrs: &mut [Attribute], v: &mut dyn SignatureLocationVisitor) {
         for attr in attrs {
-            f(&mut attr.attr_loc);
-            f(&mut attr.attr_name.loc);
+            v.attribute(attr);
         }
     }
-    fn labels(labels: &mut [LabelDeclaration], f: &mut dyn FnMut(&mut Location)) {
+    fn labels(labels: &mut [LabelDeclaration], v: &mut dyn SignatureLocationVisitor) {
         for ld in labels {
-            f(&mut ld.ld_loc);
-            attrs(&mut ld.ld_attributes, f);
+            v.location(&mut ld.ld_loc);
+            attrs(&mut ld.ld_attributes, v);
         }
     }
-    fn args(args: &mut ConstructorArguments, f: &mut dyn FnMut(&mut Location)) {
+    fn args(args: &mut ConstructorArguments, v: &mut dyn SignatureLocationVisitor) {
         if let ConstructorArguments::CstrRecord(lds) = args {
-            labels(lds, f);
+            labels(lds, v);
         }
     }
-    fn module_type(mty: &mut ModuleType, f: &mut dyn FnMut(&mut Location)) {
+    fn module_type(mty: &mut ModuleType, v: &mut dyn SignatureLocationVisitor) {
         match mty {
-            ModuleType::MtySignature(sig) => for_each_signature_location(&mut std::sync::Arc::make_mut(sig)[..], f),
+            ModuleType::MtySignature(sig) => walk_signature_locations(&mut std::sync::Arc::make_mut(sig)[..], v),
             ModuleType::MtyFunctor {
                 param_type, result, ..
             } => {
                 if let Some(param) = param_type {
-                    module_type(param, f);
+                    module_type(param, v);
                 }
-                module_type(result, f);
+                module_type(result, v);
             }
             ModuleType::MtyIdent(_) | ModuleType::MtyAlias(..) => {}
         }
@@ -681,47 +759,78 @@ pub fn for_each_signature_location(sig: &mut [SignatureItem], f: &mut dyn FnMut(
     for item in sig {
         match item {
             SignatureItem::SigValue(_, vd) => {
-                f(&mut vd.val_loc);
-                attrs(&mut vd.val_attributes, f);
+                v.location(&mut vd.val_loc);
+                attrs(&mut vd.val_attributes, v);
             }
             SignatureItem::SigType(_, td, _) => {
                 let td = std::sync::Arc::make_mut(td);
-                f(&mut td.type_loc);
-                attrs(&mut td.type_attributes, f);
+                v.location(&mut td.type_loc);
+                attrs(&mut td.type_attributes, v);
                 match &mut td.type_kind {
-                    TypeKind::TypeRecord(lds, _) => labels(lds, f),
+                    TypeKind::TypeRecord(lds, _) => labels(lds, v),
                     TypeKind::TypeVariant(cds, _) => {
                         for cd in cds {
-                            f(&mut cd.cd_loc);
-                            attrs(&mut cd.cd_attributes, f);
-                            args(&mut cd.cd_args, f);
+                            v.location(&mut cd.cd_loc);
+                            attrs(&mut cd.cd_attributes, v);
+                            args(&mut cd.cd_args, v);
                         }
                     }
                     TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
                 }
                 for inlined in &mut td.type_inlined_types {
                     let TypeInlinedType::Record { labels: lds, .. } = inlined;
-                    labels(lds, f);
+                    labels(lds, v);
                 }
             }
             SignatureItem::SigTypext(_, ext, _) => {
-                f(&mut ext.ext_loc);
-                attrs(&mut ext.ext_attributes, f);
-                args(&mut ext.ext_args, f);
+                v.location(&mut ext.ext_loc);
+                attrs(&mut ext.ext_attributes, v);
+                args(&mut ext.ext_args, v);
             }
             SignatureItem::SigModule(_, md, _) => {
-                f(&mut md.md_loc);
-                attrs(&mut md.md_attributes, f);
-                module_type(&mut md.md_type, f);
+                v.location(&mut md.md_loc);
+                attrs(&mut md.md_attributes, v);
+                module_type(&mut md.md_type, v);
             }
             SignatureItem::SigModtype(_, mtd) => {
-                f(&mut mtd.mtd_loc);
-                attrs(&mut mtd.mtd_attributes, f);
+                v.location(&mut mtd.mtd_loc);
+                attrs(&mut mtd.mtd_attributes, v);
                 if let Some(mty) = &mut mtd.mtd_type {
-                    module_type(mty, f);
+                    module_type(mty, v);
                 }
             }
             SignatureItem::SigClass | SignatureItem::SigClassType => {}
+        }
+    }
+}
+
+impl PayloadValue {
+    /// `Location.none` (`in_file "_none_"`, compiler/ml/location.ml).
+    fn none_location() -> PayloadValue {
+        let pos = PayloadValue::Position {
+            file: "_none_".to_string(),
+            line: 1,
+            bol: 0,
+            cnum: -1,
+        };
+        PayloadValue::Block(0, vec![pos.clone(), pos, PayloadValue::Int(1)])
+    }
+
+    /// Replace every `Location.t` with `Location.none`, as the `remove_loc`
+    /// mapper does (compiler/ml/subst.ml:60-67). Positions occur only inside
+    /// locations, so a location is a block of two positions and a flag.
+    pub fn remove_locations(&mut self) {
+        if let PayloadValue::Block(0, fields) = self
+            && let [PayloadValue::Position { .. }, PayloadValue::Position { .. }, PayloadValue::Int(_)] =
+                fields.as_slice()
+        {
+            *self = PayloadValue::none_location();
+            return;
+        }
+        if let PayloadValue::Block(_, fields) = self {
+            for field in fields {
+                field.remove_locations();
+            }
         }
     }
 }
@@ -739,6 +848,7 @@ pub fn internal_optional_attr() -> Attribute {
         attr_name: Located::noloc(INTERNAL_OPTIONAL_ATTR_NAME.to_string()),
         attr_payload: AttributePayload::Structure(vec![]),
         attr_loc: Location::none(),
+        attr_payload_raw: None,
     }
 }
 

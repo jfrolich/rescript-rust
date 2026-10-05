@@ -1,4 +1,4 @@
-use crate::build::packages::{Namespace, Package};
+use crate::build::packages::Package;
 use crate::config::{Config, SourceMapCommand};
 use crate::project_context::ProjectContext;
 use ahash::{AHashMap, AHashSet};
@@ -12,25 +12,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{fmt::Display, ops::Deref, path::PathBuf, time::SystemTime};
 
-/// The three explicit build modes for rewatch.
+/// How rewatch compiles.
 ///
-/// - `Default`: OCaml/file-backed build (no special flags)
-/// - `Rust`: Rust parser with bsc compilation, file-backed (`--rust`)
-/// - `InProcess`: Rust compiler fully in-process, memory-backed (`--in-process`)
+/// - `InProcess`: the Rust compiler linked into rewatch. This is the build.
+/// - `ExternalBsc`: test-only, file-backed builds with an external compiler
+///   executable, selected by `RESCRIPT_SUBPROCESS_BUILD` so parity scripts can
+///   produce OCaml reference outputs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BuildMode {
-    /// Current OCaml/file-based build (default, no flags)
-    Default,
-    /// Rust parser, bsc compilation, file-backed (`--rust`)
-    Rust,
-    /// Rust compiler fully in-process, memory-backed (`--in-process`)
+    /// External compiler executable, file-backed (test-only)
+    ExternalBsc,
+    /// Rust compiler fully in-process
     InProcess,
 }
 
 impl BuildMode {
-    /// Whether this mode uses the Rust parser (true for Rust and InProcess)
+    /// Whether parsing runs in this process with the Rust parser.
     pub fn use_rust_parser(&self) -> bool {
-        matches!(self, BuildMode::Rust | BuildMode::InProcess)
+        matches!(self, BuildMode::InProcess)
     }
 
     /// Whether this mode uses in-process compilation with no disk artifacts
@@ -223,10 +222,8 @@ pub struct BuildCommandState {
     pub build_state: BuildState,
     // Command-line --warn-error flag override (takes precedence over rescript.json config)
     pub warn_error_override: Option<String>,
-    // The explicit build mode (Default, Rust, or InProcess)
+    // The build mode (in-process, or the test-only external compiler)
     pub build_mode: BuildMode,
-    // Command-line --subprocess flag: run bsc as subprocess with timeout (instead of in-process).
-    pub subprocess: bool,
     // Command-line --dump-typed-sexp flag: add -dtyped-sexp to bsc invocations.
     pub dump_typed_sexp: bool,
     // Stored ASTs from parse phase, keyed by "{module_name}:impl" or "{module_name}:intf"
@@ -263,7 +260,6 @@ impl std::fmt::Debug for BuildCommandState {
             .field("build_state", &self.build_state)
             .field("warn_error_override", &self.warn_error_override)
             .field("build_mode", &self.build_mode)
-            .field("subprocess", &self.subprocess)
             .field("dump_typed_sexp", &self.dump_typed_sexp)
             .field("stored_asts", &"<Mutex<..>>")
             .field("in_memory_interfaces", &"<Mutex<..>>")
@@ -331,7 +327,6 @@ impl BuildCommandState {
         compiler: CompilerInfo,
         warn_error_override: Option<String>,
         build_mode: BuildMode,
-        subprocess: bool,
         dump_typed_sexp: bool,
         features: Option<Vec<String>>,
         source_map_command: SourceMapCommand,
@@ -341,7 +336,6 @@ impl BuildCommandState {
             build_state: BuildState::new(project_context, packages, compiler, source_map_command),
             warn_error_override,
             build_mode,
-            subprocess,
             dump_typed_sexp,
             stored_asts: Mutex::new(AHashMap::new()),
             in_memory_interfaces: Mutex::new(AHashMap::new()),
@@ -389,10 +383,6 @@ impl BuildCommandState {
 
     pub fn use_rust_parser(&self) -> bool {
         self.build_mode.use_rust_parser()
-    }
-
-    pub fn subprocess(&self) -> bool {
-        self.subprocess
     }
 
     pub fn dump_typed_sexp(&self) -> bool {
@@ -518,12 +508,10 @@ impl BuildCommandState {
         package_root: PathBuf,
         crcs: Vec<(String, Option<[u8; 16]>)>,
     ) {
-        self.module_registry.lock().unwrap().register_namespace_for_package(
-            namespace_name,
-            module_aliases,
-            Some(package_root),
-            crcs,
-        );
+        self.module_registry
+            .lock()
+            .unwrap()
+            .register_namespace_for_package(namespace_name, module_aliases, Some(package_root), crcs);
     }
 
     /// Store extracted dependencies from the parse phase for a module file.
@@ -583,10 +571,8 @@ impl std::ops::DerefMut for BuildCommandState {
 pub struct AstModule {
     pub module_name: String,
     pub package_name: String,
-    pub namespace: Namespace,
     pub last_modified: SystemTime,
     pub ast_file_path: PathBuf,
-    pub is_root: bool,
     pub suffix: String,
 }
 

@@ -90,11 +90,8 @@ pub enum ExternalArityInfo {
 
 pub type ExternalArityFieldTable = HashMap<String, Option<ExternalArityInfo>>;
 
-#[derive(Debug, Clone, Default)]
-pub struct ExternalArityTable {
-    pub static_imports: HashMap<String, ExternalArityFieldTable>,
-    pub dynamic_imports: HashMap<String, ExternalArityFieldTable>,
-}
+/// `Lam_compile_env.query_external_id_info` results, per module and field.
+pub type ExternalArityTable = HashMap<String, ExternalArityFieldTable>;
 
 /// Lambda compilation statistics and metadata.
 #[derive(Debug, Clone)]

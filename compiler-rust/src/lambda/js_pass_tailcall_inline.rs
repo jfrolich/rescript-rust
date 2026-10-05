@@ -387,15 +387,19 @@ impl TailcallInlineState {
             ),
             ExpressionDesc::TaggedTemplate(tag, strings, values) => ExpressionDesc::TaggedTemplate(
                 Box::new(self.transform_expression(*tag)),
-                strings
-                    .into_iter()
-                    .map(|expr| self.transform_expression(expr))
-                    .collect(),
+                strings,
                 values
                     .into_iter()
                     .map(|expr| self.transform_expression(expr))
                     .collect(),
             ),
+            ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
+                segments,
+                values: values
+                    .into_iter()
+                    .map(|expr| self.transform_expression(expr))
+                    .collect(),
+            },
             ExpressionDesc::StaticIndex(target, field, position) => ExpressionDesc::StaticIndex(
                 Box::new(self.transform_expression(*target)),
                 field,
@@ -427,7 +431,9 @@ impl TailcallInlineState {
                 async_,
                 directive,
             },
-            ExpressionDesc::Str { delim, txt } => ExpressionDesc::Str { delim, txt },
+            ExpressionDesc::Str(txt) => ExpressionDesc::Str(txt),
+            ExpressionDesc::TemplateLiteral(segment) => ExpressionDesc::TemplateLiteral(segment),
+            ExpressionDesc::JsonLiteral(source) => ExpressionDesc::JsonLiteral(source),
             ExpressionDesc::RawJsCode(info) => ExpressionDesc::RawJsCode(info),
             ExpressionDesc::Array(items, mutable_flag) => ExpressionDesc::Array(
                 items
@@ -708,7 +714,9 @@ fn collect_tailcall_use_counts_expression(
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Number(_) => {}
         ExpressionDesc::Length(inner, _)
@@ -744,11 +752,13 @@ fn collect_tailcall_use_counts_expression(
                 collect_tailcall_use_counts_expression(arg, decls, counts);
             }
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             collect_tailcall_use_counts_expression(tag, decls, counts);
-            for string in strings {
-                collect_tailcall_use_counts_expression(string, decls, counts);
+            for value in values {
+                collect_tailcall_use_counts_expression(value, decls, counts);
             }
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
             for value in values {
                 collect_tailcall_use_counts_expression(value, decls, counts);
             }
@@ -911,7 +921,9 @@ fn collect_once_pure_inline_decls_expression(
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Number(_) => {}
         ExpressionDesc::Length(inner, _)
@@ -951,11 +963,13 @@ fn collect_once_pure_inline_decls_expression(
                 collect_once_pure_inline_decls_expression(arg, statuses, tail_callees, inline_decls);
             }
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             collect_once_pure_inline_decls_expression(tag, statuses, tail_callees, inline_decls);
-            for string in strings {
-                collect_once_pure_inline_decls_expression(string, statuses, tail_callees, inline_decls);
+            for value in values {
+                collect_once_pure_inline_decls_expression(value, statuses, tail_callees, inline_decls);
             }
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
             for value in values {
                 collect_once_pure_inline_decls_expression(value, statuses, tail_callees, inline_decls);
             }
@@ -1103,12 +1117,14 @@ fn expression_assigns_ident(expr: &Expression, ident: &Ident) -> bool {
             expression_assigns_ident(func, ident)
                 || args.iter().any(|arg| expression_assigns_ident(arg, ident))
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             expression_assigns_ident(tag, ident)
-                || strings
+                || values
                     .iter()
                     .any(|expr| expression_assigns_ident(expr, ident))
-                || values
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
+            values
                     .iter()
                     .any(|expr| expression_assigns_ident(expr, ident))
         }
@@ -1137,7 +1153,9 @@ fn expression_assigns_ident(expr: &Expression, ident: &Ident) -> bool {
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Number(_) => false,
     }
@@ -1383,15 +1401,19 @@ fn substitute_inline_expression(
         ),
         ExpressionDesc::TaggedTemplate(tag, strings, values) => ExpressionDesc::TaggedTemplate(
             Box::new(substitute_inline_expression(*tag, substitution)),
-            strings
-                .into_iter()
-                .map(|expr| substitute_inline_expression(expr, substitution))
-                .collect(),
+            strings,
             values
                 .into_iter()
                 .map(|expr| substitute_inline_expression(expr, substitution))
                 .collect(),
         ),
+        ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
+            segments,
+            values: values
+                .into_iter()
+                .map(|expr| substitute_inline_expression(expr, substitution))
+                .collect(),
+        },
         ExpressionDesc::StaticIndex(target, field, position) => ExpressionDesc::StaticIndex(
             Box::new(substitute_inline_expression(*target, substitution)),
             field,
@@ -1432,7 +1454,9 @@ fn substitute_inline_expression(
             async_,
             directive,
         },
-        ExpressionDesc::Str { delim, txt } => ExpressionDesc::Str { delim, txt },
+        ExpressionDesc::Str(txt) => ExpressionDesc::Str(txt),
+        ExpressionDesc::TemplateLiteral(segment) => ExpressionDesc::TemplateLiteral(segment),
+        ExpressionDesc::JsonLiteral(source) => ExpressionDesc::JsonLiteral(source),
         ExpressionDesc::RawJsCode(info) => ExpressionDesc::RawJsCode(info),
         ExpressionDesc::Array(items, mutable_flag) => ExpressionDesc::Array(
             items
@@ -1601,11 +1625,13 @@ fn apply_tailcall_used_stats_expression(
                 apply_tailcall_used_stats_expression(arg, statuses);
             }
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             apply_tailcall_used_stats_expression(tag, statuses);
-            for string in strings {
-                apply_tailcall_used_stats_expression(string, statuses);
+            for value in values {
+                apply_tailcall_used_stats_expression(value, statuses);
             }
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
             for value in values {
                 apply_tailcall_used_stats_expression(value, statuses);
             }
@@ -1644,7 +1670,9 @@ fn apply_tailcall_used_stats_expression(
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Number(_) => {}
     }

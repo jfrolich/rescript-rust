@@ -743,19 +743,6 @@ pub enum VIdent {
     Qualified(Box<ModuleId>, Option<String>),
 }
 
-/// String delimiter type
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Delim {
-    /// No special delimiter
-    None,
-    /// StarJ format
-    StarJ,
-    /// No quotes (raw)
-    NoQuotes,
-    /// Backtick template literal
-    BackQuotes,
-}
-
 /// For loop direction
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForDirection {
@@ -877,7 +864,14 @@ pub enum ExpressionDesc {
     ArrayIndex(Box<Expression>, Box<Expression>),
 
     /// Tagged template literal
-    TaggedTemplate(Box<Expression>, Vec<Expression>, Vec<Expression>),
+    TaggedTemplate(Box<Expression>, Vec<String>, Vec<Expression>),
+
+    /// An ordinary interpolated template ready for emission: segments keep
+    /// source and semantic forms; every segment has a valid decoded value.
+    InterpolatedTemplate {
+        segments: Vec<crate::string_literal::TemplateSegment>,
+        values: Vec<Expression>,
+    },
 
     /// Static property access (obj.prop or obj["prop"])
     StaticIndex(Box<Expression>, String, Option<i32>),
@@ -899,8 +893,15 @@ pub enum ExpressionDesc {
         directive: Option<Box<String>>,
     },
 
-    /// String literal
-    Str { delim: Delim, txt: String },
+    /// A decoded runtime string value, emitted with the compiler's quoting.
+    Str(String),
+
+    /// A non-interpolated ordinary backquoted literal: `source` is emitted,
+    /// `semantic` is used for comparisons and optimizations.
+    TemplateLiteral(crate::string_literal::TemplateSegment),
+
+    /// Validated JavaScript literal source from an external `json` payload.
+    JsonLiteral(String),
 
     /// Raw JavaScript code
     RawJsCode(JsRawInfo),
@@ -994,119 +995,71 @@ impl Expression {
         Self::new(ExpressionDesc::Var(VIdent::Qualified(module.into(), member)))
     }
 
-    /// Create a string expression
+    /// Create a string expression (`Js_exp_make.str`).
     pub fn string(txt: impl Into<String>) -> Self {
-        Self::new(ExpressionDesc::Str {
-            delim: Delim::None,
-            txt: txt.into(),
-        })
+        Self::new(ExpressionDesc::Str(txt.into()))
+    }
+
+    /// `Js_exp_make.string_literal_semantic`: the runtime value of a string
+    /// or non-interpolated template literal.
+    pub fn string_literal_semantic(&self) -> Option<&str> {
+        match &self.desc {
+            ExpressionDesc::Str(semantic) => Some(semantic),
+            ExpressionDesc::TemplateLiteral(segment) => Some(segment.semantic()),
+            _ => None,
+        }
     }
 
     /// Create a string append expression, mirroring OCaml's
     /// `Js_exp_make.string_append` folding behavior.
     pub fn string_append(left: Expression, right: Expression) -> Self {
-        fn concat(expr: &Expression, left: &str, right: &str, delim: Delim) -> Expression {
-            let mut merged = expr.clone();
-            merged.desc = ExpressionDesc::Str {
-                txt: format!("{left}{right}"),
-                delim,
-            };
+        fn concat(base: &Expression, a: &str, b: &str) -> Expression {
+            let mut merged = base.clone();
+            merged.desc = ExpressionDesc::Str(format!("{a}{b}"));
             merged
         }
+        fn append(left: Expression, right: Expression) -> Expression {
+            Expression {
+                desc: ExpressionDesc::StringAppend(Box::new(left), Box::new(right)),
+                comment: None,
+                source_loc: None,
+            }
+        }
 
-        match (&left.desc, &right.desc) {
-            (ExpressionDesc::Str { txt, .. }, _) if txt.is_empty() => return right,
-            (_, ExpressionDesc::Str { txt, .. }) if txt.is_empty() => return left,
-            (
-                ExpressionDesc::Str {
-                    txt: left_txt,
-                    delim: left_delim,
-                },
-                ExpressionDesc::StringAppend(prefix, tail),
-            ) => {
-                if let ExpressionDesc::Str {
-                    txt: prefix_txt,
-                    delim: prefix_delim,
-                } = &prefix.desc
-                {
-                    if left_delim == prefix_delim {
-                        return Self::string_append(
-                            concat(&left, left_txt, prefix_txt, *left_delim),
-                            tail.as_ref().clone(),
-                        );
-                    }
-                }
-            }
-            (
-                ExpressionDesc::StringAppend(head, suffix),
-                ExpressionDesc::Str {
-                    txt: right_txt,
-                    delim: right_delim,
-                },
-            ) => {
-                if let ExpressionDesc::Str {
-                    txt: suffix_txt,
-                    delim: suffix_delim,
-                } = &suffix.desc
-                {
-                    if suffix_delim == right_delim {
-                        return Self::string_append(
-                            head.as_ref().clone(),
-                            concat(&left, suffix_txt, right_txt, *suffix_delim),
-                        );
-                    }
-                }
-            }
-            (
-                ExpressionDesc::StringAppend(head, left_suffix),
-                ExpressionDesc::StringAppend(right_prefix, tail),
-            ) => {
-                if let (
-                    ExpressionDesc::Str {
-                        txt: left_suffix_txt,
-                        delim: left_suffix_delim,
-                    },
-                    ExpressionDesc::Str {
-                        txt: right_prefix_txt,
-                        delim: right_prefix_delim,
-                    },
-                ) = (&left_suffix.desc, &right_prefix.desc)
-                {
-                    if left_suffix_delim == right_prefix_delim {
-                        return Self::string_append(
-                            Self::string_append(
-                                head.as_ref().clone(),
-                                concat(
-                                    &left,
-                                    left_suffix_txt,
-                                    right_prefix_txt,
-                                    *left_suffix_delim,
-                                ),
-                            ),
-                            tail.as_ref().clone(),
-                        );
-                    }
-                }
-            }
-            (
-                ExpressionDesc::Str {
-                    txt: left_txt,
-                    delim: left_delim,
-                },
-                ExpressionDesc::Str {
-                    txt: right_txt,
-                    delim: right_delim,
-                },
-            ) if left_delim == right_delim => {
-                return concat(&left, left_txt, right_txt, *left_delim);
+        match (left.string_literal_semantic(), right.string_literal_semantic()) {
+            (Some(""), _) => return right,
+            (_, Some("")) => return left,
+            (Some(a), Some(b)) => {
+                let mut merged = concat(&left, a, b);
+                merged.comment = None;
+                merged.source_loc = None;
+                return merged;
             }
             _ => {}
         }
-
-        Self {
-            desc: ExpressionDesc::StringAppend(Box::new(left), Box::new(right)),
-            comment: None,
-            source_loc: None,
+        match (&left.desc, &right.desc) {
+            (ExpressionDesc::StringAppend(a, b_expr), ExpressionDesc::StringAppend(c_expr, d)) => {
+                match (b_expr.string_literal_semantic(), c_expr.string_literal_semantic()) {
+                    (Some(b), Some(c)) => Self::string_append(
+                        Self::string_append(a.as_ref().clone(), concat(b_expr, b, c)),
+                        d.as_ref().clone(),
+                    ),
+                    _ => append(left, right),
+                }
+            }
+            (_, ExpressionDesc::StringAppend(b, c)) => {
+                match (left.string_literal_semantic(), b.string_literal_semantic()) {
+                    (Some(a), Some(b)) => Self::string_append(concat(&left, a, b), c.as_ref().clone()),
+                    _ => append(left, right),
+                }
+            }
+            (ExpressionDesc::StringAppend(c, b_expr), _) => {
+                match (b_expr.string_literal_semantic(), right.string_literal_semantic()) {
+                    (Some(b), Some(a)) => Self::string_append(c.as_ref().clone(), concat(b_expr, b, a)),
+                    _ => append(left, right),
+                }
+            }
+            _ => append(left, right),
         }
     }
 
@@ -1139,13 +1092,15 @@ impl Expression {
             ) if expression_has_no_side_effects(&target) => {
                 Expression::number(Number::int(items.len() as i32))
             }
-            (
-                ExpressionDesc::Str {
-                    txt,
-                    delim: Delim::None,
-                },
-                LengthObject::String,
-            ) => Expression::number(Number::int(txt.len() as i32)),
+            // js_exp_make.ml `string_length`: `String_literal.utf16_length`
+            // of a literal's semantic value.
+            (ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_), LengthObject::String) => {
+                let semantic = target.string_literal_semantic().expect("a string literal");
+                Expression::number(Number::int(
+                    crate::string_literal::utf16_length(semantic).expect("String_literal.utf16_length: Invalid_utf8")
+                        as i32,
+                ))
+            }
             (
                 ExpressionDesc::Fun {
                     is_method, params, ..
@@ -1462,19 +1417,12 @@ fn fold_strict_equality(left: &Expression, right: &Expression) -> Option<bool> {
         ) => {
             return Some(left_int == right_int);
         }
-        (
-            ExpressionDesc::Str {
-                txt: left_txt,
-                delim: left_delim,
-            },
-            ExpressionDesc::Str {
-                txt: right_txt,
-                delim: right_delim,
-            },
-        ) => {
-            return fold_strict_string_equality(left_txt, left_delim, right_txt, right_delim);
-        }
         _ => {}
+    }
+
+    // js_exp_make.ml `string_comp`: literal strings compare by semantic value.
+    if let (Some(left), Some(right)) = (left.string_literal_semantic(), right.string_literal_semantic()) {
+        return Some(left == right);
     }
 
     let same_nullish = matches!(
@@ -1526,29 +1474,6 @@ fn fold_strict_equality(left: &Expression, right: &Expression) -> Option<bool> {
     None
 }
 
-fn fold_strict_string_equality(
-    left_txt: &str,
-    left_delim: &Delim,
-    right_txt: &str,
-    right_delim: &Delim,
-) -> Option<bool> {
-    if left_delim != right_delim {
-        return None;
-    }
-
-    if left_txt == right_txt {
-        Some(true)
-    } else if is_simple_string_comparison(left_txt) && is_simple_string_comparison(right_txt) {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-fn is_simple_string_comparison(text: &str) -> bool {
-    text.is_ascii() && !text.as_bytes().contains(&b'\\')
-}
-
 fn is_nullish_literal(expr: &Expression) -> bool {
     matches!(
         expr.desc,
@@ -1576,7 +1501,10 @@ pub(crate) fn expression_has_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::Var(_)
         | ExpressionDesc::Fun { .. }
         | ExpressionDesc::Number(_)
-        | ExpressionDesc::Str { .. } => true,
+        | ExpressionDesc::JsonLiteral(_)
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_) => true,
+        ExpressionDesc::InterpolatedTemplate { values, .. } => values.iter().all(expression_has_no_side_effects),
         ExpressionDesc::StaticIndex(target, _, _) => expression_has_no_side_effects(target),
         ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right)
@@ -1610,10 +1538,11 @@ pub(crate) fn expression_has_no_side_effects(expr: &Expression) -> bool {
                 && expression_has_no_side_effects(left)
                 && expression_has_no_side_effects(right)
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
-            expression_has_no_side_effects(tag)
-                && strings.iter().all(expression_has_no_side_effects)
-                && values.iter().all(expression_has_no_side_effects)
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
+            expression_has_no_side_effects(tag) && values.iter().all(expression_has_no_side_effects)
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
+            values.iter().all(expression_has_no_side_effects)
         }
         ExpressionDesc::Call(func, args, _)
             if is_array_is_array_callee(func) && args.len() == 1 =>
@@ -1995,7 +1924,7 @@ fn normalize_statement(desc: StatementDesc, comment: Option<String>) -> Statemen
         }
         StatementDesc::StringSwitch(
             Expression {
-                desc: ExpressionDesc::Str { txt, .. },
+                desc: ExpressionDesc::Str(txt),
                 ..
             },
             clauses,
@@ -2296,7 +2225,7 @@ fn js_and_expression(left: Expression, right: Expression) -> Expression {
                 ExpressionDesc::Var(left_vident),
                 ExpressionDesc::Undefined { .. },
                 ExpressionDesc::Var(right_vident),
-                ExpressionDesc::Str { .. } | ExpressionDesc::Number(_),
+                ExpressionDesc::Str(_) | ExpressionDesc::Number(_),
             ) if same_vident(left_vident, right_vident)
         ) =>
         {
@@ -2632,7 +2561,7 @@ fn typeof_var_type_test(expr: &Expression) -> Option<(&VIdent, &str)> {
     let ExpressionDesc::Var(vident) = &value.desc else {
         return None;
     };
-    let ExpressionDesc::Str { txt, .. } = &right.desc else {
+    let ExpressionDesc::Str(txt) = &right.desc else {
         return None;
     };
     Some((vident, txt.as_str()))
@@ -2653,7 +2582,6 @@ fn strict_var_literal_comparison(expr: &Expression) -> Option<(BinOp, &VIdent, &
 
 fn is_array_is_array_callee(expr: &Expression) -> bool {
     match &expr.desc {
-        ExpressionDesc::Str { txt, .. } => txt == "Array.isArray",
         ExpressionDesc::StaticIndex(target, field, _)
             if field == "isArray"
                 && matches!(
@@ -2690,7 +2618,7 @@ fn literal_matches_type_name(literal: &Expression, type_name: &str) -> bool {
     matches!(
         (&literal.desc, type_name),
         (ExpressionDesc::Bool(_), "boolean")
-            | (ExpressionDesc::Str { .. }, "string")
+            | (ExpressionDesc::Str(_), "string")
             | (ExpressionDesc::Number(_), "number")
     )
 }
@@ -2702,7 +2630,7 @@ fn is_scalar_nullish_literal(expr: &Expression) -> bool {
             | ExpressionDesc::Null
             | ExpressionDesc::Undefined { .. }
             | ExpressionDesc::Number(_)
-            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Str(_)
     )
 }
 
@@ -2813,16 +2741,8 @@ pub(crate) fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool
                 && ocaml_eq_expression(left_lhs, right_lhs)
                 && ocaml_eq_expression(left_rhs, right_rhs)
         }
-        (
-            ExpressionDesc::Str {
-                delim: left_delim,
-                txt: left_txt,
-            },
-            ExpressionDesc::Str {
-                delim: right_delim,
-                txt: right_txt,
-            },
-        ) => left_delim == right_delim && left_txt == right_txt,
+        (ExpressionDesc::Str(left_txt), ExpressionDesc::Str(right_txt)) => left_txt == right_txt,
+        (ExpressionDesc::TemplateLiteral(left), ExpressionDesc::TemplateLiteral(right)) => left == right,
         (
             ExpressionDesc::StaticIndex(left_obj, left_field, left_pos),
             ExpressionDesc::StaticIndex(right_obj, right_field, right_pos),
@@ -2838,13 +2758,7 @@ pub(crate) fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool
             ocaml_eq_expression(left_first, right_first)
                 && ocaml_eq_expression(left_second, right_second)
         }
-        (
-            ExpressionDesc::StringAppend(left_first, left_second),
-            ExpressionDesc::StringAppend(right_first, right_second),
-        ) => {
-            ocaml_eq_expression(left_first, right_first)
-                && ocaml_eq_expression(left_second, right_second)
-        }
+        // js_analyzer.ml `eq_expression`: `String_append _` is never equal.
         (ExpressionDesc::Bool(left_bool), ExpressionDesc::Bool(right_bool)) => {
             left_bool == right_bool
         }
@@ -3153,10 +3067,10 @@ fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<Dispo
             stack.push(DisposeItem::Expression(*func));
             push_expression_vec(args, stack);
         }
-        ExpressionDesc::TaggedTemplate(tag, quasi, expressions) => {
-            push_expression_vec(quasi, stack);
+        ExpressionDesc::TaggedTemplate(_tag, _quasi, expressions) => {
             push_expression_vec(expressions, stack);
         }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => push_expression_vec(values, stack),
         ExpressionDesc::Fun {
             is_method: _,
             params: _,
@@ -3186,7 +3100,9 @@ fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<Dispo
         }
         ExpressionDesc::Var(_)
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Undefined { .. }
@@ -3224,10 +3140,7 @@ mod tests {
     fn test_string_expression() {
         let expr = Expression::string("hello");
         match &expr.desc {
-            ExpressionDesc::Str {
-                delim: Delim::None,
-                txt,
-            } => {
+            ExpressionDesc::Str(txt) => {
                 assert_eq!(txt, "hello");
             }
             _ => panic!("Expected Str"),
@@ -3248,21 +3161,12 @@ mod tests {
 
     #[test]
     fn test_string_append_folds_adjacent_same_delim_literals() {
-        let left = Expression::new(ExpressionDesc::Str {
-            txt: "hello ".to_string(),
-            delim: Delim::StarJ,
-        });
-        let right = Expression::new(ExpressionDesc::Str {
-            txt: "world".to_string(),
-            delim: Delim::StarJ,
-        });
+        let left = Expression::new(ExpressionDesc::Str("hello ".to_string()));
+        let right = Expression::new(ExpressionDesc::Str("world".to_string()));
         let expr = Expression::string_append(left, right);
 
         match &expr.desc {
-            ExpressionDesc::Str { txt, delim } => {
-                assert_eq!(txt, "hello world");
-                assert_eq!(*delim, Delim::StarJ);
-            }
+            ExpressionDesc::Str(txt) => assert_eq!(txt, "hello world"),
             other => panic!("Expected folded string literal, got {other:?}"),
         }
     }
@@ -3270,27 +3174,18 @@ mod tests {
     #[test]
     fn test_string_append_merges_literal_prefix_into_nested_append() {
         let nested = Expression::string_append(
-            Expression::new(ExpressionDesc::Str {
-                txt: "beta".to_string(),
-                delim: Delim::StarJ,
-            }),
+            Expression::new(ExpressionDesc::Str("beta".to_string())),
             Expression::var(Ident::create_local("tail")),
         );
         let expr = Expression::string_append(
-            Expression::new(ExpressionDesc::Str {
-                txt: "alpha".to_string(),
-                delim: Delim::StarJ,
-            }),
+            Expression::new(ExpressionDesc::Str("alpha".to_string())),
             nested,
         );
 
         match &expr.desc {
             ExpressionDesc::StringAppend(left, right) => {
                 match &left.desc {
-                    ExpressionDesc::Str { txt, delim } => {
-                        assert_eq!(txt, "alphabeta");
-                        assert_eq!(*delim, Delim::StarJ);
-                    }
+                    ExpressionDesc::Str(txt) => assert_eq!(txt, "alphabeta"),
                     other => panic!("Expected merged left string literal, got {other:?}"),
                 }
                 assert!(matches!(right.as_ref().desc, ExpressionDesc::Var(_)));
@@ -4578,7 +4473,7 @@ mod tests {
                     then_block.as_slice(),
                     [Statement {
                         desc: StatementDesc::Return(Expression {
-                            desc: ExpressionDesc::Str { txt, .. },
+                            desc: ExpressionDesc::Str(txt),
                             ..
                         }),
                         ..
@@ -4593,7 +4488,7 @@ mod tests {
         assert!(matches!(
             &final_return.desc,
             StatementDesc::Return(Expression {
-                desc: ExpressionDesc::Str { txt, .. },
+                desc: ExpressionDesc::Str(txt),
                 ..
             }) if txt == "no"
         ));
@@ -4704,7 +4599,7 @@ mod tests {
         assert!(matches!(
             throw_stmt.desc,
             StatementDesc::Throw(Expression {
-                desc: ExpressionDesc::Str { .. },
+                desc: ExpressionDesc::Str(_),
                 ..
             })
         ));
@@ -4820,7 +4715,7 @@ mod tests {
                         (&lhs.desc, &rhs.desc),
                         (
                             ExpressionDesc::Var(VIdent::Id(id)),
-                            ExpressionDesc::Str { txt, .. }
+                            ExpressionDesc::Str(txt)
                         ) if id.same(&key) && txt == "space"
                     )
                 ) && matches!(
@@ -4832,7 +4727,7 @@ mod tests {
                         (&lhs.desc, &rhs.desc),
                         (
                             ExpressionDesc::Var(VIdent::Id(id)),
-                            ExpressionDesc::Str { txt, .. }
+                            ExpressionDesc::Str(txt)
                         ) if id.same(&key) && txt == "a"
                     )
                 )
@@ -4854,7 +4749,7 @@ mod tests {
                 ) && matches!(
                     right.as_ref(),
                     Expression {
-                        desc: ExpressionDesc::Str { txt, .. },
+                        desc: ExpressionDesc::Str(txt),
                         ..
                     } if txt == "space"
                 )
@@ -5170,7 +5065,7 @@ mod tests {
                 ) && matches!(
                     right.as_ref(),
                     Expression {
-                        desc: ExpressionDesc::Str { txt, .. },
+                        desc: ExpressionDesc::Str(txt),
                         ..
                     } if txt == "space"
                 )
@@ -5214,7 +5109,7 @@ mod tests {
                 ) && matches!(
                     right.as_ref(),
                     Expression {
-                        desc: ExpressionDesc::Str { txt, .. },
+                        desc: ExpressionDesc::Str(txt),
                         ..
                     } if txt == "space"
                 )
@@ -5326,7 +5221,7 @@ mod tests {
         );
 
         match expr.desc {
-            ExpressionDesc::Str { txt, .. } => assert_eq!(txt, "then branch"),
+            ExpressionDesc::Str(txt) => assert_eq!(txt, "then branch"),
             other => panic!("expected folded string branch, got {other:?}"),
         }
     }

@@ -30,7 +30,7 @@ use crate::lambda::{InlineAttribute, LFunction, Lambda, PrimInfo};
 /// Rust counterpart to `Lam_compile_env.query_external_id_info` for
 /// `Lam_arity_analysis.get_arity` (compiler/core/lam_arity_analysis.ml:43-71).
 pub type ExternalArityResolver<'a> =
-    dyn FnMut(&Ident, bool, &str) -> Option<ExternalArityInfo> + 'a;
+    dyn FnMut(&Ident, &str) -> Option<ExternalArityInfo> + 'a;
 
 /// Direct port of `Lam_util.element_of_lambda` (lam_util.ml:188-196).
 ///
@@ -47,7 +47,7 @@ pub(crate) fn element_of_lambda(lam: &Lambda) -> Element {
                 ..
             } if matches!(
                 args.as_slice(),
-                [Lambda::LglobalModule(_, _) | Lambda::Lvar(_)]
+                [Lambda::LglobalModule(_) | Lambda::Lvar(_)]
             )) =>
         {
             let PrimInfo {
@@ -97,15 +97,9 @@ fn arity_of_var(ident_tbl: &AHashMap<Ident, IdKind>, v: &Ident) -> Arity {
 fn lookup_external_arity_entry<'a>(
     external_arities: &'a ExternalArityTable,
     module_id: &Ident,
-    dynamic_import: bool,
     field_name: &str,
 ) -> Option<&'a Option<ExternalArityInfo>> {
-    let modules = if dynamic_import {
-        &external_arities.dynamic_imports
-    } else {
-        &external_arities.static_imports
-    };
-    modules
+    external_arities
         .get(module_id.name())
         .and_then(|fields| fields.get(field_name))
 }
@@ -113,38 +107,23 @@ fn lookup_external_arity_entry<'a>(
 fn lookup_cached_external_arity<'a>(
     external_arities: &'a ExternalArityTable,
     module_id: &Ident,
-    dynamic_import: bool,
     field_name: &str,
 ) -> Option<&'a ExternalArityInfo> {
-    lookup_external_arity_entry(external_arities, module_id, dynamic_import, field_name)
+    lookup_external_arity_entry(external_arities, module_id, field_name)
         .and_then(Option::as_ref)
-}
-
-fn external_arity_modules_mut(
-    external_arities: &mut ExternalArityTable,
-    dynamic_import: bool,
-) -> &mut AHashMap<String, ExternalArityFieldTable> {
-    if dynamic_import {
-        &mut external_arities.dynamic_imports
-    } else {
-        &mut external_arities.static_imports
-    }
 }
 
 fn resolve_external_arity(
     external_arities: &mut ExternalArityTable,
     module_id: &Ident,
-    dynamic_import: bool,
     field_name: &str,
     resolver: &mut ExternalArityResolver<'_>,
 ) -> Option<ExternalArityInfo> {
-    if let Some(cached) =
-        lookup_external_arity_entry(external_arities, module_id, dynamic_import, field_name)
-    {
+    if let Some(cached) = lookup_external_arity_entry(external_arities, module_id, field_name) {
         return cached.clone();
     }
-    let resolved = resolver(module_id, dynamic_import, field_name);
-    external_arity_modules_mut(external_arities, dynamic_import)
+    let resolved = resolver(module_id, field_name);
+    external_arities
         .entry(module_id.name().to_string())
         .or_default()
         .insert(field_name.to_string(), resolved.clone());
@@ -162,7 +141,7 @@ fn get_arity_impl<F>(
     lookup_external_arity: &mut F,
 ) -> Arity
 where
-    F: FnMut(&Ident, bool, &str) -> Option<ExternalArityInfo>,
+    F: FnMut(&Ident, &str) -> Option<ExternalArityInfo>,
 {
     match lam {
         // lam_arity_analysis.ml:40
@@ -177,7 +156,7 @@ where
             primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
             args,
             ..
-        } if matches!(args.as_slice(), [Lambda::LglobalModule(_, _)])) =>
+        } if matches!(args.as_slice(), [Lambda::LglobalModule(_)])) =>
         {
             let PrimInfo {
                 primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
@@ -188,10 +167,10 @@ where
                 unreachable!()
             };
 
-            let [Lambda::LglobalModule(id, dynamic_import)] = args.as_slice() else {
+            let [Lambda::LglobalModule(id)] = args.as_slice() else {
                 unreachable!("guarded by matches!");
             };
-            match lookup_external_arity(id, *dynamic_import, name) {
+            match lookup_external_arity(id, name) {
                 Some(ExternalArityInfo::Single(arity)) => arity.clone(),
                 Some(ExternalArityInfo::Submodule(_)) | None => Arity::na(),
             }
@@ -208,7 +187,7 @@ where
                             primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
                             args: inner_args,
                             ..
-                        } if matches!(inner_args.as_slice(), [Lambda::LglobalModule(_, _)]))
+                        } if matches!(inner_args.as_slice(), [Lambda::LglobalModule(_)]))
             )) =>
         {
             let PrimInfo {
@@ -231,10 +210,10 @@ where
             else {
                 unreachable!("guarded by matches!");
             };
-            let [Lambda::LglobalModule(id, dynamic_import)] = inner_args.as_slice() else {
+            let [Lambda::LglobalModule(id)] = inner_args.as_slice() else {
                 unreachable!("guarded by matches!");
             };
-            match lookup_external_arity(id, *dynamic_import, name) {
+            match lookup_external_arity(id, name) {
                 Some(ExternalArityInfo::Submodule(arities)) => arities
                     .get(*index as usize)
                     .cloned()
@@ -262,7 +241,7 @@ where
             Arity::raise()
         }
         // lam_arity_analysis.ml:73-74
-        Lambda::LglobalModule(_, _) | Lambda::Lprim(_) => Arity::na(),
+        Lambda::LglobalModule(_) | Lambda::Lprim(_) => Arity::na(),
         // lam_arity_analysis.ml:87
         Lambda::Lletrec(_, body) => get_arity_impl(ident_tbl, body, lookup_external_arity),
         // lam_arity_analysis.ml:88-105
@@ -353,14 +332,8 @@ where
 }
 
 pub fn get_arity(meta: &LamStats, lam: &Lambda) -> Arity {
-    let mut lookup_external_arity = |module_id: &Ident, dynamic_import: bool, field_name: &str| {
-        lookup_cached_external_arity(
-            &meta.external_arities,
-            module_id,
-            dynamic_import,
-            field_name,
-        )
-        .cloned()
+    let mut lookup_external_arity = |module_id: &Ident, field_name: &str| {
+        lookup_cached_external_arity(&meta.external_arities, module_id, field_name).cloned()
     };
     get_arity_impl(&meta.ident_tbl, lam, &mut lookup_external_arity)
 }
@@ -372,14 +345,8 @@ pub(crate) fn get_arity_with_external_arity(
 ) -> Arity {
     let ident_tbl = &meta.ident_tbl;
     let external_arities = &mut meta.external_arities;
-    let mut lookup_external_arity = |module_id: &Ident, dynamic_import: bool, field_name: &str| {
-        resolve_external_arity(
-            external_arities,
-            module_id,
-            dynamic_import,
-            field_name,
-            resolver,
-        )
+    let mut lookup_external_arity = |module_id: &Ident, field_name: &str| {
+        resolve_external_arity(external_arities, module_id, field_name, resolver)
     };
     get_arity_impl(ident_tbl, lam, &mut lookup_external_arity)
 }
@@ -391,7 +358,7 @@ fn all_lambdas<F>(
     lookup_external_arity: &mut F,
 ) -> Arity
 where
-    F: FnMut(&Ident, bool, &str) -> Option<ExternalArityInfo>,
+    F: FnMut(&Ident, &str) -> Option<ExternalArityInfo>,
 {
     match xs.split_first() {
         None => Arity::na(),
@@ -583,7 +550,7 @@ fn collect_bind_with_external(
             );
         }
         // lam_pass_collect.ml:72-73 — Lglobal_module: alias to Module.
-        Lambda::LglobalModule(v, _) => {
+        Lambda::LglobalModule(v) => {
             alias_ident_or_global(meta, ident.clone(), v, IdKind::Module(v.clone()));
         }
         // lam_pass_collect.ml:74-77 — Lvar: alias with NA propagation.
@@ -665,7 +632,7 @@ fn collect_with_external(
             collect_with_external(meta, body, resolver);
         }
         // lam_pass_collect.ml:115
-        Lambda::LglobalModule(_, _) => {}
+        Lambda::LglobalModule(_) => {}
         // lam_pass_collect.ml:116
         Lambda::Lprim(prim) => {
             for arg in &prim.args {

@@ -7,12 +7,13 @@ use std::borrow::Cow;
 
 use super::ast::*;
 use super::core::{
-    ast_helper, mknoloc, recover, template_literal_attr, with_loc,
+    ast_helper, mknoloc, recover, with_loc,
 };
 use super::diagnostics::DiagnosticCategory;
+use crate::location::Position;
 use super::grammar::{self, Grammar};
 use super::longident::Longident;
-use super::state::{Parser, ParserMode};
+use super::state::Parser;
 use super::token::Token;
 use crate::parse_arena::{LocIdx, Located, PatIdx, PosIdx, StrIdx};
 
@@ -93,7 +94,7 @@ fn pat(desc: PatternDesc, loc: LocIdx, attrs: Attributes) -> Pattern {
     }
 }
 
-/// `Ast_helper.Pat.construct ~loc (mkloc (Lident name) loc) None`.
+/// `Ast_helper.Pat.construct ~loc (mkloc (Lident name) loc) (mkloc [] loc)`.
 fn construct_lident(p: &mut Parser<'_>, name: &'static str, loc: LocIdx, attrs: Attributes) -> Pattern {
     let lid_idx = if name == "()" {
         p.push_lident_static("()")
@@ -101,17 +102,38 @@ fn construct_lident(p: &mut Parser<'_>, name: &'static str, loc: LocIdx, attrs: 
         let name_idx = p.arena_mut().intern_string(name);
         p.push_longident(Longident::Lident(name_idx))
     };
-    pat(PatternDesc::Ppat_construct(with_loc(lid_idx, loc), None), loc, attrs)
+    pat(PatternDesc::Ppat_construct(with_loc(lid_idx, loc), ctor_args(Vec::new(), loc)), loc, attrs)
 }
 
-/// OCaml `parse_template_constant ~prefix` (res_core.ml:1045-1066).
-fn parse_template_constant(p: &mut Parser<'_>, prefix: Option<Cow<'static, str>>) -> Constant {
-    let start_pos = p.start_pos;
+/// OCaml `parse_template_constant ~start_pos ~prefix` (res_core.ml).
+fn parse_template_constant(p: &mut Parser<'_>, start_pos: Position, prefix: Option<Cow<'static, str>>) -> Constant {
     p.next_template_literal_token();
     if let Token::TemplateTail { text, .. } = &p.token {
         let text = text.to_string();
         p.next();
-        return Constant::String(Cow::Owned(text), prefix);
+        return match prefix {
+            None => match crate::string_literal::decode_js_template_escapes(&text) {
+                Some(semantic) => Constant::string(&semantic),
+                None => {
+                    p.err_at(
+                        start_pos,
+                        p.prev_end_pos,
+                        DiagnosticCategory::Message("Invalid string escape sequence".to_string()),
+                    );
+                    Constant::string("")
+                }
+            },
+            Some(_) => {
+                p.err_at(
+                    start_pos,
+                    p.prev_end_pos,
+                    DiagnosticCategory::Message(
+                        super::core::error_messages::TAGGED_TEMPLATE_IN_PATTERN.to_string(),
+                    ),
+                );
+                Constant::string(&text)
+            }
+        };
     }
     fn skip_tokens(p: &mut Parser<'_>) {
         if p.token != Token::Eof {
@@ -131,7 +153,7 @@ fn parse_template_constant(p: &mut Parser<'_>, prefix: Option<Cow<'static, str>>
             super::core::error_messages::STRING_INTERPOLATION_IN_PATTERN.to_string(),
         ),
     );
-    Constant::String(Cow::Borrowed(""), None)
+    Constant::string("")
 }
 
 /// OCaml `parse_pattern` with the default `~alias:true ~or_:true`.
@@ -170,14 +192,10 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
             }
         }
         Token::Backtick => {
-            let constant = parse_template_constant(p, Some(Cow::Borrowed("js")));
+            let start_pos = p.arena().get_position(start_pos_idx).clone();
+            let constant = parse_template_constant(p, start_pos, None);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            let template_attr = template_literal_attr(p.arena_mut());
-            pat(
-                PatternDesc::Ppat_constant(Box::new(constant)),
-                loc,
-                Attributes::from_vec(vec![template_attr]),
-            )
+            pat(PatternDesc::Ppat_constant(Box::new(constant)), loc, Attributes::new())
         }
         Token::Lparen => {
             p.next();
@@ -220,7 +238,8 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
             let loc = p.mk_loc_idx_full(start_pos_idx, end_pos);
             p.next();
             if p.token == Token::Backtick {
-                let constant = parse_template_constant(p, Some(Cow::Owned(ident)));
+                let start_pos = p.arena().get_position(start_pos_idx).clone();
+                let constant = parse_template_constant(p, start_pos, Some(Cow::Owned(ident)));
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 pat(PatternDesc::Ppat_constant(Box::new(constant)), loc, Attributes::new())
             } else {
@@ -234,7 +253,7 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
                 parse_constructor_pattern_args(p, constr, start_pos_idx, attrs.clone())
             } else {
                 let loc = constr.loc;
-                pat(PatternDesc::Ppat_construct(constr, None), loc, attrs.clone())
+                pat(PatternDesc::Ppat_construct(constr, ctor_args(Vec::new(), loc)), loc, attrs.clone())
             }
         }
         Token::DotDotDot => {
@@ -266,7 +285,10 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
                     parse_variant_pattern_args(p, ident, start_pos_idx, attrs.clone())
                 } else {
                     pat(
-                        PatternDesc::Ppat_variant(Box::new((Cow::Owned(ident), None))),
+                        PatternDesc::Ppat_variant(Box::new((
+                            Cow::Owned(ident),
+                            Located { txt: Vec::new(), loc },
+                        ))),
                         loc,
                         attrs.clone(),
                     )
@@ -407,7 +429,7 @@ fn parse_constrained_pattern_region(p: &mut Parser<'_>) -> Option<Pattern> {
 pub fn make_unit_construct_pattern(p: &mut super::state::Parser<'_>, lid_loc: Location) -> Pattern {
     let lid_idx = p.push_lident_static("()");
     // Use ghost location for the pattern, but real location for the longident
-    ast_helper::make_construct_pat(p.arena_mut(), lid_idx, None, lid_loc, LocIdx::none())
+    ast_helper::make_construct_pat(p.arena_mut(), lid_idx, Vec::new(), lid_loc, lid_loc, LocIdx::none())
 }
 
 /// OCaml `parse_tuple_pattern ~attrs ~first ~start_pos` (res_core.ml:1602-1617).
@@ -550,44 +572,10 @@ fn parse_array_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
     pat(PatternDesc::Ppat_array(Box::new(pattern_indices)), loc, attrs)
 }
 
-/// The shared argument handling of OCaml `parse_constructor_pattern_args` and
-/// `parse_variant_pattern_args` (res_core.ml:1718-1778).
-fn pattern_args(
-    p: &mut Parser<'_>,
-    lparen: PosIdx,
-    args: Vec<Pattern>,
-) -> Option<PatIdx> {
-    let arg = match args.len() {
-        0 => {
-            let loc = p.mk_loc_idx_to_prev_end(lparen);
-            construct_lident(p, "()", loc, Attributes::new())
-        }
-        1 if matches!(*args[0].ppat_desc, PatternDesc::Ppat_tuple(_)) => {
-            if p.mode == ParserMode::ParseForTypeChecker {
-                args.into_iter().next().expect("one argument")
-            } else {
-                let loc = p.mk_loc_idx_to_end(lparen);
-                let indices = args.into_iter().map(|a| p.arena_mut().push_pat(a)).collect();
-                pat(PatternDesc::Ppat_tuple(Box::new(indices)), loc, Attributes::new())
-            }
-        }
-        1 => args.into_iter().next().expect("one argument"),
-        _ => {
-            let loc = p.mk_loc_idx_to_end(lparen);
-            let indices = args.into_iter().map(|a| p.arena_mut().push_pat(a)).collect();
-            pat(PatternDesc::Ppat_tuple(Box::new(indices)), loc, Attributes::new())
-        }
-    };
-    Some(p.arena_mut().push_pat(arg))
-}
-
-/// OCaml `parse_constructor_pattern_args` (res_core.ml:1718-1748).
-fn parse_constructor_pattern_args(
-    p: &mut Parser<'_>,
-    constr: Located<crate::parse_arena::LidentIdx>,
-    start_pos_idx: PosIdx,
-    attrs: Attributes,
-) -> Pattern {
+/// OCaml `parse_pattern_args` (res_core.ml): the parenthesized argument
+/// list of a constructor or polymorphic variant pattern, located at its
+/// parentheses. `C()` is `C(())`.
+fn parse_pattern_args(p: &mut Parser<'_>) -> Located<Vec<PatIdx>> {
     let lparen = p.start_pos_idx();
     p.expect(Token::Lparen);
     let args = super::core::parse_comma_delimited_region(
@@ -597,31 +585,39 @@ fn parse_constructor_pattern_args(
         parse_constrained_pattern_region,
     );
     p.expect(Token::Rparen);
-    let arg = pattern_args(p, lparen, args);
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    pat(PatternDesc::Ppat_construct(constr, arg), loc, attrs)
+    let loc = p.mk_loc_idx_to_prev_end(lparen);
+    let args = if args.is_empty() {
+        vec![construct_lident(p, "()", loc, Attributes::new())]
+    } else {
+        args
+    };
+    let txt = args.into_iter().map(|a| p.arena_mut().push_pat(a)).collect();
+    Located { txt, loc }
 }
 
-/// OCaml `parse_variant_pattern_args` (res_core.ml:1750-1778).
+/// OCaml `parse_constructor_pattern_args` (res_core.ml).
+fn parse_constructor_pattern_args(
+    p: &mut Parser<'_>,
+    constr: Located<crate::parse_arena::LidentIdx>,
+    start_pos_idx: PosIdx,
+    attrs: Attributes,
+) -> Pattern {
+    let args = parse_pattern_args(p);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    pat(PatternDesc::Ppat_construct(constr, Box::new(args)), loc, attrs)
+}
+
+/// OCaml `parse_variant_pattern_args` (res_core.ml).
 fn parse_variant_pattern_args(
     p: &mut Parser<'_>,
     ident: String,
     start_pos_idx: PosIdx,
     attrs: Attributes,
 ) -> Pattern {
-    let lparen = p.start_pos_idx();
-    p.expect(Token::Lparen);
-    let patterns = super::core::parse_comma_delimited_region(
-        p,
-        Grammar::PatternList,
-        Token::Rparen,
-        parse_constrained_pattern_region,
-    );
-    let arg = pattern_args(p, lparen, patterns);
-    p.expect(Token::Rparen);
+    let args = parse_pattern_args(p);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     pat(
-        PatternDesc::Ppat_variant(Box::new((Cow::Owned(ident), arg))),
+        PatternDesc::Ppat_variant(Box::new((Cow::Owned(ident), args))),
         loc,
         attrs,
     )

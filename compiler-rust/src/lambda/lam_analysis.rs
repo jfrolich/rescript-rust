@@ -41,7 +41,7 @@ pub fn no_side_effects(lam: &Lambda) -> bool {
         Lambda::Lvar(_) | Lambda::Lconst(_) | Lambda::Lfunction(_) => true,
 
         // Global module references are pure (side effects tracked at module level)
-        Lambda::LglobalModule(_, _) => true,
+        Lambda::LglobalModule(_) => true,
 
         // Primitive operations - check if the primitive is pure
         Lambda::Lprim(prim_info) => {
@@ -131,6 +131,11 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         Primitive::Pmodint | Primitive::Pdivint | Primitive::Pdivbigint | Primitive::Pmodbigint => {
             second_constant.is_some_and(not_zero_constant)
         }
+        // lam_analysis.ml: raises on a negative exponent, so pure only when
+        // the exponent is a nonnegative constant.
+        Primitive::Ppowbigint => {
+            matches!(second_constant, Some(Constant::BigInt { negative: false, .. }))
+        }
 
         // Creation and type checking primitives
         Primitive::PcreateExtension(_)
@@ -145,9 +150,7 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         | Primitive::PnullToOpt
         | Primitive::PnullUndefinedToOpt
         | Primitive::PjsObjectCreate(_)
-        | Primitive::Pimport
-        | Primitive::Pnull
-        | Primitive::Pundefined => true,
+        | Primitive::Pimport(_) => true,
 
         // Block operations
         Primitive::Pmakeblock(_, _)
@@ -213,7 +216,6 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         | Primitive::Paddbigint
         | Primitive::Psubbigint
         | Primitive::Pmulbigint
-        | Primitive::Ppowbigint
         | Primitive::Pnotbigint
         | Primitive::Pandbigint
         | Primitive::Porbigint
@@ -227,8 +229,6 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
 
         // String primitives
         Primitive::Pstringlength
-        | Primitive::Pstringrefu
-        | Primitive::Pstringrefs
         | Primitive::Pstringcomp(_)
         | Primitive::Pstringorder
         | Primitive::Pstringmin
@@ -237,18 +237,17 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         // Array primitives (read-only)
         Primitive::Pmakearray
         | Primitive::Parraylength
-        | Primitive::Parrayrefu
-        | Primitive::Parrayrefs => true,
+        | Primitive::Parrayrefu => true,
 
         // List and dict primitives
         Primitive::Pmakelist | Primitive::Pmakedict | Primitive::PdictHas => true,
 
         // Type testing primitives
-        Primitive::Pisint | Primitive::PisPolyVarBlock | Primitive::Pisout(_) => true,
+        Primitive::Pisint | Primitive::PisPolyVarBlock => true,
 
         // Offset and misc
-        Primitive::Poffsetint(_)
-        | Primitive::Pstringadd
+        Primitive::Pstringadd
+        | Primitive::Ptemplate(_)
         | Primitive::PfnArity
         | Primitive::PwrapExn
         | Primitive::Phash
@@ -260,21 +259,25 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         Primitive::PrawJsCode(info) => raw_js_is_pure(info),
 
         // Impure primitives
-        Primitive::PtaggedTemplate
+        Primitive::PtaggedTemplate(_)
         | Primitive::PjsApply
         | Primitive::PjsRuntimeApply
         | Primitive::PjsCall { .. }
         | Primitive::PinitMod
         | Primitive::PupdateMod
-        | Primitive::PjsUnsafeDowngrade { .. }
+        | Primitive::PjsObjectGet(_)
+        | Primitive::PjsObjectSet(_)
         | Primitive::Pdebugger
         | Primitive::PjsFnMethod
         | Primitive::Pawait
         | Primitive::Parraysets
         | Primitive::Parraysetu
-        | Primitive::Poffsetref(_)
         | Primitive::Praise
-        | Primitive::Psetfield(_, _) => false,
+        | Primitive::Psetfield(_, _)
+        // Bounds-checked reads throw when the index is out of range.
+        | Primitive::Parrayrefs
+        | Primitive::Pstringrefs
+        | Primitive::Pstringrefu => false,
     }
 }
 
@@ -331,7 +334,7 @@ fn size_inner(lam: &Lambda) -> Option<i32> {
                 Primitive::Pfield(_, FieldDbgInfo::Module { .. }) => {
                     if prim_info.args.len() == 1 {
                         match &prim_info.args[0] {
-                            Lambda::LglobalModule(_, _) | Lambda::Lvar(_) => return Some(1),
+                            Lambda::LglobalModule(_) | Lambda::Lvar(_) => return Some(1),
                             _ => {}
                         }
                     }
@@ -356,7 +359,7 @@ fn size_inner(lam: &Lambda) -> Option<i32> {
                         .filter(|param| {
                             !matches!(
                                 param.obj_arg_type,
-                                crate::lambda::lam_primitive::ExternalArgAttr::ArgCst(_)
+                                crate::types::external_ffi_types::Attr::ArgCst(_)
                             )
                         })
                         .count();
@@ -369,7 +372,7 @@ fn size_inner(lam: &Lambda) -> Option<i32> {
             size_lams(1, &prim_info.args)
         }
 
-        Lambda::LglobalModule(_, _) => Some(1),
+        Lambda::LglobalModule(_) => Some(1),
 
         Lambda::Lapply(apply) => {
             let func_size = size_inner(&apply.ap_func)?;
@@ -434,7 +437,7 @@ fn size_constant(c: &Constant) -> i32 {
         | Constant::JsTrue
         | Constant::JsFalse => 1,
 
-        Constant::String { .. } => 1,
+        Constant::String(_) => 1,
         Constant::ImmString(_) => 1,
 
         Constant::Some(inner) => size_constant(inner),

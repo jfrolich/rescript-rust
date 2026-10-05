@@ -25,7 +25,6 @@ use rescript_compiler::parser::ast::{Signature, Structure};
 use rescript_compiler::types::path::Path as TypePath;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -38,9 +37,6 @@ use std::time::Instant;
 use std::time::SystemTime;
 use tracing::{Span, info_span, instrument};
 
-/// Backend data not stored in the typed `.cmi`. Keep it next to the typed
-/// artifacts so a fresh one-shot process can resolve clean modules exactly as
-/// the in-memory registry does during a full build.
 /// Decode captured compiler output (stdout or stderr) into a String.
 ///
 /// The output is not guaranteed to be valid UTF-8: a code frame can truncate a
@@ -350,6 +346,24 @@ fn apply_signature_ready(build_command_state: &BuildCommandState, msg: Signature
     generation_before == Some(generation_after)
 }
 
+/// Mark a module's dependents in the compile universe dirty without
+/// releasing them.
+fn mark_dependents_dirty(
+    build_state: &BuildState,
+    compile_universe: &AHashSet<String>,
+    dirty_set: &mut AHashSet<String>,
+    module_name: &str,
+) {
+    let Some(module) = build_state.get_module(module_name) else {
+        return;
+    };
+    for dep in &module.dependents {
+        if compile_universe.contains(dep) {
+            dirty_set.insert(dep.clone());
+        }
+    }
+}
+
 fn unblock_dependents(
     build_state: &BuildState,
     compile_universe: &AHashSet<String>,
@@ -496,7 +510,6 @@ fn compile_one(
     module_name: &str,
     is_dirty: bool,
     warn_error_override: Option<String>,
-    subprocess: bool,
     dump_typed_sexp: bool,
     parent_span: Span,
     in_process_hooks: Option<InProcessSchedulerHooks>,
@@ -622,11 +635,9 @@ fn compile_one(
                     package,
                     &helpers::get_ast_path(&iface.path),
                     module,
-                    module_name,
                     true,
                     build_state,
                     warn_error_override.clone(),
-                    subprocess,
                     dump_typed_sexp,
                 )
             });
@@ -634,11 +645,9 @@ fn compile_one(
                 package,
                 &helpers::get_ast_path(&source_file.implementation.path),
                 module,
-                module_name,
                 false,
                 build_state,
                 warn_error_override,
-                subprocess,
                 dump_typed_sexp,
             );
             let cmi_digest_after = helpers::compute_file_hash(Path::new(&cmi_path));
@@ -669,54 +678,6 @@ fn compile_one(
 /// The sexp starts with "(structure" or "(signature" and continues to the end.
 /// Everything before that is warnings.
 /// Returns (warnings, Option<sexp>).
-fn extract_warning_prefix_from_sexp_file(path: &Path) -> std::io::Result<String> {
-    const MAX_WARNING_BYTES: usize = 16 * 1024 * 1024;
-
-    let file = std::fs::File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut warnings = Vec::new();
-    let mut offset = 0_u64;
-    let mut at_line_start = true;
-    let mut sexp_offset = None;
-
-    loop {
-        let buffer = reader.fill_buf()?;
-        if buffer.is_empty() {
-            break;
-        }
-        if at_line_start && (buffer.starts_with(b"(structure") || buffer.starts_with(b"(signature")) {
-            sexp_offset = Some(offset);
-            break;
-        }
-
-        let consumed = buffer
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(buffer.len(), |position| position + 1);
-        let remaining = MAX_WARNING_BYTES.saturating_sub(warnings.len());
-        warnings.extend_from_slice(&buffer[..consumed.min(remaining)]);
-        at_line_start = buffer[consumed - 1] == b'\n';
-        reader.consume(consumed);
-        offset += consumed as u64;
-    }
-
-    if warnings.len() == MAX_WARNING_BYTES {
-        warnings.extend_from_slice(b"\n[compiler warning output truncated]\n");
-    }
-
-    if let Some(sexp_offset) = sexp_offset.filter(|offset| *offset > 0) {
-        let mut source = reader.into_inner();
-        source.seek(SeekFrom::Start(sexp_offset))?;
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let mut replacement = tempfile::NamedTempFile::new_in(parent)?;
-        std::io::copy(&mut source, &mut replacement)?;
-        replacement.flush()?;
-        replacement.persist(path).map_err(|error| error.error)?;
-    }
-
-    Ok(String::from_utf8_lossy(&warnings).into_owned())
-}
-
 fn extract_sexp_from_stderr(stderr: &str) -> (String, Option<String>) {
     // Find the start of the sexp - it begins with "(structure" or "(signature" at the start of a line
     let pos = stderr
@@ -952,7 +913,6 @@ pub fn compile(
     let mut dirty_set: AHashSet<String> = dirty_modules;
 
     let warn_error_override = build_state.get_warn_error_override();
-    let subprocess = build_state.subprocess();
     let dump_typed_sexp = build_state.dump_typed_sexp();
     let build_state_ref: &BuildState = &build_state.build_state;
     let build_command_state_ref: &BuildCommandState = build_state;
@@ -1006,11 +966,11 @@ pub fn compile(
                     in_flight,
                 );
             }
-            // A subprocess build stops dispatching at the first error. An
-            // in-process build recompiles everything, so it keeps compiling
-            // the modules that do not depend on a failed one: the result no
-            // longer depends on scheduling and every error is reported.
-            while in_flight < capacity && (in_process_mode || !has_errors) {
+            // Keep dispatching work that was already independent of any
+            // failed module. Otherwise diagnostics vary with worker count:
+            // a warning-producing module may or may not have started before
+            // an unrelated error finishes.
+            while in_flight < capacity {
                 if let Some(pre_js_msg) = pop_ready_js(&mut ready_js, &waiting_js_by_dep) {
                     if let Some(counters) = scheduler_counters.as_mut() {
                         counters.scheduled_js += 1;
@@ -1095,7 +1055,6 @@ pub fn compile(
                         &module_name,
                         is_dirty,
                         warn_override,
-                        subprocess,
                         dump_typed_sexp,
                         parent_span,
                         in_process_hooks,
@@ -1111,10 +1070,6 @@ pub fn compile(
             }
 
             if in_flight == 0 {
-                if !ready_heap.is_empty() {
-                    // Errors suppressed new spawns; nothing left to drain.
-                    break;
-                }
                 if completed.len() < compile_universe_count && !has_errors {
                     stalled = true;
                 }
@@ -1269,6 +1224,19 @@ pub fn compile(
                                     is_clean,
                                 );
                             }
+                        } else if module_failed {
+                            // A successful interface can replace the CMI even
+                            // when its implementation fails. Keep dependents
+                            // dirty for recovery, but do not release them
+                            // until the module succeeds.
+                            if !is_clean {
+                                mark_dependents_dirty(
+                                    build_state_ref,
+                                    &compile_universe,
+                                    &mut dirty_set,
+                                    &finished_name,
+                                );
+                            }
                         } else {
                             unblock_dependents(
                                 build_state_ref,
@@ -1317,9 +1285,9 @@ pub fn compile(
     let mut num_compiled_modules = 0;
 
     // Persist propagated dirtiness back onto build_state. Modules that were
-    // marked dirty (because a predecessor's cmi changed) but never scheduled
-    // — e.g. the first compile error aborted further dispatch — must keep
-    // compile_dirty = true so the next incremental build recompiles them.
+    // marked dirty (because a predecessor's cmi changed) but blocked by a
+    // failed prerequisite must keep compile_dirty = true so the next
+    // incremental build recompiles them.
     // Successful recompiles in the result loop below override this back to
     // false for the modules that actually ran.
     for name in &dirty_set {
@@ -1832,14 +1800,13 @@ pub(crate) struct InProcessCompilerFlags {
     pub(crate) debug: bool,
     pub(crate) jsx_preserve: bool,
     pub(crate) jsx_version: Option<i32>,
+    pub(crate) jsx_module: Option<String>,
     pub(crate) experimental_let_unwrap: bool,
     pub(crate) open_modules: Vec<String>,
     pub(crate) warning_specs: Vec<String>,
     pub(crate) warning_error_specs: Vec<String>,
     /// `Clflags.keep_locs` (`-keep-locs`/`-no-keep-locs`, default on).
     pub(crate) keep_locs: bool,
-    /// `Clflags.binary_annotations` (`-bs-no-bin-annot` turns it off).
-    pub(crate) binary_annotations: bool,
 }
 
 impl Default for InProcessCompilerFlags {
@@ -1857,12 +1824,12 @@ impl Default for InProcessCompilerFlags {
             debug: false,
             jsx_preserve: false,
             jsx_version: None,
+            jsx_module: None,
             experimental_let_unwrap: false,
             open_modules: Vec::new(),
             warning_specs: Vec::new(),
             warning_error_specs: Vec::new(),
             keep_locs: true,
-            binary_annotations: true,
         }
     }
 }
@@ -1889,10 +1856,18 @@ pub(crate) fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessComp
             // compiler/bsc/rescript_compiler_main.ml:454-458.
             "-keep-locs" => parsed.keep_locs = true,
             "-no-keep-locs" => parsed.keep_locs = false,
-            "-bs-no-bin-annot" => parsed.binary_annotations = false,
             "-bs-jsx" => {
                 if let Some(version) = iter.next().and_then(|v| v.parse::<i32>().ok()) {
                     parsed.jsx_version = Some(version);
+                }
+            }
+            "-bs-jsx-module" => {
+                if let Some(module) = iter.next() {
+                    rescript_compiler::driver::apply_jsx_module_flag(
+                        module,
+                        &mut parsed.jsx_module,
+                        &mut parsed.jsx_version,
+                    );
                 }
             }
             "-enable-experimental" => {
@@ -1924,7 +1899,7 @@ pub(crate) fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessComp
 }
 
 /// Build `CompilerOptions` for an in-process compilation from the package config.
-fn build_compiler_options(
+pub(crate) fn build_compiler_options(
     package: &packages::Package,
     module_name: &str,
     source_file_path: &Path,
@@ -2182,6 +2157,7 @@ fn build_package_compiler_options(
         source_map_sources_content,
         source_map_root,
         jsx_version,
+        jsx_module: parsed_flags.jsx_module.clone(),
         experimental_let_unwrap,
         jsx_preserve: parsed_flags.jsx_preserve,
         debug: parsed_flags.debug,
@@ -2197,19 +2173,8 @@ fn build_package_compiler_options(
         make_runtime: parsed_flags.make_runtime,
         gentype_config,
         gentype_resolver,
-        // In-process builds keep typed results in memory; they write no
-        // `.cmi`/`.cmt`/`.cmti` files.
-        typed_artifacts: None,
         keep_locs: parsed_flags.keep_locs,
-        binary_annotations: parsed_flags.binary_annotations,
         visible_package_roots: Some(visible_package_roots),
-        // The file build passes `-bs-ns <Namespace>`, which leaves the
-        // namespace out of the saved import lists (js_packages_state.ml:38-42).
-        dont_record_crc_unit: package
-            .config
-            .get_namespace()
-            .to_suffix()
-            .map(|ns| ns.to_string()),
         ..Default::default()
     })
 }
@@ -2476,6 +2441,104 @@ fn write_compiled_js_outputs(
     write_js_write_job(js_outputs)
 }
 
+/// Mirror in-source JS (and its source map) into `lib/bs`, as a file-backed
+/// build does after each compile.
+/// Copy a module's `.res`/`.resi` sources next to its build artifacts in
+/// `lib/bs` and into the flat `lib/ocaml` directory, as the subprocess build
+/// does after each compile. Installed packages (the runtime precompile reads
+/// `lib/ocaml/*.res`) depend on these copies.
+fn copy_sources_to_build_dirs(package: &packages::Package, module: &Module) {
+    let SourceType::SourceFile(source_file) = &module.source_type else {
+        return;
+    };
+    let interface_path = source_file.interface.as_ref().map(|interface| &interface.path);
+    for path in interface_path
+        .into_iter()
+        .chain([&source_file.implementation.path])
+    {
+        let source = Path::new(&package.path).join(path);
+        let build_copy = package.get_build_path().join(path);
+        if let Some(parent) = build_copy.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::copy(&source, &build_copy);
+        if let Some(file_name) = path.file_name() {
+            let _ = std::fs::copy(&source, package.get_ocaml_build_path().join(file_name));
+        }
+    }
+}
+
+fn copy_in_source_js_to_build_dir(
+    package: &packages::Package,
+    source_file_path: &Path,
+    root_config: &config::Config,
+) {
+    for spec in root_config.get_package_specs() {
+        if !spec.in_source {
+            continue;
+        }
+        let suffix = root_config.get_suffix(&spec);
+        let source = helpers::get_source_file_from_rescript_file(
+            &Path::new(&package.path).join(source_file_path),
+            &suffix,
+        );
+        let destination = helpers::get_source_file_from_rescript_file(
+            &package.get_build_path().join(source_file_path),
+            &suffix,
+        );
+        if source.exists() {
+            if let Some(parent) = destination.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::copy(&source, &destination);
+        }
+        let mut source_map = source.into_os_string();
+        source_map.push(".map");
+        let source_map = PathBuf::from(source_map);
+        let mut destination_map = destination.into_os_string();
+        destination_map.push(".map");
+        let destination_map = PathBuf::from(destination_map);
+        if source_map.exists() {
+            let _ = std::fs::copy(&source_map, &destination_map);
+        } else {
+            let _ = std::fs::remove_file(&destination_map);
+        }
+    }
+}
+
+/// The `lib/bs` copies of in-source JS outputs (see
+/// [`copy_in_source_js_to_build_dir`]), for the writer thread.
+fn build_dir_js_mirrors(
+    outputs: &[rescript_compiler::driver::JsOutput],
+    package: &packages::Package,
+    source_file_path: &Path,
+    root_config: &config::Config,
+) -> Vec<rescript_compiler::driver::JsOutput> {
+    let mut mirrors = Vec::new();
+    for spec in root_config.get_package_specs() {
+        if !spec.in_source {
+            continue;
+        }
+        let suffix = root_config.get_suffix(&spec);
+        let source = js_output_path_for_spec(package, source_file_path, root_config, &spec);
+        let destination = helpers::get_source_file_from_rescript_file(
+            &package.get_build_path().join(source_file_path),
+            &suffix,
+        );
+        mirrors.extend(
+            outputs
+                .iter()
+                .filter(|output| output.path == source)
+                .map(|output| rescript_compiler::driver::JsOutput {
+                    path: destination.clone(),
+                    code: output.code.clone(),
+                    source_map: output.source_map.clone(),
+                }),
+        );
+    }
+    mirrors
+}
+
 /// Register namespace module signatures in the PersistentEnv for --in-process mode.
 ///
 /// For each package with a namespace, synthesizes the namespace module's
@@ -2492,50 +2555,33 @@ pub(crate) fn prepare_registry_for_runtime_precompile(build_state: &BuildCommand
     register_source_fallback_paths(build_state);
 }
 
+/// The namespace of `package` and its `(short_name, internal_name)` module
+/// aliases, as `packages::parse_packages` generates the `.mlmap`.
+pub(crate) fn namespace_aliases(package: &packages::Package) -> Option<(String, Vec<(String, String)>)> {
+    let namespace_suffix = package.namespace.to_suffix()?;
+    let entry = match &package.namespace {
+        packages::Namespace::NamespaceWithEntry { namespace: _, entry } => Some(entry.as_str()),
+        _ => None,
+    };
+    let module_aliases: Vec<(String, String)> = package
+        .source_files
+        .as_ref()?
+        .keys()
+        .map(|path| helpers::file_path_to_module_name(path, &packages::Namespace::NoNamespace))
+        // The entry module is not aliased in the namespace.
+        .filter(|module_name| entry != Some(module_name.as_str()))
+        .filter(|module_name| helpers::is_non_exotic_module_name(module_name))
+        .map(|short_name| {
+            let internal_name = format!("{}-{}", short_name, namespace_suffix);
+            (short_name, internal_name)
+        })
+        .collect();
+    (!module_aliases.is_empty()).then_some((namespace_suffix, module_aliases))
+}
+
 fn register_namespace_signatures(build_state: &BuildCommandState) {
     for (_package_name, package) in build_state.packages.iter() {
-        let namespace_suffix = match package.namespace.to_suffix() {
-            Some(suffix) => suffix,
-            None => continue, // No namespace for this package
-        };
-
-        let entry = match &package.namespace {
-            packages::Namespace::NamespaceWithEntry { namespace: _, entry } => Some(entry.as_str()),
-            _ => None,
-        };
-
-        // Build the list of (short_name, internal_name) alias pairs.
-        // This mirrors the logic in packages::parse_packages that calls gen_mlmap.
-        let source_files = match &package.source_files {
-            Some(sf) => sf,
-            None => continue,
-        };
-
-        let module_aliases: Vec<(String, String)> = source_files
-            .keys()
-            .map(|path| helpers::file_path_to_module_name(path, &packages::Namespace::NoNamespace))
-            .filter(|module_name| {
-                // Exclude the entry module (it's not aliased in the namespace)
-                if let Some(entry) = entry {
-                    module_name != entry
-                } else {
-                    true
-                }
-            })
-            .filter(|module_name| helpers::is_non_exotic_module_name(module_name))
-            .map(|short_name| {
-                let internal_name = format!("{}-{}", short_name, namespace_suffix);
-                (short_name, internal_name)
-            })
-            .collect();
-
-        if !module_aliases.is_empty() {
-            // Editor tooling reads the namespace unit from lib/bs like the
-            // bsc-compiled `.mlmap` (js_implementation.ml:207-226).
-            let mut sorted_aliases = module_aliases.clone();
-            sorted_aliases.sort();
-            // In-process builds write no namespace `.cmi`/`.cmt`, so there
-            // is no saved CRC list for importers to record.
+        if let Some((namespace_suffix, module_aliases)) = namespace_aliases(package) {
             build_state.register_namespace_in_registry(
                 &namespace_suffix,
                 &module_aliases,
@@ -3032,7 +3078,7 @@ fn compile_runtime_module_from_source(
 
 /// List the runtime `.res` sources as `(module name, path)`, sorted by module
 /// name.
-fn runtime_source_paths(runtime_path: &Path) -> Result<Vec<(String, PathBuf)>> {
+pub(crate) fn runtime_source_paths(runtime_path: &Path) -> Result<Vec<(String, PathBuf)>> {
     let mut paths = Vec::new();
     for entry in std::fs::read_dir(runtime_path)
         .with_context(|| format!("failed to read runtime directory {}", runtime_path.display()))?
@@ -3101,7 +3147,7 @@ fn module_name_from_stem(stem: &str) -> Option<String> {
         .map(|ch| format!("{}{}", ch.to_uppercase(), chars.as_str()))
 }
 
-fn read_source_latin1(path: &Path) -> Result<String> {
+pub(crate) fn read_source_latin1(path: &Path) -> Result<String> {
     rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
         let bytes =
             std::fs::read(path).with_context(|| format!("failed to read source file {}", path.display()))?;
@@ -3134,7 +3180,10 @@ fn populate_runtime_deps(runtime_modules: &mut [RuntimeModuleSource]) {
     }
 }
 
-fn parse_runtime_signature(path: &Path, source: &str) -> Result<(ParseArena, Signature, AHashSet<String>)> {
+pub(crate) fn parse_runtime_signature(
+    path: &Path,
+    source: &str,
+) -> Result<(ParseArena, Signature, AHashSet<String>)> {
     rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
         let filename = path.to_string_lossy();
         let mut parser = rescript_compiler::parser::Parser::new(filename.as_ref(), source);
@@ -3162,7 +3211,10 @@ fn parse_runtime_signature(path: &Path, source: &str) -> Result<(ParseArena, Sig
     })
 }
 
-fn parse_runtime_structure(path: &Path, source: &str) -> Result<(ParseArena, Structure, AHashSet<String>)> {
+pub(crate) fn parse_runtime_structure(
+    path: &Path,
+    source: &str,
+) -> Result<(ParseArena, Structure, AHashSet<String>)> {
     rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
         let filename = path.to_string_lossy();
         let mut parser = rescript_compiler::parser::Parser::new(filename.as_ref(), source);
@@ -3300,7 +3352,7 @@ fn runtime_compile_order(runtime_modules: &[RuntimeModuleSource]) -> Vec<usize> 
     order
 }
 
-fn runtime_compiler_options(
+pub(crate) fn runtime_compiler_options(
     runtime_root: &Path,
     runtime_path: &Path,
     module_name: &str,
@@ -3336,6 +3388,7 @@ fn runtime_compiler_options(
         output_module_format,
         js_output_targets,
         jsx_version: parsed_flags.jsx_version,
+        jsx_module: parsed_flags.jsx_module.clone(),
         experimental_let_unwrap: parsed_flags.experimental_let_unwrap
             || runtime_config.has_experimental_feature(config::ExperimentalFeature::LetUnwrap),
         jsx_preserve: parsed_flags.jsx_preserve,
@@ -3871,6 +3924,8 @@ fn finish_in_process_js_inner(
         send_js_metadata_ready(metadata_tx, module_name.clone(), registry_updates)
     });
 
+    copy_sources_to_build_dirs(package, module);
+
     let mut write_duration = Duration::default();
     {
         let _write_span = info_span!(
@@ -3890,10 +3945,14 @@ fn finish_in_process_js_inner(
                 &implementation_path,
                 root_config,
             )?;
+            copy_in_source_js_to_build_dir(package, &implementation_path, root_config);
         } else {
+            let mut outputs = std::mem::take(&mut compile_result.js_outputs);
+            let mirrors = build_dir_js_mirrors(&outputs, package, &implementation_path, root_config);
+            outputs.extend(mirrors);
             let job = JsWriteJob {
                 module_name: module_name.clone(),
-                outputs: std::mem::take(&mut compile_result.js_outputs),
+                outputs,
             };
             if let Err(mpsc::SendError(job)) = write_tx.send(job) {
                 write_js_write_job(&job.outputs)?;
@@ -3956,11 +4015,9 @@ fn compile_file(
     package: &packages::Package,
     ast_path: &Path,
     module: &Module,
-    module_name: &str,
     is_interface: bool,
     build_state: &BuildState,
     warn_error_override: Option<String>,
-    subprocess: bool,
     dump_typed_sexp: bool,
 ) -> Result<Option<String>> {
     let BuildState {
@@ -4013,125 +4070,6 @@ fn compile_file(
         .map(StrippedVerbatimPath::to_stripped_verbatim_path)
         .ok()
         .unwrap();
-
-    // --subprocess: run bsc as subprocess with timeout (non-fatal on crash/timeout).
-    // This REPLACES the normal bsc call — only one bsc runs per compile_file.
-    if subprocess {
-        // Redirect stderr to sexp file when dump_typed_sexp is set
-        let sexp_file = if dump_typed_sexp {
-            let path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            Some(std::fs::File::create(&path).map_err(|e| anyhow!("Failed to create sexp file: {e}"))?)
-        } else {
-            None
-        };
-
-        match Command::new(&compiler_info.bsc_path)
-            .current_dir(&cwd)
-            .args(&to_mjs_args)
-            .stdout(std::process::Stdio::null())
-            .stderr(match sexp_file {
-                Some(f) => std::process::Stdio::from(f),
-                None => std::process::Stdio::piped(),
-            })
-            .spawn()
-        {
-            Ok(mut child) => {
-                // Drain piped stderr while the compiler is running. Waiting with try_wait while a
-                // full pipe blocks the child would otherwise turn ordinary diagnostics into a
-                // misleading timeout.
-                let stderr_reader = child.stderr.take().map(|mut stderr| {
-                    std::thread::spawn(move || {
-                        let mut bytes = Vec::new();
-                        stderr.read_to_end(&mut bytes).map(|_| bytes)
-                    })
-                });
-                let timeout = std::time::Duration::from_secs(30);
-                let start = std::time::Instant::now();
-                let mut timed_out = false;
-                let mut wait_error = None;
-                let exit_status = loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => break Some(status),
-                        Ok(None) if start.elapsed() > timeout => {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            timed_out = true;
-                            break None;
-                        }
-                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                        Err(error) => {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            wait_error = Some(error);
-                            break None;
-                        }
-                    }
-                };
-                let stderr = match stderr_reader {
-                    Some(reader) => reader
-                        .join()
-                        .map_err(|_| anyhow!("bsc stderr reader thread panicked"))??,
-                    None => Vec::new(),
-                };
-
-                if timed_out {
-                    if dump_typed_sexp {
-                        // Truncate the sexp file (partial output is invalid)
-                        let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-                        let _ = std::fs::write(&sexp_path, "");
-                    }
-                    let msg = format!(
-                        "Timeout ({:.0}s) compiling `{module_name}`",
-                        timeout.as_secs_f64()
-                    );
-                    log::warn!("{}", msg);
-                    return Ok(Some(msg));
-                }
-                if let Some(error) = wait_error {
-                    let msg = format!("bsc subprocess failed while waiting for `{module_name}`: {error}");
-                    log::warn!("{msg}");
-                    return Ok(Some(msg));
-                }
-                if let Some(status) = exit_status.filter(|status| !status.success()) {
-                    let diagnostics = if dump_typed_sexp {
-                        let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-                        std::fs::read_to_string(&sexp_path).unwrap_or_default()
-                    } else {
-                        String::from_utf8_lossy(&stderr).into_owned()
-                    };
-
-                    // An exit without a code represents a crash (for example, termination by a
-                    // signal). Subprocess mode deliberately keeps crashes nonfatal.
-                    if status.code().is_none() {
-                        let msg = format!("bsc subprocess crashed for `{module_name}`: {diagnostics}");
-                        log::warn!("{msg}");
-                        return Ok(Some(msg));
-                    }
-
-                    return Err(anyhow!(if diagnostics.is_empty() {
-                        format!("bsc exited with {status} compiling `{module_name}`")
-                    } else {
-                        diagnostics
-                    }));
-                }
-
-                let warnings = if dump_typed_sexp {
-                    let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-                    extract_warning_prefix_from_sexp_file(&sexp_path).unwrap_or_default()
-                } else {
-                    compiler_output_to_string(&stderr)
-                };
-                return Ok(visible_compiler_warnings(&warnings, package.is_local_dep));
-            }
-            Err(e) => {
-                log::warn!("Failed to spawn bsc subprocess: {e}");
-            }
-        }
-        return Ok(None);
-    }
 
     // Normal mode: run bsc via Command::output()
     // When generating sexp, redirect stderr directly to file to avoid buffering
@@ -4613,31 +4551,6 @@ mod tests {
             visible_compiler_warnings(warning, true),
             Some(warning.to_string())
         );
-    }
-
-    #[test]
-    fn typed_sexp_warning_prefix_is_removed_without_buffering_the_sexp() {
-        let temp_dir = tempfile::tempdir().expect("temp directory should be created");
-        let path = temp_dir.path().join("Module.sexp");
-        let warning = "Warning number 26\nunused variable x\n";
-        let sexp_body = "x".repeat(4 * 1024 * 1024);
-        let sexp = format!("(structure\n{sexp_body})\n");
-        let mut contents = warning.as_bytes().to_vec();
-        contents.extend_from_slice(sexp.as_bytes());
-        fs::write(&path, contents).expect("mixed compiler output should be written");
-
-        let extracted =
-            extract_warning_prefix_from_sexp_file(&path).expect("warning prefix should be extracted");
-
-        assert_eq!(extracted, warning);
-        assert_eq!(
-            fs::metadata(&path).expect("sexp should remain").len(),
-            sexp.len() as u64
-        );
-        let mut file = fs::File::open(&path).expect("sexp should open");
-        let mut prefix = [0_u8; 10];
-        file.read_exact(&mut prefix).expect("sexp prefix should read");
-        assert_eq!(&prefix, b"(structure");
     }
 
     #[test]

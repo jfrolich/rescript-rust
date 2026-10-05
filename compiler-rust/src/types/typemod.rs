@@ -568,10 +568,31 @@ fn parser_private_to_type_private(
     }
 }
 
+/// The attribute's `Parsetree.payload` in portable form: marshal it exactly as
+/// the parsetree writer does and decode the result.
+fn parser_attr_payload_raw(
+    arena: &ParseArena,
+    attr: &ParsedAttribute,
+) -> Option<Box<crate::types::decl::PayloadValue>> {
+    let mut writer = crate::binary_ast::marshal::MarshalWriter::new();
+    writer.set_arena(arena);
+    crate::binary_ast::current_marshal::marshal_attributes_plain(
+        &Attributes::from_vec(vec![attr.clone()]),
+        &mut writer,
+    );
+    let list = crate::cmi::marshal_reader::MarshalReader::new()
+        .read_value(&mut std::io::Cursor::new(writer.payload()))
+        .ok()?;
+    // `[(name, payload)]`: the list cell's head is the attribute pair.
+    let payload = list.field(0).field(1);
+    crate::cmi::sig_reader::payload_value_from_ocaml(payload).map(Box::new)
+}
+
 fn parser_attr_to_decl_attr(
     arena: &ParseArena,
     attr: &ParsedAttribute,
 ) -> crate::types::decl::Attribute {
+    let attr_payload_raw = parser_attr_payload_raw(arena, attr);
     let (name, payload) = attr;
     let attr_name = arena.get_string(name.txt);
     let attr_payload = match payload {
@@ -586,6 +607,7 @@ fn parser_attr_to_decl_attr(
                     },
                     attr_payload: payload,
                     attr_loc: arena.to_location(name.loc),
+                    attr_payload_raw,
                 };
             }
             // OCaml's Lambda.find_name: extract string from @as("name") payloads.
@@ -600,8 +622,8 @@ fn parser_attr_to_decl_attr(
                         expr.pexp_desc.as_ref()
                     {
                         match c.as_ref() {
-                            crate::parser::ast::Constant::String(value, _) => {
-                                crate::types::decl::AttributePayload::Str(value.to_string())
+                            crate::parser::ast::Constant::String(value) => {
+                                crate::types::decl::AttributePayload::Str(value.semantic().to_string())
                             }
                             crate::parser::ast::Constant::Integer(value, suffix) => match suffix {
                                 Some('n') => {
@@ -627,8 +649,9 @@ fn parser_attr_to_decl_attr(
                             "false" => crate::types::decl::AttributePayload::Bool(false),
                             _ => crate::types::decl::AttributePayload::Ident(name.to_string()),
                         }
-                    } else if let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, None) =
+                    } else if let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, args) =
                         expr.pexp_desc.as_ref()
+                        && args.txt.is_empty()
                     {
                         match arena.lident_last(lid.txt) {
                             "true" => crate::types::decl::AttributePayload::Bool(true),
@@ -656,6 +679,7 @@ fn parser_attr_to_decl_attr(
         },
         attr_payload,
         attr_loc: arena.to_location(name.loc),
+        attr_payload_raw,
     }
 }
 
@@ -672,7 +696,7 @@ fn parser_attrs_to_decl_attrs(
 fn parser_warning_attribute_payload<'a>(
     arena: &'a ParseArena,
     payload: &'a ParsedPayload,
-) -> Option<(&'a str, LocIdx)> {
+) -> Option<(String, LocIdx)> {
     let ParsedPayload::PStr(items) = payload else {
         return None;
     };
@@ -683,16 +707,10 @@ fn parser_warning_attribute_payload<'a>(
         return None;
     };
     let (expr_idx, _attrs) = eval_box.as_ref();
-    let expr = arena.get_expr(*expr_idx);
-    let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = expr.pexp_desc.as_ref() else {
-        return None;
-    };
-    let crate::parser::ast::Constant::String(spec, _) = c.as_ref() else {
-        return None;
-    };
-    // builtin_attributes.ml:202-212 reports `@ppwarning` at the payload
-    // item's `pstr_loc`.
-    Some((spec.as_ref(), item.pstr_loc))
+    // builtin_attributes.ml `string_of_payload`: the payload's semantic
+    // string. `@ppwarning` is reported at the payload item's `pstr_loc`.
+    let spec = crate::ast_payload::semantic_string_of_expression(arena, arena.get_expr(*expr_idx)).ok()??;
+    Some((spec, item.pstr_loc))
 }
 
 fn apply_warning_attribute(
@@ -727,9 +745,9 @@ fn apply_warning_attribute_with_ppwarning(
 
             let mut config = WarningConfig::new();
             let parsed = if errflag {
-                config.parse_as_error(spec)
+                config.parse_as_error(&spec)
             } else {
-                config.parse(spec)
+                config.parse(&spec)
             };
             if parsed.is_err() {
                 tctx.report_warning(
@@ -743,9 +761,9 @@ fn apply_warning_attribute_with_ppwarning(
             }
 
             if errflag {
-                tctx.apply_warning_error_spec(spec);
+                tctx.apply_warning_error_spec(&spec);
             } else {
-                tctx.apply_warning_spec(spec);
+                tctx.apply_warning_spec(&spec);
             }
         }
         "ppwarning" | "ocaml.ppwarning" if ppwarning => {
@@ -829,8 +847,8 @@ fn parser_deprecated_of_attr(arena: &ParseArena, attr: &ParsedAttribute) -> Opti
                 ParsedStructureItemDesc::Pstr_eval(eval_box) => {
                     match arena.get_expr(eval_box.0).pexp_desc.as_ref() {
                         crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match c.as_ref() {
-                            crate::parser::ast::Constant::String(value, _) => {
-                                Some(value.to_string())
+                            crate::parser::ast::Constant::String(value) => {
+                                Some(value.semantic().to_string())
                             }
                             _ => None,
                         },
@@ -893,17 +911,16 @@ fn parser_deprecated_payload_to_decl_payload(
         return None;
     };
     let (expr_idx, _attrs) = eval_box.as_ref();
-    let expr = arena.get_expr(*expr_idx);
+    // builtin_attributes.ml: `Ast_payload.unwrap_payload_expression payload`.
+    let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr_idx));
 
+    // The plain `string_of_payload` form (builtin_attributes.ml
+    // `string_of_payload`); `Deprecated` is kept for the record form.
+    if let Some(reason) = crate::ast_payload::semantic_string_of_expression(arena, expr).ok().flatten() {
+        return Some(crate::types::decl::AttributePayload::Str(reason));
+    }
     match expr.pexp_desc.as_ref() {
-        crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match c.as_ref() {
-            // The plain `string_of_payload` form (builtin_attributes.ml:23-26);
-            // `Deprecated` is kept for the record form.
-            crate::parser::ast::Constant::String(reason, _) => {
-                Some(crate::types::decl::AttributePayload::Str(reason.to_string()))
-            }
-            _ => None,
-        },
+        crate::parser::ast::ExpressionDesc::Pexp_constant(_) => None,
         crate::parser::ast::ExpressionDesc::Pexp_record(record) => {
             let (fields, _base) = record.as_ref();
             let mut reason = None;
@@ -922,12 +939,10 @@ fn parser_deprecated_payload_to_decl_payload(
                 let field_name = arena.lident_last(field.lid.txt);
                 if field_name == "reason" {
                     let field_expr = arena.get_expr(field.expr);
-                    if let crate::parser::ast::ExpressionDesc::Pexp_constant(c) =
-                        field_expr.pexp_desc.as_ref()
+                    if let Some(value) =
+                        crate::ast_payload::semantic_string_of_expression(arena, field_expr).ok().flatten()
                     {
-                        if let crate::parser::ast::Constant::String(value, _) = c.as_ref() {
-                            reason = Some(value.to_string());
-                        }
+                        reason = Some(value);
                     }
                 } else if field_name == "migrate" {
                     can_be_automigrated = true;
@@ -1135,18 +1150,18 @@ fn primitive_description_from_value_decl(
     arena: &ParseArena,
     ctx: &crate::types::context::TypeContext,
     env: &Env,
-    val_prim: &[StrIdx],
+    val_prim: &crate::parser::ast::PrimitiveRepr,
     core_type_idx: crate::parse_arena::CoreTypeIdx,
     val_ty: TypeExprRef,
 ) -> crate::types::PrimitiveDescription {
-    let prim_name = val_prim
-        .first()
-        .map(|s| arena.get_string(*s).to_string())
-        .unwrap_or_default();
-    let prim_native_name = val_prim
-        .get(1)
-        .map(|s| arena.get_string(*s).to_string())
-        .unwrap_or_default();
+    use crate::parser::ast::PrimitiveRepr;
+    use crate::types::decl::PrimKind;
+    // `Primitive.parse_declaration` (primitive.ml:55-70).
+    let (prim_name, prim_kind) = match val_prim {
+        PrimitiveRepr::PrimName(name) => (arena.get_string(*name).to_string(), PrimKind::KindIntrinsic),
+        PrimitiveRepr::PrimFfi { name, spec } => (name.clone(), PrimKind::KindExternal(spec.clone())),
+        PrimitiveRepr::PrimInlineConst(c) => (String::new(), PrimKind::KindInlineConst(c.clone())),
+    };
     let arity_from_type = get_primitive_arity_from_type(ctx, env, val_ty);
     // OCaml: from_constructor = true when get_arity returns Some AND type is Tconstr
     let prim_from_constructor = arity_from_type.is_some() && is_type_constructor(ctx, val_ty);
@@ -1156,7 +1171,7 @@ fn primitive_description_from_value_decl(
     crate::types::PrimitiveDescription {
         prim_name,
         prim_arity,
-        prim_native_name,
+        prim_kind,
         prim_native_float: false,
         prim_from_constructor,
     }
@@ -3337,41 +3352,21 @@ fn expand_record_spread_label(
                     ty
                 }
             }
-            crate::types::TypeDesc::Tobject { fields, name } => {
+            crate::types::TypeDesc::Tobject { fields } => {
                 let new_fields = substitute_type_params(ctx, *fields, params, args, cache);
-                let mut name_changed = false;
-                let new_name = name.as_ref().map(|(path, type_args)| {
-                    (
-                        path.clone(),
-                        type_args
-                            .iter()
-                            .map(|arg| {
-                                let new_arg =
-                                    substitute_type_params(ctx, *arg, params, args, cache);
-                                if new_arg != *arg {
-                                    name_changed = true;
-                                }
-                                new_arg
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                });
-                if new_fields == *fields && !name_changed {
+                if new_fields == *fields {
                     ty
                 } else {
                     with_original_level(
                         ctx,
                         ty,
-                        ctx.new_type(crate::types::TypeDesc::Tobject {
-                            fields: new_fields,
-                            name: new_name,
-                        }),
+                        ctx.new_type(crate::types::TypeDesc::Tobject { fields: new_fields }),
                     )
                 }
             }
             crate::types::TypeDesc::Tfield {
                 name,
-                kind,
+                mutability,
                 typ,
                 rest,
             } => {
@@ -3385,7 +3380,7 @@ fn expand_record_spread_label(
                         ty,
                         ctx.new_type(crate::types::TypeDesc::Tfield {
                             name: name.clone(),
-                            kind: kind.clone(),
+                            mutability: ctx.mutability_ref_repr(*mutability),
                             typ: new_typ,
                             rest: new_rest,
                         }),
@@ -3617,18 +3612,27 @@ fn make_typed_spread_label(
     };
     // OCaml record_type_spread.mk_lbl uses the expanded source field location
     // for both ld_name.loc and ld_loc (not the spread marker location).
-    let source_loc = find_loc_idx_by_location(arena, &field.ld_loc).unwrap_or(template.ld_loc);
+    // `mk_lbl` (compiler/ml/record_type_spread.ml:110-121): `ld_loc = l.ld_loc`,
+    // which for a label read from a `.cmi` may lie outside this file.
+    let source_loc = find_loc_idx_by_location(arena, &field.ld_loc)
+        .unwrap_or_else(|| {
+            arena.push_typecheck_location(&field.ld_loc, &|idx| {
+                ctx.resolve_cmi_longident_component(idx)
+            })
+        });
     TypedLabelDeclaration {
         ld_id: field.ld_id.clone(),
         ld_name: Located {
             txt: field.ld_id.name().to_string(),
             loc: source_loc,
         },
+        ld_runtime_name: field.ld_runtime_name.clone(),
         ld_mutable: parser_mutable,
         ld_optional: field.ld_optional,
         ld_type: typed_ld_type,
         ld_loc: source_loc,
         ld_attributes: decl_attrs_to_parser_attrs(arena, &field.ld_attributes),
+        ld_types_attributes: Some(field.ld_attributes.clone().into_boxed_slice()),
     }
 }
 
@@ -4858,11 +4862,11 @@ fn compare_definition_constructors(
             crate::types::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
         ) {
             let expected_tag = match &expected_layout.constructors[idx] {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
                 crate::types::VariantConstructorCase::Block(_) => unreachable!(),
             };
             let actual_tag = match &actual_layout.constructors[idx] {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
                 crate::types::VariantConstructorCase::Block(_) => unreachable!(),
             };
             if expected_tag != actual_tag {
@@ -5676,6 +5680,7 @@ fn build_spread_constructor(
                             )
                             .unwrap_or(source_cd_loc),
                         },
+                        ld_runtime_name: l.ld_runtime_name.clone(),
                         ld_mutable: match l.ld_mutable {
                             crate::types::asttypes::MutableFlag::Mutable => crate::parser::ast::MutableFlag::Mutable,
                             crate::types::asttypes::MutableFlag::Immutable => crate::parser::ast::MutableFlag::Immutable,
@@ -5703,6 +5708,7 @@ fn build_spread_constructor(
                             arena,
                             &l.ld_attributes,
                         ),
+                        ld_types_attributes: Some(l.ld_attributes.clone().into_boxed_slice()),
                     })
                     .collect();
             let args_vec = normalized_lbls
@@ -5726,8 +5732,11 @@ fn build_spread_constructor(
     };
 
 
+    // Variant_type_spread.map_constructors carries the source constructor's
+    // tag over as `pcd_runtime_tag`, which typedecl decodes back.
     let internal = crate::types::ConstructorDeclaration {
         cd_id: sc_id.clone(),
+        cd_runtime_tag: source_cstr.cd_runtime_tag.clone(),
         cd_args: sc_internal_cd_args,
         cd_res: source_cstr.cd_res,
         cd_loc: source_cstr.cd_loc.clone(),
@@ -5747,6 +5756,7 @@ fn build_spread_constructor(
             txt: sc_name.clone(),
             loc: source_cd_loc,
         },
+        cd_runtime_tag: source_cstr.cd_runtime_tag.clone(),
         cd_args: sc_typed_tree_cd_args,
         cd_res: spread_cd_res,
         cd_loc: source_cd_loc,
@@ -5795,73 +5805,42 @@ fn check_duplicate_constructor_declarations(
     Ok(())
 }
 
-/// `Record_attributes_check.check_duplicated_labels`
-/// (record_attributes_check.ml:28-69), installed as
-/// `Builtin_attributes.check_duplicated_labels` and run by
-/// `Typedecl.transl_labels` (typedecl.ml:209-213). An `@as` name clashes with
-/// any earlier label or `@as` name.
+/// `Record_runtime.check_duplicated_labels` (record_runtime.ml), run by
+/// `Typedecl.transl_labels` (typedecl.ml:209-213). A runtime name clashes
+/// with any earlier declared or runtime name.
 fn check_duplicate_label_declarations(
     arena: &ParseArena,
     labels: &[crate::parser::ast::LabelDeclaration],
     record_name: Option<&str>,
 ) -> TypeModResult<()> {
-    let mut coll: HashSet<String> = HashSet::default();
-    for label in labels {
-        let name = arena.get_string(label.pld_name.txt);
-        if coll.contains(name) && name != "..." {
-            return Err(TypeModError::DuplicateLabel {
-                loc: label.pld_name.loc,
-                label: name.to_string(),
-                record_name: record_name.map(str::to_string),
-            });
-        }
-        // The `@as` name is checked against the names before this label, so
-        // `@as("x") x` is allowed (record_attributes_check.ml:58-64).
-        let as_name = label
-            .pld_attributes
-            .iter()
-            .find_map(|attr| label_as_name_with_loc(arena, attr));
-        let clashes = as_name
-            .as_ref()
-            .is_some_and(|(as_name, _)| coll.contains(as_name));
-        coll.insert(name.to_string());
-        if let Some((as_name, as_loc)) = as_name {
-            if clashes {
-                return Err(TypeModError::DuplicateLabel {
-                    loc: as_loc,
-                    label: as_name,
-                    record_name: record_name.map(str::to_string),
-                });
-            }
-            coll.insert(as_name);
-        }
+    match crate::types::record_runtime::check_duplicated_labels(arena, labels) {
+        None => Ok(()),
+        Some((label, loc)) => Err(TypeModError::DuplicateLabel {
+            loc,
+            label,
+            record_name: record_name.map(str::to_string),
+        }),
     }
-    Ok(())
 }
 
-/// `find_name_with_loc` (record_attributes_check.ml:28-41).
-fn label_as_name_with_loc(
+/// `Record_runtime.extra_as_attribute` raised as
+/// `Ast_untagged_variants.Error (loc, Duplicated_bs_as)` (typedecl.ml
+/// `transl_labels`).
+fn check_extra_as_attribute(
     arena: &ParseArena,
-    attr: &crate::parser::ast::Attribute,
-) -> Option<(String, LocIdx)> {
-    if arena.get_string(attr.0.txt) != "as" {
-        return None;
-    }
-    let crate::parser::ast::Payload::PStr(items) = &attr.1 else {
-        return None;
-    };
-    let [item] = items.as_slice() else {
-        return None;
-    };
-    let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
-        return None;
-    };
-    match &*arena.get_expr(eval.0).pexp_desc {
-        crate::parser::ast::ExpressionDesc::Pexp_constant(constant) => match &**constant {
-            crate::parser::ast::Constant::String(s, _) => Some((s.to_string(), attr.0.loc)),
-            _ => None,
-        },
-        _ => None,
+    label: &crate::parser::ast::LabelDeclaration,
+) -> TypeModResult<()> {
+    match crate::types::record_runtime::extra_as_attribute(arena, label) {
+        Ok(None) => Ok(()),
+        Ok(Some(loc)) => Err(ast_untagged_variant_error(
+            arena.to_location(loc),
+            AstUntaggedVariantError::DuplicatedBsAs,
+        )),
+        // `Location.raise_errorf` from `Ast_payload.string_literal_of_payload`.
+        Err(error) => Err(TypeModError::InvalidAttribute {
+            loc: error.loc,
+            message: error.message.to_string(),
+        }),
     }
 }
 
@@ -6095,6 +6074,8 @@ fn reject_object_spread_with_record_field(
 pub enum AstUntaggedVariantError {
     /// A variant `@as(...)` payload has an unsupported shape.
     InvalidVariantAsAnnotation,
+    /// The integer of a variant case's `@as` is out of range.
+    VariantAsIntegerOutOfRange(String),
     /// More than one `@as` attribute was found.
     DuplicatedBsAs,
     /// A variant `@tag(...)` payload is not a string.
@@ -6117,6 +6098,9 @@ impl AstUntaggedVariantError {
             AstUntaggedVariantError::InvalidVariantAsAnnotation => {
                 "A variant case annotation @as(...) must be a string, integer, boolean, null, or undefined.".to_string()
             }
+            AstUntaggedVariantError::VariantAsIntegerOutOfRange(value) => format!(
+                "The integer {value} in this variant case's @as annotation is out of range."
+            ),
             AstUntaggedVariantError::DuplicatedBsAs => {
                 "Duplicate @as annotation; only one @as is allowed here.".to_string()
             }
@@ -6138,74 +6122,49 @@ fn ast_untagged_variant_error(loc: Location, error: AstUntaggedVariantError) -> 
     TypeModError::AstUntaggedVariantError { loc, error }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum VariantRuntimeTag {
-    String(String),
-    Int(i64),
-    Float(String),
-    BigInt(String),
-    Bool(bool),
-    Null,
-    Undefined,
+/// OCaml `Ast_untagged_variants.runtime_tag_of_parsetree`.
+pub(crate) fn runtime_tag_of_parsetree(
+    tag: &crate::parser::ast::ConstructorTag,
+) -> Result<crate::types::VariantLiteralTag, AstUntaggedVariantError> {
+    use crate::parser::ast::ConstructorTag as P;
+    use crate::types::VariantLiteralTag as T;
+    Ok(match tag {
+        P::Pct_string(s) => T::String(s.semantic().to_string()),
+        P::Pct_int(source) => match crate::types::decl::parse_ocaml_int_literal(source) {
+            Some(i) => T::Int(i as i32),
+            None => return Err(AstUntaggedVariantError::VariantAsIntegerOutOfRange(source.clone())),
+        },
+        P::Pct_float(f) => T::Float(f.clone()),
+        P::Pct_bigint(i) => T::BigInt(i.clone()),
+        P::Pct_bool(b) => T::Bool(*b),
+        P::Pct_null => T::Null,
+        P::Pct_undefined => T::Undefined,
+    })
 }
 
-fn process_variant_as_attributes(
-    attrs: &[crate::types::decl::Attribute],
-) -> TypeModResult<Option<VariantRuntimeTag>> {
-    let mut tag = None;
-    for attr in attrs {
-        if attr.attr_name.txt != "as" {
-            continue;
-        }
-        if tag.is_some() {
-            return Err(ast_untagged_variant_error(
-                attr.attr_name.loc.clone(),
-                AstUntaggedVariantError::DuplicatedBsAs,
-            ));
-        }
-        tag = match &attr.attr_payload {
-            crate::types::decl::AttributePayload::Str(value) => {
-                Some(VariantRuntimeTag::String(value.clone()))
+/// OCaml `Ast_untagged_variants.process_constructor_tag`: an `@as` left in
+/// the attributes is invalid (no valid tag was taken out) or a duplicate.
+pub(crate) fn process_constructor_tag(
+    arena: &ParseArena,
+    cstr: &crate::parser::ast::ConstructorDeclaration,
+) -> Result<Option<crate::types::VariantLiteralTag>, (LocIdx, AstUntaggedVariantError)> {
+    let leftover_as = cstr
+        .pcd_attributes
+        .iter()
+        .find(|attr| arena.get_string(attr.0.txt) == "as")
+        .map(|attr| attr.0.loc);
+    match &cstr.pcd_runtime_tag {
+        None => match leftover_as {
+            Some(loc) => Err((loc, AstUntaggedVariantError::InvalidVariantAsAnnotation)),
+            None => Ok(None),
+        },
+        Some(tag) => {
+            if let Some(loc) = leftover_as {
+                return Err((loc, AstUntaggedVariantError::DuplicatedBsAs));
             }
-            crate::types::decl::AttributePayload::Int(value) => {
-                Some(VariantRuntimeTag::Int(*value))
-            }
-            crate::types::decl::AttributePayload::IntLiteral(value) => {
-                match crate::types::decl::parse_ocaml_int_literal(value) {
-                    Some(value) => Some(VariantRuntimeTag::Int(value)),
-                    None => {
-                        return Err(TypeModError::FatalError {
-                            message: "Fatal error: exception Failure(\"int_of_string\")\n"
-                                .to_string(),
-                        });
-                    }
-                }
-            }
-            crate::types::decl::AttributePayload::Float(value) => {
-                Some(VariantRuntimeTag::Float(value.clone()))
-            }
-            crate::types::decl::AttributePayload::BigInt(value) => {
-                Some(VariantRuntimeTag::BigInt(value.clone()))
-            }
-            crate::types::decl::AttributePayload::Bool(value) => {
-                Some(VariantRuntimeTag::Bool(*value))
-            }
-            crate::types::decl::AttributePayload::Ident(value) if value == "null" => {
-                Some(VariantRuntimeTag::Null)
-            }
-            crate::types::decl::AttributePayload::Ident(value) if value == "undefined" => {
-                Some(VariantRuntimeTag::Undefined)
-            }
-            _ => None,
-        };
-        if tag.is_none() {
-            return Err(ast_untagged_variant_error(
-                attr.attr_name.loc.clone(),
-                AstUntaggedVariantError::InvalidVariantAsAnnotation,
-            ));
+            runtime_tag_of_parsetree(&tag.txt).map(Some).map_err(|error| (tag.loc, error))
         }
     }
-    Ok(tag)
 }
 
 fn process_variant_tag_name(
@@ -6248,10 +6207,8 @@ fn check_variant_tag_field_conflicts(
         };
         for field in fields {
             let field_name = field.ld_id.name().to_string();
-            let effective_field_name = match process_variant_as_attributes(&field.ld_attributes)? {
-                Some(VariantRuntimeTag::String(as_name)) => as_name,
-                Some(_) | None => field_name.clone(),
-            };
+            // `Record_runtime.declaration_name field`.
+            let effective_field_name = field.declaration_name();
             if effective_field_name == effective_tag_name {
                 return Err(ast_untagged_variant_error(
                     constructor.cd_loc.clone(),
@@ -6352,12 +6309,26 @@ fn get_untagged_constructor_block_type(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
     constructor: &crate::types::decl::ConstructorDeclaration,
-) -> Option<UntaggedVariantBlockType> {
+) -> TypeModResult<Option<UntaggedVariantBlockType>> {
     if !has_decl_attr(&constructor.cd_attributes, "unboxed") {
-        return None;
+        return Ok(None);
     }
 
-    match &constructor.cd_args {
+    // variant_layout.ml `get_block_type`: an untagged constructor carries at
+    // most one payload.
+    if let crate::types::decl::ConstructorArguments::CstrTuple(args) = &constructor.cd_args
+        && args.len() > 1
+    {
+        return Err(TypeModError::InvalidUntaggedVariantDefinition {
+            loc: constructor.cd_loc.clone(),
+            reason: format!(
+                "Constructor {} has more than one argument.",
+                constructor.cd_id.name()
+            ),
+        });
+    }
+
+    Ok(match &constructor.cd_args {
         crate::types::decl::ConstructorArguments::CstrTuple(args) => match args.as_slice() {
             [arg] => get_untagged_block_type_from_type(ctx, env, *arg).or_else(|| {
                 match extract_concrete_untagged_type_decl(ctx, env, *arg) {
@@ -6376,33 +6347,33 @@ fn get_untagged_constructor_block_type(
                     None => Some(UntaggedVariantBlockType::Unknown),
                 }
             }),
-            [_, _, ..] => Some(UntaggedVariantBlockType::Object),
+            [_, _, ..] => unreachable!("rejected above"),
             [] => None,
         },
         crate::types::decl::ConstructorArguments::CstrRecord(_) => {
             Some(UntaggedVariantBlockType::Object)
         }
-    }
+    })
 }
 
-fn variant_tag_literal(constructor_name: &str, tag: &Option<VariantRuntimeTag>) -> (bool, String) {
+fn variant_tag_literal(constructor_name: &str, tag: &Option<crate::types::VariantLiteralTag>) -> (bool, String) {
     match tag {
-        Some(VariantRuntimeTag::String(value)) => (true, value.clone()),
-        Some(VariantRuntimeTag::Int(value)) => (false, value.to_string()),
-        Some(VariantRuntimeTag::Float(value)) => (false, value.clone()),
-        Some(VariantRuntimeTag::BigInt(value)) => (false, value.clone()),
-        Some(VariantRuntimeTag::Bool(value)) => {
+        Some(crate::types::VariantLiteralTag::String(value)) => (true, value.clone()),
+        Some(crate::types::VariantLiteralTag::Int(value)) => (false, value.to_string()),
+        Some(crate::types::VariantLiteralTag::Float(value)) => (false, value.clone()),
+        Some(crate::types::VariantLiteralTag::BigInt(value)) => (false, value.clone()),
+        Some(crate::types::VariantLiteralTag::Bool(value)) => {
             (false, if *value { "true" } else { "false" }.to_string())
         }
-        Some(VariantRuntimeTag::Null) => (false, "null".to_string()),
-        Some(VariantRuntimeTag::Undefined) => (false, "undefined".to_string()),
+        Some(crate::types::VariantLiteralTag::Null) => (false, "null".to_string()),
+        Some(crate::types::VariantLiteralTag::Undefined) => (false, "undefined".to_string()),
         None => (true, constructor_name.to_string()),
     }
 }
 
 fn add_variant_literal(
     loc: &Location,
-    tag: &Option<VariantRuntimeTag>,
+    tag: &Option<crate::types::VariantLiteralTag>,
     constructor_name: &str,
     string_literals: &mut HashSet<String>,
     nonstring_literals: &mut HashSet<String>,
@@ -6434,7 +6405,8 @@ fn check_variant_well_formed(
     let mut consts = Vec::new();
     let mut blocks = Vec::new();
     for constructor in constructors {
-        let tag = process_variant_as_attributes(&constructor.cd_attributes)?;
+        // `get_cstr_loc_tag`: the declaration's decoded `@as`.
+        let tag = constructor.cd_runtime_tag.clone();
         let name = constructor.cd_id.name().to_string();
         if matches!(
             &constructor.cd_args,
@@ -6442,7 +6414,7 @@ fn check_variant_well_formed(
         ) {
             consts.push((constructor.cd_loc.clone(), name, tag));
         } else {
-            let block_type = get_untagged_constructor_block_type(ctx, env, constructor);
+            let block_type = get_untagged_constructor_block_type(ctx, env, constructor)?;
             blocks.push((constructor.cd_loc.clone(), name, tag, block_type));
         }
     }
@@ -6566,18 +6538,6 @@ fn check_variant_well_formed(
     Ok(())
 }
 
-fn canonical_variant_tag_type(tag: VariantRuntimeTag) -> crate::types::VariantTagType {
-    match tag {
-        VariantRuntimeTag::String(value) => crate::types::VariantTagType::String(value),
-        VariantRuntimeTag::Int(value) => crate::types::VariantTagType::Int(value as i32),
-        VariantRuntimeTag::Float(value) => crate::types::VariantTagType::Float(value),
-        VariantRuntimeTag::BigInt(value) => crate::types::VariantTagType::BigInt(value),
-        VariantRuntimeTag::Bool(value) => crate::types::VariantTagType::Bool(value),
-        VariantRuntimeTag::Null => crate::types::VariantTagType::Null,
-        VariantRuntimeTag::Undefined => crate::types::VariantTagType::Undefined,
-    }
-}
-
 fn canonical_variant_block_type(
     block_type: UntaggedVariantBlockType,
 ) -> crate::types::VariantBlockType {
@@ -6631,24 +6591,22 @@ fn derive_variant_layout(
         let name = constructor.cd_id.name().to_string();
         let tag = crate::types::VariantTag {
             name,
-            tag_type: process_variant_as_attributes(&constructor.cd_attributes)?
-                .map(canonical_variant_tag_type),
+            literal: constructor.cd_runtime_tag.clone(),
         };
         if matches!(&constructor.cd_args, crate::types::ConstructorArguments::CstrTuple(args) if args.is_empty())
         {
             cases.push(crate::types::VariantConstructorCase::Constant(tag));
         } else {
-            cases.push(crate::types::VariantConstructorCase::Block(
-                crate::types::VariantBlock {
-                    runtime: crate::types::BlockRuntime {
-                        tag,
-                        tag_name: process_variant_tag_name(&constructor.cd_attributes)?,
-                        untagged: has_decl_attr(&constructor.cd_attributes, "unboxed"),
-                    },
-                    block_type: get_untagged_constructor_block_type(ctx, env, constructor)
-                        .map(canonical_variant_block_type),
+            // variant_layout.ml `get_block`.
+            let tag_name = process_variant_tag_name(&constructor.cd_attributes)?;
+            let block = match get_untagged_constructor_block_type(ctx, env, constructor)? {
+                Some(block_type) => crate::types::VariantBlock::Untagged {
+                    tag,
+                    block_type: canonical_variant_block_type(block_type),
                 },
-            ));
+                None => crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag, tag_name }),
+            };
+            cases.push(crate::types::VariantConstructorCase::Block(block));
         }
     }
     Ok(crate::types::VariantLayout::new(
@@ -8100,17 +8058,28 @@ fn expression_uses_unqualified_value_path(
             expression_uses_unqualified_value_path(arena, first, name, target)
                 || expression_uses_unqualified_value_path(arena, second, name, target)
         }
+        crate::types::typedtree::ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
+            expression_uses_unqualified_value_path(arena, tag, name, target)
+                || values.iter().any(|value| expression_uses_unqualified_value_path(arena, value, name, target))
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_template { values, .. } => {
+            values.iter().any(|value| expression_uses_unqualified_value_path(arena, value, name, target))
+        }
         crate::types::typedtree::ExpressionDesc::Texp_for(_, _, start, stop, _, body) => {
             expression_uses_unqualified_value_path(arena, start, name, target)
                 || expression_uses_unqualified_value_path(arena, stop, name, target)
                 || expression_uses_unqualified_value_path(arena, body, name, target)
         }
-        crate::types::typedtree::ExpressionDesc::Texp_send(receiver, _, arg) => {
+        crate::types::typedtree::ExpressionDesc::Texp_object_get(receiver, _) => {
             expression_uses_unqualified_value_path(arena, receiver, name, target)
-                || arg.as_deref().is_some_and(|expr| {
-                    expression_uses_unqualified_value_path(arena, expr, name, target)
-                })
         }
+        crate::types::typedtree::ExpressionDesc::Texp_object_set(receiver, _, value) => {
+            expression_uses_unqualified_value_path(arena, receiver, name, target)
+                || expression_uses_unqualified_value_path(arena, value, name, target)
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_object_literal(fields) => fields
+            .iter()
+            .any(|(_, field)| expression_uses_unqualified_value_path(arena, field, name, target)),
         crate::types::typedtree::ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
             module_expr_uses_unqualified_value_path(arena, module_expr, name, target)
                 || expression_uses_unqualified_value_path(arena, body, name, target)
@@ -8290,17 +8259,28 @@ fn expression_uses_unqualified_module_path(
             expression_uses_unqualified_module_path(arena, first, name, target)
                 || expression_uses_unqualified_module_path(arena, second, name, target)
         }
+        crate::types::typedtree::ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
+            expression_uses_unqualified_module_path(arena, tag, name, target)
+                || values.iter().any(|value| expression_uses_unqualified_module_path(arena, value, name, target))
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_template { values, .. } => {
+            values.iter().any(|value| expression_uses_unqualified_module_path(arena, value, name, target))
+        }
         crate::types::typedtree::ExpressionDesc::Texp_for(_, _, start, stop, _, body) => {
             expression_uses_unqualified_module_path(arena, start, name, target)
                 || expression_uses_unqualified_module_path(arena, stop, name, target)
                 || expression_uses_unqualified_module_path(arena, body, name, target)
         }
-        crate::types::typedtree::ExpressionDesc::Texp_send(receiver, _, arg) => {
+        crate::types::typedtree::ExpressionDesc::Texp_object_get(receiver, _) => {
             expression_uses_unqualified_module_path(arena, receiver, name, target)
-                || arg.as_deref().is_some_and(|expr| {
-                    expression_uses_unqualified_module_path(arena, expr, name, target)
-                })
         }
+        crate::types::typedtree::ExpressionDesc::Texp_object_set(receiver, _, value) => {
+            expression_uses_unqualified_module_path(arena, receiver, name, target)
+                || expression_uses_unqualified_module_path(arena, value, name, target)
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_object_literal(fields) => fields
+            .iter()
+            .any(|(_, field)| expression_uses_unqualified_module_path(arena, field, name, target)),
         crate::types::typedtree::ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
             module_expr_uses_unqualified_module_path(arena, module_expr, name, target)
                 || expression_uses_unqualified_module_path(arena, body, name, target)
@@ -10192,13 +10172,8 @@ fn apply_with_type_constraints_to_module_type<'b>(
                     rewrite_type_with_substs(ctx, inner, substs, cache, visited);
                 }
             }
-            TypeDesc::Tobject { fields, name } => {
+            TypeDesc::Tobject { fields } => {
                 rewrite_type_with_substs(ctx, fields, substs, cache, visited);
-                if let Some((_path, args)) = name {
-                    for arg in args {
-                        rewrite_type_with_substs(ctx, arg, substs, cache, visited);
-                    }
-                }
             }
             TypeDesc::Tfield { typ, rest, .. } => {
                 rewrite_type_with_substs(ctx, typ, substs, cache, visited);
@@ -11026,7 +11001,7 @@ fn check_usage_of_path_of_substituted_item(
 
         enum TypeAction {
             Path(Path, Vec<TypeExprRef>),
-            Object(TypeExprRef, Option<(Path, Vec<TypeExprRef>)>),
+            Object(TypeExprRef),
             Variant(crate::types::type_expr::RowDesc),
             Children(Vec<TypeExprRef>),
         }
@@ -11040,7 +11015,7 @@ fn check_usage_of_path_of_substituted_item(
                 TypeDesc::Tpackage { path, args, .. } => {
                     TypeAction::Path(path.clone(), args.to_vec())
                 }
-                TypeDesc::Tobject { fields, name } => TypeAction::Object(*fields, name.clone()),
+                TypeDesc::Tobject { fields } => TypeAction::Object(*fields),
                 TypeDesc::Tvariant(row) => TypeAction::Variant(*row.clone()),
                 _ => {
                     let mut children = Vec::new();
@@ -11059,14 +11034,8 @@ fn check_usage_of_path_of_substituted_item(
                     check_type_expr(tctx, env, paths, arg, loc, lid, visited)?;
                 }
             }
-            TypeAction::Object(fields, name) => {
+            TypeAction::Object(fields) => {
                 check_type_expr(tctx, env, paths, fields, loc, lid, visited)?;
-                if let Some((path, args)) = name {
-                    check_path(tctx, env, paths, &path, loc, lid)?;
-                    for arg in args {
-                        check_type_expr(tctx, env, paths, arg, loc, lid, visited)?;
-                    }
-                }
             }
             TypeAction::Variant(row) => {
                 if let Some((path, args)) = &row.row_name {
@@ -13327,19 +13296,13 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                             val_id,
                             ValueDescription {
                                 val_type,
-                                val_kind: if vd.pval_prim.is_empty() {
-                                    crate::types::decl::ValueKind::ValReg
-                                } else {
-                                    crate::types::decl::ValueKind::ValPrim(
+                                val_kind: match &vd.pval_prim {
+                                    None => crate::types::decl::ValueKind::ValReg,
+                                    Some(prim) => crate::types::decl::ValueKind::ValPrim(
                                         primitive_description_from_value_decl(
-                                            arena,
-                                            ctx,
-                                            &sig_env,
-                                            &vd.pval_prim,
-                                            vd.pval_type,
-                                            val_type,
+                                            arena, ctx, &sig_env, prim, vd.pval_type, val_type,
                                         ),
-                                    )
+                                    ),
                                 },
                                 val_loc: arena.to_location(sig_item.psig_loc),
                                 val_attributes: vec![],
@@ -13493,6 +13456,11 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         // make_constructor translates inline
                                         // record labels.
                                         let cstr_id = tctx.type_ctx.create_ident(cstr_name);
+                                        let runtime_tag = process_constructor_tag(arena, cstr).map_err(
+                                            |(loc, error)| {
+                                                ast_untagged_variant_error(arena.to_location(loc), error)
+                                            },
+                                        )?;
                                         let cstr_args = match &cstr.pcd_args {
                                             crate::parser::ast::ConstructorArguments::Pcstr_tuple(
                                                 args,
@@ -13517,6 +13485,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                 let mut record_labels =
                                                     Vec::with_capacity(labels.len());
                                                 for label in labels {
+                                                    check_extra_as_attribute(arena, label)?;
                                                     let lbl_name = arena.get_string(label.pld_name.txt);
                                                     let (_typed_label_ty, lbl_type) =
                                                         transl_label_type(tctx, &sig_env, arena, label, false)?;
@@ -13533,6 +13502,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                     let label_id = tctx.type_ctx.create_ident(lbl_name);
                                                     record_labels.push(crate::types::LabelDeclaration {
                                                         ld_id: label_id,
+                                                        ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                                                         ld_mutable: mutable_flag,
                                                         ld_optional: label.pld_optional,
                                                         ld_type: lbl_type,
@@ -13547,6 +13517,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         };
                                         constructors.push(crate::types::ConstructorDeclaration {
                                             cd_id: cstr_id,
+                                            cd_runtime_tag: runtime_tag,
                                             cd_args: cstr_args,
                                             cd_res: match &cstr.pcd_res {
                                                 Some(res_core_type_idx) => {
@@ -13575,6 +13546,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                     )?;
                                     let mut record_labels = Vec::with_capacity(labels.len());
                                     for label in labels {
+                                        check_extra_as_attribute(arena, label)?;
                                         let lbl_name = arena.get_string(label.pld_name.txt);
                                         let (_typed_label_ty, lbl_type) =
                                             transl_label_type(tctx, &sig_env, arena, label, false)?;
@@ -13590,6 +13562,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         let label_id = tctx.type_ctx.create_ident(lbl_name);
                                         record_labels.push(crate::types::LabelDeclaration {
                                             ld_id: label_id,
+                                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                                             ld_mutable: mutable_flag,
                                             ld_optional: label.pld_optional,
                                             ld_type: lbl_type,
@@ -16103,9 +16076,13 @@ fn find_unbound_type_var_detail_in_single_type(
             if rest == ctx.repr(unbound) {
                 return trivial();
             }
-            fields.into_iter().find_map(|(name, _, field_ty)| {
-                crate::types::ctype::deep_occur(ctx, unbound, field_ty)
-                    .then_some(UnboundTypeVarDetail::Method { name, ty: field_ty })
+            fields.into_iter().find_map(|field| {
+                crate::types::ctype::deep_occur(ctx, unbound, field.typ).then_some(
+                    UnboundTypeVarDetail::Method {
+                        name: field.name,
+                        ty: field.typ,
+                    },
+                )
             })
         }
         TypeDesc::Tvariant(row) => {
@@ -17548,17 +17525,11 @@ pub fn transl_signature<'a>(
                 // primitive branch at typedecl.ml:1897-1898; ordinary
                 // signature values must not force constructor heads before
                 // Env.enter_value allocates val_id at typedecl.ml:1916-1919.
-                let val_kind = if vd.pval_prim.is_empty() {
-                    crate::types::decl::ValueKind::ValReg
-                } else {
-                    crate::types::decl::ValueKind::ValPrim(primitive_description_from_value_decl(
-                        arena,
-                        ctx,
-                        &sig_env,
-                        &vd.pval_prim,
-                        vd.pval_type,
-                        val_ty,
-                    ))
+                let val_kind = match &vd.pval_prim {
+                    None => crate::types::decl::ValueKind::ValReg,
+                    Some(prim) => crate::types::decl::ValueKind::ValPrim(
+                        primitive_description_from_value_decl(arena, ctx, &sig_env, prim, vd.pval_type, val_ty),
+                    ),
                 };
                 // OCaml typedecl.ml:1875-1914 translates the type scheme before
                 // Env.enter_value creates the value ident. Keep the same order so
@@ -17577,12 +17548,7 @@ pub fn transl_signature<'a>(
                         name: name_str.clone(),
                     },
                 );
-                // For primitives, we need the pval_prim as Vec<String> for the typed tree
-                let val_prim: Vec<String> = vd
-                    .pval_prim
-                    .iter()
-                    .map(|s| arena.get_string(*s).to_string())
-                    .collect();
+                let val_prim = vd.pval_prim.clone();
                 TSigDesc::Tsig_value(crate::types::typedtree::TypedValueDescription {
                     val_id: id,
                     val_name: Located {
@@ -17864,22 +17830,21 @@ pub fn transl_signature<'a>(
 // Structure Type Checking
 // ============================================================================
 
-/// typedecl.ml:1509-1520 `inline_types`: the record declarations of a group
-/// that carry `@res.inlineRecordDefinition`, in declaration order.
+/// typedecl.ml:1527-1540 `inline_types`: the record declarations of a group
+/// whose source origin is `Inline_record_definition`, in declaration order.
 fn group_inline_record_types(
-    arena: &ParseArena,
+    origins: &[crate::parser::ast::TypeDeclarationOrigin],
     typed_decls: &[TypedTypeDeclaration],
 ) -> Vec<crate::types::decl::TypeInlinedType> {
-    typed_decls
+    debug_assert_eq!(origins.len(), typed_decls.len());
+    origins
         .iter()
-        .filter(|tdecl| {
-            tdecl
-                .typ_attributes
-                .iter()
-                .any(|(name, _)| arena.get_string(name.txt) == "res.inlineRecordDefinition")
-        })
-        .filter_map(|tdecl| match &tdecl.typ_type.type_kind {
-            crate::types::TypeKind::TypeRecord(labels, _) => {
+        .zip(typed_decls)
+        .filter_map(|(origin, tdecl)| match (origin, &tdecl.typ_type.type_kind) {
+            (
+                crate::parser::ast::TypeDeclarationOrigin::Inline_record_definition,
+                crate::types::TypeKind::TypeRecord(labels, _),
+            ) => {
                 Some(crate::types::decl::TypeInlinedType::Record {
                     type_name: tdecl.typ_name.txt.clone(),
                     labels: labels.to_vec(),
@@ -17994,6 +17959,7 @@ fn type_structure_unscoped<'a>(
                     let cid = ctx.create_ident(cname);
                     constructors.push(crate::types::decl::ConstructorDeclaration {
                         cd_id: cid,
+                        cd_runtime_tag: None,
                         cd_args: crate::types::decl::ConstructorArguments::CstrTuple(vec![]),
                         cd_res: None,
                         cd_loc: crate::location::Location::none(),
@@ -18063,6 +18029,7 @@ fn type_structure_unscoped<'a>(
                             txt: cname.clone(),
                             loc: LocIdx(0),
                         },
+                        cd_runtime_tag: None,
                         cd_args: crate::types::typedtree::TypedConstructorArguments::Cstr_tuple(
                             vec![],
                         ),
@@ -18166,6 +18133,7 @@ fn type_structure_unscoped<'a>(
                     fp_param: param_ident,
                     fp_pat: param_pat,
                     fp_partial: crate::types::typedtree::Partial::Total,
+                    fp_has_default: false,
                 }],
                 body: Box::new(gen_fn.body),
                 async_: false,
@@ -18387,6 +18355,7 @@ fn type_structure_item<'a>(
                             let cid = ctx.create_ident(cname);
                             constructors.push(crate::types::decl::ConstructorDeclaration {
                                 cd_id: cid,
+                                cd_runtime_tag: None,
                                 cd_args: crate::types::decl::ConstructorArguments::CstrTuple(
                                     vec![],
                                 ),
@@ -18455,6 +18424,7 @@ fn type_structure_item<'a>(
                                     txt: cname.clone(),
                                     loc: LocIdx(0),
                                 },
+                                cd_runtime_tag: None,
                                 cd_args:
                                     crate::types::typedtree::TypedConstructorArguments::Cstr_tuple(
                                         vec![],
@@ -18519,6 +18489,7 @@ fn type_structure_item<'a>(
                                 })?;
                             labels.push(crate::types::decl::LabelDeclaration {
                                 ld_id: ctx.create_ident(&fs.name),
+                                ld_runtime_name: None,
                                 ld_mutable: if fs.mutable_ {
                                     crate::types::MutableFlag::Mutable
                                 } else {
@@ -18563,6 +18534,7 @@ fn type_structure_item<'a>(
                         for (pos, label) in labels.iter().enumerate() {
                             let lbl_desc = crate::types::LabelDescription {
                                 lbl_name: label.ld_id.name().to_string(),
+                                lbl_runtime_name: label.declaration_name(),
                                 lbl_res: res_ty,
                                 lbl_arg: label.ld_type,
                                 lbl_mut: label.ld_mutable,
@@ -18594,6 +18566,7 @@ fn type_structure_item<'a>(
                                     txt: label.ld_id.name().to_string(),
                                     loc: LocIdx(0),
                                 },
+                                ld_runtime_name: label.ld_runtime_name.clone(),
                                 ld_mutable: parser_mutable,
                                 ld_optional: label.ld_optional,
                                 ld_type: crate::types::typedtree::TypedCoreType {
@@ -18607,6 +18580,7 @@ fn type_structure_item<'a>(
                                 },
                                 ld_loc: LocIdx(0),
                                 ld_attributes: crate::parser::ast::Attributes::new(),
+                                ld_types_attributes: None,
                             });
                         }
 
@@ -18685,8 +18659,8 @@ fn type_structure_item<'a>(
                                             let (expr_idx, _) = &**inner;
                                             let expr = arena.get_expr(*expr_idx);
                                             if let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc {
-                                                if let crate::parser::ast::Constant::String(s, _) = &**c {
-                                                    return Some(s.to_string());
+                                                if let crate::parser::ast::Constant::String(s) = &**c {
+                                                    return Some(s.semantic().to_string());
                                                 }
                                             }
                                         }
@@ -18800,19 +18774,16 @@ fn type_structure_item<'a>(
             // Primitive.parse_declaration before Env.enter_value allocates the
             // external id. parse_arity itself delegates to Ctype.get_arity at
             // typedecl.ml:1863-1872; do not expand the whole value type here.
-            let prim_desc = primitive_description_from_value_decl(
-                arena,
-                ctx,
-                env,
-                &vd.pval_prim,
-                vd.pval_type,
-                val_ty,
-            );
-            // compiler/ml/typedecl.ml:1894-1904 permits nullary compiler
-            // primitives and the internal magic native-name marker, but rejects
-            // an ordinary external whose translated type has no arguments.
-            let internal_native_name = prim_desc.prim_native_name.chars().count() >= 20
-                && prim_desc.prim_native_name.starts_with("\u{84}\u{95}");
+            let Some(prim) = &vd.pval_prim else {
+                unreachable!("an external always carries a primitive (typedecl.ml:1890-1896)")
+            };
+            let prim_desc =
+                primitive_description_from_value_decl(arena, ctx, env, prim, vd.pval_type, val_ty);
+            // compiler/ml/typedecl.ml:1898-1905 permits nullary compiler
+            // primitives and digested externals, but rejects an ordinary
+            // external whose translated type has no arguments.
+            let internal_native_name =
+                !matches!(prim_desc.prim_kind, crate::types::decl::PrimKind::KindIntrinsic);
             let compiler_primitive = prim_desc
                 .prim_name
                 .as_bytes()
@@ -18827,13 +18798,7 @@ fn type_structure_item<'a>(
                 });
             }
 
-            // PPX has already encoded the FFI attributes into pval_prim,
-            // so just resolve StrIdx -> String for the typed tree
-            let val_prim: Vec<String> = vd
-                .pval_prim
-                .iter()
-                .map(|s| arena.get_string(*s).to_string())
-                .collect();
+            let val_prim = vd.pval_prim.clone();
 
             // OCaml Typedecl.transl_value_decl enters the value after translating
             // the type and parsing primitive metadata, so type lookup side effects
@@ -18897,6 +18862,10 @@ fn type_structure_item<'a>(
             let ctx = tctx.type_ctx;
             let mut new_env = env.clone();
             let mut typed_tree_decls: Vec<TypedTypeDeclaration> = Vec::new();
+            // typedecl.ml:1527-1533 pairs each typed declaration with its
+            // source declaration (`List.combine sdecl_list tdecls`); this is
+            // the source origin of each entry of `typed_tree_decls`.
+            let mut typed_tree_decl_origins: Vec<crate::parser::ast::TypeDeclarationOrigin> = Vec::new();
             let mut internal_decls_for_generalize: Vec<crate::types::TypeDeclaration> = Vec::new();
             // OCaml typedecl.ml:1500 `type_record_as_object`: set when a
             // spread-only record becomes an object manifest; it then skips
@@ -19070,6 +19039,7 @@ fn type_structure_item<'a>(
                 type_entry_is_synthetic_row.push(true);
                 internal_decls_for_generalize.push(row_internal_decl);
                 typed_tree_decls.push(typed_row_decl);
+                typed_tree_decl_origins.push(decls[row_id.decl_idx].ptype_origin);
             }
 
             for (decl_idx, decl) in decls.iter().enumerate() {
@@ -19399,6 +19369,11 @@ fn type_structure_item<'a>(
 
                             let cstr_name_str = arena.get_string(cstr.pcd_name.txt);
                             let cstr_id = ctx.create_ident(cstr_name_str);
+                            // typedecl.ml `make_cstr`: the runtime tag is
+                            // decoded right after the constructor's ident.
+                            let runtime_tag = process_constructor_tag(arena, cstr).map_err(
+                                |(loc, error)| ast_untagged_variant_error(arena.to_location(loc), error),
+                            )?;
                             let is_constant = matches!(cstr.pcd_args, crate::parser::ast::ConstructorArguments::Pcstr_tuple(ref args) if args.is_empty());
                             // OCaml `make_constructor` (compiler/ml/typedecl.ml:337-356):
                             // a generalized constructor is translated after
@@ -19441,6 +19416,7 @@ fn type_structure_item<'a>(
                                     let mut internal_labels: Vec<crate::types::LabelDeclaration> =
                                         Vec::new();
                                     for lbl in labels {
+                                        check_extra_as_attribute(arena, lbl)?;
                                         let (typed_core_type, type_ref) =
                                             transl_label_type(tctx, &temp_env, arena, lbl, cstr.pcd_res.is_none())?;
                                         let mutable_flag = match lbl.pld_mutable {
@@ -19473,6 +19449,7 @@ fn type_structure_item<'a>(
                                         let label_id = ctx.create_ident(lbl_name_str);
                                         internal_labels.push(crate::types::LabelDeclaration {
                                             ld_id: label_id.clone(),
+                                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(lbl),
                                             ld_mutable: mutable_flag,
                                             ld_optional: lbl.pld_optional,
                                             ld_type: internal_type_ref,
@@ -19488,11 +19465,13 @@ fn type_structure_item<'a>(
                                                 txt: lbl_name_str.to_string(),
                                                 loc: lbl.pld_name.loc,
                                             },
+                                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(lbl),
                                             ld_mutable: lbl.pld_mutable,
                                             ld_optional: lbl.pld_optional,
                                             ld_type: poly_typed_core_type,
                                             ld_loc: lbl.pld_loc,
                                             ld_attributes: lbl.pld_attributes.clone(),
+                                            ld_types_attributes: None,
                                         });
                                     }
                                     let has_spread = internal_labels
@@ -19707,6 +19686,7 @@ fn type_structure_item<'a>(
                             // Create internal constructor declaration
                             internal_cstrs.push(crate::types::ConstructorDeclaration {
                                 cd_id: cstr_id.clone(),
+                                cd_runtime_tag: runtime_tag.clone(),
                                 cd_args: internal_cd_args,
                                 cd_res: internal_cd_res,
                                 cd_loc: arena.to_location(cstr.pcd_loc),
@@ -19720,6 +19700,7 @@ fn type_structure_item<'a>(
                                     txt: cstr_name_str.to_string(),
                                     loc: cstr.pcd_name.loc,
                                 },
+                                cd_runtime_tag: runtime_tag,
                                 cd_args: typed_tree_cd_args,
                                 cd_res: typed_cd_res,
                                 cd_loc: cstr.pcd_loc,
@@ -19813,6 +19794,7 @@ fn type_structure_item<'a>(
                         let mut internal_labels: Vec<crate::types::LabelDeclaration> = Vec::new();
                         let mut typed_tree_labels: Vec<TypedLabelDeclaration> = Vec::new();
                         for lbl in labels {
+                            check_extra_as_attribute(arena, lbl)?;
                             let lbl_name_str = arena.get_string(lbl.pld_name.txt);
                             // typedecl.ml:223: `transl_labels` translates each
                             // label in `warning_scope pld_attributes`.
@@ -19843,6 +19825,7 @@ fn type_structure_item<'a>(
                             let label_id = ctx.create_ident(lbl_name_str);
                             internal_labels.push(crate::types::LabelDeclaration {
                                 ld_id: label_id.clone(),
+                                ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(lbl),
                                 ld_mutable: mutable_flag,
                                 ld_optional: lbl.pld_optional,
                                 ld_type: internal_type_ref,
@@ -19858,11 +19841,13 @@ fn type_structure_item<'a>(
                                     txt: lbl_name_str.to_string(),
                                     loc: lbl.pld_name.loc,
                                 },
+                                ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(lbl),
                                 ld_mutable: lbl.pld_mutable,
                                 ld_optional: lbl.pld_optional,
                                 ld_type: poly_typed_core_type,
                                 ld_loc: lbl.pld_loc,
                                 ld_attributes: lbl.pld_attributes.clone(),
+                                ld_types_attributes: None,
                             });
                         }
                         // Match OCaml typedecl + record_type_spread behavior:
@@ -20134,6 +20119,7 @@ fn type_structure_item<'a>(
                     for (pos, ld) in labels.iter().enumerate() {
                         let lbl_desc = crate::types::LabelDescription {
                             lbl_name: ld.ld_id.name().to_string(),
+                            lbl_runtime_name: ld.declaration_name(),
                             lbl_res: ty_res,
                             lbl_arg: crate::types::ctype::remap_label_type_to_params(
                                 ctx,
@@ -20179,6 +20165,7 @@ fn type_structure_item<'a>(
                 };
 
                 typed_tree_decls.push(typed_tree_decl);
+                typed_tree_decl_origins.push(decl.ptype_origin);
                 if has_fixed_rows {
                     type_entry_ids.push(type_id.clone());
                     type_entry_parser_indices.push(Some(decl_idx));
@@ -20196,7 +20183,7 @@ fn type_structure_item<'a>(
             check_type_declaration_duplicate_definitions(tctx, arena, decls);
             // typedecl.ml:1509-1526: every declaration of the group records
             // the group's inline record definitions for printing.
-            let inline_types = group_inline_record_types(arena, &typed_tree_decls);
+            let inline_types = group_inline_record_types(&typed_tree_decl_origins, &typed_tree_decls);
             if !inline_types.is_empty() {
                 for (_, decl, _, _) in final_env_entries.iter_mut() {
                     decl.type_inlined_types = inline_types.clone();
@@ -20645,6 +20632,7 @@ fn type_structure_item<'a>(
                                 let mut typed_labels = Vec::new();
                                 let mut decl_labels = Vec::new();
                                 for label in labels {
+                                    check_extra_as_attribute(arena, label)?;
                                     let label_name =
                                         arena.get_string(label.pld_name.txt).to_string();
                                     let (typed_ct, ty_ref) =
@@ -20666,6 +20654,7 @@ fn type_structure_item<'a>(
                                             txt: label_name.clone(),
                                             loc: label.pld_name.loc,
                                         },
+                                        ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                                         ld_mutable: label.pld_mutable,
                                         ld_optional: label.pld_optional,
                                         ld_type: poly_typed_ct,
@@ -20674,6 +20663,7 @@ fn type_structure_item<'a>(
                                     });
                                     decl_labels.push(crate::types::LabelDeclaration {
                                         ld_id: label_id,
+                                        ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                                         ld_mutable: match label.pld_mutable {
                                             crate::parser::ast::MutableFlag::Immutable => {
                                                 crate::types::MutableFlag::Immutable
@@ -21009,6 +20999,7 @@ fn type_structure_item<'a>(
                             let mut typed_labels = Vec::new();
                             let mut decl_labels = Vec::new();
                             for label in labels {
+                                check_extra_as_attribute(arena, label)?;
                                 let label_name = arena.get_string(label.pld_name.txt).to_string();
                                 let (typed_ct, ty_ref) =
                                     transl_label_type(tctx, env, arena, label, ret.is_none())?;
@@ -21029,6 +21020,7 @@ fn type_structure_item<'a>(
                                         txt: label_name.clone(),
                                         loc: label.pld_name.loc,
                                     },
+                                    ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                                     ld_mutable: label.pld_mutable,
                                     ld_optional: label.pld_optional,
                                     ld_type: poly_typed_ct,
@@ -21037,6 +21029,7 @@ fn type_structure_item<'a>(
                                 });
                                 decl_labels.push(crate::types::LabelDeclaration {
                                     ld_id: label_id,
+                                    ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                                     ld_mutable: match label.pld_mutable {
                                         crate::parser::ast::MutableFlag::Immutable => {
                                             crate::types::MutableFlag::Immutable
@@ -21948,6 +21941,7 @@ fn type_structure_item<'a>(
                                     );
                                     let lbl_desc = crate::types::LabelDescription {
                                         lbl_name: ld.ld_id.name().to_string(),
+                                        lbl_runtime_name: ld.declaration_name(),
                                         lbl_res: ty_res,
                                         lbl_arg,
                                         lbl_mut: ld.ld_mutable,
@@ -22105,6 +22099,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
 ) -> TypeModResult<Vec<TypedTypeDeclaration>> {
     let ctx = tctx.type_ctx;
     let mut typed_tree_decls = Vec::new();
+    let mut typed_tree_decl_origins: Vec<crate::parser::ast::TypeDeclarationOrigin> = Vec::new();
     let mut internal_decls_for_generalize: Vec<crate::types::TypeDeclaration> = Vec::new();
     // OCaml typedecl.ml:1447-1484 prepends synthetic `t#row`
     // declarations for fixed private rows before the user-written
@@ -22215,6 +22210,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
             type_entry_is_synthetic_row.push(true);
             internal_decls_for_generalize.push(row_internal_decl);
             typed_tree_decls.push(typed_row_decl);
+            typed_tree_decl_origins.push(decls[row_id.decl_idx].ptype_origin);
         }
 
         for (decl_idx, decl) in decls.iter().enumerate() {
@@ -22341,6 +22337,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                     let mut typed_tree_labels = Vec::with_capacity(labels.len());
 
                     for label in labels {
+                        check_extra_as_attribute(arena, label)?;
                         let lbl_name = arena.get_string(label.pld_name.txt);
                         let (typed_label_ty, lbl_type) =
                             transl_label_type(tctx, &temp_env, arena, label, true)?;
@@ -22365,6 +22362,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                         let label_id = ctx.create_ident(lbl_name);
                         internal_labels.push(crate::types::LabelDeclaration {
                             ld_id: label_id.clone(),
+                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                             ld_mutable: mutable_flag,
                             ld_optional: label.pld_optional,
                             ld_type: internal_lbl_type,
@@ -22378,11 +22376,13 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                 txt: lbl_name.to_string(),
                                 loc: label.pld_name.loc,
                             },
+                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                             ld_mutable: label.pld_mutable,
                             ld_optional: label.pld_optional,
                             ld_type: poly_typed_core_type,
                             ld_loc: label.pld_loc,
                             ld_attributes: label.pld_attributes.clone(),
+                            ld_types_attributes: None,
                         });
                     }
                     // OCaml compiler/ml/typedecl.ml:631-646 runs
@@ -22508,6 +22508,10 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                         // the constructor id before make_constructor
                         // translates inline record labels.
                         let cstr_id = ctx.create_ident(cstr_name);
+                        // typedecl.ml `make_cstr`.
+                        let runtime_tag = process_constructor_tag(arena, cstr).map_err(|(loc, error)| {
+                            ast_untagged_variant_error(arena.to_location(loc), error)
+                        })?;
                         // OCaml `make_constructor` (compiler/ml/typedecl.ml:337-356): narrow,
                         // reset the type variables for a generalized constructor, then widen.
                         let gadt_scope = cstr.pcd_res.is_some().then(|| {
@@ -22542,6 +22546,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                 let mut internal_record_labels = Vec::with_capacity(labels.len());
                                 let mut typed_record_labels = Vec::with_capacity(labels.len());
                                 for label in labels {
+                                    check_extra_as_attribute(arena, label)?;
                                     let lbl_name = arena.get_string(label.pld_name.txt);
                                     let (typed_label_ty, lbl_type) =
                                         transl_label_type(tctx, &temp_env, arena, label, cstr.pcd_res.is_none())?;
@@ -22570,6 +22575,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                     let label_id = ctx.create_ident(lbl_name);
                                     internal_record_labels.push(crate::types::LabelDeclaration {
                                         ld_id: label_id.clone(),
+                                        ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                                         ld_mutable: mutable_flag,
                                         ld_optional: label.pld_optional,
                                         ld_type: internal_lbl_type,
@@ -22585,11 +22591,13 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                             txt: lbl_name.to_string(),
                                             loc: label.pld_name.loc,
                                         },
+                                        ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
                                         ld_mutable: label.pld_mutable,
                                         ld_optional: label.pld_optional,
                                         ld_type: poly_typed_core_type,
                                         ld_loc: label.pld_loc,
                                         ld_attributes: label.pld_attributes.clone(),
+                                        ld_types_attributes: None,
                                     });
                                 }
                                 (
@@ -22631,6 +22639,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
 
                         internal_cstrs.push(crate::types::ConstructorDeclaration {
                             cd_id: cstr_id.clone(),
+                            cd_runtime_tag: runtime_tag.clone(),
                             cd_args: internal_args,
                             cd_res: internal_res,
                             cd_loc: arena.to_location(cstr.pcd_loc),
@@ -22646,6 +22655,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                 txt: cstr_name.to_string(),
                                 loc: cstr.pcd_name.loc,
                             },
+                            cd_runtime_tag: runtime_tag,
                             cd_args: typed_args,
                             cd_res: typed_res,
                             cd_loc: cstr.pcd_loc,
@@ -22788,6 +22798,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 typ_loc: decl.ptype_loc,
                 typ_attributes: decl.ptype_attributes.clone(),
             });
+            typed_tree_decl_origins.push(decl.ptype_origin);
             if has_fixed_rows {
                 type_entry_ids.push(type_id);
                 type_entry_parser_indices.push(Some(decl_idx));
@@ -22804,7 +22815,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         check_type_declaration_duplicate_definitions(tctx, arena, decls);
         // typedecl.ml:1509-1526: every declaration of the group records
         // the group's inline record definitions for printing.
-        let inline_types = group_inline_record_types(arena, &typed_tree_decls);
+        let inline_types = group_inline_record_types(&typed_tree_decl_origins, &typed_tree_decls);
         if !inline_types.is_empty() {
             for typed_decl in typed_tree_decls.iter_mut() {
                 typed_decl.typ_type.type_inlined_types = inline_types.clone();

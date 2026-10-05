@@ -3,14 +3,9 @@ SHELL = /bin/bash
 build:
 	yarn build
 
-	# Simulate editor-written incremental CMTs
-	mkdir -p lib/bs/___incremental
-	cp lib/bs/src/MyModule1-MyNamespace.cmt lib/bs/___incremental/MyModule1-MyNamespace.cmt
-	cp lib/bs/src/MyModule2-MyNamespace.cmt lib/bs/___incremental/MyModule2-MyNamespace.cmt
-	cp lib/bs/MyNamespace.cmt lib/bs/___incremental/MyNamespace.cmt
-
+# In-process builds write no .cmt files: analysis reads them from a watcher.
 test: build
-	./test.sh
+	../with-watcher.sh ./test.sh
 
 clean:
 	yarn clean

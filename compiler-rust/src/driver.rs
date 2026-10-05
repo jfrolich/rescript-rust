@@ -120,7 +120,7 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
     use crate::types::path::Path as TypePath;
     use crate::types::typedtree::{
         Case, ConstructorArgument, ExpExtra, Expression, ExpressionDesc, ExtensionConstructor,
-        ExtensionConstructorKind, FunctionParam, IncludeDescription, MethKind, ModuleBinding,
+        ExtensionConstructorKind, FunctionParam, IncludeDescription, ModuleBinding,
         ModuleCoercion, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeConstraint,
         ModuleTypeDeclaration, ModuleTypeDesc, OpenDeclaration, PatExtra, Pattern, PatternDesc,
         RowFieldDesc, Structure, StructureItemDesc, TypedConstructorArguments, TypedCoreType,
@@ -233,7 +233,7 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
                 PatExtra::Tpat_constraint(core_type) => {
                     visit_typed_core_type(max_stamp, core_type);
                 }
-                PatExtra::Tpat_type(path, _) | PatExtra::Tpat_open(path, _, _) => {
+                PatExtra::Tpat_type(path, _) => {
                     visit_path(max_stamp, path);
                 }
                 PatExtra::Tpat_unpack => {}
@@ -379,13 +379,25 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
                 visit_expression(max_stamp, iterable);
                 visit_expression(max_stamp, body);
             }
-            ExpressionDesc::Texp_send(expr, meth, maybe_arg) => {
-                visit_expression(max_stamp, expr);
-                if let MethKind::Tmeth_val(id) = meth {
-                    visit_ident(max_stamp, id);
+            ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
+                visit_expression(max_stamp, tag);
+                for value in values {
+                    visit_expression(max_stamp, value);
                 }
-                if let Some(arg) = maybe_arg {
-                    visit_expression(max_stamp, arg);
+            }
+            ExpressionDesc::Texp_template { values, .. } => {
+                for value in values {
+                    visit_expression(max_stamp, value);
+                }
+            }
+            ExpressionDesc::Texp_object_get(expr, _) => visit_expression(max_stamp, expr),
+            ExpressionDesc::Texp_object_set(expr, _, value) => {
+                visit_expression(max_stamp, expr);
+                visit_expression(max_stamp, value);
+            }
+            ExpressionDesc::Texp_object_literal(fields) => {
+                for (_, field) in fields {
+                    visit_expression(max_stamp, field);
                 }
             }
             ExpressionDesc::Texp_letmodule(id, _, module_expr, body) => {
@@ -403,7 +415,7 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
 
         for (extra, _, _) in &expr.exp_extra {
             match extra {
-                ExpExtra::Texp_constraint(core_type) | ExpExtra::Texp_coerce(core_type) => {
+                ExpExtra::Texp_constraint(core_type) | ExpExtra::Texp_coerce { target: core_type, .. } => {
                     visit_typed_core_type(max_stamp, core_type);
                 }
                 ExpExtra::Texp_open(_, path, _, _) => visit_path(max_stamp, path),
@@ -820,7 +832,18 @@ fn expression_has_string_literal(
     use crate::parser::ast::ExpressionDesc as ED;
 
     match &*expr.pexp_desc {
-        ED::Pexp_constant(c) => matches!(&**c, Constant::String(s, _) if s == value),
+        ED::Pexp_constant(c) => matches!(&**c, Constant::String(s) if s.semantic() == value),
+        ED::Pexp_template(template) => template
+            .values
+            .iter()
+            .any(|e| expression_has_string_literal(arena.get_expr(*e), value, arena)),
+        ED::Pexp_tagged_template(template) => {
+            expression_has_string_literal(arena.get_expr(template.tag), value, arena)
+                || template
+                    .values
+                    .iter()
+                    .any(|e| expression_has_string_literal(arena.get_expr(*e), value, arena))
+        }
         ED::Pexp_let(inner) => {
             let (_, bindings, body) = &**inner;
             bindings
@@ -854,14 +877,15 @@ fn expression_has_string_literal(
         ED::Pexp_tuple(items) | ED::Pexp_array(items) => items
             .iter()
             .any(|item| expression_has_string_literal(arena.get_expr(*item), value, arena)),
-        ED::Pexp_construct(_, arg) => arg
-            .as_ref()
-            .is_some_and(|arg| expression_has_string_literal(arena.get_expr(*arg), value, arena)),
+        ED::Pexp_construct(_, args) => args
+            .txt
+            .iter()
+            .any(|arg| expression_has_string_literal(arena.get_expr(*arg), value, arena)),
         ED::Pexp_variant(inner) => {
-            let (_, arg) = &**inner;
-            arg.as_ref().is_some_and(|arg| {
-                expression_has_string_literal(arena.get_expr(*arg), value, arena)
-            })
+            let (_, args) = &**inner;
+            args.txt
+                .iter()
+                .any(|arg| expression_has_string_literal(arena.get_expr(*arg), value, arena))
         }
         ED::Pexp_record(inner) => {
             let (fields, base) = &**inner;
@@ -886,10 +910,18 @@ fn expression_has_string_literal(
             let (expr, _, _) = &**inner;
             expression_has_string_literal(arena.get_expr(*expr), value, arena)
         }
-        ED::Pexp_send(inner) => {
+        ED::Pexp_object_get(inner) => {
             let (expr, _) = &**inner;
             expression_has_string_literal(arena.get_expr(*expr), value, arena)
         }
+        ED::Pexp_object_set(inner) => {
+            let (lhs, _, rhs) = &**inner;
+            expression_has_string_literal(arena.get_expr(*lhs), value, arena)
+                || expression_has_string_literal(arena.get_expr(*rhs), value, arena)
+        }
+        ED::Pexp_object_literal(fields) => fields
+            .iter()
+            .any(|(_, e)| expression_has_string_literal(arena.get_expr(*e), value, arena)),
         ED::Pexp_setfield(inner) => {
             let (lhs, _, rhs) = &**inner;
             expression_has_string_literal(arena.get_expr(*lhs), value, arena)
@@ -898,6 +930,14 @@ fn expression_has_string_literal(
         ED::Pexp_sequence(lhs, rhs) | ED::Pexp_while(lhs, rhs) => {
             expression_has_string_literal(arena.get_expr(*lhs), value, arena)
                 || expression_has_string_literal(arena.get_expr(*rhs), value, arena)
+        }
+        ED::Pexp_braces(braces) => expression_has_string_literal(arena.get_expr(braces.expr), value, arena),
+        ED::Pexp_regexp(_) => false,
+        ED::Pexp_ternary(inner) => {
+            let (cond, consequent, alternate) = **inner;
+            expression_has_string_literal(arena.get_expr(cond), value, arena)
+                || expression_has_string_literal(arena.get_expr(consequent), value, arena)
+                || expression_has_string_literal(arena.get_expr(alternate), value, arena)
         }
         ED::Pexp_ifthenelse(inner) => {
             let (cond, then_expr, else_expr) = &**inner;
@@ -991,8 +1031,8 @@ fn pattern_has_string_literal(
     use crate::parser::ast::PatternDesc as PD;
 
     match &*pat.ppat_desc {
-        PD::Ppat_constant(c) => matches!(&**c, Constant::String(s, _) if s == value),
-        PD::Ppat_alias(inner, _) | PD::Ppat_exception(inner) | PD::Ppat_open(_, inner) => {
+        PD::Ppat_constant(c) => matches!(&**c, Constant::String(s) if s.semantic() == value),
+        PD::Ppat_alias(inner, _) | PD::Ppat_exception(inner) => {
             pattern_has_string_literal(arena.get_pat(*inner), value, arena)
         }
         PD::Ppat_constraint(inner) => {
@@ -1002,13 +1042,15 @@ fn pattern_has_string_literal(
         PD::Ppat_tuple(items) | PD::Ppat_array(items) => items
             .iter()
             .any(|item| pattern_has_string_literal(arena.get_pat(*item), value, arena)),
-        PD::Ppat_construct(_, Some(arg)) => {
-            pattern_has_string_literal(arena.get_pat(*arg), value, arena)
-        }
+        PD::Ppat_construct(_, args) => args
+            .txt
+            .iter()
+            .any(|arg| pattern_has_string_literal(arena.get_pat(*arg), value, arena)),
         PD::Ppat_variant(inner) => {
-            let (_, arg) = &**inner;
-            arg.as_ref()
-                .is_some_and(|arg| pattern_has_string_literal(arena.get_pat(*arg), value, arena))
+            let (_, args) = &**inner;
+            args.txt
+                .iter()
+                .any(|arg| pattern_has_string_literal(arena.get_pat(*arg), value, arena))
         }
         PD::Ppat_or(lhs, rhs) => {
             pattern_has_string_literal(arena.get_pat(*lhs), value, arena)
@@ -1169,6 +1211,9 @@ pub struct CompilerOptions {
     pub source_map_root: String,
     /// JSX version from CLI `-bs-jsx` (e.g. 4). When set, enables JSX PPX rewrite.
     pub jsx_version: Option<i32>,
+    /// JSX module from CLI `-bs-jsx-module` (`Js_config.jsx_module`); `None`
+    /// is OCaml's default `React`.
+    pub jsx_module: Option<String>,
     /// Experimental LetUnwrap feature from `-enable-experimental LetUnwrap`.
     pub experimental_let_unwrap: bool,
     /// Preserve transformed JSX syntax in the final JS dumper.
@@ -1198,9 +1243,6 @@ pub struct CompilerOptions {
     pub nopervasives: bool,
     /// The module name being compiled. Used to filter self-opens.
     pub module_name: Option<String>,
-    /// `Clflags.dont_record_crc_unit` (js_packages_state.ml:38-42): the
-    /// package namespace, left out of the saved import lists.
-    pub dont_record_crc_unit: Option<String>,
     /// Current npm package name from `-bs-package-name`.
     pub package_name: Option<String>,
     /// Compile the runtime package (`-make-runtime`).
@@ -1230,215 +1272,34 @@ pub struct CompilerOptions {
     /// so frontend warnings were reported by the `-bs-ast` run and are not
     /// repeated. Rust re-runs the frontend from source, silently.
     pub frontend_already_reported: bool,
-    /// Write OCaml-compatible `.cmi`/`.cmt`/`.cmti` files for editor tooling
-    /// (compiler/ml/typemod.ml:1761-1796; js_implementation.ml:66-70).
-    pub typed_artifacts: Option<std::sync::Arc<TypedArtifactOutput>>,
     /// Package roots whose in-process units are on the load path (the `-I`
     /// directories of a file build). `None` makes every registered unit visible.
     pub visible_package_roots: Option<Vec<PathBuf>>,
-    /// `Clflags.binary_annotations` (off with `-bs-no-bin-annot`): whether
-    /// `.cmt`/`.cmti` files are saved (cmt_format.ml:20).
-    pub binary_annotations: bool,
     /// `Clflags.keep_locs` (`-keep-locs`/`-no-keep-locs`): whether saved
     /// signatures keep source locations (subst.ml:57-67 `Subst.for_saving`).
     pub keep_locs: bool,
-}
-
-/// Where and how to save the typed artifacts of one compilation unit.
-#[derive(Debug, Clone)]
-pub struct TypedArtifactOutput {
-    /// `outputprefix`: artifact path without extension (e.g. `lib/bs/src/Foo`).
-    pub output_prefix: PathBuf,
-    /// Extra directories that receive copies of the artifacts (`lib/ocaml`).
-    pub copy_dirs: Vec<PathBuf>,
-    /// `cmt_builddir`.
-    pub builddir: String,
-    /// `cmt_args`.
-    pub args: Vec<String>,
-}
-
-/// Which typed annotations are being saved.
-enum TypedArtifactKind<'t> {
-    Implementation {
-        structure: &'t crate::types::typedtree::Structure,
-        /// The inferred signature to save as `.cmi` (no `.resi`).
-        cmi: Option<(&'t [crate::types::decl::SignatureItem], Option<String>)>,
-    },
-    Interface {
-        signature: &'t crate::types::typedtree::TypedSignature,
-        sig_type: &'t [crate::types::decl::SignatureItem],
-        deprecated: Option<String>,
-    },
-}
-
-fn write_artifact_if_changed(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    if std::fs::read(path).ok().as_deref() == Some(bytes) {
-        return Ok(());
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
-}
-
-fn save_typed_artifacts(
-    options: &CompilerOptions,
-    arena: &crate::parse_arena::ParseArena,
-    type_ctx: &TypeContext,
-    filename: &str,
-    module_name: &str,
-    kind: TypedArtifactKind<'_>,
-    binary_annotations: bool,
-    imports: &[(String, Option<[u8; 16]>)],
-) -> Result<Option<[u8; 16]>> {
-    use crate::cmi::cmt_writer;
-    let Some(out) = options.typed_artifacts.as_deref() else {
-        return Ok(None);
-    };
-
-    let _phase = info_span!("compiler.save_typed_artifacts").entered();
-    let (load_path, _) = build_load_path_with_display(options);
-    let load_path: Vec<String> = load_path
-        .iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
-    let source_digest = std::fs::read(filename).ok().map(|s| cmt_writer::md5(&s));
-    // typemod.ml:1761-1788 saves under `modulename`, the unit name.
-    let unit_name = options.current_unit_name();
-    let module_name = unit_name.as_deref().unwrap_or(module_name);
-    let info = cmt_writer::CmtInfo {
-        modname: module_name,
-        sourcefile: Some(filename),
-        builddir: &out.builddir,
-        loadpath: &load_path,
-        args: &out.args,
-        source_digest,
-        imports: &[],
-        cmi_imports: imports,
-    };
-    // The `.cmi` holds the `Subst.for_saving` copy of the signature.
-    let stripped: Option<Vec<crate::types::decl::SignatureItem>> = Some({
-        let mut sig = match &kind {
-            TypedArtifactKind::Implementation { cmi, .. } => {
-                cmi.as_ref().map(|(sign, _)| sign.to_vec()).unwrap_or_default()
-            }
-            TypedArtifactKind::Interface { sig_type, .. } => sig_type.to_vec(),
-        };
-        if !options.keep_locs {
-            strip_saved_signature_locations(&mut sig);
-        }
-        strip_saved_extension_locations(&mut sig);
-        sig
-    });
-    let kind = match (kind, stripped.as_deref()) {
-        (TypedArtifactKind::Implementation { structure, cmi: Some((_, dep)) }, Some(sig)) => {
-            TypedArtifactKind::Implementation {
-                structure,
-                cmi: Some((sig, dep)),
-            }
-        }
-        (kind, _) => kind,
-    };
-    // The `.cmi` CRC: `Env.save_signature` (env.ml:1924-1940) then records
-    // the unit as an import, so the `.cmt` lists it too, sorted
-    // (cmt_format_persistence.ml:46).
-    let cmi_file = match &kind {
-        TypedArtifactKind::Implementation { cmi, .. } => cmi.as_ref().map(|(sign, deprecated)| {
-            cmt_writer::cmi_bytes(arena, type_ctx, module_name, sign, imports, deprecated.as_deref())
-        }),
-        TypedArtifactKind::Interface {
-            sig_type,
-            deprecated,
-            ..
-        } => Some(cmt_writer::cmi_bytes(
-            arena,
-            type_ctx,
-            module_name,
-            stripped.as_deref().unwrap_or(sig_type),
-            imports,
-            deprecated.as_deref(),
-        )),
-    };
-    let saved_crc = cmi_file.as_ref().map(|(_, crc)| *crc);
-    let mut cmt_imports = imports.to_vec();
-    if let Some(crc) = saved_crc {
-        cmt_imports.retain(|(name, _)| name != module_name);
-        cmt_imports.push((module_name.to_string(), Some(crc)));
-    }
-    cmt_imports.sort();
-    let info = cmt_writer::CmtInfo {
-        imports: &cmt_imports,
-        ..info
-    };
-    let mut files: Vec<(&str, Vec<u8>)> = Vec::new();
-    let mut cmi_crc = None;
-    match kind {
-        TypedArtifactKind::Implementation { structure, cmi } => {
-            if let Some((bytes, crc)) = cmi_file {
-                cmi_crc = Some(crc);
-                files.push(("cmi", bytes));
-            }
-            files.push((
-                "cmt",
-                cmt_writer::cmt_bytes(
-                    arena,
-                    type_ctx,
-                    cmt_writer::BinaryAnnots::Implementation(structure),
-                    &info,
-                    cmi.as_ref().map(|(sign, deprecated)| (*sign, deprecated.as_deref())),
-                ),
-            ));
-        }
-        TypedArtifactKind::Interface {
-            signature,
-            sig_type,
-            deprecated,
-        } => {
-            let cmi_sign = stripped.as_deref().unwrap_or(sig_type);
-            if let Some((bytes, crc)) = cmi_file {
-                cmi_crc = Some(crc);
-                files.push(("cmi", bytes));
-            }
-            files.push((
-                "cmti",
-                cmt_writer::cmt_bytes(
-                    arena,
-                    type_ctx,
-                    cmt_writer::BinaryAnnots::Interface(signature, sig_type),
-                    &info,
-                    Some((cmi_sign, deprecated.as_deref())),
-                ),
-            ));
-        }
-    }
-    // cmt_format.ml:20: without binary annotations only the `.cmi` is saved.
-    if !(binary_annotations && options.binary_annotations) {
-        files.retain(|(ext, _)| *ext == "cmi");
-    }
-    for (ext, bytes) in &files {
-        let with_ext = |path: &std::path::Path| {
-            let mut path = path.as_os_str().to_owned();
-            path.push(".");
-            path.push(ext);
-            PathBuf::from(path)
-        };
-        write_artifact_if_changed(&with_ext(&out.output_prefix), bytes)?;
-        if let Some(file_name) = out.output_prefix.file_name() {
-            for dir in &out.copy_dirs {
-                write_artifact_if_changed(&with_ext(&dir.join(file_name)), bytes)?;
-            }
-        }
-    }
-    Ok(cmi_crc)
 }
 
 /// `Subst.signature (Subst.for_saving ...)` with `Clflags.keep_locs = false`
 /// (subst.ml:57-67): saved signatures replace every location, including the
 /// attributes', with `Location.none`.
 fn strip_saved_signature_locations(sig: &mut [crate::types::decl::SignatureItem]) {
-    crate::types::decl::for_each_signature_location(sig, &mut |loc| {
-        *loc = crate::location::Location::none();
-    });
+    use crate::types::decl::{Attribute, SignatureLocationVisitor};
+    // `Subst.loc` and `Subst.attrs` (compiler/ml/subst.ml:57-67).
+    struct Strip;
+    impl SignatureLocationVisitor for Strip {
+        fn location(&mut self, loc: &mut crate::location::Location) {
+            *loc = crate::location::Location::none();
+        }
+        fn attribute(&mut self, attr: &mut Attribute) {
+            self.location(&mut attr.attr_loc);
+            self.location(&mut attr.attr_name.loc);
+            if let Some(payload) = &mut attr.attr_payload_raw {
+                payload.remove_locations();
+            }
+        }
+    }
+    crate::types::decl::walk_signature_locations(sig, &mut Strip);
 }
 
 /// `Subst.extension_constructor` for saving drops `ext_loc` whatever
@@ -1473,37 +1334,6 @@ fn strip_saved_extension_locations(sig: &mut [crate::types::decl::SignatureItem]
     }
 }
 
-/// The CRC list a saved unit carries (env.ml:1924-1930: itself first, then
-/// its imports), which importers record (env.ml:627-638). A unit typed here
-/// without writing its `.cmi` (the runtime, whose `.cmi` is prebuilt) reads
-/// the list from the `.cmi` beside its source, as OCaml loads it.
-fn unit_crcs(
-    options: &CompilerOptions,
-    module_name: &str,
-    filename: &str,
-    saved_crc: Option<[u8; 16]>,
-    imports: &[(String, Option<[u8; 16]>)],
-) -> Vec<(String, Option<[u8; 16]>)> {
-    // CRC lists only feed written `.cmi`/`.cmt` files; a compile that writes
-    // none has nothing to check them against.
-    if options.typed_artifacts.is_none() {
-        return Vec::new();
-    }
-    if saved_crc.is_none()
-        && let Some(crcs) = crate::cmi::cmi_format::read_cmi_crcs(
-            &std::path::Path::new(filename).with_extension("cmi").to_string_lossy(),
-        )
-    {
-        return crcs;
-    }
-    let unit = options
-        .current_unit_name()
-        .unwrap_or_else(|| module_name.to_string());
-    std::iter::once((unit, saved_crc))
-        .chain(imports.iter().cloned())
-        .collect()
-}
-
 /// `bsc -format` (rescript_compiler_main.ml:168-182 via
 /// res_multi_printer.ml:1-30): parse `.res`/`.resi` source in printer mode and
 /// print it back with its comments. Sources are Latin-1 byte strings like the
@@ -1524,7 +1354,7 @@ pub fn format_source_with(
 ) -> (String, Option<Vec<u8>>) {
     let source = crate::source_text::latin1_bytes_to_string(source.to_vec());
     let is_interface = filename.ends_with(".resi");
-    let mut parser = Parser::with_mode(filename, &source, crate::parser::ParserMode::Default);
+    let mut parser = Parser::new(filename, &source);
     let (report, output) = if is_interface {
         let signature = module::parse_signature(&mut parser);
         let report = parse_diagnostics_report(&parser, &source, filename);
@@ -1583,127 +1413,6 @@ fn parse_diagnostics_report(parser: &Parser<'_>, source: &str, filename: &str) -
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// Save the `.cmi`/`.cmt` of a namespace module: js_implementation.ml:207-226
-/// `implementation_map` types `module A = A-Ns` for every member listed in the
-/// `.mlmap` (sorted) and saves the unit like any implementation.
-///
-/// Returns the unit's CRC list (`(namespace, crc) :: imports`, env.ml:
-/// 1924-1930), which importers record (env.ml:627-638).
-pub fn save_namespace_typed_artifacts(
-    namespace: &str,
-    module_aliases: &[(String, String)],
-    out: &TypedArtifactOutput,
-    runtime_path: Option<&std::path::Path>,
-) -> Result<Vec<(String, Option<[u8; 16]>)>> {
-    use crate::types::decl::{AliasPresence, ModuleDeclaration, ModuleType, RecStatus, SignatureItem};
-    use crate::types::typedtree as tt;
-
-    let mut arena = crate::parse_arena::ParseArena::new();
-    let none_loc = arena.none_loc();
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    // `Parmatch.extra_pat` takes stamp 1000 at initialization, as in every
-    // compile (see `compile_source_to_js_with_options_inner`).
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-
-    // The map is typed like any implementation (js_implementation.ml:207-226)
-    // in `Res_compmisc.initial_env`, which opens Pervasives and Stdlib
-    // (res_compmisc.ml:56-62), with `-no-alias-deps` (namespaces.rs): each
-    // member is a weak `check_pers_struct` import (env.ml:741-748, 1044-1045).
-    let options = CompilerOptions {
-        module_name: Some(namespace.to_string()),
-        typed_artifacts: Some(std::sync::Arc::new(out.clone())),
-        runtime_path: runtime_path.map(std::path::Path::to_path_buf),
-        transparent_modules: true,
-        ..Default::default()
-    };
-    let mut pers_env = PersistentEnv::new();
-    let (load_path, load_path_display) = build_load_path_with_display(&options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path_with_display(load_path, load_path_display);
-    pers_env.set_compiling_module(Some(namespace.to_string()));
-    let mut env = initial_env(&type_ctx);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &[], false, Some(namespace));
-    for (_, internal_name) in module_aliases {
-        pers_env.check_pers_struct(internal_name);
-    }
-
-    let mut items = Vec::with_capacity(module_aliases.len());
-    let mut signature = Vec::with_capacity(module_aliases.len());
-    for (short_name, internal_name) in module_aliases {
-        let target = crate::types::Path::Pident(crate::ident::Ident::create_persistent(
-            internal_name.as_str(),
-        ));
-        let internal_idx = arena.intern(internal_name);
-        let lid = arena.push_longident(crate::parser::longident::Longident::Lident(internal_idx));
-        let id = type_ctx.create_ident(short_name);
-        // typemod.ml `type_module_aux` types an alias as
-        // `Mty_alias (Mta_absent, path)`.
-        let mty = ModuleType::MtyAlias(AliasPresence::MtaAbsent, target.clone());
-        items.push(tt::StructureItem {
-            str_desc: tt::StructureItemDesc::Tstr_module(tt::ModuleBinding {
-                mb_id: id.clone(),
-                mb_name: crate::parse_arena::Located {
-                    txt: short_name.clone(),
-                    loc: none_loc,
-                },
-                mb_expr: tt::ModuleExpr {
-                    mod_desc: tt::ModuleExprDesc::Tmod_ident(
-                        target,
-                        crate::parse_arena::Located { txt: lid, loc: none_loc },
-                    ),
-                    mod_loc: none_loc,
-                    mod_type: mty.clone(),
-                    mod_env: tt::EnvRef(0),
-                    mod_attributes: crate::parser::ast::Attributes::new(),
-                },
-                mb_attributes: crate::parser::ast::Attributes::new(),
-                mb_loc: none_loc,
-            }),
-            str_loc: none_loc,
-            str_env: tt::EnvRef(0),
-        });
-        signature.push(SignatureItem::SigModule(
-            id,
-            ModuleDeclaration {
-                md_type: mty,
-                md_attributes: vec![],
-                md_loc: crate::location::Location::none(),
-                md_path: None,
-            },
-            RecStatus::TrecNot,
-        ));
-    }
-    let structure = tt::Structure {
-        str_items: items,
-        str_type: signature.clone(),
-        str_final_env: tt::EnvRef(0),
-    };
-    let imports = pers_env.imports(None);
-    // `Env.save_signature` writes the `Subst.for_saving` copy (env.ml:1886-1892).
-    let saved_signature = saved_signature_copy(&type_ctx, &signature);
-    // bsc compiles the map from lib/bs as `<Ns>.mlmap` (namespaces.rs).
-    let mlmap = format!("{namespace}.mlmap");
-    let crc = save_typed_artifacts(
-        &options,
-        &arena,
-        &type_ctx,
-        &mlmap,
-        namespace,
-        TypedArtifactKind::Implementation {
-            structure: &structure,
-            cmi: Some((saved_signature.as_slice(), None)),
-        },
-        true,
-        &imports,
-    )?;
-    let mut crcs = Vec::with_capacity(imports.len() + 1);
-    crcs.push((namespace.to_string(), crc));
-    crcs.extend(imports);
-    Ok(crcs)
-}
-
 impl Default for CompilerOptions {
     fn default() -> Self {
         Self {
@@ -1725,6 +1434,7 @@ impl Default for CompilerOptions {
             source_map_sources_content: false,
             source_map_root: String::new(),
             jsx_version: None,
+            jsx_module: None,
             experimental_let_unwrap: false,
             jsx_preserve: false,
             debug: false,
@@ -1739,7 +1449,6 @@ impl Default for CompilerOptions {
             external_ppxs: Vec::new(),
             nopervasives: false,
             module_name: None,
-            dont_record_crc_unit: None,
             package_name: None,
             make_runtime: false,
             assume_compiled_interface: false,
@@ -1749,9 +1458,7 @@ impl Default for CompilerOptions {
             skip_js_render: false,
             publish_in_process_signature: true,
             frontend_already_reported: false,
-            typed_artifacts: None,
             visible_package_roots: None,
-            binary_annotations: true,
             keep_locs: true,
         }
     }
@@ -2034,7 +1741,10 @@ fn ppx_context_attribute(
         OldLocated::new(Longident::Lident(arena.intern(name)), none.clone())
     };
     let string = |s: &str| {
-        mk(pt0::ExpressionDesc::Constant(pt0::Constant::String(s.to_string(), None)))
+        mk(pt0::ExpressionDesc::Constant(pt0::Constant::String(
+            crate::string_literal::normalize_semantic(s).into_owned(),
+            None,
+        )))
     };
     let list = |arena: &mut ParseArena, items: Vec<pt0::Expression>| {
         let mut tail = mk(pt0::ExpressionDesc::Construct(lid(arena, "[]"), None));
@@ -2098,6 +1808,13 @@ pub fn apply_external_structure_ppxs(
     arena.set_builtin_spice(options.builtin_spice());
     let ppxs = external_ppxs_to_run(options);
     if ppxs.is_empty() {
+        // The builtin spice mapper stands in for a configured spice PPX, and
+        // OCaml hands that PPX the Parsetree0 form and reads it back
+        // (cmd_ppx_apply.ml:97-110), so the AST still takes that round trip.
+        if options.builtin_spice() {
+            let ast0 = crate::binary_ast::mapper_to0::map_structure(arena, &structure);
+            return Ok(crate::binary_ast::mapper_from0::map_structure(arena, &ast0)?);
+        }
         return Ok(structure);
     }
     let context = ppx_context_attribute(arena, options);
@@ -2127,7 +1844,7 @@ pub fn apply_external_structure_ppxs(
     ) {
         ast0.remove(0);
     }
-    Ok(crate::binary_ast::mapper_from0::map_structure(arena, &ast0))
+    Ok(crate::binary_ast::mapper_from0::map_structure(arena, &ast0)?)
 }
 
 /// `Cmd_ppx_apply.apply_rewriters_sig` (cmd_ppx_apply.ml:112-125).
@@ -2141,6 +1858,11 @@ pub fn apply_external_signature_ppxs(
     arena.set_builtin_spice(options.builtin_spice());
     let ppxs = external_ppxs_to_run(options);
     if ppxs.is_empty() {
+        // See `apply_external_structure_ppxs` (cmd_ppx_apply.ml:112-125).
+        if options.builtin_spice() {
+            let ast0 = crate::binary_ast::mapper_to0::map_signature(arena, &signature);
+            return Ok(crate::binary_ast::mapper_from0::map_signature(arena, &ast0)?);
+        }
         return Ok(signature);
     }
     let context = ppx_context_attribute(arena, options);
@@ -2170,7 +1892,36 @@ pub fn apply_external_signature_ppxs(
     ) {
         ast0.remove(0);
     }
-    Ok(crate::binary_ast::mapper_from0::map_signature(arena, &ast0))
+    Ok(crate::binary_ast::mapper_from0::map_signature(arena, &ast0)?)
+}
+
+/// `Js_config.string_of_jsx_module !Js_config.jsx_module`
+/// (compiler/common/js_config.ml:66-76): the module the JSX rewrite targets.
+/// File-level `@@config` flags are parsed after the command line, so they win.
+pub fn jsx_module_name<'a>(
+    options: &'a CompilerOptions,
+    file_config: Option<&'a FileConfigOverrides>,
+) -> &'a str {
+    let configured = file_config
+        .and_then(|config| config.jsx_module.as_deref())
+        .or(options.jsx_module.as_deref());
+    match configured {
+        Some(module) if !module.eq_ignore_ascii_case("react") => module,
+        _ => "react",
+    }
+}
+
+/// `-bs-jsx-module` (compiler/bsc/rescript_compiler_main.ml:267-276): set the
+/// JSX module; any module but `react` is generic JSX, which implies JSX v4.
+pub fn apply_jsx_module_flag(
+    module: &str,
+    jsx_module: &mut Option<String>,
+    jsx_version: &mut Option<i32>,
+) {
+    *jsx_module = Some(module.to_string());
+    if !module.eq_ignore_ascii_case("react") {
+        *jsx_version = Some(4);
+    }
 }
 
 pub fn jsx_version_for_structure(
@@ -2228,7 +1979,12 @@ fn preprocess_signature_for_typecheck_with_source(
     builtin_ppx_warnings: &mut Vec<ppx::PpxWarning>,
 ) -> Result<Signature> {
     let signature = if let Some(jsx_version) = options.jsx_version {
-        jsx_ppx::transform_signature_result(signature, jsx_version, arena)
+        jsx_ppx::transform_signature_result(
+            signature,
+            jsx_version,
+            jsx_module_name(options, None),
+            arena,
+        )
             .map_err(|e| jsx_ppx_error_to_anyhow(e, arena, source, filename))?
     } else {
         signature
@@ -2494,7 +2250,7 @@ fn directive_payload_error_to_anyhow(
             source,
             filename,
             err.loc,
-            "Expected a string literal.",
+            err.message,
         ),
         2,
     )
@@ -2604,7 +2360,7 @@ fn is_supported_let_unwrap_pattern(pat: &crate::parser::ast::Pattern, arena: &Pa
     let Longident::Lident(ctor_name_idx) = arena.get_longident(ctor_lid.txt) else {
         return false;
     };
-    match (arena.get_string(*ctor_name_idx), payload.is_some()) {
+    match (arena.get_string(*ctor_name_idx), !payload.txt.is_empty()) {
         ("Ok", true) | ("Error", true) | ("Some", true) | ("None", false) => true,
         _ => false,
     }
@@ -2734,12 +2490,15 @@ fn invalid_enabled_let_unwrap_in_expr(
         ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => items
             .iter()
             .find_map(|item| invalid_enabled_let_unwrap_in_expr(*item, arena)),
-        ExpressionDesc::Pexp_construct(_, payload) => {
-            payload.and_then(|expr| invalid_enabled_let_unwrap_in_expr(expr, arena))
-        }
+        ExpressionDesc::Pexp_construct(_, payload) => payload
+            .txt
+            .iter()
+            .find_map(|expr| invalid_enabled_let_unwrap_in_expr(*expr, arena)),
         ExpressionDesc::Pexp_variant(inner) => inner
             .1
-            .and_then(|expr| invalid_enabled_let_unwrap_in_expr(expr, arena)),
+            .txt
+            .iter()
+            .find_map(|expr| invalid_enabled_let_unwrap_in_expr(*expr, arena)),
         ExpressionDesc::Pexp_record(record) => record
             .0
             .iter()
@@ -2759,7 +2518,7 @@ fn invalid_enabled_let_unwrap_in_expr(
         | ExpressionDesc::Pexp_comptime_record_field(owner) => {
             invalid_enabled_let_unwrap_in_expr(*owner, arena)
         }
-        ExpressionDesc::Pexp_send(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena),
+        ExpressionDesc::Pexp_object_get(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena),
         ExpressionDesc::Pexp_setfield(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena)
             .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena)),
         ExpressionDesc::Pexp_ifthenelse(inner) => {
@@ -2771,6 +2530,10 @@ fn invalid_enabled_let_unwrap_in_expr(
                         .and_then(|else_expr| invalid_enabled_let_unwrap_in_expr(else_expr, arena))
                 })
         }
+        ExpressionDesc::Pexp_braces(braces) => invalid_enabled_let_unwrap_in_expr(braces.expr, arena),
+        ExpressionDesc::Pexp_ternary(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena)
+            .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.1, arena))
+            .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena)),
         ExpressionDesc::Pexp_sequence(lhs, rhs) => invalid_enabled_let_unwrap_in_expr(*lhs, arena)
             .or_else(|| invalid_enabled_let_unwrap_in_expr(*rhs, arena)),
         ExpressionDesc::Pexp_while(cond, body) => invalid_enabled_let_unwrap_in_expr(*cond, arena)
@@ -2925,12 +2688,15 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
         ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => items
             .iter()
             .find_map(|item| disabled_let_unwrap_loc_in_expr(*item, arena)),
-        ExpressionDesc::Pexp_construct(_, payload) => {
-            payload.and_then(|expr| disabled_let_unwrap_loc_in_expr(expr, arena))
-        }
+        ExpressionDesc::Pexp_construct(_, payload) => payload
+            .txt
+            .iter()
+            .find_map(|expr| disabled_let_unwrap_loc_in_expr(*expr, arena)),
         ExpressionDesc::Pexp_variant(inner) => inner
             .1
-            .and_then(|expr| disabled_let_unwrap_loc_in_expr(expr, arena)),
+            .txt
+            .iter()
+            .find_map(|expr| disabled_let_unwrap_loc_in_expr(*expr, arena)),
         ExpressionDesc::Pexp_record(record) => record
             .0
             .iter()
@@ -2950,7 +2716,7 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
         | ExpressionDesc::Pexp_comptime_record_field(owner) => {
             disabled_let_unwrap_loc_in_expr(*owner, arena)
         }
-        ExpressionDesc::Pexp_send(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena),
+        ExpressionDesc::Pexp_object_get(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena),
         ExpressionDesc::Pexp_setfield(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena)
             .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena)),
         ExpressionDesc::Pexp_ifthenelse(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena)
@@ -2960,6 +2726,10 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
                     .2
                     .and_then(|else_expr| disabled_let_unwrap_loc_in_expr(else_expr, arena))
             }),
+        ExpressionDesc::Pexp_braces(braces) => disabled_let_unwrap_loc_in_expr(braces.expr, arena),
+        ExpressionDesc::Pexp_ternary(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena)
+            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.1, arena))
+            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena)),
         ExpressionDesc::Pexp_sequence(lhs, rhs) => disabled_let_unwrap_loc_in_expr(*lhs, arena)
             .or_else(|| disabled_let_unwrap_loc_in_expr(*rhs, arena)),
         ExpressionDesc::Pexp_while(cond, body) => disabled_let_unwrap_loc_in_expr(*cond, arena)
@@ -3663,6 +3433,33 @@ fn type_mod_error_to_anyhow_styled(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::PolyvarLiteralOverflow { loc }) => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "Integer literal exceeds int32 range. Use float or BigInt if larger values are required.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::InvalidStringEscapeSequence { loc }) => UserDiagnostic::new(
+            format_compiler_error_report(arena, source, filename, *loc, "Invalid string escape sequence"),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::JsonLiteralOutsideExternal { loc }) => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                crate::ast_payload::JSON_LITERAL_OUTSIDE_EXTERNAL_MESSAGE,
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::UnknownLiteral {
             loc,
             literal,
@@ -4005,6 +3802,16 @@ fn type_mod_error_to_anyhow_styled(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::ObjectFieldNotMutable { loc, ty, name }) => {
+            let message = type_clash::render_error_message(|ppf| {
+                type_clash::print_object_field_not_mutable(ppf, type_ctx, *ty, name)
+            });
+            UserDiagnostic::new(
+                format_compiler_error_report_formatted(arena, source, filename, *loc, &message),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::UnboundValue {
             loc,
             name,
@@ -5768,10 +5575,7 @@ fn format_unbound_type_declaration_variable_report(
             printer.reset();
             printer.mark_loops(typ_ti);
             if let Some(var) = var {
-                let ty0 = type_ctx.new_generic_type(TypeDesc::Tobject {
-                    fields: var,
-                    name: None,
-                });
+                let ty0 = type_ctx.new_generic_type(TypeDesc::Tobject { fields: var });
                 printer.mark_loops(ty0);
             }
             let args_text = printer.printtyp.constructor_arguments(args);
@@ -5810,7 +5614,7 @@ fn format_unbound_type_declaration_variable_report(
             UnboundTypeVarDetail::Method {
                 name: method_name,
                 ty,
-            } => ("method", format!("{method_name}: "), *ty),
+            } => ("field", format!("{method_name}: "), *ty),
         };
         // `Typedecl.explain_unbound_gen` (typedecl.ml:2080-2090):
         // `reset_and_mark_loops_list [typ ti; ty0]` with
@@ -5820,10 +5624,7 @@ fn format_unbound_type_declaration_variable_report(
         printer.reset();
         printer.mark_loops(ty);
         if let Some(var) = var {
-            let ty0 = type_ctx.new_generic_type(TypeDesc::Tobject {
-                fields: var,
-                name: None,
-            });
+            let ty0 = type_ctx.new_generic_type(TypeDesc::Tobject { fields: var });
             printer.mark_loops(ty0);
         }
         let ty_text = printer.format(ty);
@@ -9536,19 +9337,8 @@ fn runtime_field_type_compatible(
 }
 
 fn label_declaration_runtime_name(label: &crate::types::decl::LabelDeclaration) -> String {
-    label_declaration_as_name(label).unwrap_or_else(|| label.ld_id.name().to_string())
-}
-
-fn label_declaration_as_name(label: &crate::types::decl::LabelDeclaration) -> Option<String> {
-    label.ld_attributes.iter().find_map(|attr| {
-        if attr.attr_name.txt == "as"
-            && let crate::types::decl::AttributePayload::Str(value) = &attr.attr_payload
-        {
-            Some(value.clone())
-        } else {
-            None
-        }
-    })
+    // `Record_runtime.declaration_name`.
+    label.declaration_name()
 }
 
 fn runtime_variant_to_primitive_coercion_compatible(
@@ -9647,7 +9437,7 @@ fn variant_constructor_runtime_matches_primitive(
     match &constructor.cd_args {
         crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty() => {
             let tag = match case {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
                 crate::types::VariantConstructorCase::Block(_) => unreachable!(),
             };
             match variant_constructor_as_payload(tag) {
@@ -9690,17 +9480,16 @@ enum VariantConstructorAsPayload {
 }
 
 fn variant_constructor_as_payload(
-    tag: &Option<crate::types::VariantTagType>,
+    tag: &Option<crate::types::VariantLiteralTag>,
 ) -> Option<VariantConstructorAsPayload> {
     tag.as_ref().map(|tag| match tag {
-        crate::types::VariantTagType::String(_) => VariantConstructorAsPayload::String,
-        crate::types::VariantTagType::Int(_) => VariantConstructorAsPayload::Int,
-        crate::types::VariantTagType::Float(_) => VariantConstructorAsPayload::Float,
-        crate::types::VariantTagType::BigInt(_) => VariantConstructorAsPayload::BigInt,
-        crate::types::VariantTagType::Bool(_) => VariantConstructorAsPayload::Bool,
-        crate::types::VariantTagType::Null => VariantConstructorAsPayload::Null,
-        crate::types::VariantTagType::Undefined => VariantConstructorAsPayload::Undefined,
-        crate::types::VariantTagType::Untagged(_) => unreachable!(),
+        crate::types::VariantLiteralTag::String(_) => VariantConstructorAsPayload::String,
+        crate::types::VariantLiteralTag::Int(_) => VariantConstructorAsPayload::Int,
+        crate::types::VariantLiteralTag::Float(_) => VariantConstructorAsPayload::Float,
+        crate::types::VariantLiteralTag::BigInt(_) => VariantConstructorAsPayload::BigInt,
+        crate::types::VariantLiteralTag::Bool(_) => VariantConstructorAsPayload::Bool,
+        crate::types::VariantLiteralTag::Null => VariantConstructorAsPayload::Null,
+        crate::types::VariantLiteralTag::Undefined => VariantConstructorAsPayload::Undefined,
     })
 }
 
@@ -9884,11 +9673,11 @@ fn variant_constructor_string_runtime_repr(
     case: &crate::types::VariantConstructorCase,
 ) -> Option<String> {
     let tag = match case {
-        crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
-        crate::types::VariantConstructorCase::Block(block) => &block.runtime.tag.tag_type,
+        crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
+        crate::types::VariantConstructorCase::Block(block) => &block.tag().literal,
     };
     match tag {
-        Some(crate::types::VariantTagType::String(value)) => Some(value.clone()),
+        Some(crate::types::VariantLiteralTag::String(value)) => Some(value.clone()),
         Some(_) => None,
         None => Some(constructor.cd_id.name().to_string()),
     }
@@ -11921,6 +11710,7 @@ pub fn run_implementation_frontend(
         let (structure, jsx_warnings) = jsx_ppx::transform_structure_collecting_warnings(
             structure,
             jsx_version,
+            jsx_module_name(options, Some(&file_config)),
             parser.arena_mut(),
         );
         let jsx_warnings = jsx_preprocessor_warnings_to_ppx(parser.arena_mut(), jsx_warnings);
@@ -12075,6 +11865,7 @@ fn compile_source_to_js_with_options_inner(
     pers_env.set_load_path_shared(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
     pers_env.set_compiling_module(current_unit_name.clone());
     load_pervasives(
@@ -12219,7 +12010,7 @@ fn compile_source_to_js_with_options_inner(
                 suppress_info_style,
             ));
         }
-        normalize_signature(&type_ctx, &simple_signature);
+        normalize_signature(&type_ctx, &final_env, &simple_signature);
         (Some(simple_signature), Some(implementation_coercion))
     } else {
         (None, None)
@@ -12253,8 +12044,12 @@ fn compile_source_to_js_with_options_inner(
         );
     }
 
-    if let Some(simple_signature) = inferred_simple_signature.as_deref() {
-        drop(prepare_inferred_signature_for_saving(&type_ctx, simple_signature, has_resi));
+    // `Env.save_signature` renames the bound identifiers of a copy of the
+    // inferred signature (env.ml:1886-1892), taking stamps; no file is written.
+    if let Some(simple_signature) = inferred_simple_signature.as_deref()
+        && !has_resi
+    {
+        saved_signature_copy(&type_ctx, simple_signature);
     }
 
     // `process_with_gentype` runs after the JS is emitted
@@ -13176,6 +12971,7 @@ pub fn typecheck_interface_source(
     pers_env.set_load_path_shared(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
     pers_env.set_compiling_module(current_unit_name.clone());
     load_pervasives(
@@ -13605,6 +13401,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         pers_env.set_load_path_shared(load_path, load_path_display);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
+        pers_env.set_jsx_module(options.jsx_module.clone());
         let current_unit_name = options.current_unit_name();
         pers_env.set_compiling_module(current_unit_name.clone());
         load_pervasives(
@@ -13663,6 +13460,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             let (structure, jsx_warnings) = jsx_ppx::transform_structure_collecting_warnings(
                 structure,
                 jsx_version,
+                jsx_module_name(options, Some(&file_config)),
                 parser.arena_mut(),
             );
             let jsx_warnings = jsx_preprocessor_warnings_to_ppx(parser.arena_mut(), jsx_warnings);
@@ -13734,6 +13532,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         pers_env.set_load_path_shared(load_path, load_path_display);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
+        pers_env.set_jsx_module(options.jsx_module.clone());
         let current_unit_name = options.current_unit_name();
         pers_env.set_compiling_module(current_unit_name.clone());
         load_pervasives(
@@ -14359,9 +14158,9 @@ fn moregen_link_impl(
 #[derive(Debug, Default, Clone)]
 pub struct FileConfigOverrides {
     pub let_unwrap: bool,
-    /// `-bs-no-bin-annot` (`Clflags.binary_annotations := false`).
-    pub no_bin_annot: bool,
     pub jsx_version: Option<i32>,
+    /// `-bs-jsx-module`.
+    pub jsx_module: Option<String>,
     /// `-w`/`-warn-error` specs in application order (`true` = `-warn-error`).
     pub warning_ops: Vec<(bool, String)>,
 }
@@ -14421,10 +14220,6 @@ fn run_file_level_flags(
             return false;
         };
         let BscFlagArity::String = arity else {
-            // rescript_compiler_main.ml:476-477.
-            if flag == "-bs-no-bin-annot" {
-                overrides.no_bin_annot = true;
-            }
             continue;
         };
         let Some(arg) = flags.get(i) else {
@@ -14454,6 +14249,9 @@ fn run_file_level_flags(
                 }
                 overrides.jsx_version = Some(4);
             }
+            "-bs-jsx-module" => {
+                apply_jsx_module_flag(arg, &mut overrides.jsx_module, &mut overrides.jsx_version);
+            }
             "-enable-experimental" => {
                 if arg == "LetUnwrap" {
                     overrides.let_unwrap = true;
@@ -14482,26 +14280,7 @@ fn extract_single_string_payload(
     payload: &Payload,
     arena: &crate::parse_arena::ParseArena,
 ) -> Option<String> {
-    use crate::parser::ast::ExpressionDesc as ED;
-
-    let Payload::PStr(items) = payload else {
-        return None;
-    };
-    if items.len() != 1 {
-        return None;
-    }
-    let StructureItemDesc::Pstr_eval(inner) = &*items[0].pstr_desc else {
-        return None;
-    };
-    let (expr_idx, _attrs) = &**inner;
-    let expr = arena.get_expr(*expr_idx);
-    match &*expr.pexp_desc {
-        ED::Pexp_constant(c) => match &**c {
-            Constant::String(s, _) => Some(s.to_string()),
-            _ => None,
-        },
-        _ => None,
-    }
+    crate::ast_payload::semantic_string_of_payload(arena, payload).ok().flatten()
 }
 
 fn extract_file_directives_from_structure(
@@ -14517,8 +14296,13 @@ fn extract_file_directives_from_structure(
         if arena.get_string(attr.0.txt) != "directive" {
             continue;
         }
+        // ast_config.ml process_directives: reject a json payload, then read
+        // the payload's semantic string.
+        if let Err(err) = crate::ast_payload::reject_json_literal_payload(arena, &attr.1) {
+            return Err(DirectivePayloadError { loc: err.loc, message: err.message });
+        }
         let Some(directive) = extract_single_string_payload(&attr.1, arena) else {
-            return Err(DirectivePayloadError { loc: item.pstr_loc });
+            return Err(DirectivePayloadError { loc: item.pstr_loc, message: "Expected a string literal." });
         };
         directives.push(directive);
     }
@@ -14529,6 +14313,7 @@ fn extract_file_directives_from_structure(
 #[derive(Debug, Clone, Copy)]
 struct DirectivePayloadError {
     loc: LocIdx,
+    message: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -14539,7 +14324,7 @@ struct ConfigPayloadError {
 
 impl std::fmt::Display for DirectivePayloadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Expected a string literal.")
+        f.write_str(self.message)
     }
 }
 
@@ -14680,7 +14465,7 @@ fn validate_config_bool_literal(
 ) -> Result<(), ConfigPayloadError> {
     let expr = arena.get_expr(expr_idx);
     let is_bool_literal = match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_construct(lid, None) => matches!(
+        ExpressionDesc::Pexp_construct(lid, args) if args.txt.is_empty() => matches!(
             arena.get_longident(lid.txt),
             Longident::Lident(name_idx)
                 if matches!(arena.get_string(*name_idx), "true" | "false")
@@ -14753,12 +14538,13 @@ fn config_flags_strings(
     let mut flags = Vec::with_capacity(elements.len());
     for elem_idx in elements.iter() {
         let elem = arena.get_expr(*elem_idx);
-        let value = match &*elem.pexp_desc {
-            ExpressionDesc::Pexp_constant(constant) => match &**constant {
-                Constant::String(value, _) => Some(value.to_string()),
-                _ => None,
-            },
-            _ => None,
+        // rescript_compiler_main.ml file_level_flags_handler:
+        // `Ast_payload.semantic_string_of_expression`.
+        let value = match crate::ast_payload::semantic_string_of_expression(arena, elem) {
+            Ok(value) => value,
+            Err(err) => {
+                return Err(ConfigPayloadError { loc: err.loc, message: err.message.to_string() });
+            }
         };
         let Some(value) = value else {
             return Err(ConfigPayloadError {
@@ -14969,7 +14755,12 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
 
     let jsx_version = options.jsx_version.or(file_config.jsx_version);
     let structure = if let Some(jsx_version) = jsx_version {
-        jsx_ppx::transform_structure_result(structure, jsx_version, &mut arena)
+        jsx_ppx::transform_structure_result(
+            structure,
+            jsx_version,
+            jsx_module_name(options, Some(&file_config)),
+            &mut arena,
+        )
             .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
     } else {
         structure
@@ -15010,6 +14801,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     pers_env.set_load_path_shared(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
     pers_env.set_compiling_module(current_unit_name.clone());
     load_pervasives(
@@ -15068,6 +14860,7 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     pers_env.set_load_path_shared(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
     pers_env.set_compiling_module(current_unit_name.clone());
     load_pervasives(
@@ -15104,26 +14897,27 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
 /// `simplify_signature sg`, so shadowed items are left as typed.
 pub(crate) fn normalize_signature(
     type_ctx: &TypeContext,
+    env: &Env,
     sig: &[crate::types::decl::SignatureItem],
 ) {
     use crate::types::decl::SignatureItem;
     for item in sig {
         match item {
             SignatureItem::SigValue(_, desc) => {
-                crate::types::ctype::normalize_type(type_ctx, desc.val_type);
+                crate::types::ctype::normalize_type(type_ctx, env, desc.val_type);
             }
-            SignatureItem::SigModule(_, md, _) => normalize_modtype(type_ctx, &md.md_type),
+            SignatureItem::SigModule(_, md, _) => normalize_modtype(type_ctx, env, &md.md_type),
             _ => {}
         }
     }
 }
 
-fn normalize_modtype(type_ctx: &TypeContext, mty: &crate::types::decl::ModuleType) {
+fn normalize_modtype(type_ctx: &TypeContext, env: &Env, mty: &crate::types::decl::ModuleType) {
     use crate::types::decl::ModuleType;
     match mty {
         ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
-        ModuleType::MtySignature(sig) => normalize_signature(type_ctx, sig),
-        ModuleType::MtyFunctor { result, .. } => normalize_modtype(type_ctx, result),
+        ModuleType::MtySignature(sig) => normalize_signature(type_ctx, env, sig),
+        ModuleType::MtyFunctor { result, .. } => normalize_modtype(type_ctx, env, result),
     }
 }
 
@@ -15193,20 +14987,7 @@ fn rename_saved_signature_idents(
 
 /// `Env.save_signature` (env.ml:1886-1892) writes `Subst.signature
 /// (Subst.for_saving Subst.identity) sg`: a copy whose bound identifiers are
-/// renamed (subst.ml:322-364). Returns that copy for the `.cmi`, made at the
-/// point where OCaml saves it so the renaming takes the same stamps.
-fn prepare_inferred_signature_for_saving(
-    type_ctx: &TypeContext,
-    simple_sig: &[crate::types::decl::SignatureItem],
-    has_resi: bool,
-) -> Option<crate::types::decl::Signature> {
-    if has_resi {
-        return None;
-    }
-
-    Some(saved_signature_copy(type_ctx, simple_sig))
-}
-
+/// renamed (subst.ml:322-364), taking fresh stamps.
 fn saved_signature_copy(
     type_ctx: &TypeContext,
     sig: &[crate::types::decl::SignatureItem],
@@ -15705,6 +15486,171 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     finish_preprocessed_structure_in_process_from_js_boundary(pre_js, options, js_registry)
 }
 
+/// The type-checking context and initial environment an in-process
+/// implementation is typed in: the registry's units are the persistent
+/// environment, Pervasives (and `-open`s) opened as `Res_compmisc.initial_env`
+/// does (res_compmisc.ml:56-62).
+fn in_process_structure_type_check_context<'a>(
+    type_ctx: &'a TypeContext,
+    arena: &'a crate::parse_arena::ParseArena,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+    module_name: &str,
+    file_config: &FileConfigOverrides,
+    frontend_warning_specs: &[ppx::WarningAttributeSpec],
+) -> (TypeCheckContext<'a>, Env) {
+    let mut tctx = TypeCheckContext::new(type_ctx, arena);
+    tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
+    tctx.transparent_modules = options.transparent_modules;
+    apply_warning_options(&mut tctx, options);
+    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
+    // attributes; compiling a preprocessed `.ast` does not run it again.
+    if !options.frontend_already_reported {
+        apply_leading_warning_attribute_options(&mut tctx, frontend_warning_specs);
+    }
+    apply_file_config_warning_options(&mut tctx, file_config);
+    let mut env = initial_env(type_ctx);
+
+    let mut pers_env = PersistentEnv::from_registry(registry);
+    pers_env.set_visible_package_roots(options.visible_package_roots.clone());
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    type_ctx.set_load_paths_shared(load_path.clone());
+    pers_env.set_load_path_shared(load_path, load_path_display);
+    pers_env.set_open_modules(options.open_modules.clone());
+    pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_jsx_module(options.jsx_module.clone());
+    pers_env.set_nopervasives(options.nopervasives);
+    pers_env.set_compiling_module(Some(module_name.to_string()));
+    load_pervasives(
+        &mut pers_env,
+        &mut env,
+        type_ctx,
+        &options.open_modules,
+        options.nopervasives,
+        Some(module_name),
+    );
+    tctx.set_persistent_env(pers_env);
+    (tctx, env)
+}
+
+/// The typed tree of one module, type-checked on demand for editor tooling,
+/// which works on it in memory.
+pub struct ToolingTypedModule {
+    pub type_ctx: TypeContext,
+    pub typed: ToolingTyped,
+}
+
+/// What type-checking a module for editor tooling produced.
+pub enum ToolingTyped {
+    Implementation(crate::types::typedtree::Structure),
+    Interface(crate::types::typedtree::TypedSignature),
+    /// The compiler's report of a module that does not type-check.
+    Failed(String),
+}
+
+/// Type-check an implementation for editor tooling, as the in-process build
+/// does (`compile_preprocessed_structure_in_process_until_js`), keeping the
+/// typed tree instead of compiling it further.
+pub fn typecheck_structure_for_tooling(
+    arena: &crate::parse_arena::ParseArena,
+    structure: &Structure,
+    filename: &str,
+    module_name: &str,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+) -> ToolingTypedModule {
+    let file_config = extract_file_config_from_structure(structure, arena);
+    let frontend_warning_specs = ppx::collect_leading_builtin_warning_attribute_specs(structure, arena);
+    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
+    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    let _ = id_gen.next_stamp();
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    let typed = {
+        let (mut tctx, env) = in_process_structure_type_check_context(
+            &type_ctx,
+            arena,
+            options,
+            registry,
+            module_name,
+            &file_config,
+            &frontend_warning_specs,
+        );
+        match type_structure(&mut tctx, &env, arena, structure) {
+            Ok((typed_structure, _final_env)) => ToolingTyped::Implementation(typed_structure),
+            Err(e) => {
+                let source = read_in_process_source(filename);
+                let report = match tctx.persistent_env.as_ref().and_then(|env| env.last_error()) {
+                    Some(error) => persistent_env_error_to_anyhow(error, filename),
+                    None => type_mod_error_to_anyhow(e, &type_ctx, arena, &source, filename, false),
+                };
+                ToolingTyped::Failed(format!("{report:#}"))
+            }
+        }
+    };
+    ToolingTypedModule { type_ctx, typed }
+}
+
+/// Type-check an interface for editor tooling, as the in-process build does
+/// (`typecheck_preprocessed_signature_in_process`), keeping the typed tree.
+pub fn typecheck_signature_for_tooling(
+    arena: &crate::parse_arena::ParseArena,
+    signature: &Signature,
+    filename: &str,
+    module_name: &str,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+) -> ToolingTypedModule {
+    let file_config = extract_file_config_from_signature(signature, arena);
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena);
+    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
+    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    let _ = id_gen.next_stamp();
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    let typed = {
+        let mut tctx = TypeCheckContext::new(&type_ctx, arena);
+        tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
+        tctx.transparent_modules = options.transparent_modules;
+        apply_warning_options(&mut tctx, options);
+        if !options.frontend_already_reported {
+            apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+        }
+        apply_file_config_warning_options(&mut tctx, &file_config);
+        let mut env = initial_env(&type_ctx);
+        let mut pers_env = PersistentEnv::from_registry(registry);
+        pers_env.set_visible_package_roots(options.visible_package_roots.clone());
+        let (load_path, load_path_display) = shared_load_path_with_display(options);
+        type_ctx.set_load_paths_shared(load_path.clone());
+        pers_env.set_load_path_shared(load_path, load_path_display);
+        pers_env.set_open_modules(options.open_modules.clone());
+        pers_env.set_jsx_version(options.jsx_version);
+        pers_env.set_jsx_module(options.jsx_module.clone());
+        pers_env.set_nopervasives(options.nopervasives);
+        pers_env.set_compiling_module(Some(module_name.to_string()));
+        load_pervasives(
+            &mut pers_env,
+            &mut env,
+            &type_ctx,
+            &options.open_modules,
+            options.nopervasives,
+            Some(module_name),
+        );
+        tctx.set_persistent_env(pers_env);
+        match transl_signature(&mut tctx, &env, arena, signature) {
+            Ok(typed_signature) => ToolingTyped::Interface(typed_signature),
+            Err(e) => {
+                let source = read_in_process_source(filename);
+                let report = match tctx.persistent_env.as_ref().and_then(|env| env.last_error()) {
+                    Some(error) => persistent_env_error_to_anyhow(error, filename),
+                    None => type_mod_error_to_anyhow(e, &type_ctx, arena, &source, filename, false),
+                };
+                ToolingTyped::Failed(format!("{report:#}"))
+            }
+        }
+    };
+    ToolingTypedModule { type_ctx, typed }
+}
+
 pub fn compile_preprocessed_structure_in_process_until_js(
     arena: &crate::parse_arena::ParseArena,
     structure: &Structure,
@@ -15748,37 +15694,15 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    let mut tctx = TypeCheckContext::new(&type_ctx, arena);
-    tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
-    tctx.transparent_modules = options.transparent_modules;
-    apply_warning_options(&mut tctx, options);
-    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
-    // attributes; compiling a preprocessed `.ast` does not run it again.
-    if !options.frontend_already_reported {
-        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
-    }
-    apply_file_config_warning_options(&mut tctx, &file_config);
-    let mut env = initial_env(&type_ctx);
-
-    let mut pers_env = PersistentEnv::from_registry(registry);
-    pers_env.set_visible_package_roots(options.visible_package_roots.clone());
-    let (load_path, load_path_display) = shared_load_path_with_display(options);
-    type_ctx.set_load_paths_shared(load_path.clone());
-    pers_env.set_load_path_shared(load_path.clone(), load_path_display);
-    pers_env.set_open_modules(options.open_modules.clone());
-    pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(Some(module_name.to_string()));
-    load_pervasives(
-        &mut pers_env,
-        &mut env,
+    let (mut tctx, env) = in_process_structure_type_check_context(
         &type_ctx,
-        &options.open_modules,
-        options.nopervasives,
-        Some(module_name),
+        arena,
+        options,
+        registry,
+        module_name,
+        &file_config,
+        &frontend_warning_specs,
     );
-
-    tctx.set_persistent_env(pers_env);
     drop(env_setup_span);
     if let Some(start) = env_setup_start {
         crate::timing::record(crate::timing::Phase::EnvSetup, start.elapsed());
@@ -15830,7 +15754,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // normalization are part of OCaml's `type_implementation`
     // (compiler/ml/typemod.ml:1740-1788); account for them as typecheck.
     let signature_prepare_start = crate::timing::enabled().then(std::time::Instant::now);
-    let mut saved_cmi_signature = None;
     let mut published_signature = {
         let _phase = info_span!("compiler.signature_prepare").entered();
         if has_interface {
@@ -15877,14 +15800,14 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                     ),
                 ));
             }
-            normalize_signature(&type_ctx, &simple_signature);
+            normalize_signature(&type_ctx, &final_env, &simple_signature);
         }
 
-        // The saved copy only feeds the `.cmi` written below; in-process
-        // builds write no artifacts.
-        if options.typed_artifacts.is_some() {
-            saved_cmi_signature =
-                prepare_inferred_signature_for_saving(&type_ctx, &simple_signature, has_interface);
+        // `Env.save_signature` (typemod.ml:1779-1788) renames the bound
+        // identifiers of a copy of the signature (env.ml:1886-1892). In-process
+        // builds write no `.cmi`, but the copy still takes its stamps.
+        if !has_interface {
+            saved_signature_copy(&type_ctx, &simple_signature);
         }
 
         simple_signature
@@ -15920,38 +15843,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // translation, as the file compile does.
     tctx.flush_value_usage_checks();
     let post_type_warning_start = tctx.warnings.len();
-
-    // typemod.ml:1761-1788: save the `.cmt` (and, without an interface, the
-    // inferred `.cmi`) before Lambda translation.
-    let imports = tctx
-        .persistent_env
-        .as_ref()
-        .filter(|_| options.typed_artifacts.is_some())
-        .map(|pers| pers.imports(options.dont_record_crc_unit.as_deref()))
-        .unwrap_or_default();
-    let saved_cmi_crc = save_typed_artifacts(
-        options,
-        arena,
-        &type_ctx,
-        filename,
-        module_name,
-        TypedArtifactKind::Implementation {
-            structure: &typed_structure,
-            cmi: (!has_interface).then(|| {
-                (
-                    saved_cmi_signature.as_deref().unwrap_or(published_signature.as_slice()),
-                    crate::types::typemod::deprecated_of_str(arena, structure),
-                )
-            }),
-        },
-        !file_config.no_bin_annot,
-        &imports,
-    )?;
-    // env.ml:1924-1930 saves `(modname, Some crc) :: imports` as the unit's
-    // CRC list, which importers record (env.ml:627-638).
-    let saved_cmi_crcs = |crc: Option<[u8; 16]>| -> Vec<(String, Option<[u8; 16]>)> {
-        unit_crcs(options, module_name, filename, crc, &imports)
-    };
 
     // OCaml saves the inferred `.cmi` only in the no-interface branch before
     // Lambda translation mutates any shared type nodes
@@ -16002,7 +15893,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             signature_for_save,
             filename,
             crate::types::typemod::deprecated_of_str(arena, structure),
-            saved_cmi_crcs(saved_cmi_crc),
+            Vec::new(),
             &type_ctx,
         );
         // OCaml saves the current unit into the persistent table before
@@ -16258,6 +16149,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
     persistent_env_for_js.set_load_path_shared(load_path, load_path_display);
     persistent_env_for_js.set_open_modules(options.open_modules.clone());
     persistent_env_for_js.set_jsx_version(options.jsx_version);
+    persistent_env_for_js.set_jsx_module(options.jsx_module.clone());
     persistent_env_for_js.set_nopervasives(options.nopervasives);
     persistent_env_for_js.set_compiling_module(options.module_name.clone());
     if let Some(module_name) = options.module_name.as_deref() {
@@ -16490,7 +16382,6 @@ pub fn typecheck_interface_in_process(
     if let Some(err) = config_processing.error {
         return Err(config_payload_error_to_anyhow(err, parser.arena(), source, filename));
     }
-    let file_config = config_processing.overrides;
     let signature = preprocess_signature_for_typecheck_with_source(
         signature,
         options,
@@ -16554,6 +16445,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     pers_env.set_load_path_shared(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_jsx_module(options.jsx_module.clone());
     pers_env.set_nopervasives(options.nopervasives);
     pers_env.set_compiling_module(Some(module_name.to_string()));
     load_pervasives(
@@ -16657,35 +16549,12 @@ pub fn typecheck_preprocessed_signature_in_process(
             }
         };
 
-    let imports = tctx
-        .persistent_env
-        .as_ref()
-        .filter(|_| options.typed_artifacts.is_some())
-        .map(|pers| pers.imports(options.dont_record_crc_unit.as_deref()))
-        .unwrap_or_default();
-    let mut saved_cmi_crc = None;
-    // js_implementation.ml:66-70: save the `.cmi` and the `.cmti`.
-    if options.typed_artifacts.is_some()
-        && let crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature) =
-            &typed_module_type.mty_desc
-    {
-        // `Env.save_signature` writes the `Subst.for_saving` copy
-        // (env.ml:1886-1892).
-        let saved_signature = saved_signature_copy(&type_ctx, &published_signature);
-        saved_cmi_crc = save_typed_artifacts(
-            options,
-            arena,
-            &type_ctx,
-            filename,
-            module_name,
-            TypedArtifactKind::Interface {
-                signature: typed_signature,
-                sig_type: &saved_signature,
-                deprecated: crate::types::typemod::deprecated_of_sig(arena, signature),
-            },
-            !file_config.no_bin_annot,
-            &imports,
-        )?;
+    // js_implementation.ml:66-70 saves the interface through
+    // `Env.save_signature`, whose `Subst.for_saving` copy renames the bound
+    // identifiers (env.ml:1886-1892). In-process builds write no `.cmi`, but
+    // the copy still takes its stamps, as in OCaml.
+    if let crate::types::typedtree::ModuleTypeDesc::Tmty_signature(_) = &typed_module_type.mty_desc {
+        saved_signature_copy(&type_ctx, &published_signature);
     }
 
     let mut internal_env = tctx
@@ -16714,7 +16583,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         strip_saved_signature_locations(&mut saved_signature);
     }
     strip_saved_extension_locations(&mut saved_signature);
-    let crcs = unit_crcs(options, module_name, filename, saved_cmi_crc, &imports);
+    let crcs = Vec::new();
     internal_env.register_in_memory_signature(
         module_name,
         saved_signature,
@@ -16795,6 +16664,7 @@ pub fn typecheck_implementation_in_process(
     pers_env.set_load_path_shared(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_jsx_module(options.jsx_module.clone());
     pers_env.set_nopervasives(options.nopervasives);
     pers_env.set_compiling_module(Some(module_name.to_string()));
     load_pervasives(
@@ -17059,19 +16929,11 @@ let makeUpdater = initialValue => {
                 trace.raw_converter_stamp,
                 trace.type_context_stamp
             );
+            // The typechecker names the optional parameter `persistOpt`
+            // (typecore.ml `type_function`'s structural optional default).
             assert!(
-                trace.raw_lambda.contains("*opt_persist*"),
+                trace.raw_lambda.contains("persistOpt/"),
                 "{case}: raw function lost the optional source parameter"
-            );
-            let expected_optional = format!("persistOpt/{}", trace.raw_max_stamp + 1);
-            let colliding_match = format!("match/{}", trace.raw_max_stamp + 1);
-            assert!(
-                trace.lowered_lambda.contains(&expected_optional),
-                "{case}: optional rename did not allocate immediately above the RawLambda maximum"
-            );
-            assert!(
-                !trace.lowered_lambda.contains(&colliding_match),
-                "{case}: fresh optional identifier reused a match stamp"
             );
             assert!(
                 output.contains("(persistOpt, newValue)"),

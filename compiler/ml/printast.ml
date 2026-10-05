@@ -60,10 +60,14 @@ let fmt_char_option f = function
 let fmt_constant f x =
   match x with
   | Pconst_integer (i, m) -> fprintf f "PConst_int (%s,%a)" i fmt_char_option m
-  | Pconst_char c -> fprintf f "PConst_char %02x" c
-  | Pconst_string (s, None) -> fprintf f "PConst_string(%S,None)" s
-  | Pconst_string (s, Some delim) ->
-    fprintf f "PConst_string (%S,Some %S)" s delim
+  | Pconst_char {source; semantic} ->
+    fprintf f "PConst_char(source=%S, semantic=%02x)" source semantic
+  | Pconst_string payload ->
+    fprintf f "PConst_string (source=%S, semantic=%S)"
+      (String_literal.string_source payload)
+      (String_literal.string_semantic payload)
+  | Pconst_json source -> fprintf f "PConst_json %S" source
+  | Pconst_raw_source source -> fprintf f "PConst_raw_source %S" source
   | Pconst_float (s, m) -> fprintf f "PConst_float (%s,%a)" s fmt_char_option m
 
 let fmt_mutable_flag f x =
@@ -199,12 +203,12 @@ and pattern i ppf x =
   | Ppat_tuple l ->
     line i ppf "Ppat_tuple\n";
     list i pattern ppf l
-  | Ppat_construct (li, po) ->
+  | Ppat_construct (li, {txt = po}) ->
     line i ppf "Ppat_construct %a\n" fmt_longident_loc li;
-    option i pattern ppf po
-  | Ppat_variant (l, po) ->
+    list i pattern ppf po
+  | Ppat_variant (l, {txt = args}) ->
     line i ppf "Ppat_variant \"%s\"\n" l;
-    option i pattern ppf po
+    list i pattern ppf args
   | Ppat_record (l, c, rest) -> (
     line i ppf "Ppat_record %a\n" fmt_closed_flag c;
     list i longident_x_pattern ppf l;
@@ -231,9 +235,6 @@ and pattern i ppf x =
   | Ppat_exception p ->
     line i ppf "Ppat_exception\n";
     pattern i ppf p
-  | Ppat_open (m, p) ->
-    line i ppf "Ppat_open \"%a\"\n" fmt_longident_loc m;
-    pattern i ppf p
   | Ppat_extension (s, arg) ->
     line i ppf "Ppat_extension \"%s\"\n" s.txt;
     payload i ppf arg
@@ -243,7 +244,18 @@ and expression i ppf x =
   attributes i ppf x.pexp_attributes;
   let i = i + 1 in
   match x.pexp_desc with
+  | Pexp_braces {expr = inner; braces_loc} ->
+    line i ppf "Pexp_braces\n";
+    line (i + 1) ppf "braces_loc %a\n" fmt_location braces_loc;
+    expression i ppf inner
   | Pexp_ident li -> line i ppf "Pexp_ident %a\n" fmt_longident_loc li
+  | Pexp_object_literal fields ->
+    line i ppf "Pexp_object_literal\n";
+    List.iter
+      (fun ((s : string Asttypes.loc), e) ->
+        line i ppf "field \"%s\"\n" s.txt;
+        expression i ppf e)
+      fields
   | Pexp_constant c -> line i ppf "Pexp_constant %a\n" fmt_constant c
   | Pexp_let (rf, l, e) ->
     line i ppf "Pexp_let %a\n" fmt_rec_flag rf;
@@ -283,12 +295,12 @@ and expression i ppf x =
   | Pexp_tuple l ->
     line i ppf "Pexp_tuple\n";
     list i expression ppf l
-  | Pexp_construct (li, eo) ->
+  | Pexp_construct (li, {txt = args}) ->
     line i ppf "Pexp_construct %a\n" fmt_longident_loc li;
-    option i expression ppf eo
-  | Pexp_variant (l, eo) ->
+    list i expression ppf args
+  | Pexp_variant (l, {txt = args}) ->
     line i ppf "Pexp_variant \"%s\"\n" l;
-    option i expression ppf eo
+    list i expression ppf args
   | Pexp_record (l, eo) ->
     line i ppf "Pexp_record\n";
     list i longident_x_expression ppf l;
@@ -310,6 +322,11 @@ and expression i ppf x =
     expression i ppf e1;
     expression i ppf e2;
     option i expression ppf eo
+  | Pexp_ternary (e1, e2, e3) ->
+    line i ppf "Pexp_ternary\n";
+    expression i ppf e1;
+    expression i ppf e2;
+    expression i ppf e3
   | Pexp_sequence (e1, e2) ->
     line i ppf "Pexp_sequence\n";
     expression i ppf e1;
@@ -344,8 +361,12 @@ and expression i ppf x =
     line i ppf "Pexp_coerce\n";
     expression i ppf e;
     core_type i ppf cto2
-  | Pexp_send (e, s) ->
-    line i ppf "Pexp_send \"%s\"\n" s.txt;
+  | Pexp_object_set (e, s, v) ->
+    line i ppf "Pexp_object_set \"%s\"\n" s.txt;
+    expression i ppf e;
+    expression i ppf v
+  | Pexp_object_get (e, s) ->
+    line i ppf "Pexp_object_get \"%s\"\n" s.txt;
     expression i ppf e
   | Pexp_letmodule (s, me, e) ->
     line i ppf "Pexp_letmodule %a\n" fmt_string_loc s;
@@ -367,6 +388,21 @@ and expression i ppf x =
   | Pexp_extension (s, arg) ->
     line i ppf "Pexp_extension \"%s\"\n" s.txt;
     payload i ppf arg
+  | Pexp_regexp {pattern; flags} ->
+    line i ppf "Pexp_regexp %S %S\n" pattern flags
+  | Pexp_template {source_segments; values} ->
+    line i ppf "Pexp_template\n";
+    List.iter
+      (fun {Asttypes.txt} -> line (i + 1) ppf "source_segment %S\n" txt)
+      source_segments;
+    List.iter (expression (i + 1) ppf) values
+  | Pexp_tagged_template {tag; raw_sources; values} ->
+    line i ppf "Pexp_tagged_template\n";
+    expression (i + 1) ppf tag;
+    List.iter
+      (fun {Asttypes.txt} -> line (i + 1) ppf "raw_source %S\n" txt)
+      raw_sources;
+    List.iter (expression (i + 1) ppf) values
   | Pexp_await e ->
     line i ppf "Pexp_await\n";
     expression i ppf e
@@ -422,7 +458,13 @@ and value_description i ppf x =
     x.pval_loc;
   attributes i ppf x.pval_attributes;
   core_type (i + 1) ppf x.pval_type;
-  list (i + 1) string ppf x.pval_prim
+  match x.pval_prim with
+  | None -> ()
+  | Some (Prim_name s) -> string (i + 1) ppf s
+  | Some (Prim_ffi {name}) ->
+    string (i + 1) ppf name;
+    line (i + 1) ppf "<ffi spec>\n"
+  | Some (Prim_inline_const _) -> line (i + 1) ppf "<inline const>\n"
 
 and type_parameter i ppf (x, _variance) = core_type i ppf x
 
@@ -438,6 +480,10 @@ and type_declaration i ppf x =
   line i ppf "ptype_kind =\n";
   type_kind (i + 1) ppf x.ptype_kind;
   line i ppf "ptype_private = %a\n" fmt_private_flag x.ptype_private;
+  (match x.ptype_origin with
+  | Declared -> ()
+  | Inline_record_definition ->
+    line i ppf "ptype_origin = Inline_record_definition\n");
   line i ppf "ptype_manifest =\n";
   option (i + 1) core_type ppf x.ptype_manifest
 
@@ -683,11 +729,10 @@ and core_type_x_core_type_x_location i ppf (ct1, ct2, l) =
   core_type (i + 1) ppf ct1;
   core_type (i + 1) ppf ct2
 
-and constructor_decl i ppf
-    {pcd_name; pcd_args; pcd_res; pcd_loc; pcd_attributes} =
+and constructor_decl i ppf ({pcd_name; pcd_args; pcd_res; pcd_loc} as cd) =
   line i ppf "%a\n" fmt_location pcd_loc;
   line (i + 1) ppf "%a\n" fmt_string_loc pcd_name;
-  attributes i ppf pcd_attributes;
+  attributes i ppf (Ast_helper.Type.constructor_attributes cd);
   constructor_arguments (i + 1) ppf pcd_args;
   option (i + 1) core_type ppf pcd_res
 
@@ -695,10 +740,9 @@ and constructor_arguments i ppf = function
   | Pcstr_tuple l -> list i core_type ppf l
   | Pcstr_record l -> list i label_decl ppf l
 
-and label_decl i ppf {pld_name; pld_mutable; pld_type; pld_loc; pld_attributes}
-    =
+and label_decl i ppf ({pld_name; pld_mutable; pld_type; pld_loc} as ld) =
   line i ppf "%a\n" fmt_location pld_loc;
-  attributes i ppf pld_attributes;
+  attributes i ppf (Ast_helper.Type.field_attributes ld);
   line (i + 1) ppf "%a\n" fmt_mutable_flag pld_mutable;
   line (i + 1) ppf "%a" fmt_string_loc pld_name;
   core_type (i + 1) ppf pld_type
@@ -744,10 +788,12 @@ and label_x_expression i ppf (l, e) =
 
 and label_x_bool_x_core_type_list i ppf x =
   match x with
-  | Rtag (l, attrs, b, ctl) ->
+  | Rtag (l, attrs, b, groups) ->
     line i ppf "Rtag \"%s\" %s\n" l.txt (string_of_bool b);
     attributes (i + 1) ppf attrs;
-    list (i + 1) core_type ppf ctl
+    list (i + 1)
+      (fun i ppf {txt = types} -> list i core_type ppf types)
+      ppf groups
   | Rinherit ct ->
     line i ppf "Rinherit\n";
     core_type (i + 1) ppf ct

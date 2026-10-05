@@ -341,18 +341,22 @@ fn rewrite_expression(
                 .collect::<Result<Vec<_>, _>>()?;
             ExpressionDesc::Pexp_tuple(Box::new(rewritten))
         }
-        ExpressionDesc::Pexp_construct(lid, arg) => {
-            let rewritten_arg = arg
-                .map(|idx| rewrite_expr_idx(idx, arena, let_unwrap_enabled))
-                .transpose()?;
-            ExpressionDesc::Pexp_construct(*lid, rewritten_arg)
+        ExpressionDesc::Pexp_construct(lid, args) => {
+            let rewritten = args
+                .txt
+                .iter()
+                .map(|idx| rewrite_expr_idx(*idx, arena, let_unwrap_enabled))
+                .collect::<Result<Vec<_>, _>>()?;
+            ExpressionDesc::Pexp_construct(*lid, crate::parser::ast::ctor_args(rewritten, args.loc))
         }
         ExpressionDesc::Pexp_variant(inner) => {
-            let (label, arg) = &**inner;
-            let rewritten_arg = arg
-                .map(|idx| rewrite_expr_idx(idx, arena, let_unwrap_enabled))
-                .transpose()?;
-            ExpressionDesc::Pexp_variant(Box::new((label.clone(), rewritten_arg)))
+            let (label, args) = &**inner;
+            let rewritten = args
+                .txt
+                .iter()
+                .map(|idx| rewrite_expr_idx(*idx, arena, let_unwrap_enabled))
+                .collect::<Result<Vec<_>, _>>()?;
+            ExpressionDesc::Pexp_variant(Box::new((label.clone(), Located::new(rewritten, args.loc))))
         }
         ExpressionDesc::Pexp_record(inner) => {
             let (fields, spread) = &**inner;
@@ -402,6 +406,21 @@ fn rewrite_expression(
                 rewritten_else,
             )))
         }
+        ExpressionDesc::Pexp_ternary(inner) => {
+            let (cond, consequent, alternate) = **inner;
+            let cond = rewrite_expr_idx(cond, arena, let_unwrap_enabled)?;
+            let consequent = rewrite_expr_idx(consequent, arena, let_unwrap_enabled)?;
+            let alternate = rewrite_expr_idx(alternate, arena, let_unwrap_enabled)?;
+            ExpressionDesc::Pexp_ternary(Box::new((cond, consequent, alternate)))
+        }
+        ExpressionDesc::Pexp_braces(braces) => {
+            let expr = rewrite_expr_idx(braces.expr, arena, let_unwrap_enabled)?;
+            ExpressionDesc::Pexp_braces(Box::new(crate::parser::ast::PexpBraces {
+                expr,
+                braces_loc: braces.braces_loc,
+            }))
+        }
+        ExpressionDesc::Pexp_regexp(regexp) => ExpressionDesc::Pexp_regexp(regexp.clone()),
         ExpressionDesc::Pexp_sequence(lhs, rhs) => {
             let rewritten_lhs = rewrite_expr_idx(*lhs, arena, let_unwrap_enabled)?;
             let rewritten_rhs = rewrite_expr_idx(*rhs, arena, let_unwrap_enabled)?;
@@ -447,10 +466,23 @@ fn rewrite_expression(
             let rewritten_subject = rewrite_expr_idx(*subject, arena, let_unwrap_enabled)?;
             ExpressionDesc::Pexp_coerce(Box::new((rewritten_subject, *from, *to)))
         }
-        ExpressionDesc::Pexp_send(inner) => {
+        ExpressionDesc::Pexp_object_get(inner) => {
             let (subject, method) = &**inner;
             let rewritten_subject = rewrite_expr_idx(*subject, arena, let_unwrap_enabled)?;
-            ExpressionDesc::Pexp_send(Box::new((rewritten_subject, method.clone())))
+            ExpressionDesc::Pexp_object_get(Box::new((rewritten_subject, method.clone())))
+        }
+        ExpressionDesc::Pexp_object_set(inner) => {
+            let (subject, name, value) = &**inner;
+            let rewritten_subject = rewrite_expr_idx(*subject, arena, let_unwrap_enabled)?;
+            let rewritten_value = rewrite_expr_idx(*value, arena, let_unwrap_enabled)?;
+            ExpressionDesc::Pexp_object_set(Box::new((rewritten_subject, name.clone(), rewritten_value)))
+        }
+        ExpressionDesc::Pexp_object_literal(fields) => {
+            let mut rewritten = Vec::with_capacity(fields.len());
+            for (name, value) in fields.iter() {
+                rewritten.push((name.clone(), rewrite_expr_idx(*value, arena, let_unwrap_enabled)?));
+            }
+            ExpressionDesc::Pexp_object_literal(Box::new(rewritten))
         }
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (name, mod_expr, body) = &**inner;
@@ -487,6 +519,30 @@ fn rewrite_expression(
         ExpressionDesc::Pexp_await(subject) => {
             let rewritten = rewrite_expr_idx(*subject, arena, let_unwrap_enabled)?;
             ExpressionDesc::Pexp_await(rewritten)
+        }
+        ExpressionDesc::Pexp_template(template) => {
+            let values = template
+                .values
+                .iter()
+                .map(|idx| rewrite_expr_idx(*idx, arena, let_unwrap_enabled))
+                .collect::<Result<Vec<_>, _>>()?;
+            ExpressionDesc::Pexp_template(Box::new(crate::parser::ast::PexpTemplate {
+                source_segments: template.source_segments.clone(),
+                values,
+            }))
+        }
+        ExpressionDesc::Pexp_tagged_template(template) => {
+            let tag = rewrite_expr_idx(template.tag, arena, let_unwrap_enabled)?;
+            let values = template
+                .values
+                .iter()
+                .map(|idx| rewrite_expr_idx(*idx, arena, let_unwrap_enabled))
+                .collect::<Result<Vec<_>, _>>()?;
+            ExpressionDesc::Pexp_tagged_template(Box::new(crate::parser::ast::PexpTaggedTemplate {
+                tag,
+                raw_sources: template.raw_sources.clone(),
+                values,
+            }))
         }
         ExpressionDesc::Pexp_jsx_element(element) => ExpressionDesc::Pexp_jsx_element(Box::new(
             rewrite_jsx_element(element, arena, let_unwrap_enabled)?,
@@ -742,9 +798,9 @@ fn make_ctor_pattern(
             ppat_loc: loc,
             ppat_attributes: Attributes::new(),
         });
-        Some(any_idx)
+        vec![any_idx]
     } else {
-        None
+        Vec::new()
     };
     Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_construct(
@@ -752,7 +808,7 @@ fn make_ctor_pattern(
                 txt: ctor_lid_idx,
                 loc,
             },
-            payload,
+            crate::parser::ast::ctor_args(payload, loc),
         )),
         ppat_loc: loc,
         ppat_attributes: Attributes::new(),
@@ -768,7 +824,7 @@ fn classify_let_unwrap_pattern(pat: &Pattern, arena: &ParseArena) -> Option<LetU
     };
     let name = arena.get_string(*name_idx);
 
-    match (name, arg.is_some()) {
+    match (name, !arg.txt.is_empty()) {
         ("Ok", true) => Some(LetUnwrapKind::ResultOk),
         ("Error", true) => Some(LetUnwrapKind::ResultError),
         ("Some", true) => Some(LetUnwrapKind::OptionSome),
@@ -778,7 +834,10 @@ fn classify_let_unwrap_pattern(pat: &Pattern, arena: &ParseArena) -> Option<LetU
 }
 
 fn extract_binding_name(pat: &Pattern, arena: &ParseArena) -> Option<crate::intern::StrIdx> {
-    let PatternDesc::Ppat_construct(_, Some(inner)) = &*pat.ppat_desc else {
+    let PatternDesc::Ppat_construct(_, args) = &*pat.ppat_desc else {
+        return None;
+    };
+    let [inner] = args.txt.as_slice() else {
         return None;
     };
     extract_single_variable_name(*inner, arena)
@@ -925,7 +984,7 @@ let f = x => {
         let ExpressionDesc::Pexp_fun(fun) = &*fun_expr.pexp_desc else {
             panic!("expected function expression");
         };
-        let body = arena.get_expr(fun.rhs);
+        let body = crate::parser::parsetree_viewer::unwrap_braces(&arena, arena.get_expr(fun.rhs));
         let rewritten_to_match = match &*body.pexp_desc {
             ExpressionDesc::Pexp_match(_) => true,
             ExpressionDesc::Pexp_let(inner) => {

@@ -13,7 +13,7 @@ use crate::parse_arena::{
     CoreTypeIdx, ExprIdx, LidentIdx, ModExprIdx, ModTypeIdx, ParseArena, PatIdx,
 };
 use crate::parser::ast::{
-    Attributes, Case, ConstructorArguments, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
+    Case, ConstructorArguments, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
     ExtensionConstructor, ExtensionConstructorKind, IncludeDeclaration, IncludeDescription,
     LabelDeclaration, ModuleBinding, ModuleDeclaration, ModuleExpr, ModuleExprDesc, ModuleType,
     ModuleTypeDeclaration, ModuleTypeDesc, ObjectField, OpenDescription, Pattern, PatternDesc,
@@ -438,7 +438,14 @@ impl<'a> DependencyCollector<'a> {
             ExpressionDesc::Pexp_ident(lid) => {
                 self.add_lident_idx(lid.txt);
             }
-            ExpressionDesc::Pexp_constant(_) => {}
+            ExpressionDesc::Pexp_braces(braces) => self.add_expr_idx(braces.expr),
+            ExpressionDesc::Pexp_constant(_) | ExpressionDesc::Pexp_regexp(_) => {}
+            ExpressionDesc::Pexp_ternary(inner) => {
+                let (cond, consequent, alternate) = **inner;
+                self.add_expr_idx(cond);
+                self.add_expr_idx(consequent);
+                self.add_expr_idx(alternate);
+            }
             ExpressionDesc::Pexp_break | ExpressionDesc::Pexp_continue => {}
             ExpressionDesc::Pexp_let(inner) => {
                 let (ref _rec_flag, ref bindings, ref body) = **inner;
@@ -537,6 +544,17 @@ impl<'a> DependencyCollector<'a> {
                     self.add_expr_idx(*arg);
                 }
             }
+            ExpressionDesc::Pexp_template(template) => {
+                for value in &template.values {
+                    self.add_expr_idx(*value);
+                }
+            }
+            ExpressionDesc::Pexp_tagged_template(template) => {
+                self.add_expr_idx(template.tag);
+                for value in &template.values {
+                    self.add_expr_idx(*value);
+                }
+            }
             ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
                 let (ref expr, ref cases) = **inner;
                 // expr is ExprIdx
@@ -551,20 +569,15 @@ impl<'a> DependencyCollector<'a> {
                     self.add_expr_idx(*expr);
                 }
             }
-            ExpressionDesc::Pexp_construct(lid, arg) => {
+            ExpressionDesc::Pexp_construct(lid, args) => {
                 self.add_lident_idx(lid.txt);
-                if let Some(arg) = arg {
-                    // arg is ExprIdx
-                    let arg = *arg;
-                    self.add_expr_idx(arg);
+                for arg in &args.txt {
+                    self.add_expr_idx(*arg);
                 }
             }
             ExpressionDesc::Pexp_variant(inner) => {
-                let (ref _label, ref arg) = **inner;
-                if let Some(arg) = arg {
-                    // arg is ExprIdx
-                    let arg = *arg;
-                    self.add_expr_idx(arg);
+                for arg in &inner.1.txt {
+                    self.add_expr_idx(*arg);
                 }
             }
             ExpressionDesc::Pexp_record(inner) => {
@@ -658,11 +671,21 @@ impl<'a> DependencyCollector<'a> {
                 }
                 self.add_core_type_idx(*ty2);
             }
-            ExpressionDesc::Pexp_send(inner) => {
+            ExpressionDesc::Pexp_object_get(inner) => {
                 let (ref expr, ref _label) = **inner;
                 // expr is ExprIdx
                 let expr = *expr;
                 self.add_expr_idx(expr);
+            }
+            ExpressionDesc::Pexp_object_set(inner) => {
+                let (ref expr, _, ref value) = **inner;
+                self.add_expr_idx(*expr);
+                self.add_expr_idx(*value);
+            }
+            ExpressionDesc::Pexp_object_literal(fields) => {
+                for (_, e) in fields.iter() {
+                    self.add_expr_idx(*e);
+                }
             }
             ExpressionDesc::Pexp_letmodule(inner) => {
                 let (ref name, ref me, ref body) = **inner;
@@ -729,7 +752,7 @@ impl<'a> DependencyCollector<'a> {
                         match items[0].pstr_desc.as_ref() {
                             StructureItemDesc::Pstr_eval(inner) => {
                                 match self.arena.get_expr(inner.0).pexp_desc.as_ref() {
-                                    ExpressionDesc::Pexp_construct(c, None) => Some(c.txt),
+                                    ExpressionDesc::Pexp_construct(c, args) if args.txt.is_empty() => Some(c.txt),
                                     _ => None,
                                 }
                             }
@@ -890,20 +913,15 @@ impl<'a> DependencyCollector<'a> {
                     self.add_pat_idx_inner(*pat, unpack_names);
                 }
             }
-            PatternDesc::Ppat_construct(lid, arg) => {
+            PatternDesc::Ppat_construct(lid, args) => {
                 self.add_lident_idx(lid.txt);
-                if let Some(arg) = arg {
-                    // arg is PatIdx
-                    let arg = *arg;
-                    self.add_pat_idx_inner(arg, unpack_names);
+                for arg in &args.txt {
+                    self.add_pat_idx_inner(*arg, unpack_names);
                 }
             }
             PatternDesc::Ppat_variant(inner) => {
-                let (ref _label, ref arg) = **inner;
-                if let Some(arg) = arg {
-                    // arg is PatIdx
-                    let arg = *arg;
-                    self.add_pat_idx_inner(arg, unpack_names);
+                for arg in &inner.1.txt {
+                    self.add_pat_idx_inner(*arg, unpack_names);
                 }
             }
             PatternDesc::Ppat_record(inner) => {
@@ -952,13 +970,6 @@ impl<'a> DependencyCollector<'a> {
             }
             PatternDesc::Ppat_extension(ext) => {
                 self.handle_extension(ext);
-            }
-            PatternDesc::Ppat_open(lid, pat_idx) => {
-                // Pattern open uses full module path
-                self.add_lident_idx_full(lid.txt);
-                // pat is PatIdx
-                let pat_idx = *pat_idx;
-                self.add_pat_idx_inner(pat_idx, unpack_names);
             }
         }
     }
@@ -1018,9 +1029,8 @@ impl<'a> DependencyCollector<'a> {
                 let (ref rows, ref _closed, ref _labels) = **inner;
                 for row in rows {
                     match row {
-                        RowField::Rtag(_label, _attrs, _bool, tys) => {
-                            for ty in tys {
-                                // ty is CoreTypeIdx
+                        RowField::Rtag(_label, _attrs, _bool, groups) => {
+                            for ty in groups.iter().flat_map(|group| group.txt.iter()) {
                                 self.add_core_type_idx(*ty);
                             }
                         }
@@ -1353,6 +1363,7 @@ impl<'a> DependencyCollector<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::ast::Attributes;
     use crate::parse_arena::{LocIdx, Located};
 
     /// Parse a dotted string like "Foo.Bar.baz" into a Longident using the arena.

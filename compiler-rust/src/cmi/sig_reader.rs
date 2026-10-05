@@ -20,7 +20,7 @@ use crate::types::decl::{
 };
 use crate::types::path::Path;
 use crate::types::type_expr::{
-    FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeArg, TypeDesc, TypeExprRef,
+    FieldMutability, GENERIC_LEVEL, MutabilityRef, RowDesc, RowField, TypeArg, TypeDesc, TypeExprRef,
 };
 use crate::types::variance::Variance;
 
@@ -38,6 +38,9 @@ pub struct SigReadContext<'a> {
     /// OCaml layout refs are shared mutable blocks. Preserve that physical
     /// sharing by mapping their marshal block identity to one TypeContext slot.
     variant_layout_cache: HashMap<usize, crate::types::VariantLayoutRef>,
+    /// Object field mutability cells are shared `ref` blocks; keep their
+    /// sharing by marshal block identity.
+    mutability_cache: HashMap<usize, MutabilityRef>,
 }
 
 impl<'a> SigReadContext<'a> {
@@ -47,6 +50,7 @@ impl<'a> SigReadContext<'a> {
             ctx,
             type_expr_cache: HashMap::new(),
             variant_layout_cache: HashMap::new(),
+            mutability_cache: HashMap::new(),
         }
     }
 
@@ -292,6 +296,30 @@ impl<'a> SigReadContext<'a> {
         }
     }
 
+    /// A `field_mutability ref` block (types.mli `field_mutability`).
+    fn read_mutability_ref(&mut self, value: &OcamlValue) -> MutabilityRef {
+        let (_, fields) = value.as_block();
+        let key = fields.as_ptr() as usize;
+        if let Some(r) = self.mutability_cache.get(&key) {
+            return *r;
+        }
+        let r = match &fields[0] {
+            // Mutability_value of mutable_flag
+            OcamlValue::Block(0, flag) => {
+                let flag = match flag[0].as_int() {
+                    0 => crate::types::asttypes::MutableFlag::Immutable,
+                    _ => crate::types::asttypes::MutableFlag::Mutable,
+                };
+                self.ctx.alloc_mutability(FieldMutability::Value(flag))
+            }
+            // Mutability_link of field_mutability ref
+            OcamlValue::Block(1, link) => self.read_mutability_ref(&link[0]),
+            other => panic!("unexpected field_mutability: {other:?}"),
+        };
+        self.mutability_cache.insert(key, r);
+        r
+    }
+
     fn read_variant_layout_ref(&mut self, value: &OcamlValue) -> crate::types::VariantLayoutRef {
         let (_, fields) = value.as_block();
         let key = fields.as_ptr() as usize;
@@ -342,18 +370,23 @@ impl<'a> SigReadContext<'a> {
         match tag {
             0 => crate::types::VariantConstructorCase::Constant(self.read_variant_tag(&fields[0])),
             1 => {
-                let (_, block) = fields[0].as_block();
-                let (_, runtime) = block[0].as_block();
-                crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                    runtime: crate::types::BlockRuntime {
-                        tag: self.read_variant_tag(&runtime[0]),
-                        tag_name: self.read_string_option(&runtime[1]),
-                        untagged: runtime[2].as_bool(),
+                // `Tagged of tagged_block | Untagged of {tag; block_type}`.
+                let (block_tag, block) = fields[0].as_block();
+                let block = match block_tag {
+                    0 => {
+                        let (_, runtime) = block[0].as_block();
+                        crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
+                            tag: self.read_variant_tag(&runtime[0]),
+                            tag_name: self.read_string_option(&runtime[1]),
+                        })
+                    }
+                    1 => crate::types::VariantBlock::Untagged {
+                        tag: self.read_variant_tag(&block[0]),
+                        block_type: self.read_variant_block_type(&block[1]),
                     },
-                    block_type: block[1]
-                        .as_option()
-                        .map(|v| self.read_variant_block_type(v)),
-                })
+                    _ => panic!("invalid variant block tag {block_tag}"),
+                };
+                crate::types::VariantConstructorCase::Block(block)
             }
             _ => panic!("invalid variant constructor case tag {tag}"),
         }
@@ -363,12 +396,14 @@ impl<'a> SigReadContext<'a> {
         let (_, fields) = value.as_block();
         crate::types::VariantTag {
             name: fields[0].as_string().to_string(),
-            tag_type: fields[1].as_option().map(|v| self.read_variant_tag_type(v)),
+            literal: fields[1].as_option().map(|v| self.read_variant_literal_tag(v)),
         }
     }
 
-    fn read_variant_tag_type(&mut self, value: &OcamlValue) -> crate::types::VariantTagType {
-        use crate::types::VariantTagType as T;
+    /// `Variant_runtime.literal_tag`: `Null`/`Undefined` are the constant
+    /// constructors, the others blocks with tags 0-4.
+    fn read_variant_literal_tag(&mut self, value: &OcamlValue) -> crate::types::VariantLiteralTag {
+        use crate::types::VariantLiteralTag as T;
         match value {
             OcamlValue::Int(0) => T::Null,
             OcamlValue::Int(1) => T::Undefined,
@@ -378,52 +413,14 @@ impl<'a> SigReadContext<'a> {
                 2 => T::Float(fields[0].as_string().to_string()),
                 3 => T::BigInt(fields[0].as_string().to_string()),
                 4 => T::Bool(fields[0].as_bool()),
-                5 => T::Untagged(self.read_variant_block_type(&fields[0])),
-                _ => panic!("invalid variant tag type {tag}"),
+                _ => panic!("invalid variant literal tag {tag}"),
             },
             _ => panic!("invalid variant tag type"),
         }
     }
 
     fn read_variant_block_type(&mut self, value: &OcamlValue) -> crate::types::VariantBlockType {
-        use crate::types::{VariantBlockType as B, VariantInstance as I};
-        match value {
-            OcamlValue::Int(0) => B::Int,
-            OcamlValue::Int(1) => B::String,
-            OcamlValue::Int(2) => B::Float,
-            OcamlValue::Int(3) => B::Bigint,
-            OcamlValue::Int(4) => B::Boolean,
-            OcamlValue::Int(5) => B::Function,
-            OcamlValue::Int(6) => B::Object,
-            OcamlValue::Int(7) => B::Unknown,
-            OcamlValue::Block(0, fields) => B::Instance(match fields[0].as_int() {
-                0 => I::Array,
-                1 => I::ArrayBuffer,
-                2 => I::BigInt64Array,
-                3 => I::BigUint64Array,
-                4 => I::Blob,
-                5 => I::DataView,
-                6 => I::Date,
-                7 => I::File,
-                8 => I::Float32Array,
-                9 => I::Float64Array,
-                10 => I::Int16Array,
-                11 => I::Int32Array,
-                12 => I::Int8Array,
-                13 => I::Promise,
-                14 => I::RegExp,
-                15 => I::Uint16Array,
-                16 => I::Uint32Array,
-                17 => I::Uint8Array,
-                18 => I::Uint8ClampedArray,
-                19 => I::Set,
-                20 => I::Map,
-                21 => I::WeakSet,
-                22 => I::WeakMap,
-                n => panic!("invalid variant instance {n}"),
-            }),
-            _ => panic!("invalid variant block type"),
-        }
+        decode_variant_block_type(value)
     }
 
     fn read_string_option(&self, value: &OcamlValue) -> Option<String> {
@@ -434,22 +431,25 @@ impl<'a> SigReadContext<'a> {
     ///
     /// Record fields:
     /// 0: ld_id: Ident.t
-    /// 1: ld_mutable: mutable_flag
-    /// 2: ld_optional: bool
-    /// 3: ld_type: type_expr
-    /// 4: ld_loc: Location.t
-    /// 5: ld_attributes: attributes
+    /// 1: ld_runtime_name: string option
+    /// 2: ld_mutable: mutable_flag
+    /// 3: ld_optional: bool
+    /// 4: ld_type: type_expr
+    /// 5: ld_loc: Location.t
+    /// 6: ld_attributes: attributes
     fn read_label_declaration(&mut self, value: &OcamlValue) -> LabelDeclaration {
         let fields = &value.as_block().1;
         let ld_id = read_ident(&fields[0]);
-        let ld_mutable = read_mutable_flag(&fields[1]);
-        let ld_optional = fields[2].as_bool();
-        let ld_type = self.read_type_expr(&fields[3]);
-        let ld_loc = read_location(self.ctx, &fields[4]);
-        let ld_attributes = read_attributes(self.ctx, &fields[5]);
+        let ld_runtime_name = fields[1].as_option().map(|name| name.as_string().to_string());
+        let ld_mutable = read_mutable_flag(&fields[2]);
+        let ld_optional = fields[3].as_bool();
+        let ld_type = self.read_type_expr(&fields[4]);
+        let ld_loc = read_location(self.ctx, &fields[5]);
+        let ld_attributes = read_attributes(self.ctx, &fields[6]);
 
         LabelDeclaration {
             ld_id,
+            ld_runtime_name,
             ld_mutable,
             ld_optional,
             ld_type,
@@ -462,20 +462,23 @@ impl<'a> SigReadContext<'a> {
     ///
     /// Record fields:
     /// 0: cd_id: Ident.t
-    /// 1: cd_args: constructor_arguments
-    /// 2: cd_res: type_expr option
-    /// 3: cd_loc: Location.t
-    /// 4: cd_attributes: attributes
+    /// 1: cd_runtime_tag: Variant_runtime.literal_tag option
+    /// 2: cd_args: constructor_arguments
+    /// 3: cd_res: type_expr option
+    /// 4: cd_loc: Location.t
+    /// 5: cd_attributes: attributes
     fn read_constructor_declaration(&mut self, value: &OcamlValue) -> ConstructorDeclaration {
         let fields = &value.as_block().1;
         let cd_id = read_ident(&fields[0]);
-        let cd_args = self.read_constructor_arguments(&fields[1]);
-        let cd_res = fields[2].as_option().map(|te| self.read_type_expr(te));
-        let cd_loc = read_location(self.ctx, &fields[3]);
-        let cd_attributes = read_attributes(self.ctx, &fields[4]);
+        let cd_runtime_tag = fields[1].as_option().map(|tag| self.read_variant_literal_tag(tag));
+        let cd_args = self.read_constructor_arguments(&fields[2]);
+        let cd_res = fields[3].as_option().map(|te| self.read_type_expr(te));
+        let cd_loc = read_location(self.ctx, &fields[4]);
+        let cd_attributes = read_attributes(self.ctx, &fields[5]);
 
         ConstructorDeclaration {
             cd_id,
+            cd_runtime_tag,
             cd_args,
             cd_res,
             cd_loc,
@@ -750,23 +753,20 @@ impl<'a> SigReadContext<'a> {
                     TypeDesc::Tconstr { path, args: args.into(), abbrev }
                 }
                 4 => {
-                    // Tobject(type_expr, (Path.t * type_expr list) option ref)
-                    let obj_fields = self.read_type_expr(&fields[0]);
-                    let name = None;
+                    // Tobject of type_expr
                     TypeDesc::Tobject {
-                        fields: obj_fields,
-                        name,
+                        fields: self.read_type_expr(&fields[0]),
                     }
                 }
                 5 => {
-                    // Tfield(string, field_kind, type_expr, type_expr)
+                    // Tfield {name; mutability: field_mutability ref; typ; rest}
                     let name = fields[0].as_string().to_string();
-                    let kind = read_field_kind(&fields[1]);
+                    let mutability = self.read_mutability_ref(&fields[1]);
                     let typ = self.read_type_expr(&fields[2]);
                     let rest = self.read_type_expr(&fields[3]);
                     TypeDesc::Tfield {
                         name,
-                        kind,
+                        mutability,
                         typ,
                         rest,
                     }
@@ -1256,10 +1256,18 @@ fn read_location(ctx: &TypeContext, value: &OcamlValue) -> Location {
     }
 }
 
-fn read_attribute_name(value: &OcamlValue) -> crate::types::asttypes::Located<String> {
+fn read_attribute_name(
+    ctx: &TypeContext,
+    value: &OcamlValue,
+) -> crate::types::asttypes::Located<String> {
     match value {
         OcamlValue::String(name) => crate::types::asttypes::Located::noloc(name.clone()),
         OcamlValue::Block(_, fields) if !fields.is_empty() => match &fields[0] {
+            // `string Asttypes.loc` = `{txt; loc}`.
+            OcamlValue::String(name) if fields.len() == 2 => crate::types::asttypes::Located {
+                txt: name.clone(),
+                loc: read_location(ctx, &fields[1]),
+            },
             OcamlValue::String(name) => crate::types::asttypes::Located::noloc(name.clone()),
             inner => crate::types::asttypes::Located::noloc(
                 read_first_string(inner).unwrap_or_else(|| "?".to_string()),
@@ -1284,13 +1292,51 @@ fn read_first_string(value: &OcamlValue) -> Option<String> {
 /// The JS backend relies on simple constructor `@as(...)` payloads from loaded
 /// interfaces, so preserve the payload forms the OCaml backend observes for
 /// null/undefined identifiers and simple string literals.
+/// Convert a marshalled `Parsetree.payload` into its portable form. The only
+/// Parsetree record laid out as `{string; int; int; int}` is
+/// `Lexing.position`, which is kept explicit for the writers' position
+/// sharing. Returns `None` for values a payload cannot contain (floats).
+pub(crate) fn payload_value_from_ocaml(
+    value: &OcamlValue,
+) -> Option<crate::types::decl::PayloadValue> {
+    use crate::types::decl::PayloadValue;
+    Some(match value {
+        OcamlValue::Int(n) => PayloadValue::Int(*n),
+        OcamlValue::String(s) => PayloadValue::Str(s.clone()),
+        OcamlValue::Float(_) => return None,
+        OcamlValue::Block(tag, fields) => match (&**fields, *tag) {
+            (
+                [
+                    OcamlValue::String(file),
+                    OcamlValue::Int(line),
+                    OcamlValue::Int(bol),
+                    OcamlValue::Int(cnum),
+                ],
+                0,
+            ) => PayloadValue::Position {
+                file: file.clone(),
+                line: *line as i32,
+                bol: *bol as i32,
+                cnum: *cnum as i32,
+            },
+            _ => PayloadValue::Block(
+                *tag,
+                fields
+                    .iter()
+                    .map(payload_value_from_ocaml)
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+        },
+    })
+}
+
 fn read_attributes(ctx: &TypeContext, value: &OcamlValue) -> Vec<Attribute> {
     value
         .as_list()
         .iter()
         .filter_map(|attr| match attr {
             OcamlValue::Block(_, fields) if !fields.is_empty() => {
-                let attr_name = read_attribute_name(&fields[0]);
+                let attr_name = read_attribute_name(ctx, &fields[0]);
                 let payload = if fields.len() > 1 {
                     if attr_name.txt == "deprecated" {
                         read_deprecated_attribute_payload(&fields[1])
@@ -1307,6 +1353,10 @@ fn read_attributes(ctx: &TypeContext, value: &OcamlValue) -> Vec<Attribute> {
                         .get(2)
                         .map(|loc| read_location(ctx, loc))
                         .unwrap_or_else(Location::none),
+                    attr_payload_raw: fields
+                        .get(1)
+                        .and_then(payload_value_from_ocaml)
+                        .map(Box::new),
                 })
             }
             _ => None,
@@ -1362,7 +1412,7 @@ fn read_deprecated_attribute_payload(value: &OcamlValue) -> AttributePayload {
 }
 
 /// `PStr [{pstr_desc = Pstr_eval ({pexp_desc = Pexp_constant
-/// (Pconst_string (s, _))}, _)}]`, given the marshaled structure list.
+/// (Pconst_string payload)}, _)}]`, given the marshaled structure list.
 fn plain_string_payload(structure: &OcamlValue) -> Option<String> {
     let OcamlValue::Block(0, cons) = structure else {
         return None;
@@ -1380,16 +1430,39 @@ fn plain_string_payload(structure: &OcamlValue) -> Option<String> {
     let OcamlValue::Block(0, expr) = eval.first()? else {
         return None;
     };
-    // Pexp_constant constant
-    let OcamlValue::Block(1, constant) = expr.first()? else {
+    // `Ast_payload.unwrap_payload_expression`: look through
+    // `Pexp_braces {expr; braces_loc}` (tag 0).
+    let mut expr = expr;
+    while let Some(OcamlValue::Block(0, braces)) = expr.first() {
+        let OcamlValue::Block(0, inner) = braces.first()? else {
+            return None;
+        };
+        expr = inner;
+    }
+    // Pexp_constant constant (tag 2: `Pexp_braces` and `Pexp_ident` precede
+    // it in parsetree.ml `expression_desc`)
+    let OcamlValue::Block(2, constant) = expr.first()? else {
         return None;
     };
-    // Pconst_string (string, delimiter)
+    // Pconst_string payload
     let OcamlValue::Block(2, string) = constant.first()? else {
         return None;
     };
-    match string.first()? {
-        OcamlValue::String(s) => Some(s.clone()),
+    string_literal_semantic(string.first()?)
+}
+
+/// `String_literal.string_semantic` of a marshaled `String_literal.payload`:
+/// `Valid {source; semantic}` (tag 0) or `Invalid_source source` (tag 1).
+fn string_literal_semantic(payload: &OcamlValue) -> Option<String> {
+    match payload {
+        OcamlValue::Block(0, fields) => match fields.as_ref() {
+            [OcamlValue::String(_), OcamlValue::String(semantic)] => Some(semantic.clone()),
+            _ => None,
+        },
+        OcamlValue::Block(1, fields) => match fields.as_ref() {
+            [OcamlValue::String(_)] => Some(String::new()),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1445,20 +1518,18 @@ fn extract_ident_payload_name(structure: &OcamlValue) -> Option<String> {
 
 /// Try to extract a string constant from a PStr attribute payload.
 ///
-/// For `@as("foo")`, the expression subtree contains a constant-string node
-/// encoded as `Block(2, [String("foo"), ...])`.
+/// For `@as("foo")`, the expression subtree contains a `Pconst_string`
+/// node encoded as `Block(2, [payload])`, whose `String_literal.payload` holds
+/// the source and semantic strings.
 fn extract_str_payload_string(structure: &OcamlValue) -> Option<String> {
     fn find_string_constant(v: &OcamlValue, depth: usize) -> Option<String> {
         if depth > 12 {
             return None;
         }
         match v {
-            OcamlValue::Block(2, fields) if !fields.is_empty() => match &fields[0] {
-                OcamlValue::String(value) => Some(value.clone()),
-                _ => fields
-                    .iter()
-                    .find_map(|field| find_string_constant(field, depth + 1)),
-            },
+            OcamlValue::Block(2, fields) if fields.len() == 1 && string_literal_semantic(&fields[0]).is_some() => {
+                string_literal_semantic(&fields[0])
+            }
             OcamlValue::Block(_, fields) => fields
                 .iter()
                 .find_map(|field| find_string_constant(field, depth + 1)),
@@ -1470,29 +1541,21 @@ fn extract_str_payload_string(structure: &OcamlValue) -> Option<String> {
 
 /// Read a Primitive.description.
 ///
-/// Record fields:
+/// Record fields (primitive.ml):
 /// 0: prim_name: string
 /// 1: prim_arity: int
 /// 2: prim_alloc: bool
-/// 3: prim_native_name: string
+/// 3: prim_kind: prim_kind
 /// 4: prim_from_constructor: bool
-/// 5: transformed_jsx: bool
 fn read_primitive_description(value: &OcamlValue) -> PrimitiveDescription {
     let fields = &value.as_block().1;
     PrimitiveDescription {
         prim_name: fields[0].as_string().to_string(),
         prim_arity: fields[1].as_int() as i32,
-        prim_native_name: if fields.len() > 3 {
-            fields[3].as_string().to_string()
-        } else {
-            String::new()
-        },
+        prim_kind: super::ffi_decode::prim_kind(&fields[3])
+            .unwrap_or(crate::types::decl::PrimKind::KindIntrinsic),
         prim_native_float: false,
-        prim_from_constructor: if fields.len() > 4 {
-            fields[4].as_bool()
-        } else {
-            false
-        },
+        prim_from_constructor: fields[4].as_bool(),
     }
 }
 
@@ -1567,10 +1630,6 @@ fn read_alias_presence(value: &OcamlValue) -> AliasPresence {
 }
 
 /// Read field_kind.
-fn read_field_kind(_value: &OcamlValue) -> FieldKind {
-    // For CMI-loaded types, just use Fpresent.
-    FieldKind::Fpresent
-}
 
 #[cfg(test)]
 mod tests {
@@ -1598,12 +1657,16 @@ mod tests {
                 0,
                 vec![block(
                     1,
+                    // Pconst_string of a `String_literal.Valid {source; semantic}`
                     vec![block(
                         2,
-                        vec![
-                            OcamlValue::String(value.to_string()),
-                            block(0, vec![OcamlValue::String("*j".to_string())]),
-                        ],
+                        vec![block(
+                            0,
+                            vec![
+                                OcamlValue::String(value.to_string()),
+                                OcamlValue::String(value.to_string()),
+                            ],
+                        )],
                     )],
                 )],
             )],
@@ -1636,5 +1699,47 @@ mod tests {
             read_attribute_payload(&cmi_string_pstr("fulfilled")),
             AttributePayload::Str("fulfilled".to_string())
         );
+    }
+}
+
+/// Decode a marshalled `Variant_runtime.block_type`.
+pub(crate) fn decode_variant_block_type(value: &OcamlValue) -> crate::types::VariantBlockType {
+    use crate::types::{VariantBlockType as B, VariantInstance as I};
+    match value {
+        OcamlValue::Int(0) => B::Int,
+        OcamlValue::Int(1) => B::String,
+        OcamlValue::Int(2) => B::Float,
+        OcamlValue::Int(3) => B::Bigint,
+        OcamlValue::Int(4) => B::Boolean,
+        OcamlValue::Int(5) => B::Function,
+        OcamlValue::Int(6) => B::Object,
+        OcamlValue::Int(7) => B::Unknown,
+        OcamlValue::Block(0, fields) => B::Instance(match fields[0].as_int() {
+            0 => I::Array,
+            1 => I::ArrayBuffer,
+            2 => I::BigInt64Array,
+            3 => I::BigUint64Array,
+            4 => I::Blob,
+            5 => I::DataView,
+            6 => I::Date,
+            7 => I::File,
+            8 => I::Float32Array,
+            9 => I::Float64Array,
+            10 => I::Int16Array,
+            11 => I::Int32Array,
+            12 => I::Int8Array,
+            13 => I::Promise,
+            14 => I::RegExp,
+            15 => I::Uint16Array,
+            16 => I::Uint32Array,
+            17 => I::Uint8Array,
+            18 => I::Uint8ClampedArray,
+            19 => I::Set,
+            20 => I::Map,
+            21 => I::WeakSet,
+            22 => I::WeakMap,
+            n => panic!("invalid variant instance {n}"),
+        }),
+        _ => panic!("invalid variant block type"),
     }
 }

@@ -37,17 +37,8 @@ pub(crate) fn eliminate_ref(
             let value = eliminate_ref(store, target, args[1])?;
             Ok(store.append(NodeSnapshot::Assign(target.clone(), value)))
         }
-        NodeSnapshot::Prim(Primitive::Poffsetref(delta), args, loc) if matches!(args.as_slice(), [base] if matches!(store.view(*base), NodeView::Var(id) if id.same(target))) =>
-        {
-            let variable = store.append(NodeSnapshot::Var(target.clone()));
-            let value = append_rebuilt(
-                store,
-                NodeSnapshot::Prim(Primitive::Poffsetint(delta), vec![variable], loc),
-            );
-            Ok(store.append(NodeSnapshot::Assign(target.clone(), value)))
-        }
         NodeSnapshot::Const(_)
-        | NodeSnapshot::GlobalModule(_, _)
+        | NodeSnapshot::GlobalModule(_)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => Ok(node),
         NodeSnapshot::Apply(function, args, info, jsx) => {
@@ -240,8 +231,22 @@ mod tests {
                     Location::none(),
                 ),
                 Lambda::prim(
-                    Primitive::Poffsetref(1),
-                    vec![Lambda::var(reference.clone())],
+                    Primitive::Psetfield(0, SetFieldDbgInfo::RecordSet("contents".into())),
+                    vec![
+                        Lambda::var(reference.clone()),
+                        Lambda::prim(
+                            Primitive::Paddint,
+                            vec![
+                                Lambda::prim(
+                                    Primitive::Pfield(0, FieldDbgInfo::Tuple),
+                                    vec![Lambda::var(reference.clone())],
+                                    Location::none(),
+                                ),
+                                Lambda::const_(Constant::int(1)),
+                            ],
+                            Location::none(),
+                        ),
+                    ],
                     Location::none(),
                 ),
             ),
@@ -256,8 +261,8 @@ mod tests {
                 Lambda::assign(
                     reference.clone(),
                     Lambda::prim(
-                        Primitive::Poffsetint(1),
-                        vec![Lambda::var(reference.clone())],
+                        Primitive::Paddint,
+                        vec![Lambda::var(reference.clone()), Lambda::const_(Constant::int(1))],
                         Location::none(),
                     ),
                 ),

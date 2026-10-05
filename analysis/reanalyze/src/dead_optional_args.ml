@@ -8,9 +8,9 @@ let rec has_optional_args (texpr : Types.type_expr) =
   | Tarrow (params, _) ->
     params
     |> List.exists (fun ({lbl} : Types.arg) ->
-           match lbl with
-           | Optional _ -> true
-           | _ -> false)
+        match lbl with
+        | Optional _ -> true
+        | _ -> false)
   | Tlink t -> has_optional_args t
   | Tsubst t -> has_optional_args t
   | _ -> false
@@ -24,7 +24,7 @@ let add_function_reference ~config ~cross_file ~(loc_from : Location.t)
     let pos_to = loc_to.loc_start in
     let pos_from = loc_from.loc_start in
     if config.Dce_config.cli.debug then
-      Log_.item "OptionalArgs.addFunctionReference %s %s@."
+      Log_.item "Dead_optional_args.add_function_reference %s %s@."
         (pos_from |> Pos.to_string)
         (pos_to |> Pos.to_string);
     Cross_file_items.add_function_reference cross_file ~pos_from ~pos_to)
@@ -37,9 +37,9 @@ let rec from_type_expr (texpr : Types.type_expr) =
   | Tarrow (params, _) ->
     params
     |> List.filter_map (fun ({lbl} : Types.arg) ->
-           match lbl with
-           | Optional {txt = s} -> Some s
-           | _ -> None)
+        match lbl with
+        | Optional {txt = s} -> Some s
+        | _ -> None)
   | Tlink t -> from_type_expr t
   | Tsubst t -> from_type_expr t
   | _ -> []

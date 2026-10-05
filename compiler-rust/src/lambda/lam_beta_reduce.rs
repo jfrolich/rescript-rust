@@ -98,12 +98,10 @@ pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> O
         Lambda::Lprim(prim_info) => {
             let new_args = substitute_args(&prim_info.args, &mut param_map)?;
 
-            // Build the new primitive
-            let mut result = Lambda::Lprim(Box::new(PrimInfo {
-                primitive: prim_info.primitive.clone(),
-                args: new_args,
-                loc: prim_info.loc.clone(),
-            }));
+            // lam_beta_reduce_util.ml:79-81 builds it through the folding
+            // `Lambda.prim`.
+            let mut result =
+                Lambda::prim(prim_info.primitive.clone(), new_args, prim_info.loc.clone());
 
             // Add sequences for unused arguments (preserve side effects)
             for (_param, usage) in param_map.iter() {
@@ -139,7 +137,7 @@ pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> O
                         unreachable!()
                     };
 
-                    matches!(args.as_slice(), [Lambda::LglobalModule(_, _)])
+                    matches!(args.as_slice(), [Lambda::LglobalModule(_)])
                 }
                 _ => false,
             };
@@ -357,7 +355,7 @@ pub fn propagate_beta_reduce_with_map_and_meta_and_id_gen(
                 substitution.insert(param.clone(), arg.clone());
             }
             // Global modules need to be bound (for proper module loading)
-            Lambda::LglobalModule(_, _) => {
+            Lambda::LglobalModule(_) => {
                 let new_param = param.rename(id_gen);
                 rest_bindings.push((new_param.clone(), arg.clone()));
                 substitution.insert(param.clone(), Lambda::var(new_param));
@@ -496,16 +494,18 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
     match lam {
         Lambda::Lvar(id) => substitution.get(id).cloned().unwrap_or_else(|| lam.clone()),
         Lambda::Lconst(_) => lam.clone(),
-        Lambda::Lapply(apply) => Lambda::Lapply(Box::new(Apply {
-            ap_func: Box::new(rewrite_bounded_vars(substitution, &apply.ap_func, id_gen)),
-            ap_args: apply
+        // lam_bounded_vars.ml `rewrite` rebuilds every node through the
+        // smart constructors (`Lambda.apply`, `Lambda.prim`, `Lambda.if_`,
+        // `Lambda.seq`, ...).
+        Lambda::Lapply(apply) => {
+            let func = rewrite_bounded_vars(substitution, &apply.ap_func, id_gen);
+            let args = apply
                 .ap_args
                 .iter()
                 .map(|arg| rewrite_bounded_vars(substitution, arg, id_gen))
-                .collect(),
-            ap_info: apply.ap_info.clone(),
-            ap_transformed_jsx: apply.ap_transformed_jsx,
-        })),
+                .collect();
+            Lambda::apply(func, args, apply.ap_info.clone(), apply.ap_transformed_jsx)
+        }
         Lambda::Lfunction(func) => {
             let params = func
                 .params
@@ -540,16 +540,16 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
                 .collect();
             Lambda::letrec(bindings, rewrite_bounded_vars(substitution, body, id_gen))
         }
-        Lambda::Lprim(prim_info) => Lambda::Lprim(Box::new(PrimInfo {
-            primitive: prim_info.primitive.clone(),
-            args: prim_info
+        Lambda::Lprim(prim_info) => Lambda::prim(
+            prim_info.primitive.clone(),
+            prim_info
                 .args
                 .iter()
                 .map(|arg| rewrite_bounded_vars(substitution, arg, id_gen))
                 .collect(),
-            loc: prim_info.loc.clone(),
-        })),
-        Lambda::LglobalModule(_, _) => lam.clone(),
+            prim_info.loc.clone(),
+        ),
+        Lambda::LglobalModule(_) => lam.clone(),
         Lambda::Lswitch(arg, switch) => Lambda::switch(
             rewrite_bounded_vars(substitution, arg, id_gen),
             crate::lambda::LambdaSwitch {
@@ -597,7 +597,7 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
                 .as_ref()
                 .map(|value| Box::new(rewrite_bounded_vars(substitution, value, id_gen))),
         ),
-        Lambda::LstaticRaise(id, args) => Lambda::LstaticRaise(
+        Lambda::LstaticRaise(id, args) => Lambda::static_raise(
             *id,
             args.iter()
                 .map(|arg| rewrite_bounded_vars(substitution, arg, id_gen))
@@ -624,28 +624,30 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
                 Box::new(rewrite_bounded_vars(substitution, handler, id_gen)),
             )
         }
-        Lambda::LifThenElse(cond, then_, else_) => Lambda::LifThenElse(
-            Box::new(rewrite_bounded_vars(substitution, cond, id_gen)),
-            Box::new(rewrite_bounded_vars(substitution, then_, id_gen)),
-            Box::new(rewrite_bounded_vars(substitution, else_, id_gen)),
-        ),
-        Lambda::Lsequence(first, second) => Lambda::Lsequence(
-            Box::new(rewrite_bounded_vars(substitution, first, id_gen)),
-            Box::new(rewrite_bounded_vars(substitution, second, id_gen)),
-        ),
+        Lambda::LifThenElse(cond, then_, else_) => {
+            let cond = rewrite_bounded_vars(substitution, cond, id_gen);
+            let then_ = rewrite_bounded_vars(substitution, then_, id_gen);
+            let else_ = rewrite_bounded_vars(substitution, else_, id_gen);
+            Lambda::if_(cond, then_, else_)
+        }
+        Lambda::Lsequence(first, second) => {
+            let first = rewrite_bounded_vars(substitution, first, id_gen);
+            let second = rewrite_bounded_vars(substitution, second, id_gen);
+            Lambda::seq(first, second)
+        }
         Lambda::Lwhile(cond, body) => Lambda::Lwhile(
             Box::new(rewrite_bounded_vars(substitution, cond, id_gen)),
             Box::new(rewrite_bounded_vars(substitution, body, id_gen)),
         ),
         Lambda::Lfor(id, from, to, direction, body) => {
             let id = rebind(id, substitution, id_gen);
-            Lambda::Lfor(
-                id,
-                Box::new(rewrite_bounded_vars(substitution, from, id_gen)),
-                Box::new(rewrite_bounded_vars(substitution, to, id_gen)),
-                *direction,
-                Box::new(rewrite_bounded_vars(substitution, body, id_gen)),
-            )
+            let from = rewrite_bounded_vars(substitution, from, id_gen);
+            let to = rewrite_bounded_vars(substitution, to, id_gen);
+            let body = rewrite_bounded_vars(substitution, body, id_gen);
+            // lam_bounded_vars.ml: `Lambda.for_ ident (aux l1) l2 dir l3`
+            // rewrites the already rewritten start expression once more.
+            let from = rewrite_bounded_vars(substitution, &from, id_gen);
+            Lambda::Lfor(id, Box::new(from), Box::new(to), *direction, Box::new(body))
         }
         Lambda::Lfor_of(id, iterable, body) => {
             let id = rebind(id, substitution, id_gen);
@@ -674,7 +676,7 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
 
 pub(crate) fn max_ident_stamp_in_lambda(lam: &Lambda) -> i32 {
     match lam {
-        Lambda::Lvar(id) | Lambda::LglobalModule(id, _) => id.stamp(),
+        Lambda::Lvar(id) | Lambda::LglobalModule(id) => id.stamp(),
         Lambda::Lconst(_) => 0,
         Lambda::Lapply(apply) => apply.ap_args.iter().fold(
             max_ident_stamp_in_lambda(&apply.ap_func),
@@ -783,21 +785,13 @@ mod tests {
         let result = simple_beta_reduce(&params, &body, &args);
         assert!(result.is_some());
 
+        // lam_beta_reduce_util.ml builds the result with the folding
+        // `Lambda.prim`, so `1 + 2` is the constant `3`.
         let reduced = result.unwrap();
-        match reduced {
-            Lambda::Lprim(ref info) => {
-                assert_eq!(info.args.len(), 2);
-                assert!(matches!(
-                    info.args[0],
-                    Lambda::Lconst(Constant::Int { i: 1, .. })
-                ));
-                assert!(matches!(
-                    info.args[1],
-                    Lambda::Lconst(Constant::Int { i: 2, .. })
-                ));
-            }
-            _ => panic!("Expected Lprim"),
-        }
+        assert!(
+            matches!(reduced, Lambda::Lconst(Constant::Int { i: 3, .. })),
+            "Expected folded constant, got {reduced:?}"
+        );
     }
 
     #[test]
@@ -886,15 +880,7 @@ mod tests {
                 Primitive::PjsCall {
                     prim_name: name.to_string(),
                     arg_types: vec![],
-                    ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
-                        kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
-                        spec: None,
-                        obj_params: None,
-                        return_wrapper:
-                            crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
-                        inline_constant: None,
-                    }),
-                    dynamic_import: false,
+                    ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                     transformed_jsx: false,
                 },
                 vec![],
@@ -950,10 +936,7 @@ mod tests {
                 FunctionAttribute::default(),
             ),
         );
-        let args = vec![Lambda::const_(Constant::String {
-            s: "".to_string(),
-            delim: None,
-        })];
+        let args = vec![Lambda::const_(Constant::String("".to_string()))];
 
         let reduced = propagate_beta_reduce(&params, &body, &args);
         let Lambda::Llet(kind, id, value, body) = reduced else {
@@ -991,15 +974,7 @@ mod tests {
                 Primitive::PjsCall {
                     prim_name: "exec".to_string(),
                     arg_types: vec![],
-                    ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
-                        kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
-                        spec: None,
-                        obj_params: None,
-                        return_wrapper:
-                            crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
-                        inline_constant: None,
-                    }),
-                    dynamic_import: false,
+                    ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                     transformed_jsx: false,
                 },
                 vec![Lambda::const_(Constant::string("subject"))],
@@ -1117,16 +1092,12 @@ mod tests {
 
         let result = propagate_beta_reduce_with_map(&stats, &params, &body, &args);
 
-        // Should get direct primitive application
-        match result {
-            Lambda::Lprim(ref info) => {
-                assert!(matches!(
-                    info.args[0],
-                    Lambda::Lconst(Constant::Int { i: 5, .. })
-                ));
-            }
-            _ => panic!("Expected Lprim, got {result:?}"),
-        }
+        // Direct substitution through the folding `Lambda.prim`
+        // (lam_beta_reduce_util.ml) gives the constant `6`.
+        assert!(
+            matches!(result, Lambda::Lconst(Constant::Int { i: 6, .. })),
+            "Expected folded constant, got {result:?}"
+        );
     }
 
     #[test]

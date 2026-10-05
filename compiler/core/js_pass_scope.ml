@@ -157,13 +157,11 @@ let record_scope_pass =
               {init_state with mutable_values = mutable_params}
               body
           in
-          (* let defined_idents', used_idents' =
-             obj#get_defined_idents, obj#get_used_idents  in *)
           (* mark which param is used *)
           params
           |> List.iteri (fun i v ->
-                 if not (Set_ident.mem used_idents' v) then
-                   Js_fun_env.mark_unused env i);
+              if not (Set_ident.mem used_idents' v) then
+                Js_fun_env.mark_unused env i);
           let closured_idents' =
             (* pass param_set down *)
             Set_ident.(diff used_idents' (union defined_idents' param_set))
@@ -224,18 +222,8 @@ let record_scope_pass =
                       TODO:
                   *)
                      match x.expression_desc with
-                     | Fun _ | Number _ | Str _ -> state
-                     | _ ->
-                       (* if Set_ident.(is_empty @@ *)
-                       (*   inter self#get_mutable_values  *)
-                       (*     ( ({<  *)
-                       (*         defined_idents = Set_ident.empty;  *)
-                       (*         used_idents = Set_ident.empty; *)
-                       (*         >} # expression x) # get_used_idents)) then *)
-                       (*   (\* FIXME: still need to check expression is pure or not*\) *)
-                       (*   self *)
-                       (* else  *)
-                       add_loop_mutable_variable state ident))
+                     | Fun _ | Number _ | Str _ | Template_literal _ -> state
+                     | _ -> add_loop_mutable_variable state ident))
                  | false, Variable -> add_mutable_variable state ident
                  | false, (Strict | StrictOpt | Alias) -> state)
                  ident)
@@ -335,4 +323,3 @@ let record_scope_pass =
 let program js =
   (record_scope_pass.program record_scope_pass init_state js)
     .loop_mutable_values
-(* (scope_pass # program js ) # get_loop_mutable_values *)

@@ -19,15 +19,15 @@ use crate::js_ir::op::{
 };
 use crate::js_ir::printer::{convert_ident_name, is_js_keyword_or_global};
 use crate::js_ir::{
-    BinOp, Block, CallInfo, Delim, Expression, ExpressionDesc, ModuleId, Statement, StatementDesc,
+    BinOp, Block, CallInfo, Expression, ExpressionDesc, ModuleId, Statement, StatementDesc,
     VIdent, VariableDeclaration, expression_has_no_side_effects,
 };
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_constant::Constant;
+use crate::js_ir::printer::js_export_name;
 use crate::lambda::lam_primitive::{
-    ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
-    ExternalFfiKind, ExternalModuleBindName, ExternalModuleName, ExternalObjLabel, ExternalObjSpec,
-    ExternalSpec, Mutable, Primitive,
+    Attr, Cst, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, Label,
+    LabelNoname, ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
 };
 use crate::lambda::{ApplyStatus, Lambda, TagInfo};
 use crate::location::Location;
@@ -41,8 +41,8 @@ pub(crate) fn external_module_import_attributes(
 
 pub(crate) fn external_module_ident_name(module_name: &ExternalModuleName) -> String {
     match &module_name.module_bind_name {
-        ExternalModuleBindName::HintName(hint) => capitalize_ascii_first(hint),
-        ExternalModuleBindName::Nothing => js_id_name_of_hint_name(&module_name.bundle),
+        ModuleBindName::PhintName(hint) => capitalize_ascii_first(hint),
+        ModuleBindName::PhintNothing => js_id_name_of_hint_name(&module_name.bundle),
     }
 }
 
@@ -154,7 +154,7 @@ impl LambdaCompiler {
     ) -> Expression {
         match &arg.desc {
             ExpressionDesc::Undefined { .. } => Expression::undefined(false),
-            ExpressionDesc::Str { txt, .. } => {
+            ExpressionDesc::Str(txt) => {
                 Expression::string(external_polyvar_string_dispatch(dispatches, txt))
             }
             _ => string_switch_iife(
@@ -179,7 +179,7 @@ impl LambdaCompiler {
                     items.as_slice(),
                     [
                         Expression {
-                            desc: ExpressionDesc::Str { .. },
+                            desc: ExpressionDesc::Str(_),
                             ..
                         },
                         value,
@@ -188,7 +188,7 @@ impl LambdaCompiler {
             {
                 let [
                     Expression {
-                        desc: ExpressionDesc::Str { txt, .. },
+                        desc: ExpressionDesc::Str(txt),
                         ..
                     },
                     value,
@@ -223,7 +223,7 @@ impl LambdaCompiler {
     ) -> Expression {
         match &arg.desc {
             ExpressionDesc::Undefined { .. } => Expression::undefined(false),
-            ExpressionDesc::Str { txt, .. } => {
+            ExpressionDesc::Str(txt) => {
                 int_expr(external_polyvar_int_dispatch(dispatches, txt) as i32)
             }
             _ => string_switch_iife(
@@ -318,7 +318,7 @@ impl LambdaCompiler {
         lam: LambdaInput<'_>,
     ) -> Option<Expression> {
         let mut module_target_var: Option<Ident> = None;
-        let mut module_target_global: Option<(Ident, bool)> = None;
+        let mut module_target_global: Option<Ident> = None;
         let mut alias_chain = Vec::new();
         let mut cursor = lam;
 
@@ -335,17 +335,15 @@ impl LambdaCompiler {
                     module_target_var.get_or_insert_with(|| id.clone());
                     Some(())
                 }
-                LambdaInputView::GlobalModule(id, dynamic_import) => {
+                LambdaInputView::GlobalModule(id) => {
                     if module_target_var.is_some()
-                        || module_target_global.as_ref().is_some_and(
-                            |(current_id, current_dynamic_import)| {
-                                !current_id.same(id) || *current_dynamic_import != dynamic_import
-                            },
-                        )
+                        || module_target_global
+                            .as_ref()
+                            .is_some_and(|current_id| !current_id.same(id))
                     {
                         return None;
                     }
-                    module_target_global.get_or_insert_with(|| (id.clone(), dynamic_import));
+                    module_target_global.get_or_insert_with(|| id.clone());
                     Some(())
                 }
                 _ => None,
@@ -423,12 +421,12 @@ impl LambdaCompiler {
 
                     return if let Some(id) = module_target_var {
                         Some(Expression::var(id))
-                    } else if let Some((id, dynamic_import)) = module_target_global {
+                    } else if let Some(id) = module_target_global {
                         Some(Expression::qualified(
                             ModuleId {
                                 id,
                                 kind: Kind::Ml,
-                                dynamic_import,
+                                dynamic_import: false,
                             },
                             None,
                         ))
@@ -474,12 +472,8 @@ impl LambdaCompiler {
         &mut self,
         module_name: &ExternalModuleName,
         default: bool,
-        dynamic_import: bool,
     ) -> Expression {
-        Expression::qualified(
-            self.external_module_id(module_name, default, dynamic_import),
-            None,
-        )
+        Expression::qualified(self.external_module_id(module_name, default, false), None)
     }
 
     pub(crate) fn translate_scoped_module_value(
@@ -487,20 +481,19 @@ impl LambdaCompiler {
         module_name: Option<&ExternalModuleName>,
         name: &str,
         scopes: &[String],
-        dynamic_import: bool,
     ) -> Expression {
         match module_name {
             Some(module_name) => match scopes.split_first() {
                 None => {
                     let default = name == "default";
                     Expression::qualified(
-                        self.external_module_id(module_name, default, dynamic_import),
+                        self.external_module_id(module_name, default, false),
                         Some(name.to_string()),
                     )
                 }
                 Some((first_scope, rest_scopes)) => {
                     let mut expr = Expression::qualified(
-                        self.external_module_id(module_name, false, dynamic_import),
+                        self.external_module_id(module_name, false, false),
                         Some(first_scope.clone()),
                     );
                     for scope in rest_scopes {
@@ -568,7 +561,8 @@ impl LambdaCompiler {
                 | ExpressionDesc::Number(_)
                 | ExpressionDesc::CamlBlock(_, _, _)
                 | ExpressionDesc::Array(_, _)
-                | ExpressionDesc::Str { .. }
+                | ExpressionDesc::Str(_)
+                | ExpressionDesc::TemplateLiteral(_)
         );
         self.optional_block(value, identity)
     }
@@ -616,8 +610,8 @@ impl LambdaCompiler {
     pub(crate) fn lower_object_external_arg_value_and_effect(
         &self,
         raw_arg: Expression,
-        arg_label: ExternalArgLabel,
-        arg_type: &ExternalArgAttr,
+        arg_label: LabelNoname,
+        arg_type: &Attr,
     ) -> (Expression, Option<Expression>) {
         let (values, effect) =
             self.lower_external_arg_values_and_effect(raw_arg, arg_label, arg_type);
@@ -634,60 +628,60 @@ impl LambdaCompiler {
     pub(crate) fn lower_external_arg_values_and_effect(
         &self,
         raw_arg: Expression,
-        arg_label: ExternalArgLabel,
-        arg_type: &ExternalArgAttr,
+        arg_label: LabelNoname,
+        arg_type: &Attr,
     ) -> (Vec<Expression>, Option<Expression>) {
         // Only `Unwrap` of an optional argument reads the raw argument again.
-        let keep_raw = matches!(arg_type, ExternalArgAttr::Unwrap)
-            && matches!(arg_label, ExternalArgLabel::Optional);
+        let keep_raw = matches!(arg_type, Attr::Unwrap)
+            && matches!(arg_label, LabelNoname::ArgOptional);
         let (arg, raw_arg) = match arg_label {
-            ExternalArgLabel::Optional => {
+            LabelNoname::ArgOptional => {
                 let raw_copy = keep_raw.then(|| raw_arg.clone());
                 (self.external_optional_to_undefined_expr(raw_arg), raw_copy)
             }
-            ExternalArgLabel::Label | ExternalArgLabel::Empty => (raw_arg, None),
+            LabelNoname::ArgLabel | LabelNoname::ArgEmpty => (raw_arg, None),
         };
 
         match arg_type {
-            ExternalArgAttr::ArgCst(_) => (Vec::new(), None),
-            ExternalArgAttr::ExternUnit => {
+            Attr::ArgCst(_) => (Vec::new(), None),
+            Attr::ExternUnit => {
                 let effect = self.external_arg_effect(&arg);
-                let values = if matches!(arg_label, ExternalArgLabel::Empty) {
+                let values = if matches!(arg_label, LabelNoname::ArgEmpty) {
                     Vec::new()
                 } else {
                     vec![Expression::undefined(true)]
                 };
                 (values, effect)
             }
-            ExternalArgAttr::Ignore => (Vec::new(), self.external_arg_effect(&arg)),
-            ExternalArgAttr::PolyVarString { descr } => {
+            Attr::Ignore => (Vec::new(), self.external_arg_effect(&arg)),
+            Attr::PolyVarString { descr } => {
                 (vec![self.external_polyvar_string_expr(arg, descr)], None)
             }
-            ExternalArgAttr::PolyVar { descr } => (
+            Attr::PolyVar { descr } => (
                 self.external_polyvar_event_exprs(arg, descr.as_deref()),
                 None,
             ),
-            ExternalArgAttr::Int(dispatches) => {
+            Attr::Int(dispatches) => {
                 (vec![self.external_polyvar_int_expr(arg, dispatches)], None)
             }
-            ExternalArgAttr::Unwrap => {
+            Attr::Unwrap => {
                 let value = match arg_label {
-                    ExternalArgLabel::Optional => self.external_option_unwrap_expr(
+                    LabelNoname::ArgOptional => self.external_option_unwrap_expr(
                         raw_arg.expect("optional unwrap keeps the raw argument"),
                     ),
-                    ExternalArgLabel::Label | ExternalArgLabel::Empty => {
+                    LabelNoname::ArgLabel | LabelNoname::ArgEmpty => {
                         self.external_polyvar_unwrap_expr(arg)
                     }
                 };
                 (vec![value], None)
             }
-            ExternalArgAttr::Nothing => (vec![arg], None),
+            Attr::Nothing => (vec![arg], None),
         }
     }
 
     pub(crate) fn assemble_external_args_no_splice(
         &self,
-        arg_types: &[ExternalArgSpec],
+        arg_types: &[Param],
         args: Vec<Expression>,
     ) -> (Vec<Expression>, Option<Expression>) {
         let mut runtime_args = args.into_iter();
@@ -696,7 +690,7 @@ impl LambdaCompiler {
 
         for arg_spec in arg_types {
             match &arg_spec.arg_type {
-                ExternalArgAttr::ArgCst(cst) => {
+                Attr::ArgCst(cst) => {
                     assembled.push(self.compile_external_arg_const(cst));
                 }
                 _ => {
@@ -725,7 +719,7 @@ impl LambdaCompiler {
 
     pub(crate) fn keep_non_undefined_external_args(
         &self,
-        arg_types: &[ExternalArgSpec],
+        arg_types: &[Param],
         mut args: Vec<Expression>,
     ) -> Vec<Expression> {
         let trailing_optional_undefined_count = arg_types
@@ -733,7 +727,7 @@ impl LambdaCompiler {
             .rev()
             .zip(args.iter().rev())
             .take_while(|(arg_spec, arg)| {
-                matches!(arg_spec.arg_label, ExternalArgLabel::Optional)
+                matches!(arg_spec.arg_label, LabelNoname::ArgOptional)
                     && matches!(arg.desc, ExpressionDesc::Undefined { is_unit: false })
             })
             .count();
@@ -747,7 +741,7 @@ impl LambdaCompiler {
 
     pub(crate) fn assemble_external_args_with_splice(
         &self,
-        arg_types: &[ExternalArgSpec],
+        arg_types: &[Param],
         args: Vec<Expression>,
     ) -> (Vec<Expression>, Option<Expression>) {
         let mut runtime_args = args.into_iter().peekable();
@@ -757,7 +751,7 @@ impl LambdaCompiler {
 
         for arg_spec in arg_types {
             match &arg_spec.arg_type {
-                ExternalArgAttr::ArgCst(cst) => {
+                Attr::ArgCst(cst) => {
                     assembled.push(self.compile_external_arg_const(cst));
                 }
                 _ => {
@@ -815,7 +809,7 @@ impl LambdaCompiler {
 
     pub(crate) fn assemble_external_args(
         &self,
-        arg_types: &[ExternalArgSpec],
+        arg_types: &[Param],
         args: Vec<Expression>,
         splice: bool,
     ) -> (Vec<Expression>, Option<Expression>) {
@@ -828,7 +822,7 @@ impl LambdaCompiler {
 
     pub(crate) fn compile_js_object_create(
         &mut self,
-        obj_params: &[ExternalObjSpec],
+        obj_params: &[ObjParam],
         args: Vec<Expression>,
         prelude: &mut Block,
     ) -> Expression {
@@ -836,7 +830,7 @@ impl LambdaCompiler {
         struct PendingOptionalAssignment {
             name: String,
             arg: Expression,
-            arg_type: ExternalArgAttr,
+            arg_type: Attr,
             for_sure_no_nested_option: bool,
         }
 
@@ -847,8 +841,8 @@ impl LambdaCompiler {
 
         for obj_param in obj_params {
             match &obj_param.obj_arg_label {
-                ExternalObjLabel::Empty => {
-                    if !matches!(obj_param.obj_arg_type, ExternalArgAttr::ArgCst(_)) {
+                Label::ObjEmpty => {
+                    if !matches!(obj_param.obj_arg_type, Attr::ArgCst(_)) {
                         let arg = runtime_args
                             .next()
                             .unwrap_or_else(|| Expression::undefined(false));
@@ -857,8 +851,8 @@ impl LambdaCompiler {
                         }
                     }
                 }
-                ExternalObjLabel::Label { name } => match &obj_param.obj_arg_type {
-                    ExternalArgAttr::ArgCst(cst) => {
+                Label::ObjLabel { name } => match &obj_param.obj_arg_type {
+                    Attr::ArgCst(cst) => {
                         props.push((
                             PropertyName::lit(name.clone()),
                             self.compile_external_arg_const(cst),
@@ -870,7 +864,7 @@ impl LambdaCompiler {
                             .unwrap_or_else(|| Expression::undefined(false));
                         let (value, effect) = self.lower_object_external_arg_value_and_effect(
                             arg,
-                            ExternalArgLabel::Label,
+                            LabelNoname::ArgLabel,
                             &obj_param.obj_arg_type,
                         );
                         if let Some(effect) = effect {
@@ -879,7 +873,7 @@ impl LambdaCompiler {
                         props.push((PropertyName::lit(name.clone()), value));
                     }
                 },
-                ExternalObjLabel::Optional {
+                Label::ObjOptional {
                     name,
                     for_sure_no_nested_option,
                 } => {
@@ -896,7 +890,7 @@ impl LambdaCompiler {
                         ExpressionDesc::OptionalBlock(inner, _) => {
                             let (value, effect) = self.lower_object_external_arg_value_and_effect(
                                 *inner,
-                                ExternalArgLabel::Label,
+                                LabelNoname::ArgLabel,
                                 &obj_param.obj_arg_type,
                             );
                             if let Some(effect) = effect {
@@ -957,7 +951,7 @@ impl LambdaCompiler {
             };
             let (value, effect) = self.lower_object_external_arg_value_and_effect(
                 value_arg,
-                ExternalArgLabel::Empty,
+                LabelNoname::ArgEmpty,
                 &pending.arg_type,
             );
             let cond = Expression::bin(BinOp::NotEqEq, prepared, Expression::undefined(false));
@@ -980,207 +974,145 @@ impl LambdaCompiler {
                 | ExpressionDesc::Null
                 | ExpressionDesc::Bool(_)
                 | ExpressionDesc::Number(_)
-                | ExpressionDesc::Str { .. }
+                | ExpressionDesc::Str(_)
         )
     }
 
+    /// `Lam_compile_external_call.translate_ffi`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn compile_js_call(
         &mut self,
-        loc: &Location,
         prim_name: &str,
-        arg_types: &[ExternalArgSpec],
-        ffi: &crate::lambda::lam_primitive::ExternalFfiSpec,
-        dynamic_import: bool,
+        arg_types: &[Param],
+        decl: &ExternalDecl,
         transformed_jsx: bool,
         args: Vec<Expression>,
-        _prelude: &mut Block,
     ) -> Expression {
-        let transformed_jsx_call_info = CallInfo {
+        let call_info = CallInfo {
             call_transformed_jsx: transformed_jsx,
             ..CallInfo::default()
         };
-
-        if ffi.kind == ExternalFfiKind::Normal {
-            self.report_diagnostic(
-                loc,
-                &format!(
-                    "\x1b[1;31mError:\x1b[0m internal error, using unrecognized primitive {prim_name}"
-                ),
-            );
-            return Expression::undefined(false);
-        }
-
-        match ffi.spec.as_ref() {
-            Some(ExternalSpec::JsVar {
-                name,
-                external_module_name,
-                scopes,
-            }) => {
-                let value = self.translate_scoped_module_value(
-                    external_module_name.as_ref(),
-                    name,
-                    scopes,
-                    dynamic_import,
-                );
-                if args.is_empty() {
-                    value
-                } else {
-                    Expression::call(value, args, transformed_jsx_call_info.clone())
-                }
+        let splice = decl.variadic;
+        let scopes = &decl.scopes;
+        // a bare `@module` binds the module itself under the primitive name
+        let module_itself_name = || ExternalModuleName {
+            bundle: prim_name.to_string(),
+            module_bind_name: ModuleBindName::PhintNothing,
+            import_attributes: None,
+        };
+        let named_module = match &decl.module_ {
+            Some(ModuleSource::ModuleNamed(emn)) => Some(emn),
+            Some(ModuleSource::ModuleItself) | None => None,
+        };
+        let module_itself = matches!(decl.module_, Some(ModuleSource::ModuleItself));
+        match &decl.kind {
+            // the module itself, as a value
+            DeclKind::DeclVal { .. } if module_itself && decl.effective_arity == 0 => {
+                self.external_module_binding(&module_itself_name(), false)
             }
-            Some(ExternalSpec::JsCall {
-                name,
-                external_module_name,
-                splice,
-                scopes,
-            }) => {
-                let target = self.translate_scoped_module_value(
-                    external_module_name.as_ref(),
-                    name,
-                    scopes,
-                    dynamic_import,
-                );
-
-                let (args, effect) = self.assemble_external_args(arg_types, args, *splice);
-                self.add_external_effect(
-                    effect,
-                    Expression::call(target, args, transformed_jsx_call_info.clone()),
-                )
+            // the module itself, called as a function
+            DeclKind::DeclVal { .. } if module_itself => {
+                let target = self.external_module_binding(&module_itself_name(), false);
+                let (args, effect) = self.assemble_external_args(arg_types, args, splice);
+                self.add_external_effect(effect, Expression::call(target, args, call_info))
             }
-            Some(ExternalSpec::JsNew {
-                name,
-                external_module_name,
-                splice,
-                scopes,
-                ..
-            }) => {
-                let (args, effect) = self.assemble_external_args(arg_types, args, *splice);
-                let target = self.translate_scoped_module_value(
-                    external_module_name.as_ref(),
-                    name,
-                    scopes,
-                    dynamic_import,
-                );
+            // the module itself, as a class
+            DeclKind::DeclNew { .. } if module_itself => {
+                let target = self.external_module_binding(&module_itself_name(), false);
+                let (args, effect) = self.assemble_external_args_no_splice(arg_types, args);
                 let expr = Expression::new(ExpressionDesc::New(Box::new(target), Some(args)));
                 self.add_external_effect(effect, expr)
             }
-            Some(ExternalSpec::JsSend {
-                name,
-                splice,
-                js_send_scopes,
-                ..
-            }) => match args.split_first() {
-                Some((receiver, rest)) => {
-                    let (rest_args, effect) = self.assemble_external_args(
-                        arg_types.get(1..).unwrap_or(&[]),
-                        rest.to_vec(),
-                        *splice,
-                    );
-                    self.add_external_effect(
-                        effect,
-                        Expression::call(
-                            self.static_index(
-                                self.apply_scoped_access(receiver.clone(), js_send_scopes),
-                                name,
-                            ),
-                            rest_args,
-                            transformed_jsx_call_info.clone(),
-                        ),
-                    )
+            _ if module_itself => unreachable!("rejected during digestion"),
+            // a global value
+            DeclKind::DeclVal { name } if decl.effective_arity == 0 => {
+                let value = self.translate_scoped_module_value(named_module, name, scopes);
+                if args.is_empty() {
+                    value
+                } else {
+                    Expression::call(value, args, call_info)
                 }
-                None => self.compile_plain_js_call(prim_name, args, transformed_jsx),
-            },
-            Some(ExternalSpec::JsGet {
-                js_get_name,
-                js_get_scopes,
-            }) => {
+            }
+            // a global (possibly module-scoped) function call
+            DeclKind::DeclVal { name } => {
+                let target = self.translate_scoped_module_value(named_module, name, scopes);
+                let (args, effect) = self.assemble_external_args(arg_types, args, splice);
+                self.add_external_effect(effect, Expression::call(target, args, call_info))
+            }
+            DeclKind::DeclNew { name } => {
+                let (args, effect) = self.assemble_external_args(arg_types, args, splice);
+                let target = self.translate_scoped_module_value(named_module, name, scopes);
+                let expr = Expression::new(ExpressionDesc::New(Box::new(target), Some(args)));
+                self.add_external_effect(effect, expr)
+            }
+            DeclKind::DeclSend { name } => {
+                let Some((receiver, rest)) = args.split_first() else {
+                    unreachable!("@send external called without a receiver")
+                };
+                let (rest_args, effect) = self.assemble_external_args(
+                    arg_types.get(1..).unwrap_or(&[]),
+                    rest.to_vec(),
+                    splice,
+                );
+                self.add_external_effect(
+                    effect,
+                    Expression::call(
+                        self.static_index(self.apply_scoped_access(receiver.clone(), scopes), name),
+                        rest_args,
+                        call_info,
+                    ),
+                )
+            }
+            DeclKind::DeclGet { name } => {
                 let (assembled, effect) = self.assemble_external_args_no_splice(arg_types, args);
                 let expr = match assembled.as_slice() {
-                    [receiver] => self.static_index(
-                        self.apply_scoped_access(receiver.clone(), js_get_scopes),
-                        js_get_name,
+                    [receiver] => {
+                        self.static_index(self.apply_scoped_access(receiver.clone(), scopes), name)
+                    }
+                    _ => panic!(
+                        "Internal compiler error: @get external called with wrong number of arguments. Expected exactly one object argument."
                     ),
-                    _ => self.compile_plain_js_call(prim_name, assembled, transformed_jsx),
                 };
                 self.add_external_effect(effect, expr)
             }
-            Some(ExternalSpec::JsSet {
-                js_set_name,
-                js_set_scopes,
-            }) => {
+            DeclKind::DeclSet { name } => {
                 let (assembled, effect) = self.assemble_external_args_no_splice(arg_types, args);
                 let expr = match assembled.as_slice() {
                     [receiver, value] => Expression::bin(
                         BinOp::Eq,
-                        self.static_index(
-                            self.apply_scoped_access(receiver.clone(), js_set_scopes),
-                            js_set_name,
-                        ),
+                        self.static_index(self.apply_scoped_access(receiver.clone(), scopes), name),
                         value.clone(),
                     ),
-                    _ => self.compile_plain_js_call(prim_name, assembled, transformed_jsx),
+                    _ => unreachable!("@set external takes an object and a value"),
                 };
                 self.add_external_effect(effect, expr)
             }
-            Some(ExternalSpec::JsGetIndex {
-                js_get_index_scopes,
-            }) => {
+            DeclKind::DeclGetIndex => {
                 let (assembled, effect) = self.assemble_external_args_no_splice(arg_types, args);
                 let expr = match assembled.as_slice() {
                     [receiver, index] => Expression::new(ExpressionDesc::ArrayIndex(
-                        Box::new(self.apply_scoped_access(receiver.clone(), js_get_index_scopes)),
+                        Box::new(self.apply_scoped_access(receiver.clone(), scopes)),
                         Box::new(index.clone()),
                     )),
-                    _ => self.compile_plain_js_call(prim_name, assembled, transformed_jsx),
+                    _ => unreachable!("@get_index external takes an object and an index"),
                 };
                 self.add_external_effect(effect, expr)
             }
-            Some(ExternalSpec::JsSetIndex {
-                js_set_index_scopes,
-            }) => {
+            DeclKind::DeclSetIndex => {
                 let (assembled, effect) = self.assemble_external_args_no_splice(arg_types, args);
                 let expr = match assembled.as_slice() {
                     [receiver, index, value] => Expression::bin(
                         BinOp::Eq,
                         Expression::new(ExpressionDesc::ArrayIndex(
-                            Box::new(
-                                self.apply_scoped_access(receiver.clone(), js_set_index_scopes),
-                            ),
+                            Box::new(self.apply_scoped_access(receiver.clone(), scopes)),
                             Box::new(index.clone()),
                         )),
                         value.clone(),
                     ),
-                    _ => self.compile_plain_js_call(prim_name, assembled, transformed_jsx),
+                    _ => unreachable!("@set_index external takes an object, an index and a value"),
                 };
                 self.add_external_effect(effect, expr)
             }
-            Some(ExternalSpec::JsModuleAsVar(module_name)) => {
-                let value = self.external_module_binding(module_name, false, dynamic_import);
-                let (args, effect) = self.assemble_external_args_no_splice(arg_types, args);
-                let expr = if args.is_empty() {
-                    value
-                } else {
-                    Expression::call(value, args, transformed_jsx_call_info.clone())
-                };
-                self.add_external_effect(effect, expr)
-            }
-            Some(ExternalSpec::JsModuleAsFn {
-                external_module_name,
-                splice,
-            }) => {
-                let (args, effect) = self.assemble_external_args(arg_types, args, *splice);
-                let target =
-                    self.external_module_binding(external_module_name, false, dynamic_import);
-                let expr = Expression::call(target, args, transformed_jsx_call_info.clone());
-                self.add_external_effect(effect, expr)
-            }
-            Some(ExternalSpec::JsModuleAsClass(module_name)) => {
-                let (args, effect) = self.assemble_external_args_no_splice(arg_types, args);
-                let target = self.external_module_binding(module_name, false, dynamic_import);
-                let expr = Expression::new(ExpressionDesc::New(Box::new(target), Some(args)));
-                self.add_external_effect(effect, expr)
-            }
-            _ => self.compile_plain_js_call(prim_name, args, transformed_jsx),
         }
     }
 
@@ -1200,106 +1132,91 @@ impl LambdaCompiler {
         )
     }
 
-    pub(crate) fn compile_import(&mut self, loc: &Location, args: Vec<Expression>) -> Expression {
-        let arg = match args.as_slice() {
-            [arg] => arg,
-            [
-                arg,
-                Expression {
-                    desc: ExpressionDesc::Undefined { is_unit: true },
-                    ..
-                },
-            ] => arg,
-            _ => {
-                self.report_diagnostic(
-                    loc,
-                    "Invalid argument: Dynamic import must take a single module or module value as its argument.",
-                );
-                return Expression::undefined(false);
-            }
-        };
+    /// `[import(...).then(m => m.<p0>.<p1>...)]`
+    /// (`Lam_compile_primitive.wrap_then_path`).
+    fn wrap_then_path(&self, import: Expression, path: &[String]) -> Expression {
+        let param = self.fresh_ident("m");
+        let mut value = Expression::var(param.clone());
+        for segment in path {
+            value = self.static_index(value, segment);
+        }
+        let callback = Expression::new(ExpressionDesc::Fun {
+            is_method: false,
+            params: vec![param],
+            body: vec![Statement::return_(value)],
+            env: Default::default(),
+            return_unit: false,
+            async_: false,
+            directive: None,
+        });
+        Expression::call(self.static_index(import, "then"), vec![callback], CallInfo::default())
+    }
 
-        let Some((module, member)) = self.module_of_expression(arg) else {
-            self.report_diagnostic(
-                loc,
-                "Invalid argument: Dynamic import requires a module or module value that is a file as argument. Passing a value or local module is not allowed.",
-            );
-            return Expression::undefined(false);
-        };
-
-        let path = match &module.kind {
-            Kind::External { name, .. } => Some(name.clone()),
-            _ => self
-                .module_path_resolver
-                .as_ref()
-                .and_then(|resolver| resolver.resolve_module_path(&module)),
-        };
-
-        let Some(path) = path else {
-            self.report_diagnostic(
-                loc,
-                "Invalid argument: Dynamic import requires a module or module value that is a file as argument. Passing a value or local module is not allowed.",
-            );
-            return Expression::undefined(false);
-        };
-
-        let import_expr = Expression::call(
+    fn import_of_path(path: String) -> Expression {
+        Expression::call(
             Expression::var(Ident::create_persistent("import")),
             vec![Expression::string(path)],
             CallInfo::default(),
-        );
-
-        let member = member.or_else(|| match &module.kind {
-            Kind::External { default: true, .. } => Some("default".to_string()),
-            _ => None,
-        });
-
-        match member {
-            Some(member) => {
-                let param = self.fresh_ident("m");
-                let body = vec![Statement::return_(
-                    self.static_index(Expression::var(param.clone()), &member),
-                )];
-                let callback = Expression::new(ExpressionDesc::Fun {
-                    is_method: false,
-                    params: vec![param],
-                    body,
-                    env: Default::default(),
-                    return_unit: false,
-                    async_: false,
-                    directive: None,
-                });
-                Expression::call(
-                    self.static_index(import_expr, "then"),
-                    vec![callback],
-                    CallInfo::default(),
-                )
-            }
-            None => import_expr,
-        }
+        )
     }
 
-    pub(crate) fn module_of_expression(
-        &self,
-        expr: &Expression,
-    ) -> Option<(ModuleId, Option<String>)> {
-        match &expr.desc {
-            ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, member)) => {
-                Some(((**module).clone(), member.clone()))
+    /// `Lam_compile_primitive.translate` for `Pimport source`: the module is
+    /// registered as a dynamic dependency here, the single place that knows
+    /// about it, and the emitted form is `import("path")[.then(m => m.<name>)]`.
+    pub(crate) fn compile_import(&mut self, loc: &Location, source: &ImportSource) -> Expression {
+        let invalid = "Invalid argument: Dynamic import requires a module or module value that is a file as argument. Passing a value or local module is not allowed.";
+        match source {
+            ImportSource::ImportModule { module_, path } => {
+                let oid = ModuleId {
+                    id: module_.clone(),
+                    kind: Kind::Ml,
+                    dynamic_import: true,
+                };
+                self.dynamic_import_modules.push(oid.clone());
+                let Some(import_path) = self
+                    .module_path_resolver
+                    .as_ref()
+                    .and_then(|resolver| resolver.resolve_module_path(&oid))
+                else {
+                    self.report_diagnostic(loc, invalid);
+                    return Expression::undefined(false);
+                };
+                let import = Self::import_of_path(import_path);
+                match path.as_slice() {
+                    [] => import,
+                    [name] => self.wrap_then_path(import, &[js_export_name(name)]),
+                    _ => {
+                        // a nested path is importable when the target is a
+                        // hoisted root-level export; the cmj knows
+                        let hoisted = self
+                            .module_path_resolver
+                            .as_ref()
+                            .and_then(|resolver| {
+                                resolver.module_cmj_hoisted_export(module_.name(), path)
+                            });
+                        match hoisted {
+                            Some(hoisted_name) => {
+                                self.wrap_then_path(import, &[js_export_name(&hoisted_name)])
+                            }
+                            None => {
+                                self.report_diagnostic(loc, invalid);
+                                Expression::undefined(false)
+                            }
+                        }
+                    }
+                }
             }
-            ExpressionDesc::StaticIndex(target, field, _) => match &target.desc {
-                ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, None)) => {
-                    Some(((**module).clone(), Some(field.clone())))
+            ImportSource::ImportExternal { module_, path } => {
+                let default = path.len() == 1 && path[0] == "default";
+                let oid = self.external_module_id(module_, default, true);
+                self.dynamic_import_modules.push(oid.clone());
+                let import = Self::import_of_path(module_.bundle.clone());
+                if path.is_empty() {
+                    import
+                } else {
+                    self.wrap_then_path(import, path)
                 }
-                _ => None,
-            },
-            ExpressionDesc::Call(func, _, _) => match &func.desc {
-                ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, member)) => {
-                    Some(((**module).clone(), member.clone()))
-                }
-                _ => None,
-            },
-            _ => None,
+            }
         }
     }
 

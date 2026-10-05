@@ -678,11 +678,11 @@ fn value_binding_id(pattern: &Pattern) -> Option<&crate::ident::Ident> {
 }
 
 fn function_param_name(arena: &ParseArena, param: &FunctionParam) -> String {
-    let a_name = param.fp_param.name();
-    if a_name == "*opt*" {
-        param.fp_lbl.label_name().unwrap_or_default().to_string()
-    } else {
-        a_name.to_string()
+    // translate_structure.ml: an optional parameter with a default compiles
+    // to a synthetic option carrier; show the label instead.
+    match param.fp_lbl.label_name() {
+        Some(label) if param.fp_has_default && param.fp_lbl.is_optional() => label.to_string(),
+        _ => param.fp_param.name().to_string(),
     }
 }
 

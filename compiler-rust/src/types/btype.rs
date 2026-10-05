@@ -310,7 +310,6 @@ where
         Two(TypeExprRef, TypeExprRef),
         Many(smallvec::SmallVec<[TypeExprRef; 8]>),
         Variant(RowDesc, TypeExprRef),
-        Object(TypeExprRef, Option<Vec<TypeExprRef>>),
         Poly(TypeExprRef, smallvec::SmallVec<[TypeExprRef; 8]>),
     }
 
@@ -329,10 +328,7 @@ where
             }
             TypeDesc::Ttuple(types) => Children::Many(types.iter().copied().collect()),
             TypeDesc::Tconstr { args, .. } => Children::Many(args.iter().copied().collect()),
-            TypeDesc::Tobject { fields, name, .. } => {
-                let name_types = name.as_ref().map(|(_, types)| types.clone());
-                Children::Object(*fields, name_types)
-            }
+            TypeDesc::Tobject { fields } => Children::One(*fields),
             TypeDesc::Tvariant(row) => {
                 let row_clone = row.clone();
                 let more = row.row_more;
@@ -364,14 +360,6 @@ where
         Children::Variant(row, _more) => {
             iter_row(ctx, &row, &mut f);
             f(row_more(ctx, &row));
-        }
-        Children::Object(fields, name_types) => {
-            f(fields);
-            if let Some(types) = name_types {
-                for t in types {
-                    f(t);
-                }
-            }
         }
         Children::Poly(body, vars) => {
             f(body);

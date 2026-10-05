@@ -156,9 +156,9 @@ pub fn walk_typ<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: CoreTyp
         CoreTypeDesc::Ptyp_variant(inner) => {
             for row in inner.0.iter() {
                 match row {
-                    RowField::Rtag(_, attrs, _, types) => {
+                    RowField::Rtag(_, attrs, _, groups) => {
                         v.attributes(arena, attrs.as_slice());
-                        for t in types {
+                        for t in groups.iter().flat_map(|group| group.txt.iter()) {
                             v.typ(arena, *t);
                         }
                     }
@@ -408,8 +408,15 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
     let expr = arena.get_expr(idx);
     v.attributes(arena, expr.pexp_attributes.as_slice());
     match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_braces(braces) => v.expr(arena, braces.expr),
+        ExpressionDesc::Pexp_ternary(inner) => {
+            v.expr(arena, inner.0);
+            v.expr(arena, inner.1);
+            v.expr(arena, inner.2);
+        }
         ExpressionDesc::Pexp_ident(_)
         | ExpressionDesc::Pexp_constant(_)
+        | ExpressionDesc::Pexp_regexp(_)
         | ExpressionDesc::Pexp_break
         | ExpressionDesc::Pexp_continue => {}
         ExpressionDesc::Pexp_let(inner) => {
@@ -450,14 +457,14 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
                 v.expr(arena, *e);
             }
         }
-        ExpressionDesc::Pexp_construct(_, _) => {
-            if let Some(arg) = arena.construct_arg(idx) {
-                v.expr(arena, arg);
+        ExpressionDesc::Pexp_construct(_, args) => {
+            for arg in &args.txt {
+                v.expr(arena, *arg);
             }
         }
-        ExpressionDesc::Pexp_variant(_) => {
-            if let Some(arg) = arena.variant_arg(idx) {
-                v.expr(arena, arg);
+        ExpressionDesc::Pexp_variant(inner) => {
+            for arg in &inner.1.txt {
+                v.expr(arena, *arg);
             }
         }
         ExpressionDesc::Pexp_record(inner) => {
@@ -508,7 +515,16 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
             v.expr(arena, inner.0);
             v.typ(arena, inner.1);
         }
-        ExpressionDesc::Pexp_send(inner) => v.expr(arena, inner.0),
+        ExpressionDesc::Pexp_object_get(inner) => v.expr(arena, inner.0),
+        ExpressionDesc::Pexp_object_set(inner) => {
+            v.expr(arena, inner.0);
+            v.expr(arena, inner.2);
+        }
+        ExpressionDesc::Pexp_object_literal(fields) => {
+            for (_, e) in fields.iter() {
+                v.expr(arena, *e);
+            }
+        }
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (_, me, body) = &**inner;
             v.module_expr(arena, *me);
@@ -520,6 +536,17 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
             v.expr(arena, *body);
         }
         ExpressionDesc::Pexp_assert(e) | ExpressionDesc::Pexp_await(e) => v.expr(arena, *e),
+        ExpressionDesc::Pexp_template(template) => {
+            for value in &template.values {
+                v.expr(arena, *value);
+            }
+        }
+        ExpressionDesc::Pexp_tagged_template(template) => {
+            v.expr(arena, template.tag);
+            for value in &template.values {
+                v.expr(arena, *value);
+            }
+        }
         ExpressionDesc::Pexp_newtype(inner) => v.expr(arena, inner.1),
         ExpressionDesc::Pexp_pack(me) => v.module_expr(arena, *me),
         ExpressionDesc::Pexp_open(inner) => v.expr(arena, inner.2),
@@ -595,14 +622,14 @@ pub fn walk_pat<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: PatIdx)
                 v.pat(arena, *p);
             }
         }
-        PatternDesc::Ppat_construct(_, arg) => {
-            if let Some(arg) = arg {
+        PatternDesc::Ppat_construct(_, args) => {
+            for arg in &args.txt {
                 v.pat(arena, *arg);
             }
         }
         PatternDesc::Ppat_variant(inner) => {
-            if let Some(arg) = inner.1 {
-                v.pat(arena, arg);
+            for arg in &inner.1.txt {
+                v.pat(arena, *arg);
             }
         }
         PatternDesc::Ppat_record(inner) => {
@@ -624,7 +651,6 @@ pub fn walk_pat<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: PatIdx)
             v.typ(arena, inner.1);
         }
         PatternDesc::Ppat_extension(ext) => v.extension(arena, ext),
-        PatternDesc::Ppat_open(_, p) => v.pat(arena, *p),
     }
 }
 

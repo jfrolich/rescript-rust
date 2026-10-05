@@ -496,7 +496,9 @@ fn is_false_literal(expr_idx: crate::parse_arena::ExprIdx, arena: &ParseArena) -
     use crate::parser::longident::Longident;
 
     let expr = arena.get_expr(expr_idx);
-    if let ExpressionDesc::Pexp_construct(lid_loc, None) = &*expr.pexp_desc {
+    if let ExpressionDesc::Pexp_construct(lid_loc, args) = &*expr.pexp_desc
+        && args.txt.is_empty()
+    {
         let lid = arena.get_longident(lid_loc.txt);
         if let Longident::Lident(s) = lid {
             return arena.get_string(*s) == "false";

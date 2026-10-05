@@ -59,8 +59,8 @@ let non_shadowed_pervasive_or_stdlib = function
   | Pdot (Pident id, s, _pos) as path -> (
     (Ident.same id ident_pervasives || Ident.same id ident_stdlib)
     &&
-    try Path.same path (Env.lookup_type (Lident s) !printing_env)
-    with Not_found -> true)
+      try Path.same path (Env.lookup_type (Lident s) !printing_env)
+      with Not_found -> true)
   | _ -> false
 
 let rec tree_of_path = function
@@ -110,27 +110,6 @@ let raw_list pr ppf = function
     fprintf ppf "@[<1>[%a%t]@]" pr a (fun ppf ->
         List.iter (fun x -> fprintf ppf ";@,%a" pr x) l)
 
-let kind_vars = ref []
-let kind_count = ref 0
-
-let rec safe_kind_repr v = function
-  | Fvar {contents = Some k} ->
-    if List.memq k v then "Fvar loop" else safe_kind_repr (k :: v) k
-  | Fvar r ->
-    let vid =
-      try List.assq r !kind_vars
-      with Not_found ->
-        let c =
-          incr kind_count;
-          !kind_count
-        in
-        kind_vars := (r, c) :: !kind_vars;
-        c
-    in
-    Printf.sprintf "Fvar {None}@%d" vid
-  | Fpresent -> "Fpresent"
-  | Fabsent -> "Fabsent"
-
 let rec safe_repr v = function
   | {desc = Tlink t} when not (List.memq t v) -> safe_repr (t :: v) t
   | t -> t
@@ -172,15 +151,13 @@ and raw_type_desc ppf = function
   | Tconstr (p, tl, abbrev) ->
     fprintf ppf "@[<hov1>Tconstr(@,%a,@,%a,@,%a)@]" path p raw_type_list tl
       (raw_list path) (list_of_memo !abbrev)
-  | Tobject (t, nm) ->
-    fprintf ppf "@[<hov1>Tobject(@,%a,@,@[<1>ref%t@])@]" raw_type t (fun ppf ->
-        match !nm with
-        | None -> fprintf ppf " None"
-        | Some (p, tl) ->
-          fprintf ppf "(Some(@,%a,@,%a))" path p raw_type_list tl)
-  | Tfield (f, k, t1, t2) ->
+  | Tobject t -> fprintf ppf "@[<hov1>Tobject@,%a@]" raw_type t
+  | Tfield {name = f; mutability; typ = t1; rest = t2} ->
     fprintf ppf "@[<hov1>Tfield(@,%s,@,%s,@,%a,@;<0 -1>%a)@]" f
-      (safe_kind_repr [] k) raw_type t1 raw_type t2
+      (match Btype.mutability_repr mutability with
+      | Mutable -> "mutable"
+      | Immutable -> "immutable")
+      raw_type t1 raw_type t2
   | Tnil -> fprintf ppf "Tnil"
   | Tlink t -> fprintf ppf "@[<1>Tlink@,%a@]" raw_type t
   | Tsubst t -> fprintf ppf "@[<1>Tsubst@,%a@]" raw_type t
@@ -214,11 +191,8 @@ and raw_field ppf = function
 
 let raw_type_expr ppf t =
   visited := [];
-  kind_vars := [];
-  kind_count := 0;
   raw_type ppf t;
-  visited := [];
-  kind_vars := []
+  visited := []
 
 let () = Btype.print_raw := raw_type_expr
 
@@ -382,8 +356,8 @@ let best_type_path p =
     while
       !printing_cont <> []
       &&
-      try fst (path_size (get_path ())) > !printing_depth
-      with Not_found -> true
+        try fst (path_size (get_path ())) > !printing_depth
+        with Not_found -> true
     do
       printing_cont := List.map snd (Env.run_iter_cont !printing_cont);
       incr printing_depth
@@ -524,22 +498,16 @@ let rec mark_loops_rec visited ty =
         | Some (_p, tyl) when namable_row row ->
           List.iter (mark_loops_rec visited) tyl
         | _ -> iter_row (mark_loops_rec visited) row)
-    | Tobject (fi, nm) ->
+    | Tobject fi ->
       if List.memq px !visited_objects then add_alias px
       else (
-        if opened_object ty then visited_objects := px :: !visited_objects;
-        match !nm with
-        | None ->
-          let fields, _ = flatten_fields fi in
-          List.iter
-            (fun (_, kind, ty) ->
-              if field_kind_repr kind = Fpresent then mark_loops_rec visited ty)
-            fields
-        | Some (_, l) -> List.iter (mark_loops_rec visited) (List.tl l))
-    | Tfield (_, kind, ty1, ty2) when field_kind_repr kind = Fpresent ->
+        if object_row_is_structurally_open ty then
+          visited_objects := px :: !visited_objects;
+        let fields, _ = flatten_fields fi in
+        List.iter (fun {Ctype.f_typ} -> mark_loops_rec visited f_typ) fields)
+    | Tfield {typ = ty1; rest = ty2} ->
       mark_loops_rec visited ty1;
       mark_loops_rec visited ty2
-    | Tfield (_, _, _, ty2) -> mark_loops_rec visited ty2
     | Tnil -> ()
     | Tsubst ty -> mark_loops_rec visited ty
     | Tlink _ -> fatal_error "Printtyp.mark_loops_rec (2)"
@@ -591,8 +559,8 @@ let find_inlined_type name (printing_context : printing_context option) =
   | Some {inlined_types} ->
     inlined_types
     |> List.find_opt (fun inlined_type ->
-           match inlined_type with
-           | Record {type_name} -> type_name = name)
+        match inlined_type with
+        | Record {type_name} -> type_name = name)
 
 (* Disabled in classic mode when printing an unification error *)
 
@@ -691,8 +659,8 @@ let rec tree_of_typexp ?(printing_context : printing_context option) sch ty =
             if all_present then None else Some (List.map fst present)
           in
           Otyp_variant (non_gen, Ovar_fields fields, row.row_closed, tags))
-      | Tobject (fi, nm) -> tree_of_typobject ?printing_context sch fi !nm
-      | Tnil | Tfield _ -> tree_of_typobject ?printing_context sch ty None
+      | Tobject fi -> tree_of_typobject ?printing_context sch fi
+      | Tnil | Tfield _ -> tree_of_typobject ?printing_context sch ty
       | Tsubst ty -> tree_of_typexp ?printing_context sch ty
       | Tlink _ -> fatal_error "Printtyp.tree_of_typexp"
       | Tpoly (ty, []) -> tree_of_typexp ?printing_context sch ty
@@ -740,33 +708,21 @@ and tree_of_row_field ?printing_context sch (l, f) =
 and tree_of_typlist ?printing_context sch tyl =
   List.map ((tree_of_typexp ?printing_context) sch) tyl
 
-and tree_of_typobject ?printing_context sch fi nm =
-  match nm with
-  | None ->
-    let pr_fields fi =
-      let fields, rest = flatten_fields fi in
-      let present_fields =
-        List.fold_right
-          (fun (n, k, t) l ->
-            match field_kind_repr k with
-            | Fpresent -> (n, t) :: l
-            | _ -> l)
-          fields []
-      in
-      let sorted_fields =
-        List.sort (fun (n, _) (n', _) -> String.compare n n') present_fields
-      in
-      tree_of_typfields ?printing_context sch rest sorted_fields
-    in
-    let fields, rest = pr_fields fi in
-    Otyp_object (fields, rest)
-  | Some (p, ty :: tyl) ->
-    let non_gen = is_non_gen sch (repr ty) in
-    let args = tree_of_typlist ?printing_context sch tyl in
-    let p', s = best_type_path p in
-    assert (s = Id);
-    Otyp_class (non_gen, tree_of_path p', args)
-  | _ -> fatal_error "Printtyp.tree_of_typobject"
+and tree_of_typobject ?printing_context sch fi =
+  let fields, rest = flatten_fields fi in
+  let present_fields =
+    List.map
+      (fun {f_name; f_mut; f_typ} ->
+        (f_name, Btype.mutability_repr f_mut = Asttypes.Mutable, f_typ))
+      fields
+  in
+  let sorted_fields =
+    List.sort (fun (n, _, _) (n', _, _) -> String.compare n n') present_fields
+  in
+  let fields, rest =
+    tree_of_typfields ?printing_context sch rest sorted_fields
+  in
+  Otyp_object (fields, rest)
 
 and is_non_gen sch ty = sch && is_Tvar ty && ty.level <> generic_level
 
@@ -780,8 +736,8 @@ and tree_of_typfields ?printing_context sch rest = function
       | _ -> fatal_error "typfields (1)"
     in
     ([], rest)
-  | (s, t) :: l ->
-    let field = (s, tree_of_typexp ?printing_context sch t) in
+  | (s, mut, t) :: l ->
+    let field = (s, mut, tree_of_typexp ?printing_context sch t) in
     let fields, rest = tree_of_typfields ?printing_context sch rest l in
     (field :: fields, rest)
 
@@ -925,15 +881,18 @@ and tree_of_constructor ?printing_context ~layout ~position cd =
   let repr =
     if not nullary then None
     else
+      let as_annotation = function
+        | Variant_runtime.Null -> "@as(null)"
+        | Undefined -> "@as(undefined)"
+        | String s -> Printf.sprintf "@as(%S)" s
+        | Int i -> Printf.sprintf "@as(%d)" i
+        | Float f -> Printf.sprintf "@as(%s)" f
+        | Bool b -> Printf.sprintf "@as(%b)" b
+        | BigInt s -> Printf.sprintf "@as(%sn)" s
+      in
       match Variant_runtime.constructor_tag layout position with
-      | Some Null -> Some "@as(null)"
-      | Some Undefined -> Some "@as(undefined)"
-      | Some (String s) -> Some (Printf.sprintf "@as(%S)" s)
-      | Some (Int i) -> Some (Printf.sprintf "@as(%d)" i)
-      | Some (Float f) -> Some (Printf.sprintf "@as(%s)" f)
-      | Some (Bool b) -> Some (Printf.sprintf "@as(%b)" b)
-      | Some (BigInt s) -> Some (Printf.sprintf "@as(%sn)" s)
-      | Some (Untagged _) (* should never happen *) | None -> None
+      | Some d -> Some (as_annotation d)
+      | None -> None
   in
   let arg () = tree_of_constructor_arguments ?printing_context cd.cd_args in
   match cd.cd_res with
@@ -1055,7 +1014,7 @@ let tree_of_value_description id decl =
   let id = Ident.name id in
   let ty = tree_of_type_scheme decl.val_type in
   let vd =
-    {oval_name = id; oval_type = ty; oval_prims = []; oval_attributes = []}
+    {oval_name = id; oval_type = ty; oval_prim = None; oval_attributes = []}
   in
   let vd =
     match decl.val_kind with
@@ -1066,8 +1025,6 @@ let tree_of_value_description id decl =
 
 let value_description id ppf decl =
   !Oprint.out_sig_item ppf (tree_of_value_description id decl)
-
-(* Print a class type *)
 
 (* Print a module type *)
 
@@ -1314,7 +1271,9 @@ let has_explanation t3 t4 =
   | Tvar _, _
   | Tvariant _, Tvariant _ ->
     true
-  | Tfield (l, _, _, {desc = Tnil}), Tfield (l', _, _, {desc = Tnil}) -> l = l'
+  | ( Tfield {name = l; rest = {desc = Tnil}},
+      Tfield {name = l'; rest = {desc = Tnil}} ) ->
+    l = l'
   | _ -> false
 
 let rec mismatch = function
@@ -1346,11 +1305,8 @@ let explanation unif t3 t4 ppf =
     else
       fprintf ppf "@,@[<hov>This instance of %a is ambiguous:@ %s@]" type_expr
         t' "it would escape the scope of its equation"
-  | Tfield (lab, _, _, _), _ when lab = dummy_method ->
-    fprintf ppf "@,Self type cannot be unified with a closed object type"
-  | _, Tfield (lab, _, _, _) when lab = dummy_method ->
-    fprintf ppf "@,Self type cannot be unified with a closed object type"
-  | Tfield (l, _, f1, {desc = Tnil}), Tfield (l', _, f2, {desc = Tnil})
+  | ( Tfield {name = l; typ = f1; rest = {desc = Tnil}},
+      Tfield {name = l'; typ = f2; rest = {desc = Tnil}} )
     when l = l' ->
     fprintf ppf
       "@,\
@@ -1359,14 +1315,14 @@ let explanation unif t3 t4 ppf =
        Field @{<info>\"%s\"@} in the passed object has type @{<error>%a@}, but \
        is expected to have type @{<info>%a@}."
       l l type_expr f1 type_expr f2
-  | (Tnil | Tconstr _), Tfield (l, _, f1, _) ->
+  | (Tnil | Tconstr _), Tfield {name = l; typ = f1} ->
     fprintf ppf
       "@,\
        @,\
        @[The first object is expected to have a field @{<info>\"%s\"@} of type \
        @{<info>%a@}, but it does not.@]"
       l type_expr f1
-  | Tfield (l, _, f1, _), (Tnil | Tconstr _) ->
+  | Tfield {name = l; typ = f1}, (Tnil | Tconstr _) ->
     fprintf ppf
       "@,\
        @,\
@@ -1600,7 +1556,7 @@ let print_variant_runtime_representation_issue ppf variant_name
        @{<info>@as@} payload that has a runtime representation of \
        @{<info>%s@}, which is not compatible with the expected @{<info>%s@}."
       constructor_name (Path.name variant_name)
-      (Ast_untagged_variants.tag_type_to_user_visible_string as_payload)
+      (Ast_untagged_variants.literal_tag_to_user_visible_string as_payload)
       (Path.name expected_typename)
   | Mismatched_unboxed_payload _ -> ()
   | Mismatched_as_payload {constructor_name; expected_typename; as_payload} ->
@@ -1615,7 +1571,7 @@ let print_variant_runtime_representation_issue ppf variant_name
       fprintf ppf
         "an @{<info>@as@} payload that gives it the runtime type of \
          @{<info>%s@}."
-        (Ast_untagged_variants.tag_type_to_user_visible_string payload));
+        (Ast_untagged_variants.literal_tag_to_user_visible_string payload));
     fprintf ppf
       "@ That runtime representation is not compatible with the expected \
        runtime representation of @{<info>%s@}."
@@ -1681,8 +1637,8 @@ let print_variant_configuration_issue ppf
 
     constructor_names_to_print
     |> List.iteri (fun index name ->
-           if index = 0 then () else fprintf ppf ", ";
-           fprintf ppf "@{<info>%s@}" name);
+        if index = 0 then () else fprintf ppf ", ";
+        fprintf ppf "@{<info>%s@}" name);
     if not_printed_constructor_count > 0 then
       fprintf ppf " (+%i more)" not_printed_constructor_count;
 

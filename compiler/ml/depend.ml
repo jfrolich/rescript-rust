@@ -116,7 +116,8 @@ let rec add_type bv ty =
   | Ptyp_variant (fl, _, _) ->
     List.iter
       (function
-        | Rtag (_, _, _, stl) -> List.iter (add_type bv) stl
+        | Rtag (_, _, _, groups) ->
+          List.iter (fun {txt} -> List.iter (add_type bv) txt) groups
         | Rinherit sty -> add_type bv sty)
       fl
   | Ptyp_poly (_, t) -> add_type bv t
@@ -174,9 +175,9 @@ let rec add_pattern bv pat =
   | Ppat_alias (p, _) -> add_pattern bv p
   | Ppat_interval _ | Ppat_constant _ -> ()
   | Ppat_tuple pl -> List.iter (add_pattern bv) pl
-  | Ppat_construct (c, op) ->
+  | Ppat_construct (c, {txt = args}) ->
     add bv c;
-    add_opt add_pattern bv op
+    List.iter (add_pattern bv) args
   | Ppat_record (pl, _, rest) ->
     List.iter
       (fun {lid = lbl; x = p} ->
@@ -191,12 +192,9 @@ let rec add_pattern bv pat =
   | Ppat_constraint (p, ty) ->
     add_pattern bv p;
     add_type bv ty
-  | Ppat_variant (_, op) -> add_opt add_pattern bv op
+  | Ppat_variant (_, {txt = args}) -> List.iter (add_pattern bv) args
   | Ppat_type li -> add bv li
   | Ppat_unpack id -> pattern_bv := String_map.add id.txt bound !pattern_bv
-  | Ppat_open (m, p) ->
-    let bv = open_module bv m.txt in
-    add_pattern bv p
   | Ppat_exception p -> add_pattern bv p
   | Ppat_extension e -> handle_extension e
 
@@ -207,6 +205,7 @@ let add_pattern bv pat =
 
 let rec add_expr bv exp =
   match exp.pexp_desc with
+  | Pexp_braces {expr = inner} -> add_expr bv inner
   | Pexp_ident l -> add bv l
   | Pexp_constant _ -> ()
   | Pexp_let (rf, pel, e) ->
@@ -224,6 +223,11 @@ let rec add_expr bv exp =
   | Pexp_apply {funct = e; args = el} ->
     add_expr bv e;
     List.iter (fun (_, e) -> add_expr bv e) el
+  | Pexp_regexp _ -> ()
+  | Pexp_template {values} -> List.iter (add_expr bv) values
+  | Pexp_tagged_template {tag; values} ->
+    add_expr bv tag;
+    List.iter (add_expr bv) values
   | Pexp_match (e, pel) ->
     add_expr bv e;
     add_cases bv pel
@@ -231,10 +235,10 @@ let rec add_expr bv exp =
     add_expr bv e;
     add_cases bv pel
   | Pexp_tuple el -> List.iter (add_expr bv) el
-  | Pexp_construct (c, opte) ->
+  | Pexp_construct (c, {txt = args}) ->
     add bv c;
-    add_opt add_expr bv opte
-  | Pexp_variant (_, opte) -> add_opt add_expr bv opte
+    List.iter (add_expr bv) args
+  | Pexp_variant (_, {txt = args}) -> List.iter (add_expr bv) args
   | Pexp_record (lblel, opte) ->
     List.iter
       (fun {lid = lbl; x = e} ->
@@ -254,6 +258,10 @@ let rec add_expr bv exp =
     add_expr bv e1;
     add_expr bv e2;
     add_opt add_expr bv opte3
+  | Pexp_ternary (e1, e2, e3) ->
+    add_expr bv e1;
+    add_expr bv e2;
+    add_expr bv e3
   | Pexp_sequence (e1, e2) ->
     add_expr bv e1;
     add_expr bv e2
@@ -279,7 +287,11 @@ let rec add_expr bv exp =
   | Pexp_constraint (e1, ty2) ->
     add_expr bv e1;
     add_type bv ty2
-  | Pexp_send (e, _m) -> add_expr bv e
+  | Pexp_object_get (e, _m) -> add_expr bv e
+  | Pexp_object_set (e, _m, v) ->
+    add_expr bv e;
+    add_expr bv v
+  | Pexp_object_literal fields -> List.iter (fun (_, e) -> add_expr bv e) fields
   | Pexp_letmodule (id, m, e) ->
     let b = add_module_binding bv m in
     add_expr (String_map.add id.txt b bv) e
@@ -293,7 +305,7 @@ let rec add_expr bv exp =
       (( {txt = "ocaml.extension_constructor" | "extension_constructor"; _},
          PStr [item] ) as e) -> (
     match item.pstr_desc with
-    | Pstr_eval ({pexp_desc = Pexp_construct (c, None)}, _) -> add bv c
+    | Pstr_eval ({pexp_desc = Pexp_construct (c, {txt = []})}, _) -> add bv c
     | _ -> handle_extension e)
   | Pexp_extension e -> handle_extension e
   | Pexp_await e -> add_expr bv e

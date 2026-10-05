@@ -172,7 +172,7 @@ fn make_lambda_key(lam: &RawLambda) -> Option<u64> {
                         1u8.hash(h);
                         c.hash(h);
                     }
-                    Constant::String { s, .. } => {
+                    Constant::String(s) => {
                         2u8.hash(h);
                         s.hash(h);
                     }
@@ -229,28 +229,64 @@ fn make_prim(prim: Primitive, args: Vec<RawLambda>) -> RawLambda {
     }))
 }
 
-fn make_offset(arg: RawLambda, n: i32) -> RawLambda {
-    if n == 0 {
-        arg
-    } else {
-        make_prim(Primitive::Poffsetint(n), vec![arg])
-    }
-}
-
-fn make_isout(h: RawLambda, arg: RawLambda) -> RawLambda {
-    // OCaml: Lprim(Pisout, [h; arg])
-    // Rust Pisout(n) bakes the constant in. Extract from h.
-    match h.peel() {
-        RawLambda::Lconst(Constant::Int { i, .. }) => make_prim(Primitive::Pisout(*i), vec![arg]),
-        _ => {
-            // Shouldn't happen - h is always make_const(d)
-            make_prim(Primitive::Pisout(0), vec![arg])
+/// OCaml `Switch.covers_range` (switch.ml:104-111): `cases` is exactly the
+/// contiguous integer keys `start .. finish`, in order.
+fn covers_range(cases: &[(crate::lambda::SwitchKey, RawLambda)], start: i32, finish: i32) -> bool {
+    let mut start = start;
+    for (key, _) in cases {
+        match key {
+            crate::lambda::SwitchKey::Int(i) if start <= finish && *i == start => start += 1,
+            _ => return false,
         }
     }
+    finish < start
 }
 
-fn make_isin(h: RawLambda, arg: RawLambda) -> RawLambda {
-    make_prim(Primitive::Pnot, vec![make_isout(h, arg)])
+/// OCaml `Switch.out_of_range` (switch.ml:113-118): `arg` is outside
+/// `lo .. hi`. A two-value range reads better as a pair of equality tests
+/// than as a pair of comparisons.
+pub(crate) fn out_of_range(arg: &RawLambda, lo: i32, hi: i32) -> RawLambda {
+    let test = |cmp: Comparison, k: i32| make_prim(Primitive::Pintcomp(cmp), vec![arg.clone(), make_const(k)]);
+    if hi == lo + 1 {
+        make_prim(
+            Primitive::Pnot,
+            vec![make_prim(Primitive::Psequor, vec![test(Comparison::Eq, lo), test(Comparison::Eq, hi)])],
+        )
+    } else {
+        make_prim(Primitive::Psequor, vec![test(Comparison::Gt, hi), test(Comparison::Lt, lo)])
+    }
+}
+
+/// OCaml `Switch.emit_if_out` (switch.ml:120-138). The switcher guards a
+/// jump table with a range test; a JS `switch` has a native `default`, so
+/// when the table already covers the whole guarded range the guard is
+/// dropped and its action becomes the failaction.
+fn emit_if_out(offset: i32, range: i32, arg: &RawLambda, ifso: RawLambda, ifno: RawLambda) -> RawLambda {
+    let lo = -offset;
+    let hi = range - offset;
+    if let (RawLambda::Lvar(x), RawLambda::Lswitch(sarg, sw)) = (arg, &ifno)
+        && let RawLambda::Lvar(y) = sarg.as_ref()
+        && sw.sw_blocks.is_empty()
+        && sw.sw_blocks_full
+        && sw.sw_failaction.is_none()
+        && x.same(y)
+        && covers_range(&sw.sw_consts, lo, hi)
+    {
+        let RawLambda::Lswitch(sarg, mut sw) = ifno else {
+            unreachable!()
+        };
+        sw.sw_failaction = Some(Box::new(ifso));
+        sw.sw_consts_full = false;
+        return RawLambda::Lswitch(sarg, sw);
+    }
+    make_if(out_of_range(arg, lo, hi), ifso, ifno)
+}
+
+/// OCaml `Switch.emit_if_in` (switch.ml:140-142).
+fn emit_if_in(offset: i32, range: i32, arg: &RawLambda, ifso: RawLambda, ifno: RawLambda) -> RawLambda {
+    let lo = -offset;
+    let hi = range - offset;
+    make_if(make_prim(Primitive::Pnot, vec![out_of_range(arg, lo, hi)]), ifso, ifno)
 }
 
 fn make_if(cond: RawLambda, ifso: RawLambda, ifnot: RawLambda) -> RawLambda {
@@ -259,7 +295,6 @@ fn make_if(cond: RawLambda, ifso: RawLambda, ifnot: RawLambda) -> RawLambda {
 
 /// Build an Lswitch from a mapping table.
 fn build_lswitch(
-    loc: &Location,
     arg: RawLambda,
     tbl: &[usize],
     acts: Vec<RawLambda>,
@@ -280,19 +315,16 @@ fn build_lswitch(
     RawLambda::Lswitch(
         Box::new(arg),
         Box::new(RawLambdaSwitch {
-            sw_numconsts: tbl.len(),
-            sw_consts_full: false,
+            sw_consts_full: true,
             sw_consts: cases
                 .into_iter()
                 .map(|(key, action)| (crate::lambda::SwitchKey::Int(key), action))
                 .collect(),
-            sw_numblocks: 0,
-            sw_blocks_full: false,
+            sw_blocks_full: true,
             sw_blocks: Vec::new(),
             sw_failaction: None,
             sw_dispatch: crate::lambda::SwitchDispatch::Direct,
         }),
-        loc.clone(),
     )
 }
 
@@ -780,23 +812,15 @@ impl SwitchCompiler {
                         make_if_ne(arg, low + off, ifso, ifnot)
                     }
                 } else if less_tests(coutside, cinside) {
-                    let offset_arg = if low + off == 0 {
-                        arg.clone()
-                    } else {
-                        make_offset(arg.clone(), -(low + off))
-                    };
+                    // OCaml `make_if_in ctx (low + ctx.off) (high - low)`
+                    // (switch.ml:535-536, 566-569).
                     let ifso = self.c_test(off, arg, &inside, actions);
                     let ifno = self.c_test(off, arg, &outside, actions);
-                    do_make_if_in(make_const(high - low), offset_arg, ifso, ifno)
+                    emit_if_in(-(low + off), high - low, arg, ifso, ifno)
                 } else {
-                    let offset_arg = if low + off == 0 {
-                        arg.clone()
-                    } else {
-                        make_offset(arg.clone(), -(low + off))
-                    };
                     let ifso = self.c_test(off, arg, &outside, actions);
                     let ifno = self.c_test(off, arg, &inside, actions);
-                    do_make_if_out(make_const(high - low), offset_arg, ifso, ifno)
+                    emit_if_out(-(low + off), high - low, arg, ifso, ifno)
                 }
             }
             TRet::Sep(i) => {
@@ -860,21 +884,12 @@ fn make_if_ne(arg: &RawLambda, i: i32, ifso: RawLambda, ifnot: RawLambda) -> Raw
     make_if_test(Primitive::Pintcomp(Comparison::Neq), arg, i, ifso, ifnot)
 }
 
-fn do_make_if_out(h: RawLambda, arg: RawLambda, ifso: RawLambda, ifno: RawLambda) -> RawLambda {
-    make_if(make_isout(h, arg), ifso, ifno)
-}
-
-fn do_make_if_in(h: RawLambda, arg: RawLambda, ifso: RawLambda, ifno: RawLambda) -> RawLambda {
-    make_if(make_isin(h, arg), ifso, ifno)
-}
-
 // ── Cluster building (port of make_clusters/make_switch) ──────────────
 
 /// Build clusters and generate the final test tree.
 /// This combines comp_clusters, make_clusters, and c_test.
 fn build_clustered_test(
     compiler: &mut SwitchCompiler,
-    loc: &Location,
     cases: &[(i32, i32, usize)],
     actions: &[RawLambda],
     arg: &RawLambda,
@@ -895,7 +910,6 @@ fn build_clustered_test(
     fn build_clusters(
         j: usize,
         ir: usize,
-        loc: &Location,
         cases: &[(i32, i32, usize)],
         actions: &[RawLambda],
         k: &[usize],
@@ -955,7 +969,6 @@ fn build_clustered_test(
 
             // Build the switch action inline
             let switch_lam = build_lswitch(
-                loc,
                 // arg will be filled in during c_test when this action is used
                 // We need to use a marker... but c_test just uses actions[idx].clone()
                 // Actually c_test passes arg directly. The switch needs the actual arg.
@@ -993,7 +1006,6 @@ fn build_clustered_test(
             build_clusters(
                 i - 1,
                 ir - 1,
-                loc,
                 cases,
                 actions,
                 k,
@@ -1010,7 +1022,6 @@ fn build_clustered_test(
     build_clusters(
         len - 1,
         n_clusters - 1,
-        loc,
         cases,
         actions,
         &k,
@@ -1044,12 +1055,12 @@ fn build_clustered_test(
 /// Fix up any Lswitch nodes that have a unit placeholder as their arg.
 fn fix_switch_arg(lam: &mut RawLambda, real_arg: &RawLambda) {
     if matches!(lam, RawLambda::Lshared(_))
-        && matches!(lam.peel(), RawLambda::Lswitch(switch_arg, _, _) if switch_arg.is_unit())
+        && matches!(lam.peel(), RawLambda::Lswitch(switch_arg, _) if switch_arg.is_unit())
     {
         *lam = std::mem::replace(lam, RawLambda::Lbreak).unshare();
     }
     match lam {
-        RawLambda::Lswitch(switch_arg, _, _) => {
+        RawLambda::Lswitch(switch_arg, _) => {
             if switch_arg.is_unit() {
                 *switch_arg = Box::new(real_arg.clone());
             }
@@ -1106,7 +1117,6 @@ fn wrap_handlers(mut result: RawLambda, handlers: Vec<(i32, RawLambda)>) -> RawL
 ///
 /// Port of OCaml's `Switcher.zyva` / `Switch.Make.zyva`.
 pub fn zyva(
-    loc: Location,
     edges: (i32, i32),
     arg: RawLambda,
     cases: &[(i32, i32, usize)],
@@ -1118,7 +1128,6 @@ pub fn zyva(
 
     let shared_actions = store.act_get_shared();
     zyva_with_shared_actions(
-        loc,
         edges,
         arg,
         cases,
@@ -1133,7 +1142,6 @@ pub fn zyva(
 /// This preserves the exact indices embedded in `cases`, matching OCaml's
 /// `Switcher.zyva` call where the `StoreExp` action array is passed directly.
 pub fn zyva_with_shared_actions(
-    loc: Location,
     edges: (i32, i32),
     arg: RawLambda,
     cases: &[(i32, i32, usize)],
@@ -1149,7 +1157,7 @@ pub fn zyva_with_shared_actions(
     let ok_inter = low.abs() <= INTER_LIMIT && high.abs() <= INTER_LIMIT;
     let mut compiler = SwitchCompiler::new(ok_inter);
 
-    let result = build_clustered_test(&mut compiler, &loc, cases, &actions, &arg, &sw_dispatch);
+    let result = build_clustered_test(&mut compiler,cases, &actions, &arg, &sw_dispatch);
     wrap_handlers(result, handlers)
 }
 
@@ -1337,7 +1345,6 @@ fn get_edges(low: i32, high: i32, sorted: &[(i32, RawLambda)]) -> (i32, i32) {
 
 /// High-level entry point matching OCaml's `call_switcher`.
 pub fn call_switcher(
-    loc: Location,
     fail: Option<RawLambda>,
     arg: RawLambda,
     low: i32,
@@ -1350,5 +1357,5 @@ pub fn call_switcher(
     sorted.sort_by_key(|(i, _)| *i);
 
     let (edges, cases, store) = as_interval(fail, low, high, &sorted);
-    zyva(loc, edges, arg, &cases, store, sw_dispatch, next_raise)
+    zyva(edges, arg, &cases, store, sw_dispatch, next_raise)
 }

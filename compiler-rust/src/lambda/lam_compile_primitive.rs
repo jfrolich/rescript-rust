@@ -10,9 +10,9 @@ use super::js_exp_make::{
     compile_int_equality, compile_nullish_strict_comparison, compile_raw_comparison, int_bnot,
     int_expr, int_literal, int32_add, int32_band, int32_bor, int32_bxor, int32_lsl, int32_lsr,
     int32_minus, int32_mul, int32_offset, int32_pow, is_nullish_literal, is_optional_block,
-    is_out_expr, is_type_number_expr, is_type_object_expr, is_zero_int, js_expr_no_side_effects,
-    js_seq, ocaml_typeof_expr, poly_var_tag_access, poly_var_value_access, range_exclusion_or,
-    runtime_compare_call_args, runtime_member_for_eta_wrapped_primitive, strict_eq_int, to_int32,
+    is_type_number_expr, is_type_object_expr, is_zero_int, js_expr_no_side_effects,
+    js_seq, ocaml_typeof_expr, poly_var_tag_access, poly_var_value_access,
+    runtime_compare_call_args, runtime_member_for_eta_wrapped_primitive, to_int32,
 };
 use super::lam_compile::{Compiled, LambdaCompiler, call_info_of_apply_status};
 use super::lam_compile_input::{LambdaInputView, LambdaInputs};
@@ -24,7 +24,7 @@ use crate::js_ir::{
 };
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 use crate::lambda::lam_constant::Constant;
-use crate::lambda::lam_primitive::{ExternalSpec, Mutable, Primitive};
+use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::{Lambda, TagInfo};
 use crate::location::Location;
 
@@ -35,10 +35,6 @@ impl LambdaCompiler {
         args: &[Lambda],
         loc: &Location,
     ) -> Compiled {
-        if matches!(prim, Primitive::Pimport) {
-            return self.compile_import_primitive(loc, args);
-        }
-
         if let Some(compiled) =
             self.compile_hoisted_external_field(prim, LambdaInputs::Recursive(args))
         {
@@ -67,7 +63,7 @@ impl LambdaCompiler {
             prim: &'a Primitive,
             args: LambdaInputs<'a>,
             segments: &mut Vec<String>,
-        ) -> Option<(&'a Ident, bool)> {
+        ) -> Option<&'a Ident> {
             let Primitive::Pfield(_, FieldDbgInfo::Module { name }) = prim else {
                 return None;
             };
@@ -76,13 +72,13 @@ impl LambdaCompiler {
                 return None;
             }
             match args.first()?.view() {
-                LambdaInputView::GlobalModule(id, dynamic_import) => Some((id, dynamic_import)),
+                LambdaInputView::GlobalModule(id) => Some(id),
                 LambdaInputView::Prim(prim, args, _) => external_field_path(prim, args, segments),
                 _ => None,
             }
         }
         let mut reversed = Vec::new();
-        let (id, dynamic_import) = external_field_path(prim, args, &mut reversed)?;
+        let id = external_field_path(prim, args, &mut reversed)?;
         if reversed.len() < 2 {
             return None;
         }
@@ -97,7 +93,7 @@ impl LambdaCompiler {
                 crate::js_ir::ModuleId {
                     id: id.clone(),
                     kind: crate::js_ir::Kind::Ml,
-                    dynamic_import,
+                    dynamic_import: false,
                 },
                 Some(export_name),
             ),
@@ -123,25 +119,20 @@ impl LambdaCompiler {
             Parraylength => {
                 Expression::length(take_arg(&mut compiled_args, 0), LengthObject::Array)
             }
-            // Upstream compiler/core/lam_compile_primitive.ml:91-101.
-            PtaggedTemplate => match compiled_args.as_slice() {
-                [
-                    tag,
-                    Expression {
-                        desc: ExpressionDesc::Array(strings, _),
-                        ..
-                    },
-                    Expression {
-                        desc: ExpressionDesc::Array(values, _),
-                        ..
-                    },
-                ] => Expression::new(ExpressionDesc::TaggedTemplate(
-                    Box::new(tag.clone()),
-                    strings.clone(),
-                    values.clone(),
-                )),
-                _ => unreachable!("tagged-template primitive operands are two arrays"),
-            },
+            // lam_compile_primitive.ml `Ptagged_template strings`:
+            // `[tag; value0; ...]` plus raw source segments -> tag`...`.
+            PtaggedTemplate(strings) => {
+                let mut args = std::mem::take(&mut compiled_args).into_iter();
+                let tag = args.next().expect("a tagged template has a tag");
+                Expression::new(ExpressionDesc::TaggedTemplate(Box::new(tag), strings.clone(), args.collect()))
+            }
+            // `Ptemplate [segment] when args = []` / `Ptemplate segments`.
+            Ptemplate(segments) if segments.len() == 1 && compiled_args.is_empty() => {
+                Expression::new(ExpressionDesc::TemplateLiteral(segments[0].clone()))
+            }
+            Ptemplate(segments) => {
+                crate::lambda::js_exp_make::interpolated_template(segments.clone(), std::mem::take(&mut compiled_args))
+            }
             // OCaml lam_compile_primitive.ml:87-90 lowers Pjs_apply to a
             // direct call of the first argument with the remaining arguments.
             PjsApply => match compiled_args.split_first() {
@@ -500,34 +491,8 @@ impl LambdaCompiler {
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
             ),
-            Poffsetint(offset) => int32_offset(take_arg(&mut compiled_args, 0), *offset),
-            Poffsetref(offset) => {
-                // OCaml lowers through `Js_of_lam_block.field
-                // Lambda.ref_field_info`, so the `contents` access keeps
-                // record field position metadata
-                // (compiler/core/lam_compile_primitive.ml:342-348).
-                let field = self.compile_field_access(
-                    0,
-                    &FieldDbgInfo::Record {
-                        name: "contents".to_string(),
-                    },
-                    &compiled_args[0],
-                );
-                Expression::new(ExpressionDesc::Seq(
-                    Box::new(Expression::bin(
-                        BinOp::Eq,
-                        field.clone(),
-                        int32_offset(field, *offset),
-                    )),
-                    Box::new(Expression::undefined(false)),
-                ))
-            }
             Pisint => is_type_number_expr(take_arg(&mut compiled_args, 0)),
             PisPolyVarBlock => is_type_object_expr(take_arg(&mut compiled_args, 0)),
-            Pisout(offset) => match compiled_args.as_slice() {
-                [range, value] => is_out_expr(int32_offset(value.clone(), *offset), range.clone()),
-                _ => Expression::undefined(false),
-            },
             Pmakearray => Expression::array(compiled_args, MutableFlag::Mutable),
             Pmakedict => match compiled_args.as_slice() {
                 [
@@ -544,7 +509,7 @@ impl LambdaCompiler {
                                     fields.as_slice(),
                                     [
                                         Expression {
-                                            desc: ExpressionDesc::Str { .. },
+                                            desc: ExpressionDesc::Str(_),
                                             ..
                                         },
                                         _
@@ -553,7 +518,7 @@ impl LambdaCompiler {
                             {
                                 let [
                                     Expression {
-                                        desc: ExpressionDesc::Str { txt, .. },
+                                        desc: ExpressionDesc::Str(txt),
                                         ..
                                     },
                                     value,
@@ -732,7 +697,10 @@ impl LambdaCompiler {
                 Some(expr) => expr,
                 None => Expression::undefined(false),
             },
-            PjsUnsafeDowngrade { name, setter } => match (*setter, compiled_args.as_slice()) {
+            PjsObjectGet(name) | PjsObjectSet(name) => match (
+                matches!(prim, PjsObjectSet(_)),
+                compiled_args.as_slice(),
+            ) {
                 (false, [receiver]) => self.static_index(receiver.clone(), name),
                 (true, [receiver, value]) => Expression::new(ExpressionDesc::Seq(
                     Box::new(Expression::bin(
@@ -744,25 +712,13 @@ impl LambdaCompiler {
                 )),
                 _ => Expression::undefined(false),
             },
-            Pimport => self.compile_import(loc, compiled_args),
+            Pimport(source) => self.compile_import(loc, source),
             PjsCall {
                 prim_name,
                 arg_types,
                 ffi,
-                dynamic_import,
                 transformed_jsx,
-            } => self.compile_js_call(
-                loc,
-                prim_name,
-                arg_types,
-                ffi,
-                *dynamic_import,
-                *transformed_jsx,
-                compiled_args,
-                &mut prelude,
-            ),
-            Pnull => Expression::null(),
-            Pundefined => Expression::undefined(false),
+            } => self.compile_js_call(prim_name, arg_types, ffi, *transformed_jsx, compiled_args),
             _ => Expression::undefined(false),
         };
 

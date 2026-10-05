@@ -8,6 +8,7 @@
 //! can evolve independently without perturbing JS generation.
 
 pub mod convert;
+pub(crate) mod lambda_scc;
 pub mod lower;
 pub mod matching;
 pub mod print;
@@ -22,14 +23,10 @@ use crate::location::Location;
 /// Raw-lambda switch construct.
 #[derive(Debug, Clone)]
 pub struct RawLambdaSwitch {
-    /// Number of integer cases in the source switch table.
-    pub sw_numconsts: usize,
     /// Are all constant cases covered?
     pub sw_consts_full: bool,
     /// Constant case branches.
     pub sw_consts: Vec<(crate::lambda::SwitchKey, RawLambda)>,
-    /// Number of block-tag cases in the source switch table.
-    pub sw_numblocks: usize,
     /// Are all block cases covered?
     pub sw_blocks_full: bool,
     /// Block case branches.
@@ -83,7 +80,7 @@ pub enum RawLambda {
     /// Variable reference.
     Lvar(Ident),
     /// Global module reference.
-    LglobalModule(Ident, bool),
+    LglobalModule(Ident),
     /// Constant value.
     Lconst(Constant),
     /// Function application.
@@ -97,7 +94,7 @@ pub enum RawLambda {
     /// Primitive operation.
     Lprim(Box<RawPrimInfo>),
     /// Switch on integer/block tag.
-    Lswitch(Box<RawLambda>, Box<RawLambdaSwitch>, Location),
+    Lswitch(Box<RawLambda>, Box<RawLambdaSwitch>),
     /// Switch on string value.
     LstringSwitch(
         Box<RawLambda>,
@@ -134,8 +131,6 @@ pub enum RawLambda {
     Lcontinue,
     /// Assignment.
     Lassign(Ident, Box<RawLambda>),
-    /// Method send.
-    Lsend(String, Box<RawLambda>, Location),
     /// A match action placed in a compiled matching without copying it.
     /// Only the pattern-matching compiler creates this, and its entry points
     /// replace every occurrence (see `matching::resolve_shared_actions`), so
@@ -168,7 +163,7 @@ impl RawLambda {
     pub fn for_each_child_mut(&mut self, f: &mut impl FnMut(&mut RawLambda)) {
         match self {
             RawLambda::Lvar(_)
-            | RawLambda::LglobalModule(_, _)
+            | RawLambda::LglobalModule(_)
             | RawLambda::Lconst(_)
             | RawLambda::Lbreak
             | RawLambda::Lcontinue => {}
@@ -186,7 +181,7 @@ impl RawLambda {
                 f(body);
             }
             RawLambda::Lprim(info) => info.args.iter_mut().for_each(|arg| f(arg)),
-            RawLambda::Lswitch(arg, sw, _) => {
+            RawLambda::Lswitch(arg, sw) => {
                 f(arg);
                 sw.sw_consts.iter_mut().for_each(|(_, act)| f(act));
                 sw.sw_blocks.iter_mut().for_each(|(_, act)| f(act));
@@ -224,7 +219,7 @@ impl RawLambda {
                 f(iterable);
                 f(body);
             }
-            RawLambda::Lassign(_, value) | RawLambda::Lsend(_, value, _) => f(value),
+            RawLambda::Lassign(_, value) => f(value),
             RawLambda::Lshared(_) => {}
         }
     }
@@ -235,8 +230,8 @@ impl RawLambda {
     }
 
     /// Create a global module reference.
-    pub fn global_module(id: Ident, dynamic_import: bool) -> Self {
-        RawLambda::LglobalModule(id, dynamic_import)
+    pub fn global_module(id: Ident) -> Self {
+        RawLambda::LglobalModule(id)
     }
 
     /// Create a constant.
@@ -278,6 +273,55 @@ impl RawLambda {
         }))
     }
 
+    /// `Lambda.mk_builtin` builds a builtin through the smart `Lambda.prim`
+    /// (lambda.ml), whose folds evaluate a primitive over one or two
+    /// constant arguments at construction. Those folds read constants only,
+    /// so they are taken from [`Lambda::prim`], applied to the constants in
+    /// the form OCaml builds them (raw constants keep a few encodings, such
+    /// as an int-named polymorphic variant, until they are lowered).
+    pub fn prim_folded(primitive: Primitive, args: Vec<RawLambda>, loc: Location) -> Self {
+        if matches!(args.len(), 1 | 2) && args.iter().all(|arg| matches!(arg, RawLambda::Lconst(_))) {
+            let consts = args
+                .iter()
+                .map(|arg| match arg {
+                    RawLambda::Lconst(c) => Lambda::Lconst(crate::raw_lambda::lower::lower_constant(c.clone())),
+                    _ => unreachable!(),
+                })
+                .collect();
+            if let Lambda::Lconst(c) = Lambda::prim(primitive.clone(), consts, loc.clone()) {
+                return RawLambda::Lconst(c);
+            }
+        }
+        RawLambda::prim(primitive, args, loc)
+    }
+
+    /// Translcore builds conditionals through the smart `Lambda.if_`
+    /// (lambda.ml). Its constant-condition and `assert false` arms decide
+    /// which branches the match compiler sees, so they apply here; the arms
+    /// that rewrite the condition itself are applied by [`Lambda::if_`] when
+    /// the term is lowered.
+    pub fn if_(cond: RawLambda, then_: RawLambda, else_: RawLambda) -> Self {
+        let is_assertfalse = |lam: &RawLambda| {
+            matches!(
+                lam,
+                RawLambda::Lconst(Constant::Int { comment: Some(info), .. })
+                    if matches!(**info, crate::lambda::lam_constant::PointerInfo::AssertFalse)
+            )
+        };
+        match cond {
+            RawLambda::Lconst(c) => {
+                if crate::raw_lambda::lower::lower_constant(c).eval_as_bool() {
+                    then_
+                } else {
+                    else_
+                }
+            }
+            cond if is_assertfalse(&else_) => RawLambda::seq(cond, then_),
+            cond if is_assertfalse(&then_) => RawLambda::seq(cond, else_),
+            cond => RawLambda::LifThenElse(Box::new(cond), Box::new(then_), Box::new(else_)),
+        }
+    }
+
     /// Create a sequence.
     pub fn seq(first: RawLambda, second: RawLambda) -> Self {
         RawLambda::Lsequence(Box::new(first), Box::new(second))
@@ -300,8 +344,8 @@ impl RawLambda {
     pub fn from_lowered(lowered: Lambda) -> Self {
         match lowered {
             Lambda::Lvar(id) => RawLambda::Lvar(id),
-            Lambda::LglobalModule(id, dynamic_import) => {
-                RawLambda::LglobalModule(id, dynamic_import)
+            Lambda::LglobalModule(id) => {
+                RawLambda::LglobalModule(id)
             }
             Lambda::Lconst(c) => RawLambda::Lconst(c),
             Lambda::Lapply(apply) => RawLambda::Lapply(Box::new(RawApply {
@@ -341,14 +385,12 @@ impl RawLambda {
             Lambda::Lswitch(arg, sw) => RawLambda::Lswitch(
                 Box::new(RawLambda::from_lowered(*arg)),
                 Box::new(RawLambdaSwitch {
-                    sw_numconsts: sw.sw_consts.len(),
                     sw_consts_full: sw.sw_consts_full,
                     sw_consts: sw
                         .sw_consts
                         .into_iter()
                         .map(|(tag, lam)| (tag, RawLambda::from_lowered(lam)))
                         .collect(),
-                    sw_numblocks: sw.sw_blocks.len(),
                     sw_blocks_full: sw.sw_blocks_full,
                     sw_blocks: sw
                         .sw_blocks
@@ -360,7 +402,6 @@ impl RawLambda {
                         .map(|lam| Box::new(RawLambda::from_lowered(*lam))),
                     sw_dispatch: sw.sw_dispatch,
                 }),
-                Location::none(),
             ),
             Lambda::LstringSwitch(arg, cases, default) => RawLambda::LstringSwitch(
                 Box::new(RawLambda::from_lowered(*arg)),
@@ -426,8 +467,8 @@ impl RawLambda {
         match self {
             RawLambda::Lshared(inner) => std::sync::Arc::unwrap_or_clone(inner).into_lowered(),
             RawLambda::Lvar(id) => Lambda::Lvar(id),
-            RawLambda::LglobalModule(id, dynamic_import) => {
-                Lambda::LglobalModule(id, dynamic_import)
+            RawLambda::LglobalModule(id) => {
+                Lambda::LglobalModule(id)
             }
             RawLambda::Lconst(c) => Lambda::Lconst(c),
             RawLambda::Lapply(apply) => Lambda::Lapply(Box::new(crate::lambda::Apply {
@@ -464,7 +505,7 @@ impl RawLambda {
                 args: info.args.into_iter().map(RawLambda::into_lowered).collect(),
                 loc: info.loc,
             })),
-            RawLambda::Lswitch(arg, sw, _) => Lambda::Lswitch(
+            RawLambda::Lswitch(arg, sw) => Lambda::Lswitch(
                 Box::new(arg.into_lowered()),
                 Box::new(crate::lambda::LambdaSwitch {
                     sw_consts_full: sw.sw_consts_full,
@@ -536,24 +577,6 @@ impl RawLambda {
             RawLambda::Lbreak => Lambda::Lbreak,
             RawLambda::Lcontinue => Lambda::Lcontinue,
             RawLambda::Lassign(id, value) => Lambda::Lassign(id, Box::new(value.into_lowered())),
-            RawLambda::Lsend(name, obj, loc) => Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
-                primitive: Primitive::PjsCall {
-                    prim_name: format!("send{name}"),
-                    arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
-                    ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
-                        kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
-                        spec: None,
-                        obj_params: None,
-                        return_wrapper:
-                            crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
-                        inline_constant: None,
-                    }),
-                    dynamic_import: false,
-                    transformed_jsx: false,
-                },
-                args: vec![obj.into_lowered()],
-                loc,
-            })),
         }
     }
 }

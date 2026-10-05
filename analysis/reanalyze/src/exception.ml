@@ -19,7 +19,7 @@ let merge_values_builders (builders : (string * values_builder) list) :
   let table = Hashtbl.create 15 in
   builders
   |> List.iter (fun (module_name, builder) ->
-         Hashtbl.replace table module_name builder);
+      Hashtbl.replace table module_name builder);
   table
 
 module Values = struct
@@ -79,7 +79,7 @@ module Event = struct
   let rec print ppf event =
     match event with
     | {kind = Call {callee; module_path}; exceptions; loc} ->
-      Format.fprintf ppf "%s Call(%s, modulePath:%s) %a@."
+      Format.fprintf ppf "%s Call(%s, module_path:%s) %a@."
         (loc.loc_start |> Pos.to_string)
         (callee |> Dce_path.to_string)
         (module_path |> Dce_path.to_string)
@@ -97,7 +97,7 @@ module Event = struct
         (Exceptions.pp ~exn_table:None)
         exceptions
     | {kind = Catches nested_events; exceptions; loc} ->
-      Format.fprintf ppf "%s Catches exceptions:%a nestedEvents:%a@."
+      Format.fprintf ppf "%s Catches exceptions:%a nested_events:%a@."
         (loc.loc_start |> Pos.to_string)
         (Exceptions.pp ~exn_table:None)
         exceptions
@@ -168,8 +168,8 @@ module Event = struct
           let new_throws = Exceptions.diff nested_exceptions exceptions in
           exceptions
           |> Exceptions.iter (fun exn ->
-                 nested_events
-                 |> List.iter (fun event -> shrink_exn_table exn event.loc));
+              nested_events
+              |> List.iter (fun event -> shrink_exn_table exn event.loc));
           loop (Exceptions.union exn_set new_throws) rest
       | [] -> exn_set
     in
@@ -275,9 +275,9 @@ let traverse_ast ~file ~values_builder ~checks_builder () =
   let iter_cases self cases =
     cases
     |> List.iter (fun case ->
-           case.Typedtree.c_lhs |> iter_pat self;
-           case.c_guard |> iter_expr_opt self;
-           case.c_rhs |> iter_expr self)
+        case.Typedtree.c_lhs |> iter_pat self;
+        case.c_guard |> iter_expr_opt self;
+        case.c_rhs |> iter_expr self)
   in
   let is_throw s = s = "Pervasives.raise" || s = "Pervasives.throw" in
   let throw_args args =
@@ -291,12 +291,12 @@ let traverse_ast ~file ~values_builder ~checks_builder () =
   let does_not_throw attributes =
     attributes
     |> Annotation.get_attribute_payload (function
-         | "doesNotRaise" | "doesnotraise" | "DoesNoRaise" | "doesNotraise"
-         | "doNotRaise" | "donotraise" | "DoNoRaise" | "doNotraise"
-         | "doesNotThrow" | "doesnotthrow" | "DoesNoThrow" | "doesNotthrow"
-         | "doNotThrow" | "donotthrow" | "DoNoThrow" | "doNotthrow" ->
-           true
-         | _ -> false)
+      | "doesNotRaise" | "doesnotraise" | "DoesNoRaise" | "doesNotraise"
+      | "doNotRaise" | "donotraise" | "DoNoRaise" | "doNotraise"
+      | "doesNotThrow" | "doesnotthrow" | "DoesNoThrow" | "doesNotthrow"
+      | "doNotThrow" | "donotthrow" | "DoNoThrow" | "doNotthrow" ->
+        true
+      | _ -> false)
     <> None
   in
   let expr ~(module_path : Module_path.t) (self : Tast_mapper.mapper)
@@ -398,7 +398,7 @@ let traverse_ast ~file ~values_builder ~checks_builder () =
     let throws_annotation_payload =
       attributes
       |> Annotation.get_attribute_payload (fun s ->
-             s = "throws" || s = "throw" || s = "raises" || s = "raise")
+          s = "throws" || s = "throw" || s = "raises" || s = "raise")
     in
     let rec get_exceptions payload =
       match payload with
@@ -412,7 +412,7 @@ let traverse_ast ~file ~values_builder ~checks_builder () =
       | Annotation.TuplePayload tuple ->
         tuple
         |> List.map (fun payload ->
-               payload |> get_exceptions |> Exceptions.to_list)
+            payload |> get_exceptions |> Exceptions.to_list)
         |> List.concat |> Exceptions.from_list
       | _ -> Exceptions.empty
     in

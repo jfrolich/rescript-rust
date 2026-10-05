@@ -1,6 +1,11 @@
 type kind = Parenthesized | Braced of Location.t | Nothing
 
 val expr : Parsetree.expression -> kind
+
+(* Unlike [expr], this does not request parentheses for a top-level coercion.
+   Use only where the surrounding grammar delimits the expression, such as call
+   arguments and collection elements. *)
+val expr_allowing_coercion : Parsetree.expression -> kind
 val structure_expr : Parsetree.expression -> kind
 
 val unary_expr_operand : Parsetree.expression -> kind
@@ -14,8 +19,6 @@ val binary_operator_inside_await_needs_parens : string -> bool
 val assert_or_await_expr_rhs : ?in_await:bool -> Parsetree.expression -> kind
 
 val field_expr : Parsetree.expression -> kind
-
-val set_field_expr_rhs : Parsetree.expression -> kind
 
 val ternary_operand : Parsetree.expression -> kind
 

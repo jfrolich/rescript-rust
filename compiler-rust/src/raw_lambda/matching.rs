@@ -337,7 +337,7 @@ fn const_compare(c1: &Constant, c2: &Constant) -> std::cmp::Ordering {
             v1.partial_cmp(&v2).unwrap_or(Ordering::Equal)
         }
         (Constant::BigInt(s1, b1), Constant::BigInt(s2, b2)) => compare_bigint(*s1, b1, *s2, b2),
-        (Constant::String(s1, _), Constant::String(s2, _)) => s1.cmp(s2),
+        (Constant::String(s1), Constant::String(s2)) => s1.cmp(s2),
         (Constant::Int(i1), Constant::Int(i2)) => i1.cmp(i2),
         (Constant::Char(c1), Constant::Char(c2)) => c1.cmp(c2),
         _ => {
@@ -921,7 +921,9 @@ fn record_all_labels(
                     cached
                         .into_iter()
                         .map(|(name, pos, mutflag, repr, attrs)| LabelDescription {
-                            lbl_name: name,
+                            lbl_name: name.clone(),
+                            // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
+                            lbl_runtime_name: name,
                             lbl_res: TypeExprRef(0),
                             lbl_arg: TypeExprRef(0),
                             lbl_mut: mutflag,
@@ -1846,12 +1848,8 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                     Some(e.clone())
                 }
             }
-            RawLambda::Lconst(crate::lambda::Constant::String { .. }) => {
-                // Mutable constants are not shared
-                None
-            }
             RawLambda::Lconst(_) => Some(e.clone()),
-            RawLambda::LglobalModule(_, _) => Some(e.clone()),
+            RawLambda::LglobalModule(_) => Some(e.clone()),
             RawLambda::Lapply(ap) => {
                 let func = tr_rec(env, &ap.ap_func, count, next_id)?;
                 let args = tr_recs(env, &ap.ap_args, count, next_id)?;
@@ -1906,13 +1904,12 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                     loc: Location::none(),
                 })))
             }
-            RawLambda::Lswitch(scrut, sw, loc) => {
+            RawLambda::Lswitch(scrut, sw) => {
                 let scrut_norm = tr_rec(env, scrut, count, next_id)?;
                 let sw_norm = tr_sw(env, sw, count, next_id)?;
                 Some(RawLambda::Lswitch(
                     Box::new(scrut_norm),
                     Box::new(sw_norm),
-                    loc.clone(),
                 ))
             }
             RawLambda::LstringSwitch(scrut, cases, default) => {
@@ -1969,14 +1966,6 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                 let e_norm = tr_rec(env, e, count, next_id)?;
                 Some(RawLambda::Lassign(x.clone(), Box::new(e_norm)))
             }
-            RawLambda::Lsend(m, e1, _loc) => {
-                let e1_norm = tr_rec(env, e1, count, next_id)?;
-                Some(RawLambda::Lsend(
-                    m.clone(),
-                    Box::new(e1_norm),
-                    Location::none(),
-                ))
-            }
             // OCaml `Lambda.make_key` after #8348:
             // `Lbreak -> Lbreak | Lcontinue -> Lcontinue`.
             RawLambda::Lbreak => Some(RawLambda::Lbreak),
@@ -2016,10 +2005,8 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
         }
         let fail = tr_opt(env, sw.sw_failaction.as_deref(), count, next_id)?;
         Some(RawLambdaSwitch {
-            sw_numconsts: sw.sw_numconsts,
             sw_consts_full: sw.sw_consts_full,
             sw_consts: consts,
-            sw_numblocks: sw.sw_numblocks,
             sw_blocks_full: sw.sw_blocks_full,
             sw_blocks: blocks,
             sw_failaction: fail.map(Box::new),
@@ -2137,15 +2124,14 @@ impl MakeKeyWriter {
                 }
                 Some(())
             }
-            RawLambda::Lconst(crate::lambda::Constant::String { .. }) => None,
             RawLambda::Lconst(c) => {
                 write!(out, "Lconst({c:?})").ok()?;
                 Some(())
             }
-            RawLambda::LglobalModule(id, dynamic_import) => {
+            RawLambda::LglobalModule(id) => {
                 out.push_str("LglobalModule(");
                 write_ident_key(out, id);
-                write!(out, ",{dynamic_import})").ok()?;
+                out.push(')');
                 Some(())
             }
             RawLambda::Lapply(ap) => {
@@ -2171,13 +2157,13 @@ impl MakeKeyWriter {
                 out.push_str("])");
                 Some(())
             }
-            RawLambda::Lswitch(scrut, sw, loc) => {
+            RawLambda::Lswitch(scrut, sw) => {
                 out.push_str("Lswitch(");
                 self.write_raw(scrut, out)?;
                 write!(
                     out,
-                    ",numc={},fullc={},consts=[",
-                    sw.sw_numconsts, sw.sw_consts_full
+                    ",fullc={},consts=[",
+                    sw.sw_consts_full
                 )
                 .ok()?;
                 for (idx, (tag, act)) in sw.sw_consts.iter().enumerate() {
@@ -2189,8 +2175,8 @@ impl MakeKeyWriter {
                 }
                 write!(
                     out,
-                    "],numb={},fullb={},blocks=[",
-                    sw.sw_numblocks, sw.sw_blocks_full
+                    "],fullb={},blocks=[",
+                    sw.sw_blocks_full
                 )
                 .ok()?;
                 for (idx, (tag, act)) in sw.sw_blocks.iter().enumerate() {
@@ -2202,7 +2188,7 @@ impl MakeKeyWriter {
                 }
                 out.push_str("],fail=");
                 self.write_raw_opt(sw.sw_failaction.as_deref(), out)?;
-                write!(out, ",names={:?},loc={loc:?})", sw.sw_dispatch).ok()?;
+                write!(out, ",names={:?})", sw.sw_dispatch).ok()?;
                 Some(())
             }
             RawLambda::LstringSwitch(scrut, cases, default) => {
@@ -2275,12 +2261,6 @@ impl MakeKeyWriter {
                 write_ident_key(out, x);
                 out.push(',');
                 self.write_raw(e, out)?;
-                out.push(')');
-                Some(())
-            }
-            RawLambda::Lsend(m, e1, _loc) => {
-                write!(out, "Lsend({m:?},").ok()?;
-                self.write_raw(e1, out)?;
                 out.push(')');
                 Some(())
             }
@@ -3309,7 +3289,7 @@ fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
             RawLambda::Lvar(id) => {
                 fv.insert(id.clone());
             }
-            RawLambda::LglobalModule(_, _) | RawLambda::Lconst(_) => {}
+            RawLambda::LglobalModule(_) | RawLambda::Lconst(_) => {}
             RawLambda::Lapply(apply) => {
                 collect(&apply.ap_func, fv);
                 for arg in &apply.ap_args {
@@ -3341,7 +3321,7 @@ fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
                     collect(arg, fv);
                 }
             }
-            RawLambda::Lswitch(arg, sw, _) => {
+            RawLambda::Lswitch(arg, sw) => {
                 collect(arg, fv);
                 for (_, lam) in &sw.sw_consts {
                     collect(lam, fv);
@@ -3407,9 +3387,6 @@ fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
             RawLambda::Lassign(id, expr) => {
                 fv.insert(id.clone());
                 collect(expr, fv);
-            }
-            RawLambda::Lsend(_, obj, _) => {
-                collect(obj, fv);
             }
             RawLambda::Lbreak | RawLambda::Lcontinue => {}
         }
@@ -4920,16 +4897,9 @@ fn matcher_constr_arityN<'p>(
     }
 }
 
-/// Helper: get runtime name from label attributes (OCaml's Lambda.find_name).
+/// The label's runtime name (OCaml `lbl.lbl_runtime_name`).
 fn label_runtime_name_matching(lbl: &LabelDescription) -> String {
-    for attr in &lbl.lbl_attributes {
-        if attr.attr_name.txt == "as" {
-            if let crate::types::decl::AttributePayload::Str(name) = &attr.attr_payload {
-                return name.clone();
-            }
-        }
-    }
-    lbl.lbl_name.clone()
+    lbl.lbl_runtime_name.clone()
 }
 
 /// Create field debug info for a record label (equivalent to OCaml's Lambda.fld_record).
@@ -6126,10 +6096,7 @@ fn typed_const_to_lambda_const(c: &Constant) -> RawLambda {
     let lc = match c {
         Constant::Int(i) => crate::lambda::Constant::int(*i as i32),
         Constant::Char(c) => crate::lambda::Constant::Char(*c),
-        Constant::String(s, _) => crate::lambda::Constant::String {
-            s: s.clone(),
-            delim: None,
-        },
+        Constant::String(s) => crate::lambda::Constant::String(s.clone()),
         Constant::Float(f) => crate::lambda::Constant::Float(f.clone()),
         Constant::BigInt(positive, v) => crate::lambda::Constant::BigInt {
             negative: !*positive,
@@ -6252,124 +6219,6 @@ fn make_test_sequence(
 }
 
 // ============================================================================
-// SArg module — Switch module arguments (OCaml matching.ml lines 1708-1758)
-// ============================================================================
-// The SArg module in OCaml provides the primitives needed by Switch.Make.
-// In Rust, the switch.rs module already has these functions built in.
-// The functions below provide matching.ml-level wrappers.
-
-/// SArg: make a primitive application.
-/// Equivalent to OCaml's `SArg.make_prim`.
-fn sarg_make_prim(p: Primitive, args: Vec<RawLambda>) -> RawLambda {
-    RawLambda::Lprim(Box::new(RawPrimInfo {
-        primitive: p,
-        args,
-        loc: Location::none(),
-    }))
-}
-
-/// SArg: add an offset to an argument.
-/// Equivalent to OCaml's `SArg.make_offset`.
-fn sarg_make_offset(arg: RawLambda, n: i32) -> RawLambda {
-    if n == 0 {
-        arg
-    } else {
-        RawLambda::Lprim(Box::new(RawPrimInfo {
-            primitive: Primitive::Poffsetint(n),
-            args: vec![arg],
-            loc: Location::none(),
-        }))
-    }
-}
-
-/// SArg: bind a variable.
-/// Equivalent to OCaml's `SArg.bind`.
-fn sarg_bind(arg: RawLambda, body: impl FnOnce(RawLambda) -> RawLambda) -> RawLambda {
-    match arg.peel() {
-        RawLambda::Lvar(v) => {
-            let newarg = arg.clone();
-            let result = body(newarg);
-            RawLambda::Llet(LetKind::Alias, v.clone(), Box::new(arg), Box::new(result))
-        }
-        _ => {
-            let newvar = Ident::create_local("switcher");
-            let newarg = RawLambda::Lvar(newvar.clone());
-            let result = body(newarg);
-            RawLambda::Llet(LetKind::Alias, newvar, Box::new(arg), Box::new(result))
-        }
-    }
-}
-
-/// SArg: make a constant integer.
-/// Equivalent to OCaml's `SArg.make_const`.
-fn sarg_make_const(i: i32) -> RawLambda {
-    RawLambda::Lconst(crate::lambda::Constant::int(i))
-}
-
-/// SArg: make an `isout` test.
-/// Equivalent to OCaml's `SArg.make_isout`.
-fn sarg_make_isout(h: RawLambda, arg: RawLambda) -> RawLambda {
-    RawLambda::Lprim(Box::new(RawPrimInfo {
-        primitive: Primitive::Pisout(match h.peel() {
-            RawLambda::Lconst(crate::lambda::Constant::Int { i, .. }) => *i,
-            _ => 0,
-        }),
-        args: vec![arg],
-        loc: Location::none(),
-    }))
-}
-
-/// SArg: make an `isin` test.
-/// Equivalent to OCaml's `SArg.make_isin`.
-fn sarg_make_isin(h: RawLambda, arg: RawLambda) -> RawLambda {
-    RawLambda::Lprim(Box::new(RawPrimInfo {
-        primitive: Primitive::Pnot,
-        args: vec![sarg_make_isout(h, arg)],
-        loc: Location::none(),
-    }))
-}
-
-/// SArg: make an if-then-else.
-/// Equivalent to OCaml's `SArg.make_if`.
-fn sarg_make_if(cond: RawLambda, ifso: RawLambda, ifnot: RawLambda) -> RawLambda {
-    RawLambda::LifThenElse(Box::new(cond), Box::new(ifso), Box::new(ifnot))
-}
-
-/// SArg: make a switch.
-/// Equivalent to OCaml's `SArg.make_switch`.
-fn sarg_make_switch(
-    _loc: Location,
-    arg: RawLambda,
-    cases: &[usize],
-    acts: &[RawLambda],
-    offset: i32,
-    sw_dispatch: Option<crate::lambda::SwitchDispatch>,
-) -> RawLambda {
-    let mut l: Vec<(i32, RawLambda)> = Vec::new();
-    for i in (0..cases.len()).rev() {
-        l.push((offset + i as i32, acts[cases[i]].clone()));
-    }
-    l.reverse();
-    RawLambda::Lswitch(
-        Box::new(arg),
-        Box::new(RawLambdaSwitch {
-            sw_numconsts: cases.len(),
-            sw_consts_full: false,
-            sw_consts: l
-                .into_iter()
-                .map(|(key, action)| (crate::lambda::SwitchKey::Int(key), action))
-                .collect(),
-            sw_numblocks: 0,
-            sw_blocks_full: false,
-            sw_blocks: Vec::new(),
-            sw_failaction: None,
-            sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-        }),
-        _loc,
-    )
-}
-
-// ============================================================================
 // Action sharing for Lswitch argument (OCaml matching.ml lines 1761-1833)
 // ============================================================================
 
@@ -6383,10 +6232,8 @@ pub fn share_actions_sw(
 
     // Store fail action as shared
     let RawLambdaSwitch {
-        sw_numconsts,
         sw_consts_full,
         sw_consts,
-        sw_numblocks,
         sw_blocks_full,
         sw_blocks,
         sw_failaction,
@@ -6457,7 +6304,6 @@ pub fn share_actions_sw(
     });
 
     let new_sw = RawLambdaSwitch {
-        sw_numconsts,
         sw_consts_full,
         sw_consts: consts
             .into_iter()
@@ -6468,7 +6314,6 @@ pub fn share_actions_sw(
                 )
             })
             .collect(),
-        sw_numblocks,
         sw_blocks_full,
         sw_blocks: blocks
             .into_iter()
@@ -6529,13 +6374,15 @@ pub fn reintroduce_fail(sw: RawLambdaSwitch) -> RawLambdaSwitch {
                 })
                 .collect()
         }
+        let nconsts = sw.sw_consts.len();
+        let nblocks = sw.sw_blocks.len();
+        let sw_consts = remove(sw.sw_consts, default);
+        let sw_blocks = remove(sw.sw_blocks, default);
         RawLambdaSwitch {
-            sw_numconsts: sw.sw_numconsts,
-            sw_consts_full: sw.sw_consts_full,
-            sw_consts: remove(sw.sw_consts, default),
-            sw_numblocks: sw.sw_numblocks,
-            sw_blocks_full: sw.sw_blocks_full,
-            sw_blocks: remove(sw.sw_blocks, default),
+            sw_consts_full: sw.sw_consts_full && sw_consts.len() == nconsts,
+            sw_consts,
+            sw_blocks_full: sw.sw_blocks_full && sw_blocks.len() == nblocks,
+            sw_blocks,
             sw_failaction: Some(Box::new(make_exit(default))),
             sw_dispatch: sw.sw_dispatch,
         }
@@ -6739,7 +6586,6 @@ fn as_interval(
 /// Compile an integer switch using the switch module.
 /// Equivalent to OCaml's `call_switcher`.
 pub fn call_switcher(
-    loc: Location,
     fail: Option<RawLambda>,
     arg: RawLambda,
     low: i32,
@@ -6762,7 +6608,6 @@ pub fn call_switcher(
         .collect();
 
     crate::raw_lambda::switch::zyva_with_shared_actions(
-        loc,
         edges,
         arg,
         &cases,
@@ -7205,7 +7050,6 @@ fn combine_constant<'p>(
                 })
                 .collect();
             call_switcher(
-                loc,
                 fail,
                 arg,
                 i32::MIN,
@@ -7224,7 +7068,6 @@ fn combine_constant<'p>(
                 })
                 .collect();
             call_switcher(
-                loc,
                 fail,
                 arg,
                 0,
@@ -7234,12 +7077,12 @@ fn combine_constant<'p>(
                 next_raise_count,
             )
         }
-        Constant::String(_, _) => {
+        Constant::String(_) => {
             let const_lambda_list = sort_lambda_list(const_lambda_list);
             let sw: Vec<(String, RawLambda)> = const_lambda_list
                 .into_iter()
                 .map(|(c, act)| match c {
-                    Constant::String(s, _) => (s, act),
+                    Constant::String(s) => (s, act),
                     _ => panic!("combine_constant: expected Const_string"),
                 })
                 .collect();
@@ -7342,7 +7185,7 @@ fn transl_normal_path(path: &crate::types::path::Path) -> RawLambda {
     match path {
         Path::Pident(id) => {
             if id.is_global() {
-                RawLambda::LglobalModule(id.clone(), false)
+                RawLambda::LglobalModule(id.clone())
             } else {
                 RawLambda::Lvar(id.clone())
             }
@@ -7645,10 +7488,8 @@ fn combine_constructor<'p>(
                         .collect()
                 };
                 let sw = RawLambdaSwitch {
-                    sw_numconsts: num_consts,
                     sw_consts_full: consts.len() >= num_consts,
                     sw_consts: switch_cases(consts),
-                    sw_numblocks: num_nonconsts,
                     sw_blocks_full: nonconsts.len() >= num_nonconsts,
                     sw_blocks: switch_cases(nonconsts),
                     sw_failaction: fail_opt.map(Box::new),
@@ -7656,7 +7497,7 @@ fn combine_constructor<'p>(
                 };
                 let (handlers, sw) = share_actions_sw(sw, next_raise_count);
                 let sw = reintroduce_fail(sw);
-                let result = RawLambda::Lswitch(Box::new(arg), Box::new(sw), loc.clone());
+                let result = RawLambda::Lswitch(Box::new(arg), Box::new(sw));
                 apply_handlers(result, handlers)
             }
         };
@@ -7976,7 +7817,6 @@ fn combine_array<'p>(
             .map(|(len, act)| (len as i32, act))
             .collect();
         let switch_result = call_switcher(
-            loc.clone(),
             fail,
             RawLambda::Lvar(newvar.clone()),
             0,
@@ -8160,9 +8000,12 @@ fn compile_test<'p, K: Clone>(
 
 /// Check if v approximately appears in lam.
 /// Equivalent to OCaml's `approx_present`.
+/// matching.ml `approx_present`: anything but a constant, a static raise,
+/// a primitive, an alias let or a variable (including `Lglobal_module`)
+/// counts as present.
 fn approx_present(v: &Ident, lam: &RawLambda) -> bool {
     match lam.peel() {
-        RawLambda::Lconst(_) | RawLambda::LglobalModule(_, _) => false,
+        RawLambda::Lconst(_) => false,
         RawLambda::LstaticRaise(_, args) => args.iter().any(|a| approx_present(v, a)),
         RawLambda::Lprim(info) => info.args.iter().any(|a| approx_present(v, a)),
         RawLambda::Llet(LetKind::Alias, _, l1, l2) => {
@@ -8217,18 +8060,18 @@ fn lower_bind(v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
                 ),
             }
         }
-        RawLambda::Lswitch(ls, mut sw, loc) => {
+        RawLambda::Lswitch(ls, mut sw) => {
             if sw.sw_consts.len() == 1 && sw.sw_blocks.is_empty() && !approx_present(v, &ls) {
                 let (i, act) = sw.sw_consts.pop().expect("single const switch branch");
                 sw.sw_consts.push((i, lower_bind(v, arg, act)));
-                RawLambda::Lswitch(ls, sw, loc)
+                RawLambda::Lswitch(ls, sw)
             } else if sw.sw_consts.is_empty() && sw.sw_blocks.len() == 1 && !approx_present(v, &ls)
             {
                 let (i, act) = sw.sw_blocks.pop().expect("single block switch branch");
                 sw.sw_blocks.push((i, lower_bind(v, arg, act)));
-                RawLambda::Lswitch(ls, sw, loc)
+                RawLambda::Lswitch(ls, sw)
             } else {
-                bind(LetKind::Alias, v, arg, RawLambda::Lswitch(ls, sw, loc))
+                bind(LetKind::Alias, v, arg, RawLambda::Lswitch(ls, sw))
             }
         }
         RawLambda::Llet(LetKind::Alias, vv, lv, l) => {
@@ -8243,9 +8086,9 @@ fn lower_bind(v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
                 RawLambda::Llet(LetKind::Alias, vv, lv, Box::new(lower_bind(v, arg, *l)))
             }
         }
-        RawLambda::Lvar(u) if u.same(v) && u.name() == "*sth*" => {
-            arg.clone() // eliminate let *sth* = from_option x in *sth*
-        }
+        // matching.ml:2407-2410: eliminate `let v = arg in v`; lower_bind is
+        // only used for alias bindings, so `arg` is pure.
+        RawLambda::Lvar(u) if u.same(v) => arg.clone(),
         other => bind(LetKind::Alias, v, arg, other),
     }
 }
@@ -8904,7 +8747,9 @@ fn label_descriptions_from_cached_entries(
     cached
         .into_iter()
         .map(|(name, pos, mutflag, repr, attrs)| LabelDescription {
-            lbl_name: name,
+            lbl_name: name.clone(),
+            // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
+            lbl_runtime_name: name,
             lbl_res: TypeExprRef(0),
             lbl_arg: TypeExprRef(0),
             lbl_mut: mutflag,
@@ -8942,7 +8787,9 @@ fn resolve_labels_from_type(
                 cached
                     .into_iter()
                     .map(|(name, pos, mutflag, repr, attrs)| LabelDescription {
-                        lbl_name: name,
+                        lbl_name: name.clone(),
+                        // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
+                        lbl_runtime_name: name,
                         lbl_res: TypeExprRef(0),
                         lbl_arg: TypeExprRef(0),
                         lbl_mut: mutflag,
@@ -9095,6 +8942,7 @@ fn build_label_descriptions(
         .map(|(pos, ld)| {
             LabelDescription {
                 lbl_name: ld.ld_id.name().to_string(),
+                lbl_runtime_name: ld.declaration_name(),
                 lbl_res: TypeExprRef(0), // Not used by matching
                 lbl_arg: ld.ld_type,
                 lbl_mut: ld.ld_mutable,
@@ -9426,7 +9274,7 @@ pub fn partial_function(_ctx_ref: &TypeContext, loc: Location) -> RawLambda {
     let fname = String::new();
 
     let match_failure_ident = crate::types::predef::ident_match_failure();
-    let exn = RawLambda::LglobalModule(match_failure_ident, false);
+    let exn = RawLambda::LglobalModule(match_failure_ident);
     let payload = RawLambda::Lconst(crate::lambda::Constant::Block {
         tag_info: Box::new(TagInfo::Tuple),
         elements: vec![
@@ -10047,7 +9895,7 @@ mod tests {
             .iter()
             .map(|case| match case {
                 crate::types::VariantConstructorCase::Block(block) => {
-                    block.runtime.tag.name.as_str()
+                    block.tag().name.as_str()
                 }
                 crate::types::VariantConstructorCase::Constant(tag) => tag.name.as_str(),
             })

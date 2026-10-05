@@ -92,7 +92,9 @@ The Makefile’s targets build on each other in this order:
 
 - **We are NOT bound by OCaml compatibility** - The ReScript compiler originated as a fork of the OCaml compiler, but we maintain our own AST and can make breaking changes. Focus on what's best for ReScript's JavaScript compilation target.
 
-- **Never modify `parsetree0.ml`** - Existing PPX (parser extensions) rely on this frozen v0 version. When changing `parsetree.ml`, always update the mapping modules `ast_mapper_from0.ml` and `ast_mapper_to0.ml` to maintain PPX compatibility while allowing the main parsetree to evolve
+- **Never modify `parsetree0.ml`** - Existing PPX (parser extensions) rely on this frozen v0 version. When changing `parsetree.ml`, always update the mapping modules `ast_mapper_from0.ml` and `ast_mapper_to0.ml` to maintain PPX compatibility while allowing the main parsetree to evolve. **Test the bridge with the existing infra** — do not build new harnesses for this:
+  - Add a source fixture exercising the new syntax to `tests/syntax_tests/data/ast-mapping/`. Every file there is run through `res_parser -test-ast-conversion` (which round-trips the parsetree through the frozen v0 AST before printing) as part of `make test-syntax`; the printed output must match the snapshot in its `expected/` directory.
+  - For exact-identity invariants (locations, attributes) or the v0 wire shape itself, add cases to `tests/ounit_tests/ounit_ast_mapper0_tests.ml`, which tests `ast_mapper_to0`/`ast_mapper_from0` directly.
 
 - **Missing test coverage** - Always add tests for syntax, lambda, and end-to-end behavior
 
@@ -102,8 +104,6 @@ The Makefile’s targets build on each other in this order:
 - **Avoid `let _ = …` for side effects** - If you need to call a function only for its side effects, use `ignore expr` (or bind the result and thread state explicitly). Do not write `let _ = expr in ()`, and do not discard stateful results—plumb them through instead.
 
 - **Don't use unit `()` with mandatory labeled arguments** - When a function has a mandatory labeled argument (like `~config`), don't add a trailing `()` parameter. The labeled argument already prevents accidental partial application. Only use `()` when all parameters are optional and you need to force evaluation. Example: `let forceDelayedItems ~config = ...` not `let forceDelayedItems ~config () = ...`
-
-- **Be careful with similar constructor names across different IRs** - Note that `Lam` (Lambda IR) and `Lambda` (typed lambda) have variants with similar constructor names like `Ltrywith`, but they represent different things in different compilation phases.
 
 - **Avoid warning suppressions** - Never use `[@@warning "..."]` to silence warnings. Instead, fix the underlying issue properly
 - **Skip trailing `; _` in record patterns** - The warning it targets is disabled in this codebase, so prefer `{field = x}` over `{field = x; _}`.
@@ -503,6 +503,18 @@ tests/
 
 ### Development Workflow
 
+Read the area guide before changing a compiler subsystem:
+
+- [`compiler/syntax/README.md`](compiler/syntax/README.md) for parsing,
+  printing, and JSX transformation
+- [`compiler/ml/README.md`](compiler/ml/README.md) for the type checker and
+  typed tree
+- [`compiler/core/README.md`](compiler/core/README.md) for Lambda
+  optimization and JavaScript generation
+- [`analysis/README.md`](analysis/README.md) for editor analysis
+- [`rewatch/README.md`](rewatch/README.md) for the build system
+- [`tools/README.md`](tools/README.md) for `rescript-tools`
+
 1. **Understand which layer you're working on:**
    - **Syntax layer** (`compiler/syntax/`): Parsing and surface syntax
    - **ML layer** (`compiler/ml/`): Type checking and AST transformations
@@ -724,11 +736,15 @@ These principles apply to all performance-sensitive Rust code in the compiler, e
 
 ### Stacked pull requests
 
-When a PR depends on another unmerged PR, create a native GitHub stack with
-`gh stack` rather than only targeting the preceding feature branch. Keep the
-branches linear and in the same repository, and list branches or PRs from
-bottom to top. For existing PRs, use `gh stack link BOTTOM_PR [NEXT_PR...]`,
-then verify that GitHub reports stack metadata and runs CI for every PR.
+When a PR depends on another unmerged PR, make a native GitHub stack. Keep the
+branches linear and in the same repository, then run `gh stack link BOTTOM
+[NEXT...]`, listing the stack bottom to top. Each argument is a branch name or
+a PR number: the command pushes each branch, reuses the PR that already exists
+for it, and opens one where there is none, so branches alone are enough. Open
+the PRs yourself first if you want to write their titles and descriptions.
+
+Linking sets each PR's base to the branch below it, leaving only the bottom PR
+on `master`. CI runs on every PR in the stack.
 
 ### Code Quality
 
@@ -739,7 +755,7 @@ then verify that GitHub reports stack metadata and runs CI for every PR.
 
 ## Development Environment
 
-- **OCaml**: 5.3.0+ with opam
+- **OCaml**: 5.5.0+ with opam
 - **Build System**: dune with profiles (dev, release, browser)
 - **JavaScript**: Node.js 20+ for tooling
 - **Rust**: Toolchain needed for rewatch

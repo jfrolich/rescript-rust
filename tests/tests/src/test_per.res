@@ -7,11 +7,6 @@ let invalid_arg = s => throw(Invalid_argument(s))
 
 exception Exit
 
-/* Composition operators */
-
-external \"|>": ('a, 'a => 'b) => 'b = "%revapply"
-external \"@@": ('a => 'b, 'a) => 'b = "%apply"
-
 /* Debugging */
 
 external __LOC__: string = "%loc_LOC"
@@ -62,8 +57,6 @@ external \"||": (bool, bool) => bool = "%sequor"
 
 external \"~-": int => int = "%negint"
 external \"~+": int => int = "%identity"
-external succ: int => int = "%succint"
-external pred: int => int = "%predint"
 external \"+": (int, int) => int = "%addint"
 external \"-": (int, int) => int = "%subint"
 external \"*": (int, int) => int = "%mulint"
@@ -118,7 +111,6 @@ external tan: float => float = "?tan_float"
 external tanh: float => float = "?tanh_float"
 external ceil: float => float = "?ceil_float"
 external floor: float => float = "?floor_float"
-external abs_float: float => float = "%absfloat"
 external copysign: (float, float) => float = "?copysign_float"
 external mod_float: (float, float) => float = "%modfloat"
 external frexp: float => (float, int) = "?frexp_float"
@@ -163,7 +155,4 @@ external snd: (('a, 'b)) => 'b = "%field1"
 
 type ref<'a> = {mutable contents: 'a}
 external ref: 'a => ref<'a> = "%makeref"
-external \"!": ref<'a> => 'a = "%refget"
 external \":=": (ref<'a>, 'a) => unit = "%refset"
-external incr: ref<int> => unit = "%incr"
-external decr: ref<int> => unit = "%decr"

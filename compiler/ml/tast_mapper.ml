@@ -159,7 +159,6 @@ let extension_constructor sub x =
 let pat sub x =
   let extra = function
     | (Tpat_type _ | Tpat_unpack) as d -> d
-    | Tpat_open (path, loc, env) -> Tpat_open (path, loc, sub.env sub env)
     | Tpat_constraint ct -> Tpat_constraint (sub.typ sub ct)
   in
   let pat_env = sub.env sub x.pat_env in
@@ -182,7 +181,8 @@ let pat sub x =
 let expr sub x =
   let extra = function
     | Texp_constraint cty -> Texp_constraint (sub.typ sub cty)
-    | Texp_coerce cty2 -> Texp_coerce (sub.typ sub cty2)
+    | Texp_coerce {source_type; target; target_type} ->
+      Texp_coerce {source_type; target = sub.typ sub target; target_type}
     | Texp_open (ovf, path, loc, env) ->
       Texp_open (ovf, path, loc, sub.env sub env)
   in
@@ -253,8 +253,20 @@ let expr sub x =
       Texp_for_of (id, p, sub.expr sub exp1, sub.expr sub exp2)
     | Texp_for_await_of (id, p, exp1, exp2) ->
       Texp_for_await_of (id, p, sub.expr sub exp1, sub.expr sub exp2)
-    | Texp_send (exp, meth, expo) ->
-      Texp_send (sub.expr sub exp, meth, opt (sub.expr sub) expo)
+    | Texp_template {segments; values} ->
+      Texp_template {segments; values = List.map (sub.expr sub) values}
+    | Texp_tagged_template {tag; raw_sources; values} ->
+      Texp_tagged_template
+        {
+          tag = sub.expr sub tag;
+          raw_sources;
+          values = List.map (sub.expr sub) values;
+        }
+    | Texp_object_get (exp, name) -> Texp_object_get (sub.expr sub exp, name)
+    | Texp_object_set (exp, name, v) ->
+      Texp_object_set (sub.expr sub exp, name, sub.expr sub v)
+    | Texp_object_literal fields ->
+      Texp_object_literal (List.map (fun (s, e) -> (s, sub.expr sub e)) fields)
     | Texp_letmodule (id, s, mexpr, exp) ->
       Texp_letmodule (id, s, sub.module_expr sub mexpr, sub.expr sub exp)
     | Texp_letexception (cd, exp) ->

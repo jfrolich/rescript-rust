@@ -5,7 +5,6 @@
 //! single bindings. Mirrors `Lam_pass_deep_flatten.deep_flatten`.
 
 use crate::lambda::map_box;
-use crate::lambda::{map_function_body, map_prim_args};
 use ahash::AHashMap as HashMap;
 
 use crate::context::IdGenerator;
@@ -13,7 +12,7 @@ use crate::ident::Ident;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_util::refine_let;
-use crate::lambda::{Apply, Lambda, LambdaSwitch, PrimInfo};
+use crate::lambda::{Lambda, PrimInfo};
 use crate::location::Location;
 
 enum FlattenGroup {
@@ -65,7 +64,7 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
     fn hit_variable(target: &Ident, lam: &Lambda) -> bool {
         match lam {
             Lambda::Lvar(id) => id.same(target),
-            Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+            Lambda::LglobalModule(_) | Lambda::Lconst(_) => false,
             Lambda::Lapply(apply) => {
                 hit_variable(target, &apply.ap_func)
                     || apply.ap_args.iter().any(|arg| hit_variable(target, arg))
@@ -224,6 +223,28 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
         }
     }
 
+    /// lam_pass_deep_flatten.ml `regroups_binding`: whether `flatten`
+    /// restructures this binding. Every other binding is rebuilt in place.
+    fn regroups_binding(kind: LetKind, id: &Ident, arg: &Lambda) -> bool {
+        if rhs_is_beta_residue(arg) {
+            return false;
+        }
+        match arg {
+            Lambda::Llet(..) | Lambda::Lsequence(..) | Lambda::Lletrec(..) => true,
+            Lambda::Lprim(prim)
+                if matches!(prim.primitive, Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt) =>
+            {
+                !matches!(prim.args.as_slice(), [Lambda::Lvar(_)])
+            }
+            Lambda::Lprim(prim) => {
+                matches!(prim.primitive, Primitive::Pmakeblock(_, Mutable::Immutable))
+                    && matches!(id.name(), "match" | "include" | "param")
+                    && matches!(kind, LetKind::Alias | LetKind::Strict | LetKind::StrictOpt)
+            }
+            _ => false,
+        }
+    }
+
     fn flatten(acc: &mut Vec<FlattenGroup>, lam: Lambda, id_gen: &IdGenerator) -> Lambda {
         match lam {
             Lambda::Llet(kind, id, value, body) if rhs_is_beta_residue(&value) => {
@@ -357,106 +378,49 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
     }
 
     fn aux(lam: Lambda, id_gen: &IdGenerator) -> Lambda {
+        aux_sharing(lam, id_gen).0
+    }
+
+    /// lam_pass_deep_flatten.ml `aux`: `Llet`/`Lletrec` are regrouped, every
+    /// other node goes through `Lambda_traverse.shallow_map_sharing`, which
+    /// rebuilds (through the folding smart constructors such as
+    /// `Lambda.seq`) only when a child changed.
+    fn aux_sharing(lam: Lambda, id_gen: &IdGenerator) -> crate::lambda::lambda_traverse::Mapped {
         match lam {
+            // `Lam_util.refine_let ~original:lam ~kind:str id (aux arg) (aux body)`;
+            // OCaml evaluates the arguments right to left.
+            Lambda::Llet(kind, id, value, body) if !regroups_binding(kind, &id, &value) => {
+                let (body, body_changed) = aux_sharing(*body, id_gen);
+                let (value, value_changed) = aux_sharing(*value, id_gen);
+                crate::lambda::lam_util::refine_let_original(
+                    kind,
+                    id,
+                    value,
+                    body,
+                    !(value_changed || body_changed),
+                )
+            }
             Lambda::Llet(_, _, _, _) => {
                 let mut groups = Vec::new();
                 let result = flatten(&mut groups, lam, id_gen);
-                lambda_of_groups(groups, result)
+                (lambda_of_groups(groups, result), true)
             }
-            Lambda::Lletrec(bindings, body) => Lambda::Lletrec(
-                bindings
+            Lambda::Lletrec(bindings, body) => {
+                let mut changed = false;
+                let bindings = bindings
                     .into_iter()
-                    .map(|(id, expr)| (id, aux(expr, id_gen)))
-                    .collect(),
-                map_box(body, |inner| aux(inner, id_gen)),
-            ),
-            Lambda::Lsequence(first, second) => {
-                Lambda::seq(aux(*first, id_gen), aux(*second, id_gen))
+                    .map(|(id, expr)| {
+                        let (expr, c) = aux_sharing(expr, id_gen);
+                        changed |= c;
+                        (id, expr)
+                    })
+                    .collect();
+                let (body, c) = aux_sharing(*body, id_gen);
+                (Lambda::Lletrec(bindings, Box::new(body)), changed || c)
             }
-            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam,
-            Lambda::Lapply(apply) => Lambda::Lapply(Box::new(Apply {
-                ap_func: map_box(apply.ap_func, |inner| aux(inner, id_gen)),
-                ap_args: apply
-                    .ap_args
-                    .into_iter()
-                    .map(|arg| aux(arg, id_gen))
-                    .collect(),
-                ap_info: apply.ap_info,
-                ap_transformed_jsx: apply.ap_transformed_jsx,
-            })),
-            Lambda::Lfunction(func) => map_function_body(func, |inner| aux(inner, id_gen)),
-            Lambda::Lprim(info) => map_prim_args(info, |arg| aux(arg, id_gen)),
-            Lambda::Lswitch(scrutinee, switch) => Lambda::Lswitch(
-                map_box(scrutinee, |inner| aux(inner, id_gen)),
-                Box::new(LambdaSwitch {
-                    sw_consts_full: switch.sw_consts_full,
-                    sw_consts: switch
-                        .sw_consts
-                        .into_iter()
-                        .map(|(tag, lam)| (tag, aux(lam, id_gen)))
-                        .collect(),
-                    sw_blocks_full: switch.sw_blocks_full,
-                    sw_blocks: switch
-                        .sw_blocks
-                        .into_iter()
-                        .map(|(tag, lam)| (tag, aux(lam, id_gen)))
-                        .collect(),
-                    sw_failaction: switch
-                        .sw_failaction
-                        .map(|lam| map_box(lam, |inner| aux(inner, id_gen))),
-                    sw_dispatch: switch.sw_dispatch,
-                }),
-            ),
-            Lambda::LstringSwitch(scrutinee, cases, default) => Lambda::LstringSwitch(
-                map_box(scrutinee, |inner| aux(inner, id_gen)),
-                cases
-                    .into_iter()
-                    .map(|(tag, lam)| (tag, aux(lam, id_gen)))
-                    .collect(),
-                default.map(|lam| map_box(lam, |inner| aux(inner, id_gen))),
-            ),
-            Lambda::LstaticRaise(id, args) => {
-                Lambda::LstaticRaise(id, args.into_iter().map(|arg| aux(arg, id_gen)).collect())
-            }
-            Lambda::LstaticCatch(body, ids, handler) => Lambda::LstaticCatch(
-                map_box(body, |inner| aux(inner, id_gen)),
-                ids,
-                map_box(handler, |inner| aux(inner, id_gen)),
-            ),
-            Lambda::LtryWith(body, exn, handler) => Lambda::LtryWith(
-                map_box(body, |inner| aux(inner, id_gen)),
-                exn,
-                map_box(handler, |inner| aux(inner, id_gen)),
-            ),
-            Lambda::LifThenElse(cond, then_, else_) => {
-                Lambda::if_(aux(*cond, id_gen), aux(*then_, id_gen), aux(*else_, id_gen))
-            }
-            Lambda::Lwhile(cond, body) => Lambda::Lwhile(
-                map_box(cond, |inner| aux(inner, id_gen)),
-                map_box(body, |inner| aux(inner, id_gen)),
-            ),
-            Lambda::Lfor(id, start, end, direction, body) => Lambda::Lfor(
-                id,
-                map_box(start, |inner| aux(inner, id_gen)),
-                map_box(end, |inner| aux(inner, id_gen)),
-                direction,
-                map_box(body, |inner| aux(inner, id_gen)),
-            ),
-            Lambda::Lfor_of(id, iterable, body) => Lambda::Lfor_of(
-                id,
-                map_box(iterable, |inner| aux(inner, id_gen)),
-                map_box(body, |inner| aux(inner, id_gen)),
-            ),
-            Lambda::Lfor_await_of(id, iterable, body) => Lambda::Lfor_await_of(
-                id,
-                map_box(iterable, |inner| aux(inner, id_gen)),
-                map_box(body, |inner| aux(inner, id_gen)),
-            ),
-            Lambda::Lbreak => Lambda::break_(),
-            Lambda::Lcontinue => Lambda::continue_(),
-            Lambda::Lassign(id, value) => {
-                Lambda::Lassign(id, map_box(value, |inner| aux(inner, id_gen)))
-            }
+            lam => crate::lambda::lambda_traverse::shallow_map_sharing(lam, &mut |inner| {
+                aux_sharing(inner, id_gen)
+            }),
         }
     }
 
@@ -553,7 +517,7 @@ mod tests {
             }
             Lambda::Lassign(_, value) => has_binding(value, target),
             Lambda::Lvar(_)
-            | Lambda::LglobalModule(_, _)
+            | Lambda::LglobalModule(_)
             | Lambda::Lconst(_)
             | Lambda::Lbreak
             | Lambda::Lcontinue => false,

@@ -170,19 +170,21 @@ const JSX_SPREAD_AFTER_PROP_MSG: &str =
 pub fn transform_structure(
     structure: Structure,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> Structure {
-    transform_structure_result(structure, initial_version, arena).expect("JSX PPX transform failed")
+    transform_structure_result(structure, initial_version, initial_module, arena).expect("JSX PPX transform failed")
 }
 
 /// Transform a structure, applying JSX PPX transformations.
 pub fn transform_structure_result(
     structure: Structure,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> JsxPreprocessorResult<Structure> {
     let (structure, _) =
-        transform_structure_with_warnings_result(structure, initial_version, arena)?;
+        transform_structure_with_warnings_result(structure, initial_version, initial_module, arena)?;
     Ok(structure)
 }
 
@@ -190,9 +192,10 @@ pub fn transform_structure_result(
 pub fn transform_structure_with_warnings(
     structure: Structure,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> (Structure, Vec<JsxPreprocessorWarning>) {
-    transform_structure_with_warnings_result(structure, initial_version, arena)
+    transform_structure_with_warnings_result(structure, initial_version, initial_module, arena)
         .expect("JSX PPX transform failed")
 }
 
@@ -200,10 +203,11 @@ pub fn transform_structure_with_warnings(
 pub fn transform_structure_with_warnings_result(
     structure: Structure,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> JsxPreprocessorResult<(Structure, Vec<JsxPreprocessorWarning>)> {
     let (result, warnings) =
-        transform_structure_collecting_warnings(structure, initial_version, arena);
+        transform_structure_collecting_warnings(structure, initial_version, initial_module, arena);
     result.map(|structure| (structure, warnings))
 }
 
@@ -213,6 +217,7 @@ pub fn transform_structure_with_warnings_result(
 pub fn transform_structure_collecting_warnings(
     structure: Structure,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> (JsxPreprocessorResult<Structure>, Vec<JsxPreprocessorWarning>) {
     // Extract file name from first item's location
@@ -229,6 +234,7 @@ pub fn transform_structure_collecting_warnings(
     };
     let mut config = JsxConfig {
         version: initial_version,
+        module_name: initial_module.to_string(),
         file_name,
         empty_loc,
         ..Default::default()
@@ -250,19 +256,21 @@ pub fn transform_structure_collecting_warnings(
 pub fn transform_signature(
     signature: Signature,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> Signature {
-    transform_signature_result(signature, initial_version, arena).expect("JSX PPX transform failed")
+    transform_signature_result(signature, initial_version, initial_module, arena).expect("JSX PPX transform failed")
 }
 
 /// Transform a signature, applying JSX PPX transformations.
 pub fn transform_signature_result(
     signature: Signature,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> JsxPreprocessorResult<Signature> {
     let (signature, _) =
-        transform_signature_with_warnings_result(signature, initial_version, arena)?;
+        transform_signature_with_warnings_result(signature, initial_version, initial_module, arena)?;
     Ok(signature)
 }
 
@@ -270,9 +278,10 @@ pub fn transform_signature_result(
 pub fn transform_signature_with_warnings(
     signature: Signature,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> (Signature, Vec<JsxPreprocessorWarning>) {
-    transform_signature_with_warnings_result(signature, initial_version, arena)
+    transform_signature_with_warnings_result(signature, initial_version, initial_module, arena)
         .expect("JSX PPX transform failed")
 }
 
@@ -280,6 +289,7 @@ pub fn transform_signature_with_warnings(
 pub fn transform_signature_with_warnings_result(
     signature: Signature,
     initial_version: i32,
+    initial_module: &str,
     arena: &mut ParseArena,
 ) -> JsxPreprocessorResult<(Signature, Vec<JsxPreprocessorWarning>)> {
     // Extract file name from first item's location
@@ -296,6 +306,7 @@ pub fn transform_signature_with_warnings_result(
     };
     let mut config = JsxConfig {
         version: initial_version,
+        module_name: initial_module.to_string(),
         file_name,
         empty_loc,
         ..Default::default()
@@ -503,6 +514,7 @@ fn spelunk_for_fun_expression(
 ) -> (Option<Expression>, bool, Expression) {
     let expr = arena.get_expr(expr_idx).clone();
     match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_braces(braces) => spelunk_for_fun_expression(arena, braces.expr),
         // let make = (~prop) => ...
         ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => (None, false, expr),
         // let make = {let foo = bar in (~prop) => ...}
@@ -1327,6 +1339,7 @@ fn is_async_function(arena: &ParseArena, expr_idx: ExprIdx) -> bool {
             let PexpFun { ref is_async, .. } = **inner;
             *is_async
         }
+        ExpressionDesc::Pexp_braces(braces) => is_async_function(arena, braces.expr),
         ExpressionDesc::Pexp_constraint(inner) => {
             let (ref inner_idx, _) = **inner;
             is_async_function(arena, *inner_idx)
@@ -1718,7 +1731,7 @@ fn add_default_value_matches(
                                         txt: some_lid,
                                         loc: empty_loc(),
                                     },
-                                    Some(some_inner_pat_idx),
+                                    ctor_args(vec![some_inner_pat_idx], empty_loc()),
                                 )),
                                 ppat_loc: empty_loc(),
                                 ppat_attributes: Attributes::new(),
@@ -1741,7 +1754,7 @@ fn add_default_value_matches(
                                         txt: none_lid,
                                         loc: empty_loc(),
                                     },
-                                    None,
+                                    ctor_args(Vec::new(), empty_loc()),
                                 )),
                                 ppat_loc: empty_loc(),
                                 ppat_attributes: Attributes::new(),
@@ -2219,17 +2232,20 @@ fn make_props_record_type_with_live(
             };
 
             let label_idx = arena.push_interned_string(&nt.label);
-            LabelDeclaration {
-                pld_name: Loc {
+            let typ_idx = arena.push_core_type(type_var);
+            crate::ast_helper_type::field(
+                arena,
+                nt.loc.clone(),
+                nt.attrs.clone(),
+                MutableFlag::Immutable,
+                is_optional,
+                None,
+                Loc {
                     txt: label_idx,
                     loc: nt.loc.clone(),
                 },
-                pld_mutable: MutableFlag::Immutable,
-                pld_type: arena.push_core_type(type_var),
-                pld_loc: nt.loc.clone(),
-                pld_attributes: nt.attrs.clone(),
-                pld_optional: is_optional,
-            }
+                typ_idx,
+            )
         })
         .collect();
 
@@ -2282,6 +2298,7 @@ fn make_props_record_type_with_live(
                 ptype_kind: TypeKind::Ptype_record(label_decls),
                 ptype_private: PrivateFlag::Public,
                 ptype_manifest: None,
+                ptype_origin: TypeDeclarationOrigin::Declared,
                 ptype_attributes: Attributes::from_vec(vec![jsx_props_attr, live_attr]),
                 ptype_loc: loc.clone(),
             }],
@@ -2510,6 +2527,9 @@ fn component_props_need_labelled_error_loc(
                 }
             }
         }
+        ExpressionDesc::Pexp_braces(braces) => {
+            component_props_need_labelled_error_loc(arena, braces.expr, has_application)
+        }
         ExpressionDesc::Pexp_newtype(inner) => {
             let (_, body_idx) = &**inner;
             component_props_need_labelled_error_loc(arena, *body_idx, has_application)
@@ -2530,21 +2550,49 @@ fn component_props_need_labelled_error_loc(
     }
 }
 
-/// OCaml `modified_binding_old` (jsx_v4.ml:391-417): the component function
-/// whose parameters define the props. When there is none (the
-/// `component_call_needs_function_error_loc` error), the expression itself.
-fn modified_binding_old_expr(arena: &ParseArena, expr_idx: ExprIdx) -> Expression {
+/// jsx_v4.ml `find_function_expression`: the final function through
+/// expression wrappers. Applications are only followed when inspecting
+/// component wrappers such as forwardRef and memo.
+fn find_function_expression(
+    arena: &ParseArena,
+    expr_idx: ExprIdx,
+    through_application: bool,
+) -> Result<&Expression, &Expression> {
     let expr = arena.get_expr(expr_idx);
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_let(inner) => modified_binding_old_expr(arena, inner.2),
-        ExpressionDesc::Pexp_apply(apply)
-            if apply.args.len() == 1 && matches!(apply.args[0].0, ArgLabel::Nolabel) =>
-        {
-            modified_binding_old_expr(arena, apply.args[0].1)
+        ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => Ok(expr),
+        ExpressionDesc::Pexp_braces(braces) => {
+            find_function_expression(arena, braces.expr, through_application)
         }
-        ExpressionDesc::Pexp_sequence(_, inner_idx) => modified_binding_old_expr(arena, *inner_idx),
-        ExpressionDesc::Pexp_constraint(inner) => modified_binding_old_expr(arena, inner.0),
-        _ => expr.clone(),
+        ExpressionDesc::Pexp_constraint(inner) => {
+            find_function_expression(arena, inner.0, through_application)
+        }
+        ExpressionDesc::Pexp_let(inner) => find_function_expression(arena, inner.2, through_application),
+        ExpressionDesc::Pexp_sequence(_, body) => {
+            find_function_expression(arena, *body, through_application)
+        }
+        ExpressionDesc::Pexp_apply(apply)
+            if through_application
+                && apply.args.len() == 1
+                && matches!(apply.args[0].0, ArgLabel::Nolabel) =>
+        {
+            find_function_expression(arena, apply.args[0].1, through_application)
+        }
+        _ => Err(expr),
+    }
+}
+
+/// jsx_v4.ml `is_function_expression`.
+fn is_function_expression(arena: &ParseArena, expr_idx: ExprIdx) -> bool {
+    find_function_expression(arena, expr_idx, false).is_ok()
+}
+
+/// OCaml `modified_binding_old`: the component function whose parameters
+/// define the props. When there is none (the
+/// `component_call_needs_function_error_loc` error), the expression itself.
+fn modified_binding_old_expr(arena: &ParseArena, expr_idx: ExprIdx) -> Expression {
+    match find_function_expression(arena, expr_idx, true) {
+        Ok(expr) | Err(expr) => expr.clone(),
     }
 }
 
@@ -2552,103 +2600,9 @@ fn component_call_needs_function_error_loc(
     arena: &ParseArena,
     expr_idx: ExprIdx,
 ) -> Option<Location> {
-    let expr = arena.get_expr(expr_idx);
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => None,
-        ExpressionDesc::Pexp_let(inner) => {
-            let (_, _, body_idx) = &**inner;
-            component_call_needs_function_error_loc(arena, *body_idx)
-        }
-        ExpressionDesc::Pexp_apply(apply)
-            if apply.args.len() == 1 && matches!(apply.args[0].0, ArgLabel::Nolabel) =>
-        {
-            component_call_needs_function_error_loc(arena, apply.args[0].1)
-        }
-        ExpressionDesc::Pexp_sequence(_, inner_idx) => {
-            component_call_needs_function_error_loc(arena, *inner_idx)
-        }
-        ExpressionDesc::Pexp_constraint(inner) => {
-            let (inner_idx, _) = &**inner;
-            component_call_needs_function_error_loc(arena, *inner_idx)
-        }
-        _ => Some(expr.pexp_loc),
-    }
-}
-
-fn component_ref_plain_args_error_loc(arena: &ParseArena, expr_idx: ExprIdx) -> Option<Location> {
-    let expr = arena.get_expr(expr_idx);
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_fun(fun) => {
-            if let Some(params) = arena.stored_nary_fun_params(fun) {
-                component_ref_plain_args_error_loc_in_params(arena, params)
-            } else {
-                component_ref_plain_args_error_loc_in_fun(arena, expr_idx)
-            }
-        }
-        ExpressionDesc::Pexp_newtype(inner) => {
-            let (_, body_idx) = &**inner;
-            component_ref_plain_args_error_loc(arena, *body_idx)
-        }
-        ExpressionDesc::Pexp_let(inner) => {
-            let (_, _, body_idx) = &**inner;
-            component_ref_plain_args_error_loc(arena, *body_idx)
-        }
-        ExpressionDesc::Pexp_apply(apply)
-            if apply.args.len() == 1 && matches!(apply.args[0].0, ArgLabel::Nolabel) =>
-        {
-            component_ref_plain_args_error_loc(arena, apply.args[0].1)
-        }
-        ExpressionDesc::Pexp_sequence(_, inner_idx) => {
-            component_ref_plain_args_error_loc(arena, *inner_idx)
-        }
-        ExpressionDesc::Pexp_constraint(inner) => {
-            let (inner_idx, _) = &**inner;
-            component_ref_plain_args_error_loc(arena, *inner_idx)
-        }
-        _ => None,
-    }
-}
-
-fn component_ref_plain_args_error_loc_in_params(
-    arena: &ParseArena,
-    params: &[crate::parser::ast::FunParam],
-) -> Option<Location> {
-    for param in params {
-        if matches!(param.p_lbl, ArgLabel::Labelled(_) | ArgLabel::Optional(_)) {
-            continue;
-        }
-        let pattern = arena.get_pat(param.p_pat);
-        if !pattern_is_unit_or_any(arena, pattern)
-            && !pattern_is_plain_name_or_constraint(pattern, arena)
-        {
-            return Some(pattern.ppat_loc);
-        }
-    }
-    None
-}
-
-fn component_ref_plain_args_error_loc_in_fun(
-    arena: &ParseArena,
-    expr_idx: ExprIdx,
-) -> Option<Location> {
-    let expr = arena.get_expr(expr_idx);
-    let ExpressionDesc::Pexp_fun(fun) = &*expr.pexp_desc else {
-        return None;
-    };
-    match &fun.arg_label {
-        ArgLabel::Labelled(_) | ArgLabel::Optional(_) => {
-            component_ref_plain_args_error_loc_in_fun(arena, fun.rhs)
-        }
-        ArgLabel::Nolabel => {
-            let lhs = arena.get_pat(fun.lhs);
-            if pattern_is_unit_or_any(arena, lhs) || pattern_is_plain_name_or_constraint(lhs, arena)
-            {
-                None
-            } else {
-                Some(lhs.ppat_loc)
-            }
-        }
-    }
+    find_function_expression(arena, expr_idx, true)
+        .err()
+        .map(|expr| expr.pexp_loc)
 }
 
 fn pattern_is_plain_name_or_constraint(pat: &Pattern, arena: &ParseArena) -> bool {
@@ -2711,6 +2665,7 @@ fn string_int_attribute_loc_in_core_type(
             RowField::Rtag(_, attrs, _, args) => string_int_attribute_loc_in_attrs(arena, attrs)
                 .or_else(|| {
                     args.iter()
+                        .flat_map(|group| group.txt.iter())
                         .find_map(|arg| string_int_attribute_loc_in_core_type(arena, arg))
                 }),
             RowField::Rinherit(typ) => string_int_attribute_loc_in_core_type(arena, typ),
@@ -2897,6 +2852,21 @@ fn constrain_jsx_return(
     let element_type_idx = arena.push_core_type(element_type);
 
     match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_braces(braces) if is_function_expression(arena, braces.expr) => {
+            let inner = arena.get_expr(braces.expr).clone();
+            let constrained = constrain_jsx_return(arena, inner, config);
+            let constrained_idx = arena.push_expr(constrained);
+            Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_braces(Box::new(
+                    crate::parser::ast::PexpBraces {
+                        expr: constrained_idx,
+                        braces_loc: braces.braces_loc,
+                    },
+                ))),
+                pexp_loc: expr.pexp_loc,
+                pexp_attributes: expr.pexp_attributes.clone(),
+            }
+        }
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun {
                 ref arg_label,
@@ -3123,7 +3093,7 @@ fn unit_expr(arena: &mut ParseArena, loc: &Location) -> Expression {
                 txt: arena.push_longident(Longident::Lident(unit_str_idx)),
                 loc: loc.clone(),
             },
-            None,
+            ctor_args(Vec::new(), loc.clone()),
         )),
         pexp_loc: loc.clone(),
         pexp_attributes: Attributes::new(),
@@ -3422,17 +3392,20 @@ fn make_props_record_type(
             };
 
             let label_str_idx = arena.push_interned_string(&nt.label);
-            LabelDeclaration {
-                pld_name: Loc {
+            let typ_idx = arena.push_core_type(type_var);
+            crate::ast_helper_type::field(
+                arena,
+                nt.loc.clone(),
+                nt.attrs.clone(),
+                MutableFlag::Immutable,
+                is_optional,
+                None,
+                Loc {
                     txt: label_str_idx,
                     loc: nt.loc.clone(),
                 },
-                pld_mutable: MutableFlag::Immutable,
-                pld_type: arena.push_core_type(type_var),
-                pld_loc: nt.loc.clone(),
-                pld_optional: is_optional,
-                pld_attributes: nt.attrs.clone(),
-            }
+                typ_idx,
+            )
         })
         .collect();
 
@@ -3465,6 +3438,7 @@ fn make_props_record_type(
         ptype_kind: TypeKind::Ptype_record(label_decls),
         ptype_private: PrivateFlag::Public,
         ptype_manifest: None,
+        ptype_origin: TypeDeclarationOrigin::Declared,
         ptype_attributes: Attributes::from_vec(vec![(
             Loc {
                 txt: jsx_props_attr_idx,
@@ -3515,17 +3489,20 @@ fn make_props_record_type_sig(
             };
 
             let label_str_idx = arena.push_interned_string(&nt.label);
-            LabelDeclaration {
-                pld_name: Loc {
+            let typ_idx = arena.push_core_type(type_var);
+            crate::ast_helper_type::field(
+                arena,
+                nt.loc.clone(),
+                nt.attrs.clone(),
+                MutableFlag::Immutable,
+                is_optional,
+                None,
+                Loc {
                     txt: label_str_idx,
                     loc: nt.loc.clone(),
                 },
-                pld_mutable: MutableFlag::Immutable,
-                pld_type: arena.push_core_type(type_var),
-                pld_loc: nt.loc.clone(),
-                pld_optional: is_optional,
-                pld_attributes: nt.attrs.clone(),
-            }
+                typ_idx,
+            )
         })
         .collect();
 
@@ -3558,6 +3535,7 @@ fn make_props_record_type_sig(
         ptype_kind: TypeKind::Ptype_record(label_decls),
         ptype_private: PrivateFlag::Public,
         ptype_manifest: None,
+        ptype_origin: TypeDeclarationOrigin::Declared,
         ptype_attributes: Attributes::from_vec(vec![(
             Loc {
                 txt: jsx_props_attr_idx,
@@ -3603,6 +3581,7 @@ fn make_props_abstract_type(
         ptype_kind: TypeKind::Ptype_abstract,
         ptype_private: PrivateFlag::Public,
         ptype_manifest: Some(arena.push_core_type(manifest.clone())),
+        ptype_origin: TypeDeclarationOrigin::Declared,
         ptype_attributes: Attributes::new(),
         ptype_loc: loc.clone(),
     };
@@ -3641,6 +3620,7 @@ fn make_props_abstract_type_sig(
         ptype_kind: TypeKind::Ptype_abstract,
         ptype_private: PrivateFlag::Public,
         ptype_manifest: Some(arena.push_core_type(manifest.clone())),
+        ptype_origin: TypeDeclarationOrigin::Declared,
         ptype_attributes: Attributes::new(),
         ptype_loc: loc.clone(),
     };
@@ -3666,7 +3646,12 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
         for item in items.iter() {
             if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc {
                 let (ref expr, _) = **eval_inner;
-                let expr = arena.get_expr(*expr);
+                // jsx_ppx.ml `get_payload_fields`: `Ast_payload.unwrap_payload_expression`.
+                let expr = if items.len() == 1 {
+                    crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr))
+                } else {
+                    arena.get_expr(*expr)
+                };
                 if let ExpressionDesc::Pexp_record(rec_inner) = &*expr.pexp_desc {
                     let (ref fields, _) = **rec_inner;
                     let mut module_raw: Option<String> = None;
@@ -3677,8 +3662,11 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
                         let last_str = arena.get_string(last_idx);
                         match last_str {
                             "version" => {
-                                if let ExpressionDesc::Pexp_constant(c) =
-                                    &*arena.get_expr(field.expr).pexp_desc
+                                if let ExpressionDesc::Pexp_constant(c) = &*crate::ast_payload::unwrap_braces(
+                                    arena,
+                                    arena.get_expr(field.expr),
+                                )
+                                .pexp_desc
                                 {
                                     if let Constant::Integer(s, _) = &**c {
                                         if let Ok(v) = s.parse::<i32>() {
@@ -3688,11 +3676,17 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
                                 }
                             }
                             "module_" => {
-                                if let ExpressionDesc::Pexp_constant(c) =
-                                    &*arena.get_expr(field.expr).pexp_desc
-                                {
-                                    if let Constant::String(s, _) = &**c {
-                                        module_raw = Some(s.to_string());
+                                match crate::ast_payload::semantic_string_of_expression(
+                                    arena,
+                                    arena.get_expr(field.expr),
+                                ) {
+                                    Ok(value) => {
+                                        if let Some(value) = value {
+                                            module_raw = Some(value);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        set_fatal_error(config, error.loc, error.message);
                                     }
                                 }
                             }
@@ -4118,22 +4112,22 @@ fn transform_expression(
                 })
                 .collect(),
         )),
-        ExpressionDesc::Pexp_construct(lid, arg) => {
-            let rw_arg = arg.map(|e| {
-                let e_expr = arena.get_expr(e).clone();
+        ExpressionDesc::Pexp_construct(lid, mut args) => {
+            for e in args.txt.iter_mut() {
+                let e_expr = arena.get_expr(*e).clone();
                 let rw = transform_expression(e_expr, config, arena);
-                arena.push_expr(rw)
-            });
-            ExpressionDesc::Pexp_construct(lid, rw_arg)
+                *e = arena.push_expr(rw);
+            }
+            ExpressionDesc::Pexp_construct(lid, args)
         }
         ExpressionDesc::Pexp_variant(inner) => {
-            let (label, arg) = *inner;
-            let transformed_arg = arg.map(|e| {
-                let e_expr = arena.get_expr(e).clone();
+            let (label, mut args) = *inner;
+            for e in args.txt.iter_mut() {
+                let e_expr = arena.get_expr(*e).clone();
                 let transformed = transform_expression(e_expr, config, arena);
-                arena.push_expr(transformed)
-            });
-            ExpressionDesc::Pexp_variant(Box::new((label, transformed_arg)))
+                *e = arena.push_expr(transformed);
+            }
+            ExpressionDesc::Pexp_variant(Box::new((label, args)))
         }
         ExpressionDesc::Pexp_record(inner) => {
             let (fields, base) = *inner;
@@ -4175,6 +4169,31 @@ fn transform_expression(
                 arena.push_expr(transformed_value),
             )))
         }
+        ExpressionDesc::Pexp_object_get(inner) => {
+            let (obj, name) = *inner;
+            let obj_expr = arena.get_expr(obj).clone();
+            let transformed_obj = transform_expression(obj_expr, config, arena);
+            ExpressionDesc::Pexp_object_get(Box::new((arena.push_expr(transformed_obj), name)))
+        }
+        ExpressionDesc::Pexp_object_set(inner) => {
+            let (obj, name, value) = *inner;
+            let value_expr = arena.get_expr(value).clone();
+            let transformed_value = transform_expression(value_expr, config, arena);
+            let value = arena.push_expr(transformed_value);
+            let obj_expr = arena.get_expr(obj).clone();
+            let transformed_obj = transform_expression(obj_expr, config, arena);
+            ExpressionDesc::Pexp_object_set(Box::new((arena.push_expr(transformed_obj), name, value)))
+        }
+        ExpressionDesc::Pexp_object_literal(fields) => ExpressionDesc::Pexp_object_literal(Box::new(
+            fields
+                .into_iter()
+                .map(|(name, e)| {
+                    let e_expr = arena.get_expr(e).clone();
+                    let transformed = transform_expression(e_expr, config, arena);
+                    (name, arena.push_expr(transformed))
+                })
+                .collect(),
+        )),
         ExpressionDesc::Pexp_array(elems) => ExpressionDesc::Pexp_array(Box::new(
             elems
                 .into_iter()
@@ -4201,6 +4220,28 @@ fn transform_expression(
                 arena.push_expr(transformed_then),
                 transformed_else,
             )))
+        }
+        ExpressionDesc::Pexp_ternary(inner) => {
+            let (cond, consequent, alternate) = *inner;
+            let cond = arena.get_expr(cond).clone();
+            let consequent = arena.get_expr(consequent).clone();
+            let alternate = arena.get_expr(alternate).clone();
+            let cond = transform_expression(cond, config, arena);
+            let consequent = transform_expression(consequent, config, arena);
+            let alternate = transform_expression(alternate, config, arena);
+            ExpressionDesc::Pexp_ternary(Box::new((
+                arena.push_expr(cond),
+                arena.push_expr(consequent),
+                arena.push_expr(alternate),
+            )))
+        }
+        ExpressionDesc::Pexp_braces(braces) => {
+            let inner = arena.get_expr(braces.expr).clone();
+            let inner = transform_expression(inner, config, arena);
+            ExpressionDesc::Pexp_braces(Box::new(crate::parser::ast::PexpBraces {
+                expr: arena.push_expr(inner),
+                braces_loc: braces.braces_loc,
+            }))
         }
         ExpressionDesc::Pexp_sequence(e1, e2) => {
             let e1_expr = arena.get_expr(e1).clone();
@@ -4319,6 +4360,35 @@ fn transform_expression(
             let e_expr = arena.get_expr(e).clone();
             let transformed = transform_expression(e_expr, config, arena);
             ExpressionDesc::Pexp_await(arena.push_expr(transformed))
+        }
+        // Ast_mapper: `Pexp_template` maps its values; `Pexp_tagged_template`
+        // maps the tag, then the values.
+        ExpressionDesc::Pexp_template(mut template) => {
+            template.values = template
+                .values
+                .into_iter()
+                .map(|e| {
+                    let e_expr = arena.get_expr(e).clone();
+                    let transformed = transform_expression(e_expr, config, arena);
+                    arena.push_expr(transformed)
+                })
+                .collect();
+            ExpressionDesc::Pexp_template(template)
+        }
+        ExpressionDesc::Pexp_tagged_template(mut template) => {
+            let tag_expr = arena.get_expr(template.tag).clone();
+            let tag = transform_expression(tag_expr, config, arena);
+            template.tag = arena.push_expr(tag);
+            template.values = template
+                .values
+                .into_iter()
+                .map(|e| {
+                    let e_expr = arena.get_expr(e).clone();
+                    let transformed = transform_expression(e_expr, config, arena);
+                    arena.push_expr(transformed)
+                })
+                .collect();
+            ExpressionDesc::Pexp_tagged_template(template)
         }
         other => other,
     };
@@ -4786,10 +4856,7 @@ fn transform_jsx_unary(
         JsxTagName::Lower(name) => {
             // Lowercase element like <div />
             let component_name_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
-                    Cow::Owned(name.clone()),
-                    None,
-                )))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(name)))),
                 pexp_loc: tag_loc.clone(),
                 pexp_attributes: Attributes::new(),
             };
@@ -4880,10 +4947,7 @@ fn transform_jsx_container(
         JsxTagName::Lower(name) => {
             // Lowercase element like <div>...</div>
             let component_name_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
-                    Cow::Owned(name.clone()),
-                    None,
-                )))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(name)))),
                 pexp_loc: tag_loc.clone(),
                 pexp_attributes: Attributes::new(),
             };
@@ -5000,7 +5064,7 @@ let make = (~value: string) => React.null
         let mut parser = Parser::new("test.res".to_string(), source);
         let structure = module::parse_structure(&mut parser);
         assert!(!parser.has_errors());
-        let transformed = transform_structure(structure, 4, parser.arena_mut());
+        let transformed = transform_structure(structure, 4, "react", parser.arena_mut());
 
         let StructureItemDesc::Pstr_value(value) = &*transformed
             .last()
@@ -5041,7 +5105,7 @@ let make = (~priority as _, ~text="Test") => React.string(text)
         let mut parser = Parser::new("test.res".to_string(), source);
         let structure = module::parse_structure(&mut parser);
         assert!(!parser.has_errors());
-        let transformed = transform_structure(structure, 4, parser.arena_mut());
+        let transformed = transform_structure(structure, 4, "react", parser.arena_mut());
 
         let mut output = Vec::new();
         sexp_locs::print_structure(&transformed, parser.arena(), &mut output);
@@ -5081,7 +5145,7 @@ module MakePreset = (Preset: { let value: int }) => {
             before
         );
 
-        let transformed = transform_structure(structure, 4, parser.arena_mut());
+        let transformed = transform_structure(structure, 4, "react", parser.arena_mut());
 
         let mut after = Vec::new();
         sexp_locs::print_structure(&transformed, parser.arena(), &mut after);
@@ -5120,22 +5184,34 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
                         || child(case.pc_rhs, memo)
                 })
         }
+        ExpressionDesc::Pexp_template(template) => template.values.iter().any(|item| child(*item, memo)),
+        ExpressionDesc::Pexp_tagged_template(template) => {
+            child(template.tag, memo) || template.values.iter().any(|item| child(*item, memo))
+        }
         ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
             items.iter().any(|item| child(*item, memo))
         }
-        ExpressionDesc::Pexp_construct(_, arg) => arg.is_some_and(|arg| child(arg, memo)),
-        ExpressionDesc::Pexp_variant(inner) => inner.1.is_some_and(|arg| child(arg, memo)),
+        ExpressionDesc::Pexp_construct(_, args) => args.txt.iter().any(|arg| child(*arg, memo)),
+        ExpressionDesc::Pexp_variant(inner) => inner.1.txt.iter().any(|arg| child(*arg, memo)),
         ExpressionDesc::Pexp_record(inner) => {
             inner.0.iter().any(|field| child(field.expr, memo))
                 || inner.1.is_some_and(|spread| child(spread, memo))
         }
         ExpressionDesc::Pexp_field(target, _) => child(*target, memo),
         ExpressionDesc::Pexp_setfield(inner) => child(inner.0, memo) || child(inner.2, memo),
+        ExpressionDesc::Pexp_object_get(inner) => child(inner.0, memo),
+        ExpressionDesc::Pexp_object_set(inner) => child(inner.0, memo) || child(inner.2, memo),
+        ExpressionDesc::Pexp_object_literal(fields) => fields.iter().any(|(_, e)| child(*e, memo)),
         ExpressionDesc::Pexp_ifthenelse(inner) => {
             child(inner.0, memo)
                 || child(inner.1, memo)
                 || inner.2.is_some_and(|else_| child(else_, memo))
         }
+        ExpressionDesc::Pexp_ternary(inner) => {
+            child(inner.0, memo) || child(inner.1, memo) || child(inner.2, memo)
+        }
+        ExpressionDesc::Pexp_braces(braces) => child(braces.expr, memo),
+        ExpressionDesc::Pexp_regexp(_) => false,
         ExpressionDesc::Pexp_sequence(first, second)
         | ExpressionDesc::Pexp_while(first, second) => child(*first, memo) || child(*second, memo),
         ExpressionDesc::Pexp_for(inner) => {
@@ -5155,7 +5231,6 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
         ExpressionDesc::Pexp_jsx_element(_)
         | ExpressionDesc::Pexp_letmodule(_)
         | ExpressionDesc::Pexp_pack(_)
-        | ExpressionDesc::Pexp_send(_)
         | ExpressionDesc::Pexp_extension(_)
         | ExpressionDesc::Pexp_inline_for(_)
         | ExpressionDesc::Pexp_comptime_typeinfo(_)

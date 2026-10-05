@@ -1,0 +1,2 @@
+Consumer-InProcessNamespace	src/Consumer.res
+Provider-InProcessNamespace	src/Provider.res

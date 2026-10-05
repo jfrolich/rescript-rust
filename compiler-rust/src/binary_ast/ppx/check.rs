@@ -514,13 +514,12 @@ impl<'a> Checker<'a> {
     fn typ(&mut self, idx: CoreTypeIdx) -> PpxResult<()> {
         let typ = self.arena.get_core_type(idx).clone();
         if let CoreTypeDesc::Ptyp_object(inner) = &*typ.ptyp_desc {
-            // Object fields go through `process_getter_setter` from the last
-            // one (`Ext_list.fold_right`); the object's own attributes and
+            // Object fields are mapped from the last one
+            // (`Ext_list.fold_right`); the object's own attributes and
             // inherited types are not mapped.
             let (fields, _closed) = &**inner;
             for field in fields.iter().rev() {
-                if let ObjectField::Otag(_label, attrs, field_type) = field {
-                    validate_object_field_method_attrs(attrs, self.arena, &mut self.warnings)?;
+                if let ObjectField::Otag(_label, _attrs, field_type) = field {
                     self.typ(*field_type)?;
                 }
             }
@@ -572,7 +571,7 @@ impl<'a> Checker<'a> {
                 for row in &inner.0 {
                     match row {
                         RowField::Rtag(_label, attrs, _empty, types) => {
-                            for typ in types {
+                            for typ in types.iter().flat_map(|group| group.txt.iter()) {
                                 self.typ(*typ)?;
                             }
                             self.attributes(attrs)?;
@@ -602,12 +601,11 @@ impl<'a> Checker<'a> {
         let pat = self.arena.get_pat(idx).clone();
         if let PatternDesc::Ppat_constant(constant) = &*pat.ppat_desc {
             match &**constant {
-                // `Ast_utf8_string_interp.transform_pat`.
-                Constant::String(s, Some(delim)) => {
-                    if delim == "js" {
-                        validate_js_string_literal(s, pat.ppat_loc)?;
-                    }
-                    return Ok(());
+                Constant::Json(_) => {
+                    return Err(PpxError::at_loc(
+                        pat.ppat_loc,
+                        "Tagged template literals are not supported in patterns",
+                    ));
                 }
                 Constant::Integer(_, Some('l')) => return Ok(()),
                 _ => {}
@@ -627,22 +625,25 @@ impl<'a> Checker<'a> {
             | PatternDesc::Ppat_type(_)
             | PatternDesc::Ppat_unpack(_) => Ok(()),
             PatternDesc::Ppat_alias(inner, _)
-            | PatternDesc::Ppat_exception(inner)
-            | PatternDesc::Ppat_open(_, inner) => self.pat(*inner),
+            | PatternDesc::Ppat_exception(inner) => self.pat(*inner),
             PatternDesc::Ppat_tuple(items) | PatternDesc::Ppat_array(items) => {
                 for item in items.iter() {
                     self.pat(*item)?;
                 }
                 Ok(())
             }
-            PatternDesc::Ppat_construct(_, arg) => match arg {
-                Some(arg) => self.pat(*arg),
-                None => Ok(()),
-            },
-            PatternDesc::Ppat_variant(inner) => match inner.1 {
-                Some(arg) => self.pat(arg),
-                None => Ok(()),
-            },
+            PatternDesc::Ppat_construct(_, args) => {
+                for arg in args.txt.iter() {
+                    self.pat(*arg)?;
+                }
+                Ok(())
+            }
+            PatternDesc::Ppat_variant(inner) => {
+                for arg in inner.1.txt.iter() {
+                    self.pat(*arg)?;
+                }
+                Ok(())
+            }
             PatternDesc::Ppat_record(inner) => {
                 let (fields, _closed, rest) = &**inner;
                 for field in fields {
@@ -697,21 +698,47 @@ impl<'a> Checker<'a> {
         let old_in_function_def = self.in_function_def;
         self.in_function_def = false;
         match &*expr.pexp_desc {
+            // `Pexp_regexp`: `Ast_payload.validate_raw_source ~kind:Raw_re`
+            // on `/pattern/flags`, then the attributes are mapped.
+            ExpressionDesc::Pexp_regexp(regexp) => {
+                let source = format!("/{}/{}", regexp.pattern, regexp.flags);
+                validate_regexp_source(&source, expr.pexp_loc, self.arena, &mut self.warnings)?;
+                self.attributes(&expr.pexp_attributes)
+            }
+            // `Pexp_braces`: forward `@this` to a braced function.
+            ExpressionDesc::Pexp_braces(braces) => {
+                let (this_attrs, other_attrs): (Vec<Attribute>, Vec<Attribute>) = expr
+                    .pexp_attributes
+                    .iter()
+                    .cloned()
+                    .partition(|(name, _)| self.arena.get_string(name.txt) == "this");
+                let forwarded = if this_attrs.is_empty() {
+                    None
+                } else {
+                    add_this_to_braced_function(&this_attrs, braces.expr, self.arena)
+                };
+                match forwarded {
+                    Some(inner) => {
+                        let rewritten = Expression {
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_braces(Box::new(
+                                crate::parser::ast::PexpBraces {
+                                    expr: inner,
+                                    braces_loc: braces.braces_loc,
+                                },
+                            ))),
+                            pexp_loc: expr.pexp_loc,
+                            pexp_attributes: Attributes::from_vec(other_attrs),
+                        };
+                        self.default_expr(&rewritten)
+                    }
+                    None => self.default_expr(expr),
+                }
+            }
             // `Ast_exp_extension.handle_extension` (ast_exp_extension.ml:26-83).
             ExpressionDesc::Pexp_extension(extension) => {
                 self.expression_extension(expr.pexp_loc, extension)
             }
             ExpressionDesc::Pexp_constant(constant) => match &**constant {
-                // `Ast_utf8_string_interp.transform_exp`.
-                Constant::String(s, Some(delim)) => {
-                    if delim == "js"
-                        && !attributes_have_template_marker(&expr.pexp_attributes, self.arena)
-                        && !is_js_regex_like_literal(s)
-                    {
-                        validate_js_string_literal(s, expr.pexp_loc)?;
-                    }
-                    Ok(())
-                }
                 Constant::Integer(_, Some('l')) => Ok(()),
                 _ => self.attributes(&expr.pexp_attributes),
             },
@@ -816,35 +843,17 @@ impl<'a> Checker<'a> {
         if let Some(error) = app_exp_mapper_error(expr, self.arena) {
             return Err(error);
         }
-        let op = ["->", "#=", "##"]
-            .into_iter()
-            .find(|op| expression_is_lident(apply.funct, op, self.arena));
-        match op {
+        if expression_is_lident(apply.funct, "->", self.arena) {
             // `a |. f`: `let a = self.expr self a_ in let f = self.expr self f_`.
-            Some("->") => {
-                self.expr(apply.args[0].1)?;
-                self.expr(apply.args[1].1)
+            self.expr(apply.args[0].1)?;
+            self.expr(apply.args[1].1)
+        } else {
+            // `default_expr_mapper`: attributes, arguments, function.
+            self.attributes(&expr.pexp_attributes)?;
+            for (_label, arg) in &apply.args {
+                self.expr(*arg)?;
             }
-            // `obj##name`: the object.
-            Some("##") => self.expr(apply.args[0].1),
-            // `obj#=arg` (gen_assignment): the object, then the value.
-            Some("#=") => {
-                let lhs = self.arena.get_expr(apply.args[0].1).clone();
-                match &*lhs.pexp_desc {
-                    ExpressionDesc::Pexp_send(inner) => self.expr(inner.0)?,
-                    ExpressionDesc::Pexp_apply(inner) => self.expr(inner.args[0].1)?,
-                    _ => {}
-                }
-                self.expr(apply.args[1].1)
-            }
-            _ => {
-                // `default_expr_mapper`: attributes, arguments, function.
-                self.attributes(&expr.pexp_attributes)?;
-                for (_label, arg) in &apply.args {
-                    self.expr(*arg)?;
-                }
-                self.expr(apply.funct)
-            }
+            self.expr(apply.funct)
         }
     }
 
@@ -861,7 +870,8 @@ impl<'a> Checker<'a> {
             && self.arena.value_constraint(vb.pvb_pat).is_none()
             && self.is_record_pattern(vb.pvb_pat)
             && !matches!(
-                &*self.arena.get_expr(vb.pvb_expr).pexp_desc,
+                &*crate::parser::parsetree_viewer::unwrap_braces(self.arena, self.arena.get_expr(vb.pvb_expr))
+                    .pexp_desc,
                 ExpressionDesc::Pexp_pack(_)
             )
         {
@@ -886,17 +896,17 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// `Ast_exp_extension.handle_extension` (ast_exp_extension.ml:26-83): the
-    /// payload is not mapped, except the fields of `%obj`.
+    /// `Ast_exp_extension.handle_extension` (ast_exp_extension.ml:26-67): the
+    /// payload is not mapped.
     fn expression_extension(&mut self, loc: LocIdx, extension: &Extension) -> PpxResult<()> {
         let (ext_name, payload) = extension;
         match self.arena.get_string(ext_name.txt) {
-            "obj" => {}
             "todo" => {
+                reject_json_literal_payload(payload, self.arena)?;
                 self.warnings.push(PpxWarning {
                     loc,
                     warning: Warning::BsTodo {
-                        message: todo_payload_message(payload, self.arena),
+                        message: payload_semantic_string(payload, self.arena),
                     },
                 });
                 return Ok(());
@@ -913,26 +923,8 @@ impl<'a> Checker<'a> {
                 push_raw_js_expression_warning(payload, self.arena, &mut self.warnings);
                 return Ok(());
             }
-            "re" => {
-                validate_expression_extension_payload_error(extension, self.arena)?;
-                push_raw_re_warning(payload, self.arena, &mut self.warnings);
-                return Ok(());
-            }
-            _ => return validate_expression_extension_payload_error(extension, self.arena),
+            _ => validate_expression_extension_payload_error(extension, self.arena),
         }
-        let Some(fields) = payload_single_record_fields_without_spread(payload, self.arena) else {
-            return Err(PpxError::at_loc(ext_name.loc, "Expect a record expression here"));
-        };
-        // `Ast_util.record_as_js_object` folds right over the fields: each
-        // label is checked, then its expression mapped.
-        let fields = fields.clone();
-        for field in fields.iter().rev() {
-            if !matches!(self.arena.get_longident(field.lid.txt), Longident::Lident(_)) {
-                return Err(PpxError::at_loc(field.lid.loc, "invalid js label "));
-            }
-            self.expr(field.expr)?;
-        }
-        Ok(())
     }
 
     /// `E.map` (ast_mapper.ml:282-390).
@@ -954,14 +946,32 @@ impl<'a> Checker<'a> {
                 }
                 Ok(())
             }
-            ExpressionDesc::Pexp_construct(_, arg) => match arg {
-                Some(arg) => self.expr(*arg),
-                None => Ok(()),
-            },
-            ExpressionDesc::Pexp_variant(inner) => match inner.1 {
-                Some(arg) => self.expr(arg),
-                None => Ok(()),
-            },
+            ExpressionDesc::Pexp_template(template) => {
+                for value in &template.values {
+                    self.expr(*value)?;
+                }
+                Ok(())
+            }
+            // The tag is the first constructor argument, so it is mapped after
+            // the values.
+            ExpressionDesc::Pexp_tagged_template(template) => {
+                for value in &template.values {
+                    self.expr(*value)?;
+                }
+                self.expr(template.tag)
+            }
+            ExpressionDesc::Pexp_construct(_, args) => {
+                for arg in args.txt.iter() {
+                    self.expr(*arg)?;
+                }
+                Ok(())
+            }
+            ExpressionDesc::Pexp_variant(inner) => {
+                for arg in inner.1.txt.iter() {
+                    self.expr(*arg)?;
+                }
+                Ok(())
+            }
             ExpressionDesc::Pexp_record(inner) => {
                 let (fields, spread) = &**inner;
                 if let Some(spread) = spread {
@@ -986,6 +996,14 @@ impl<'a> Checker<'a> {
                 self.expr(*then_expr)?;
                 self.expr(*cond)
             }
+            ExpressionDesc::Pexp_ternary(inner) => {
+                let (cond, consequent, alternate) = **inner;
+                self.expr(alternate)?;
+                self.expr(consequent)?;
+                self.expr(cond)
+            }
+            ExpressionDesc::Pexp_braces(braces) => self.expr(braces.expr),
+            ExpressionDesc::Pexp_regexp(_) => Ok(()),
             ExpressionDesc::Pexp_sequence(first, second) | ExpressionDesc::Pexp_while(first, second) => {
                 self.expr(*second)?;
                 self.expr(*first)
@@ -1018,7 +1036,19 @@ impl<'a> Checker<'a> {
                 }
                 self.expr(*inner_expr)
             }
-            ExpressionDesc::Pexp_send(inner) => self.expr(inner.0),
+            ExpressionDesc::Pexp_object_get(inner) => self.expr(inner.0),
+            // `object_set ~loc ~attrs (sub.expr sub e) (map_loc sub s) (sub.expr sub v)`:
+            // arguments right to left.
+            ExpressionDesc::Pexp_object_set(inner) => {
+                self.expr(inner.2)?;
+                self.expr(inner.0)
+            }
+            ExpressionDesc::Pexp_object_literal(fields) => {
+                for (_, e) in fields.iter() {
+                    self.expr(*e)?;
+                }
+                Ok(())
+            }
             ExpressionDesc::Pexp_letmodule(inner) => {
                 let (_name, mod_expr, body) = &**inner;
                 self.expr(*body)?;
@@ -1100,8 +1130,8 @@ impl<'a> Checker<'a> {
         case.pc_guard.is_none()
             && matches!(
                 &*self.arena.get_pat(case.pc_lhs).ppat_desc,
-                PatternDesc::Ppat_construct(lid, None)
-                    if matches!(
+                PatternDesc::Ppat_construct(lid, args)
+                    if args.txt.is_empty() && matches!(
                         self.arena.get_longident(lid.txt),
                         Longident::Lident(n) if self.arena.get_string(*n) == name
                     )

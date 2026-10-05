@@ -30,7 +30,7 @@ where
                     args.iter().any(|a| aux(a, exits))
                 }
             }
-            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+            Lambda::Lvar(_) | Lambda::LglobalModule(_) | Lambda::Lconst(_) => false,
             Lambda::Lapply(apply) => {
                 aux(&apply.ap_func, exits) || apply.ap_args.iter().any(|a| aux(a, exits))
             }

@@ -27,6 +27,22 @@ pub type Subst = HashMap<Ident, Lambda>;
 ///
 /// # Returns
 /// A new Lambda expression with substitutions applied.
+/// `Lambda_traverse.subst_lambda` (lambda_traverse.ml:235-241): replace
+/// variables and rebuild, through the smart constructors of
+/// `shallow_map_sharing`, only the nodes whose children changed.
+pub fn subst_lambda(s: &Subst, lam: Lambda) -> Lambda {
+    fn go(s: &Subst, lam: Lambda) -> crate::lambda::lambda_traverse::Mapped {
+        match lam {
+            Lambda::Lvar(ref id) => match s.get(id) {
+                Some(value) => (value.clone(), true),
+                None => (lam, false),
+            },
+            lam => crate::lambda::lambda_traverse::shallow_map_sharing(lam, &mut |inner| go(s, inner)),
+        }
+    }
+    go(s, lam).0
+}
+
 pub fn subst(s: &Subst, lam: &Lambda) -> Lambda {
     if s.is_empty() {
         return lam.clone();
@@ -79,7 +95,7 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
             loc: prim_info.loc.clone(),
         })),
 
-        Lambda::LglobalModule(_, _) => lam.clone(),
+        Lambda::LglobalModule(_) => lam.clone(),
 
         Lambda::Lswitch(arg, switch) => Lambda::Lswitch(
             Box::new(subst_aux(s, arg)),

@@ -54,7 +54,7 @@ type tail_type = Not_tail | Maybe_tail_is_return of maybe_tail
 (* have a mutable field to notifiy it's actually triggered *)
 (* anonoymous function does not have identifier *)
 
-type let_kind = Lam_compat.let_kind
+type let_kind = Lambda.let_kind
 type loop_frame = {mutable label: J.label option}
 
 type continuation =
@@ -100,7 +100,7 @@ let ensure_loop_label cxt frame =
     frame.label <- Some label;
     label
 
-type handler = {label: jbl_label; handler: Lam.t; bindings: Ident.t list}
+type handler = {label: jbl_label; handler: Lambda.t; bindings: Ident.t list}
 
 let no_static_raise_in_handler (x : handler) : bool =
   not (Lam_exit_code.has_exit_code x.handler (fun _code -> true))
@@ -112,7 +112,7 @@ let no_static_raise_in_handler (x : handler) : bool =
    [handlers] is used for compiling [staticcatch]
 *)
 let add_jmps (m : jmp_table) (exit_id : Ident.t) (code_table : handler list) :
-    jmp_table * (int * Lam.t) list =
+    jmp_table * (int * Lambda.t) list =
   let map, handlers =
     Ext_list.fold_left_with_offset code_table (m, [])
       (Handler_map.cardinal m + 1)
@@ -124,7 +124,7 @@ let add_jmps (m : jmp_table) (exit_id : Ident.t) (code_table : handler list) :
 
 let add_pseudo_jmp (m : jmp_table)
     (exit_id : Ident.t) (* TODO not needed, remove it later *)
-    (code_table : handler) : jmp_table * Lam.t =
+    (code_table : handler) : jmp_table * Lambda.t =
   ( Handler_map.add m code_table.label
       {exit_id; bindings = code_table.bindings; order_id = -1},
     code_table.handler )

@@ -7,16 +7,15 @@ let rec addAnnotationsToTypes_ ~config ~(expr : Typedtree.expression)
     let rec zip (params : Typedtree.function_param list)
         (arg_types : arg_type list) =
       match (params, arg_types) with
-      | {fp_lbl; fp_param} :: rest_params, {a_type} :: rest_types ->
-        let a_name = Ident.name fp_param in
+      | ( {fp_lbl; fp_param; fp_has_default} :: rest_params,
+          {a_type} :: rest_types ) ->
         let a_name =
-          (* optional parameters with a default are bound to a synthetic
-             [*opt_<label>*] variable; show the label instead *)
-          if String.length a_name >= 4 && String.sub a_name 0 4 = "*opt" then
-            match fp_lbl with
-            | Optional {txt = l} -> l
-            | _ -> "" (* should not happen *)
-          else a_name
+          match fp_lbl with
+          | Optional {txt = l} when fp_has_default ->
+            (* the compiled parameter is a synthetic option carrier; show the
+               label instead *)
+            l
+          | _ -> Ident.name fp_param
         in
         {a_name; a_type} :: zip rest_params rest_types
       | [], rest -> rest |> addAnnotationsToTypes_ ~config ~expr:body
@@ -36,7 +35,7 @@ and add_annotations_to_types ~config ~(expr : Typedtree.expression)
     (* Underscore "_" appears as "param", can occur more than once *)
     arg_types
     |> List.mapi (fun i {a_name; a_type} ->
-           {a_name = a_name ^ "_" ^ string_of_int i; a_type})
+        {a_name = a_name ^ "_" ^ string_of_int i; a_type})
   else arg_types
 
 and add_annotations_to_fields ~config (expr : Typedtree.expression)
@@ -126,10 +125,10 @@ let rec remove_duplicate_value_bindings
     let value_bindings_filtered =
       value_bindings
       |> List.filter (fun value_binding ->
-             match value_binding with
-             | {Typedtree.vb_pat = {pat_desc = Tpat_var (id, _)}} ->
-               not (bound_in_rest |> String_set.mem (id |> Ident.name))
-             | _ -> true)
+          match value_binding with
+          | {Typedtree.vb_pat = {pat_desc = Tpat_var (id, _)}} ->
+            not (bound_in_rest |> String_set.mem (id |> Ident.name))
+          | _ -> true)
     in
     let bound =
       value_bindings
@@ -354,6 +353,6 @@ and translate_structure ~config ~output_file_relative ~resolver ~type_env
   if !Debug.translation then Log_.item "Translate Structure\n";
   structure.Typedtree.str_items |> remove_value_binding_duplicates
   |> List.map (fun struct_item ->
-         struct_item
-         |> translate_structure_item ~config ~output_file_relative ~resolver
-              ~type_env)
+      struct_item
+      |> translate_structure_item ~config ~output_file_relative ~resolver
+           ~type_env)

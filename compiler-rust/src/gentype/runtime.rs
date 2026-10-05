@@ -48,14 +48,4 @@ pub fn js_variant_value(polymorphic: bool) -> String {
     }
 }
 
-pub fn is_mutable_object_field(name: &str) -> bool {
-    name.len() >= 2 && name.ends_with("#=")
-}
-
-/// Mutable fields, i.e. fields annotated "[@set]" are represented as extra
-/// fields called "fieldName#=" preceding the normal field.
-pub fn check_mutable_object_field(previous_name: &str, name: &str) -> bool {
-    previous_name == format!("{name}#=")
-}
-
 pub const default: &str = "$$default";

@@ -184,7 +184,7 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
                 f.print(format_args!("'\\x{i:02x}'"));
             }
         }
-        Constant::String { s, .. } => print_ocaml_string(f, s),
+        Constant::String(s) => print_ocaml_string(f, s),
         Constant::ImmString(s) => {
             f.string("#");
             print_ocaml_string(f, s);
@@ -354,7 +354,7 @@ fn print_switch_cases_with_exn<W: Write>(
                 block,
             )) => f.print(format_args!(
                 "case constructor {:?}:",
-                block.runtime.tag.name
+                block.tag().name
             )),
             crate::lambda::SwitchKey::Constructor(
                 crate::types::VariantConstructorCase::Constant(_),
@@ -424,14 +424,10 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
     match lam0 {
         RawLambda::Lshared(inner) => lam(f, inner, reraise_exn),
         RawLambda::Lvar(id) => print_ident(f, id),
-        RawLambda::LglobalModule(id, dynamic_import) => {
+        RawLambda::LglobalModule(id) => {
             f.open_box(BoxKind::Box, 2);
             f.string("(");
-            if *dynamic_import {
-                f.string("dynamic global ");
-            } else {
-                f.string("global ");
-            }
+            f.string("global ");
             print_ident(f, id);
             f.string(")");
             f.close_box();
@@ -508,7 +504,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
             f.string(")");
             f.close_box();
         }
-        RawLambda::Lswitch(arg, sw, _) => {
+        RawLambda::Lswitch(arg, sw) => {
             f.open_box(BoxKind::Box, 1);
             if sw.sw_failaction.is_some() {
                 f.string("(switch");
@@ -658,16 +654,6 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
             print_ident(f, id);
             f.space();
             lam(f, expr, reraise_exn);
-            f.string(")");
-            f.close_box();
-        }
-        RawLambda::Lsend(name, obj, _) => {
-            f.open_box(BoxKind::Box, 2);
-            f.string("(send");
-            f.string(name);
-            f.space();
-            lam(f, obj, reraise_exn);
-            f.space();
             f.string(")");
             f.close_box();
         }

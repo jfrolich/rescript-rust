@@ -22,7 +22,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA. *)
 
-(* let derivingName = "abstract" *)
 module U = Ast_derive_util
 open Ast_helper
 (* type tdcls = Parsetree.type_declaration list *)
@@ -32,11 +31,10 @@ type abstract_kind = Not_abstract | Light_abstract | Complex_abstract
 let is_abstract (xs : Ast_payload.action list) =
   match xs with
   | [({txt = "abstract"}, None)] -> Complex_abstract
-  | [({txt = "abstract"}, Some {pexp_desc = Pexp_ident {txt = Lident "light"}})]
-    ->
-    Light_abstract
-  | [({loc; txt = "abstract"}, Some _)] ->
-    Location.raise_errorf ~loc "invalid config for abstract"
+  | [({loc; txt = "abstract"}, Some config)] -> (
+    match (Ast_payload.unwrap_braces config).pexp_desc with
+    | Pexp_ident {txt = Lident "light"} -> Light_abstract
+    | _ -> Location.raise_errorf ~loc "invalid config for abstract")
   | xs ->
     Ext_list.iter xs (function {loc; txt}, _ ->
         (match txt with
@@ -92,6 +90,7 @@ let handle_tdcl light (tdcl : Parsetree.type_declaration) :
           [] )
         (fun ({
                 pld_name = {txt = label_name; loc = label_loc} as pld_name;
+                pld_runtime_name;
                 pld_type;
                 pld_mutable;
                 pld_attributes;
@@ -101,11 +100,13 @@ let handle_tdcl light (tdcl : Parsetree.type_declaration) :
              (acc, maker, labels)
            ->
           let prim_as_name, new_label =
-            match Ast_attributes.iter_process_bs_string_as pld_attributes with
+            match pld_runtime_name with
             | None -> (label_name, pld_name)
-            | Some new_name -> (new_name, {pld_name with txt = new_name})
+            | Some {txt} ->
+              let new_name = String_literal.string_semantic txt in
+              (new_name, {pld_name with txt = new_name})
           in
-          let prim = [prim_as_name] in
+          let prim = Parsetree.Prim_name prim_as_name in
           let is_optional = Ast_attributes.has_bs_optional pld_attributes in
 
           (* build the argument representing this field *)
@@ -137,9 +138,20 @@ let handle_tdcl light (tdcl : Parsetree.type_declaration) :
             (* Not needed actually *)
             if is_optional then prim
             else
-              External_ffi_types.ffi_bs_as_prims [External_arg_spec.dummy]
-                Return_identity
-                (Js_get {js_get_name = prim_as_name; js_get_scopes = []})
+              Parsetree.Prim_ffi
+                {
+                  name = "";
+                  spec =
+                    External_ffi_types.ffi_bs [External_arg_spec.dummy]
+                      Return_identity
+                      {
+                        kind = Decl_get {name = prim_as_name};
+                        module_ = None;
+                        scopes = [];
+                        variadic = false;
+                        effective_arity = 1;
+                      };
+                }
           in
           let accessor_attrs =
             if is_optional then get_optional_attrs else get_attrs
@@ -197,7 +209,6 @@ let handle_tdcl light (tdcl : Parsetree.type_declaration) :
         my_maker :: setter_accessor )
   | Ptype_abstract | Ptype_variant _ | Ptype_open ->
     (* Looks obvious that it does not make sense to warn *)
-    (* U.notApplicable tdcl.ptype_loc derivingName;  *)
     (tdcl, [])
 
 let handle_tdcls_in_str ~light rf tdcls =

@@ -1,6 +1,7 @@
 SHELL = /bin/bash
 
 test-analysis-binary:
+	./no-watcher.sh
 	make -C tests test
 	make -C tests-generic-jsx-transform test
 	make -C tests-incremental-typechecking test

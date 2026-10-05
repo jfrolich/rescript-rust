@@ -1,5 +1,11 @@
 open Parsetree
 
+let argument_loc (lbl, (arg : Parsetree.expression)) =
+  match lbl with
+  | Asttypes.Labelled {loc} | Optional {loc} ->
+    {loc with loc_end = arg.pexp_loc.loc_end}
+  | Nolabel -> arg.pexp_loc
+
 let arrow_type ct =
   match ct with
   | {ptyp_desc = Ptyp_arrow {params; ret}; ptyp_attributes = attrs} ->
@@ -31,13 +37,6 @@ let expr_is_await e =
   | Pexp_await _ -> true
   | _ -> false
 
-let has_inline_record_definition_attribute attrs =
-  List.exists
-    (function
-      | {Location.txt = "res.inlineRecordDefinition"}, _ -> true
-      | _ -> false)
-    attrs
-
 let has_res_pat_variant_spread_attribute attrs =
   List.exists
     (function
@@ -48,13 +47,13 @@ let has_res_pat_variant_spread_attribute attrs =
 let has_dict_pattern_attribute attrs =
   attrs
   |> List.find_opt (fun (({txt}, _) : Parsetree.attribute) ->
-         txt = "res.dictPattern")
+      txt = "res.dictPattern")
   |> Option.is_some
 
 let has_dict_spread_attribute attrs =
   attrs
   |> List.find_opt (fun (({txt}, _) : Parsetree.attribute) ->
-         txt = "res.dictSpread")
+      txt = "res.dictSpread")
   |> Option.is_some
 
 type dict_expr_part =
@@ -70,9 +69,10 @@ let collect_list_expressions expr =
   let rec collect acc expr =
     match expr.pexp_desc with
     | Pexp_construct ({txt = Longident.Lident "[]"}, _) -> (List.rev acc, None)
+    | Pexp_construct ({txt = Longident.Lident "::"}, {txt = hd :: [tail]})
     | Pexp_construct
         ( {txt = Longident.Lident "::"},
-          Some {pexp_desc = Pexp_tuple (hd :: [tail])} ) ->
+          {txt = [{pexp_desc = Pexp_tuple [hd; tail]}]} ) ->
       collect (hd :: acc) tail
     | _ -> (List.rev acc, Some expr)
   in
@@ -215,11 +215,15 @@ let fun_expr expr_ =
     (async, newtype_params newtypes @ params_of_fun params, body)
   | _ -> (false, [], expr_)
 
-let process_braces_attr expr =
-  match expr.pexp_attributes with
-  | (({txt = "res.braces" | "ns.braces"}, _) as attr) :: attrs ->
-    (Some attr, {expr with pexp_attributes = attrs})
+let process_braces expr =
+  match expr.pexp_desc with
+  | Pexp_braces {expr = inner; braces_loc} -> (Some braces_loc, inner)
   | _ -> (None, expr)
+
+let rec unwrap_braces expr =
+  match expr.pexp_desc with
+  | Pexp_braces {expr = inner} -> unwrap_braces inner
+  | _ -> expr
 
 let filter_parsing_attrs attrs =
   List.filter
@@ -227,10 +231,8 @@ let filter_parsing_attrs attrs =
       match attr with
       | ( {
             Location.txt =
-              ( "res.braces" | "ns.braces" | "res.iflet" | "res.ternary"
-              | "res.await" | "res.template" | "res.taggedTemplate"
-              | "res.patVariantSpread" | "res.dictPattern" | "res.dictSpread"
-              | "res.inlineRecordDefinition" );
+              ( "res.iflet" | "res.ternary" | "res.await"
+              | "res.patVariantSpread" | "res.dictPattern" | "res.dictSpread" );
           },
           _ ) ->
         false
@@ -238,15 +240,15 @@ let filter_parsing_attrs attrs =
     attrs
 
 let is_block_expr expr =
-  match expr.pexp_desc with
+  match (unwrap_braces expr).pexp_desc with
   | Pexp_letmodule _ | Pexp_letexception _ | Pexp_let _ | Pexp_open _
   | Pexp_sequence _ ->
     true
   | _ -> false
 
 let is_braced_expr expr =
-  match process_braces_attr expr with
-  | Some _, _ -> true
+  match expr.pexp_desc with
+  | Pexp_braces _ -> true
   | _ -> false
 
 let is_multiline_text txt =
@@ -265,23 +267,24 @@ let is_multiline_text txt =
 let is_huggable_expression expr =
   match expr.pexp_desc with
   | Pexp_array _ | Pexp_tuple _
-  | Pexp_constant (Pconst_string (_, Some _))
+  | Pexp_constant (Pconst_json _ | Pconst_char _)
+  | Pexp_template {values = []}
   | Pexp_construct ({txt = Longident.Lident ("::" | "[]")}, _)
-  | Pexp_extension ({txt = "obj"}, _)
-  | Pexp_record _ ->
+  | Pexp_object_literal _ | Pexp_record _ | Pexp_braces _ ->
     true
   | _ when is_block_expr expr -> true
-  | _ when is_braced_expr expr -> true
-  | Pexp_constant (Pconst_string (txt, None)) when is_multiline_text txt -> true
+  | Pexp_constant (Pconst_string payload)
+    when is_multiline_text (String_literal.string_source payload) ->
+    true
+  | Pexp_constant (Pconst_raw_source source) when is_multiline_text source ->
+    true
   | _ -> false
 
 let is_huggable_rhs expr =
   match expr.pexp_desc with
-  | Pexp_array _ | Pexp_tuple _
-  | Pexp_extension ({txt = "obj"}, _)
-  | Pexp_record _ ->
+  | Pexp_array _ | Pexp_tuple _ | Pexp_object_literal _ | Pexp_record _
+  | Pexp_braces _ ->
     true
-  | _ when is_braced_expr expr -> true
   | _ -> false
 
 let is_huggable_pattern pattern =
@@ -385,13 +388,7 @@ let has_attributes attrs =
   List.exists
     (fun attr ->
       match attr with
-      | ( {
-            Location.txt =
-              ( "res.braces" | "ns.braces" | "res.iflet" | "res.ternary"
-              | "res.await" | "res.template" | "res.inlineRecordDefinition" );
-          },
-          _ ) ->
-        false
+      | {Location.txt = "res.iflet" | "res.ternary" | "res.await"}, _ -> false
       (* Remove the fragile pattern warning for iflet expressions *)
       | ( {Location.txt = "warning"},
           PStr
@@ -399,10 +396,11 @@ let has_attributes attrs =
               {
                 pstr_desc =
                   Pstr_eval
-                    ({pexp_desc = Pexp_constant (Pconst_string ("-4", None))}, _);
+                    ({pexp_desc = Pexp_constant (Pconst_string payload)}, _);
               };
             ] ) ->
-        not (has_if_let_attribute attrs)
+        String_literal.string_semantic payload <> "-4"
+        || not (has_if_let_attribute attrs)
       | _ -> true)
     attrs
 
@@ -462,27 +460,15 @@ let collect_if_expressions expr =
   in
   collect [] expr
 
-let rec has_ternary_attribute attrs =
-  match attrs with
-  | [] -> false
-  | ({Location.txt = "res.ternary"}, _) :: _ -> true
-  | _ :: attrs -> has_ternary_attribute attrs
-
 let is_ternary_expr expr =
-  match expr with
-  | {pexp_attributes = attrs; pexp_desc = Pexp_ifthenelse _}
-    when has_ternary_attribute attrs ->
-    true
+  match expr.pexp_desc with
+  | Pexp_ternary _ -> true
   | _ -> false
 
 let collect_ternary_parts expr =
   let rec collect acc expr =
     match expr with
-    | {
-     pexp_attributes = attrs;
-     pexp_desc = Pexp_ifthenelse (condition, consequent, Some alternate);
-    }
-      when has_ternary_attribute attrs ->
+    | {pexp_desc = Pexp_ternary (condition, consequent, alternate)} ->
       collect ((condition, consequent) :: acc) alternate
     | alternate -> (List.rev acc, alternate)
   in
@@ -495,14 +481,6 @@ let parameters_should_hug parameters =
     true
   | _ -> false
 
-let filter_ternary_attributes attrs =
-  List.filter
-    (fun attr ->
-      match attr with
-      | {Location.txt = "res.ternary"}, _ -> false
-      | _ -> true)
-    attrs
-
 let filter_fragile_match_attributes attrs =
   List.filter
     (fun attr ->
@@ -513,10 +491,10 @@ let filter_fragile_match_attributes attrs =
               {
                 pstr_desc =
                   Pstr_eval
-                    ({pexp_desc = Pexp_constant (Pconst_string ("-4", _))}, _);
+                    ({pexp_desc = Pexp_constant (Pconst_string payload)}, _);
               };
             ] ) ->
-        false
+        String_literal.string_semantic payload <> "-4"
       | _ -> true)
     attrs
 
@@ -546,16 +524,15 @@ let should_indent_binary_expr expr =
   }
     when is_binary_operator operator ->
     is_equality_operator operator
-    || (not (same_precedence_sub_expression operator lhs))
-    || operator = ":="
+    || not (same_precedence_sub_expression operator lhs)
   | _ -> false
 
 let should_inline_rhs_binary_expr rhs =
-  match rhs.pexp_desc with
+  match (unwrap_braces rhs).pexp_desc with
   | Parsetree.Pexp_constant _ | Pexp_let _ | Pexp_letmodule _
   | Pexp_letexception _ | Pexp_sequence _ | Pexp_open _ | Pexp_ifthenelse _
-  | Pexp_for _ | Pexp_for_of _ | Pexp_for_await_of _ | Pexp_while _ | Pexp_try _
-  | Pexp_array _ | Pexp_record _ ->
+  | Pexp_ternary _ | Pexp_for _ | Pexp_for_of _ | Pexp_for_await_of _
+  | Pexp_while _ | Pexp_try _ | Pexp_array _ | Pexp_record _ ->
     true
   | _ -> false
 
@@ -563,9 +540,7 @@ let is_printable_attribute attr =
   match attr with
   | ( {
         Location.txt =
-          ( "res.iflet" | "res.braces" | "ns.braces" | "JSX" | "res.await"
-          | "res.template" | "res.taggedTemplate" | "res.ternary"
-          | "res.inlineRecordDefinition" | "res.dictSpread" );
+          "res.iflet" | "JSX" | "res.await" | "res.ternary" | "res.dictSpread";
       },
       _ ) ->
     false
@@ -587,17 +562,17 @@ let partition_doc_comment_attributes attrs =
             [
               {
                 pstr_desc =
-                  Pstr_eval
-                    ({pexp_desc = Pexp_constant (Pconst_string (_, _))}, _);
+                  Pstr_eval ({pexp_desc = Pexp_constant (Pconst_string _)}, _);
               };
             ] ) ->
         true
       | _ -> false)
     attrs
 
-let is_fun_expr expr =
+let rec is_fun_expr expr =
   match expr.pexp_desc with
   | Pexp_fun _ -> true
+  | Pexp_braces {expr} -> is_fun_expr expr
   | _ -> false
 
 let requires_special_callback_printing_last_arg args =
@@ -646,45 +621,21 @@ let mod_expr_functor mod_expr =
 let rec collect_patterns_from_list_construct acc pattern =
   let open Parsetree in
   match pattern.ppat_desc with
+  | Ppat_construct ({txt = Longident.Lident "::"}, {txt = [pat; rest]})
   | Ppat_construct
-      ({txt = Longident.Lident "::"}, Some {ppat_desc = Ppat_tuple [pat; rest]})
-    ->
+      ( {txt = Longident.Lident "::"},
+        {txt = [{ppat_desc = Ppat_tuple [pat; rest]}]} ) ->
     collect_patterns_from_list_construct (pat :: acc) rest
   | _ -> (List.rev acc, pattern)
 
-let has_template_literal_attr attrs =
-  List.exists
-    (fun attr ->
-      match attr with
-      | {Location.txt = "res.template"}, _ -> true
-      | _ -> false)
-    attrs
-
-let has_tagged_template_literal_attr attrs =
-  List.exists
-    (fun attr ->
-      match attr with
-      | {Location.txt = "res.taggedTemplate"}, _ -> true
-      | _ -> false)
-    attrs
-
 let is_template_literal expr =
   match expr.pexp_desc with
-  | Pexp_apply
-      {
-        funct = {pexp_desc = Pexp_ident {txt = Longident.Lident "++"}};
-        args = [(Nolabel, _); (Nolabel, _)];
-      }
-    when has_template_literal_attr expr.pexp_attributes ->
-    true
-  | Pexp_constant (Pconst_string (_, Some "")) -> true
-  | Pexp_constant _ when has_template_literal_attr expr.pexp_attributes -> true
+  | Pexp_template _ -> true
   | _ -> false
 
 let is_tagged_template_literal expr =
-  match expr with
-  | {pexp_desc = Pexp_apply _; pexp_attributes = attrs} ->
-    has_tagged_template_literal_attr attrs
+  match expr.pexp_desc with
+  | Pexp_tagged_template _ -> true
   | _ -> false
 
 let has_spread_attr attrs =

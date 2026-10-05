@@ -11,12 +11,11 @@ pub(super) use crate::lambda::js_exp_make::{
 pub(super) use crate::lambda::lam_coercion::resolve_export_aliases;
 pub(super) use crate::lambda::lam_compile_external::external_module_import_attributes;
 pub(super) use crate::lambda::lam_constant::{
-    Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo, StringDelim,
+    Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo,
 };
 pub(super) use crate::lambda::lam_primitive::{
-    ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
-    ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName, ExternalObjLabel,
-    ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, JsRawInfo, Mutable, Primitive,
+    Attr, Cst, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, JsRawInfo, Label,
+    LabelNoname, ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
 };
 pub(super) use crate::lambda::{
     ApInfo, Apply, ApplyStatus, Comparison, FieldDbgInfo, FunctionAttribute, InlineAttribute,
@@ -150,7 +149,7 @@ pub(super) fn find_variable_initializer<'a>(
 pub(super) fn external_module(bundle: &str) -> ExternalModuleName {
     ExternalModuleName {
         bundle: bundle.to_string(),
-        module_bind_name: ExternalModuleBindName::Nothing,
+        module_bind_name: ModuleBindName::PhintNothing,
         import_attributes: None,
     }
 }
@@ -162,7 +161,7 @@ fn external_module_with_attrs(
 ) -> ExternalModuleName {
     ExternalModuleName {
         bundle: bundle.to_string(),
-        module_bind_name: ExternalModuleBindName::HintName(hint.to_string()),
+        module_bind_name: ModuleBindName::PhintName(hint.to_string()),
         import_attributes: Some(
             attrs
                 .iter()
@@ -177,18 +176,15 @@ fn js_var_external(name: &str, external_module_name: Option<ExternalModuleName>)
         Primitive::PjsCall {
             prim_name: name.to_string(),
             arg_types: vec![],
-            ffi: Box::new(ExternalFfiSpec {
-                kind: ExternalFfiKind::Default,
-                spec: Some(ExternalSpec::JsVar {
+            ffi: Box::new(ExternalDecl {
+                kind: DeclKind::DeclVal {
                     name: name.to_string(),
-                    external_module_name,
-                    scopes: vec![],
-                }),
-                obj_params: None,
-                return_wrapper: ExternalReturnWrapper::Identity,
-                inline_constant: None,
+                },
+                module_: external_module_name.map(ModuleSource::ModuleNamed),
+                scopes: vec![],
+                variadic: false,
+                effective_arity: 0,
             }),
-            dynamic_import: false,
             transformed_jsx: false,
         },
         vec![],
@@ -340,14 +336,7 @@ fn console_log_effect(arg: Lambda) -> Lambda {
             Primitive::PjsCall {
                 prim_name: "console.log".to_string(),
                 arg_types: vec![],
-                ffi: Box::new(ExternalFfiSpec {
-                    kind: ExternalFfiKind::Default,
-                    spec: None,
-                    obj_params: None,
-                    return_wrapper: ExternalReturnWrapper::Identity,
-                    inline_constant: None,
-                }),
-                dynamic_import: false,
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                 transformed_jsx: false,
             },
             vec![arg],
@@ -546,30 +535,6 @@ fn lowers_upto_subint_one_finish_to_ocaml_exclusive_for_range() {
 
 #[test]
 #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn lowers_upto_predint_finish_to_ocaml_exclusive_for_range() {
-    let mut compiler = LambdaCompiler::new();
-    let i = Ident::create_local("i");
-    let xs = Ident::create_local("xs");
-    let lam = Lambda::for_(
-        i,
-        Lambda::const_(Constant::int(0)),
-        Lambda::prim(
-            Primitive::Poffsetint(-1),
-            vec![Lambda::var(xs)],
-            Location::none(),
-        ),
-        crate::lambda::DirectionFlag::Upto,
-        Lambda::unit(),
-    );
-
-    let compiled = compiler.compile_expr(&lam);
-    let rendered = print_block(&compiled.prelude);
-
-    assert_eq!(rendered.trim(), "for (let i = 0; i < xs; ++i) {}");
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
 fn lowers_for_bounds_preludes_in_ocaml_order_when_start_expr_is_pure() {
     let mut compiler = LambdaCompiler::new();
     let i = Ident::create_local("i");
@@ -674,7 +639,7 @@ fn compile_constant_named_constructor_uses_string_runtime_name() {
     assert!(matches!(
         compiled,
         Expression {
-            desc: ExpressionDesc::Str { ref txt, .. },
+            desc: ExpressionDesc::Str(ref txt),
             ..
         } if txt == "NoParam"
     ));
@@ -695,7 +660,7 @@ fn compile_constant_constructor_runtime_tag_uses_runtime_literal() {
     assert!(matches!(
         compiled,
         Expression {
-            desc: ExpressionDesc::Str { ref txt, .. },
+            desc: ExpressionDesc::Str(ref txt),
             ..
         } if txt == "three"
     ));
@@ -752,60 +717,34 @@ fn compile_constant_some_unit_boxes_undefined_none_encoding() {
 }
 
 #[test]
-fn compile_constant_preserves_marshaled_starj_strings() {
-    let compiled = LambdaCompiler::compile_constant(&Constant::String {
-        s: "\\\"".to_string(),
-        delim: Some(StringDelim::StarJ),
-    });
+fn compile_constant_escapes_semantic_strings() {
+    // lam_compile_const.ml: `Const_string s -> E.str s`, printed by
+    // `Js_dump_string.pp_string`.
+    let compiled = LambdaCompiler::compile_constant(&Constant::String("\\\"".to_string()));
 
     assert!(matches!(
         compiled,
         Expression {
-            desc: ExpressionDesc::Str {
-                delim: Delim::StarJ,
-                ref txt,
-            },
+            desc: ExpressionDesc::Str(ref txt),
             ..
         } if txt == "\\\""
     ));
-    assert_eq!(print_expression(&compiled), "\"\\\"\"");
+    assert_eq!(print_expression(&compiled), "\"\\\\\\\"\"");
 }
 
 #[test]
-fn compile_constant_quotes_noquote_delim_strings_like_ocaml() {
-    let compiled = LambdaCompiler::compile_constant(&Constant::String {
-        s: "{foo:true}".to_string(),
-        delim: Some(StringDelim::NoQuotes),
-    });
-
-    assert!(matches!(
-        compiled,
-        Expression {
-            desc: ExpressionDesc::Str {
-                delim: Delim::None,
-                ref txt,
-            },
-            ..
-        } if txt == "{foo:true}"
-    ));
-    assert_eq!(print_expression(&compiled), "\"{foo:true}\"");
-}
-
-#[test]
-fn switch_case_expr_preserves_marshaled_string_tags() {
+fn switch_case_expr_escapes_string_tags() {
+    // js_exp_make.ml `tag_type`: `String s -> str s`.
     let compiled = LambdaCompiler::switch_case_expr(&SwitchCaseTag::String("\\\"".to_string()));
 
     assert!(matches!(
         compiled,
         Expression {
-            desc: ExpressionDesc::Str {
-                delim: Delim::StarJ,
-                ref txt,
-            },
+            desc: ExpressionDesc::Str(ref txt),
             ..
         } if txt == "\\\""
     ));
-    assert_eq!(print_expression(&compiled), "\"\\\"\"");
+    assert_eq!(print_expression(&compiled), "\"\\\\\\\"\"");
 }
 
 #[test]
@@ -918,7 +857,7 @@ fn compile_create_extension_uses_primitive_exceptions_create() {
     assert!(matches!(
         args.as_slice(),
         [Expression {
-            desc: ExpressionDesc::Str { txt, .. },
+            desc: ExpressionDesc::Str(txt),
             ..
         }] if txt == "Local_exception_test.A"
     ));
@@ -970,10 +909,7 @@ fn compile_integer_inequality_preserves_typeof_string_comparison_like_ocaml() {
                 vec![Lambda::const_(Constant::int(3))],
                 Location::none(),
             ),
-            Lambda::const_(Constant::String {
-                s: "number".to_string(),
-                delim: Some(StringDelim::StarJ),
-            }),
+            Lambda::const_(Constant::String("number".to_string())),
         ],
         Location::none(),
     ));
@@ -1464,7 +1400,7 @@ fn compile_expr_keeps_forwarded_module_call_params_like_ocaml() {
                         name: "fromArray".to_string(),
                     },
                 ),
-                vec![Lambda::LglobalModule(belt_map, false)],
+                vec![Lambda::LglobalModule(belt_map)],
                 Location::none(),
             )),
             ap_args: vec![Lambda::var(none.clone()), Lambda::var(icmp.clone())],
@@ -1516,7 +1452,7 @@ fn compile_expr_keeps_forwarded_nested_wrapper_params_like_ocaml() {
                             name: "eq".to_string(),
                         },
                     ),
-                    vec![Lambda::LglobalModule(belt_map, false)],
+                    vec![Lambda::LglobalModule(belt_map)],
                     Location::none(),
                 )),
                 ap_args: vec![
@@ -1562,10 +1498,7 @@ fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_s
     let always_true = Ident::create_local("h");
     let also_true = Ident::create_local("j");
     let loc = Location::none();
-    let starj_empty = Lambda::const_(Constant::String {
-        s: "".to_string(),
-        delim: Some(StringDelim::StarJ),
-    });
+    let starj_empty = Lambda::const_(Constant::String("".to_string()));
 
     let outer_value = Lambda::let_(
         LetKind::Strict,
@@ -2364,10 +2297,7 @@ fn compile_deps_program_rebinds_marshaled_string_exports_after_surviving_functio
         Lambda::let_(
             LetKind::Strict,
             s.clone(),
-            Lambda::const_(Constant::String {
-                s: "😀".to_string(),
-                delim: Some(StringDelim::StarJ),
-            }),
+            Lambda::const_(Constant::String("😀".to_string())),
             Lambda::let_(
                 LetKind::Strict,
                 bar.clone(),
@@ -2520,7 +2450,7 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_across_later_
             ident,
             value:
                 Some(Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 }),
             property,
@@ -2593,7 +2523,7 @@ fn compile_deps_program_keeps_exports_after_trailing_effect_sequence() {
 }
 
 #[test]
-fn compile_deps_program_skips_unreachable_throwing_export_binding_declaration() {
+fn compile_deps_program_declares_export_left_unbound_by_throwing_binding() {
     let mut compiler = LambdaCompiler::new();
     let exported = Ident::create_local("u");
     let export_block = Lambda::prim(
@@ -2618,17 +2548,26 @@ fn compile_deps_program_skips_unreachable_throwing_export_binding_declaration() 
     let deps = compiler.compile_deps_program(&lam);
 
     assert_eq!(deps.program.exports, vec![exported.clone()]);
-    let [stmt] = deps.program.block.as_slice() else {
+    // lam_compile_main.ml `declare_undeclared_exports`: the export the
+    // throw left unbound is declared after it.
+    let [stmt, declared] = deps.program.block.as_slice() else {
         panic!(
-            "expected the terminating throw to stay as the only statement, got {:?}",
+            "expected the terminating throw followed by the export declaration, got {:?}",
             deps.program.block
         );
     };
     assert!(matches!(
+        declared,
+        Statement {
+            desc: StatementDesc::Variable(VariableDeclaration { ident, value: None, .. }),
+            ..
+        } if ident.same(&exported)
+    ));
+    assert!(matches!(
         stmt,
         Statement {
             desc: StatementDesc::Throw(Expression {
-                desc: ExpressionDesc::Str { txt, .. },
+                desc: ExpressionDesc::Str(txt),
                 ..
             }),
             ..
@@ -2637,7 +2576,7 @@ fn compile_deps_program_skips_unreachable_throwing_export_binding_declaration() 
 }
 
 #[test]
-fn compile_deps_program_skips_unreachable_nested_throwing_export_binding_declaration() {
+fn compile_deps_program_declares_export_left_unbound_by_nested_throwing_binding() {
     let mut compiler = LambdaCompiler::new();
     let exported = Ident::create_local("A");
     let nested = Ident::create_local("u");
@@ -2678,18 +2617,27 @@ fn compile_deps_program_skips_unreachable_nested_throwing_export_binding_declara
     let deps = compiler.compile_deps_program(&lam);
 
     assert_eq!(deps.program.exports, vec![exported.clone()]);
-    let [stmt] = deps.program.block.as_slice() else {
+    // lam_compile_main.ml `declare_undeclared_exports`: the export the
+    // throw left unbound is declared after it.
+    let [stmt, declared] = deps.program.block.as_slice() else {
         panic!(
-            "expected the terminating throw to stay as the only statement, got {:?}",
+            "expected the terminating throw followed by the export declaration, got {:?}",
             deps.program.block
         );
     };
+    assert!(matches!(
+        declared,
+        Statement {
+            desc: StatementDesc::Variable(VariableDeclaration { ident, value: None, .. }),
+            ..
+        } if ident.same(&exported)
+    ));
     assert!(
         matches!(
             stmt,
             Statement {
                 desc: StatementDesc::Throw(Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 }),
                 ..
@@ -2719,7 +2667,7 @@ fn compile_return_block_skips_unreachable_sequence_after_throw() {
         stmt,
         Statement {
             desc: StatementDesc::Throw(Expression {
-                desc: ExpressionDesc::Str { txt, .. },
+                desc: ExpressionDesc::Str(txt),
                 ..
             }),
             ..
@@ -4228,7 +4176,7 @@ fn unit_return_function_with_trivial_if_branches_keeps_condition_effect_only() {
 }
 
 #[test]
-fn unit_return_function_keeps_positive_effect_guard_through_js_pipeline() {
+fn unit_return_function_flips_effect_guard_into_early_return() {
     let mut compiler = LambdaCompiler::new();
     let run = Ident::create_local("run");
     let cond = Ident::create_local("cond");
@@ -4261,21 +4209,13 @@ fn unit_return_function_keeps_positive_effect_guard_through_js_pipeline() {
 
     let deps = compiler.compile_deps_program(&lam);
     let rendered = print_deps_program(&deps, None);
+    // OCaml compiles the assignment as a statement whatever the
+    // continuation (`compile_assign`), so the tail `else` is
+    // `[Return undefined]` and `Js_stmt_make.if_` flips the guard into an
+    // early return.
     assert!(
-        rendered.contains("if (cond) {"),
-        "expected the unit-return function to keep a positive guard, got:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("seen = 1;"),
-        "expected the effectful branch to stay inside the positive guard, got:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("return;"),
-        "expected the unit-return branch to keep its tail return, got:\n{rendered}"
-    );
-    assert!(
-        !rendered.contains("if (!cond) {"),
-        "unexpected negative guard in final JS pipeline output:\n{rendered}"
+        rendered.contains("  if (!cond) {\n    return;\n  }\n  seen = 1;\n}"),
+        "expected the guard to flip into an early return, got:\n{rendered}"
     );
 }
 
@@ -5380,7 +5320,7 @@ pub(super) fn mixed_untagged_string_overlap_switch(
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                         name: "a".to_string(),
-                        tag_type: Some(crate::types::VariantTagType::String("a".to_string())),
+                        literal: Some(crate::types::VariantLiteralTag::String("a".to_string())),
                     }),
                 ),
                 default_body.clone(),
@@ -5389,7 +5329,7 @@ pub(super) fn mixed_untagged_string_overlap_switch(
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                         name: "b".to_string(),
-                        tag_type: Some(crate::types::VariantTagType::String("b".to_string())),
+                        literal: Some(crate::types::VariantLiteralTag::String("b".to_string())),
                     }),
                 ),
                 default_body.clone(),
@@ -5398,7 +5338,7 @@ pub(super) fn mixed_untagged_string_overlap_switch(
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                         name: "space".to_string(),
-                        tag_type: Some(crate::types::VariantTagType::String("space".to_string())),
+                        literal: Some(crate::types::VariantLiteralTag::String("space".to_string())),
                     }),
                 ),
                 space_body,
@@ -5411,9 +5351,9 @@ pub(super) fn mixed_untagged_string_overlap_switch(
             tag_name: None,
             block_types: vec![crate::types::VariantBlockType::String],
             literal_tags: vec![
-                crate::types::VariantTagType::String("space".to_string()),
-                crate::types::VariantTagType::String("b".to_string()),
-                crate::types::VariantTagType::String("a".to_string()),
+                crate::types::VariantLiteralTag::String("space".to_string()),
+                crate::types::VariantLiteralTag::String("b".to_string()),
+                crate::types::VariantLiteralTag::String("a".to_string()),
             ],
             has_null: false,
             has_undefined: false,
@@ -5432,7 +5372,7 @@ pub(super) fn single_complete_array_block_switch(
             crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(
                 crate::types::VariantTag {
                     name: "Empty".to_string(),
-                    tag_type: Some(crate::types::VariantTagType::Undefined),
+                    literal: Some(crate::types::VariantLiteralTag::Undefined),
                 },
             )),
             undefined_body,
@@ -5440,19 +5380,12 @@ pub(super) fn single_complete_array_block_switch(
         sw_blocks_full: true,
         sw_blocks: vec![(
             crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                crate::types::VariantBlock {
-                    runtime: crate::types::BlockRuntime {
-                        tag: crate::types::VariantTag {
+                crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                             name: "Cons".to_string(),
-                            tag_type: None,
-                        },
-                        tag_name: None,
-                        untagged: true,
-                    },
-                    block_type: Some(crate::types::VariantBlockType::Instance(
+                            literal: None,
+                        }, block_type: crate::types::VariantBlockType::Instance(
                         crate::types::VariantInstance::Array,
-                    )),
-                },
+                    ) },
             )),
             array_body,
         )],
@@ -5462,7 +5395,7 @@ pub(super) fn single_complete_array_block_switch(
             block_types: vec![crate::types::VariantBlockType::Instance(
                 crate::types::VariantInstance::Array,
             )],
-            literal_tags: vec![crate::types::VariantTagType::Undefined],
+            literal_tags: vec![crate::types::VariantLiteralTag::Undefined],
             has_null: false,
             has_undefined: true,
             has_other_literal: false,
@@ -5480,17 +5413,10 @@ pub(super) fn default_only_untagged_boolean_switch(
         sw_blocks_full: false,
         sw_blocks: vec![(
             crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                crate::types::VariantBlock {
-                    runtime: crate::types::BlockRuntime {
-                        tag: crate::types::VariantTag {
+                crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                             name: "B".to_string(),
-                            tag_type: None,
-                        },
-                        tag_name: None,
-                        untagged: true,
-                    },
-                    block_type: Some(crate::types::VariantBlockType::Boolean),
-                },
+                            literal: None,
+                        }, block_type: crate::types::VariantBlockType::Boolean },
             )),
             boolean_body,
         )],
@@ -5503,8 +5429,8 @@ pub(super) fn default_only_untagged_boolean_switch(
                 crate::types::VariantBlockType::Boolean,
             ],
             literal_tags: vec![
-                crate::types::VariantTagType::Undefined,
-                crate::types::VariantTagType::Null,
+                crate::types::VariantLiteralTag::Undefined,
+                crate::types::VariantLiteralTag::Null,
             ],
             has_null: true,
             has_undefined: true,
@@ -5759,7 +5685,7 @@ pub(super) fn assert_typeof_check(
             assert!(matches!(
                 right.as_ref(),
                 Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 } if txt == expected_type
             ));
@@ -5830,7 +5756,7 @@ pub(super) fn assert_string_equality_check(
             assert!(matches!(
                 right.as_ref(),
                 Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 } if txt == expected_tag
             ));
@@ -7471,14 +7397,10 @@ fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
                                 Box::new(TagInfo::Constructor {
                                     name: "::".to_string(),
                                     num_nonconst: 1,
-                                    runtime: Box::new(crate::types::BlockRuntime {
-                                        tag: crate::types::VariantTag {
+                                    runtime: Box::new(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                             name: "::".to_string(),
-                                            tag_type: None,
-                                        },
-                                        tag_name: None,
-                                        untagged: false,
-                                    }),
+                                            literal: None,
+                                        }, tag_name: None }),
                                 }),
                             )),
                         ],
@@ -7486,14 +7408,10 @@ fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
                         Box::new(TagInfo::Constructor {
                             name: "::".to_string(),
                             num_nonconst: 1,
-                            runtime: Box::new(crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                            runtime: Box::new(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                     name: "::".to_string(),
-                                    tag_type: None,
-                                },
-                                tag_name: None,
-                                untagged: false,
-                            }),
+                                    literal: None,
+                                }, tag_name: None }),
                         }),
                     ))),
                     property: LetKind::Strict,
@@ -8069,7 +7987,7 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
                         items.as_slice(),
                         [
                             Expression {
-                                desc: ExpressionDesc::Str { .. },
+                                desc: ExpressionDesc::Str(_),
                                 ..
                             },
                             Expression {
@@ -8365,16 +8283,18 @@ x: {
 }
 
 #[test]
-fn source_json_template_falls_back_to_regular_string_interpolation_like_ocaml() {
+fn source_json_template_with_interpolation_is_a_syntax_error_like_ocaml() {
     let source = r#"
 let x = json`some random ${"string"}`
 "#;
 
-    let output = compile_test_source_to_js(source, "json_template_test.res").unwrap();
+    let error = compile_test_source_to_js(source, "json_template_test.res")
+        .unwrap_err()
+        .to_string();
 
     assert!(
-        output.contains("let x = \"some random \" + \"string\";"),
-        "expected ordinary string interpolation fallback, got:\n{output}"
+        error.contains("`json` literals do not support interpolation"),
+        "expected json interpolation syntax error, got:\n{error}"
     );
 }
 
@@ -8462,93 +8382,14 @@ fn lowers_paddint_with_int32_coercion() {
 }
 
 #[test]
-fn lowers_poffsetref_to_ref_contents_update() {
-    let mut compiler = LambdaCompiler::new();
-    let cell = Ident::create_local("cell");
-    let program = compiler.compile_program(&Lambda::prim(
-        Primitive::Poffsetref(1),
-        vec![Lambda::var(cell.clone())],
-        Location::none(),
-    ));
-
-    let [stmt] = program.block.as_slice() else {
-        panic!("expected a single effect statement");
-    };
-    match &stmt.desc {
-        StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::Bin(BinOp::Eq, left, right),
-            ..
-        }) => {
-            assert!(matches!(
-                left.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::StaticIndex(target, field, Some(index)),
-                    ..
-                } if field == "contents"
-                    && *index == 0
-                    && matches!(
-                        target.as_ref(),
-                        Expression {
-                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                            ..
-                        } if id.same(&cell)
-                    )
-            ));
-            assert!(matches!(
-                right.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Bin(BinOp::Bor, offset_inner, truncation),
-                    ..
-                }
-                if matches!(
-                    truncation.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Number(Number::Int { i: 0, .. }),
-                        ..
-                    }
-                ) && matches!(
-                    offset_inner.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Bin(BinOp::Plus, read_back, delta),
-                        ..
-                    }
-                    if matches!(
-                        read_back.as_ref(),
-                        Expression {
-                            desc: ExpressionDesc::StaticIndex(target, field, Some(index)),
-                            ..
-                        } if field == "contents"
-                            && *index == 0
-                            && matches!(
-                                target.as_ref(),
-                                Expression {
-                                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                                    ..
-                                } if id.same(&cell)
-                            )
-                    ) && matches!(
-                        delta.as_ref(),
-                        Expression {
-                            desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
-                            ..
-                        }
-                    )
-                )
-            ));
-        }
-        other => panic!("expected `cell.contents = cell.contents + 1 | 0`, got {other:?}"),
-    }
-}
-
-#[test]
 fn lassign_expression_lowers_to_statement_prelude_and_unit_value() {
     let mut compiler = LambdaCompiler::new();
     let cell = Ident::create_local("cell");
     let compiled = compiler.compile_expr(&Lambda::Lassign(
         cell.clone(),
         Box::new(Lambda::prim(
-            Primitive::Poffsetint(1),
-            vec![Lambda::var(cell.clone())],
+            Primitive::Paddint,
+            vec![Lambda::var(cell.clone()), Lambda::const_(Constant::int(1))],
             Location::none(),
         )),
     ));
@@ -8574,8 +8415,8 @@ fn let_bindings_of_unit_lassigns_emit_effects_before_undefined_declarations() {
         &Lambda::Lassign(
             u.clone(),
             Box::new(Lambda::prim(
-                Primitive::Poffsetint(1),
-                vec![Lambda::var(u.clone())],
+                Primitive::Paddint,
+                vec![Lambda::var(u.clone()), Lambda::const_(Constant::int(1))],
                 Location::none(),
             )),
         ),
@@ -8668,43 +8509,6 @@ fn typeof_literal_comparisons_fold_like_ocaml_string_equal() {
             "object",
         )),
         "false"
-    );
-}
-
-#[test]
-fn lowers_pisout_to_ocaml_range_check_shapes() {
-    let mut compiler = LambdaCompiler::new();
-    let value = Ident::create_local("value");
-    let zero_offset = compiler.compile_expr(&Lambda::prim(
-        Primitive::Pisout(0),
-        vec![Lambda::const_(Constant::int(1)), Lambda::var(value.clone())],
-        Location::none(),
-    ));
-    let one_offset = compiler.compile_expr(&Lambda::prim(
-        Primitive::Pisout(1),
-        vec![Lambda::const_(Constant::int(1)), Lambda::var(value)],
-        Location::none(),
-    ));
-
-    assert!(
-        zero_offset.prelude.is_empty(),
-        "unexpected prelude:\n{}",
-        print_block(&zero_offset.prelude)
-    );
-    assert!(
-        one_offset.prelude.is_empty(),
-        "unexpected prelude:\n{}",
-        print_block(&one_offset.prelude)
-    );
-    assert!(
-        print_expression(&zero_offset.expr) == "value !== 0 && value !== 1",
-        "rendered expression was:\n{}",
-        print_expression(&zero_offset.expr)
-    );
-    assert!(
-        print_expression(&one_offset.expr) == "value !== -1 && value !== 0",
-        "rendered expression was:\n{}",
-        print_expression(&one_offset.expr)
     );
 }
 
@@ -8997,7 +8801,7 @@ fn lowers_pnull_to_opt_non_inline_operand_to_primitive_option_from_null() {
     assert!(matches!(
         args.as_slice(),
         [Expression {
-            desc: ExpressionDesc::Str { txt, .. },
+            desc: ExpressionDesc::Str(txt),
             ..
         }] if txt == "value"
     ));
@@ -9030,7 +8834,7 @@ fn lowers_pnull_undefined_to_opt_non_inline_operand_to_primitive_option_from_nul
     assert!(matches!(
         args.as_slice(),
         [Expression {
-            desc: ExpressionDesc::Str { txt, .. },
+            desc: ExpressionDesc::Str(txt),
             ..
         }] if txt == "value"
     ));
@@ -9304,14 +9108,10 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
             Box::new(TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
-                runtime: Box::new(crate::types::BlockRuntime {
-                    tag: crate::types::VariantTag {
+                runtime: Box::new(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                         name: "::".to_string(),
-                        tag_type: None,
-                    },
-                    tag_name: None,
-                    untagged: false,
-                }),
+                        literal: None,
+                    }, tag_name: None }),
             }),
         )),
     );
@@ -9324,14 +9124,10 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
             Box::new(TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
-                runtime: Box::new(crate::types::BlockRuntime {
-                    tag: crate::types::VariantTag {
+                runtime: Box::new(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                         name: "::".to_string(),
-                        tag_type: None,
-                    },
-                    tag_name: None,
-                    untagged: false,
-                }),
+                        literal: None,
+                    }, tag_name: None }),
             }),
         )),
     );
@@ -10566,7 +10362,7 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                         name: "Empty".to_string(),
-                        tag_type: None,
+                        literal: None,
                     }),
                 ),
                 Lambda::const_(Constant::int(0)),
@@ -10574,17 +10370,10 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
             sw_blocks_full: true,
             sw_blocks: vec![(
                 crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                    crate::types::VariantBlock {
-                        runtime: crate::types::BlockRuntime {
-                            tag: crate::types::VariantTag {
+                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                 name: "Node".to_string(),
-                                tag_type: None,
-                            },
-                            tag_name: None,
-                            untagged: false,
-                        },
-                        block_type: None,
-                    },
+                                literal: None,
+                            }, tag_name: None }),
                 )),
                 tailcall,
             )],
@@ -10593,7 +10382,7 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
                 crate::types::VariantMatchingFacts {
                     tag_name: None,
                     block_types: vec![],
-                    literal_tags: vec![crate::types::VariantTagType::String(
+                    literal_tags: vec![crate::types::VariantLiteralTag::String(
                         "Empty".to_string().clone(),
                     )],
                     has_null: false,

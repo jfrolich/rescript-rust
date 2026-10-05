@@ -15,7 +15,7 @@ use crate::types::context::TypeContext;
 use crate::types::path::Path;
 use crate::parser::longident::Longident;
 use crate::types::asttypes::ArgLabel;
-use crate::types::type_expr::{FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
+use crate::types::type_expr::{GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
 
 // ============================================================================
 // Outcometree (compiler/ml/outcometree.ml)
@@ -51,10 +51,10 @@ pub(crate) enum OutType {
     Otyp_open,
     Otyp_alias(Box<OutType>, String),
     Otyp_arrow(Vec<(OutArgLabel, OutType)>, Box<OutType>),
-    Otyp_class(bool, OutIdent, Vec<OutType>),
     Otyp_constr(OutIdent, Vec<OutType>),
     Otyp_manifest(Box<OutType>, Box<OutType>),
-    Otyp_object(Vec<(String, OutType)>, Option<bool>),
+    /// Fields are (name, mutable, type).
+    Otyp_object(Vec<(String, bool, OutType)>, Option<bool>),
     /// `(name, mutable, optional, type)` rows.
     Otyp_record(Vec<(String, bool, bool, OutType)>),
     Otyp_stuff(String),
@@ -115,7 +115,21 @@ pub(crate) struct OutExtensionConstructor {
 pub(crate) struct OutValDecl {
     pub name: String,
     pub typ: OutType,
-    pub prims: Vec<String>,
+    /// `oval_prim`: the primitive, rebuilt from the primitive description by
+    /// `Primitive.print`.
+    pub prim: Option<OutPrim>,
+}
+
+/// `Parsetree.primitive_repr` as `Primitive.print` rebuilds it for the
+/// outcome tree.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum OutPrim {
+    Name(String),
+    Ffi {
+        name: String,
+        spec: crate::types::external_ffi_types::ExternalFfi,
+    },
+    InlineConst(crate::types::external_ffi_types::InlineConst),
 }
 
 /// `Outcometree.out_module_type`.
@@ -503,36 +517,21 @@ impl<'a> Printtyp<'a> {
                     }
                 }
             }
-            TypeDesc::Tobject { fields, name } => {
+            TypeDesc::Tobject { fields } => {
                 if self.visited_objects.contains(&px) {
                     self.add_alias(px);
                 } else {
                     if self.opened_object(ty) {
                         self.visited_objects.insert(0, px);
                     }
-                    match name {
-                        None => {
-                            let (fields, _) = flatten_fields(self.ctx, fields);
-                            for (_, kind, t) in fields {
-                                if matches!(kind, FieldKind::Fpresent) {
-                                    self.mark_loops_rec(visited, t);
-                                }
-                            }
-                        }
-                        Some((_, l)) => {
-                            for t in l.into_iter().skip(1) {
-                                self.mark_loops_rec(visited, t);
-                            }
-                        }
+                    let (fields, _) = flatten_fields(self.ctx, fields);
+                    for field in fields {
+                        self.mark_loops_rec(visited, field.typ);
                     }
                 }
             }
-            TypeDesc::Tfield {
-                kind, typ, rest, ..
-            } => {
-                if matches!(kind, FieldKind::Fpresent) {
-                    self.mark_loops_rec(visited, typ);
-                }
+            TypeDesc::Tfield { typ, rest, .. } => {
+                self.mark_loops_rec(visited, typ);
                 self.mark_loops_rec(visited, rest);
             }
             TypeDesc::Tnil => {}
@@ -551,7 +550,8 @@ impl<'a> Printtyp<'a> {
 
     /// `mark_loops`.
     pub(crate) fn mark_loops(&mut self, ty: TypeExprRef) {
-        crate::types::ctype::normalize_type(self.ctx, ty);
+        // printtyp.ml:520: `normalize_type Env.empty ty`.
+        crate::types::ctype::normalize_type(self.ctx, &crate::types::env::Env::empty(), ty);
         self.mark_loops_rec(&mut Vec::new(), ty);
     }
 
@@ -652,10 +652,8 @@ impl<'a> Printtyp<'a> {
                     OutType::Otyp_constr(this.tree_of_path(path), this.tree_of_typlist(sch, args))
                 }
                 TypeDesc::Tvariant(row) => this.tree_of_variant(sch, px, row),
-                TypeDesc::Tobject { fields, name } => {
-                    this.tree_of_typobject(sch, *fields, name.clone())
-                }
-                TypeDesc::Tnil | TypeDesc::Tfield { .. } => this.tree_of_typobject(sch, ty, None),
+                TypeDesc::Tobject { fields } => this.tree_of_typobject(sch, *fields),
+                TypeDesc::Tnil | TypeDesc::Tfield { .. } => this.tree_of_typobject(sch, ty),
                 TypeDesc::Tsubst(t) => this.tree_of_typexp(sch, *t),
                 TypeDesc::Tlink(_) => unreachable!("Printtyp.tree_of_typexp"),
                 TypeDesc::Tpoly { body, vars } => {
@@ -770,40 +768,30 @@ impl<'a> Printtyp<'a> {
         tyl.iter().map(|t| self.tree_of_typexp(sch, *t)).collect()
     }
 
-    fn tree_of_typobject(
-        &mut self,
-        sch: bool,
-        fi: TypeExprRef,
-        nm: Option<(Path, Vec<TypeExprRef>)>,
-    ) -> OutType {
-        match nm {
-            None => {
-                let (fields, rest) = flatten_fields(self.ctx, fi);
-                let mut present: Vec<(String, TypeExprRef)> = fields
-                    .into_iter()
-                    .filter(|(_, k, _)| matches!(k, FieldKind::Fpresent))
-                    .map(|(n, _, t)| (n, t))
-                    .collect();
-                present.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
-                let fields = present
-                    .into_iter()
-                    .map(|(s, t)| (s, self.tree_of_typexp(sch, t)))
-                    .collect();
-                let rest = match &*self.ctx.borrow_desc(rest) {
-                    TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => Some(self.is_non_gen(sch, rest)),
-                    TypeDesc::Tconstr { .. } => Some(false),
-                    TypeDesc::Tnil => None,
-                    _ => unreachable!("typfields (1)"),
-                };
-                OutType::Otyp_object(fields, rest)
-            }
-            Some((p, tyl)) if !tyl.is_empty() => {
-                let non_gen = self.is_non_gen(sch, self.ctx.repr(tyl[0]));
-                let args = self.tree_of_typlist(sch, &tyl[1..]);
-                OutType::Otyp_class(non_gen, self.tree_of_path(&p), args)
-            }
-            Some(_) => unreachable!("Printtyp.tree_of_typobject"),
-        }
+    fn tree_of_typobject(&mut self, sch: bool, fi: TypeExprRef) -> OutType {
+        let (fields, rest) = flatten_fields(self.ctx, fi);
+        let mut present: Vec<(String, bool, TypeExprRef)> = fields
+            .into_iter()
+            .map(|f| {
+                let mutable = matches!(
+                    self.ctx.mutability_repr(f.mutability),
+                    crate::types::asttypes::MutableFlag::Mutable
+                );
+                (f.name, mutable, f.typ)
+            })
+            .collect();
+        present.sort_by(|(a, _, _), (b, _, _)| a.as_bytes().cmp(b.as_bytes()));
+        let fields = present
+            .into_iter()
+            .map(|(s, mutable, t)| (s, mutable, self.tree_of_typexp(sch, t)))
+            .collect();
+        let rest = match &*self.ctx.borrow_desc(rest) {
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => Some(self.is_non_gen(sch, rest)),
+            TypeDesc::Tconstr { .. } => Some(false),
+            TypeDesc::Tnil => None,
+            _ => unreachable!("typfields (1)"),
+        };
+        OutType::Otyp_object(fields, rest)
     }
 
     /// `tree_of_label` (compiler/ml/printtyp.ml).
@@ -1131,23 +1119,23 @@ impl<'a> Printtyp<'a> {
             None
         } else {
             let tag_type = layout.and_then(|layout| match layout.constructors.get(position) {
-                Some(crate::types::VariantConstructorCase::Constant(tag)) => tag.tag_type.clone(),
+                Some(crate::types::VariantConstructorCase::Constant(tag)) => tag.literal.clone(),
                 Some(crate::types::VariantConstructorCase::Block(block)) => {
-                    block.runtime.tag.tag_type.clone()
+                    block.tag().literal.clone()
                 }
                 None => None,
             });
             match tag_type {
-                Some(crate::types::VariantTagType::Null) => Some("@as(null)".to_string()),
-                Some(crate::types::VariantTagType::Undefined) => Some("@as(undefined)".to_string()),
-                Some(crate::types::VariantTagType::String(s)) => {
+                Some(crate::types::VariantLiteralTag::Null) => Some("@as(null)".to_string()),
+                Some(crate::types::VariantLiteralTag::Undefined) => Some("@as(undefined)".to_string()),
+                Some(crate::types::VariantLiteralTag::String(s)) => {
                     Some(format!("@as(\"{}\")", ocaml_string_escaped(&s)))
                 }
-                Some(crate::types::VariantTagType::Int(i)) => Some(format!("@as({i})")),
-                Some(crate::types::VariantTagType::Float(f)) => Some(format!("@as({f})")),
-                Some(crate::types::VariantTagType::Bool(b)) => Some(format!("@as({b})")),
-                Some(crate::types::VariantTagType::BigInt(s)) => Some(format!("@as({s}n)")),
-                Some(crate::types::VariantTagType::Untagged(_)) | None => None,
+                Some(crate::types::VariantLiteralTag::Int(i)) => Some(format!("@as({i})")),
+                Some(crate::types::VariantLiteralTag::Float(f)) => Some(format!("@as({f})")),
+                Some(crate::types::VariantLiteralTag::Bool(b)) => Some(format!("@as({b})")),
+                Some(crate::types::VariantLiteralTag::BigInt(s)) => Some(format!("@as({s}n)")),
+                None => None,
             }
         };
         match cd.cd_res {
@@ -1256,20 +1244,22 @@ impl<'a> Printtyp<'a> {
     ) -> OutSigItem {
         self.reset_and_mark_loops(decl.val_type);
         let typ = self.tree_of_typexp(true, decl.val_type);
-        let prims = match &decl.val_kind {
-            crate::types::decl::ValueKind::ValPrim(p) => {
-                if p.prim_native_name.is_empty() {
-                    vec![p.prim_name.clone()]
-                } else {
-                    vec![p.prim_name.clone(), p.prim_native_name.clone()]
-                }
-            }
-            crate::types::decl::ValueKind::ValReg => Vec::new(),
+        // primitive.ml `print`.
+        let prim = match &decl.val_kind {
+            crate::types::decl::ValueKind::ValPrim(p) => Some(match &p.prim_kind {
+                crate::types::decl::PrimKind::KindIntrinsic => OutPrim::Name(p.prim_name.clone()),
+                crate::types::decl::PrimKind::KindExternal(spec) => OutPrim::Ffi {
+                    name: p.prim_name.clone(),
+                    spec: (**spec).clone(),
+                },
+                crate::types::decl::PrimKind::KindInlineConst(c) => OutPrim::InlineConst((**c).clone()),
+            }),
+            crate::types::decl::ValueKind::ValReg => None,
         };
         OutSigItem::Osig_value(OutValDecl {
             name: id.name().to_string(),
             typ,
-            prims,
+            prim,
         })
     }
 
@@ -1468,27 +1458,8 @@ fn ocaml_string_escaped(s: &str) -> String {
 fn flatten_fields(
     ctx: &TypeContext,
     ty: TypeExprRef,
-) -> (Vec<(String, FieldKind, TypeExprRef)>, TypeExprRef) {
-    let mut fields = Vec::new();
-    let mut current = ctx.repr(ty);
-    loop {
-        let next = match &*ctx.borrow_desc(current) {
-            TypeDesc::Tfield {
-                name,
-                kind,
-                typ,
-                rest,
-            } => {
-                fields.push((name.clone(), kind.clone(), *typ));
-                *rest
-            }
-            _ => break,
-        };
-        current = ctx.repr(next);
-    }
-    fields.reverse();
-    fields.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-    (fields, current)
+) -> (Vec<crate::types::ctype::FieldInfo>, TypeExprRef) {
+    crate::types::ctype::flatten_fields(ctx, ty)
 }
 
 /// `Longident.flatten`.
@@ -1571,7 +1542,6 @@ pub(crate) fn print_out_type_doc(out_type: &OutType) -> Doc {
             Doc::text(s.clone()),
         ]),
         OutType::Otyp_object(fields, rest) => print_object_fields(fields, rest),
-        OutType::Otyp_class(..) => Doc::nil(),
         OutType::Otyp_constr(out_ident, args) => {
             let args_doc = Doc::concat(vec![
                 Doc::less_than(),
@@ -1743,7 +1713,7 @@ fn print_out_variant(variant: &OutVariant) -> Doc {
     }
 }
 
-fn print_object_fields(fields: &[(String, OutType)], rest: &Option<bool>) -> Doc {
+fn print_object_fields(fields: &[(String, bool, OutType)], rest: &Option<bool>) -> Doc {
     let dots = match rest {
         Some(non_gen) => Doc::text(if *non_gen { "_.." } else { ".." }),
         None => {
@@ -1763,8 +1733,9 @@ fn print_object_fields(fields: &[(String, OutType)], rest: &Option<bool>) -> Doc
                 Doc::concat(vec![Doc::comma(), Doc::line()]),
                 fields
                     .iter()
-                    .map(|(lbl, out_type)| {
+                    .map(|(lbl, mutable, out_type)| {
                         Doc::group(Doc::concat(vec![
+                            if *mutable { Doc::text("@set ") } else { Doc::nil() },
                             Doc::text(format!("\"{lbl}\": ")),
                             print_out_type_doc(out_type),
                         ]))
@@ -1905,49 +1876,202 @@ fn print_type_params_doc(params: Vec<Doc>, trailing_comma: bool) -> Doc {
     ]))
 }
 
+// Print a digested FFI declaration as the surface attributes the user wrote;
+// the stored form is the declaration itself (res_outcome_printer.ml:481-613).
+
+fn print_string_literal_doc(s: &str) -> Doc {
+    // `"\"" ^ String.escaped s ^ "\""`
+    Doc::text(crate::types::external_ffi_types::debug::quote(s))
+}
+
+fn print_inline_const_doc(c: &crate::types::external_ffi_types::InlineConst) -> Doc {
+    use crate::types::external_ffi_types::InlineConst;
+    match c {
+        InlineConst::ConstString(s) => print_string_literal_doc(s),
+        InlineConst::ConstBool(b) => Doc::text(if *b { "true" } else { "false" }),
+        InlineConst::ConstInt(i) => Doc::text(i.to_string()),
+        InlineConst::ConstBigint { negative, digits } => {
+            Doc::text(format!("{}{}n", if *negative { "-" } else { "" }, digits))
+        }
+        InlineConst::ConstFloat(f) => Doc::text(f.clone()),
+    }
+}
+
+fn print_external_module_doc(emn: &crate::types::external_ffi_types::ExternalModuleName) -> Doc {
+    use crate::types::external_ffi_types::ModuleBindName;
+    let payload = match (&emn.module_bind_name, &emn.import_attributes) {
+        (ModuleBindName::PhintNothing, None) => print_string_literal_doc(&emn.bundle),
+        (ModuleBindName::PhintName(hint), None) => Doc::concat(vec![
+            Doc::text("("),
+            print_string_literal_doc(&emn.bundle),
+            Doc::text(", "),
+            print_string_literal_doc(hint),
+            Doc::text(")"),
+        ]),
+        (bind_name, Some(import_attributes)) => {
+            // `@module({from: "x", with: {k: "v"}})` record payload
+            let with_fields = import_attributes
+                .iter()
+                .map(|(k, v)| {
+                    // digestion stores the source key `type_` as `type`; other
+                    // keys print escaped again to be writable source
+                    let key = if k == "type" {
+                        Doc::text("type_")
+                    } else {
+                        crate::parser::printer::print_ident_like(k, false, false)
+                    };
+                    Doc::concat(vec![key, Doc::text(": "), print_string_literal_doc(v)])
+                })
+                .collect();
+            Doc::concat(vec![
+                Doc::text("{from: "),
+                print_string_literal_doc(&emn.bundle),
+                match bind_name {
+                    ModuleBindName::PhintNothing => Doc::nil(),
+                    ModuleBindName::PhintName(hint) => {
+                        Doc::concat(vec![Doc::text(", as: "), print_string_literal_doc(hint)])
+                    }
+                },
+                Doc::text(", with: {"),
+                Doc::join(Doc::text(", "), with_fields),
+                Doc::text("}}"),
+            ])
+        }
+    };
+    Doc::concat(vec![Doc::text("@module("), payload, Doc::text(") ")])
+}
+
+fn print_scopes_doc(scopes: &[String]) -> Doc {
+    match scopes {
+        [] => Doc::nil(),
+        [s] => Doc::concat(vec![Doc::text("@scope("), print_string_literal_doc(s), Doc::text(") ")]),
+        _ => Doc::concat(vec![
+            Doc::text("@scope(("),
+            Doc::join(Doc::text(", "), scopes.iter().map(|s| print_string_literal_doc(s)).collect()),
+            Doc::text(")) "),
+        ]),
+    }
+}
+
+fn print_return_wrapper_doc(w: crate::types::external_ffi_types::ReturnWrapper) -> Doc {
+    use crate::types::external_ffi_types::ReturnWrapper;
+    match w {
+        ReturnWrapper::ReturnUnset => Doc::nil(),
+        ReturnWrapper::ReturnIdentity => Doc::text("@return(identity) "),
+        ReturnWrapper::ReturnNullToOpt => Doc::text("@return(null_to_opt) "),
+        ReturnWrapper::ReturnNullUndefinedToOpt => Doc::text("@return(nullable) "),
+    }
+}
+
+fn print_decl_kind_doc(
+    kind: &crate::types::external_ffi_types::DeclKind,
+    module_: &Option<crate::types::external_ffi_types::ModuleSource>,
+    prim_name: &str,
+) -> Doc {
+    use crate::types::external_ffi_types::{DeclKind, ModuleSource};
+    // the attribute payload names the JS entity when it differs from the
+    // external's primitive string; print it back
+    let with_payload = |attr: &str, name: &str| {
+        if name == prim_name {
+            Doc::text(format!("@{attr} "))
+        } else {
+            Doc::concat(vec![
+                Doc::text(format!("@{attr}(")),
+                print_string_literal_doc(name),
+                Doc::text(") "),
+            ])
+        }
+    };
+    match kind {
+        // `@val` conflicts with bare `@module`; elsewhere it is the default
+        // and always legal to write
+        DeclKind::DeclVal { name } => match module_ {
+            Some(ModuleSource::ModuleItself) => Doc::nil(),
+            _ => with_payload("val", name),
+        },
+        DeclKind::DeclSend { name } => with_payload("send", name),
+        DeclKind::DeclNew { name } => with_payload("new", name),
+        DeclKind::DeclGet { name } => with_payload("get", name),
+        DeclKind::DeclSet { name } => with_payload("set", name),
+        DeclKind::DeclGetIndex => Doc::text("@get_index "),
+        DeclKind::DeclSetIndex => Doc::text("@set_index "),
+    }
+}
+
+fn print_module_source_doc(module_: &Option<crate::types::external_ffi_types::ModuleSource>) -> Doc {
+    use crate::types::external_ffi_types::ModuleSource;
+    match module_ {
+        None => Doc::nil(),
+        Some(ModuleSource::ModuleItself) => Doc::text("@module "),
+        Some(ModuleSource::ModuleNamed(emn)) => print_external_module_doc(emn),
+    }
+}
+
+fn print_external_decl_attrs_doc(
+    decl: &crate::types::external_ffi_types::ExternalDecl,
+    return_wrapper: crate::types::external_ffi_types::ReturnWrapper,
+    prim_name: &str,
+) -> Doc {
+    Doc::concat(vec![
+        print_decl_kind_doc(&decl.kind, &decl.module_, prim_name),
+        print_module_source_doc(&decl.module_),
+        print_scopes_doc(&decl.scopes),
+        if decl.variadic { Doc::text("@variadic ") } else { Doc::nil() },
+        print_return_wrapper_doc(return_wrapper),
+    ])
+}
+
 /// `print_out_sig_item_doc ~print_name_as_is:false` (res_outcome_printer.ml:481-655).
 pub(crate) fn print_out_sig_item_doc(item: &OutSigItem) -> Doc {
+    print_out_sig_item_doc_with(item, false)
+}
+
+/// `print_out_sig_item_doc ?print_name_as_is` (res_outcome_printer.ml:481-655).
+pub(crate) fn print_out_sig_item_doc_with(item: &OutSigItem, print_name_as_is: bool) -> Doc {
     match item {
         OutSigItem::Osig_class => Doc::nil(),
         OutSigItem::Osig_ellipsis => Doc::dotdotdot(),
         OutSigItem::Osig_value(value_decl) => {
-            let prims_doc = if value_decl.prims.is_empty() {
-                Doc::nil()
-            } else {
-                Doc::indent(Doc::concat(vec![
+            let (ffi_attrs, keyword, prim_name) = match &value_decl.prim {
+                None => (Doc::nil(), "let ", None),
+                Some(OutPrim::Name(s)) => (Doc::nil(), "external ", Some(s.as_str())),
+                // surface syntax: `@inline("hello") let f: string`
+                Some(OutPrim::InlineConst(c)) => (
+                    Doc::concat(vec![
+                        Doc::text("@inline("),
+                        print_inline_const_doc(c),
+                        Doc::text(") "),
+                    ]),
+                    "let ",
+                    None,
+                ),
+                Some(OutPrim::Ffi { name, spec }) => match spec {
+                    crate::types::external_ffi_types::ExternalFfi::FfiObjCreate(_) => {
+                        (Doc::text("@obj "), "external ", Some(name.as_str()))
+                    }
+                    crate::types::external_ffi_types::ExternalFfi::FfiBs(_, return_wrapper, decl) => (
+                        print_external_decl_attrs_doc(decl, *return_wrapper, name),
+                        "external ",
+                        Some(name.as_str()),
+                    ),
+                },
+            };
+            let prim_doc = match prim_name {
+                None => Doc::nil(),
+                Some(prim) => Doc::indent(Doc::concat(vec![
                     Doc::text(" ="),
                     Doc::line(),
-                    Doc::group(Doc::join(
-                        Doc::line(),
-                        value_decl
-                            .prims
-                            .iter()
-                            .map(|prim| {
-                                // '\132' is the marshalled FFI payload marker.
-                                let prim = if prim.as_bytes().first() == Some(&132)
-                                    || prim.chars().next().map(|c| c as u32) == Some(132)
-                                {
-                                    "#rescript-external"
-                                } else {
-                                    prim.as_str()
-                                };
-                                Doc::text(format!("\"{prim}\""))
-                            })
-                            .collect(),
-                    )),
-                ]))
+                    Doc::group(Doc::text(format!("\"{prim}\""))),
+                ])),
             };
             Doc::group(Doc::concat(vec![
-                Doc::text(if value_decl.prims.is_empty() {
-                    "let "
-                } else {
-                    "external "
-                }),
+                ffi_attrs,
+                Doc::text(keyword),
                 Doc::text(value_decl.name.clone()),
                 Doc::text(":"),
                 Doc::space(),
                 print_out_type_doc(&value_decl.typ),
-                prims_doc,
+                prim_doc,
             ]))
         }
         OutSigItem::Osig_typext(ext, _) => print_out_extension_constructor_doc(ext),
@@ -2036,7 +2160,11 @@ pub(crate) fn print_out_sig_item_doc(item: &OutSigItem) -> Doc {
                 attrs,
                 Doc::group(Doc::concat(vec![
                     kw,
-                    print_ident_like(&decl.name, false, false),
+                    if print_name_as_is {
+                        Doc::text(decl.name.clone())
+                    } else {
+                        print_ident_like(&decl.name, false, false)
+                    },
                     type_params,
                     kind,
                 ])),
@@ -2372,13 +2500,12 @@ impl<'a> Printtyp<'a> {
                 self.ctx
                     .alloc_type_at_level(TypeDesc::Tvariant(Box::new(RowDesc { row_more, ..row })), level)
             }
-            TypeDesc::Tobject { fields, name } => {
+            TypeDesc::Tobject { fields } => {
                 // `newty2 ty.level` reads the shadowed `ty`: the fields' level.
                 let fields = self.ctx.repr(fields);
                 let fields_level = self.ctx.get_level(fields);
                 let fields = self.unalias_object(fields);
-                self.ctx
-                    .alloc_type_at_level(TypeDesc::Tobject { fields, name }, fields_level)
+                self.ctx.alloc_type_at_level(TypeDesc::Tobject { fields }, fields_level)
             }
             desc => self.ctx.alloc_type_at_level(desc, level),
         }
@@ -2391,7 +2518,7 @@ impl<'a> Printtyp<'a> {
         match desc {
             TypeDesc::Tfield {
                 name,
-                kind,
+                mutability,
                 typ,
                 rest,
             } => {
@@ -2399,7 +2526,7 @@ impl<'a> Printtyp<'a> {
                 self.ctx.alloc_type_at_level(
                     TypeDesc::Tfield {
                         name,
-                        kind,
+                        mutability,
                         typ,
                         rest,
                     },

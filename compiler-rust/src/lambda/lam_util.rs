@@ -27,6 +27,14 @@ fn is_block_constructor(primitive: &Primitive) -> bool {
 fn is_safe_to_alias(lam: &Lambda) -> bool {
     match lam {
         Lambda::Lvar(_) | Lambda::Lconst(_) => true,
+        // A template without interpolations is a JavaScript literal;
+        // repeating it preserves its value and source spelling.
+        Lambda::Lprim(prim)
+            if matches!(&prim.primitive, Primitive::Ptemplate(segments) if segments.len() == 1)
+                && prim.args.is_empty() =>
+        {
+            true
+        }
         Lambda::Lprim(__prim2)
             if matches!(__prim2.as_ref(), PrimInfo {
             primitive: Primitive::Pfield(_, dbg_info),
@@ -36,7 +44,7 @@ fn is_safe_to_alias(lam: &Lambda) -> bool {
             dbg_info,
             crate::lambda::lam_compat::FieldDbgInfo::Module { .. }
         ) && args.len() == 1
-            && matches!(args[0], Lambda::LglobalModule(_, _) | Lambda::Lvar(_))) =>
+            && matches!(args[0], Lambda::LglobalModule(_) | Lambda::Lvar(_))) =>
         {
             let PrimInfo {
                 primitive: Primitive::Pfield(_, dbg_info),
@@ -77,7 +85,35 @@ fn is_safe_to_alias(lam: &Lambda) -> bool {
 /// OCaml so that the JS backend never sees a binding that was over- or
 /// under-relaxed relative to the OCaml reference.
 pub fn refine_let(kind: LetKind, param: Ident, arg: Lambda, body: Lambda) -> Lambda {
-    match (&kind, &arg, &body) {
+    refine_let_parts(kind, param, arg, body)
+        .unwrap_or_else(|(kind, param, arg, body)| Lambda::let_(kind, param, arg, body))
+}
+
+/// `Lam_util.refine_let ~original`: when no refinement applies and neither
+/// the bound expression nor the body changed (`unchanged`), the binding is
+/// handed back as the original rather than counted as rebuilt.
+pub fn refine_let_original(
+    kind: LetKind,
+    param: Ident,
+    arg: Lambda,
+    body: Lambda,
+    unchanged: bool,
+) -> (Lambda, bool) {
+    match refine_let_parts(kind, param, arg, body) {
+        Ok(refined) => (refined, true),
+        Err((kind, param, arg, body)) => (Lambda::let_(kind, param, arg, body), !unchanged),
+    }
+}
+
+/// The refinement clauses of `refine_let`; `Err` hands the parts back when
+/// the binding falls through unrefined.
+fn refine_let_parts(
+    kind: LetKind,
+    param: Ident,
+    arg: Lambda,
+    body: Lambda,
+) -> Result<Lambda, (LetKind, Ident, Lambda, Lambda)> {
+    Ok(match (&kind, &arg, &body) {
         // (Return) `let[k] x = e in x` -> `e` (lam_util.ml:100-104).
         (_, _, Lambda::Lvar(w)) if w == &param => arg,
 
@@ -136,8 +172,8 @@ pub fn refine_let(kind: LetKind, param: Ident, arg: Lambda, body: Lambda) -> Lam
         }
 
         // Fall-through: keep the original binding (lam_util.ml:137-138).
-        _ => Lambda::let_(kind, param, arg, body),
-    }
+        _ => return Err((kind, param, arg, body)),
+    })
 }
 
 /// Direct port of `Lam_util.field_flatten_get` (lam_util.ml:202-232).
@@ -159,7 +195,7 @@ pub fn field_flatten_get(
         // `Lam.global_module g`.
         Some(IdKind::Module(g)) => Lambda::prim(
             Primitive::Pfield(i, info.clone()),
-            vec![Lambda::global_module(g.clone(), false)],
+            vec![Lambda::global_module(g.clone())],
             Location::none(),
         ),
         // lam_util.ml:208-213 — ImmutableBlock: lift element if `SimpleForm`,

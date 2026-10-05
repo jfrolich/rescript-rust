@@ -279,8 +279,8 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
 /// the previous pass result into owned ports such as `deep_flatten_owned`
 /// without changing the pass order or behavior.
 pub fn simplify_for_js_backend_with_jsx_preserve_owned(lam: Lambda, jsx_preserve: bool) -> Lambda {
-    let mut no_external_inline = |_: &Ident, _: bool, _: &str| None;
-    let mut no_external_arity = |_: &Ident, _: bool, _: &str| None;
+    let mut no_external_inline = |_: &Ident, _: &str| None;
+    let mut no_external_arity = |_: &Ident, _: &str| None;
     simplify_for_js_backend_with_external_inline_owned(
         lam,
         jsx_preserve,
@@ -411,6 +411,9 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
 
     // lam_compile_main.ml:193 — simplify_lets (DCE + alias inlining).
     let lam = simplify_lets_owned(lam);
+
+    // lam_compile_main.ml — scalar replacement of local mutable blocks.
+    let lam = crate::lambda::lam_pass_sroa::simplify(lam, &meta.id_gen);
 
     // lam_compile_main.ml:200 — final simplify_exits.
     let lam = simplify_exits_owned(lam, &meta.id_gen);

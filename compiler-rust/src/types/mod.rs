@@ -39,14 +39,17 @@ pub mod context;
 pub mod ctype;
 pub mod decl;
 pub mod env;
+pub mod external_ffi_types;
 pub(crate) mod env_lazy;
 pub mod includemod;
 pub(crate) mod parmatch;
 pub mod path;
 pub mod predef;
+pub mod record_runtime;
 pub mod printtyp;
 pub mod sexp_typedtree;
 pub mod shared_store;
+pub mod tast_iterator;
 pub mod thread_store;
 pub mod type_expr;
 pub mod typecore;
@@ -73,17 +76,17 @@ pub use decl::{
 pub use path::{NOPOS, Path, Typath};
 pub(crate) use type_expr::TypeExprRefMap;
 pub use type_expr::{
-    AbbrevMemo, AbbrevMemoRef, FieldKind, FieldKindRef, GENERIC_LEVEL, LOWEST_LEVEL, ObjectName,
+    AbbrevMemo, AbbrevMemoRef, FieldMutability, GENERIC_LEVEL, LOWEST_LEVEL, MutabilityRef,
     PIVOT_LEVEL, RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeDescSer, TypeExpr,
     TypeExprRef,
 };
 pub use variance::{Variance, VarianceFlag};
 pub use variant_runtime::{
-    Block as VariantBlock, BlockRuntime, BlockType as VariantBlockType,
+    Block as VariantBlock, BlockType as VariantBlockType, TaggedBlock,
     Configuration as VariantConfiguration, ConstructorCase as VariantConstructorCase,
     ConstructorReference, Instance as VariantInstance, Layout as VariantLayout,
     LayoutRef as VariantLayoutRef, MatchingFacts as VariantMatchingFacts, Tag as VariantTag,
-    TagType as VariantTagType,
+    TagType as VariantTagType, LiteralTag as VariantLiteralTag, MatchableTag as VariantMatchableTag,
 };
 
 // btype exports

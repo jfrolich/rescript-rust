@@ -25,13 +25,13 @@ let Actors = {};
 
 let Dom_html = {};
 
-function setup_sprite(loopOpt, bbox_offsetOpt, bbox_sizeOpt, img_src, max_frames, max_ticks, frame_size, src_offset) {
+function setup_sprite(loopOpt, bb_offOpt, bb_szOpt, img_src, max_frames, max_ticks, frame_size, src_offset) {
   let loop = loopOpt !== undefined ? loopOpt : true;
-  let bbox_offset = bbox_offsetOpt !== undefined ? bbox_offsetOpt : [
+  let bbox_offset = bb_offOpt !== undefined ? bb_offOpt : [
       0,
       0
     ];
-  let bbox_size = bbox_sizeOpt !== undefined ? bbox_sizeOpt : [
+  let bbox_size = bb_szOpt !== undefined ? bb_szOpt : [
       0,
       0
     ];
@@ -790,13 +790,11 @@ let Particle = {
   process: process
 };
 
-let id_counter = {
-  contents: Stdlib_Int.Constants.minValue
-};
+let id_counter = Stdlib_Int.Constants.minValue;
 
-function setup_obj(has_gravityOpt, speedOpt, param) {
-  let has_gravity = has_gravityOpt !== undefined ? has_gravityOpt : true;
-  let speed = speedOpt !== undefined ? speedOpt : 1;
+function setup_obj(gOpt, spdOpt, param) {
+  let has_gravity = gOpt !== undefined ? gOpt : true;
+  let speed = spdOpt !== undefined ? spdOpt : 1;
   return {
     has_gravity: has_gravity,
     speed: speed
@@ -843,13 +841,13 @@ function make_type$2(x) {
 }
 
 function new_id() {
-  id_counter.contents = id_counter.contents + 1 | 0;
-  return id_counter.contents;
+  id_counter = id_counter + 1 | 0;
+  return id_counter;
 }
 
-function make$2($staropt_id$star, $staropt_dir$star, spawnable, context, param) {
-  let id = $staropt_id$star !== undefined ? Primitive_option.valFromOption($staropt_id$star) : undefined;
-  let dir = $staropt_dir$star !== undefined ? $staropt_dir$star : "Left";
+function make$2(idOpt, dirOpt, spawnable, context, param) {
+  let id = idOpt !== undefined ? Primitive_option.valFromOption(idOpt) : undefined;
+  let dir = dirOpt !== undefined ? dirOpt : "Left";
   let spr = make(spawnable, dir, context);
   let params = make_type$2(spawnable);
   let id$1 = id !== undefined ? id : new_id();
@@ -1580,25 +1578,21 @@ let Viewport = {
   update: update
 };
 
-let pressed_keys = {
-  left: false,
-  right: false,
-  up: false,
-  down: false,
-  bbox: 0
-};
+let pressed_keys_left = false;
 
-let collid_objs = {
-  contents: /* [] */0
-};
+let pressed_keys_right = false;
 
-let particles = {
-  contents: /* [] */0
-};
+let pressed_keys_up = false;
 
-let last_time = {
-  contents: 0
-};
+let pressed_keys_down = false;
+
+let pressed_keys_bbox = 0;
+
+let collid_objs = /* [] */0;
+
+let particles = /* [] */0;
+
+let last_time = 0;
 
 function calc_fps(t0, t1) {
   let delta = (t1 - t0) / 1000;
@@ -1878,58 +1872,42 @@ function process_collision(dir, c1, c2, state) {
           }
           if (exit$4 === 4) {
             let exit$5 = 0;
-            let typ$2;
             switch (t1) {
               case "GKoopaShell" :
-                if (typeof t2$3 !== "object") {
-                  if (t2$3 === "Brick") {
-                    dec_health(o2$6);
-                    reverse_left_right(o1$4);
-                    return [
-                      undefined,
-                      undefined
-                    ];
-                  }
-                  exit$5 = 5;
-                } else {
-                  typ$2 = t2$3._0;
-                  exit$5 = 6;
-                }
-                break;
               case "RKoopaShell" :
-                if (typeof t2$3 !== "object") {
-                  if (t2$3 === "Brick") {
-                    dec_health(o2$6);
-                    reverse_left_right(o1$4);
-                    return [
-                      undefined,
-                      undefined
-                    ];
-                  }
-                  exit$5 = 5;
-                } else {
-                  typ$2 = t2$3._0;
-                  exit$5 = 6;
-                }
+                exit$5 = 5;
                 break;
               default:
-                exit$5 = 5;
-            }
-            switch (exit$5) {
-              case 5 :
                 rev_dir(o1$4, t1, s1$3);
                 return [
                   undefined,
                   undefined
                 ];
-              case 6 :
+            }
+            if (exit$5 === 5) {
+              if (typeof t2$3 !== "object") {
+                if (t2$3 === "Brick") {
+                  dec_health(o2$6);
+                  reverse_left_right(o1$4);
+                  return [
+                    undefined,
+                    undefined
+                  ];
+                }
+                rev_dir(o1$4, t1, s1$3);
+                return [
+                  undefined,
+                  undefined
+                ];
+              } else {
                 let updated_block$1 = evolve_block(o2$6, context);
-                let spawned_item$1 = spawn_above(o1$4.dir, o2$6, typ$2, context);
+                let spawned_item$1 = spawn_above(o1$4.dir, o2$6, t2$3._0, context);
                 rev_dir(o1$4, t1, s1$3);
                 return [
                   updated_block$1,
                   spawned_item$1
                 ];
+              }
             }
           }
           break;
@@ -2154,7 +2132,7 @@ function update_collidable(state, collid, all_collids) {
     vpt_adj_xy.x,
     vpt_adj_xy.y
   ]);
-  if (pressed_keys.bbox === 1) {
+  if (pressed_keys_bbox === 1) {
     render_bbox(spr, [
       vpt_adj_xy.x,
       vpt_adj_xy.y
@@ -2168,22 +2146,22 @@ function update_collidable(state, collid, all_collids) {
 
 function translate_keys() {
   let ctrls_0 = [
-    pressed_keys.left,
+    pressed_keys_left,
     "CLeft"
   ];
   let ctrls_1 = {
     hd: [
-      pressed_keys.right,
+      pressed_keys_right,
       "CRight"
     ],
     tl: {
       hd: [
-        pressed_keys.up,
+        pressed_keys_up,
         "CUp"
       ],
       tl: {
         hd: [
-          pressed_keys.down,
+          pressed_keys_down,
           "CDown"
         ],
         tl: /* [] */0
@@ -2226,19 +2204,19 @@ function run_update_collid(state, collid, all_collids) {
       player = collid;
     }
     let evolved = update_collidable(state, player, all_collids);
-    collid_objs.contents = Stdlib_List.concat(collid_objs.contents, evolved);
+    collid_objs = Stdlib_List.concat(collid_objs, evolved);
     return player;
   }
   let obj = collid._2;
   let evolved$1 = update_collidable(state, collid, all_collids);
   if (!obj.kill) {
-    collid_objs.contents = {
+    collid_objs = {
       hd: collid,
-      tl: Stdlib_List.concat(collid_objs.contents, evolved$1)
+      tl: Stdlib_List.concat(collid_objs, evolved$1)
     };
   }
   let new_parts = obj.kill ? kill(collid, state.ctx) : /* [] */0;
-  particles.contents = Stdlib_List.concat(particles.contents, new_parts);
+  particles = Stdlib_List.concat(particles, new_parts);
   return collid;
 }
 
@@ -2266,10 +2244,10 @@ function update_loop(canvas, param, map_dim) {
     if (state.game_over === true) {
       return game_win(state.ctx);
     }
-    collid_objs.contents = /* [] */0;
-    particles.contents = /* [] */0;
-    let fps$1 = calc_fps(last_time.contents, time);
-    last_time.contents = time;
+    collid_objs = /* [] */0;
+    particles = /* [] */0;
+    let fps$1 = calc_fps(last_time, time);
+    last_time = time;
     clear_canvas(canvas);
     let vpos_x_int = state.vpt.pos.x / 5 | 0;
     let bgd_width = state.bgd.params.frame_size[0] | 0;
@@ -2299,17 +2277,17 @@ function update_loop(canvas, param, map_dim) {
         x,
         y
       ]);
-      if (!part.kill) {
-        particles.contents = {
-          hd: part,
-          tl: particles.contents
-        };
+      if (part.kill) {
         return;
       }
+      particles = {
+        hd: part,
+        tl: particles
+      };
     });
     fps(canvas, fps$1);
     hud(canvas, state$1.score, state$1.coins);
-    requestAnimationFrame(t => update_helper(t, state$1, player$1, collid_objs.contents, particles.contents));
+    requestAnimationFrame(t => update_helper(t, state$1, player$1, collid_objs, particles));
   };
   update_helper(0, state, player, param[1], /* [] */0);
 }
@@ -2319,19 +2297,19 @@ function keydown(evt) {
   if (match >= 41) {
     switch (match) {
       case 65 :
-        pressed_keys.left = true;
+        pressed_keys_left = true;
         break;
       case 66 :
-        pressed_keys.bbox = (pressed_keys.bbox + 1 | 0) % 2;
+        pressed_keys_bbox = (pressed_keys_bbox + 1 | 0) % 2;
         break;
       case 68 :
-        pressed_keys.right = true;
+        pressed_keys_right = true;
         break;
       case 83 :
-        pressed_keys.down = true;
+        pressed_keys_down = true;
         break;
       case 87 :
-        pressed_keys.up = true;
+        pressed_keys_up = true;
         break;
     }
   } else if (match >= 32) {
@@ -2342,17 +2320,17 @@ function keydown(evt) {
       case 36 :
         break;
       case 37 :
-        pressed_keys.left = true;
+        pressed_keys_left = true;
         break;
       case 32 :
       case 38 :
-        pressed_keys.up = true;
+        pressed_keys_up = true;
         break;
       case 39 :
-        pressed_keys.right = true;
+        pressed_keys_right = true;
         break;
       case 40 :
-        pressed_keys.down = true;
+        pressed_keys_down = true;
         break;
     }
   }
@@ -2364,22 +2342,18 @@ function keyup(evt) {
   if (match >= 68) {
     if (match !== 83) {
       if (match !== 87) {
-        if (match >= 69) {
-          
-        } else {
-          pressed_keys.right = false;
+        if (match < 69) {
+          pressed_keys_right = false;
         }
       } else {
-        pressed_keys.up = false;
+        pressed_keys_up = false;
       }
     } else {
-      pressed_keys.down = false;
+      pressed_keys_down = false;
     }
   } else if (match >= 41) {
-    if (match !== 65) {
-      
-    } else {
-      pressed_keys.left = false;
+    if (match === 65) {
+      pressed_keys_left = false;
     }
   } else if (match >= 32) {
     switch (match) {
@@ -2389,17 +2363,17 @@ function keyup(evt) {
       case 36 :
         break;
       case 37 :
-        pressed_keys.left = false;
+        pressed_keys_left = false;
         break;
       case 32 :
       case 38 :
-        pressed_keys.up = false;
+        pressed_keys_up = false;
         break;
       case 39 :
-        pressed_keys.right = false;
+        pressed_keys_right = false;
         break;
       case 40 :
-        pressed_keys.down = false;
+        pressed_keys_down = false;
         break;
     }
   }
@@ -3246,7 +3220,7 @@ let loadCount = {
 function load(param) {
   let canvas_id = "canvas";
   let el = document.getElementById(canvas_id);
-  let canvas = el !== null ? el : (console.log("cant find canvas " + canvas_id), Pervasives.failwith("fail"));
+  let canvas = el !== null ? el : (console.log("cant find canvas canvas"), Pervasives.failwith("fail"));
   let context = canvas.getContext("2d");
   document.addEventListener("keydown", keydown, true);
   document.addEventListener("keyup", keyup, true);
