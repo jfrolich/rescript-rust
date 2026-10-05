@@ -5016,9 +5016,9 @@ pub fn type_expr_mentions_path_prefixes(
         ty: TypeExprRef,
         prefixes: &PathPrefixes<'_>,
         ctx: &TypeContext,
-        visited: &mut HashSet<usize>,
+        visited: &mut HashSet<TypeExprRef>,
     ) -> bool {
-        if !visited.insert(ty.index()) {
+        if !visited.insert(ty) {
             return false;
         }
         let desc = ctx.get_desc(ty);
