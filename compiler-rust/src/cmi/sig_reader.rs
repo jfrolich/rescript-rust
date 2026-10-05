@@ -1292,44 +1292,6 @@ fn read_first_string(value: &OcamlValue) -> Option<String> {
 /// The JS backend relies on simple constructor `@as(...)` payloads from loaded
 /// interfaces, so preserve the payload forms the OCaml backend observes for
 /// null/undefined identifiers and simple string literals.
-/// Convert a marshalled `Parsetree.payload` into its portable form. The only
-/// Parsetree record laid out as `{string; int; int; int}` is
-/// `Lexing.position`, which is kept explicit for the writers' position
-/// sharing. Returns `None` for values a payload cannot contain (floats).
-pub(crate) fn payload_value_from_ocaml(
-    value: &OcamlValue,
-) -> Option<crate::types::decl::PayloadValue> {
-    use crate::types::decl::PayloadValue;
-    Some(match value {
-        OcamlValue::Int(n) => PayloadValue::Int(*n),
-        OcamlValue::String(s) => PayloadValue::Str(s.clone()),
-        OcamlValue::Float(_) => return None,
-        OcamlValue::Block(tag, fields) => match (&**fields, *tag) {
-            (
-                [
-                    OcamlValue::String(file),
-                    OcamlValue::Int(line),
-                    OcamlValue::Int(bol),
-                    OcamlValue::Int(cnum),
-                ],
-                0,
-            ) => PayloadValue::Position {
-                file: file.clone(),
-                line: *line as i32,
-                bol: *bol as i32,
-                cnum: *cnum as i32,
-            },
-            _ => PayloadValue::Block(
-                *tag,
-                fields
-                    .iter()
-                    .map(payload_value_from_ocaml)
-                    .collect::<Option<Vec<_>>>()?,
-            ),
-        },
-    })
-}
-
 fn read_attributes(ctx: &TypeContext, value: &OcamlValue) -> Vec<Attribute> {
     value
         .as_list()
@@ -1353,10 +1315,6 @@ fn read_attributes(ctx: &TypeContext, value: &OcamlValue) -> Vec<Attribute> {
                         .get(2)
                         .map(|loc| read_location(ctx, loc))
                         .unwrap_or_else(Location::none),
-                    attr_payload_raw: fields
-                        .get(1)
-                        .and_then(payload_value_from_ocaml)
-                        .map(Box::new),
                 })
             }
             _ => None,

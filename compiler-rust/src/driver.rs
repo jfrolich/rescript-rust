@@ -1294,9 +1294,6 @@ fn strip_saved_signature_locations(sig: &mut [crate::types::decl::SignatureItem]
         fn attribute(&mut self, attr: &mut Attribute) {
             self.location(&mut attr.attr_loc);
             self.location(&mut attr.attr_name.loc);
-            if let Some(payload) = &mut attr.attr_payload_raw {
-                payload.remove_locations();
-            }
         }
     }
     crate::types::decl::walk_signature_locations(sig, &mut Strip);

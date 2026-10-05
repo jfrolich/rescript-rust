@@ -636,34 +636,6 @@ pub struct Attribute {
     pub attr_payload: AttributePayload,
     /// Source location
     pub attr_loc: Location,
-    /// The complete `Parsetree.payload`. OCaml `Types` attributes are
-    /// `Parsetree.attributes` (compiler/ml/types.mli), so declarations keep
-    /// the parser payload verbatim and `.cmi`/`.cmt` files marshal it back.
-    /// `None` only for attributes the compiler synthesizes without a source
-    /// payload.
-    #[serde(default)]
-    pub attr_payload_raw: Option<Box<PayloadValue>>,
-}
-
-/// A `Parsetree.payload` in its marshalled shape, independent of any
-/// compilation's `ParseArena` so it can cross compilation units like the
-/// rest of a `Types` signature. `Lexing.position` records are explicit so
-/// writers share them like every other position they emit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PayloadValue {
-    /// An immediate (`int`, constant constructor, `bool`, `unit`, ...).
-    Int(i64),
-    /// A string.
-    Str(String),
-    /// A block with its tag and fields.
-    Block(u8, Vec<PayloadValue>),
-    /// A `Lexing.position` (`{pos_fname; pos_lnum; pos_bol; pos_cnum}`).
-    Position {
-        file: String,
-        line: i32,
-        bol: i32,
-        cnum: i32,
-    },
 }
 
 /// Attribute payload.
@@ -804,37 +776,6 @@ pub fn walk_signature_locations(sig: &mut [SignatureItem], v: &mut dyn Signature
     }
 }
 
-impl PayloadValue {
-    /// `Location.none` (`in_file "_none_"`, compiler/ml/location.ml).
-    fn none_location() -> PayloadValue {
-        let pos = PayloadValue::Position {
-            file: "_none_".to_string(),
-            line: 1,
-            bol: 0,
-            cnum: -1,
-        };
-        PayloadValue::Block(0, vec![pos.clone(), pos, PayloadValue::Int(1)])
-    }
-
-    /// Replace every `Location.t` with `Location.none`, as the `remove_loc`
-    /// mapper does (compiler/ml/subst.ml:60-67). Positions occur only inside
-    /// locations, so a location is a block of two positions and a flag.
-    pub fn remove_locations(&mut self) {
-        if let PayloadValue::Block(0, fields) = self
-            && let [PayloadValue::Position { .. }, PayloadValue::Position { .. }, PayloadValue::Int(_)] =
-                fields.as_slice()
-        {
-            *self = PayloadValue::none_location();
-            return;
-        }
-        if let PayloadValue::Block(_, fields) = self {
-            for field in fields {
-                field.remove_locations();
-            }
-        }
-    }
-}
-
 pub const INTERNAL_OPTIONAL_ATTR_NAME: &str = "internal.optional";
 
 pub fn has_internal_optional_attr(attrs: &[Attribute]) -> bool {
@@ -848,7 +789,6 @@ pub fn internal_optional_attr() -> Attribute {
         attr_name: Located::noloc(INTERNAL_OPTIONAL_ATTR_NAME.to_string()),
         attr_payload: AttributePayload::Structure(vec![]),
         attr_loc: Location::none(),
-        attr_payload_raw: None,
     }
 }
 

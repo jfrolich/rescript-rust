@@ -568,31 +568,10 @@ fn parser_private_to_type_private(
     }
 }
 
-/// The attribute's `Parsetree.payload` in portable form: marshal it exactly as
-/// the parsetree writer does and decode the result.
-fn parser_attr_payload_raw(
-    arena: &ParseArena,
-    attr: &ParsedAttribute,
-) -> Option<Box<crate::types::decl::PayloadValue>> {
-    let mut writer = crate::binary_ast::marshal::MarshalWriter::new();
-    writer.set_arena(arena);
-    crate::binary_ast::current_marshal::marshal_attributes_plain(
-        &Attributes::from_vec(vec![attr.clone()]),
-        &mut writer,
-    );
-    let list = crate::cmi::marshal_reader::MarshalReader::new()
-        .read_value(&mut std::io::Cursor::new(writer.payload()))
-        .ok()?;
-    // `[(name, payload)]`: the list cell's head is the attribute pair.
-    let payload = list.field(0).field(1);
-    crate::cmi::sig_reader::payload_value_from_ocaml(payload).map(Box::new)
-}
-
 fn parser_attr_to_decl_attr(
     arena: &ParseArena,
     attr: &ParsedAttribute,
 ) -> crate::types::decl::Attribute {
-    let attr_payload_raw = parser_attr_payload_raw(arena, attr);
     let (name, payload) = attr;
     let attr_name = arena.get_string(name.txt);
     let attr_payload = match payload {
@@ -607,7 +586,6 @@ fn parser_attr_to_decl_attr(
                     },
                     attr_payload: payload,
                     attr_loc: arena.to_location(name.loc),
-                    attr_payload_raw,
                 };
             }
             // OCaml's Lambda.find_name: extract string from @as("name") payloads.
@@ -679,7 +657,6 @@ fn parser_attr_to_decl_attr(
         },
         attr_payload,
         attr_loc: arena.to_location(name.loc),
-        attr_payload_raw,
     }
 }
 
