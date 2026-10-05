@@ -6,11 +6,11 @@
 use std::io::Write;
 
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
-use crate::lambda::lam_constant::{Constant, PointerInfo};
+use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{
-    ApInfo, Apply, ApplyStatus, DirectionFlag, FunctionAttribute, InlineAttribute, LFunction,
+    ApInfo, Apply, DirectionFlag, FunctionAttribute, InlineAttribute, LFunction,
     Lambda, LambdaSwitch, PrimInfo,
 };
 use crate::parser::ast::MutableFlag;
@@ -136,15 +136,6 @@ fn let_kind(k: &LetKind) -> Sexp {
     }
 }
 
-// Apply status
-fn apply_status(s: &ApplyStatus) -> Sexp {
-    match s {
-        ApplyStatus::Na => Sexp::atom("App_na"),
-        ApplyStatus::InferFull => Sexp::atom("App_infer_full"),
-        ApplyStatus::Uncurry => Sexp::atom("App_uncurry"),
-    }
-}
-
 // Inline attribute
 fn inline_attribute(attr: &InlineAttribute) -> Sexp {
     match attr {
@@ -184,7 +175,7 @@ fn tag_info(info: &TagInfo) -> Sexp {
             variant_tagged_block(runtime),
         ]),
         TagInfo::Tuple => Sexp::atom("Blk_tuple"),
-        TagInfo::PolyVar(s) => Sexp::list(vec![Sexp::atom("Blk_poly_var"), string(s)]),
+        TagInfo::PolyVar(_) => Sexp::atom("Blk_poly_var"),
         TagInfo::Record {
             fields,
             mutable_flag,
@@ -259,25 +250,6 @@ fn set_field_dbg_info(info: &SetFieldDbgInfo) -> Sexp {
         }
         SetFieldDbgInfo::RecordExtensionSet(s) => {
             Sexp::list(vec![Sexp::atom("Fld_record_extension_set"), string(s)])
-        }
-    }
-}
-
-// Pointer info
-fn pointer_info(info: &Option<PointerInfo>) -> Sexp {
-    match info {
-        None => Sexp::atom("None"),
-        Some(PointerInfo::None) => Sexp::atom("None"),
-        Some(PointerInfo::ShapeNone) => Sexp::atom("Pt_shape_none"),
-        Some(PointerInfo::Constructor(tag)) => Sexp::list(vec![
-            Sexp::atom("Pt_constructor"),
-            string(&tag.name),
-            int(tag.const_),
-            int(tag.non_const),
-        ]),
-        Some(PointerInfo::AssertFalse) => Sexp::atom("Pt_assertfalse"),
-        Some(PointerInfo::Some(s)) | Some(PointerInfo::PolyVariant(s)) => {
-            Sexp::list(vec![Sexp::atom("Some"), string(s)])
         }
     }
 }
@@ -403,16 +375,14 @@ fn constant(c: &Constant) -> Sexp {
         }
         Constant::JsTrue => Sexp::atom("Const_js_true"),
         Constant::JsFalse => Sexp::atom("Const_js_false"),
-        Constant::Int { i, comment } => Sexp::list(vec![
-            Sexp::atom("Const_int"),
-            Sexp::atom(i.to_string()),
-            pointer_info(&comment.as_deref().cloned()),
-        ]),
-        Constant::NativeInt { i, comment } => Sexp::list(vec![
-            Sexp::atom("Const_int"),
-            Sexp::atom(i.to_string()),
-            pointer_info(&comment.as_deref().cloned()),
-        ]),
+        // compiler/core/sexp_lambda.ml `Const_int i`: Lambda constants carry
+        // no pointer comment.
+        Constant::Int { i, .. } => {
+            Sexp::list(vec![Sexp::atom("Const_int"), Sexp::atom(i.to_string())])
+        }
+        Constant::NativeInt { i, .. } => {
+            Sexp::list(vec![Sexp::atom("Const_int"), Sexp::atom(i.to_string())])
+        }
         Constant::Constructor(tag) => {
             Sexp::list(vec![Sexp::atom("Const_constructor"), variant_tag(tag)])
         }
@@ -425,7 +395,7 @@ fn constant(c: &Constant) -> Sexp {
             bool_sexp(!negative),
             string(value),
         ]),
-        Constant::Pointer(s) => Sexp::list(vec![Sexp::atom("Const_pointer"), string(s)]),
+        Constant::Pointer(s) => Sexp::list(vec![Sexp::atom("Const_polyvar"), string(s)]),
         Constant::Block {
             tag_info: info,
             elements,
@@ -657,15 +627,16 @@ fn lambda(lam: &Lambda, with_locs: bool) -> Sexp {
             ])
         }
         Lambda::Lfunction(__func1) => {
+            // compiler/core/sexp_lambda.ml prints no arity: Lambda functions
+            // are n-ary by their parameter list.
             let LFunction {
-                arity,
                 params,
                 body,
                 attr,
+                ..
             } = __func1.as_ref();
             Sexp::list(vec![
                 Sexp::atom("Lfunction"),
-                int(*arity),
                 Sexp::list(params.iter().map(ident).collect()),
                 lambda(body, with_locs),
                 function_attribute(attr),
@@ -779,7 +750,6 @@ fn ap_info_sexp(info: &ApInfo, _with_locs: bool) -> Sexp {
     Sexp::list(vec![
         Sexp::atom("ap_info"),
         inline_attribute(&info.inlined),
-        apply_status(&info.status),
         // TODO: add location if with_locs
     ])
 }
@@ -938,9 +908,8 @@ fn indexed_lambda(
             ap_info_sexp(info, with_locs),
             bool_sexp(jsx),
         ]),
-        NodeView::Function(arity, params, body, attr) => Sexp::list(vec![
+        NodeView::Function(_, params, body, attr) => Sexp::list(vec![
             Sexp::atom("Lfunction"),
-            int(arity),
             Sexp::list(params.iter().map(ident).collect()),
             child(body),
             function_attribute(attr),
