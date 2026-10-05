@@ -2445,18 +2445,16 @@ fn write_compiled_js_outputs(
     write_js_write_job(js_outputs)
 }
 
-/// Mirror in-source JS (and its source map) into `lib/bs`, as a file-backed
-/// build does after each compile.
 /// A source file and the build-directory paths it is mirrored to.
 struct SourceCopy {
     source: PathBuf,
     destinations: [PathBuf; 2],
 }
 
-/// A module's `.res`/`.resi` sources and their copies next to its build
-/// artifacts in `lib/bs` and in the flat `lib/ocaml` directory, as the
-/// subprocess build makes after each compile. Installed packages (the runtime
-/// precompile reads `lib/ocaml/*.res`) depend on these copies.
+/// A runtime module's `.res`/`.resi` sources and their copies next to its
+/// build artifacts in `lib/bs` and in the flat `lib/ocaml` directory. The
+/// published runtime ships only `lib`, and the runtime precompile of an
+/// installed copy reads `lib/ocaml/*.res`.
 fn source_copies_for_build_dirs(package: &packages::Package, module: &Module) -> Vec<SourceCopy> {
     let SourceType::SourceFile(source_file) = &module.source_type else {
         return Vec::new();
@@ -2490,77 +2488,6 @@ fn copy_sources(copies: &[SourceCopy]) {
             let _ = write_file_creating_parent_on_missing(destination, &contents);
         }
     }
-}
-
-fn copy_in_source_js_to_build_dir(
-    package: &packages::Package,
-    source_file_path: &Path,
-    root_config: &config::Config,
-) {
-    for spec in root_config.get_package_specs() {
-        if !spec.in_source {
-            continue;
-        }
-        let suffix = root_config.get_suffix(&spec);
-        let source = helpers::get_source_file_from_rescript_file(
-            &Path::new(&package.path).join(source_file_path),
-            &suffix,
-        );
-        let destination = helpers::get_source_file_from_rescript_file(
-            &package.get_build_path().join(source_file_path),
-            &suffix,
-        );
-        if source.exists() {
-            if let Some(parent) = destination.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::copy(&source, &destination);
-        }
-        let mut source_map = source.into_os_string();
-        source_map.push(".map");
-        let source_map = PathBuf::from(source_map);
-        let mut destination_map = destination.into_os_string();
-        destination_map.push(".map");
-        let destination_map = PathBuf::from(destination_map);
-        if source_map.exists() {
-            let _ = std::fs::copy(&source_map, &destination_map);
-        } else {
-            let _ = std::fs::remove_file(&destination_map);
-        }
-    }
-}
-
-/// The `lib/bs` copies of in-source JS outputs (see
-/// [`copy_in_source_js_to_build_dir`]), for the writer thread.
-fn build_dir_js_mirrors(
-    outputs: &[rescript_compiler::driver::JsOutput],
-    package: &packages::Package,
-    source_file_path: &Path,
-    root_config: &config::Config,
-) -> Vec<rescript_compiler::driver::JsOutput> {
-    let mut mirrors = Vec::new();
-    for spec in root_config.get_package_specs() {
-        if !spec.in_source {
-            continue;
-        }
-        let suffix = root_config.get_suffix(&spec);
-        let source = js_output_path_for_spec(package, source_file_path, root_config, &spec);
-        let destination = helpers::get_source_file_from_rescript_file(
-            &package.get_build_path().join(source_file_path),
-            &suffix,
-        );
-        mirrors.extend(
-            outputs
-                .iter()
-                .filter(|output| output.path == source)
-                .map(|output| rescript_compiler::driver::JsOutput {
-                    path: destination.clone(),
-                    code: output.code.clone(),
-                    source_map: output.source_map.clone(),
-                }),
-        );
-    }
-    mirrors
 }
 
 /// Register namespace module signatures in the PersistentEnv for --in-process mode.
@@ -3948,9 +3875,15 @@ fn finish_in_process_js_inner(
         send_js_metadata_ready(metadata_tx, module_name.clone(), registry_updates)
     });
 
-    // Mirrored by the writer thread with the JS, or here when the JS is
-    // written inline.
-    let mut source_copies = source_copies_for_build_dirs(package, module);
+    // Only the runtime package ships its sources, in `lib/ocaml`, for the
+    // runtime precompile of installed copies; other packages' build
+    // directories get no source copies. Written by the writer thread with
+    // the JS, or here when the JS is written inline.
+    let mut source_copies = if is_runtime {
+        source_copies_for_build_dirs(package, module)
+    } else {
+        Vec::new()
+    };
 
     let mut write_duration = Duration::default();
     {
@@ -3971,12 +3904,9 @@ fn finish_in_process_js_inner(
                 &implementation_path,
                 root_config,
             )?;
-            copy_in_source_js_to_build_dir(package, &implementation_path, root_config);
             copy_sources(&std::mem::take(&mut source_copies));
         } else {
-            let mut outputs = std::mem::take(&mut compile_result.js_outputs);
-            let mirrors = build_dir_js_mirrors(&outputs, package, &implementation_path, root_config);
-            outputs.extend(mirrors);
+            let outputs = std::mem::take(&mut compile_result.js_outputs);
             let job = JsWriteJob {
                 module_name: module_name.clone(),
                 outputs,
