@@ -8,7 +8,7 @@
 //! reassembled exactly as it was, and a changed one goes through the same
 //! smart constructor OCaml uses.
 
-use crate::lambda::{Apply, Lambda, LambdaSwitch, PrimInfo};
+use crate::lambda::{Apply, Lambda, PrimInfo};
 
 /// A mapped value and whether it differs from the input.
 pub type Mapped = (Lambda, bool);
@@ -46,195 +46,141 @@ pub fn shallow_exists(lam: &Lambda, f: &mut impl FnMut(&Lambda) -> bool) -> bool
     }
 }
 
-fn map_list(items: Vec<Lambda>, f: &mut impl FnMut(Lambda) -> Mapped) -> (Vec<Lambda>, bool) {
-    let mut changed = false;
-    let items = items
-        .into_iter()
-        .map(|item| {
-            let (item, c) = f(item);
-            changed |= c;
-            item
-        })
-        .collect();
-    (items, changed)
+/// Rewrite one child in place, returning whether it changed.
+#[inline]
+fn map_in(slot: &mut Lambda, f: &mut impl FnMut(Lambda) -> Mapped) -> bool {
+    let (item, changed) = f(std::mem::replace(slot, Lambda::Lbreak));
+    *slot = item;
+    changed
 }
 
-fn map_snd<K>(
-    items: Vec<(K, Lambda)>,
-    f: &mut impl FnMut(Lambda) -> Mapped,
-) -> (Vec<(K, Lambda)>, bool) {
+fn map_list(items: &mut [Lambda], f: &mut impl FnMut(Lambda) -> Mapped) -> bool {
     let mut changed = false;
-    let items = items
-        .into_iter()
-        .map(|(k, item)| {
-            let (item, c) = f(item);
-            changed |= c;
-            (k, item)
-        })
-        .collect();
-    (items, changed)
-}
-
-fn map_opt(
-    item: Option<Box<Lambda>>,
-    f: &mut impl FnMut(Lambda) -> Mapped,
-) -> (Option<Box<Lambda>>, bool) {
-    match item {
-        None => (None, false),
-        Some(item) => {
-            let (item, c) = f(*item);
-            (Some(Box::new(item)), c)
-        }
+    for item in items {
+        changed |= map_in(item, f);
     }
+    changed
+}
+
+fn map_snd<K>(items: &mut [(K, Lambda)], f: &mut impl FnMut(Lambda) -> Mapped) -> bool {
+    let mut changed = false;
+    for (_, item) in items {
+        changed |= map_in(item, f);
+    }
+    changed
+}
+
+fn map_opt(item: &mut Option<Box<Lambda>>, f: &mut impl FnMut(Lambda) -> Mapped) -> bool {
+    item.as_deref_mut().is_some_and(|item| map_in(item, f))
 }
 
 /// `Lambda_traverse.shallow_map_sharing`: rewrite the immediate children with
 /// `f`, left to right, and rebuild through the smart constructor only when a
 /// child changed.
-pub fn shallow_map_sharing(lam: Lambda, f: &mut impl FnMut(Lambda) -> Mapped) -> Mapped {
-    match lam {
+///
+/// Children are rewritten in place, so an unchanged node keeps its
+/// allocations. Only `apply`, `prim`, `switch`, `string_switch`, `if_` and
+/// `seq` fold; the other constructors just build the node, which in-place
+/// rewriting already produced.
+pub fn shallow_map_sharing(mut lam: Lambda, f: &mut impl FnMut(Lambda) -> Mapped) -> Mapped {
+    let changed = match &mut lam {
         Lambda::Lvar(_)
         | Lambda::LglobalModule(_)
         | Lambda::Lconst(_)
         | Lambda::Lbreak
-        | Lambda::Lcontinue => (lam, false),
+        | Lambda::Lcontinue => return (lam, false),
         Lambda::Lapply(ap) => {
-            let Apply { ap_func, ap_args, ap_info, ap_transformed_jsx } = *ap;
-            let (func, c1) = f(*ap_func);
-            let (args, c2) = map_list(ap_args, f);
-            if c1 || c2 {
-                (Lambda::apply(func, args, ap_info, ap_transformed_jsx), true)
-            } else {
-                (
-                    Lambda::Lapply(Box::new(Apply {
-                        ap_func: Box::new(func),
-                        ap_args: args,
-                        ap_info,
-                        ap_transformed_jsx,
-                    })),
-                    false,
-                )
+            let c1 = map_in(&mut ap.ap_func, f);
+            let c2 = map_list(&mut ap.ap_args, f);
+            if !(c1 || c2) {
+                return (lam, false);
             }
+            let Lambda::Lapply(ap) = lam else { unreachable!() };
+            let Apply { ap_func, ap_args, ap_info, ap_transformed_jsx } = *ap;
+            return (Lambda::apply(*ap_func, ap_args, ap_info, ap_transformed_jsx), true);
         }
-        Lambda::Lfunction(mut func) => {
-            let body = std::mem::replace(func.body.as_mut(), Lambda::Lbreak);
-            let (body, c) = f(body);
-            *func.body = body;
-            (Lambda::Lfunction(func), c)
-        }
-        Lambda::Llet(kind, id, e, b) => {
-            let (e, c1) = f(*e);
-            let (b, c2) = f(*b);
-            (Lambda::let_(kind, id, e, b), c1 || c2)
+        Lambda::Lfunction(func) => map_in(&mut func.body, f),
+        Lambda::Llet(_, _, e, b) => {
+            let c1 = map_in(e, f);
+            let c2 = map_in(b, f);
+            c1 || c2
         }
         Lambda::Lletrec(bs, b) => {
-            let (bs, c1) = map_snd(bs, f);
-            let (b, c2) = f(*b);
-            (Lambda::letrec(bs, b), c1 || c2)
+            let c1 = map_snd(bs, f);
+            let c2 = map_in(b, f);
+            c1 || c2
         }
         Lambda::Lprim(prim) => {
-            let PrimInfo { primitive, args, loc } = *prim;
-            let (args, c) = map_list(args, f);
-            if c {
-                (Lambda::prim(primitive, args, loc), true)
-            } else {
-                (Lambda::Lprim(Box::new(PrimInfo { primitive, args, loc })), false)
+            if !map_list(&mut prim.args, f) {
+                return (lam, false);
             }
+            let Lambda::Lprim(prim) = lam else { unreachable!() };
+            let PrimInfo { primitive, args, loc } = *prim;
+            return (Lambda::prim(primitive, args, loc), true);
         }
         Lambda::Lswitch(e, sw) => {
-            let (e, c1) = f(*e);
-            let LambdaSwitch {
-                sw_consts_full,
-                sw_consts,
-                sw_blocks_full,
-                sw_blocks,
-                sw_failaction,
-                sw_dispatch,
-            } = *sw;
-            let (sw_consts, c2) = map_snd(sw_consts, f);
-            let (sw_blocks, c3) = map_snd(sw_blocks, f);
-            let (sw_failaction, c4) = map_opt(sw_failaction, f);
-            let sw = LambdaSwitch {
-                sw_consts_full,
-                sw_consts,
-                sw_blocks_full,
-                sw_blocks,
-                sw_failaction,
-                sw_dispatch,
-            };
-            if c1 || c2 || c3 || c4 {
-                (Lambda::switch(e, sw), true)
-            } else {
-                (Lambda::Lswitch(Box::new(e), Box::new(sw)), false)
+            let c1 = map_in(e, f);
+            let c2 = map_snd(&mut sw.sw_consts, f);
+            let c3 = map_snd(&mut sw.sw_blocks, f);
+            let c4 = map_opt(&mut sw.sw_failaction, f);
+            if !(c1 || c2 || c3 || c4) {
+                return (lam, false);
             }
+            let Lambda::Lswitch(e, sw) = lam else { unreachable!() };
+            return (Lambda::switch(*e, *sw), true);
         }
         Lambda::LstringSwitch(e, cases, d) => {
-            let (e, c1) = f(*e);
-            let (cases, c2) = map_snd(cases, f);
-            let (d, c3) = map_opt(d, f);
-            if c1 || c2 || c3 {
-                (Lambda::string_switch(e, cases, d), true)
-            } else {
-                (Lambda::LstringSwitch(Box::new(e), cases, d), false)
+            let c1 = map_in(e, f);
+            let c2 = map_snd(cases, f);
+            let c3 = map_opt(d, f);
+            if !(c1 || c2 || c3) {
+                return (lam, false);
             }
+            let Lambda::LstringSwitch(e, cases, d) = lam else { unreachable!() };
+            return (Lambda::string_switch(*e, cases, d), true);
         }
-        Lambda::LstaticRaise(i, args) => {
-            let (args, c) = map_list(args, f);
-            (Lambda::static_raise(i, args), c)
+        Lambda::LstaticRaise(_, args) => map_list(args, f),
+        Lambda::LstaticCatch(b, _, hd) => {
+            let c1 = map_in(b, f);
+            let c2 = map_in(hd, f);
+            c1 || c2
         }
-        Lambda::LstaticCatch(b, h, hd) => {
-            let (b, c1) = f(*b);
-            let (hd, c2) = f(*hd);
-            (Lambda::LstaticCatch(Box::new(b), h, Box::new(hd)), c1 || c2)
-        }
-        Lambda::LtryWith(b, id, h) => {
-            let (b, c1) = f(*b);
-            let (h, c2) = f(*h);
-            (Lambda::try_(b, id, h), c1 || c2)
+        Lambda::LtryWith(b, _, h) => {
+            let c1 = map_in(b, f);
+            let c2 = map_in(h, f);
+            c1 || c2
         }
         Lambda::LifThenElse(a, b, c) => {
-            let (a, c1) = f(*a);
-            let (b, c2) = f(*b);
-            let (c, c3) = f(*c);
-            if c1 || c2 || c3 {
-                (Lambda::if_(a, b, c), true)
-            } else {
-                (Lambda::LifThenElse(Box::new(a), Box::new(b), Box::new(c)), false)
+            let c1 = map_in(a, f);
+            let c2 = map_in(b, f);
+            let c3 = map_in(c, f);
+            if !(c1 || c2 || c3) {
+                return (lam, false);
             }
+            let Lambda::LifThenElse(a, b, c) = lam else { unreachable!() };
+            return (Lambda::if_(*a, *b, *c), true);
         }
         Lambda::Lsequence(a, b) => {
-            let (a, c1) = f(*a);
-            let (b, c2) = f(*b);
-            if c1 || c2 {
-                (Lambda::seq(a, b), true)
-            } else {
-                (Lambda::Lsequence(Box::new(a), Box::new(b)), false)
+            let c1 = map_in(a, f);
+            let c2 = map_in(b, f);
+            if !(c1 || c2) {
+                return (lam, false);
             }
+            let Lambda::Lsequence(a, b) = lam else { unreachable!() };
+            return (Lambda::seq(*a, *b), true);
         }
-        Lambda::Lwhile(a, b) => {
-            let (a, c1) = f(*a);
-            let (b, c2) = f(*b);
-            (Lambda::while_(a, b), c1 || c2)
+        Lambda::Lwhile(a, b) | Lambda::Lfor_of(_, a, b) | Lambda::Lfor_await_of(_, a, b) => {
+            let c1 = map_in(a, f);
+            let c2 = map_in(b, f);
+            c1 || c2
         }
-        Lambda::Lfor(id, a, b, d, c) => {
-            let (a, c1) = f(*a);
-            let (b, c2) = f(*b);
-            let (c, c3) = f(*c);
-            (Lambda::for_(id, a, b, d, c), c1 || c2 || c3)
+        Lambda::Lfor(_, a, b, _, c) => {
+            let c1 = map_in(a, f);
+            let c2 = map_in(b, f);
+            let c3 = map_in(c, f);
+            c1 || c2 || c3
         }
-        Lambda::Lfor_of(id, a, b) => {
-            let (a, c1) = f(*a);
-            let (b, c2) = f(*b);
-            (Lambda::for_of(id, a, b), c1 || c2)
-        }
-        Lambda::Lfor_await_of(id, a, b) => {
-            let (a, c1) = f(*a);
-            let (b, c2) = f(*b);
-            (Lambda::for_await_of(id, a, b), c1 || c2)
-        }
-        Lambda::Lassign(id, b) => {
-            let (b, c) = f(*b);
-            (Lambda::assign(id, b), c)
-        }
-    }
+        Lambda::Lassign(_, b) => map_in(b, f),
+    };
+    (lam, changed)
 }
