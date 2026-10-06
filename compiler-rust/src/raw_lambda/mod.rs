@@ -324,6 +324,23 @@ impl RawLambda {
             }
             cond if is_assertfalse(&else_) => RawLambda::seq(cond, then_),
             cond if is_assertfalse(&then_) => RawLambda::seq(cond, else_),
+            // lambda.ml `if_`: `if a then true else false` is `a`, and
+            // `if a then false else true` is `not a`, when `a` is boolean.
+            cond if matches!(
+                (&then_, &else_),
+                (RawLambda::Lconst(Constant::JsTrue), RawLambda::Lconst(Constant::JsFalse))
+            ) && raw_has_boolean_type(&cond).is_some() =>
+            {
+                cond
+            }
+            cond if matches!(
+                (&then_, &else_),
+                (RawLambda::Lconst(Constant::JsFalse), RawLambda::Lconst(Constant::JsTrue))
+            ) && raw_has_boolean_type(&cond).is_some() =>
+            {
+                let loc = raw_has_boolean_type(&cond).expect("checked above");
+                raw_not(loc, cond)
+            }
             cond => RawLambda::LifThenElse(Box::new(cond), Box::new(then_), Box::new(else_)),
         }
     }
@@ -587,3 +604,38 @@ impl RawLambda {
 
 #[allow(dead_code)]
 fn _keep_public_types_used(_cmp: Comparison, _field: FieldDbgInfo, _set_field: SetFieldDbgInfo) {}
+
+/// `Lambda.has_boolean_type` (`compiler/ml/lambda.ml:1137-1147`).
+fn raw_has_boolean_type(lam: &RawLambda) -> Option<Location> {
+    match lam {
+        RawLambda::Lprim(info)
+            if matches!(
+                info.primitive,
+                Primitive::Pnot
+                    | Primitive::Psequand
+                    | Primitive::Psequor
+                    | Primitive::PisNotNone
+                    | Primitive::Pobjcomp(_)
+                    | Primitive::Pboolcomp(_)
+                    | Primitive::Pintcomp(_)
+                    | Primitive::Pfloatcomp(_)
+                    | Primitive::Pbigintcomp(_)
+                    | Primitive::Pstringcomp(_)
+            ) =>
+        {
+            Some(info.loc.clone())
+        }
+        _ => None,
+    }
+}
+
+/// `Lambda.not_` (`compiler/ml/lambda.ml:1131-1135`).
+fn raw_not(loc: Location, lam: RawLambda) -> RawLambda {
+    match lam {
+        RawLambda::Lprim(mut info) if matches!(info.primitive, Primitive::Pintcomp(Comparison::Neq)) => {
+            info.primitive = Primitive::Pintcomp(Comparison::Eq);
+            RawLambda::Lprim(info)
+        }
+        lam => RawLambda::prim(Primitive::Pnot, vec![lam], loc),
+    }
+}
