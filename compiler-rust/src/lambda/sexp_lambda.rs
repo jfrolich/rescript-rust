@@ -419,7 +419,6 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
             Sexp::list(vec![Sexp::atom("Pcreate_extension"), string(s)])
         }
         Primitive::PextensionSlotEq => Sexp::atom("Pextension_slot_eq"),
-        Primitive::PwrapExn => Sexp::atom("Pwrap_exn"),
         Primitive::PinitMod => Sexp::atom("Pinit_mod"),
         Primitive::PupdateMod => Sexp::atom("Pupdate_mod"),
         Primitive::PjsApply => Sexp::atom("Pjs_apply"),

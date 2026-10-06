@@ -249,7 +249,6 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         Primitive::Pstringadd
         | Primitive::Ptemplate(_)
         | Primitive::PfnArity
-        | Primitive::PwrapExn
         | Primitive::Phash
         | Primitive::PhashMixstring
         | Primitive::PhashMixint

@@ -3120,7 +3120,6 @@ impl<'a> RawLambdaConverter<'a> {
             "%is_nullable" => Some(Primitive::PisNullUndefined),
             "%null_to_opt" => Some(Primitive::PnullToOpt),
             "%nullable_to_opt" => Some(Primitive::PnullUndefinedToOpt),
-            "%wrap_exn" => Some(Primitive::PwrapExn),
             "%powint" => Some(Primitive::Ppowint),
             // OCaml translcore.ml:377-387 maps these runtime externals to
             // dedicated primitives before lambda conversion.

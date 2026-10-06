@@ -656,9 +656,6 @@ impl LambdaCompiler {
                 &mut compiled_args,
                 0,
             )))),
-            PwrapExn => {
-                self.runtime_call_expr("Primitive_exceptions", "internalToException", compiled_args)
-            }
             PcreateExtension(name) => self.pure_runtime_call_expr(
                 "Primitive_exceptions",
                 "create",

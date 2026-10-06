@@ -347,11 +347,7 @@ impl<'a> LoweringContext<'a> {
             let wrapped = Lambda::let_(
                 LetKind::StrictOpt,
                 id,
-                Lambda::prim(
-                    Primitive::PwrapExn,
-                    vec![Lambda::var(raw_id.clone())],
-                    Location::none(),
-                ),
+                wrap_exn(Location::none(), Lambda::var(raw_id.clone())),
                 lowered_handler,
             );
             Lambda::try_(lowered_body, raw_id, wrapped)
@@ -359,6 +355,34 @@ impl<'a> LoweringContext<'a> {
             Lambda::try_(lowered_body, id, lowered_handler)
         }
     }
+}
+
+/// `Translcore.wrap_exn` (compiler/ml/translcore.ml:912-920): apply
+/// `Primitive_exceptions.internalToException` to a caught value, so matching
+/// sees a ReScript exception.
+pub(crate) fn wrap_exn(loc: Location, arg: Lambda) -> Lambda {
+    let internal_to_exception = Lambda::prim(
+        Primitive::Pfield(
+            0,
+            FieldDbgInfo::Module {
+                name: "internalToException".to_string(),
+            },
+        ),
+        vec![Lambda::global_module(Ident::create_persistent(
+            "Primitive_exceptions",
+        ))],
+        loc.clone(),
+    );
+    Lambda::apply(
+        internal_to_exception,
+        vec![arg],
+        ApInfo {
+            loc,
+            inlined: crate::lambda::InlineAttribute::Default,
+            status: ApplyStatus::Uncurry,
+        },
+        false,
+    )
 }
 
 fn collect_exported_idents(raw: &RawLambda, exports: &mut HashSet<Ident>) {

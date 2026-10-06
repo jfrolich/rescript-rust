@@ -399,10 +399,9 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                             Box::new(Lambda::let_(
                                                 LetKind::StrictOpt,
                                                 exn.clone(),
-                                                Lambda::prim(
-                                                    Primitive::PwrapExn,
-                                                    vec![Lambda::var(raw_exn.clone())],
+                                                crate::raw_lambda::lower::wrap_exn(
                                                     Location::none(),
+                                                    Lambda::var(raw_exn.clone()),
                                                 ),
                                                 Lambda::LstaticCatch(
                                                     Box::new(Lambda::if_(

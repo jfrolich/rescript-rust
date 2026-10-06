@@ -329,8 +329,6 @@ pub enum Primitive {
     Ptypeof,
     /// Function arity
     PfnArity,
-    /// Wrap exception
-    PwrapExn,
     /// Create extension
     PcreateExtension(String),
     /// Compare an extensible-constructor block against an extension slot
@@ -377,8 +375,7 @@ impl Primitive {
             // lam_primitive.ml:199-232 — the big "rhs = lhs" simple list.
             // Every nullary primitive in OCaml's eq_primitive_approx that
             // matches this arm. Mapped to Rust enum variant names.
-            PwrapExn
-            | Praise
+            Praise
             | Pobjorder
             | Pobjmin
             | Pobjmax

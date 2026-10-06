@@ -872,10 +872,9 @@ fn compile_create_extension_uses_primitive_exceptions_create() {
 fn compile_wrap_exn_uses_primitive_exceptions_internal_to_exception() {
     let mut compiler = LambdaCompiler::new();
     let exn = Ident::create_local("exn");
-    let compiled = compiler.compile_expr(&Lambda::prim(
-        Primitive::PwrapExn,
-        vec![Lambda::var(exn.clone())],
+    let compiled = compiler.compile_expr(&crate::raw_lambda::lower::wrap_exn(
         Location::none(),
+        Lambda::var(exn.clone()),
     ));
 
     assert!(compiled.prelude.is_empty());
