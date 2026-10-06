@@ -418,6 +418,10 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     // lam_compile_main.ml:200 — final simplify_exits.
     let lam = simplify_exits_owned(lam, &meta.id_gen);
 
+    // lam_compile_main.ml — guard_raises runs last, after every pass that can
+    // produce `if a then raise e else c`.
+    let lam = crate::lambda::lam_pass_guard_raises::guard_raises(lam);
+
     // lam_compile_main.ml:212 — Lam_coercion.coerce_and_group_big_lambda
     // (lam_coercion.ml:196). The OCaml flow flattens the lambda into a list
     // of `Lam_group.t` and runs `handle_exports` on the trailing

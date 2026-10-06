@@ -64,6 +64,7 @@ pub(crate) mod lam_pass_deep_flatten_indexed;
 pub(crate) mod lam_pass_eliminate_ref_indexed;
 pub mod lam_pass_exits;
 pub mod lam_pass_exits_indexed;
+pub mod lam_pass_guard_raises;
 pub mod lam_pass_lets_dce;
 pub mod lam_pass_sroa;
 pub mod lambda_traverse;
@@ -977,19 +978,9 @@ impl Lambda {
                     };
                 }
 
-                if matches!(
-                    &then_,
-                    Lambda::Lprim(__prim101) if matches!(__prim101.as_ref(), PrimInfo {
-                        primitive: Primitive::Praise,
-                        ..
-                    })
-) {
-                    return if matches!(&else_, Lambda::Lconst(_)) {
-                        make_if(cond, then_, else_)
-                    } else {
-                        Lambda::seq(make_if(cond, then_, Lambda::unit()), else_)
-                    };
-                }
+                // `if a then raise e else c` -> `(if a then raise e else ()); c`
+                // is code motion, not normalization; it is the final
+                // `lam_pass_guard_raises` pass (compiler/ml/lambda.ml if_).
 
                 match cond {
                     Lambda::Lprim(prim_info) => match *prim_info {
@@ -1728,6 +1719,9 @@ mod tests {
             ),
             Lambda::static_raise(1, Vec::new()),
         );
+        // The constructor keeps the shape; the final pass moves the code.
+        assert!(matches!(if_expr, Lambda::LifThenElse(..)));
+        let if_expr = crate::lambda::lam_pass_guard_raises::guard_raises(if_expr);
 
         match if_expr {
             Lambda::Lsequence(first, second) => {
