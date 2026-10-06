@@ -21,7 +21,6 @@ const EXCEPTION_ID_FIELD: &str = "RE_EXN_ID";
 
 struct LoweringContext<'a> {
     alias_tbl: HashMap<Ident, Ident>,
-    exit_map: HashMap<i32, i32>,
     exported_idents: HashSet<Ident>,
     id_gen: &'a IdGenerator,
 }
@@ -30,7 +29,6 @@ impl<'a> LoweringContext<'a> {
     fn with_id_gen(exported_idents: HashSet<Ident>, id_gen: &'a IdGenerator) -> Self {
         Self {
             alias_tbl: HashMap::new(),
-            exit_map: HashMap::new(),
             exported_idents,
             id_gen,
         }
@@ -73,23 +71,10 @@ impl<'a> LoweringContext<'a> {
                 let lowered_scrutinee = self.lower_lambda(*scrutinee);
                 Lambda::LstringSwitch(Box::new(lowered_scrutinee), lowered_cases, lowered_default)
             }
-            RawLambda::LstaticRaise(id, args) if args.is_empty() => {
-                Lambda::static_raise(self.remap_exit(id), Vec::new())
-            }
             RawLambda::LstaticRaise(id, args) => Lambda::static_raise(
                 id,
                 args.into_iter().map(|arg| self.lower_lambda(arg)).collect(),
             ),
-            RawLambda::LstaticCatch(body, (i, ids), handler)
-                if ids.is_empty()
-                    && matches!(&*handler, RawLambda::LstaticRaise(_, inner) if inner.is_empty()) =>
-            {
-                let RawLambda::LstaticRaise(j, _) = *handler else {
-                    unreachable!();
-                };
-                self.exit_map.insert(i, self.remap_exit(j));
-                self.lower_lambda(*body)
-            }
             RawLambda::LstaticCatch(body, (i, ids), handler) => {
                 let lowered_handler = self.lower_lambda(*handler);
                 let lowered_body = self.lower_lambda(*body);
@@ -136,10 +121,6 @@ impl<'a> LoweringContext<'a> {
 
     fn alias_target(&self, id: Ident) -> Ident {
         self.alias_tbl.get(&id).cloned().unwrap_or(id)
-    }
-
-    fn remap_exit(&self, id: i32) -> i32 {
-        self.exit_map.get(&id).copied().unwrap_or(id)
     }
 
     fn lower_apply(&mut self, apply: RawApply) -> Lambda {
@@ -1719,161 +1700,6 @@ mod tests {
         };
         assert!(!switch.sw_consts_full);
         assert!(switch.sw_blocks_full);
-    }
-
-    fn raw_exit_alias(alias_from: i32, alias_to: i32) -> RawLambda {
-        RawLambda::LstaticCatch(
-            Box::new(RawLambda::LstaticRaise(alias_from, Vec::new())),
-            (alias_from, Vec::new()),
-            Box::new(RawLambda::LstaticRaise(alias_to, Vec::new())),
-        )
-    }
-
-    #[test]
-    fn lowers_sequence_rhs_before_lhs_for_exit_aliases() {
-        let lowered = lower_to_lambda(RawLambda::Lsequence(
-            Box::new(RawLambda::LstaticRaise(7, Vec::new())),
-            Box::new(raw_exit_alias(7, 8)),
-        ));
-
-        let Lambda::Lsequence(first, second) = lowered else {
-            panic!("expected sequence");
-        };
-        assert!(matches!(
-            first.as_ref(),
-            Lambda::LstaticRaise(8, args) if args.is_empty()
-        ));
-        assert!(matches!(
-            second.as_ref(),
-            Lambda::LstaticRaise(8, args) if args.is_empty()
-        ));
-    }
-
-    #[test]
-    fn lowers_if_else_before_then_before_cond_for_exit_aliases() {
-        let lowered = lower_to_lambda(RawLambda::LifThenElse(
-            Box::new(RawLambda::LstaticRaise(7, Vec::new())),
-            Box::new(RawLambda::const_(Constant::int(1))),
-            Box::new(raw_exit_alias(7, 8)),
-        ));
-
-        let Lambda::LifThenElse(cond, _, else_) = lowered else {
-            panic!("expected if");
-        };
-        assert!(matches!(
-            cond.as_ref(),
-            Lambda::LstaticRaise(8, args) if args.is_empty()
-        ));
-        assert!(matches!(
-            else_.as_ref(),
-            Lambda::LstaticRaise(8, args) if args.is_empty()
-        ));
-    }
-
-    #[test]
-    fn lowers_staticcatch_handler_before_body_for_exit_aliases() {
-        let lowered = lower_to_lambda(RawLambda::LstaticCatch(
-            Box::new(raw_exit_alias(7, 8)),
-            (9, vec![Ident::create_local("param")]),
-            Box::new(RawLambda::LstaticRaise(7, Vec::new())),
-        ));
-
-        let Lambda::LstaticCatch(body, (id, params), handler) = lowered else {
-            panic!("expected static catch");
-        };
-        assert_eq!(id, 9);
-        assert_eq!(params.len(), 1);
-        assert!(matches!(
-            body.as_ref(),
-            Lambda::LstaticRaise(8, args) if args.is_empty()
-        ));
-        assert!(matches!(
-            handler.as_ref(),
-            Lambda::LstaticRaise(7, args) if args.is_empty()
-        ));
-    }
-
-    #[test]
-    fn lowers_apply_arguments_before_function_for_exit_aliases() {
-        let lowered = lower_to_lambda(RawLambda::Lapply(Box::new(RawApply {
-            ap_func: Box::new(RawLambda::LstaticRaise(7, Vec::new())),
-            ap_args: vec![raw_exit_alias(7, 8)],
-            ap_info: ApInfo {
-                loc: Location::none(),
-                inlined: InlineAttribute::Default,
-                status: ApplyStatus::Na,
-            },
-            ap_transformed_jsx: false,
-        })));
-
-        let Lambda::Lapply(apply) = lowered else {
-            panic!("expected apply");
-        };
-        assert!(matches!(
-            apply.ap_func.as_ref(),
-            Lambda::LstaticRaise(8, args) if args.is_empty()
-        ));
-        assert!(matches!(
-            apply.ap_args.as_slice(),
-            [Lambda::LstaticRaise(8, args)] if args.is_empty()
-        ));
-    }
-
-    #[test]
-    fn lowers_switch_cases_before_scrutinee_for_exit_aliases() {
-        let lowered = lower_to_lambda(RawLambda::Lswitch(
-            Box::new(raw_exit_alias(7, 8)),
-            Box::new(RawLambdaSwitch {
-                sw_consts_full: true,
-                sw_consts: vec![(
-                    crate::lambda::SwitchKey::Int(0),
-                    RawLambda::LstaticRaise(7, Vec::new()),
-                )],
-                sw_blocks_full: true,
-                sw_blocks: Vec::new(),
-                sw_failaction: None,
-                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            }),
-        ));
-
-        let Lambda::Lswitch(scrutinee, switch) = lowered else {
-            panic!("expected switch");
-        };
-        assert!(matches!(
-            scrutinee.as_ref(),
-            Lambda::LstaticRaise(8, args) if args.is_empty()
-        ));
-        assert!(matches!(
-            switch.sw_consts.as_slice(),
-            [(crate::lambda::SwitchKey::Int(0), Lambda::LstaticRaise(7, args))] if args.is_empty()
-        ));
-    }
-
-    #[test]
-    fn lowers_switch_failaction_before_scrutinee_for_exit_aliases() {
-        let lowered = lower_to_lambda(RawLambda::Lswitch(
-            Box::new(RawLambda::LstaticRaise(7, Vec::new())),
-            Box::new(RawLambdaSwitch {
-                sw_consts_full: true,
-                sw_consts: Vec::new(),
-                sw_blocks_full: true,
-                sw_blocks: Vec::new(),
-                sw_failaction: Some(Box::new(raw_exit_alias(7, 8))),
-                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            }),
-        ));
-
-        let Lambda::Lswitch(scrutinee, switch) = lowered else {
-            panic!("expected switch");
-        };
-        assert!(matches!(
-            scrutinee.as_ref(),
-            Lambda::LstaticRaise(8, args) if args.is_empty()
-        ));
-        assert!(matches!(
-            switch.sw_failaction.as_deref(),
-            Some(Lambda::LstaticRaise(8, args)) if args.is_empty()
-        ));
     }
 
     #[test]
