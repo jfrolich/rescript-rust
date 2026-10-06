@@ -6108,7 +6108,7 @@ pub(crate) fn runtime_tag_of_parsetree(
     Ok(match tag {
         P::Pct_string(s) => T::String(s.semantic().to_string()),
         P::Pct_int(source) => match crate::types::decl::parse_ocaml_int_literal(source) {
-            Some(i) => T::Int(i as i32),
+            Some(i) => T::Int(i),
             None => return Err(AstUntaggedVariantError::VariantAsIntegerOutOfRange(source.clone())),
         },
         P::Pct_float(f) => T::Float(f.clone()),

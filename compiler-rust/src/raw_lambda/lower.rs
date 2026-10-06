@@ -473,7 +473,7 @@ pub(crate) fn lower_constant(constant: Constant) -> Constant {
         Constant::Constructor(tag) if tag.name == "()" => Constant::JsUndefined { is_unit: true },
         Constant::Constructor(tag) => match tag.literal {
             Some(crate::types::VariantLiteralTag::Int(value)) => Constant::Int {
-                i: value,
+                i: value as i32,
                 comment: None,
             },
             _ => Constant::Constructor(tag),

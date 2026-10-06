@@ -3094,7 +3094,7 @@ fn decode_cmj_variant_literal_tag(value: &OcamlValue) -> Option<crate::types::Va
             Some(T::String(fields[0].as_string().to_string()))
         }
         OcamlValue::Block(1, fields) if fields.len() == 1 => {
-            Some(T::Int(fields[0].as_int() as i32))
+            Some(T::Int(fields[0].as_int()))
         }
         OcamlValue::Block(2, fields) if fields.len() == 1 => {
             Some(T::Float(fields[0].as_string().to_string()))

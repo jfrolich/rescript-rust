@@ -409,7 +409,7 @@ impl<'a> SigReadContext<'a> {
             OcamlValue::Int(1) => T::Undefined,
             OcamlValue::Block(tag, fields) => match tag {
                 0 => T::String(fields[0].as_string().to_string()),
-                1 => T::Int(fields[0].as_int() as i32),
+                1 => T::Int(fields[0].as_int()),
                 2 => T::Float(fields[0].as_string().to_string()),
                 3 => T::BigInt(fields[0].as_string().to_string()),
                 4 => T::Bool(fields[0].as_bool()),

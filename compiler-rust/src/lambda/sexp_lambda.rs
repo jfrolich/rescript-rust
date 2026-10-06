@@ -277,7 +277,7 @@ fn variant_literal_tag(tag: &crate::types::VariantLiteralTag) -> Sexp {
     use crate::types::VariantLiteralTag as T;
     match tag {
         T::String(value) => Sexp::list(vec![Sexp::atom("String"), string(value)]),
-        T::Int(value) => Sexp::list(vec![Sexp::atom("Int"), int(*value)]),
+        T::Int(value) => Sexp::list(vec![Sexp::atom("Int"), Sexp::atom(value.to_string())]),
         T::Float(value) => Sexp::list(vec![Sexp::atom("Float"), string(value)]),
         T::BigInt(value) => Sexp::list(vec![Sexp::atom("BigInt"), string(value)]),
         T::Bool(value) => Sexp::list(vec![Sexp::atom("Bool"), bool_sexp(*value)]),

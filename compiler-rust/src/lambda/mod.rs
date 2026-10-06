@@ -201,8 +201,8 @@ fn runtime_value_kind(c: &Constant) -> ValueKind {
     use crate::types::VariantLiteralTag as L;
     match c {
         Constant::String(s) | Constant::ImmString(s) => ValueKind::IsLiteral(L::String(s.clone())),
-        Constant::Int { i, .. } => ValueKind::IsLiteral(L::Int(*i)),
-        Constant::NativeInt { i, .. } => ValueKind::IsLiteral(L::Int(*i as i32)),
+        Constant::Int { i, .. } => ValueKind::IsLiteral(L::Int(i64::from(*i))),
+        Constant::NativeInt { i, .. } => ValueKind::IsLiteral(L::Int(i64::from(*i as i32))),
         Constant::Float(f) => ValueKind::IsLiteral(L::Float(f.clone())),
         Constant::JsTrue => ValueKind::IsLiteral(L::Bool(true)),
         Constant::JsFalse => ValueKind::IsLiteral(L::Bool(false)),
@@ -248,12 +248,13 @@ fn literal_denotes_same(a: &crate::types::VariantLiteralTag, b: &crate::types::V
     use crate::types::VariantLiteralTag as L;
     match (a, b) {
         (L::String(x), L::String(y)) => x == y,
-        (L::Int(x), L::Int(y)) => x == y,
+        // lambda.ml:824 compares through `Int32.of_int`.
+        (L::Int(x), L::Int(y)) => *x as i32 == *y as i32,
         (L::Float(x), L::Float(y)) => {
             matches!((ocaml_float_of_string(x), ocaml_float_of_string(y)), (Some(x), Some(y)) if x == y)
         }
         (L::Int(x), L::Float(y)) | (L::Float(y), L::Int(x)) => {
-            ocaml_float_of_string(y).is_some_and(|y| *x as f64 == y)
+            ocaml_float_of_string(y).is_some_and(|y| f64::from(*x as i32) == y)
         }
         (L::Bool(x), L::Bool(y)) => x == y,
         (L::Null, L::Null) | (L::Undefined, L::Undefined) => true,

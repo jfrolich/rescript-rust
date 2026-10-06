@@ -103,7 +103,7 @@ impl LambdaCompiler {
             },
             Constant::Constructor(tag) => match &tag.literal {
                 Some(crate::types::VariantLiteralTag::Int(value)) => {
-                    Expression::number(Number::int(*value))
+                    Expression::number(Number::int(*value as i32))
                 }
                 // lam_compile_const.ml `E.tag_type t`: `String s -> str s`.
                 Some(crate::types::VariantLiteralTag::String(value)) => {

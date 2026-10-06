@@ -83,7 +83,7 @@ pub enum BlockType {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LiteralTag {
     String(String),
-    Int(i32),
+    Int(i64),
     Float(String),
     BigInt(String),
     Bool(bool),

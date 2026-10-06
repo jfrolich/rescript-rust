@@ -350,7 +350,7 @@ impl LambdaCompiler {
     fn literal_tag_value(tag: &crate::types::VariantLiteralTag) -> SwitchCaseTag {
         match tag {
             crate::types::VariantLiteralTag::String(value) => SwitchCaseTag::String(value.clone()),
-            crate::types::VariantLiteralTag::Int(value) => SwitchCaseTag::Int(*value as i64),
+            crate::types::VariantLiteralTag::Int(value) => SwitchCaseTag::Int(i64::from(*value as i32)),
             crate::types::VariantLiteralTag::Float(value) => SwitchCaseTag::Float(value.clone()),
             crate::types::VariantLiteralTag::BigInt(value) => SwitchCaseTag::BigInt(value.clone()),
             crate::types::VariantLiteralTag::Bool(value) => SwitchCaseTag::Bool(*value),

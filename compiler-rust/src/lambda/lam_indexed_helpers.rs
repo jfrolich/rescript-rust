@@ -566,7 +566,7 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                         || comment.is_none() && matches!(key,
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Constant(tag)
-                            ) if matches!(tag.literal, Some(crate::types::VariantLiteralTag::Int(value)) if value == *i)
+                            ) if matches!(tag.literal, Some(crate::types::VariantLiteralTag::Int(value)) if value == i64::from(*i))
                         )
                 }).map(|(_, node)| *node),
                 NodeView::Const(Constant::Block { tag_info, .. }) => {

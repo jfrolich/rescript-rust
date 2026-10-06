@@ -2916,7 +2916,7 @@ fn call_argument_needs_extra_group_indent(
 fn variant_tag_to_switch(tag: &crate::types::VariantTag) -> Option<SwitchCaseTag> {
     match tag.literal.as_ref()? {
         crate::types::VariantLiteralTag::String(value) => Some(SwitchCaseTag::String(value.clone())),
-        crate::types::VariantLiteralTag::Int(value) => Some(SwitchCaseTag::Int(*value as i64)),
+        crate::types::VariantLiteralTag::Int(value) => Some(SwitchCaseTag::Int(i64::from(*value as i32))),
         crate::types::VariantLiteralTag::Float(value) => Some(SwitchCaseTag::Float(value.clone())),
         crate::types::VariantLiteralTag::BigInt(value) => Some(SwitchCaseTag::BigInt(value.clone())),
         crate::types::VariantLiteralTag::Bool(value) => Some(SwitchCaseTag::Bool(*value)),

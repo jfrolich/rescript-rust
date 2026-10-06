@@ -469,7 +469,7 @@ fn constructor_runtime_tag(
     tag: &Option<crate::types::VariantLiteralTag>,
 ) -> Option<ConstructorRuntimeTag> {
     tag.as_ref().and_then(|tag| match tag {
-        crate::types::VariantLiteralTag::Int(value) => Some(ConstructorRuntimeTag::Int(*value as i64)),
+        crate::types::VariantLiteralTag::Int(value) => Some(ConstructorRuntimeTag::Int(i64::from(*value as i32))),
         crate::types::VariantLiteralTag::String(value) => {
             Some(ConstructorRuntimeTag::String(value.clone()))
         }
