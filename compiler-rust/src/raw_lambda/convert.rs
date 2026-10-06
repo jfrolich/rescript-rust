@@ -1203,7 +1203,7 @@ impl<'a> RawLambdaConverter<'a> {
         &mut self,
         handler_fun: impl FnOnce() -> RawLambda,
         arg: RawLambda,
-        pat_act_list: Vec<(&Pattern, RawLambda)>,
+        pat_act_list: Vec<(&Pattern, full_matching::CaseAction)>,
         partial: Partial,
     ) -> RawLambda {
         self.sync_matching_stamps();
@@ -1250,7 +1250,7 @@ impl<'a> RawLambdaConverter<'a> {
         &mut self,
         loc: Location,
         param: RawLambda,
-        pat_act_list: Vec<(&Pattern, RawLambda)>,
+        pat_act_list: Vec<(&Pattern, full_matching::CaseAction)>,
         partial: Partial,
     ) -> RawLambda {
         self.sync_matching_stamps();
@@ -1270,7 +1270,7 @@ impl<'a> RawLambdaConverter<'a> {
     fn for_trywith_with_synced_stamps(
         &mut self,
         param: RawLambda,
-        pat_act_list: Vec<(&Pattern, RawLambda)>,
+        pat_act_list: Vec<(&Pattern, full_matching::CaseAction)>,
     ) -> RawLambda {
         self.sync_matching_stamps();
         let lambda = full_matching::for_trywith(
@@ -1288,7 +1288,7 @@ impl<'a> RawLambdaConverter<'a> {
         &mut self,
         loc: Location,
         paraml: Vec<RawLambda>,
-        pat_act_list: Vec<(&Pattern, RawLambda)>,
+        pat_act_list: Vec<(&Pattern, full_matching::CaseAction)>,
         partial: Partial,
     ) -> RawLambda {
         self.sync_matching_stamps();
@@ -1322,24 +1322,22 @@ impl<'a> RawLambdaConverter<'a> {
         self.next_negative_raise
     }
 
-    /// Convert typed tree cases to `(Pattern, RawLambda)` pairs for the full
-    /// matching compiler. Guards are encoded as
-    /// `if guard then body else staticraise(0, [])` per OCaml convention.
-    fn cases_to_pat_act_list<'c>(&mut self, cases: &'c [Case]) -> Vec<(&'c Pattern, RawLambda)> {
+    /// Convert typed tree cases to `(Pattern, action)` pairs for the full
+    /// matching compiler. A guard stays data until matching knows its
+    /// fallthrough (`compiler/ml/translcore.ml` `Matching.guarded`).
+    fn cases_to_pat_act_list<'c>(
+        &mut self,
+        cases: &'c [Case],
+    ) -> Vec<(&'c Pattern, full_matching::CaseAction)> {
         cases
             .iter()
             .map(|case| {
                 let body = self.convert_expr_raw(&case.c_rhs);
                 let act = match &case.c_guard {
                     Some(guard) => {
-                        let guard_lam = self.convert_expr_raw(guard);
-                        RawLambda::LifThenElse(
-                            Box::new(guard_lam),
-                            Box::new(body),
-                            Box::new(RawLambda::LstaticRaise(0, Vec::new())),
-                        )
+                        full_matching::CaseAction::guarded(self.convert_expr_raw(guard), body)
                     }
-                    None => body,
+                    None => full_matching::CaseAction::unguarded(body),
                 };
                 (&case.c_lhs, act)
             })
@@ -11013,7 +11011,7 @@ impl<'a> RawLambdaConverter<'a> {
                             acc = RawLambda::let_(kind, id, value, acc);
                         } else {
                             // Use matching compiler's for_let (OCaml: Matching.for_let)
-                            let pat_act_list = vec![(&binding.vb_pat, acc)];
+                            let pat_act_list = vec![(&binding.vb_pat, acc.into())];
                             let loc = self.loc(binding.vb_pat.pat_loc);
                             let fname = self.basename_for_loc(loc.clone());
                             let loc_for_handler = loc.clone();
@@ -11209,7 +11207,7 @@ impl<'a> RawLambdaConverter<'a> {
                 _ => self.for_function_with_synced_stamps(
                     self.loc(pat.pat_loc),
                     RawLambda::var(id.clone()),
-                    vec![(pat, lambda_body)],
+                    vec![(pat, lambda_body.into())],
                     param.fp_partial,
                 ),
             };

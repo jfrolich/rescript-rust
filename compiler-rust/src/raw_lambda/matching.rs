@@ -58,10 +58,59 @@ struct MatchActionData {
     normalized_key: OnceLock<Option<String>>,
 }
 
+/// A case's right-hand side as translation hands it to matching
+/// (`compiler/ml/matching.ml:348-360`): the guard stays data until the
+/// fallthrough it needs is known.
+pub struct CaseAction {
+    pub guard: Option<RawLambda>,
+    pub body: RawLambda,
+}
+
+impl CaseAction {
+    /// `Matching.unguarded`.
+    pub fn unguarded(body: RawLambda) -> Self {
+        Self { guard: None, body }
+    }
+
+    /// `Matching.guarded`.
+    pub fn guarded(guard: RawLambda, body: RawLambda) -> Self {
+        Self {
+            guard: Some(guard),
+            body,
+        }
+    }
+}
+
+impl From<RawLambda> for CaseAction {
+    fn from(body: RawLambda) -> Self {
+        Self::unguarded(body)
+    }
+}
+
+/// The stand-in fallthrough when actions are compared by key
+/// (`compiler/ml/matching.ml:381-386`). OCaml makes a fresh variable per
+/// comparison so no real action can mention it; a negative stamp is never
+/// allocated, which gives the same guarantee and lets keys be cached.
+fn fallthrough_stand_in() -> RawLambda {
+    RawLambda::Lvar(Ident::new("fallthrough", -1, crate::ident::IdentFlags::NONE))
+}
+
+/// A shared term as a child of a new node. Constants are copied so the
+/// folding constructors see them.
+fn shared_term(term: &Arc<RawLambda>) -> RawLambda {
+    match term.as_ref() {
+        RawLambda::Lconst(_) => term.as_ref().clone(),
+        _ => RawLambda::Lshared(term.clone()),
+    }
+}
+
 enum MatchActionKind {
-    /// Shared so a compiled matching can place the action without copying it
-    /// (see `RawLambda::Lshared`).
-    Raw(Arc<RawLambda>),
+    /// A case's guard and body. Shared so a compiled matching can place them
+    /// without copying (see `RawLambda::Lshared`).
+    Case {
+        guard: Option<Arc<RawLambda>>,
+        body: Arc<RawLambda>,
+    },
     Bind {
         kind: LetKind,
         id: Ident,
@@ -72,7 +121,14 @@ enum MatchActionKind {
 
 impl MatchAction {
     fn new(action: RawLambda) -> Self {
-        Self::from_kind(MatchActionKind::Raw(Arc::new(action)))
+        Self::from_case(CaseAction::unguarded(action))
+    }
+
+    fn from_case(action: CaseAction) -> Self {
+        Self::from_kind(MatchActionKind::Case {
+            guard: action.guard.map(Arc::new),
+            body: Arc::new(action.body),
+        })
     }
 
     fn from_kind(kind: MatchActionKind) -> Self {
@@ -99,9 +155,15 @@ impl MatchAction {
         }
     }
 
-    fn to_raw(&self) -> RawLambda {
+    /// `Matching.action_body_with ~fail` (`compiler/ml/matching.ml:370-376`):
+    /// the guard falls through to `fail`, under the action's bindings.
+    fn body_with(&self, fail: RawLambda) -> RawLambda {
         match &self.0.kind {
-            MatchActionKind::Raw(raw) => RawLambda::Lshared(raw.clone()),
+            MatchActionKind::Case { guard: None, body } => RawLambda::Lshared(body.clone()),
+            MatchActionKind::Case {
+                guard: Some(guard),
+                body,
+            } => RawLambda::if_(shared_term(guard), shared_term(body), fail),
             MatchActionKind::Bind {
                 kind,
                 id,
@@ -111,17 +173,16 @@ impl MatchAction {
                 *kind,
                 id.clone(),
                 Box::new(arg.clone()),
-                Box::new(action.to_raw()),
+                Box::new(action.body_with(fail)),
             ),
         }
     }
 
-    fn into_raw(self) -> RawLambda {
-        match Arc::try_unwrap(self.0) {
-            Ok(data) => data.into_raw(),
-            Err(shared) => MatchAction(shared).to_raw(),
-        }
+    /// An unguarded action's term (`action_body_with ~fail:lambda_unit`).
+    fn to_raw(&self) -> RawLambda {
+        self.body_with(lambda_unit())
     }
+
 
     fn normalized_key(&self) -> Option<&str> {
         // OCaml `compiler/ml/lambda.ml:432-466` computes `Lambda.make_key`, and
@@ -137,14 +198,21 @@ impl MatchAction {
 
     fn is_guarded(&self) -> bool {
         match &self.0.kind {
-            MatchActionKind::Raw(raw) => is_guarded(raw),
+            MatchActionKind::Case { guard, .. } => guard.is_some(),
             MatchActionKind::Bind { action, .. } => action.is_guarded(),
         }
     }
 
+    /// `Matching.action_free_variables` (`compiler/ml/matching.ml:388-397`).
     fn free_variables(&self) -> IdentSet {
         match &self.0.kind {
-            MatchActionKind::Raw(raw) => raw_lambda_free_variables(raw),
+            MatchActionKind::Case { guard, body } => {
+                let mut fv = raw_lambda_free_variables(body);
+                if let Some(guard) = guard {
+                    fv.extend(raw_lambda_free_variables(guard));
+                }
+                fv
+            }
             MatchActionKind::Bind {
                 id, arg, action, ..
             } => {
@@ -156,36 +224,6 @@ impl MatchAction {
         }
     }
 
-    fn patch_guarded(&self, patch: RawLambda) -> RawLambda {
-        match &self.0.kind {
-            MatchActionKind::Raw(raw) => patch_guarded(patch, raw),
-            MatchActionKind::Bind {
-                kind,
-                id,
-                arg,
-                action,
-            } => RawLambda::Llet(
-                *kind,
-                id.clone(),
-                Box::new(arg.clone()),
-                Box::new(action.patch_guarded(patch)),
-            ),
-        }
-    }
-}
-
-impl MatchActionData {
-    fn into_raw(self) -> RawLambda {
-        match self.kind {
-            MatchActionKind::Raw(raw) => RawLambda::Lshared(raw),
-            MatchActionKind::Bind {
-                kind,
-                id,
-                arg,
-                action,
-            } => RawLambda::Llet(kind, id, Box::new(arg), Box::new(action.into_raw())),
-        }
-    }
 }
 
 type Clause<'p> = (Vec<&'p Pattern>, MatchAction);
@@ -2092,7 +2130,12 @@ impl MakeKeyWriter {
             return None;
         }
         match &action.0.kind {
-            MatchActionKind::Raw(raw) => self.write_raw_after_count(raw, out),
+            MatchActionKind::Case { guard: None, body } => self.write_raw_after_count(body, out),
+            // `Matching.action_key_term` (`compiler/ml/matching.ml:381-386`).
+            MatchActionKind::Case { guard: Some(_), .. } => {
+                let term = action.body_with(fallthrough_stand_in());
+                self.write_raw_after_count(&term, out)
+            }
             MatchActionKind::Bind {
                 kind,
                 id,
@@ -2354,7 +2397,7 @@ fn same_var_body(body: &KeyBody<'_>, id: &Ident) -> bool {
     match body {
         KeyBody::Raw(raw) if matches!(raw.peel(), RawLambda::Lvar(v) if v.same(id)) => true,
         KeyBody::Action(action) => {
-            matches!(&action.0.kind, MatchActionKind::Raw(raw) if matches!(&**raw, RawLambda::Lvar(v) if v.same(id)))
+            matches!(&action.0.kind, MatchActionKind::Case { guard: None, body } if matches!(&**body, RawLambda::Lvar(v) if v.same(id)))
         }
         _ => false,
     }
@@ -3404,23 +3447,6 @@ fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
 // This layer implements the pattern grouping predicates, or-pattern
 // operations, and the split/precompile functions that prepare pattern
 // matchings for compilation.
-
-// ============================================================================
-// is_guarded — Check if an action has a guard (anticipated staticraise)
-// ============================================================================
-// Ported from OCaml's lambda.ml lines 603-606.
-
-/// Check if a lambda action is guarded (contains `if ... then ... else staticraise(0, [])`).
-/// Equivalent to OCaml's `Lambda.is_guarded`.
-fn is_guarded(lam: &RawLambda) -> bool {
-    match lam.peel() {
-        RawLambda::LifThenElse(_, _, else_br) => {
-            matches!(else_br.peel(), RawLambda::LstaticRaise(0, args) if args.is_empty())
-        }
-        RawLambda::Llet(_, _, _, body) => is_guarded(body),
-        _ => false,
-    }
-}
 
 // ============================================================================
 // Group predicates (lines 659-700)
@@ -8249,26 +8275,6 @@ fn lambda_unit() -> RawLambda {
     RawLambda::Lconst(crate::lambda::Constant::JsUndefined { is_unit: true })
 }
 
-/// Patch a guarded action: replace the guard's static raise(0,[]) with the patch lambda.
-/// Equivalent to OCaml's `Lambda.patch_guarded`.
-fn patch_guarded(patch: RawLambda, lam: &RawLambda) -> RawLambda {
-    match lam.peel() {
-        RawLambda::LifThenElse(cond, body, else_br) => match else_br.peel() {
-            RawLambda::LstaticRaise(0, args) if args.is_empty() => {
-                RawLambda::LifThenElse(cond.clone(), body.clone(), Box::new(patch))
-            }
-            _ => panic!("patch_guarded: unexpected else branch"),
-        },
-        RawLambda::Llet(kind, id, lam_inner, body) => RawLambda::Llet(
-            *kind,
-            id.clone(),
-            lam_inner.clone(),
-            Box::new(patch_guarded(patch, body)),
-        ),
-        _ => panic!("patch_guarded: unexpected lambda"),
-    }
-}
-
 /// The main compilation function.
 /// Input:
 ///   repr=used for inserting debug events (unused in ReScript)
@@ -8307,7 +8313,7 @@ fn compile_match<'p>(
                     &remaining,
                     next_raise_count,
                 )?;
-                Ok((action.patch_guarded(lambda), total))
+                Ok((action.body_with(lambda), total))
             } else {
                 Ok((action.to_raw(), jumps_empty()))
             }
@@ -9093,14 +9099,14 @@ fn is_mutable(p: &Pattern) -> bool {
 
 /// Downgrade Total to Partial when needed.
 /// Equivalent to OCaml's `check_partial` (single pattern version).
-fn check_partial_single<'p>(pat_act_list: &[(&'p Pattern, RawLambda)], partial: Partial) -> Partial {
+fn check_partial_single<'p>(pat_act_list: &[(&'p Pattern, CaseAction)], partial: Partial) -> Partial {
     match partial {
         Partial::Partial => Partial::Partial,
         Partial::Total => {
             if pat_act_list.is_empty()
                 || pat_act_list
                     .iter()
-                    .any(|(pat, lam)| is_mutable(pat) && is_guarded(lam))
+                    .any(|(pat, act)| is_mutable(pat) && act.guard.is_some())
             {
                 Partial::Partial
             } else {
@@ -9176,7 +9182,7 @@ pub fn compile_matching<'p>(
     arena: &ParseArena,
     handler_fun: impl FnOnce() -> RawLambda,
     arg: RawLambda,
-    pat_act_list: Vec<(&'p Pattern, RawLambda)>,
+    pat_act_list: Vec<(&'p Pattern, CaseAction)>,
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
@@ -9200,7 +9206,7 @@ fn compile_matching_unresolved<'p>(
     arena: &ParseArena,
     handler_fun: impl FnOnce() -> RawLambda,
     arg: RawLambda,
-    pat_act_list: Vec<(&'p Pattern, RawLambda)>,
+    pat_act_list: Vec<(&'p Pattern, CaseAction)>,
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
@@ -9211,7 +9217,7 @@ fn compile_matching_unresolved<'p>(
             let pm = PatternMatching {
                 cases: pat_act_list
                     .into_iter()
-                    .map(|(pat, act)| (vec![pat], MatchAction::new(act)))
+                    .map(|(pat, act)| (vec![pat], MatchAction::from_case(act)))
                     .collect(),
                 args: MatchArgs::new(vec![(arg, LetKind::Strict)]),
                 default: vec![(vec![vec![omega()]], raise_num)],
@@ -9234,7 +9240,7 @@ fn compile_matching_unresolved<'p>(
             let pm = PatternMatching {
                 cases: pat_act_list
                     .into_iter()
-                    .map(|(pat, act)| (vec![pat], MatchAction::new(act)))
+                    .map(|(pat, act)| (vec![pat], MatchAction::from_case(act)))
                     .collect(),
                 args: MatchArgs::new(vec![(arg, LetKind::Strict)]),
                 default: Vec::new(),
@@ -9302,7 +9308,7 @@ pub fn for_function<'p>(
     arena: &ParseArena,
     loc: Location,
     param: RawLambda,
-    pat_act_list: Vec<(&'p Pattern, RawLambda)>,
+    pat_act_list: Vec<(&'p Pattern, CaseAction)>,
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
@@ -9324,7 +9330,7 @@ pub fn for_trywith<'p>(
     ctx_ref: &TypeContext,
     arena: &ParseArena,
     param: RawLambda,
-    pat_act_list: Vec<(&'p Pattern, RawLambda)>,
+    pat_act_list: Vec<(&'p Pattern, CaseAction)>,
     next_raise_count: &mut i32,
 ) -> RawLambda {
     let param_clone = param.clone();
@@ -9362,7 +9368,7 @@ pub fn simple_for_let(
         arena,
         || partial_function(ctx_ref, loc_clone),
         param,
-        vec![(pat, body)],
+        vec![(pat, CaseAction::unguarded(body))],
         Partial::Partial,
         next_raise_count,
     )
@@ -9407,7 +9413,7 @@ pub fn for_tupled_function<'p>(
     arena: &ParseArena,
     loc: Location,
     paraml: &[Ident],
-    pats_act_list: Vec<(Vec<&'p Pattern>, RawLambda)>,
+    pats_act_list: Vec<(Vec<&'p Pattern>, CaseAction)>,
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
@@ -9431,13 +9437,13 @@ fn for_tupled_function_unresolved<'p>(
     arena: &ParseArena,
     loc: Location,
     paraml: &[Ident],
-    pats_act_list: Vec<(Vec<&'p Pattern>, RawLambda)>,
+    pats_act_list: Vec<(Vec<&'p Pattern>, CaseAction)>,
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
     let pats_act_list: Vec<Clause<'p>> = pats_act_list
         .into_iter()
-        .map(|(pats, act)| (pats, MatchAction::new(act)))
+        .map(|(pats, act)| (pats, MatchAction::from_case(act)))
         .collect();
     let partial = check_partial_list(&pats_act_list, partial);
     let raise_num = bump_raise_count(next_raise_count, "matching::for_tupled_function");
@@ -9635,7 +9641,7 @@ pub fn do_for_multiple_match<'p>(
     arena: &ParseArena,
     loc: Location,
     paraml: Vec<RawLambda>,
-    pat_act_list: Vec<(&'p Pattern, RawLambda)>,
+    pat_act_list: Vec<(&'p Pattern, CaseAction)>,
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
@@ -9646,7 +9652,7 @@ pub fn do_for_multiple_match<'p>(
     // cloning each raw-lambda action before the matrix transformations.
     let cases: Vec<Clause<'p>> = pat_act_list
         .into_iter()
-        .map(|(pat, act)| (vec![pat], MatchAction::new(act)))
+        .map(|(pat, act)| (vec![pat], MatchAction::from_case(act)))
         .collect();
     let tuple_arg = RawLambda::Lprim(Box::new(RawPrimInfo {
         primitive: Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
@@ -9795,7 +9801,7 @@ pub fn for_multiple_match<'p>(
     arena: &ParseArena,
     loc: Location,
     paraml: Vec<RawLambda>,
-    pat_act_list: Vec<(&'p Pattern, RawLambda)>,
+    pat_act_list: Vec<(&'p Pattern, CaseAction)>,
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
