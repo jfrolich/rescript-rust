@@ -69,6 +69,7 @@ fn escape_ocaml_string(s: &str) -> String {
             0x0A /* \n */ => escaped.push_str("\\n"),
             0x0D /* \r */ => escaped.push_str("\\r"),
             0x09 /* \t */ => escaped.push_str("\\t"),
+            0x08 /* \b */ => escaped.push_str("\\b"),
             0x20..=0x7E => escaped.push(ch),
             // Lambda strings are Latin-1 byte strings. OCaml prints non-ASCII
             // and other non-printable bytes using decimal \NNN escapes.
