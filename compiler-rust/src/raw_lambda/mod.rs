@@ -229,9 +229,15 @@ impl RawLambda {
         RawLambda::Lvar(id)
     }
 
-    /// Create a global module reference.
+    /// Create a global module reference. A predefined exception is its own
+    /// name at runtime, so it becomes that string
+    /// (`compiler/ml/transl_path.ml` `transl_normal_path`).
     pub fn global_module(id: Ident) -> Self {
-        RawLambda::LglobalModule(id)
+        if id.is_predef_exn() {
+            RawLambda::Lconst(Constant::String(id.name().to_string()))
+        } else {
+            RawLambda::LglobalModule(id)
+        }
     }
 
     /// Create a constant.
@@ -344,9 +350,7 @@ impl RawLambda {
     pub fn from_lowered(lowered: Lambda) -> Self {
         match lowered {
             Lambda::Lvar(id) => RawLambda::Lvar(id),
-            Lambda::LglobalModule(id) => {
-                RawLambda::LglobalModule(id)
-            }
+            Lambda::LglobalModule(id) => RawLambda::global_module(id),
             Lambda::Lconst(c) => RawLambda::Lconst(c),
             Lambda::Lapply(apply) => RawLambda::Lapply(Box::new(RawApply {
                 ap_func: Box::new(RawLambda::from_lowered(*apply.ap_func)),

@@ -7211,7 +7211,7 @@ fn transl_normal_path(path: &crate::types::path::Path) -> RawLambda {
     match path {
         Path::Pident(id) => {
             if id.is_global() {
-                RawLambda::LglobalModule(id.clone())
+                RawLambda::global_module(id.clone())
             } else {
                 RawLambda::Lvar(id.clone())
             }
@@ -9280,7 +9280,7 @@ pub fn partial_function(_ctx_ref: &TypeContext, loc: Location) -> RawLambda {
     let fname = String::new();
 
     let match_failure_ident = crate::types::predef::ident_match_failure();
-    let exn = RawLambda::LglobalModule(match_failure_ident);
+    let exn = RawLambda::global_module(match_failure_ident);
     let payload = RawLambda::Lconst(crate::lambda::Constant::Block {
         tag_info: Box::new(TagInfo::Tuple),
         elements: vec![

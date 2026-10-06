@@ -7614,7 +7614,7 @@ impl<'a> RawLambdaConverter<'a> {
             let char_pos = loc_for_handler.loc_start.column();
             let match_failure_ident =
                 predef_exception_ident("Match_failure", PREDEF_MATCH_FAILURE_STAMP);
-            let exn = RawLambda::LglobalModule(match_failure_ident);
+            let exn = RawLambda::global_module(match_failure_ident);
             let payload = RawLambda::Lconst(Constant::Block {
                 tag_info: Box::new(TagInfo::Tuple),
                 elements: vec![
@@ -7683,7 +7683,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let char_pos = loc_for_handler.loc_start.column();
                 let match_failure_ident =
                     predef_exception_ident("Match_failure", PREDEF_MATCH_FAILURE_STAMP);
-                let exn = RawLambda::LglobalModule(match_failure_ident);
+                let exn = RawLambda::global_module(match_failure_ident);
                 let payload = RawLambda::Lconst(Constant::Block {
                     tag_info: Box::new(TagInfo::Tuple),
                     elements: vec![
@@ -11022,7 +11022,7 @@ impl<'a> RawLambdaConverter<'a> {
                                     "Match_failure",
                                     PREDEF_MATCH_FAILURE_STAMP,
                                 );
-                                let exn = RawLambda::LglobalModule(match_failure_ident);
+                                let exn = RawLambda::global_module(match_failure_ident);
                                 let payload = RawLambda::Lconst(Constant::Block {
                                     tag_info: Box::new(TagInfo::Tuple),
                                     elements: vec![
