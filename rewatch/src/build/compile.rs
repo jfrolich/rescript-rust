@@ -151,6 +151,7 @@ struct PreJsMsg {
     has_interface: bool,
     is_runtime: bool,
     is_clean: bool,
+    registry_only: bool,
 }
 
 struct SignatureReadyMsg {
@@ -202,6 +203,9 @@ fn pop_ready_js(
 struct InProcessSchedulerHooks {
     tx: mpsc::Sender<WorkerMsg>,
     compile_universe: Arc<AHashSet<String>>,
+    /// Support modules of an incremental build: compiled for the registry,
+    /// without rendering or writing JavaScript (see `incremental`).
+    registry_only: Arc<AHashSet<String>>,
 }
 
 #[derive(Default)]
@@ -781,7 +785,11 @@ pub fn compile(
     )
     .entered();
     let compile_parent_span = Span::current();
-    if dirty_modules.is_empty() {
+    let incremental_plan = build_state.incremental_plan.take();
+    let has_support_work = incremental_plan
+        .as_ref()
+        .is_some_and(|plan| plan.support_everything);
+    if dirty_modules.is_empty() && !has_support_work {
         set_length(0);
         let mut warnings = String::new();
         append_compile_warnings(
@@ -873,6 +881,20 @@ pub fn compile(
         frontier = next_frontier;
     }
 
+    let registry_only = incremental_plan
+        .as_ref()
+        .map(|plan| super::incremental::support_modules(build_state, &compile_universe, plan))
+        .unwrap_or_default();
+    if incremental_plan.is_some() {
+        log::debug!(
+            "incremental build: compiling {} modules, {} more for their dependencies only",
+            compile_universe.len(),
+            registry_only.len()
+        );
+    }
+    compile_universe.extend(registry_only.iter().cloned());
+    let registry_only = Arc::new(registry_only);
+
     let compile_universe_count = compile_universe.len();
     set_length(compile_universe_count as u64);
 
@@ -911,6 +933,7 @@ pub fn compile(
     // dependents are forced dirty. This mirrors the old `compile_dirty` flag
     // mutation but keeps build_state borrow-free while workers are running.
     let mut dirty_set: AHashSet<String> = dirty_modules;
+    dirty_set.extend(registry_only.iter().cloned());
 
     let warn_error_override = build_state.get_warn_error_override();
     let dump_typed_sexp = build_state.dump_typed_sexp();
@@ -1045,6 +1068,7 @@ pub fn compile(
                 let in_process_hooks = in_process_mode.then(|| InProcessSchedulerHooks {
                     tx: tx.clone(),
                     compile_universe: compile_universe.clone(),
+                    registry_only: registry_only.clone(),
                 });
                 scope.spawn(move |_| {
                     let msg = compile_one(
@@ -1351,7 +1375,9 @@ pub fn compile(
         } = msg;
 
         if is_compiled {
-            num_compiled_modules += 1;
+            if !registry_only.contains(&module_name) {
+                num_compiled_modules += 1;
+            }
             recompiled_modules.insert(module_name.clone());
         }
 
@@ -1436,6 +1462,12 @@ pub fn compile(
                 module.compile_dirty = false;
                 module.last_compiled_cmi = Some(compile_timestamp);
                 module.last_compiled_cmt = Some(compile_timestamp);
+                if is_compiled
+                    && !registry_only.contains(&module_name)
+                    && let Some(started) = build_state.build_started_at
+                {
+                    build_state.js_confirmed_at.insert(module_name.clone(), started);
+                }
             }
 
             (compile_warning, compile_error, interface_warning, interface_error)
@@ -1497,6 +1529,7 @@ pub fn compile(
     // A module whose JS output could not be written must be recompiled next
     // time, exactly as when the write still happened on the worker.
     for (module_name, err) in js_write_failures {
+        build_state.js_confirmed_at.remove(&module_name);
         if let Some(module) = build_state.build_state.modules.get_mut(&module_name) {
             module.compile_dirty = true;
         }
@@ -2205,7 +2238,7 @@ fn js_output_path_for_spec(
     }
 }
 
-fn js_output_targets_for_source(
+pub(crate) fn js_output_targets_for_source(
     package: &packages::Package,
     source_file_path: &Path,
     root_config: &config::Config,
@@ -3416,6 +3449,12 @@ fn compile_module_in_process_to_js_boundary(
 
     // Build compiler options from package config
     let mut options = build_compiler_options(package, module_name, implementation_path, build_command_state)?;
+    let registry_only = scheduler_hooks.is_some_and(|hooks| hooks.registry_only.contains(module_name));
+    if registry_only {
+        // A support module's outputs are up to date; GenType writes files.
+        options.gentype_config = None;
+        options.gentype_resolver = None;
+    }
     let root_config = build_state.get_root_config();
 
     let source_abs = helpers::ocaml_absname(&Path::new(&package.path).join(implementation_path));
@@ -3721,6 +3760,7 @@ fn compile_module_in_process_to_js_boundary(
         has_interface,
         is_runtime,
         is_clean: false,
+        registry_only,
     })
 }
 
@@ -3778,6 +3818,7 @@ fn finish_in_process_js_inner(
         has_interface,
         is_runtime,
         is_clean: _,
+        registry_only,
     } = pre_js_msg;
     let module_timing_enabled = std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
     let module_timing_start = module_timing_enabled.then(Instant::now);
@@ -3800,7 +3841,15 @@ fn finish_in_process_js_inner(
         Span::none().entered()
     };
     let root_config = build_command_state.get_root_config();
-    let options = build_compiler_options(package, &module_name, &implementation_path, build_command_state)?;
+    let mut options =
+        build_compiler_options(package, &module_name, &implementation_path, build_command_state)?;
+    if registry_only {
+        // The backend still runs for the metadata dependents read (purity,
+        // exported arities and inlinable bodies); only the output is skipped.
+        options.skip_js_render = true;
+        options.gentype_config = None;
+        options.gentype_resolver = None;
+    }
     let metadata_interface_registry_update = interface_registry_update;
     let mut metadata_registry_updates: Option<Vec<PendingRegistryUpdate>> = None;
     let mut metadata_hook = |metadata: rescript_compiler::driver::InProcessJsMetadataReady| -> Result<()> {
@@ -3874,6 +3923,13 @@ fn finish_in_process_js_inner(
         );
         send_js_metadata_ready(metadata_tx, module_name.clone(), registry_updates)
     });
+
+    if registry_only {
+        return Ok(InProcessModuleResult {
+            warning,
+            registry_updates,
+        });
+    }
 
     // Only the runtime package ships its sources, in `lib/ocaml`, for the
     // runtime precompile of installed copies; other packages' build

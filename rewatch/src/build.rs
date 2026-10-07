@@ -3,6 +3,7 @@ pub mod clean;
 pub mod compile;
 pub mod compiler_info;
 pub mod deps;
+pub mod incremental;
 pub mod logs;
 pub mod namespaces;
 pub mod packages;
@@ -422,6 +423,8 @@ pub fn incremental_build_without_lock(
         rescript_compiler::perf_counters::reset();
     }
     logs::initialize(&build_state.packages);
+    build_state.build_started_at = Some(std::time::SystemTime::now());
+    build_state.last_build_ok = false;
 
     // When dump_typed_sexp is set, force all modules parse_dirty and compile_dirty
     // so every file gets re-parsed (to store AST) and sexp-dumped
@@ -433,6 +436,60 @@ pub fn incremental_build_without_lock(
     // module compiles (in-process builds keep no artifacts on disk).
     let fresh_in_process =
         build_state.build_mode().is_in_process() && build_state.module_registry.lock().unwrap().is_empty();
+    // A fresh in-process build compiles only what changed since the JavaScript
+    // was written (see `incremental`). It still parses every module: the
+    // dependency graph comes from the parse.
+    let incremental = fresh_in_process && incremental::applies(build_state);
+    if incremental
+        && build_state.build_state.source_map_command == SourceMapCommand::Build
+        && incremental::everything_up_to_date(build_state)
+    {
+        for module in build_state.build_state.modules.values_mut() {
+            module.compile_dirty = false;
+        }
+        let parse_warnings = incremental::restore_parse_warnings(build_state);
+        // Nothing compiles; this reports the restored warnings.
+        let compile_warnings = compile::compile(build_state, false, || (), |_| ())
+            .map(|(_, warnings, _)| warnings)
+            .unwrap_or_default();
+        logs::finalize(&build_state.packages);
+        if show_progress {
+            if plain_output {
+                println!("Compiled 0 modules")
+            } else {
+                println!(
+                    "{}{} {}Compiled 0 modules, everything is up to date",
+                    LINE_CLEAR,
+                    format_step(2, 3),
+                    SWORDS,
+                );
+            }
+        }
+        let has_parse_warnings = has_output(&parse_warnings);
+        if has_parse_warnings {
+            eprintln!("{}", &parse_warnings);
+        }
+        let has_compile_warnings = has_output(&compile_warnings);
+        if has_compile_warnings {
+            eprintln!("{}", &compile_warnings);
+        }
+        if initial_build {
+            log_config_warnings(build_state);
+        }
+        write_compiler_info(build_state);
+        build_state.last_build_ok = true;
+        print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
+        return Ok(
+            if has_parse_warnings
+                || has_compile_warnings
+                || (initial_build && has_config_warnings(build_state))
+            {
+                CompilationOutcome::Warnings
+            } else {
+                CompilationOutcome::Clean
+            },
+        );
+    }
     if fresh_in_process {
         mark_modules_dirty(build_state, false);
     }
@@ -566,6 +623,9 @@ pub fn incremental_build_without_lock(
     if !build_state.build_mode().is_in_process() {
         mark_modules_with_expired_deps_dirty(build_state);
     }
+    if incremental {
+        incremental::plan(build_state);
+    }
     mark_modules_with_deleted_deps_dirty(&mut build_state.build_state);
     current_step += 1;
 
@@ -685,6 +745,7 @@ pub fn incremental_build_without_lock(
         phase_mark("compiler-info-end");
 
         print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
+        build_state.last_build_ok = true;
         Ok(outcome)
     }
 }

@@ -334,17 +334,40 @@ pub fn write_in_process_manifest(build_state: &BuildCommandState) {
             continue;
         };
         entries.sort();
-        let content: String = entries
+        let content = build::incremental::render_manifest(
+            &entries,
+            &build_state.js_confirmed_at,
+            build_state.build_started_at,
+            build_state.last_build_ok,
+        );
+        let parse_warnings = build_state
+            .parse_warnings
+            .lock()
+            .unwrap()
             .iter()
-            .map(|(module_name, path)| format!("{module_name}\t{}\n", path.to_string_lossy()))
+            .filter(|(_, (package, _))| *package == package_name)
+            .map(|(key, (_, text))| (key.clone(), text.clone()))
             .collect();
+        let warnings = build::incremental::render_warnings(
+            parse_warnings,
+            build_state
+                .modules
+                .iter()
+                .filter(|(_, module)| module.package_name == package_name),
+        );
         let dir = package.get_ocaml_build_path();
         let path = dir.join(IN_PROCESS_MANIFEST);
-        if std::fs::read_to_string(&path).is_ok_and(|existing| existing == content) {
-            continue;
-        }
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(path, content);
+        let warnings_path = dir.join(build::incremental::WARNINGS_FILE);
+        match warnings {
+            Some(warnings) => {
+                let _ = std::fs::write(warnings_path, warnings);
+            }
+            None => {
+                let _ = std::fs::remove_file(warnings_path);
+            }
+        }
     }
 }
 
@@ -358,19 +381,33 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
     let mut removed = 0;
     let mut total = 0;
     let mut deleted_modules = AHashSet::new();
+    let mut previous = build::incremental::PreviousInProcessBuild::default();
     for package in build_state.packages.values() {
         let Ok(content) = std::fs::read_to_string(package.get_ocaml_build_path().join(IN_PROCESS_MANIFEST))
         else {
             continue;
         };
+        let mut record = build::incremental::parse_manifest(&content);
+        if let Ok(warnings) = std::fs::read_to_string(
+            package
+                .get_ocaml_build_path()
+                .join(build::incremental::WARNINGS_FILE),
+        ) {
+            build::incremental::read_warnings(&warnings, &mut record);
+        }
+        previous.packages.insert(package.name.clone(), record);
         let current_paths: AHashSet<&PathBuf> = current
             .get(&package.name)
             .map(|entries| entries.iter().map(|(_, path)| path).collect())
             .unwrap_or_default();
         for line in content.lines() {
-            let Some((module_name, path)) = line.split_once('\t') else {
+            let mut columns = line.split('\t');
+            let (Some(module_name), Some(path)) = (columns.next(), columns.next()) else {
                 continue;
             };
+            if module_name.starts_with('#') {
+                continue;
+            }
             total += 1;
             let path = PathBuf::from(path);
             if current_paths.contains(&path) {
@@ -397,6 +434,7 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
         }
     }
     build_state.deleted_modules = deleted_modules;
+    build_state.previous_in_process = Some(previous);
     (removed, total)
 }
 

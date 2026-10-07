@@ -204,6 +204,10 @@ pub struct BuildState {
     pub source_map_command: SourceMapCommand,
 }
 
+/// Parse warnings by source file (`Module:impl` or `Module:intf`), with the
+/// package that reported them.
+pub type ParseWarnings = Mutex<AHashMap<String, (String, String)>>;
+
 pub struct GentypeCompileContext {
     pub config: Arc<rescript_compiler::gentype::config::T>,
     pub resolver: Arc<rescript_compiler::gentype::module_resolver::Resolver>,
@@ -251,6 +255,22 @@ pub struct BuildCommandState {
     // Command-line --features override. `None` means all features are active; `Some(list)`
     // restricts the root package to those features (and whatever they transitively imply).
     pub features: Option<Vec<String>>,
+    // What the previous in-process build recorded (see `incremental`). Read
+    // during initialization, in-process builds only.
+    pub previous_in_process: Option<super::incremental::PreviousInProcessBuild>,
+    // The incremental plan of a fresh in-process build, consumed by `compile`.
+    pub incremental_plan: Option<super::incremental::IncrementalPlan>,
+    // When the latest build started, and whether it finished without errors;
+    // recorded in the in-process manifest.
+    pub build_started_at: Option<std::time::SystemTime>,
+    pub last_build_ok: bool,
+    // The parse warnings of the latest parse of each source file, saved so a
+    // build that parses nothing can report them again.
+    pub parse_warnings: ParseWarnings,
+    // When each module's JavaScript was last known to be up to date: the start
+    // of the build that compiled it. Identical output is not rewritten, so the
+    // file's own modification time can be older (see `incremental`).
+    pub js_confirmed_at: AHashMap<String, std::time::SystemTime>,
 }
 
 impl std::fmt::Debug for BuildCommandState {
@@ -345,6 +365,12 @@ impl BuildCommandState {
             gentype_contexts: Mutex::new(AHashMap::new()),
             package_compiler_options: Mutex::new(AHashMap::new()),
             features,
+            previous_in_process: None,
+            incremental_plan: None,
+            build_started_at: None,
+            last_build_ok: false,
+            parse_warnings: Mutex::new(AHashMap::new()),
+            js_confirmed_at: AHashMap::new(),
         }
     }
 

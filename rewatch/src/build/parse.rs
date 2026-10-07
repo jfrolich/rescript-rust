@@ -1,3 +1,4 @@
+use super::build_types::ParseWarnings;
 use super::build_types::*;
 use super::compile::retain_critical_external_warnings;
 use super::logs;
@@ -186,6 +187,10 @@ pub fn generate_asts(
                 if is_dirty {
                     module.compile_dirty = true;
                     module.deps_dirty = true;
+                    // Re-parsed: its warnings, if any, are recorded below.
+                    let mut parse_warnings = build_state.parse_warnings.lock().unwrap();
+                    parse_warnings.remove(&format!("{module_name}:impl"));
+                    parse_warnings.remove(&format!("{module_name}:intf"));
                 }
                 if let SourceType::SourceFile(ref mut source_file) = module.source_type {
                     // We get Err(x) when there is a parse error. When it's Ok(_, Some(
@@ -204,6 +209,12 @@ pub fn generate_asts(
                             source_file.implementation.parse_dirty = true;
                             logs::append(package, &stderr_warnings);
                             stderr.push_str(&stderr_warnings);
+                            record_parse_warnings(
+                                &build_state.parse_warnings,
+                                format!("{module_name}:impl"),
+                                &package.name,
+                                &stderr_warnings,
+                            );
                             if let Some(ast) = stored_ast {
                                 build_state
                                     .stored_asts
@@ -233,6 +244,12 @@ pub fn generate_asts(
                             if let Some(kept) = retain_critical_external_warnings(&stderr_warnings) {
                                 logs::append(package, &kept);
                                 stderr.push_str(&kept);
+                                record_parse_warnings(
+                                    &build_state.parse_warnings,
+                                    format!("{module_name}:impl"),
+                                    &package.name,
+                                    &kept,
+                                );
                             }
                             if let Some(ast) = stored_ast {
                                 build_state
@@ -300,6 +317,12 @@ pub fn generate_asts(
                             }
                             logs::append(package, &stderr_warnings);
                             stderr.push_str(&stderr_warnings);
+                            record_parse_warnings(
+                                &build_state.parse_warnings,
+                                format!("{module_name}:intf"),
+                                &package.name,
+                                &stderr_warnings,
+                            );
                             if let Some(ast) = stored_ast {
                                 build_state
                                     .stored_asts
@@ -328,6 +351,12 @@ pub fn generate_asts(
                             if let Some(kept) = retain_critical_external_warnings(&stderr_warnings) {
                                 logs::append(package, &kept);
                                 stderr.push_str(&kept);
+                                record_parse_warnings(
+                                    &build_state.parse_warnings,
+                                    format!("{module_name}:intf"),
+                                    &package.name,
+                                    &kept,
+                                );
                             }
                             if let Some(ast) = stored_ast {
                                 build_state
@@ -1100,4 +1129,13 @@ mod tests {
             OneOrMore::Single(command) if command == "unconditional-ppx"
         ));
     }
+}
+
+/// Record a source file's parse warnings (keyed `Module:impl` or
+/// `Module:intf`) for the in-process manifest.
+fn record_parse_warnings(parse_warnings: &ParseWarnings, key: String, package_name: &str, warnings: &str) {
+    parse_warnings
+        .lock()
+        .unwrap()
+        .insert(key, (package_name.to_string(), warnings.to_string()));
 }
