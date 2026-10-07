@@ -265,10 +265,11 @@ fn source_paths(module: &Module) -> Option<Vec<&Path>> {
     Some(paths)
 }
 
-/// The newest of a module's own inputs: its sources, its package's
-/// configuration and the root configuration. `None` if one is unreadable.
-fn newest_own_input(module: &Module, package: &Package, root_config: &Config) -> Option<SystemTime> {
-    let mut newest = mtime(&root_config.path)?.max(mtime(&package.config.path)?);
+/// The newest of a module's own inputs: its sources and `config_time`, the
+/// newer of its package's and the root configuration. `None` if one is
+/// unreadable.
+fn newest_own_input(module: &Module, package: &Package, config_time: Option<SystemTime>) -> Option<SystemTime> {
+    let mut newest = config_time?;
     for path in source_paths(module)? {
         newest = newest.max(mtime(&package.path.join(path))?);
     }
@@ -317,6 +318,15 @@ struct ModuleTimes {
 fn module_times(build_state: &BuildCommandState) -> AHashMap<String, ModuleTimes> {
     let previous = build_state.previous_in_process.as_ref();
     let root_config = build_state.get_root_config();
+    let root_config_time = mtime(&root_config.path);
+    let config_times: AHashMap<&String, Option<SystemTime>> = build_state
+        .packages
+        .iter()
+        .map(|(name, package)| {
+            let package_time = mtime(&package.config.path);
+            (name, root_config_time.zip(package_time).map(|(a, b)| a.max(b)))
+        })
+        .collect();
     build_state
         .modules
         .par_iter()
@@ -324,12 +334,23 @@ fn module_times(build_state: &BuildCommandState) -> AHashMap<String, ModuleTimes
         .map(|(module_name, module)| {
             let package = build_state.get_package(&module.package_name).expect("package");
             let record = previous.and_then(|previous| previous.packages.get(&module.package_name));
+            if !recorded_as_is(module_name, module, record) {
+                // Stale whatever its files say, and so is everything that
+                // depends on it.
+                let times = ModuleTimes {
+                    recorded: false,
+                    newest_input: None,
+                    output: None,
+                    js_confirmed_at: None,
+                };
+                return (module_name.clone(), times);
+            }
             let js_confirmed_at = record.and_then(|record| record.js_confirmed_at.get(module_name).copied());
             let output = oldest_output(module, package, root_config)
                 .map(|oldest| js_confirmed_at.map_or(oldest, |confirmed| oldest.max(confirmed)));
             let times = ModuleTimes {
-                recorded: recorded_as_is(module_name, module, record),
-                newest_input: newest_own_input(module, package, root_config),
+                recorded: true,
+                newest_input: newest_own_input(module, package, config_times[&module.package_name]),
                 output,
                 js_confirmed_at,
             };
