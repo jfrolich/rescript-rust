@@ -32,7 +32,8 @@ fi
 # Count files with new extension
 file_count=$(find ./packages -name *.res.js | wc -l)
 
-if [ "$file_count" -eq 146 ];
+# One in-source output per module; builds copy no JavaScript into lib/bs.
+if [ "$file_count" -eq 73 ];
 then
   success "Found files with correct suffix"
 else
