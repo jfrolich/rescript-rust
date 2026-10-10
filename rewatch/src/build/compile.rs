@@ -1406,7 +1406,7 @@ pub fn compile(
         round_dirty = next;
     };
     let registry_only = all_registry_only;
-    let mut dirty_set = all_dirty;
+    let dirty_set = all_dirty;
     // A full build does not compile the modules that depend on a failed
     // one, and reports nothing for them: do not replay the warnings of their
     // earlier compile either (they stay recorded, for the builds after).
@@ -1415,7 +1415,6 @@ pub fn compile(
     } else {
         AHashSet::new()
     };
-    dirty_set.extend(blocked_by_failure.iter().cloned());
     build_state.compiled_modules.extend(compiled_this_build);
     if let Some(counters) = scheduler_counters.as_ref() {
         counters.print_report(capacity);
@@ -1478,7 +1477,16 @@ pub fn compile(
             }
             false
         };
-        results_buffer.retain(|msg| !depends_on_failed(&msg.module_name));
+        let (dropped, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut results_buffer)
+            .into_iter()
+            .partition(|msg| depends_on_failed(&msg.module_name));
+        results_buffer = kept;
+        for msg in dropped {
+            if msg.is_compiled {
+                build_state.compiled_modules.remove(&msg.module_name);
+                build_state.invalidated_modules.insert(msg.module_name);
+            }
+        }
     }
 
     // These timestamps are used as a compile-generation marker by

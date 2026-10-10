@@ -421,6 +421,7 @@ pub fn incremental_build_without_lock(
     build_state.build_started_at = Some(std::time::SystemTime::now());
     build_state.last_build_ok = false;
     build_state.stopped_at_parse = false;
+    build_state.invalidated_modules.clear();
 
     // When dump_typed_sexp is set, force all modules parse_dirty and compile_dirty
     // so every file gets re-parsed (to store AST) and sexp-dumped

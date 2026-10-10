@@ -263,6 +263,11 @@ pub struct BuildCommandState {
     // The build stopped at a parse error, before planning: it compiled
     // nothing and leaves the previous build record in place.
     pub stopped_at_parse: bool,
+    // Modules compiled after a dependency failed: their results were dropped,
+    // but their JavaScript may have been written from the failed module's
+    // incomplete metadata. The build record forgets what they imported, so
+    // the next build recompiles them.
+    pub invalidated_modules: AHashSet<String>,
     // The modules whose stored interface this build loaded instead of
     // compiling them.
     pub loaded_modules: AHashSet<String>,
@@ -397,6 +402,7 @@ impl BuildCommandState {
             module_alias_rewrites: Mutex::new(AHashMap::new()),
             compiled_modules: AHashSet::new(),
             stopped_at_parse: false,
+            invalidated_modules: AHashSet::new(),
             loaded_modules: AHashSet::new(),
             parse_warnings_replayed: false,
             written_modules: AHashSet::new(),

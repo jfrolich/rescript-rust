@@ -270,10 +270,21 @@ pub fn current_record(
                     (row.interface_digest, imports)
                 }),
         };
+        // A module that is still dirty was stale but not compiled (a failed
+        // module, or one depending on it): what it records must not make it
+        // look up to date to the next build.
+        let invalidated = build_state.invalidated_modules.contains(module_name) || module.compile_dirty;
+        let (interface_digest, imports) = if invalidated {
+            (None, None)
+        } else {
+            (interface_digest, imports)
+        };
         record.modules.insert(
             module_name.clone(),
             ModuleRow {
-                js_confirmed_at: build_state.js_confirmed_at.get(module_name).copied(),
+                js_confirmed_at: (!invalidated)
+                    .then(|| build_state.js_confirmed_at.get(module_name).copied())
+                    .flatten(),
                 implementation_warnings: source_file.implementation.compile_warnings.clone(),
                 interface_warnings: source_file
                     .interface
