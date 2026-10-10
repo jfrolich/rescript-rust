@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const DB_FILE: &str = "rescript.sqlite";
 
 /// Bump when the schema changes; an older database is then discarded.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -36,6 +36,7 @@ CREATE TABLE modules (
     interface_warnings TEXT
 ) WITHOUT ROWID;
 CREATE TABLE parse_warnings (source TEXT PRIMARY KEY, text TEXT NOT NULL) WITHOUT ROWID;
+CREATE TABLE deps (source TEXT PRIMARY KEY, mtime INTEGER NOT NULL, deps TEXT NOT NULL) WITHOUT ROWID;
 ";
 
 /// Files that earlier builds wrote instead of the database.
@@ -64,6 +65,17 @@ pub struct PackageState {
     pub modules: BTreeMap<String, ModuleRow>,
     /// Parse warnings by source file (`Module:impl` / `Module:intf`).
     pub parse_warnings: BTreeMap<String, String>,
+    /// The raw module references of each source file (`Module:impl` /
+    /// `Module:intf`), with the file's modification time when it was parsed.
+    pub deps: BTreeMap<String, SourceDeps>,
+}
+
+/// A source file's module references, valid while its modification time is
+/// unchanged.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SourceDeps {
+    pub mtime: i64,
+    pub deps: Vec<String>,
 }
 
 pub const META_BUILD_STARTED_AT: &str = "build_started_at";
@@ -156,11 +168,35 @@ pub fn read(package: &Package) -> Option<PackageState> {
             let (source, text) = row?;
             parse_warnings.insert(source, text);
         }
+        let mut deps = BTreeMap::new();
+        let mut stmt = conn.prepare("SELECT source, mtime, deps FROM deps")?;
+        for row in stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })? {
+            let (source, mtime, text) = row?;
+            let deps_list = text
+                .split('\n')
+                .filter(|dep| !dep.is_empty())
+                .map(str::to_string)
+                .collect();
+            deps.insert(
+                source,
+                SourceDeps {
+                    mtime,
+                    deps: deps_list,
+                },
+            );
+        }
         Ok(PackageState {
             meta,
             sources,
             modules,
             parse_warnings,
+            deps,
         })
     };
     read().ok()
@@ -200,6 +236,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
     if previous.sources == new.sources
         && previous.modules == new.modules
         && previous.parse_warnings == new.parse_warnings
+        && previous.deps == new.deps
         && new
             .meta
             .iter()
@@ -262,6 +299,20 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                 &new.parse_warnings,
                 |source| delete_warning.execute(params![source]).map(drop),
                 |source, text| set_warning.execute(params![source, text]).map(drop),
+            )?;
+
+            let mut delete_deps = tx.prepare("DELETE FROM deps WHERE source = ?1")?;
+            let mut set_deps =
+                tx.prepare("INSERT OR REPLACE INTO deps (source, mtime, deps) VALUES (?1, ?2, ?3)")?;
+            sync_rows(
+                &previous.deps,
+                &new.deps,
+                |source| delete_deps.execute(params![source]).map(drop),
+                |source, row| {
+                    set_deps
+                        .execute(params![source, row.mtime, row.deps.join("\n")])
+                        .map(drop)
+                },
             )?;
         }
         tx.commit()
@@ -380,6 +431,13 @@ mod tests {
         second
             .parse_warnings
             .insert("A:impl".to_string(), "parse warning".to_string());
+        second.deps.insert(
+            "A:impl".to_string(),
+            SourceDeps {
+                mtime: 42,
+                deps: vec!["B".to_string(), "C.D".to_string()],
+            },
+        );
         write_record(&package, Some(&first), &second);
         assert_eq!(read(&package).as_ref(), Some(&second));
     }

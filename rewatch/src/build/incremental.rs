@@ -26,7 +26,7 @@
 
 use super::build_types::{BuildCommandState, Module, SourceType};
 use super::packages::Package;
-use super::state_db::{self, ModuleRow, PackageState};
+use super::state_db::{self, ModuleRow, PackageState, SourceDeps};
 use crate::config::{Config, SourceMapCommand};
 use ahash::{AHashMap, AHashSet};
 use rayon::prelude::*;
@@ -123,6 +123,39 @@ pub fn current_record(build_state: &BuildCommandState, package_name: &str) -> Pa
             },
         );
     }
+    let previous = build_state
+        .previous_in_process
+        .as_ref()
+        .and_then(|previous| previous.packages.get(package_name));
+    let in_memory_deps = build_state.in_memory_deps.lock().unwrap();
+    for (module_name, module) in build_state.modules.iter() {
+        if module.package_name != package_name {
+            continue;
+        }
+        let SourceType::SourceFile(source_file) = &module.source_type else {
+            continue;
+        };
+        let kinds: &[&str] = if source_file.interface.is_some() {
+            &["impl", "intf"]
+        } else {
+            &["impl"]
+        };
+        for kind in kinds {
+            let key = format!("{module_name}:{kind}");
+            let row = match (in_memory_deps.get(&key), build_state.source_mtimes.get(&key)) {
+                (Some(deps), Some(mtime)) => Some(SourceDeps {
+                    mtime: *mtime,
+                    deps: deps.iter().cloned().collect(),
+                }),
+                // Not parsed in this build: the recorded row still holds.
+                _ => previous.and_then(|previous| previous.state.deps.get(&key).cloned()),
+            };
+            if let Some(row) = row {
+                record.deps.insert(key, row);
+            }
+        }
+    }
+    drop(in_memory_deps);
     record.parse_warnings = build_state
         .parse_warnings
         .lock()
@@ -182,6 +215,188 @@ fn restore_warnings(build_state: &mut BuildCommandState, up_to_date: &dyn Fn(&st
             interface.compile_warnings = stored.interface_warnings.clone();
         }
     }
+}
+
+/// The source files of a module, keyed `Module:impl` / `Module:intf`, with
+/// their paths relative to the package.
+fn source_keys<'a>(module_name: &str, module: &'a Module) -> Vec<(String, &'a Path)> {
+    let SourceType::SourceFile(source_file) = &module.source_type else {
+        return Vec::new();
+    };
+    let mut keys = vec![(
+        format!("{module_name}:impl"),
+        source_file.implementation.path.as_path(),
+    )];
+    if let Some(interface) = &source_file.interface {
+        keys.push((format!("{module_name}:intf"), interface.path.as_path()));
+    }
+    keys
+}
+
+/// Read every source file's modification time, before anything is parsed.
+pub fn collect_source_mtimes(build_state: &mut BuildCommandState) {
+    let mtimes: Vec<(String, i64)> = build_state
+        .modules
+        .par_iter()
+        .flat_map_iter(|(module_name, module)| {
+            let package = build_state.get_package(&module.package_name).expect("package");
+            source_keys(module_name, module)
+                .into_iter()
+                .filter_map(|(key, path)| {
+                    mtime(&package.path.join(path)).map(|time| (key, state_db::nanos_from_time(time)))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    build_state.source_mtimes = mtimes.into_iter().collect();
+}
+
+/// Use the recorded module references of every source file that has not
+/// changed since it was last parsed, and mark the others for parsing. Run
+/// after [`collect_source_mtimes`].
+pub fn seed_recorded_deps(build_state: &mut BuildCommandState) {
+    let Some(previous) = build_state.previous_in_process.as_ref() else {
+        return;
+    };
+    let mut seeded = Vec::new();
+    let mut to_parse = AHashSet::new();
+    for (module_name, module) in build_state.build_state.modules.iter() {
+        let keys = source_keys(module_name, module);
+        if keys.is_empty() {
+            continue;
+        }
+        let record = previous.packages.get(&module.package_name);
+        let recorded: Option<Vec<(String, &SourceDeps)>> = keys
+            .iter()
+            .map(|(key, _)| {
+                let row = record?.state.deps.get(key)?;
+                (build_state.source_mtimes.get(key) == Some(&row.mtime)).then(|| (key.clone(), row))
+            })
+            .collect();
+        match recorded {
+            Some(rows) => seeded.extend(rows),
+            None => {
+                to_parse.insert(module_name.clone());
+            }
+        }
+    }
+    {
+        let mut in_memory_deps = build_state.in_memory_deps.lock().unwrap();
+        for (key, row) in seeded {
+            in_memory_deps.insert(key, row.deps.iter().cloned().collect());
+        }
+    }
+    for (module_name, module) in build_state.build_state.modules.iter_mut() {
+        let parse = to_parse.contains(module_name);
+        if let SourceType::SourceFile(source_file) = &mut module.source_type {
+            source_file.implementation.parse_dirty = parse;
+            if let Some(interface) = source_file.interface.as_mut() {
+                interface.parse_dirty = parse;
+            }
+        }
+        module.compile_dirty = parse;
+    }
+}
+
+/// The modules a compile of `stale` touches: those it compiles and writes,
+/// and the support modules it compiles for the registry.
+fn modules_to_compile(build_state: &BuildCommandState, stale: &AHashSet<String>) -> AHashSet<String> {
+    let mut universe = stale.clone();
+    let mut frontier: Vec<String> = stale.iter().cloned().collect();
+    while let Some(module_name) = frontier.pop() {
+        if let Some(module) = build_state.get_module(&module_name) {
+            for dependent in &module.dependents {
+                if universe.insert(dependent.clone()) {
+                    frontier.push(dependent.clone());
+                }
+            }
+        }
+    }
+    let plan = build_state
+        .incremental_plan
+        .as_ref()
+        .expect("planned before choosing what to parse");
+    let support = support_modules(build_state, &universe, plan);
+    universe.extend(support);
+    universe
+}
+
+/// Parse an incremental build in two rounds: first the source files that
+/// changed (the rest of the dependency graph is recorded), then, once the
+/// plan is known, the unchanged modules it compiles. Every other module is
+/// never parsed. Returns the parse warnings to report.
+pub fn parse_and_plan(build_state: &mut BuildCommandState, inc: impl Fn() + Sync) -> anyhow::Result<String> {
+    let mut warnings = super::parse::generate_asts(build_state, &inc)?;
+    let deleted_modules = build_state.deleted_modules.clone();
+    super::deps::get_deps(build_state, &deleted_modules);
+    plan(build_state);
+    super::compile::mark_modules_with_deleted_deps_dirty(&mut build_state.build_state);
+    let stale: AHashSet<String> = build_state
+        .modules
+        .iter()
+        .filter(|(_, module)| module.compile_dirty)
+        .map(|(module_name, _)| module_name.clone())
+        .collect();
+    let needed = modules_to_compile(build_state, &stale);
+    {
+        let stored_asts = build_state.stored_asts.lock().unwrap();
+        let unparsed: Vec<String> = needed
+            .into_iter()
+            .filter(|module_name| !stored_asts.contains_key(&format!("{module_name}:impl")))
+            .collect();
+        drop(stored_asts);
+        for module_name in unparsed {
+            if let Some(module) = build_state.build_state.modules.get_mut(&module_name)
+                && let SourceType::SourceFile(source_file) = &mut module.source_type
+            {
+                source_file.implementation.parse_dirty = true;
+                if let Some(interface) = source_file.interface.as_mut() {
+                    interface.parse_dirty = true;
+                }
+            }
+        }
+    }
+    warnings.push_str(&super::parse::generate_asts(build_state, &inc)?);
+    // Parsing marks what it parsed for compilation; the plan decides.
+    for (module_name, module) in build_state.build_state.modules.iter_mut() {
+        module.compile_dirty = stale.contains(module_name);
+    }
+    warnings.push_str(&restore_unparsed_parse_warnings(build_state));
+    Ok(warnings)
+}
+
+/// The saved parse warnings of source files this build did not parse:
+/// recorded for the next build record and appended to the package log.
+/// Returns them for printing.
+fn restore_unparsed_parse_warnings(build_state: &BuildCommandState) -> String {
+    let Some(previous) = build_state.previous_in_process.as_ref() else {
+        return String::new();
+    };
+    let stored_asts = build_state.stored_asts.lock().unwrap();
+    let mut recorded = build_state.parse_warnings.lock().unwrap();
+    let mut restored: Vec<(&String, &String, &String)> = Vec::new();
+    for (package_name, record) in &previous.packages {
+        for (key, text) in &record.state.parse_warnings {
+            let module_name = key.rsplit_once(':').map_or(key.as_str(), |(name, _)| name);
+            let still_this_package = build_state
+                .modules
+                .get(module_name)
+                .is_some_and(|module| &module.package_name == package_name);
+            if still_this_package && !stored_asts.contains_key(key) && !recorded.contains_key(key) {
+                restored.push((package_name, key, text));
+            }
+        }
+    }
+    restored.sort();
+    let mut all = String::new();
+    for (package_name, key, text) in restored {
+        if let Some(package) = build_state.get_package(package_name) {
+            super::logs::append(package, text);
+        }
+        recorded.insert(key.clone(), (package_name.clone(), text.clone()));
+        all.push_str(text);
+    }
+    all
 }
 
 /// Whether incremental planning applies: a fresh in-process build that does

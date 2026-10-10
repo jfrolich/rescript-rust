@@ -486,6 +486,11 @@ pub fn incremental_build_without_lock(
         );
     }
     if fresh_in_process {
+        incremental::collect_source_mtimes(build_state);
+    }
+    if incremental {
+        incremental::seed_recorded_deps(build_state);
+    } else if fresh_in_process {
         mark_modules_dirty(build_state, false);
     }
 
@@ -525,7 +530,11 @@ pub fn incremental_build_without_lock(
                     phase_mark("runtime-precompile-done");
                     result
                 });
-            let result_asts = parse::generate_asts(build_state, || pb.inc(1));
+            let result_asts = if incremental {
+                incremental::parse_and_plan(build_state, || pb.inc(1))
+            } else {
+                parse::generate_asts(build_state, || pb.inc(1))
+            };
             phase_mark("parse-asts-done");
             let precompile_result = match handle {
                 Ok(handle) => handle.join().unwrap_or_else(|panic| {
@@ -595,6 +604,18 @@ pub fn incremental_build_without_lock(
     deps::get_deps(build_state, &deleted_modules);
     phase_mark("deps-end");
     let timing_parse_total = timing_parse_start.elapsed();
+    // An incremental build parses in two rounds; report what it parsed.
+    let num_dirty_modules = if incremental {
+        build_state
+            .stored_asts
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|key| key.ends_with(":impl"))
+            .count() as u64
+    } else {
+        num_dirty_modules
+    };
 
     if show_progress {
         if plain_output {
@@ -617,9 +638,6 @@ pub fn incremental_build_without_lock(
 
     if !build_state.build_mode().is_in_process() {
         mark_modules_with_expired_deps_dirty(build_state);
-    }
-    if incremental {
-        incremental::plan(build_state);
     }
     mark_modules_with_deleted_deps_dirty(&mut build_state.build_state);
     current_step += 1;

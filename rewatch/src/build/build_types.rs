@@ -271,6 +271,9 @@ pub struct BuildCommandState {
     // of the build that compiled it. Identical output is not rewritten, so the
     // file's own modification time can be older (see `incremental`).
     pub js_confirmed_at: AHashMap<String, std::time::SystemTime>,
+    // Each source file's modification time (`Module:impl` / `Module:intf`),
+    // read before it is parsed; recorded with its dependencies.
+    pub source_mtimes: AHashMap<String, i64>,
 }
 
 impl std::fmt::Debug for BuildCommandState {
@@ -371,6 +374,7 @@ impl BuildCommandState {
             last_build_ok: false,
             parse_warnings: Mutex::new(AHashMap::new()),
             js_confirmed_at: AHashMap::new(),
+            source_mtimes: AHashMap::new(),
         }
     }
 
