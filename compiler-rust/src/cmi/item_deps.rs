@@ -127,7 +127,7 @@ pub fn item_digests(
 ) -> BTreeMap<String, u64> {
     let mut digests: BTreeMap<String, u64> = BTreeMap::new();
     if let Some(ps) = ps {
-        let entries = &ps.type_graph.entries;
+        let graph = super::portable_types::HashGraph::of(&ps.type_graph);
         for item in &ps.ps_sig {
             let Some(key) = sig_item_key(item) else {
                 continue;
@@ -136,7 +136,7 @@ pub fn item_digests(
             if let Some(previous) = digests.get(&key) {
                 previous.hash(&mut hasher);
             }
-            super::portable_types::hash_sig_item_pub(&mut hasher, item, entries);
+            super::portable_types::hash_sig_item_pub(&mut hasher, item, &graph);
             if let (Some(info), Some(name)) =
                 (info, key.strip_prefix("v:").or(key.strip_prefix("m:")))
             {

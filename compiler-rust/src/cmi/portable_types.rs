@@ -172,11 +172,35 @@ pub struct PortablePersStruct {
 /// even if internal stamps shift due to dependency changes.
 /// Public API for computing a fingerprint outside of `serialize_pers_struct`
 /// (e.g., for namespace signatures synthesized directly).
-pub fn compute_type_graph_fingerprint_pub(entries: &[PortableTypeEntry], sig: &Signature) -> u64 {
+/// What hashing a signature reads of its portable type graph: the type
+/// entries, and the variant layouts declarations refer to by index.
+#[derive(Clone, Copy)]
+pub struct HashGraph<'a> {
+    pub entries: &'a [PortableTypeEntry],
+    pub layouts: &'a [crate::types::VariantLayout],
+}
+
+impl<'a> HashGraph<'a> {
+    pub fn of(graph: &'a PortableTypeGraph) -> Self {
+        HashGraph {
+            entries: &graph.entries,
+            layouts: &graph.variant_layouts,
+        }
+    }
+}
+
+impl std::ops::Deref for HashGraph<'_> {
+    type Target = [PortableTypeEntry];
+    fn deref(&self) -> &[PortableTypeEntry] {
+        self.entries
+    }
+}
+
+pub fn compute_type_graph_fingerprint_pub(entries: &HashGraph<'_>, sig: &Signature) -> u64 {
     compute_type_graph_fingerprint(entries, sig)
 }
 
-fn compute_type_graph_fingerprint(entries: &[PortableTypeEntry], sig: &Signature) -> u64 {
+fn compute_type_graph_fingerprint(entries: &HashGraph<'_>, sig: &Signature) -> u64 {
     // Deterministic within a build (fixed seeds); the fingerprint only lives
     // in the in-memory interface registry.
     use std::hash::BuildHasher;
@@ -220,7 +244,7 @@ fn hash_path_by_name(hasher: &mut impl Hasher, path: &Path) {
 fn hash_type_ref(
     hasher: &mut impl Hasher,
     idx: usize,
-    entries: &[PortableTypeEntry],
+    entries: &HashGraph<'_>,
     visiting: &mut Vec<usize>,
 ) {
     if idx >= entries.len() {
@@ -243,7 +267,7 @@ fn hash_type_ref(
 fn hash_type_refs(
     hasher: &mut impl Hasher,
     refs: &[usize],
-    entries: &[PortableTypeEntry],
+    entries: &HashGraph<'_>,
     visiting: &mut Vec<usize>,
 ) {
     refs.len().hash(hasher);
@@ -255,7 +279,7 @@ fn hash_type_refs(
 fn hash_portable_desc(
     hasher: &mut impl Hasher,
     desc: &PortableTypeDesc,
-    entries: &[PortableTypeEntry],
+    entries: &HashGraph<'_>,
     visiting: &mut Vec<usize>,
 ) {
     std::mem::discriminant(desc).hash(hasher);
@@ -308,7 +332,7 @@ fn hash_portable_desc(
 fn hash_portable_row_desc(
     hasher: &mut impl Hasher,
     rd: &PortableRowDesc,
-    entries: &[PortableTypeEntry],
+    entries: &HashGraph<'_>,
     visiting: &mut Vec<usize>,
 ) {
     rd.row_fields.len().hash(hasher);
@@ -331,7 +355,7 @@ fn hash_portable_row_desc(
 fn hash_portable_row_field(
     hasher: &mut impl Hasher,
     rf: &PortableRowField,
-    entries: &[PortableTypeEntry],
+    entries: &HashGraph<'_>,
     visiting: &mut Vec<usize>,
 ) {
     std::mem::discriminant(rf).hash(hasher);
@@ -359,7 +383,7 @@ fn hash_portable_row_field(
 
 /// Hash the signature structure: item names and kinds.
 /// Uses name-based identity for all paths.
-fn hash_signature(hasher: &mut impl Hasher, sig: &Signature, entries: &[PortableTypeEntry]) {
+fn hash_signature(hasher: &mut impl Hasher, sig: &Signature, entries: &HashGraph<'_>) {
     sig.len().hash(hasher);
     for item in sig {
         hash_sig_item(hasher, item, entries);
@@ -367,11 +391,11 @@ fn hash_signature(hasher: &mut impl Hasher, sig: &Signature, entries: &[Portable
 }
 
 /// The fingerprint contribution of one signature item.
-pub fn hash_sig_item_pub(hasher: &mut impl Hasher, item: &SignatureItem, entries: &[PortableTypeEntry]) {
+pub fn hash_sig_item_pub(hasher: &mut impl Hasher, item: &SignatureItem, entries: &HashGraph<'_>) {
     hash_sig_item(hasher, item, entries)
 }
 
-fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem, entries: &[PortableTypeEntry]) {
+fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem, entries: &HashGraph<'_>) {
     std::mem::discriminant(item).hash(hasher);
     match item {
         SignatureItem::SigValue(ident, vd) => {
@@ -392,6 +416,13 @@ fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem, entries: &[Port
             ident.name().hash(hasher);
             hash_attributes(hasher, &md.md_attributes);
             hash_module_type(hasher, &md.md_type, entries);
+            match &md.md_path {
+                Some(path) => {
+                    true.hash(hasher);
+                    hash_path_by_name(hasher, path);
+                }
+                None => false.hash(hasher),
+            }
         }
         SignatureItem::SigModtype(ident, mtd) => {
             ident.name().hash(hasher);
@@ -411,7 +442,7 @@ fn hash_attributes(hasher: &mut impl Hasher, attrs: &[crate::types::decl::Attrib
     }
 }
 
-fn hash_value_desc(hasher: &mut impl Hasher, vd: &ValueDescription, entries: &[PortableTypeEntry]) {
+fn hash_value_desc(hasher: &mut impl Hasher, vd: &ValueDescription, entries: &HashGraph<'_>) {
     hash_type_ref(hasher, vd.val_type.index(), entries, &mut Vec::new());
     hash_attributes(hasher, &vd.val_attributes);
     match &vd.val_kind {
@@ -435,7 +466,7 @@ fn hash_value_desc(hasher: &mut impl Hasher, vd: &ValueDescription, entries: &[P
     }
 }
 
-fn hash_type_decl(hasher: &mut impl Hasher, td: &TypeDeclaration, entries: &[PortableTypeEntry]) {
+fn hash_type_decl(hasher: &mut impl Hasher, td: &TypeDeclaration, entries: &HashGraph<'_>) {
     td.type_arity.hash(hasher);
     hash_attributes(hasher, &td.type_attributes);
     hash_type_expr_refs(hasher, &td.type_params, entries);
@@ -471,7 +502,7 @@ fn hash_type_decl(hasher: &mut impl Hasher, td: &TypeDeclaration, entries: &[Por
 fn hash_type_expr_refs(
     hasher: &mut impl Hasher,
     refs: &[TypeExprRef],
-    entries: &[PortableTypeEntry],
+    entries: &HashGraph<'_>,
 ) {
     refs.len().hash(hasher);
     for r in refs {
@@ -479,18 +510,32 @@ fn hash_type_expr_refs(
     }
 }
 
-fn hash_type_kind(hasher: &mut impl Hasher, kind: &TypeKind, entries: &[PortableTypeEntry]) {
+fn hash_type_kind(hasher: &mut impl Hasher, kind: &TypeKind, entries: &HashGraph<'_>) {
     std::mem::discriminant(kind).hash(hasher);
     match kind {
         TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
+        // The representations decide dependents' JS (`@unboxed`, `@tag`,
+        // inlined records).
         TypeKind::TypeRecord(labels, repr) => {
             hash_label_decls(hasher, labels, entries);
             std::mem::discriminant(repr).hash(hasher);
+            match repr {
+                crate::types::decl::RecordRepresentation::RecordUnboxed(flag) => flag.hash(hasher),
+                crate::types::decl::RecordRepresentation::RecordInlined { name, representation } => {
+                    name.hash(hasher);
+                    representation.position.hash(hasher);
+                    format!("{:?}", entries.layouts.get(representation.variant.0 as usize)).hash(hasher);
+                }
+                _ => {}
+            }
         }
-        TypeKind::TypeVariant(ctors, _) => {
+        TypeKind::TypeVariant(ctors, layout) => {
+            format!("{:?}", entries.layouts.get(layout.0 as usize)).hash(hasher);
             ctors.len().hash(hasher);
             for ctor in ctors {
                 ctor.cd_id.name().hash(hasher);
+                // The run-time tag (`@as`).
+                format!("{:?}", ctor.cd_runtime_tag).hash(hasher);
                 hash_attributes(hasher, &ctor.cd_attributes);
                 hash_constructor_args(hasher, &ctor.cd_args, entries);
                 if let Some(res) = ctor.cd_res {
@@ -507,11 +552,13 @@ fn hash_type_kind(hasher: &mut impl Hasher, kind: &TypeKind, entries: &[Portable
 fn hash_label_decls(
     hasher: &mut impl Hasher,
     labels: &[LabelDeclaration],
-    entries: &[PortableTypeEntry],
+    entries: &HashGraph<'_>,
 ) {
     labels.len().hash(hasher);
     for label in labels {
         label.ld_id.name().hash(hasher);
+        // The run-time field name (`@as`).
+        label.ld_runtime_name.hash(hasher);
         hash_attributes(hasher, &label.ld_attributes);
         label.ld_mutable.hash(hasher);
         label.ld_optional.hash(hasher);
@@ -522,7 +569,7 @@ fn hash_label_decls(
 fn hash_constructor_args(
     hasher: &mut impl Hasher,
     args: &ConstructorArguments,
-    entries: &[PortableTypeEntry],
+    entries: &HashGraph<'_>,
 ) {
     std::mem::discriminant(args).hash(hasher);
     match args {
@@ -534,7 +581,7 @@ fn hash_constructor_args(
 fn hash_extension_constructor(
     hasher: &mut impl Hasher,
     ext: &ExtensionConstructor,
-    entries: &[PortableTypeEntry],
+    entries: &HashGraph<'_>,
 ) {
     hash_path_by_name(hasher, &ext.ext_type_path);
     hash_attributes(hasher, &ext.ext_attributes);
@@ -553,7 +600,7 @@ fn hash_extension_constructor(
 fn hash_modtype_decl(
     hasher: &mut impl Hasher,
     mtd: &ModtypeDeclaration,
-    entries: &[PortableTypeEntry],
+    entries: &HashGraph<'_>,
 ) {
     hash_attributes(hasher, &mtd.mtd_attributes);
     if let Some(mty) = &mtd.mtd_type {
@@ -564,7 +611,7 @@ fn hash_modtype_decl(
     }
 }
 
-fn hash_module_type(hasher: &mut impl Hasher, mty: &ModuleType, entries: &[PortableTypeEntry]) {
+fn hash_module_type(hasher: &mut impl Hasher, mty: &ModuleType, entries: &HashGraph<'_>) {
     std::mem::discriminant(mty).hash(hasher);
     match mty {
         ModuleType::MtyIdent(path) => hash_path_by_name(hasher, path),
@@ -604,7 +651,7 @@ pub fn serialize_pers_struct(
         Some((sig, graph)) => (Some(sig), Some(graph)),
         None => (None, None),
     };
-    let fingerprint = compute_type_graph_fingerprint(&type_graph.entries, &sig);
+    let fingerprint = compute_type_graph_fingerprint(&HashGraph::of(&type_graph), &sig);
     PortablePersStruct {
         ps_name: ps.ps_name.clone(),
         ps_filename: ps.ps_filename.clone(),

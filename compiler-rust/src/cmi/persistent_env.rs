@@ -685,7 +685,13 @@ impl ModuleRegistry {
 
         // Namespace signatures contain only MtyAlias entries (no TypeExprRefs),
         // so the portable type graph is empty.
-        let fingerprint = portable_types::compute_type_graph_fingerprint_pub(&[], &sig_items);
+        let fingerprint = portable_types::compute_type_graph_fingerprint_pub(
+            &portable_types::HashGraph {
+                entries: &[],
+                layouts: &[],
+            },
+            &sig_items,
+        );
         let portable = PortablePersStruct {
             ps_name: namespace_name.to_string(),
             ps_filename: format!("{}.mlmap", namespace_name),
