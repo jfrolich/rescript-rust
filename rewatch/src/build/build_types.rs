@@ -256,6 +256,13 @@ pub struct BuildCommandState {
     // Recorded imports a build checked item by item and found unaffected:
     // module -> unit -> the unit's interface digest now.
     pub verified_imports: Mutex<AHashMap<String, AHashMap<String, u64>>>,
+    // The alias rewrites each module registered, for its stored interface.
+    pub module_alias_rewrites: Mutex<AHashMap<String, Vec<(String, rescript_compiler::types::path::Path)>>>,
+    // The modules this build compiled (written or not).
+    pub compiled_modules: AHashSet<String>,
+    // The modules whose stored interface this build loaded instead of
+    // compiling them.
+    pub loaded_modules: AHashSet<String>,
     // Set while parsing modules whose saved parse warnings were already
     // reported this build: the parse then only records them.
     pub parse_warnings_replayed: bool,
@@ -384,6 +391,9 @@ impl BuildCommandState {
             loaded_units: Mutex::new(AHashMap::new()),
             unit_reads: Mutex::new(AHashMap::new()),
             verified_imports: Mutex::new(AHashMap::new()),
+            module_alias_rewrites: Mutex::new(AHashMap::new()),
+            compiled_modules: AHashSet::new(),
+            loaded_modules: AHashSet::new(),
             parse_warnings_replayed: false,
             written_modules: AHashSet::new(),
             gentype_contexts: Mutex::new(AHashMap::new()),

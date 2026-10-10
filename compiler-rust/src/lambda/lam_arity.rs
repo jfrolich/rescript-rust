@@ -10,7 +10,7 @@ use std::fmt;
 ///
 /// This tracks the expected argument counts for a function and whether
 /// it can accept additional arguments beyond those tracked.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Arity {
     /// Known arity information.
     ///

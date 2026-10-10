@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 // ============================================================================
 
 /// A value description (type of a let-bound value).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ValueDescription {
     /// Type of the value
     pub val_type: TypeExprRef,
@@ -31,7 +31,7 @@ pub struct ValueDescription {
 }
 
 /// Kind of value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ValueKind {
     /// Regular value
     ValReg,
@@ -68,7 +68,7 @@ pub struct PrimitiveDescription {
 // ============================================================================
 
 /// A type declaration (`type t = ...`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TypeDeclaration {
     /// Type parameters
     pub type_params: Vec<TypeExprRef>,
@@ -137,7 +137,7 @@ impl std::ops::Deref for TypeDeclarationRef<'_> {
 }
 
 /// An inlined type representation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TypeInlinedType {
     /// Inlined record
     Record {
@@ -152,7 +152,7 @@ pub enum TypeInlinedType {
 /// copied through a component substitution; OCaml shares the untouched
 /// constructor and label lists physically in those copies. Sharing the lists
 /// keeps those declaration copies from deep-cloning every constructor.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SharedVec<T>(std::sync::Arc<Vec<T>>);
 
 impl<T> SharedVec<T> {
@@ -229,7 +229,7 @@ impl<T: Clone> SharedVec<T> {
 }
 
 /// Kind of type definition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TypeKind {
     /// Abstract type
     TypeAbstract,
@@ -254,7 +254,7 @@ impl TypeDeclaration {
 }
 
 /// Record representation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RecordRepresentation {
     /// Regular record (all fields boxed/tagged)
     RecordRegular,
@@ -272,14 +272,14 @@ pub enum RecordRepresentation {
 }
 
 /// Runtime representation for single-payload unboxing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TypeRepresentation {
     Boxed,
     Unboxed,
 }
 
 /// A label (field) declaration in a record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LabelDeclaration {
     /// Label identifier
     pub ld_id: Ident,
@@ -310,7 +310,7 @@ impl LabelDeclaration {
 }
 
 /// A constructor declaration in a variant.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConstructorDeclaration {
     /// Constructor identifier
     pub cd_id: Ident,
@@ -327,7 +327,7 @@ pub struct ConstructorDeclaration {
 }
 
 /// Constructor arguments.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConstructorArguments {
     /// Tuple arguments
     CstrTuple(Vec<TypeExprRef>),
@@ -340,7 +340,7 @@ pub enum ConstructorArguments {
 // ============================================================================
 
 /// An extension constructor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExtensionConstructor {
     /// Path to the extensible type
     pub ext_type_path: Path,
@@ -365,7 +365,7 @@ pub struct ExtensionConstructor {
 // ============================================================================
 
 /// A constructor description (used in typing environment).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConstructorDescription {
     /// Constructor name
     pub cstr_name: String,
@@ -392,7 +392,7 @@ pub struct ConstructorDescription {
 }
 
 /// Semantic constructor identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConstructorKind {
     /// Constructor declared by an ordinary variant.
     Ordinary(super::variant_runtime::ConstructorReference),
@@ -423,7 +423,7 @@ pub fn may_equal_constructor(c1: &ConstructorDescription, c2: &ConstructorDescri
 }
 
 /// A label description (used in typing environment).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LabelDescription {
     /// Short name
     pub lbl_name: String,
@@ -453,7 +453,7 @@ pub struct LabelDescription {
 }
 
 /// Reference to an array of label descriptions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LabelArrayRef(pub u32);
 
 // ============================================================================
@@ -461,7 +461,7 @@ pub struct LabelArrayRef(pub u32);
 // ============================================================================
 
 /// A module type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModuleType {
     /// Module type identifier
     MtyIdent(Path),
@@ -479,7 +479,7 @@ pub enum ModuleType {
 }
 
 /// Alias presence flag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AliasPresence {
     /// Alias is present
     MtaPresent,
@@ -496,7 +496,7 @@ pub fn signature_mut(signature: &mut std::sync::Arc<Signature>) -> &mut Signatur
 }
 
 /// A signature item.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SignatureItem {
     /// Value in signature
     SigValue(Ident, ValueDescription),
@@ -577,7 +577,7 @@ pub fn signature_runtime_bound_idents(sig: &[SignatureItem]) -> Vec<(Ident, usiz
 }
 
 /// A module declaration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModuleDeclaration {
     /// Module type
     pub md_type: ModuleType,
@@ -591,7 +591,7 @@ pub struct ModuleDeclaration {
 }
 
 /// A module type declaration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModtypeDeclaration {
     /// Module type (None for abstract)
     pub mtd_type: Option<ModuleType>,
@@ -602,7 +602,7 @@ pub struct ModtypeDeclaration {
 }
 
 /// Recursive status for type/module declarations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RecStatus {
     /// Not first in a nonrecursive group
     TrecNot,
@@ -613,7 +613,7 @@ pub enum RecStatus {
 }
 
 /// Extension status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExtStatus {
     /// First constructor of an extension
     TextFirst,

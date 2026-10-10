@@ -184,14 +184,14 @@ pub struct PersStruct {
     pub ps_crcs: Vec<(String, Option<[u8; 16]>)>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CmjExportConstant {
     Bool(bool),
     Null,
     Undefined { is_unit: bool },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum CmjExportArity {
     Single(Arity),
     Submodule(Vec<Arity>),
@@ -250,7 +250,7 @@ pub struct CmjModuleImportInfo {
 /// When a module is registered in the in-memory registry, these fields
 /// replace the disk-based lookups that normally read `.ast` (source path),
 /// `.cmj` (purity), and `.cmi` (interface).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InMemoryModuleInfo {
     /// Source file path (replaces `.ast` source-path lookup)
     pub source_path: Arc<PathBuf>,
@@ -576,6 +576,30 @@ impl ModuleRegistry {
             }
         }
         super::item_deps::resolve_reads(reads, &Source(self))
+    }
+
+    /// The module's published interface encoded for storage (see
+    /// [`super::stored_module`]), `None` when it is not registered.
+    pub fn encode_stored_module(&self, name: &str, alias_rewrites: &[(String, Path)]) -> Option<Vec<u8>> {
+        let (pers, info) = self.registered(name);
+        let info = info?;
+        Some(super::stored_module::encode(&super::stored_module::StoredModuleRef {
+            pers_struct: pers.as_deref(),
+            info: &info,
+            alias_rewrites,
+        }))
+    }
+
+    /// Register a stored module's interface, as compiling it would.
+    pub fn register_stored_module(&mut self, name: &str, module: super::stored_module::StoredModule) {
+        let alias_rewrites = module.alias_rewrite_map();
+        match module.pers_struct {
+            Some(pers) => self.register_module_arc(name, Arc::new(pers), module.info, alias_rewrites),
+            None => {
+                self.insert_module_info(name.to_string(), module.info);
+                self.extend_alias_rewrites(alias_rewrites);
+            }
+        }
     }
 
     pub fn register_disk_module(&mut self, name: &str, info: InMemoryModuleInfo) {

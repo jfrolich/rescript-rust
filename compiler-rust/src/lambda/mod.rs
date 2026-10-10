@@ -96,14 +96,14 @@ pub struct HoistedFunction {
 }
 
 /// CMJ lookup entry for a successfully materialized flat export.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HoistedExport {
     pub path: Vec<String>,
     pub export_name: String,
 }
 
 /// Application status for function calls
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ApplyStatus {
     /// No special handling
     Na,
@@ -114,7 +114,7 @@ pub enum ApplyStatus {
 }
 
 /// Inline attribute for functions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum InlineAttribute {
     /// Always inline this function
     Always,
@@ -126,7 +126,7 @@ pub enum InlineAttribute {
 }
 
 /// Application info for function calls
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ApInfo {
     /// Source location
     pub loc: Location,
@@ -137,7 +137,7 @@ pub struct ApInfo {
 }
 
 /// Function attributes
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FunctionAttribute {
     /// Inline hint
     pub inline: InlineAttribute,
@@ -167,7 +167,7 @@ impl Default for FunctionAttribute {
 }
 
 /// Key selected by a Lambda switch branch.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SwitchKey {
     Int(i32),
     Constructor(crate::types::VariantConstructorCase),
@@ -343,14 +343,14 @@ fn untagged_action(
 }
 
 /// Runtime dispatch semantics for a Lambda switch.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SwitchDispatch {
     Direct,
     Variant(crate::types::VariantMatchingFacts),
 }
 
 /// Switch construct for pattern matching.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LambdaSwitch {
     pub sw_consts_full: bool,
     pub sw_consts: Vec<(SwitchKey, Lambda)>,
@@ -361,7 +361,7 @@ pub struct LambdaSwitch {
 }
 
 /// Runtime literal carried by an OCaml/ReScript variant tag.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SwitchCaseTag {
     String(String),
     Int(i64),
@@ -373,7 +373,7 @@ pub enum SwitchCaseTag {
 }
 
 /// Lambda function definition
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LFunction {
     /// Number of arguments (arity)
     pub arity: i32,
@@ -386,7 +386,7 @@ pub struct LFunction {
 }
 
 /// Primitive operation info
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PrimInfo {
     /// The primitive operation
     pub primitive: Primitive,
@@ -397,7 +397,7 @@ pub struct PrimInfo {
 }
 
 /// Function application
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Apply {
     /// Function being applied
     pub ap_func: Box<Lambda>,
@@ -440,7 +440,7 @@ pub(crate) fn map_function_body(
 /// Lambda IR expression
 ///
 /// This is the core representation used for code generation and optimization.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Lambda {
     /// Variable reference
     Lvar(Ident),
@@ -511,7 +511,7 @@ pub enum Lambda {
 }
 
 /// Direction flag for for loops
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DirectionFlag {
     /// Ascending (to)
     Upto,

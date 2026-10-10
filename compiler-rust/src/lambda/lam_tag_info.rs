@@ -9,7 +9,7 @@ use crate::parser::ast::MutableFlag;
 /// Block tag information
 ///
 /// Describes the kind of block being created, which affects code generation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TagInfo {
     /// Constructor block (variant)
     Constructor {

@@ -324,6 +324,17 @@ fn apply_pending_registry_updates(
         return;
     }
 
+    {
+        let mut alias_rewrites = build_command_state.module_alias_rewrites.lock().unwrap();
+        for update in &updates {
+            if !update.alias_rewrites.is_empty() {
+                alias_rewrites
+                    .entry(update.module_name.clone())
+                    .or_default()
+                    .extend(update.alias_rewrites.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+        }
+    }
     let mut registry = build_command_state.module_registry.lock().unwrap();
     for update in updates {
         if let Some(pers_struct) = update.pers_struct {
@@ -933,6 +944,16 @@ pub fn compile(
     let mut round = 0usize;
     let compile_universe = loop {
         round += 1;
+        // Unchanged dependencies with a stored interface are loaded instead
+        // of compiled (see `incremental::stored_loadable`).
+        if cutoff {
+            let loadable =
+                super::incremental::stored_loadable(build_state, &round_dirty, &round_registry_only);
+            let loaded = super::incremental::load_stored(build_state, &loadable);
+            round_registry_only.retain(|module_name| !loaded.contains(module_name));
+            round_universe.retain(|module_name| !loaded.contains(module_name));
+            build_state.loaded_modules.extend(loaded);
+        }
         let registry_only = Arc::new(std::mem::take(&mut round_registry_only));
         let compile_universe_count = round_universe.len();
         total_universe_count += compile_universe_count;
@@ -1338,7 +1359,10 @@ pub fn compile(
         if next.is_empty() {
             break compile_universe;
         }
-        round_registry_only = super::incremental::round_support(build_state, &next, &compiled_this_build);
+        let mut available = compiled_this_build.clone();
+        available.extend(build_state.loaded_modules.iter().cloned());
+        round_registry_only = super::incremental::round_support(build_state, &next, &available);
+        let loadable = super::incremental::stored_loadable(build_state, &next, &round_registry_only);
         log::debug!(
             "incremental build: round {}: compiling {} modules whose imports changed, {} more for their dependencies only",
             round + 1,
@@ -1347,7 +1371,8 @@ pub fn compile(
         );
         let mut needed = next.clone();
         needed.extend(round_registry_only.iter().cloned());
-        super::incremental::parse_for_round(build_state, &needed)?;
+        let to_parse: AHashSet<String> = needed.difference(&loadable).cloned().collect();
+        super::incremental::parse_for_round(build_state, &to_parse)?;
         all_registry_only.retain(|module_name| !next.contains(module_name));
         results_buffer.retain(|msg| !needed.contains(&msg.module_name));
         round_universe = needed;
@@ -1355,6 +1380,7 @@ pub fn compile(
     };
     let registry_only = all_registry_only;
     let dirty_set = all_dirty;
+    build_state.compiled_modules.extend(compiled_this_build);
     if let Some(counters) = scheduler_counters.as_ref() {
         counters.print_report(capacity);
     }

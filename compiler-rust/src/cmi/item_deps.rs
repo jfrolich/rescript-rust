@@ -32,7 +32,7 @@ pub const WHOLE: &str = "*";
 pub const MODULE_LEVEL: &str = "@";
 
 /// The namespace of a top-level item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Value,
     Type,

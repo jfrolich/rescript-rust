@@ -37,6 +37,23 @@ impl BuildHasher for FastState {
 #[derive(Clone)]
 pub struct AHashMap<K, V>(std::collections::HashMap<K, V, FastState>);
 
+impl<K: serde::Serialize, V: serde::Serialize> serde::Serialize for AHashMap<K, V> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.0.iter())
+    }
+}
+
+impl<'de, K, V> serde::Deserialize<'de> for AHashMap<K, V>
+where
+    K: serde::Deserialize<'de> + Eq + std::hash::Hash,
+    V: serde::Deserialize<'de>,
+{
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let map = std::collections::HashMap::<K, V>::deserialize(deserializer)?;
+        Ok(AHashMap(map.into_iter().collect()))
+    }
+}
+
 /// `HashSet` keyed with [`FastState`]; API-compatible with `ahash::AHashSet`.
 #[derive(Clone)]
 pub struct AHashSet<T>(std::collections::HashSet<T, FastState>);

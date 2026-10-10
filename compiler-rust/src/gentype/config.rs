@@ -7,14 +7,14 @@ use std::sync::{Mutex, OnceLock};
 
 pub type ModuleNameMap = BTreeMap<crate::gentype::module_name::T, crate::gentype::module_name::T>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Module {
     CommonJS,
     ESModule,
 }
 
 /// Compatibility for `compilerOptions.moduleResolution` in TypeScript projects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModuleResolution {
     /// should drop extension on import statements
     Node,
@@ -26,7 +26,7 @@ pub enum ModuleResolution {
 
 pub type BsVersion = (i32, i32, i32);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct T {
     pub bsb_project_root: String,
     pub bs_dependencies: Vec<String>,

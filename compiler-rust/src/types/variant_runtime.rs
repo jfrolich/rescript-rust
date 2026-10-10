@@ -7,7 +7,7 @@
 
 use super::context::TypeContext;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Instance {
     Array,
     ArrayBuffer,
@@ -64,7 +64,7 @@ impl Instance {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum BlockType {
     Int,
     String,
@@ -80,7 +80,7 @@ pub enum BlockType {
 /// OCaml `Variant_runtime.literal_tag`: the literal value a constructor is
 /// represented by, what `@as` states (or the constructor's own name when it
 /// states nothing). It never describes an inferred untagged payload shape.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum LiteralTag {
     String(String),
     Int(i64),
@@ -103,7 +103,7 @@ pub enum TagType {
 
 /// OCaml `Variant_runtime.tag`: a constructor's name and its optional
 /// explicitly declared runtime literal.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Tag {
     pub name: String,
     pub literal: Option<LiteralTag>,
@@ -126,7 +126,7 @@ pub fn to_matchable_tag(tag: &Tag) -> MatchableTag {
 }
 
 /// OCaml `Variant_runtime.tagged_block`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct TaggedBlock {
     pub tag: Tag,
     pub tag_name: Option<String>,
@@ -135,7 +135,7 @@ pub struct TaggedBlock {
 /// OCaml `Variant_runtime.block`: an untagged payload always carries the
 /// runtime shape used for dispatch. Only tagged blocks have an emitted tag
 /// field.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Block {
     Tagged(TaggedBlock),
     Untagged { tag: Tag, block_type: BlockType },
@@ -162,7 +162,7 @@ impl Block {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ConstructorCase {
     Constant(Tag),
     Block(Block),
@@ -174,7 +174,7 @@ pub struct Configuration {
     pub tag_name: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MatchingFacts {
     pub tag_name: Option<String>,
     pub block_types: Vec<BlockType>,
@@ -184,7 +184,7 @@ pub struct MatchingFacts {
     pub has_other_literal: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Layout {
     pub unboxed: bool,
     pub constructors: Vec<ConstructorCase>,
@@ -197,7 +197,7 @@ pub(crate) enum LayoutState {
     Complete(Layout),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LayoutRef(pub(crate) u32);
 
 impl LayoutRef {
@@ -267,7 +267,7 @@ impl LayoutRef {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ConstructorReference {
     pub variant: LayoutRef,
     pub position: usize,

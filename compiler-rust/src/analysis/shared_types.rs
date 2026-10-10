@@ -12,7 +12,7 @@ use std::sync::Arc;
 pub type ModulePathList = Vec<String>;
 
 /// A source position (`Lexing.position` without the file name).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Pos {
     pub line: i32,
     pub bol: i32,
@@ -36,7 +36,7 @@ impl Pos {
 
 /// A source location (`Location.t`). The derived order is OCaml's
 /// polymorphic compare on the record, file names aside.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Loc {
     pub start: Pos,
     pub end: Pos,
@@ -104,7 +104,7 @@ impl Loc {
 }
 
 /// `string Location.loc`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Located<T> {
     pub txt: T,
     pub loc: Loc,
@@ -161,7 +161,7 @@ impl ModulePath {
 }
 
 /// `field`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Field {
     pub stamp: i32,
     pub fname: Located<String>,
@@ -172,14 +172,14 @@ pub struct Field {
 }
 
 /// `constructor_args`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ConstructorArgs {
     InlineRecord(Vec<Field>),
     Args(Vec<(TypeExprRef, Loc)>),
 }
 
 /// `Constructor.t`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Constructor {
     pub stamp: i32,
     pub cname: Located<String>,
@@ -191,7 +191,7 @@ pub struct Constructor {
 }
 
 /// `Type.kind`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TypeKind {
     Abstract(Option<(Path, Vec<TypeExprRef>)>),
     Open,
@@ -202,7 +202,7 @@ pub enum TypeKind {
 
 /// `Type.t`. OCaml keeps the declaration's attributes, which the analysis
 /// only reads for `@editor.completeFrom`; that list is kept instead.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Type {
     pub kind: TypeKind,
     pub decl: Arc<TypeDeclaration>,
@@ -219,7 +219,7 @@ pub enum ExportedKind {
 }
 
 /// `Exported.t`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Exported {
     pub types: Hashtbl<String, i32>,
     pub values: Hashtbl<String, i32>,
@@ -271,7 +271,7 @@ impl Exported {
 }
 
 /// `Module.kind`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ModuleItemKind {
     Value(TypeExprRef),
     Type(Type, RecStatus),
@@ -279,7 +279,7 @@ pub enum ModuleItemKind {
 }
 
 /// `Module.item`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModuleItem {
     pub kind: ModuleItemKind,
     pub name: String,
@@ -289,7 +289,7 @@ pub struct ModuleItem {
 }
 
 /// `Module.structure`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Structure {
     pub name: String,
     pub docstring: Vec<String>,
@@ -299,7 +299,7 @@ pub struct Structure {
 }
 
 /// `Module.t`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Module {
     Ident(Path),
     Structure(Arc<Structure>),

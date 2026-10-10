@@ -27,7 +27,7 @@ use crate::types::context::TypeContext;
 use crate::ident::Ident;
 
 /// A pattern node in the matrix arena.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct P(u32);
 
 /// Environment queries needed by the algorithms (`Env.find_type`,
@@ -140,7 +140,7 @@ pub(crate) enum VarKind {
     Extension(Ident, LocIdx),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Field<'a> {
     /// The source label longident; `None` for the `?temp?`/`?pat_of_label?`
     /// fields built by the algorithm.

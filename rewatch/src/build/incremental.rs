@@ -144,6 +144,15 @@ impl UnitDigests {
         }
     }
 
+    /// The module's interface encoded for storage.
+    pub fn encode(
+        &self,
+        module_name: &str,
+        alias_rewrites: &[(String, rescript_compiler::types::path::Path)],
+    ) -> Option<Vec<u8>> {
+        self.registry.encode_stored_module(module_name, alias_rewrites)
+    }
+
     /// The module's interface digest and item digests, `None` when it is not
     /// registered.
     pub fn get(&self, module_name: &str) -> Option<std::sync::Arc<(u64, ItemDigests)>> {
@@ -182,6 +191,34 @@ pub fn current_record(
             if build_state.last_build_ok { "1" } else { "0" }.to_string(),
         );
     }
+    // The interfaces of the modules this build compiled, where they differ
+    // from the stored ones.
+    let stored = build_state
+        .previous_in_process
+        .as_ref()
+        .and_then(|previous| previous.packages.get(package_name))
+        .map(|record| &record.state.stored_interfaces);
+    let alias_rewrites = build_state.module_alias_rewrites.lock().unwrap().clone();
+    record.interface_updates = build_state
+        .compiled_modules
+        .par_iter()
+        .filter(|module_name| {
+            build_state
+                .get_module(module_name)
+                .is_some_and(|module| module.package_name == package_name && !module.compile_dirty)
+        })
+        .filter_map(|module_name| {
+            let digest = digests.get(module_name)?.0;
+            if stored.and_then(|stored| stored.get(module_name)) == Some(&digest) {
+                return None;
+            }
+            let aliases = alias_rewrites.get(module_name).map(Vec::as_slice).unwrap_or(&[]);
+            let data = digests.encode(module_name, aliases)?;
+            Some((module_name.clone(), (digest, data)))
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect();
     let mut written: AHashMap<&String, WrittenRecord> = build_state
         .modules
         .par_iter()
@@ -443,8 +480,113 @@ fn modules_to_compile(build_state: &BuildCommandState, stale: &AHashSet<String>)
         }
     }
     let support = support_modules(build_state, &universe, plan);
-    universe.extend(support);
+    // Support modules with a stored interface are loaded, not parsed.
+    let loadable = if plan.cutoff {
+        stored_loadable(build_state, stale, &support)
+    } else {
+        AHashSet::new()
+    };
+    universe.extend(
+        support
+            .into_iter()
+            .filter(|module_name| !loadable.contains(module_name)),
+    );
     universe
+}
+
+/// Of the support modules of a round, those whose stored interface can
+/// stand in for compiling them: modules with a stored interface that are not
+/// stale and do not depend, transitively, on a module the round compiles
+/// (whose interface may still change). A stored interface is the one the
+/// module's last compile published: it holds while the module's sources are
+/// unchanged and no item it read changed, which is what not being stale
+/// means.
+pub fn stored_loadable(
+    build_state: &BuildCommandState,
+    round: &AHashSet<String>,
+    support: &AHashSet<String>,
+) -> AHashSet<String> {
+    let Some(previous) = build_state.previous_in_process.as_ref() else {
+        return AHashSet::new();
+    };
+    let mut downstream: AHashSet<&String> = AHashSet::new();
+    let mut frontier: Vec<&String> = round.iter().collect();
+    while let Some(module_name) = frontier.pop() {
+        if let Some(module) = build_state.get_module(module_name) {
+            for dependent in &module.dependents {
+                if downstream.insert(dependent) {
+                    frontier.push(dependent);
+                }
+            }
+        }
+    }
+    support
+        .iter()
+        .filter(|module_name| {
+            let Some(module) = build_state.get_module(module_name) else {
+                return false;
+            };
+            !module.is_mlmap()
+                && !module.compile_dirty
+                && !downstream.contains(module_name)
+                && !build_state.compiled_modules.contains(*module_name)
+                && previous
+                    .packages
+                    .get(&module.package_name)
+                    .is_some_and(|record| record.state.stored_interfaces.contains_key(*module_name))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Load the stored interfaces of `modules` into the registry. Returns the
+/// modules loaded; any other must be compiled.
+pub fn load_stored(build_state: &BuildCommandState, modules: &AHashSet<String>) -> AHashSet<String> {
+    if modules.is_empty() {
+        return AHashSet::new();
+    }
+    let mut by_package: AHashMap<&str, Vec<&str>> = AHashMap::new();
+    for module_name in modules {
+        if let Some(module) = build_state.get_module(module_name) {
+            by_package
+                .entry(module.package_name.as_str())
+                .or_default()
+                .push(module_name.as_str());
+        }
+    }
+    let blobs: Vec<(String, Vec<u8>)> = by_package
+        .into_iter()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .flat_map_iter(
+            |(package_name, modules)| match build_state.get_package(package_name) {
+                Some(package) => state_db::read_interfaces(package, &modules),
+                None => Vec::new(),
+            },
+        )
+        .collect();
+    let decoded: Vec<(String, rescript_compiler::cmi::stored_module::StoredModule)> = blobs
+        .into_par_iter()
+        .filter_map(|(module_name, data)| {
+            Some((module_name, rescript_compiler::cmi::stored_module::decode(&data)?))
+        })
+        .collect();
+    let mut loaded = AHashSet::new();
+    let mut alias_rewrites = build_state.module_alias_rewrites.lock().unwrap();
+    let mut registry = build_state.module_registry.lock().unwrap();
+    for (module_name, module) in decoded {
+        if !module.alias_rewrites.is_empty() {
+            alias_rewrites.insert(module_name.clone(), module.alias_rewrites.clone());
+        }
+        registry.register_stored_module(&module_name, module);
+        loaded.insert(module_name);
+    }
+    log::debug!(
+        "incremental build: loaded {} of {} stored interfaces",
+        loaded.len(),
+        modules.len()
+    );
+    loaded
 }
 
 /// Parse an incremental build in two rounds: first the source files that

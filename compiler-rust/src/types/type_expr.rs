@@ -461,7 +461,7 @@ const SHARED_REF_BITS: u32 = STORE_REF_TAG | SHARED_REF_TAG;
 /// identity (`compiler/ml/types.ml:22`, `compiler/ml/btype.ml:46-48`).
 /// The top bit selects the worker store; remaining bits index its arena or
 /// the compilation-local arena. No structural equality or deduplication.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct TypeExprRef(pub u32);
 
 impl TypeExprRef {
@@ -1101,7 +1101,7 @@ impl MutabilityRef {
 }
 
 /// Row description for polymorphic variants.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RowDesc {
     /// The variant fields: (label, row_field). Shared copy-on-write, so
     /// snapshots of variant descriptors do not copy the field list.
@@ -1117,7 +1117,7 @@ pub struct RowDesc {
 }
 
 /// Row field for polymorphic variants.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum RowField {
     /// Present variant: Some(type) for valued, None for constant
     Rpresent(Option<TypeExprRef>),
@@ -1137,7 +1137,7 @@ pub enum RowField {
 }
 
 /// Reference to a row field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RowFieldRef(pub u32);
 
 impl RowFieldRef {

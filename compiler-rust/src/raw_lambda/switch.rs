@@ -488,7 +488,7 @@ fn coupe_inter(
     (low, high, inside, outside)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 enum Kind {
     Kvalue(usize),
     Kinter(usize),

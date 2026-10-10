@@ -43,7 +43,7 @@ pub use program_printer::{
 };
 
 /// Module identifier for imports/requires
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ModuleId {
     /// The module identifier
     pub id: Ident,
@@ -735,7 +735,7 @@ fn relative_path_between(base_dir: &FsPath, target: &FsPath) -> Option<PathBuf> 
 }
 
 /// Variable identifier (local or qualified)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum VIdent {
     /// Local identifier
     Id(Ident),
@@ -744,7 +744,7 @@ pub enum VIdent {
 }
 
 /// For loop direction
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ForDirection {
     /// i++
     Upto,
@@ -756,7 +756,7 @@ pub enum ForDirection {
 
 /// Kind of call, matching OCaml's `Js_call_info.call_info`
 /// (js_call_info.ml:27-34).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CallKind {
     /// Plain ML expression call. Mirrors OCaml's `Call_ml`.
     MlCall,
@@ -774,7 +774,7 @@ pub enum CallKind {
 /// `pp_function` rewrite wraps such calls with `Curry.__N(...)`. Rust does
 /// not currently emit the Curry wrapper, so the printer's rewrite is gated
 /// on `Full` only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CallArity {
     /// Full application (arity matches).
     Full,
@@ -784,7 +784,7 @@ pub enum CallArity {
 }
 
 /// Call information for function calls
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CallInfo {
     /// Is this a method call?
     pub is_method: bool,
@@ -800,14 +800,14 @@ pub struct CallInfo {
 }
 
 /// Function environment (for closures)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FunEnv {
     /// Captured variables
     pub captured: Vec<Ident>,
 }
 
 /// Raw JavaScript code info
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct JsRawInfo {
     /// The JavaScript code
     pub code: String,
@@ -816,7 +816,7 @@ pub struct JsRawInfo {
 }
 
 /// JavaScript expression description
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ExpressionDesc {
     /// Length property access (arr.length, str.length)
     Length(Box<Expression>, LengthObject),
@@ -941,7 +941,7 @@ pub enum ExpressionDesc {
 }
 
 /// A field excluded by object-rest destructuring.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RecordRestField {
     pub label: String,
     pub ident: Option<Ident>,
@@ -951,7 +951,7 @@ pub struct RecordRestField {
 pub type PropertyMap = Vec<(PropertyName, Expression)>;
 
 /// JavaScript expression
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Expression {
     /// Expression description
     pub desc: ExpressionDesc,
@@ -1633,7 +1633,7 @@ fn push_negation(expr: Expression) -> Option<Expression> {
 }
 
 /// Switch case clause
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CaseClause {
     /// Case body
     pub body: Block,
@@ -1649,7 +1649,7 @@ pub struct CaseClause {
 pub type IntClause = (i32, CaseClause);
 
 /// String switch clause (tag type, case clause)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StringClause {
     /// Tag type (from Ast_untagged_variants)
     pub tag_type: SwitchCaseTag,
@@ -1658,7 +1658,7 @@ pub struct StringClause {
 }
 
 /// Variable declaration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VariableDeclaration {
     /// Variable identifier
     pub ident: Ident,
@@ -1671,7 +1671,7 @@ pub struct VariableDeclaration {
 }
 
 /// JavaScript statement description
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum StatementDesc {
     /// Block of statements
     Block(Block),
@@ -1735,7 +1735,7 @@ pub enum StatementDesc {
 }
 
 /// JavaScript statement
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Statement {
     /// Statement description
     pub desc: StatementDesc,

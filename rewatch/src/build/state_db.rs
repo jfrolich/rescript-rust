@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const DB_FILE: &str = "rescript.sqlite";
 
 /// Bump when the schema changes; an older database is then discarded.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -41,6 +41,7 @@ CREATE TABLE parse_warnings (source TEXT PRIMARY KEY, text TEXT NOT NULL) WITHOU
 CREATE TABLE deps (source TEXT PRIMARY KEY, mtime INTEGER NOT NULL, deps TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE reads (module TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE items (module TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE interfaces (module TEXT PRIMARY KEY, digest INTEGER NOT NULL, data BLOB NOT NULL);
 ";
 
 /// Files that earlier builds wrote instead of the database.
@@ -105,6 +106,12 @@ pub struct PackageState {
     /// [`read_reads`] and [`read_items`].
     pub reads_updates: BTreeMap<String, UnitReads>,
     pub items_updates: BTreeMap<String, ItemDigests>,
+    /// The interface digest of every module with a stored interface (read
+    /// with the record; the interfaces themselves with [`read_interfaces`]).
+    pub stored_interfaces: BTreeMap<String, u64>,
+    /// Stored interfaces to set: module to its interface digest and the
+    /// encoded interface (`rescript_compiler::cmi::stored_module`).
+    pub interface_updates: BTreeMap<String, (u64, Vec<u8>)>,
 }
 
 /// What a module's compile read of each unit: the digest of the items read
@@ -179,6 +186,23 @@ pub fn read_reads(package: &Package, modules: &[&str]) -> BTreeMap<String, UnitR
     read_data_rows(package, "reads", modules)
         .into_iter()
         .filter_map(|(module, data)| Some((module, decode_reads(&data)?)))
+        .collect()
+}
+
+/// The stored interfaces of the given modules of the package.
+pub fn read_interfaces(package: &Package, modules: &[&str]) -> Vec<(String, Vec<u8>)> {
+    let Some(conn) = open_existing(&path(package)) else {
+        return Vec::new();
+    };
+    let Ok(mut stmt) = conn.prepare("SELECT data FROM interfaces WHERE module = ?1") else {
+        return Vec::new();
+    };
+    modules
+        .iter()
+        .filter_map(|module| {
+            let data: Vec<u8> = stmt.query_row(params![module], |row| row.get(0)).ok()?;
+            Some((module.to_string(), data))
+        })
         .collect()
 }
 
@@ -314,12 +338,19 @@ pub fn read(package: &Package) -> Option<PackageState> {
                 },
             );
         }
+        let mut stored_interfaces = BTreeMap::new();
+        let mut stmt = conn.prepare("SELECT module, digest FROM interfaces")?;
+        for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))? {
+            let (module, digest) = row?;
+            stored_interfaces.insert(module, digest as u64);
+        }
         Ok(PackageState {
             meta,
             sources,
             modules,
             parse_warnings,
             deps,
+            stored_interfaces,
             ..PackageState::default()
         })
     };
@@ -363,6 +394,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
         && previous.deps == new.deps
         && new.reads_updates.is_empty()
         && new.items_updates.is_empty()
+        && new.interface_updates.is_empty()
         && new
             .meta
             .iter()
@@ -403,6 +435,12 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             for (module, items) in &new.items_updates {
                 set_items.execute(params![module, encode_items(items)])?;
             }
+            let mut set_interface =
+                tx.prepare("INSERT OR REPLACE INTO interfaces (module, digest, data) VALUES (?1, ?2, ?3)")?;
+            for (module, (digest, data)) in &new.interface_updates {
+                set_interface.execute(params![module, *digest as i64, data])?;
+            }
+            let mut delete_interface = tx.prepare("DELETE FROM interfaces WHERE module = ?1")?;
             let mut delete_reads = tx.prepare("DELETE FROM reads WHERE module = ?1")?;
             let mut delete_items = tx.prepare("DELETE FROM items WHERE module = ?1")?;
             let mut delete_module = tx.prepare("DELETE FROM modules WHERE module = ?1")?;
@@ -416,6 +454,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                 &previous.modules,
                 &new.modules,
                 |module| {
+                    delete_interface.execute(params![module])?;
                     delete_reads.execute(params![module])?;
                     delete_items.execute(params![module])?;
                     delete_module.execute(params![module]).map(drop)

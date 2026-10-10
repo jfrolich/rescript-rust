@@ -7,7 +7,7 @@
 use super::lam_tag_info::TagInfo;
 
 /// Pointer info for tracking constructor origins
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PointerInfo {
     /// No specific info
     None,
@@ -24,7 +24,7 @@ pub enum PointerInfo {
 }
 
 /// Constructor tag information
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ConstructorTag {
     /// Constructor name
     pub name: String,
@@ -37,7 +37,7 @@ pub struct ConstructorTag {
 }
 
 /// Runtime representation selected for an untagged variant constructor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConstructorRuntimeTag {
     Int(i64),
     String(String),
@@ -52,7 +52,7 @@ pub enum ConstructorRuntimeTag {
 ///
 /// These represent compile-time constant values that can be embedded
 /// directly in the generated JavaScript.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Constant {
     /// JavaScript null
     JsNull,

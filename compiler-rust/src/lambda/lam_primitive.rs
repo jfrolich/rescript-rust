@@ -8,7 +8,7 @@ use super::lam_compat::{Comparison, FieldDbgInfo, SetFieldDbgInfo};
 use super::lam_tag_info::TagInfo;
 
 /// Raw JavaScript code info
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct JsRawInfo {
     /// The JavaScript code
     pub code: String,
@@ -24,7 +24,7 @@ pub use crate::types::external_ffi_types::{
 /// `Lambda.import_source`: the target of a dynamic `import`, resolved at
 /// translation. The argument of the import primitive is a module reference,
 /// never an expression.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ImportSource {
     /// A ReScript module, or a value/submodule reached from one (`path = []`:
     /// the module itself). The JS export name for a nested `path` is resolved
@@ -62,7 +62,7 @@ impl ImportSource {
 /// Primitive operations
 ///
 /// These are built-in operations that compile directly to JavaScript.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Primitive {
     // ==================== Block Operations ====================
     /// Make a block (tuple, record, variant)
@@ -354,7 +354,7 @@ pub enum Primitive {
 }
 
 /// Mutable flag
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Mutable {
     Mutable,
     Immutable,

@@ -4,7 +4,7 @@
 use crate::gentype::gen_type_common::{StringMap, Type, doc_string};
 use crate::location::Location;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExportType {
     pub loc: Location,
     pub name_as: Option<String>,
@@ -15,7 +15,7 @@ pub struct ExportType {
     pub doc_string: doc_string::T,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ImportValue {
     pub as_path: String,
     pub import_annotation: crate::gentype::annotation::Import,
@@ -23,7 +23,7 @@ pub struct ImportValue {
     pub value_name: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExportValue {
     pub doc_string: doc_string::T,
     pub module_access_path: crate::gentype::runtime::ModuleAccessPath,
@@ -32,13 +32,13 @@ pub struct ExportValue {
     pub type_: Type,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExportFromTypeDeclaration {
     pub export_type: ExportType,
     pub annotation: crate::gentype::annotation::T,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ImportType {
     pub type_name: String,
     pub as_type_name: Option<String>,
@@ -54,13 +54,13 @@ pub struct ExportTypeItem {
 
 pub type ExportTypeMap = StringMap<ExportTypeItem>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TypeDeclaration {
     pub export_from_type_declaration: ExportFromTypeDeclaration,
     pub import_types: Vec<ImportType>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum T {
     ExportValue(ExportValue),
     ImportValue(ImportValue),

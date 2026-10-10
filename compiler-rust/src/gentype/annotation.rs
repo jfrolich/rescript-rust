@@ -11,7 +11,7 @@ use crate::types::typedtree::{
     TypedSignature, TypedSignatureItem, TypedSignatureItemDesc,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Import {
     pub import_path: crate::gentype::import_path::T,
 }
@@ -27,7 +27,7 @@ pub enum AttributePayload {
     UnrecognizedPayload,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum T {
     GenType,
     GenTypeOpaque,

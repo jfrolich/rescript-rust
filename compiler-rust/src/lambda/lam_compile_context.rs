@@ -19,7 +19,7 @@ use crate::lambda::lam_constant::Constant;
 pub type JblLabel = i32;
 
 /// Recursion flag for functions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RecFlag {
     /// Recursive function
     Rec,

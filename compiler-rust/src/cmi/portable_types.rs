@@ -41,7 +41,7 @@ use super::persistent_env::PersStruct;
 // ============================================================================
 
 /// A self-contained type graph that can be loaded into any TypeContext.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PortableTypeGraph {
     /// Type entries indexed by position. TypeExprRef values in the associated
     /// signature are indices into this vec.
@@ -54,14 +54,14 @@ pub struct PortableTypeGraph {
 }
 
 /// One type expression in portable form.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PortableTypeEntry {
     pub desc: PortableTypeDesc,
     pub level: i32,
 }
 
 /// TypeDesc with indices into `PortableTypeGraph.entries` instead of arena refs.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PortableTypeDesc {
     Tvar(Option<String>),
     Tarrow {
@@ -99,7 +99,7 @@ pub enum PortableTypeDesc {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PortableLongident {
     Lident(String),
     Ldot(Box<PortableLongident>, String),
@@ -107,7 +107,7 @@ pub enum PortableLongident {
 }
 
 /// Portable row description for polymorphic variants.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PortableRowDesc {
     pub row_fields: Vec<(String, PortableRowField)>,
     pub row_more: usize,
@@ -117,7 +117,7 @@ pub struct PortableRowDesc {
 }
 
 /// Portable row field.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PortableRowField {
     Rpresent(Option<usize>),
     Reither {
@@ -129,7 +129,7 @@ pub enum PortableRowField {
 }
 
 /// A PersStruct with types stored portably, independent of any TypeArena.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PortablePersStruct {
     pub ps_name: String,
     pub ps_filename: String,

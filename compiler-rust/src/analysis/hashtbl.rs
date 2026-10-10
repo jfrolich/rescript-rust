@@ -80,7 +80,7 @@ impl OcamlHash for String {
 }
 
 /// A `Hashtbl.t`. Each bucket keeps its head first.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Hashtbl<K, V> {
     buckets: Vec<Vec<(K, V)>>,
     size: usize,

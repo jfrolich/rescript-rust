@@ -3,7 +3,7 @@
 
 pub type ModuleItem = String;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModuleAccessPath {
     Root(String),
     Dot(Box<ModuleAccessPath>, ModuleItem),
