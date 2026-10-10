@@ -1,5 +1,5 @@
 Cleaned 1/512
-Parsed 51 source files
+Parsed 2 source files
 Compiled 2 modules
 
   [1;33mWarning number 32[0m
