@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const DB_FILE: &str = "rescript.sqlite";
 
 /// Bump when the schema changes; an older database is then discarded.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -41,7 +41,7 @@ CREATE TABLE parse_warnings (source TEXT PRIMARY KEY, text TEXT NOT NULL) WITHOU
 CREATE TABLE deps (source TEXT PRIMARY KEY, mtime INTEGER NOT NULL, deps TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE reads (module TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE items (module TEXT PRIMARY KEY, data TEXT NOT NULL);
-CREATE TABLE interfaces (module TEXT PRIMARY KEY, digest INTEGER NOT NULL, data BLOB NOT NULL);
+CREATE TABLE interfaces (module TEXT PRIMARY KEY, hash INTEGER NOT NULL, data BLOB NOT NULL);
 ";
 
 /// Files that earlier builds wrote instead of the database.
@@ -106,11 +106,11 @@ pub struct PackageState {
     /// [`read_reads`] and [`read_items`].
     pub reads_updates: BTreeMap<String, UnitReads>,
     pub items_updates: BTreeMap<String, ItemDigests>,
-    /// The interface digest of every module with a stored interface (read
-    /// with the record; the interfaces themselves with [`read_interfaces`]).
+    /// The content hash of every module's stored interface (read with the
+    /// record; the interfaces themselves with [`read_interfaces`]).
     pub stored_interfaces: BTreeMap<String, u64>,
-    /// Stored interfaces to set: module to its interface digest and the
-    /// encoded interface (`rescript_compiler::cmi::stored_module`).
+    /// Stored interfaces to set: module to the content hash and the encoded
+    /// interface (`rescript_compiler::cmi::stored_module`).
     pub interface_updates: BTreeMap<String, (u64, Vec<u8>)>,
 }
 
@@ -339,7 +339,7 @@ pub fn read(package: &Package) -> Option<PackageState> {
             );
         }
         let mut stored_interfaces = BTreeMap::new();
-        let mut stmt = conn.prepare("SELECT module, digest FROM interfaces")?;
+        let mut stmt = conn.prepare("SELECT module, hash FROM interfaces")?;
         for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))? {
             let (module, digest) = row?;
             stored_interfaces.insert(module, digest as u64);
@@ -436,7 +436,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                 set_items.execute(params![module, encode_items(items)])?;
             }
             let mut set_interface =
-                tx.prepare("INSERT OR REPLACE INTO interfaces (module, digest, data) VALUES (?1, ?2, ?3)")?;
+                tx.prepare("INSERT OR REPLACE INTO interfaces (module, hash, data) VALUES (?1, ?2, ?3)")?;
             for (module, (digest, data)) in &new.interface_updates {
                 set_interface.execute(params![module, *digest as i64, data])?;
             }

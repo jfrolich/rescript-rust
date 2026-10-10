@@ -260,6 +260,9 @@ pub struct BuildCommandState {
     pub module_alias_rewrites: Mutex<AHashMap<String, Vec<(String, rescript_compiler::types::path::Path)>>>,
     // The modules this build compiled (written or not).
     pub compiled_modules: AHashSet<String>,
+    // The build stopped at a parse error, before planning: it compiled
+    // nothing and leaves the previous build record in place.
+    pub stopped_at_parse: bool,
     // The modules whose stored interface this build loaded instead of
     // compiling them.
     pub loaded_modules: AHashSet<String>,
@@ -393,6 +396,7 @@ impl BuildCommandState {
             verified_imports: Mutex::new(AHashMap::new()),
             module_alias_rewrites: Mutex::new(AHashMap::new()),
             compiled_modules: AHashSet::new(),
+            stopped_at_parse: false,
             loaded_modules: AHashSet::new(),
             parse_warnings_replayed: false,
             written_modules: AHashSet::new(),

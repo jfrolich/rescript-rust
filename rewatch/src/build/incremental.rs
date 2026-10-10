@@ -192,7 +192,8 @@ pub fn current_record(
         );
     }
     // The interfaces of the modules this build compiled, where they differ
-    // from the stored ones.
+    // from the stored ones (by content: the interface digest leaves out
+    // locations, which the stored interface keeps).
     let stored = build_state
         .previous_in_process
         .as_ref()
@@ -208,13 +209,14 @@ pub fn current_record(
                 .is_some_and(|module| module.package_name == package_name && !module.compile_dirty)
         })
         .filter_map(|module_name| {
-            let digest = digests.get(module_name)?.0;
-            if stored.and_then(|stored| stored.get(module_name)) == Some(&digest) {
-                return None;
-            }
             let aliases = alias_rewrites.get(module_name).map(Vec::as_slice).unwrap_or(&[]);
             let data = digests.encode(module_name, aliases)?;
-            Some((module_name.clone(), (digest, data)))
+            let hash = blake3::hash(&data);
+            let content = u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"));
+            if stored.and_then(|stored| stored.get(module_name)) == Some(&content) {
+                return None;
+            }
+            Some((module_name.clone(), (content, data)))
         })
         .collect::<Vec<_>>()
         .into_iter()
@@ -509,17 +511,7 @@ pub fn stored_loadable(
     let Some(previous) = build_state.previous_in_process.as_ref() else {
         return AHashSet::new();
     };
-    let mut downstream: AHashSet<&String> = AHashSet::new();
-    let mut frontier: Vec<&String> = round.iter().collect();
-    while let Some(module_name) = frontier.pop() {
-        if let Some(module) = build_state.get_module(module_name) {
-            for dependent in &module.dependents {
-                if downstream.insert(dependent) {
-                    frontier.push(dependent);
-                }
-            }
-        }
-    }
+    let downstream = downstream_of(build_state, round);
     support
         .iter()
         .filter(|module_name| {
@@ -528,7 +520,7 @@ pub fn stored_loadable(
             };
             !module.is_mlmap()
                 && !module.compile_dirty
-                && !downstream.contains(module_name)
+                && !downstream.contains(*module_name)
                 && !build_state.compiled_modules.contains(*module_name)
                 && previous
                     .packages
@@ -1093,6 +1085,22 @@ pub fn next_round(build_state: &BuildCommandState, written: &AHashSet<String>) -
             .get(unit)
             .map(|digests| std::sync::Arc::new(digests.1.clone()))
     })
+}
+
+/// The modules that depend, transitively, on one of `modules`.
+pub fn downstream_of(build_state: &BuildCommandState, modules: &AHashSet<String>) -> AHashSet<String> {
+    let mut downstream: AHashSet<String> = AHashSet::new();
+    let mut frontier: Vec<&String> = modules.iter().collect();
+    while let Some(module_name) = frontier.pop() {
+        if let Some(module) = build_state.get_module(module_name) {
+            for dependent in &module.dependents {
+                if downstream.insert(dependent.clone()) {
+                    frontier.push(dependent);
+                }
+            }
+        }
+    }
+    downstream
 }
 
 /// The support modules of a compile universe: the modules to compile without

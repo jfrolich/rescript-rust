@@ -939,6 +939,11 @@ pub fn compile(
     let mut all_registry_only: AHashSet<String> = AHashSet::new();
     let mut all_dirty: AHashSet<String> = AHashSet::new();
     let mut compiled_this_build: AHashSet<String> = AHashSet::new();
+    let mut failed_this_build: AHashSet<String> = AHashSet::new();
+    // Failed modules that did not publish an interface: their dependents
+    // cannot compile. (A module whose `.resi` compiled publishes it even when
+    // its implementation fails.)
+    let mut unpublished_this_build: AHashSet<String> = AHashSet::new();
     let mut round_dirty = dirty_modules;
     let mut round_universe = compile_universe;
     let mut round = 0usize;
@@ -950,6 +955,10 @@ pub fn compile(
             let loadable =
                 super::incremental::stored_loadable(build_state, &round_dirty, &round_registry_only);
             let loaded = super::incremental::load_stored(build_state, &loadable);
+            // A stored interface that did not load: compile the module after
+            // all (it was not parsed).
+            let unloaded: AHashSet<String> = loadable.difference(&loaded).cloned().collect();
+            super::incremental::parse_for_round(build_state, &unloaded)?;
             round_registry_only.retain(|module_name| !loaded.contains(module_name));
             round_universe.retain(|module_name| !loaded.contains(module_name));
             build_state.loaded_modules.extend(loaded);
@@ -1343,11 +1352,20 @@ pub fn compile(
             let ok = msg.result.is_ok() && !matches!(msg.interface_result, Some(Err(_)));
             if msg.is_compiled && ok {
                 compiled_this_build.insert(msg.module_name.clone());
+            } else if !ok {
+                failed_this_build.insert(msg.module_name.clone());
+                let interface_failed = match &msg.interface_result {
+                    Some(result) => result.is_err(),
+                    None => true,
+                };
+                if interface_failed {
+                    unpublished_this_build.insert(msg.module_name.clone());
+                }
             }
         }
         all_registry_only.extend(registry_only.iter().cloned());
         all_dirty.extend(dirty_set);
-        if !cutoff || has_errors || stalled {
+        if !cutoff || stalled {
             break compile_universe;
         }
         let written: AHashSet<String> = compiled_this_build
@@ -1355,7 +1373,16 @@ pub fn compile(
             .filter(|module_name| !all_registry_only.contains(*module_name))
             .cloned()
             .collect();
-        let next = super::incremental::next_round(build_state, &written);
+        let mut next = super::incremental::next_round(build_state, &written);
+        // After errors, still compile the modules a full build would: those
+        // that do not depend on a failed module (a failed module is not
+        // compiled again).
+        if !failed_this_build.is_empty() {
+            let blocked = super::incremental::downstream_of(build_state, &unpublished_this_build);
+            next.retain(|module_name| {
+                !blocked.contains(module_name) && !failed_this_build.contains(module_name)
+            });
+        }
         if next.is_empty() {
             break compile_universe;
         }
@@ -1379,7 +1406,16 @@ pub fn compile(
         round_dirty = next;
     };
     let registry_only = all_registry_only;
-    let dirty_set = all_dirty;
+    let mut dirty_set = all_dirty;
+    // A full build does not compile the modules that depend on a failed
+    // one, and reports nothing for them: do not replay the warnings of their
+    // earlier compile either (they stay recorded, for the builds after).
+    let blocked_by_failure = if incremental_plan.is_some() && !failed_this_build.is_empty() {
+        super::incremental::downstream_of(build_state, &failed_this_build)
+    } else {
+        AHashSet::new()
+    };
+    dirty_set.extend(blocked_by_failure.iter().cloned());
     build_state.compiled_modules.extend(compiled_this_build);
     if let Some(counters) = scheduler_counters.as_ref() {
         counters.print_report(capacity);
@@ -1627,10 +1663,11 @@ pub fn compile(
 
     // Collect replayed warnings into the same list as fresh warnings so mixed
     // output matches the sorted order used when every module compiles normally.
-    warning_entries.extend(collect_stored_warnings_for_modules_not_recompiled(
-        &build_state.build_state,
-        &recompiled_modules,
-    ));
+    warning_entries.extend(
+        collect_stored_warnings_for_modules_not_recompiled(&build_state.build_state, &recompiled_modules)
+            .into_iter()
+            .filter(|warning| !blocked_by_failure.contains(&warning.module_name)),
+    );
     append_compile_warnings(&build_state.build_state, warning_entries, &mut compile_warnings);
 
     Ok((compile_errors, compile_warnings, num_compiled_modules))

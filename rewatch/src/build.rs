@@ -420,6 +420,7 @@ pub fn incremental_build_without_lock(
     logs::initialize(&build_state.packages);
     build_state.build_started_at = Some(std::time::SystemTime::now());
     build_state.last_build_ok = false;
+    build_state.stopped_at_parse = false;
 
     // When dump_typed_sexp is set, force all modules parse_dirty and compile_dirty
     // so every file gets re-parsed (to store AST) and sexp-dumped
@@ -577,6 +578,7 @@ pub fn incremental_build_without_lock(
         }
         Err(err) => {
             let _error_span = info_span!("build.parse_error").entered();
+            build_state.stopped_at_parse = true;
             logs::finalize(&build_state.packages);
 
             if !plain_output && show_progress {

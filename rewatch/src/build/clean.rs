@@ -325,6 +325,9 @@ fn in_process_source_paths(build_state: &BuildCommandState) -> AHashMap<String, 
 /// [`build::state_db`]): the sources it compiled, when each module's
 /// JavaScript was confirmed up to date, and the warnings to report again.
 pub fn write_in_process_record(build_state: &BuildCommandState) {
+    if build_state.stopped_at_parse {
+        return;
+    }
     let digests = build::incremental::UnitDigests::all(build_state);
     crate::build::phase_mark("record-digests");
     build_state
@@ -346,6 +349,24 @@ pub fn write_in_process_record(build_state: &BuildCommandState) {
 /// sources it compiled that no longer exist: the JS output and any typed
 /// artifacts in `lib/bs` and `lib/ocaml`. Returns (removed sources, recorded
 /// sources).
+/// Remove the genType output of a removed source file, when genType wrote it.
+fn remove_gentype_file(package: &Package, source: &Path) {
+    let Some(gentype) = package.config.gentype_config.as_ref() else {
+        return;
+    };
+    let extension = gentype.generated_file_extension.as_deref().unwrap_or(".gen.tsx");
+    let source = package.path.join(source);
+    let (Some(dir), Some(stem)) = (source.parent(), source.file_stem()) else {
+        return;
+    };
+    let file = dir.join(format!("{}{extension}", stem.to_string_lossy()));
+    let generated = std::fs::read_to_string(&file)
+        .is_ok_and(|content| content.starts_with("/* TypeScript file generated from"));
+    if generated {
+        let _ = std::fs::remove_file(file);
+    }
+}
+
 pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) -> (usize, usize) {
     let root_config = build_state.get_root_config();
     let suffix = root_config.get_suffix(root_config.get_package_specs().first().unwrap());
@@ -384,6 +405,7 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
                 .is_some_and(helpers::is_implementation_file)
             {
                 remove_mjs_file(&package.path.join(path), &suffix);
+                remove_gentype_file(package, path);
             }
             if !build_state.modules.contains_key(module_name) {
                 deleted_modules.insert(module_name.to_string());
