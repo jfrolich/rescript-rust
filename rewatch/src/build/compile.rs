@@ -2247,6 +2247,7 @@ fn build_package_compiler_options(
         include_paths,
         runtime_path,
         open_modules,
+        collect_unit_reads: true,
         warning_specs: parsed_flags.warning_specs,
         warning_error_specs: parsed_flags.warning_error_specs,
         source_map,
@@ -3497,6 +3498,7 @@ fn compile_module_in_process_to_js_boundary(
         .lock()
         .unwrap()
         .remove(module_name);
+    build_command_state.unit_reads.lock().unwrap().remove(module_name);
     let _span = info_span!(
         "compiler.in_process_module",
         module = %module_name,
@@ -3601,7 +3603,11 @@ fn compile_module_in_process_to_js_boundary(
             }
         };
         interface_warnings = intf_result.warnings;
-        build_command_state.record_loaded_units(module_name, intf_result.loaded_units);
+        build_command_state.record_loaded_units(
+            module_name,
+            intf_result.loaded_units,
+            local_registry.resolve_reads(intf_result.unit_reads),
+        );
 
         // Register the .resi's PersStruct in the local registry so the
         // .res compilation can find it for moregen constraints.
@@ -3748,13 +3754,16 @@ fn compile_module_in_process_to_js_boundary(
             // What the backend reads besides the type checker: the modules
             // the generated code may require.
             let mut loaded_units = std::mem::take(&mut result.loaded_units);
-            loaded_units.extend(
-                result
-                    .possible_required_modules
-                    .iter()
-                    .map(|module_id| module_id.id.name().to_string()),
-            );
-            build_command_state.record_loaded_units(module_name, loaded_units);
+            let mut reads = local_registry.resolve_reads(std::mem::take(&mut result.unit_reads));
+            for module_id in &result.possible_required_modules {
+                let unit = module_id.id.name().to_string();
+                reads
+                    .entry(unit.clone())
+                    .or_default()
+                    .insert(rescript_compiler::cmi::item_deps::MODULE_LEVEL.to_string());
+                loaded_units.push(unit);
+            }
+            build_command_state.record_loaded_units(module_name, loaded_units, reads);
             result.warnings.insert_str(0, &interface_warnings);
             result
         }

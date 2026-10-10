@@ -366,6 +366,11 @@ fn hash_signature(hasher: &mut impl Hasher, sig: &Signature, entries: &[Portable
     }
 }
 
+/// The fingerprint contribution of one signature item.
+pub fn hash_sig_item_pub(hasher: &mut impl Hasher, item: &SignatureItem, entries: &[PortableTypeEntry]) {
+    hash_sig_item(hasher, item, entries)
+}
+
 fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem, entries: &[PortableTypeEntry]) {
     std::mem::discriminant(item).hash(hasher);
     match item {

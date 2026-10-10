@@ -13,6 +13,7 @@
 
 pub mod cmi_format;
 pub mod ffi_decode;
+pub mod item_deps;
 pub mod marshal_reader;
 pub mod persistent_env;
 pub mod portable_types;

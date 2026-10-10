@@ -1187,6 +1187,9 @@ pub struct CompilerOptions {
     pub runtime_path: Option<PathBuf>,
     /// Additional modules opened implicitly from `-open` flags.
     pub open_modules: Vec<String>,
+    /// Record what an in-process compile read of other units
+    /// (`unit_reads` of the results), for incremental builds.
+    pub collect_unit_reads: bool,
     /// Warning enable/disable specs from `-w` flags.
     pub warning_specs: Vec<String>,
     /// Warning-as-error specs from `-warn-error` flags.
@@ -1421,6 +1424,7 @@ impl Default for CompilerOptions {
             include_paths: Vec::new(),
             runtime_path: None,
             open_modules: Vec::new(),
+            collect_unit_reads: false,
             warning_specs: Vec::new(),
             warning_error_specs: Vec::new(),
             source_filename: None,
@@ -15056,6 +15060,9 @@ pub struct InProcessPreJsCompileResult {
     pub warnings: String,
     /// The units whose interface type checking read.
     pub loaded_units: Vec<String>,
+    /// What the typed tree read of other units (with
+    /// `CompilerOptions::collect_unit_reads`).
+    pub unit_reads: Vec<crate::cmi::item_deps::UnitRead>,
 }
 
 pub struct InProcessJsMetadataReady {
@@ -15098,6 +15105,9 @@ pub struct InProcessInterfaceResult {
     pub warnings: String,
     /// The units whose interface type checking read.
     pub loaded_units: Vec<String>,
+    /// What the typed signature read of other units (with
+    /// `CompilerOptions::collect_unit_reads`).
+    pub unit_reads: Vec<crate::cmi::item_deps::UnitRead>,
 }
 
 fn process_gentype_typed_artifact_if_enabled<'a>(
@@ -15844,6 +15854,11 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // translation, as the file compile does.
     tctx.flush_value_usage_checks();
     let post_type_warning_start = tctx.warnings.len();
+    let unit_reads = if options.collect_unit_reads {
+        crate::types::unit_reads::structure_reads(&type_ctx, &typed_structure, &options.open_modules)
+    } else {
+        Vec::new()
+    };
 
     // OCaml saves the inferred `.cmi` only in the no-interface branch before
     // Lambda translation mutates any shared type nodes
@@ -16119,6 +16134,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         raw_lambda_sexp,
         lambda_sexp,
         warnings,
+        unit_reads,
         loaded_units: tctx
             .persistent_env
             .as_ref()
@@ -16499,6 +16515,11 @@ pub fn typecheck_preprocessed_signature_in_process(
             ));
         }
     };
+    let unit_reads = if options.collect_unit_reads {
+        crate::types::unit_reads::signature_reads(&type_ctx, &typed_signature, &options.open_modules)
+    } else {
+        Vec::new()
+    };
     // js_implementation.ml:62: `ignore (Includemod.signatures initial_env sg
     // sg)`, which marks the declarations of the interface used.
     let sig_type = crate::types::typemod::decl_signature_from_typed_signature(&typed_signature, arena);
@@ -16614,6 +16635,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         gentype_ignore_interface,
         warnings,
         loaded_units: internal_env.loaded_units(),
+        unit_reads,
     })
 }
 
@@ -16724,6 +16746,7 @@ pub fn typecheck_implementation_in_process(
         gentype_ignore_interface: false,
         warnings: String::new(),
         loaded_units: internal_env.loaded_units(),
+        unit_reads: Vec::new(),
     })
 }
 

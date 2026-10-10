@@ -325,11 +325,13 @@ fn in_process_source_paths(build_state: &BuildCommandState) -> AHashMap<String, 
 /// [`build::state_db`]): the sources it compiled, when each module's
 /// JavaScript was confirmed up to date, and the warnings to report again.
 pub fn write_in_process_record(build_state: &BuildCommandState) {
+    let digests = build::incremental::UnitDigests::all(build_state);
+    crate::build::phase_mark("record-digests");
     build_state
         .packages
         .par_iter()
         .for_each(|(package_name, package)| {
-            let record = build::incremental::current_record(build_state, package_name);
+            let record = build::incremental::current_record(build_state, package_name, &digests);
             let previous = build_state
                 .previous_in_process
                 .as_ref()
@@ -400,6 +402,7 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
 pub fn cleanup_after_build(build_state: &BuildCommandState) {
     if build_state.build_mode().is_in_process() {
         write_in_process_record(build_state);
+        crate::build::phase_mark("record-written");
     }
     build_state.modules.par_iter().for_each(|(_module_name, module)| {
         let package = build_state.get_package(&module.package_name).unwrap();

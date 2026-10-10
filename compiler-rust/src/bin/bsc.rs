@@ -523,6 +523,7 @@ fn run() -> Result<()> {
         include_paths: opts.include_paths.clone(),
         runtime_path,
         open_modules: opts.open_modules.clone(),
+        collect_unit_reads: false,
         warning_specs: opts.warning_specs.clone(),
         warning_error_specs: opts.warning_error_specs.clone(),
         source_filename: Some(source_path.to_string_lossy().into_owned()),

@@ -425,6 +425,10 @@ pub struct ModuleRegistry {
     local_alias_rewrites: HashMap<String, Path>,
     local_source_fallback_paths: HashMap<String, PathBuf>,
     write_to_local: bool,
+    /// Item references of registered signatures (see `resolve_reads`),
+    /// shared by every snapshot. Keyed by the signature's identity, so a
+    /// module registered again gets fresh entries.
+    item_refs_cache: Arc<Mutex<HashMap<(String, usize, u64), Arc<super::item_deps::UnitRefs>>>>,
 }
 
 impl ModuleRegistry {
@@ -502,6 +506,76 @@ impl ModuleRegistry {
             info.is_runtime.hash(&mut hasher);
         }
         Some(hasher.finish())
+    }
+
+    fn registered(&self, name: &str) -> (Option<Arc<PortablePersStruct>>, Option<InMemoryModuleInfo>) {
+        let pers = self
+            .local_cached_modules
+            .get(name)
+            .cloned()
+            .or_else(|| self.cached_modules.get_cloned(name));
+        let info = self
+            .local_module_info
+            .get(name)
+            .cloned()
+            .or_else(|| self.module_info.get_cloned(name));
+        (pers, info)
+    }
+
+    /// The per-item digests of a registered module
+    /// (see [`super::item_deps::item_digests`]), `None` when it is not
+    /// registered.
+    pub fn item_digests(&self, name: &str) -> Option<std::collections::BTreeMap<String, u64>> {
+        let (pers, info) = self.registered(name);
+        if pers.is_none() && info.is_none() {
+            return None;
+        }
+        Some(super::item_deps::item_digests(pers.as_deref(), info.as_ref()))
+    }
+
+    /// Resolve the reads of a compile against the registered modules (see
+    /// [`super::item_deps::resolve_reads`]). Runtime modules are not recorded.
+    pub fn resolve_reads(
+        &self,
+        reads: Vec<super::item_deps::UnitRead>,
+    ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+        struct Source<'a>(&'a ModuleRegistry);
+        impl super::item_deps::UnitSource for Source<'_> {
+            fn portable(&self, unit: &str) -> Option<Arc<PortablePersStruct>> {
+                self.0.registered(unit).0
+            }
+            fn lambda_units(&self, unit: &str, name: &str) -> Vec<String> {
+                let Some(info) = self.0.registered(unit).1 else {
+                    return Vec::new();
+                };
+                let Some(lambda) = info.cmj_export_lambdas.get(name) else {
+                    return Vec::new();
+                };
+                crate::lambda::lam_compile::collect_possible_required_modules_for_lambda(lambda)
+                    .into_iter()
+                    .map(|module| module.id.name().to_string())
+                    .collect()
+            }
+            fn ignored(&self, unit: &str) -> bool {
+                self.0.module_info_is_runtime(unit)
+            }
+            fn refs(&self, unit: &str) -> Option<Arc<super::item_deps::UnitRefs>> {
+                let ps = self
+                    .0
+                    .local_cached_modules
+                    .get(unit)
+                    .cloned()
+                    .or_else(|| self.0.cached_modules.get_cloned(unit))?;
+                let key = (unit.to_string(), Arc::as_ptr(&ps) as usize, ps.fingerprint);
+                if let Some(refs) = self.0.item_refs_cache.lock().unwrap().get(&key) {
+                    return Some(refs.clone());
+                }
+                let refs = Arc::new(super::item_deps::unit_refs(unit, &ps, self));
+                self.0.item_refs_cache.lock().unwrap().insert(key, refs.clone());
+                Some(refs)
+            }
+        }
+        super::item_deps::resolve_reads(reads, &Source(self))
     }
 
     pub fn register_disk_module(&mut self, name: &str, info: InMemoryModuleInfo) {

@@ -3,24 +3,30 @@
 //! In-process builds keep no compiler artifacts on disk, so a new process
 //! knows nothing about the previous build except its outputs: the JavaScript
 //! files and each package's build record in [`super::state_db`]. Besides
-//! timestamps, the record keeps for every module the digest of what other
-//! modules can read of it (its signature and JS metadata, see
-//! `ModuleRegistry::interface_digest`) and the digests of the modules its own
-//! compile read (the units the compiler actually loaded, not the syntactic
-//! dependencies).
+//! timestamps, the record keeps for every module:
+//!
+//! - the digest of what other modules can read of it (its signature and JS
+//!   metadata, see `ModuleRegistry::interface_digest`), and per top-level
+//!   item (`rescript_compiler::cmi::item_deps`);
+//! - for every unit its compile read (the units the compiler loaded, not the
+//!   syntactic dependencies), that unit's digest then, and which of its
+//!   items the compile read with their combined digest. The items read come
+//!   from the typed tree, closed over the declarations they reach and over
+//!   module aliases; `open`, `include` and whole-module uses read all items.
 //!
 //! A module is stale when its own sources or configuration changed since its
-//! JavaScript was written, when a module it references is new, or when a
-//! module it read now records a different digest. A build then compiles in
-//! rounds:
+//! JavaScript was written, when a module it references is new, or when an
+//! item it read of another unit now has a different digest. A build then
+//! compiles in rounds:
 //!
 //! - the modules to write compile and write their JavaScript;
 //! - support modules, their unchanged dependencies, compile without rendering
 //!   or writing JavaScript: the registry needs their signatures and backend
 //!   metadata, which nothing on disk records;
-//! - once a round is done, the modules that read a module whose digest
-//!   changed are written in the next round (see [`next_round`]). An edit that
-//!   keeps a module's interface recompiles only that module.
+//! - once a round is done, the modules that read an item that changed are
+//!   written in the next round (see [`next_round`]). An edit that keeps a
+//!   module's interface recompiles only that module, and one that changes
+//!   some items only the modules that read those.
 //!
 //! Every other module is not compiled, nor parsed. Watch mode keeps the
 //! earlier behavior: it compiles every module into memory anyway, and
@@ -32,10 +38,11 @@
 
 use super::build_types::{BuildCommandState, Module, SourceType};
 use super::packages::Package;
-use super::state_db::{self, ModuleRow, PackageState, SourceDeps};
+use super::state_db::{self, ItemDigests, ModuleRow, PackageState, SourceDeps, UnitReads};
 use crate::config::{Config, SourceMapCommand};
 use ahash::{AHashMap, AHashSet};
 use rayon::prelude::*;
+use rescript_compiler::cmi::item_deps;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -96,7 +103,74 @@ pub struct IncrementalPlan {
 }
 
 /// The build record to save for `package` after this build.
-pub fn current_record(build_state: &BuildCommandState, package_name: &str) -> PackageState {
+/// The interface and item digests of registered modules, computed once for
+/// a set of lookups.
+pub struct UnitDigests {
+    registry: rescript_compiler::cmi::persistent_env::ModuleRegistry,
+    cache: std::sync::Mutex<AHashMap<String, Option<std::sync::Arc<(u64, ItemDigests)>>>>,
+    /// Computed up front for every module (see [`UnitDigests::all`]).
+    all: Option<AHashMap<String, std::sync::Arc<(u64, ItemDigests)>>>,
+}
+
+impl UnitDigests {
+    pub fn new(build_state: &BuildCommandState) -> Self {
+        Self {
+            registry: build_state.snapshot_module_registry(),
+            cache: std::sync::Mutex::new(AHashMap::new()),
+            all: None,
+        }
+    }
+
+    /// The digests of every registered module of the build, computed in
+    /// parallel.
+    pub fn all(build_state: &BuildCommandState) -> Self {
+        let registry = build_state.snapshot_module_registry();
+        let all = build_state
+            .modules
+            .par_iter()
+            .filter_map(|(module_name, _)| {
+                let digests = registry
+                    .interface_digest(module_name)
+                    .zip(registry.item_digests(module_name))?;
+                Some((module_name.clone(), std::sync::Arc::new(digests)))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect();
+        Self {
+            registry,
+            cache: std::sync::Mutex::new(AHashMap::new()),
+            all: Some(all),
+        }
+    }
+
+    /// The module's interface digest and item digests, `None` when it is not
+    /// registered.
+    pub fn get(&self, module_name: &str) -> Option<std::sync::Arc<(u64, ItemDigests)>> {
+        if let Some(all) = &self.all {
+            return all.get(module_name).cloned();
+        }
+        if let Some(known) = self.cache.lock().unwrap().get(module_name) {
+            return known.clone();
+        }
+        let computed = self
+            .registry
+            .interface_digest(module_name)
+            .zip(self.registry.item_digests(module_name))
+            .map(std::sync::Arc::new);
+        self.cache
+            .lock()
+            .unwrap()
+            .insert(module_name.to_string(), computed.clone());
+        computed
+    }
+}
+
+pub fn current_record(
+    build_state: &BuildCommandState,
+    package_name: &str,
+    digests: &UnitDigests,
+) -> PackageState {
     let mut record = PackageState::default();
     if let Some(started) = build_state.build_started_at {
         record.meta.insert(
@@ -108,6 +182,16 @@ pub fn current_record(build_state: &BuildCommandState, package_name: &str) -> Pa
             if build_state.last_build_ok { "1" } else { "0" }.to_string(),
         );
     }
+    let mut written: AHashMap<&String, WrittenRecord> = build_state
+        .modules
+        .par_iter()
+        .filter(|(_, module)| module.package_name == package_name)
+        .filter_map(|(module_name, _)| {
+            Some((module_name, written_interface(build_state, module_name, digests)?))
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect();
     for (module_name, module) in build_state.modules.iter() {
         if module.package_name != package_name {
             continue;
@@ -122,12 +206,30 @@ pub fn current_record(build_state: &BuildCommandState, package_name: &str) -> Pa
             record.sources.insert(interface.path.clone(), module_name.clone());
         }
         // A module this build did not write keeps what its last written
-        // compile read and published.
-        let (interface_digest, imports) = match written_interface(build_state, module_name) {
-            Some((digest, imports)) => (Some(digest), Some(imports)),
+        // compile read and published, with the imports this build checked
+        // item by item brought up to date.
+        let (interface_digest, imports) = match written.remove(module_name) {
+            Some(written) => {
+                record.reads_updates.insert(module_name.clone(), written.reads);
+                record.items_updates.insert(module_name.clone(), written.items);
+                (Some(written.digest), Some(written.imports))
+            }
             None => recorded_row(build_state, module_name)
                 .filter(|_| !build_state.written_modules.contains(module_name))
-                .map_or((None, None), |row| (row.interface_digest, row.imports.clone())),
+                .map_or((None, None), |row| {
+                    let verified = build_state.verified_imports.lock().unwrap();
+                    let imports = row.imports.clone().map(|imports| {
+                        imports
+                            .into_iter()
+                            .map(|(unit, digest)| {
+                                let now = verified.get(module_name).and_then(|units| units.get(&unit));
+                                let digest = now.copied().unwrap_or(digest);
+                                (unit, digest)
+                            })
+                            .collect()
+                    });
+                    (row.interface_digest, imports)
+                }),
         };
         record.modules.insert(
             module_name.clone(),
@@ -687,6 +789,7 @@ pub fn plan(build_state: &mut BuildCommandState) {
         // Dependents of a recompiled module are decided once its new digest
         // is known (see `next_round`).
         let digests = recorded_digests(build_state);
+        let mut import_candidates: Vec<(String, Vec<(String, u64)>)> = Vec::new();
         for (module_name, own) in &times {
             let own_stale = !own.recorded
                 || !matches!((own.newest_input, own.output), (Some(newest), Some(output)) if newest <= output);
@@ -699,15 +802,60 @@ pub fn plan(build_state: &mut BuildCommandState) {
                     .iter()
                     .any(|dep| times.get(dep).is_some_and(|times| !times.recorded))
             });
-            let import_changed = row.and_then(|row| row.imports.as_ref()).is_some_and(|imports| {
-                imports.iter().any(|(import, digest)| {
-                    !build_state.modules.contains_key(import)
-                        || digests.get(import).is_some_and(|current| current != digest)
-                })
+            let import_removed = row.and_then(|row| row.imports.as_ref()).is_some_and(|imports| {
+                imports
+                    .iter()
+                    .any(|(import, _)| !build_state.modules.contains_key(import))
             });
-            if own_stale || unknown_imports || references_new_module || import_changed {
+            if own_stale || unknown_imports || references_new_module || import_removed {
                 stale.insert(module_name.clone());
+                continue;
             }
+            let changed: Vec<(String, u64)> = row
+                .and_then(|row| row.imports.as_ref())
+                .into_iter()
+                .flatten()
+                .filter_map(|(import, digest)| {
+                    let current = *digests.get(import)?;
+                    (current != *digest).then(|| (import.clone(), current))
+                })
+                .collect();
+            if !changed.is_empty() {
+                import_candidates.push((module_name.clone(), changed));
+            }
+        }
+        // An import's digest changed since the module was compiled (an
+        // earlier build stopped before deciding about it): compare the items
+        // it read with what the unit's record says now.
+        if !import_candidates.is_empty() {
+            let mut by_package: AHashMap<&str, Vec<&str>> = AHashMap::new();
+            for (_, changed) in &import_candidates {
+                for (unit, _) in changed {
+                    if let Some(module) = build_state.get_module(unit) {
+                        by_package
+                            .entry(module.package_name.as_str())
+                            .or_default()
+                            .push(unit.as_str());
+                    }
+                }
+            }
+            let mut recorded_items: AHashMap<String, std::sync::Arc<ItemDigests>> = AHashMap::new();
+            for (package_name, mut units) in by_package {
+                units.sort();
+                units.dedup();
+                if let Some(package) = build_state.get_package(package_name) {
+                    recorded_items.extend(
+                        state_db::read_items(package, &units)
+                            .into_iter()
+                            .map(|(unit, items)| (unit, std::sync::Arc::new(items))),
+                    );
+                }
+            }
+            stale.extend(affected_by_changed_imports(
+                build_state,
+                std::mem::take(&mut import_candidates),
+                &|unit| recorded_items.get(unit).cloned(),
+            ));
         }
     } else {
         let mut memo = AHashMap::new();
@@ -772,10 +920,8 @@ fn recorded_digests(build_state: &BuildCommandState) -> AHashMap<String, u64> {
 /// interface digest. A module's current digest is the registry's when this
 /// build registered it, the recorded one otherwise.
 pub fn next_round(build_state: &BuildCommandState, written: &AHashSet<String>) -> AHashSet<String> {
-    let recorded = recorded_digests(build_state);
-    let registry = build_state.module_registry.lock().unwrap();
-    let mut current: AHashMap<&str, Option<u64>> = AHashMap::new();
-    let mut next = AHashSet::new();
+    let digests = UnitDigests::new(build_state);
+    let mut candidates = Vec::new();
     for (module_name, module) in build_state.modules.iter() {
         if written.contains(module_name) || module.is_mlmap() {
             continue;
@@ -784,22 +930,27 @@ pub fn next_round(build_state: &BuildCommandState, written: &AHashSet<String>) -
         else {
             continue;
         };
-        let changed = imports.iter().any(|(import, digest)| {
-            let digest_now = *current.entry(import.as_str()).or_insert_with(|| {
-                registry
-                    .interface_digest(import)
-                    .or_else(|| recorded.get(import).copied())
-            });
-            if digest_now != Some(*digest) {
-                log::debug!("{module_name} recompiles: the interface of {import} changed");
-            }
-            digest_now != Some(*digest)
-        });
-        if changed {
-            next.insert(module_name.clone());
+        let verified = build_state.verified_imports.lock().unwrap();
+        let checked = verified.get(module_name);
+        // Units this build did not compile are as recorded.
+        let changed: Vec<(String, u64)> = imports
+            .iter()
+            .filter_map(|(import, digest)| {
+                let now = digests.get(import)?.0;
+                let seen = checked.and_then(|units| units.get(import)).unwrap_or(digest);
+                (now != *seen).then(|| (import.clone(), now))
+            })
+            .collect();
+        drop(verified);
+        if !changed.is_empty() {
+            candidates.push((module_name.clone(), changed));
         }
     }
-    next
+    affected_by_changed_imports(build_state, candidates, &|unit| {
+        digests
+            .get(unit)
+            .map(|digests| std::sync::Arc::new(digests.1.clone()))
+    })
 }
 
 /// The support modules of a compile universe: the modules to compile without
@@ -862,24 +1013,109 @@ pub fn round_support(
 }
 
 /// What a module written by this build read and published, for its record.
+struct WrittenRecord {
+    digest: u64,
+    imports: Vec<(String, u64)>,
+    reads: UnitReads,
+    items: ItemDigests,
+}
+
 fn written_interface(
     build_state: &BuildCommandState,
     module_name: &str,
-) -> Option<(u64, Vec<(String, u64)>)> {
+    digests: &UnitDigests,
+) -> Option<WrittenRecord> {
     if !build_state.written_modules.contains(module_name) {
         return None;
     }
-    let loaded = build_state.loaded_units.lock().unwrap();
-    let registry = build_state.module_registry.lock().unwrap();
-    let digest = registry.interface_digest(module_name)?;
-    let mut imports = loaded
-        .get(module_name)?
-        .iter()
-        .filter(|unit| build_state.modules.contains_key(*unit))
-        .map(|unit| Some((unit.clone(), registry.interface_digest(unit)?)))
-        .collect::<Option<Vec<_>>>()?;
-    imports.sort();
-    Some((digest, imports))
+    let own = digests.get(module_name)?;
+    let mut read_keys: BTreeMap<String, std::collections::BTreeSet<String>> = build_state
+        .unit_reads
+        .lock()
+        .unwrap()
+        .get(module_name)
+        .cloned()
+        .unwrap_or_default();
+    // A unit the compile loaded without a recorded read is read whole.
+    for unit in build_state.loaded_units.lock().unwrap().get(module_name)? {
+        read_keys.entry(unit.clone()).or_insert_with(|| {
+            [item_deps::WHOLE.to_string(), item_deps::MODULE_LEVEL.to_string()]
+                .into_iter()
+                .collect()
+        });
+    }
+    let mut imports = Vec::new();
+    let mut reads = UnitReads::new();
+    for (unit, mut keys) in read_keys {
+        if unit == module_name || !build_state.modules.contains_key(&unit) {
+            continue;
+        }
+        // The digest of every item covers the others.
+        if keys.contains(item_deps::WHOLE) {
+            keys = [item_deps::WHOLE.to_string()].into_iter().collect();
+        }
+        let unit_digests = digests.get(&unit)?;
+        let read_digest = item_deps::read_digest(&unit_digests.1, keys.iter());
+        imports.push((unit.clone(), unit_digests.0));
+        reads.insert(unit, (read_digest, keys.into_iter().collect()));
+    }
+    Some(WrittenRecord {
+        digest: own.0,
+        imports,
+        reads,
+        items: own.1.clone(),
+    })
+}
+
+/// Of `candidates` (modules with recorded imports whose unit's interface
+/// digest is now different), the ones that read an item of those units that
+/// changed. For the others, the imports are recorded as verified. `items`
+/// gives a unit's current item digests.
+fn affected_by_changed_imports(
+    build_state: &BuildCommandState,
+    candidates: Vec<(String, Vec<(String, u64)>)>,
+    items: &dyn Fn(&str) -> Option<std::sync::Arc<ItemDigests>>,
+) -> AHashSet<String> {
+    let mut by_package: AHashMap<&str, Vec<&str>> = AHashMap::new();
+    for (module_name, _) in &candidates {
+        if let Some(module) = build_state.get_module(module_name) {
+            by_package
+                .entry(module.package_name.as_str())
+                .or_default()
+                .push(module_name.as_str());
+        }
+    }
+    let mut recorded_reads: AHashMap<String, UnitReads> = AHashMap::new();
+    for (package_name, modules) in by_package {
+        if let Some(package) = build_state.get_package(package_name) {
+            recorded_reads.extend(state_db::read_reads(package, &modules));
+        }
+    }
+    let mut affected = AHashSet::new();
+    let mut verified = build_state.verified_imports.lock().unwrap();
+    for (module_name, changed) in candidates {
+        let reads = recorded_reads.get(&module_name);
+        let unaffected = changed.iter().all(|(unit, _)| {
+            let Some((digest, keys)) = reads.and_then(|reads| reads.get(unit)) else {
+                return false;
+            };
+            let same =
+                items(unit).is_some_and(|items| item_deps::read_digest(&items, keys.iter()) == *digest);
+            if !same {
+                log::debug!("{module_name} recompiles: an item it reads of {unit} changed");
+            }
+            same
+        });
+        if unaffected {
+            let entry = verified.entry(module_name).or_default();
+            for (unit, now) in changed {
+                entry.insert(unit, now);
+            }
+        } else {
+            affected.insert(module_name);
+        }
+    }
+    affected
 }
 
 #[cfg(test)]

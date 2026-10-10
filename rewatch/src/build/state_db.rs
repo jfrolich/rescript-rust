@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const DB_FILE: &str = "rescript.sqlite";
 
 /// Bump when the schema changes; an older database is then discarded.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 5;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -39,6 +39,8 @@ CREATE TABLE modules (
 ) WITHOUT ROWID;
 CREATE TABLE parse_warnings (source TEXT PRIMARY KEY, text TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE deps (source TEXT PRIMARY KEY, mtime INTEGER NOT NULL, deps TEXT NOT NULL) WITHOUT ROWID;
+CREATE TABLE reads (module TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE items (module TEXT PRIMARY KEY, data TEXT NOT NULL);
 ";
 
 /// Files that earlier builds wrote instead of the database.
@@ -97,6 +99,95 @@ pub struct PackageState {
     /// The raw module references of each source file (`Module:impl` /
     /// `Module:intf`), with the file's modification time when it was parsed.
     pub deps: BTreeMap<String, SourceDeps>,
+    /// Rows to set in the `reads` and `items` tables (see [`UnitReads`] and
+    /// [`ItemDigests`]). These are only written, never read with the rest
+    /// of the record: a build looks up the few it needs with
+    /// [`read_reads`] and [`read_items`].
+    pub reads_updates: BTreeMap<String, UnitReads>,
+    pub items_updates: BTreeMap<String, ItemDigests>,
+}
+
+/// What a module's compile read of each unit: the digest of the items read
+/// when it was compiled, and their keys.
+pub type UnitReads = BTreeMap<String, (u64, Vec<String>)>;
+
+/// A module's item digests, by item key.
+pub type ItemDigests = BTreeMap<String, u64>;
+
+fn encode_reads(reads: &UnitReads) -> String {
+    reads
+        .iter()
+        .map(|(unit, (digest, keys))| format!("{unit}\t{digest:x}\t{}", keys.join(",")))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn decode_reads(text: &str) -> Option<UnitReads> {
+    text.split('\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            let unit = parts.next()?.to_string();
+            let digest = u64::from_str_radix(parts.next()?, 16).ok()?;
+            let keys = parts
+                .next()?
+                .split(',')
+                .filter(|key| !key.is_empty())
+                .map(str::to_string)
+                .collect();
+            Some((unit, (digest, keys)))
+        })
+        .collect()
+}
+
+fn encode_items(items: &ItemDigests) -> String {
+    items
+        .iter()
+        .map(|(key, digest)| format!("{key}\t{digest:x}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn decode_items(text: &str) -> Option<ItemDigests> {
+    text.split('\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let (key, digest) = line.split_once('\t')?;
+            Some((key.to_string(), u64::from_str_radix(digest, 16).ok()?))
+        })
+        .collect()
+}
+
+fn read_data_rows(package: &Package, table: &str, modules: &[&str]) -> BTreeMap<String, String> {
+    let Some(conn) = open_existing(&path(package)) else {
+        return BTreeMap::new();
+    };
+    let Ok(mut stmt) = conn.prepare(&format!("SELECT data FROM {table} WHERE module = ?1")) else {
+        return BTreeMap::new();
+    };
+    modules
+        .iter()
+        .filter_map(|module| {
+            let data: String = stmt.query_row(params![module], |row| row.get(0)).ok()?;
+            Some((module.to_string(), data))
+        })
+        .collect()
+}
+
+/// The recorded reads of the given modules of the package.
+pub fn read_reads(package: &Package, modules: &[&str]) -> BTreeMap<String, UnitReads> {
+    read_data_rows(package, "reads", modules)
+        .into_iter()
+        .filter_map(|(module, data)| Some((module, decode_reads(&data)?)))
+        .collect()
+}
+
+/// The recorded item digests of the given modules of the package.
+pub fn read_items(package: &Package, modules: &[&str]) -> BTreeMap<String, ItemDigests> {
+    read_data_rows(package, "items", modules)
+        .into_iter()
+        .filter_map(|(module, data)| Some((module, decode_items(&data)?)))
+        .collect()
 }
 
 /// A source file's module references, valid while its modification time is
@@ -229,6 +320,7 @@ pub fn read(package: &Package) -> Option<PackageState> {
             modules,
             parse_warnings,
             deps,
+            ..PackageState::default()
         })
     };
     read().ok()
@@ -269,6 +361,8 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
         && previous.modules == new.modules
         && previous.parse_warnings == new.parse_warnings
         && previous.deps == new.deps
+        && new.reads_updates.is_empty()
+        && new.items_updates.is_empty()
         && new
             .meta
             .iter()
@@ -301,6 +395,16 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                 },
             )?;
 
+            let mut set_reads = tx.prepare("INSERT OR REPLACE INTO reads (module, data) VALUES (?1, ?2)")?;
+            for (module, reads) in &new.reads_updates {
+                set_reads.execute(params![module, encode_reads(reads)])?;
+            }
+            let mut set_items = tx.prepare("INSERT OR REPLACE INTO items (module, data) VALUES (?1, ?2)")?;
+            for (module, items) in &new.items_updates {
+                set_items.execute(params![module, encode_items(items)])?;
+            }
+            let mut delete_reads = tx.prepare("DELETE FROM reads WHERE module = ?1")?;
+            let mut delete_items = tx.prepare("DELETE FROM items WHERE module = ?1")?;
             let mut delete_module = tx.prepare("DELETE FROM modules WHERE module = ?1")?;
             let mut set_module = tx.prepare(
                 "INSERT OR REPLACE INTO modules
@@ -311,7 +415,11 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             sync_rows(
                 &previous.modules,
                 &new.modules,
-                |module| delete_module.execute(params![module]).map(drop),
+                |module| {
+                    delete_reads.execute(params![module])?;
+                    delete_items.execute(params![module])?;
+                    delete_module.execute(params![module]).map(drop)
+                },
                 |module, row| {
                     set_module
                         .execute(params![
@@ -477,6 +585,38 @@ mod tests {
         );
         write_record(&package, Some(&first), &second);
         assert_eq!(read(&package).as_ref(), Some(&second));
+    }
+
+    #[test]
+    fn reads_and_items_are_looked_up_by_module() {
+        let dir = TempDir::new().unwrap();
+        let package = test_package(dir.path());
+        let mut new = state(1, None);
+        new.reads_updates.insert(
+            "A".to_string(),
+            [
+                ("B".to_string(), (7, vec!["@".to_string(), "v:x".to_string()])),
+                ("C".to_string(), (u64::MAX, vec!["*".to_string()])),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        new.items_updates.insert(
+            "A".to_string(),
+            [("@".to_string(), 1), ("t:t".to_string(), u64::MAX)]
+                .into_iter()
+                .collect(),
+        );
+        write_record(&package, None, &new);
+        assert_eq!(read_reads(&package, &["A", "Z"]), new.reads_updates);
+        assert_eq!(read_items(&package, &["A"]), new.items_updates);
+
+        // Removing the module removes its rows.
+        let mut empty = PackageState::default();
+        empty.meta.insert(META_BUILD_OK.to_string(), "1".to_string());
+        write_record(&package, read(&package).as_ref(), &empty);
+        assert!(read_reads(&package, &["A"]).is_empty());
+        assert!(read_items(&package, &["A"]).is_empty());
     }
 
     #[test]

@@ -249,6 +249,13 @@ pub struct BuildCommandState {
     // interface of (type checking its interface and implementation, plus
     // the modules its generated code may require).
     pub loaded_units: Mutex<AHashMap<String, AHashSet<String>>>,
+    // The items of each unit the last compile of a module read (see
+    // `rescript_compiler::cmi::item_deps`).
+    pub unit_reads:
+        Mutex<AHashMap<String, std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>>,
+    // Recorded imports a build checked item by item and found unaffected:
+    // module -> unit -> the unit's interface digest now.
+    pub verified_imports: Mutex<AHashMap<String, AHashMap<String, u64>>>,
     // Set while parsing modules whose saved parse warnings were already
     // reported this build: the parse then only records them.
     pub parse_warnings_replayed: bool,
@@ -375,6 +382,8 @@ impl BuildCommandState {
             module_registry: Mutex::new(ModuleRegistry::new()),
             in_memory_deps: Mutex::new(AHashMap::new()),
             loaded_units: Mutex::new(AHashMap::new()),
+            unit_reads: Mutex::new(AHashMap::new()),
+            verified_imports: Mutex::new(AHashMap::new()),
             parse_warnings_replayed: false,
             written_modules: AHashSet::new(),
             gentype_contexts: Mutex::new(AHashMap::new()),
@@ -446,10 +455,23 @@ impl BuildCommandState {
     /// number assigned (which may be the same as before if unchanged).
     /// Record units a compile of `module_name` read. An interface compile
     /// records first, then its implementation adds to it.
-    pub fn record_loaded_units(&self, module_name: &str, units: Vec<String>) {
+    pub fn record_loaded_units(
+        &self,
+        module_name: &str,
+        units: Vec<String>,
+        reads: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    ) {
         let mut loaded = self.loaded_units.lock().unwrap();
         let entry = loaded.entry(module_name.to_string()).or_default();
         entry.extend(units.into_iter().filter(|unit| unit != module_name));
+        drop(loaded);
+        let mut all_reads = self.unit_reads.lock().unwrap();
+        let entry = all_reads.entry(module_name.to_string()).or_default();
+        for (unit, keys) in reads {
+            if unit != module_name {
+                entry.entry(unit).or_default().extend(keys);
+            }
+        }
     }
 
     pub fn register_in_memory_interface(&self, module_name: String, fingerprint: u64, is_pure: bool) -> u64 {

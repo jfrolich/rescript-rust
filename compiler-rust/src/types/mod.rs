@@ -55,6 +55,7 @@ pub mod type_expr;
 pub mod typecore;
 pub mod typedtree;
 pub mod typemod;
+pub mod unit_reads;
 pub mod usage;
 pub mod variance;
 pub mod variant_runtime;
