@@ -245,6 +245,16 @@ pub struct CmjModuleImportInfo {
     pub file_case: CmjFileCase,
 }
 
+/// Serialize a map in key order, so that equal maps encode identically.
+fn serialize_sorted<V: serde::Serialize, S: serde::Serializer>(
+    map: &Arc<HashMap<String, V>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let mut entries: Vec<(&String, &V)> = map.iter().collect();
+    entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    serializer.collect_map(entries)
+}
+
 /// In-memory module metadata for the `--in-process` build mode.
 ///
 /// When a module is registered in the in-memory registry, these fields
@@ -257,11 +267,14 @@ pub struct InMemoryModuleInfo {
     /// Whether the module is side-effect free (replaces `.cmj` purity lookup)
     pub is_pure: bool,
     /// Closed constant exports (replaces `.cmj` constant lookup)
+    #[serde(serialize_with = "serialize_sorted")]
     pub cmj_export_constants: Arc<HashMap<String, CmjExportConstant>>,
     /// Arity metadata for exports (replaces `.cmj` arity lookup)
+    #[serde(serialize_with = "serialize_sorted")]
     pub cmj_export_arities: Arc<HashMap<String, CmjExportArity>>,
     /// Non-constant `persistent_closed_lambda` exports (replaces the `.cmj`
     /// lookup used for cross-module inlining, js_cmj_format.ml:112-121).
+    #[serde(serialize_with = "serialize_sorted")]
     pub cmj_export_lambdas: Arc<HashMap<String, Lambda>>,
     /// Flat hoisted-export path metadata (replaces `.cmj` lookup).
     pub cmj_hoisted_exports: Arc<Vec<crate::lambda::HoistedExport>>,
