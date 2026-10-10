@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const DB_FILE: &str = "rescript.sqlite";
 
 /// Bump when the schema changes; an older database is then discarded.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -33,7 +33,9 @@ CREATE TABLE modules (
     module TEXT PRIMARY KEY,
     js_confirmed_at INTEGER,
     implementation_warnings TEXT,
-    interface_warnings TEXT
+    interface_warnings TEXT,
+    interface_digest INTEGER,
+    imports TEXT
 ) WITHOUT ROWID;
 CREATE TABLE parse_warnings (source TEXT PRIMARY KEY, text TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE deps (source TEXT PRIMARY KEY, mtime INTEGER NOT NULL, deps TEXT NOT NULL) WITHOUT ROWID;
@@ -47,13 +49,40 @@ pub fn path(package: &Package) -> PathBuf {
     package.get_build_path().join(DB_FILE)
 }
 
-/// A module's row: when its JavaScript was last confirmed up to date, and its
-/// compile warnings.
+/// A module's row: when its JavaScript was last confirmed up to date, its
+/// compile warnings, and what that compile read and published.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ModuleRow {
     pub js_confirmed_at: Option<SystemTime>,
     pub implementation_warnings: Option<String>,
     pub interface_warnings: Option<String>,
+    /// The digest of what other modules can read of this one (see
+    /// `ModuleRegistry::interface_digest`).
+    pub interface_digest: Option<u64>,
+    /// The project modules whose interface the compile read, with the
+    /// digest each had then. `None` when unknown.
+    pub imports: Option<Vec<(String, u64)>>,
+}
+
+fn encode_imports(imports: &Option<Vec<(String, u64)>>) -> Option<String> {
+    imports.as_ref().map(|imports| {
+        imports
+            .iter()
+            .map(|(module, digest)| format!("{module}={digest:x}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
+}
+
+fn decode_imports(text: Option<String>) -> Option<Vec<(String, u64)>> {
+    let text = text?;
+    text.split('\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let (module, digest) = line.rsplit_once('=')?;
+            Some((module.to_string(), u64::from_str_radix(digest, 16).ok()?))
+        })
+        .collect()
 }
 
 /// Everything recorded for one package.
@@ -147,7 +176,8 @@ pub fn read(package: &Package) -> Option<PackageState> {
         }
         let mut modules = BTreeMap::new();
         let mut stmt = conn.prepare(
-            "SELECT module, js_confirmed_at, implementation_warnings, interface_warnings FROM modules",
+            "SELECT module, js_confirmed_at, implementation_warnings, interface_warnings,
+                    interface_digest, imports FROM modules",
         )?;
         for row in stmt.query_map([], |row| {
             Ok((
@@ -156,6 +186,8 @@ pub fn read(package: &Package) -> Option<PackageState> {
                     js_confirmed_at: row.get::<_, Option<i64>>(1)?.and_then(time_from_nanos),
                     implementation_warnings: row.get(2)?,
                     interface_warnings: row.get(3)?,
+                    interface_digest: row.get::<_, Option<i64>>(4)?.map(|digest| digest as u64),
+                    imports: decode_imports(row.get(5)?),
                 },
             ))
         })? {
@@ -272,8 +304,9 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             let mut delete_module = tx.prepare("DELETE FROM modules WHERE module = ?1")?;
             let mut set_module = tx.prepare(
                 "INSERT OR REPLACE INTO modules
-                 (module, js_confirmed_at, implementation_warnings, interface_warnings)
-                 VALUES (?1, ?2, ?3, ?4)",
+                 (module, js_confirmed_at, implementation_warnings, interface_warnings,
+                  interface_digest, imports)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
             sync_rows(
                 &previous.modules,
@@ -285,7 +318,9 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                             module,
                             row.js_confirmed_at.map(nanos_from_time),
                             row.implementation_warnings,
-                            row.interface_warnings
+                            row.interface_warnings,
+                            row.interface_digest.map(|digest| digest as i64),
+                            encode_imports(&row.imports)
                         ])
                         .map(drop)
                 },
@@ -405,6 +440,8 @@ mod tests {
                 js_confirmed_at: Some(UNIX_EPOCH + Duration::from_nanos(js)),
                 implementation_warnings: warning.map(str::to_string),
                 interface_warnings: None,
+                interface_digest: Some(u64::MAX - js),
+                imports: Some(vec![("B".to_string(), js), ("C".to_string(), u64::MAX)]),
             },
         );
         state

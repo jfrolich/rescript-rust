@@ -865,8 +865,13 @@ pub fn compile(
 
     // Expand the compile universe: every dirty module plus everything that
     // transitively depends on it.
+    // A cut-off build decides the dependents round by round instead.
     let mut compile_universe = dirty_modules.clone();
-    let mut frontier = dirty_modules.iter().cloned().collect::<Vec<_>>();
+    let mut frontier = if incremental_plan.as_ref().is_some_and(|plan| plan.cutoff) {
+        Vec::new()
+    } else {
+        dirty_modules.iter().cloned().collect::<Vec<_>>()
+    };
     while !frontier.is_empty() {
         let mut next_frontier = Vec::new();
         for module_name in &frontier {
@@ -881,7 +886,7 @@ pub fn compile(
         frontier = next_frontier;
     }
 
-    let registry_only = incremental_plan
+    let mut round_registry_only = incremental_plan
         .as_ref()
         .map(|plan| super::incremental::support_modules(build_state, &compile_universe, plan))
         .unwrap_or_default();
@@ -889,58 +894,18 @@ pub fn compile(
         log::debug!(
             "incremental build: compiling {} modules, {} more for their dependencies only",
             compile_universe.len(),
-            registry_only.len()
+            round_registry_only.len()
         );
     }
-    compile_universe.extend(registry_only.iter().cloned());
-    let registry_only = Arc::new(registry_only);
-
-    let compile_universe_count = compile_universe.len();
-    set_length(compile_universe_count as u64);
+    compile_universe.extend(round_registry_only.iter().cloned());
+    // A cut-off build compiles in rounds: the dependents of a module whose
+    // interface digest changed are compiled in the next round
+    // (see `incremental::next_round`).
+    let cutoff = incremental_plan.as_ref().is_some_and(|plan| plan.cutoff);
 
     let in_process_mode = build_state.build_mode().is_in_process();
-    let stored_asts_snapshot = in_process_mode.then(|| build_state.snapshot_stored_asts());
-    let compile_universe = Arc::new(compile_universe);
-    let module_costs = compute_module_costs(build_state, &compile_universe, stored_asts_snapshot.as_ref());
-    let priorities =
-        compute_critical_path_priorities(&compile_universe, &build_state.build_state, &module_costs);
-
-    // Count of not-yet-completed in-universe dependencies for each module.
-    // Only touched on the main thread.
-    let mut pending_deps: AHashMap<String, usize> = compile_universe
-        .iter()
-        .map(|name| {
-            let module = build_state.get_module(name).unwrap();
-            let count = module
-                .deps
-                .iter()
-                .filter(|d| compile_universe.contains(*d))
-                .count();
-            (name.clone(), count)
-        })
-        .collect();
-
-    let mut ready_heap: BinaryHeap<WorkUnit> = compile_universe
-        .iter()
-        .filter(|name| pending_deps[*name] == 0)
-        .map(|name| WorkUnit {
-            priority: *priorities.get(name).unwrap_or(&0),
-            module_name: name.clone(),
-        })
-        .collect();
-
-    // Dirtiness propagation tracked locally: when a module's cmi changes, its
-    // dependents are forced dirty. This mirrors the old `compile_dirty` flag
-    // mutation but keeps build_state borrow-free while workers are running.
-    let mut dirty_set: AHashSet<String> = dirty_modules;
-    dirty_set.extend(registry_only.iter().cloned());
-
     let warn_error_override = build_state.get_warn_error_override();
     let dump_typed_sexp = build_state.dump_typed_sexp();
-    let build_state_ref: &BuildState = &build_state.build_state;
-    let build_command_state_ref: &BuildCommandState = build_state;
-
-    let (tx, rx) = mpsc::channel::<WorkerMsg>();
     let js_writer = JsWriter::spawn();
     // Bound the jobs handed to rayon so the priority heap still orders work —
     // dumping everything into rayon's queue would defeat #2. Allow one queued
@@ -948,112 +913,99 @@ pub fn compile(
     // starts its next job at once instead of idling until this dispatcher
     // has received its message and spawned a replacement.
     let capacity = 2 * rayon::current_num_threads().max(1);
-    // Worker snapshots share the registry's Arc-backed maps. Publishing a
-    // dependency updates those shared maps, so a single template snapshot is
-    // enough; each worker still clones it before adding local provisional
-    // module/interface entries.
-    let worker_registry_template = if in_process_mode {
-        build_state.snapshot_module_registry()
-    } else {
-        ModuleRegistry::new()
-    };
-
-    crate::build::phase_mark("schedule-start");
-    let mut completed: AHashSet<String> = AHashSet::new();
-    let mut signature_ready: AHashSet<String> = AHashSet::new();
-    let mut results_buffer: Vec<CompletionMsg> = Vec::with_capacity(compile_universe_count);
-    let mut ready_js: Vec<PreJsMsg> = Vec::new();
-    let mut pending_js_payloads: AHashMap<String, PreJsMsg> = AHashMap::new();
-    let mut pending_js_deps: AHashMap<String, usize> = AHashMap::new();
-    let mut waiting_js_by_dep: AHashMap<String, Vec<String>> = AHashMap::new();
-    let mut js_metadata_ready: AHashSet<String> = AHashSet::new();
-    let mut has_errors = false;
-    let mut stalled = false;
     let mut scheduler_counters = (in_process_mode
         && std::env::var_os("RESCRIPT_SCHEDULER_COUNTERS").is_some())
     .then(InProcessSchedulerCounters::default);
     // Critical-path placement: the highest-priority ready typecheck units get
     // performance-core QoS, at most one per performance core at a time.
     let critical_slots = if in_process_mode { qos::critical_slots() } else { 0 };
-    let mut critical_in_flight: usize = 0;
-    let mut critical_modules: AHashSet<String> = AHashSet::new();
 
-    rayon::in_place_scope(|scope| {
-        let mut in_flight: usize = 0;
-        loop {
-            if let Some(counters) = scheduler_counters.as_mut() {
-                counters.observe_queues(
-                    ready_heap.len(),
-                    ready_js.len(),
-                    pending_js_payloads.len(),
-                    in_flight,
-                );
-            }
-            // Keep dispatching work that was already independent of any
-            // failed module. Otherwise diagnostics vary with worker count:
-            // a warning-producing module may or may not have started before
-            // an unrelated error finishes.
-            while in_flight < capacity {
-                if let Some(pre_js_msg) = pop_ready_js(&mut ready_js, &waiting_js_by_dep) {
-                    if let Some(counters) = scheduler_counters.as_mut() {
-                        counters.scheduled_js += 1;
-                        if !ready_heap.is_empty() {
-                            counters.js_scheduled_while_typecheck_ready += 1;
-                        }
-                    }
-                    let module_name = pre_js_msg.module_name.clone();
-                    let tx = tx.clone();
-                    let write_tx = js_writer.sender();
-                    let inc_ref = &inc;
-                    let parent_span = compile_parent_span.clone();
-                    let registry_snapshot = worker_registry_template.clone();
-                    in_flight += 1;
-                    if let Some(counters) = scheduler_counters.as_mut() {
-                        counters.observe_queues(
-                            ready_heap.len(),
-                            ready_js.len(),
-                            pending_js_payloads.len(),
-                            in_flight,
-                        );
-                    }
-                    scope.spawn(move |_| {
-                        let msg = finish_in_process_js(
-                            build_state_ref,
-                            build_command_state_ref,
-                            pre_js_msg,
-                            parent_span,
-                            registry_snapshot,
-                            &tx,
-                            &write_tx,
-                        );
-                        if show_progress {
-                            inc_ref();
-                        }
-                        let _ = tx.send(WorkerMsg::Completed(msg));
-                    });
-                    trace!("scheduled in-process JS finish for {}", module_name);
-                    continue;
-                }
-                let Some(work) = ready_heap.pop() else { break };
-                if let Some(counters) = scheduler_counters.as_mut() {
-                    counters.scheduled_typecheck += 1;
-                }
-                let module_name = work.module_name.clone();
-                let is_dirty = dirty_set.contains(&module_name);
-                let warn_override = warn_error_override.clone();
-                let tx = tx.clone();
-                let inc_ref = &inc;
-                in_flight += 1;
-                let placement = if critical_in_flight < critical_slots {
-                    critical_in_flight += 1;
-                    critical_modules.insert(module_name.clone());
-                    if let Some(counters) = scheduler_counters.as_mut() {
-                        counters.critical_scheduled += 1;
-                    }
-                    qos::UnitClass::Critical
-                } else {
-                    qos::UnitClass::Default
-                };
+    let mut results_buffer: Vec<CompletionMsg> = Vec::with_capacity(compile_universe.len());
+    let mut has_errors = false;
+    let mut stalled = false;
+    let mut completed_count = 0usize;
+    let mut total_universe_count = 0usize;
+    let mut all_registry_only: AHashSet<String> = AHashSet::new();
+    let mut all_dirty: AHashSet<String> = AHashSet::new();
+    let mut compiled_this_build: AHashSet<String> = AHashSet::new();
+    let mut round_dirty = dirty_modules;
+    let mut round_universe = compile_universe;
+    let mut round = 0usize;
+    let compile_universe = loop {
+        round += 1;
+        let registry_only = Arc::new(std::mem::take(&mut round_registry_only));
+        let compile_universe_count = round_universe.len();
+        total_universe_count += compile_universe_count;
+        set_length(total_universe_count as u64);
+
+        let stored_asts_snapshot = in_process_mode.then(|| build_state.snapshot_stored_asts());
+        let compile_universe = Arc::new(std::mem::take(&mut round_universe));
+        let module_costs =
+            compute_module_costs(build_state, &compile_universe, stored_asts_snapshot.as_ref());
+        let priorities =
+            compute_critical_path_priorities(&compile_universe, &build_state.build_state, &module_costs);
+
+        // Count of not-yet-completed in-universe dependencies for each module.
+        // Only touched on the main thread.
+        let mut pending_deps: AHashMap<String, usize> = compile_universe
+            .iter()
+            .map(|name| {
+                let module = build_state.get_module(name).unwrap();
+                let count = module
+                    .deps
+                    .iter()
+                    .filter(|d| compile_universe.contains(*d))
+                    .count();
+                (name.clone(), count)
+            })
+            .collect();
+
+        let mut ready_heap: BinaryHeap<WorkUnit> = compile_universe
+            .iter()
+            .filter(|name| pending_deps[*name] == 0)
+            .map(|name| WorkUnit {
+                priority: *priorities.get(name).unwrap_or(&0),
+                module_name: name.clone(),
+            })
+            .collect();
+
+        // Dirtiness propagation tracked locally: when a module's cmi changes, its
+        // dependents are forced dirty. This mirrors the old `compile_dirty` flag
+        // mutation but keeps build_state borrow-free while workers are running.
+        let mut dirty_set: AHashSet<String> = std::mem::take(&mut round_dirty);
+        dirty_set.extend(registry_only.iter().cloned());
+
+        let build_state_ref: &BuildState = &build_state.build_state;
+        let build_command_state_ref: &BuildCommandState = build_state;
+
+        let (tx, rx) = mpsc::channel::<WorkerMsg>();
+        // Worker snapshots share the registry's Arc-backed maps. Publishing a
+        // dependency updates those shared maps, so a single template snapshot is
+        // enough; each worker still clones it before adding local provisional
+        // module/interface entries.
+        let worker_registry_template = if in_process_mode {
+            build_state.snapshot_module_registry()
+        } else {
+            ModuleRegistry::new()
+        };
+
+        if round == 1 {
+            crate::build::phase_mark("schedule-start");
+        }
+        let round_results_start = results_buffer.len();
+        let mut completed: AHashSet<String> = AHashSet::new();
+        let mut signature_ready: AHashSet<String> = AHashSet::new();
+        let mut ready_js: Vec<PreJsMsg> = Vec::new();
+        let mut pending_js_payloads: AHashMap<String, PreJsMsg> = AHashMap::new();
+        let mut pending_js_deps: AHashMap<String, usize> = AHashMap::new();
+        let mut waiting_js_by_dep: AHashMap<String, Vec<String>> = AHashMap::new();
+        let mut js_metadata_ready: AHashSet<String> = AHashSet::new();
+        let mut critical_in_flight: usize = 0;
+        let mut critical_modules: AHashSet<String> = AHashSet::new();
+
+        rayon::in_place_scope(|scope| {
+            let mut in_flight: usize = 0;
+            loop {
                 if let Some(counters) = scheduler_counters.as_mut() {
                     counters.observe_queues(
                         ready_heap.len(),
@@ -1062,180 +1014,279 @@ pub fn compile(
                         in_flight,
                     );
                 }
-                let registry_snapshot = worker_registry_template.clone();
-                let stored_asts = stored_asts_snapshot.as_ref();
-                let parent_span = compile_parent_span.clone();
-                let in_process_hooks = in_process_mode.then(|| InProcessSchedulerHooks {
-                    tx: tx.clone(),
-                    compile_universe: compile_universe.clone(),
-                    registry_only: registry_only.clone(),
-                });
-                scope.spawn(move |_| {
-                    let msg = compile_one(
-                        build_state_ref,
-                        build_command_state_ref,
-                        &registry_snapshot,
-                        stored_asts,
-                        &module_name,
-                        is_dirty,
-                        warn_override,
-                        dump_typed_sexp,
-                        parent_span,
-                        in_process_hooks,
-                        placement,
-                    );
-                    if show_progress && matches!(msg, WorkerMsg::Completed(_)) {
-                        inc_ref();
-                    }
-                    // Receiver lives for the full scope, so send cannot fail
-                    // unless the dispatcher has already hung up on purpose.
-                    let _ = tx.send(msg);
-                });
-            }
-
-            if in_flight == 0 {
-                if completed.len() < compile_universe_count && !has_errors {
-                    stalled = true;
-                }
-                break;
-            }
-
-            let idle_slots = if ready_heap.is_empty() && ready_js.is_empty() && in_flight < capacity {
-                capacity - in_flight
-            } else {
-                0
-            };
-            let wait_start = scheduler_counters.as_ref().map(|_| Instant::now());
-            let Ok(first_msg) = rx.recv() else { break };
-            if let (Some(counters), Some(wait_start)) = (scheduler_counters.as_mut(), wait_start) {
-                counters.observe_wait(wait_start.elapsed(), idle_slots);
-            }
-            let mut worker_messages = vec![first_msg];
-            while let Ok(msg) = rx.try_recv() {
-                worker_messages.push(msg);
-            }
-
-            for worker_msg in worker_messages {
-                match worker_msg {
-                    WorkerMsg::SignatureReady(msg) => {
+                // Keep dispatching work that was already independent of any
+                // failed module. Otherwise diagnostics vary with worker count:
+                // a warning-producing module may or may not have started before
+                // an unrelated error finishes.
+                while in_flight < capacity {
+                    if let Some(pre_js_msg) = pop_ready_js(&mut ready_js, &waiting_js_by_dep) {
                         if let Some(counters) = scheduler_counters.as_mut() {
-                            counters.signature_ready += 1;
+                            counters.scheduled_js += 1;
+                            if !ready_heap.is_empty() {
+                                counters.js_scheduled_while_typecheck_ready += 1;
+                            }
                         }
-                        let module_name = msg.module_name.clone();
-                        let is_clean = apply_signature_ready(build_command_state_ref, msg);
-                        unblock_dependents(
-                            build_state_ref,
-                            &compile_universe,
-                            &priorities,
-                            &mut pending_deps,
-                            &mut dirty_set,
-                            &mut signature_ready,
-                            &mut ready_heap,
-                            &module_name,
-                            is_clean,
+                        let module_name = pre_js_msg.module_name.clone();
+                        let tx = tx.clone();
+                        let write_tx = js_writer.sender();
+                        let inc_ref = &inc;
+                        let parent_span = compile_parent_span.clone();
+                        let registry_snapshot = worker_registry_template.clone();
+                        in_flight += 1;
+                        if let Some(counters) = scheduler_counters.as_mut() {
+                            counters.observe_queues(
+                                ready_heap.len(),
+                                ready_js.len(),
+                                pending_js_payloads.len(),
+                                in_flight,
+                            );
+                        }
+                        scope.spawn(move |_| {
+                            let msg = finish_in_process_js(
+                                build_state_ref,
+                                build_command_state_ref,
+                                pre_js_msg,
+                                parent_span,
+                                registry_snapshot,
+                                &tx,
+                                &write_tx,
+                            );
+                            if show_progress {
+                                inc_ref();
+                            }
+                            let _ = tx.send(WorkerMsg::Completed(msg));
+                        });
+                        trace!("scheduled in-process JS finish for {}", module_name);
+                        continue;
+                    }
+                    let Some(work) = ready_heap.pop() else { break };
+                    if let Some(counters) = scheduler_counters.as_mut() {
+                        counters.scheduled_typecheck += 1;
+                    }
+                    let module_name = work.module_name.clone();
+                    let is_dirty = dirty_set.contains(&module_name);
+                    let warn_override = warn_error_override.clone();
+                    let tx = tx.clone();
+                    let inc_ref = &inc;
+                    in_flight += 1;
+                    let placement = if critical_in_flight < critical_slots {
+                        critical_in_flight += 1;
+                        critical_modules.insert(module_name.clone());
+                        if let Some(counters) = scheduler_counters.as_mut() {
+                            counters.critical_scheduled += 1;
+                        }
+                        qos::UnitClass::Critical
+                    } else {
+                        qos::UnitClass::Default
+                    };
+                    if let Some(counters) = scheduler_counters.as_mut() {
+                        counters.observe_queues(
+                            ready_heap.len(),
+                            ready_js.len(),
+                            pending_js_payloads.len(),
+                            in_flight,
                         );
                     }
-                    WorkerMsg::PreJsReady(msg) => {
-                        if let Some(counters) = scheduler_counters.as_mut() {
-                            counters.pre_js_ready += 1;
+                    let registry_snapshot = worker_registry_template.clone();
+                    let stored_asts = stored_asts_snapshot.as_ref();
+                    let parent_span = compile_parent_span.clone();
+                    let in_process_hooks = in_process_mode.then(|| InProcessSchedulerHooks {
+                        tx: tx.clone(),
+                        compile_universe: compile_universe.clone(),
+                        registry_only: registry_only.clone(),
+                    });
+                    scope.spawn(move |_| {
+                        let msg = compile_one(
+                            build_state_ref,
+                            build_command_state_ref,
+                            &registry_snapshot,
+                            stored_asts,
+                            &module_name,
+                            is_dirty,
+                            warn_override,
+                            dump_typed_sexp,
+                            parent_span,
+                            in_process_hooks,
+                            placement,
+                        );
+                        if show_progress && matches!(msg, WorkerMsg::Completed(_)) {
+                            inc_ref();
                         }
-                        in_flight -= 1;
-                        let module_name = msg.module_name.clone();
-                        if critical_modules.remove(&module_name) {
-                            critical_in_flight -= 1;
-                        }
-                        let pending_deps_for_js = msg
-                            .needed_modules
-                            .iter()
-                            .filter(|dep| !completed.contains(*dep) && !js_metadata_ready.contains(*dep))
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        if pending_deps_for_js.is_empty() {
-                            ready_js.push(msg);
-                        } else {
+                        // Receiver lives for the full scope, so send cannot fail
+                        // unless the dispatcher has already hung up on purpose.
+                        let _ = tx.send(msg);
+                    });
+                }
+
+                if in_flight == 0 {
+                    if completed.len() < compile_universe_count && !has_errors {
+                        stalled = true;
+                    }
+                    break;
+                }
+
+                let idle_slots = if ready_heap.is_empty() && ready_js.is_empty() && in_flight < capacity {
+                    capacity - in_flight
+                } else {
+                    0
+                };
+                let wait_start = scheduler_counters.as_ref().map(|_| Instant::now());
+                let Ok(first_msg) = rx.recv() else { break };
+                if let (Some(counters), Some(wait_start)) = (scheduler_counters.as_mut(), wait_start) {
+                    counters.observe_wait(wait_start.elapsed(), idle_slots);
+                }
+                let mut worker_messages = vec![first_msg];
+                while let Ok(msg) = rx.try_recv() {
+                    worker_messages.push(msg);
+                }
+
+                for worker_msg in worker_messages {
+                    match worker_msg {
+                        WorkerMsg::SignatureReady(msg) => {
                             if let Some(counters) = scheduler_counters.as_mut() {
-                                counters.observe_pending_js_deps(pending_deps_for_js.iter());
+                                counters.signature_ready += 1;
                             }
-                            pending_js_deps.insert(module_name.clone(), pending_deps_for_js.len());
-                            for dep in pending_deps_for_js {
-                                waiting_js_by_dep
-                                    .entry(dep)
-                                    .or_default()
-                                    .push(module_name.clone());
-                            }
-                            pending_js_payloads.insert(module_name, msg);
-                        }
-                    }
-                    WorkerMsg::JsMetadataReady(mut msg) => {
-                        if in_process_mode {
-                            apply_pending_registry_updates(
-                                build_command_state_ref,
-                                std::mem::take(&mut msg.registry_updates),
+                            let module_name = msg.module_name.clone();
+                            let is_clean = apply_signature_ready(build_command_state_ref, msg);
+                            unblock_dependents(
+                                build_state_ref,
+                                &compile_universe,
+                                &priorities,
+                                &mut pending_deps,
+                                &mut dirty_set,
+                                &mut signature_ready,
+                                &mut ready_heap,
+                                &module_name,
+                                is_clean,
                             );
                         }
-                        let ready_name = msg.module_name;
-                        js_metadata_ready.insert(ready_name.clone());
+                        WorkerMsg::PreJsReady(msg) => {
+                            if let Some(counters) = scheduler_counters.as_mut() {
+                                counters.pre_js_ready += 1;
+                            }
+                            in_flight -= 1;
+                            let module_name = msg.module_name.clone();
+                            if critical_modules.remove(&module_name) {
+                                critical_in_flight -= 1;
+                            }
+                            let pending_deps_for_js = msg
+                                .needed_modules
+                                .iter()
+                                .filter(|dep| !completed.contains(*dep) && !js_metadata_ready.contains(*dep))
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            if pending_deps_for_js.is_empty() {
+                                ready_js.push(msg);
+                            } else {
+                                if let Some(counters) = scheduler_counters.as_mut() {
+                                    counters.observe_pending_js_deps(pending_deps_for_js.iter());
+                                }
+                                pending_js_deps.insert(module_name.clone(), pending_deps_for_js.len());
+                                for dep in pending_deps_for_js {
+                                    waiting_js_by_dep
+                                        .entry(dep)
+                                        .or_default()
+                                        .push(module_name.clone());
+                                }
+                                pending_js_payloads.insert(module_name, msg);
+                            }
+                        }
+                        WorkerMsg::JsMetadataReady(mut msg) => {
+                            if in_process_mode {
+                                apply_pending_registry_updates(
+                                    build_command_state_ref,
+                                    std::mem::take(&mut msg.registry_updates),
+                                );
+                            }
+                            let ready_name = msg.module_name;
+                            js_metadata_ready.insert(ready_name.clone());
 
-                        if let Some(waiters) = waiting_js_by_dep.remove(&ready_name) {
-                            for waiter in waiters {
-                                let Some(count) = pending_js_deps.get_mut(&waiter) else {
-                                    continue;
-                                };
-                                *count -= 1;
-                                if *count == 0 {
-                                    pending_js_deps.remove(&waiter);
-                                    if let Some(payload) = pending_js_payloads.remove(&waiter) {
-                                        ready_js.push(payload);
+                            if let Some(waiters) = waiting_js_by_dep.remove(&ready_name) {
+                                for waiter in waiters {
+                                    let Some(count) = pending_js_deps.get_mut(&waiter) else {
+                                        continue;
+                                    };
+                                    *count -= 1;
+                                    if *count == 0 {
+                                        pending_js_deps.remove(&waiter);
+                                        if let Some(payload) = pending_js_payloads.remove(&waiter) {
+                                            ready_js.push(payload);
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    WorkerMsg::Completed(mut msg) => {
-                        if let Some(counters) = scheduler_counters.as_mut() {
-                            counters.completed += 1;
-                        }
-                        in_flight -= 1;
-                        if critical_modules.remove(&msg.module_name) {
-                            critical_in_flight -= 1;
-                        }
-                        if in_process_mode {
-                            apply_pending_registry_updates(
-                                build_command_state_ref,
-                                std::mem::take(&mut msg.registry_updates),
-                            );
-                        }
+                        WorkerMsg::Completed(mut msg) => {
+                            if let Some(counters) = scheduler_counters.as_mut() {
+                                counters.completed += 1;
+                            }
+                            in_flight -= 1;
+                            if critical_modules.remove(&msg.module_name) {
+                                critical_in_flight -= 1;
+                            }
+                            if in_process_mode {
+                                apply_pending_registry_updates(
+                                    build_command_state_ref,
+                                    std::mem::take(&mut msg.registry_updates),
+                                );
+                            }
 
-                        let module_failed =
-                            msg.result.is_err() || msg.interface_result.as_ref().is_some_and(|r| r.is_err());
-                        if module_failed {
-                            has_errors = true;
-                        }
+                            let module_failed = msg.result.is_err()
+                                || msg.interface_result.as_ref().is_some_and(|r| r.is_err());
+                            if module_failed {
+                                has_errors = true;
+                            }
 
-                        let is_clean = msg.is_clean;
-                        let finished_name = msg.module_name.clone();
-                        completed.insert(finished_name.clone());
-                        js_metadata_ready.insert(finished_name.clone());
+                            let is_clean = msg.is_clean;
+                            let finished_name = msg.module_name.clone();
+                            completed.insert(finished_name.clone());
+                            js_metadata_ready.insert(finished_name.clone());
 
-                        if let Some(waiters) = waiting_js_by_dep.remove(&finished_name) {
-                            for waiter in waiters {
-                                let Some(count) = pending_js_deps.get_mut(&waiter) else {
-                                    continue;
-                                };
-                                *count -= 1;
-                                if *count == 0 {
-                                    pending_js_deps.remove(&waiter);
-                                    if let Some(payload) = pending_js_payloads.remove(&waiter) {
-                                        ready_js.push(payload);
+                            if let Some(waiters) = waiting_js_by_dep.remove(&finished_name) {
+                                for waiter in waiters {
+                                    let Some(count) = pending_js_deps.get_mut(&waiter) else {
+                                        continue;
+                                    };
+                                    *count -= 1;
+                                    if *count == 0 {
+                                        pending_js_deps.remove(&waiter);
+                                        if let Some(payload) = pending_js_payloads.remove(&waiter) {
+                                            ready_js.push(payload);
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        if in_process_mode {
-                            let completed_without_signature =
-                                !signature_ready.contains(&finished_name) && !module_failed;
-                            if completed_without_signature {
+                            if in_process_mode {
+                                let completed_without_signature =
+                                    !signature_ready.contains(&finished_name) && !module_failed;
+                                if completed_without_signature {
+                                    unblock_dependents(
+                                        build_state_ref,
+                                        &compile_universe,
+                                        &priorities,
+                                        &mut pending_deps,
+                                        &mut dirty_set,
+                                        &mut signature_ready,
+                                        &mut ready_heap,
+                                        &finished_name,
+                                        is_clean,
+                                    );
+                                }
+                            } else if module_failed {
+                                // A successful interface can replace the CMI even
+                                // when its implementation fails. Keep dependents
+                                // dirty for recovery, but do not release them
+                                // until the module succeeds.
+                                if !is_clean {
+                                    mark_dependents_dirty(
+                                        build_state_ref,
+                                        &compile_universe,
+                                        &mut dirty_set,
+                                        &finished_name,
+                                    );
+                                }
+                            } else {
                                 unblock_dependents(
                                     build_state_ref,
                                     &compile_universe,
@@ -1248,59 +1299,70 @@ pub fn compile(
                                     is_clean,
                                 );
                             }
-                        } else if module_failed {
-                            // A successful interface can replace the CMI even
-                            // when its implementation fails. Keep dependents
-                            // dirty for recovery, but do not release them
-                            // until the module succeeds.
-                            if !is_clean {
-                                mark_dependents_dirty(
-                                    build_state_ref,
-                                    &compile_universe,
-                                    &mut dirty_set,
-                                    &finished_name,
-                                );
-                            }
-                        } else {
-                            unblock_dependents(
-                                build_state_ref,
-                                &compile_universe,
-                                &priorities,
-                                &mut pending_deps,
-                                &mut dirty_set,
-                                &mut signature_ready,
-                                &mut ready_heap,
-                                &finished_name,
-                                is_clean,
-                            );
-                        }
 
-                        results_buffer.push(msg);
+                            results_buffer.push(msg);
+                        }
                     }
                 }
+                if let Some(counters) = scheduler_counters.as_mut() {
+                    counters.observe_queues(
+                        ready_heap.len(),
+                        ready_js.len(),
+                        pending_js_payloads.len(),
+                        in_flight,
+                    );
+                }
             }
-            if let Some(counters) = scheduler_counters.as_mut() {
-                counters.observe_queues(
-                    ready_heap.len(),
-                    ready_js.len(),
-                    pending_js_payloads.len(),
-                    in_flight,
-                );
+        });
+        // Close our sender handle so any lingering clones in already-spawned
+        // workers don't keep the channel open past the scope.
+        drop(tx);
+        completed_count += completed.len();
+        for msg in &results_buffer[round_results_start..] {
+            let ok = msg.result.is_ok() && !matches!(msg.interface_result, Some(Err(_)));
+            if msg.is_compiled && ok {
+                compiled_this_build.insert(msg.module_name.clone());
             }
         }
-    });
+        all_registry_only.extend(registry_only.iter().cloned());
+        all_dirty.extend(dirty_set);
+        if !cutoff || has_errors || stalled {
+            break compile_universe;
+        }
+        let written: AHashSet<String> = compiled_this_build
+            .iter()
+            .filter(|module_name| !all_registry_only.contains(*module_name))
+            .cloned()
+            .collect();
+        let next = super::incremental::next_round(build_state, &written);
+        if next.is_empty() {
+            break compile_universe;
+        }
+        round_registry_only = super::incremental::round_support(build_state, &next, &compiled_this_build);
+        log::debug!(
+            "incremental build: round {}: compiling {} modules whose imports changed, {} more for their dependencies only",
+            round + 1,
+            next.len(),
+            round_registry_only.len()
+        );
+        let mut needed = next.clone();
+        needed.extend(round_registry_only.iter().cloned());
+        super::incremental::parse_for_round(build_state, &needed)?;
+        all_registry_only.retain(|module_name| !next.contains(module_name));
+        results_buffer.retain(|msg| !needed.contains(&msg.module_name));
+        round_universe = needed;
+        round_dirty = next;
+    };
+    let registry_only = all_registry_only;
+    let dirty_set = all_dirty;
     if let Some(counters) = scheduler_counters.as_ref() {
         counters.print_report(capacity);
     }
-    // Close our sender handle so any lingering clones in already-spawned
-    // workers don't keep the channel open past the scope.
-    drop(tx);
     let js_write_failures = js_writer.finish();
 
     trace!(
         "Compiled {} out of {} in the universe",
-        completed.len(),
-        compile_universe_count,
+        completed_count, total_universe_count,
     );
 
     let mut compile_errors = String::new();
@@ -1462,11 +1524,11 @@ pub fn compile(
                 module.compile_dirty = false;
                 module.last_compiled_cmi = Some(compile_timestamp);
                 module.last_compiled_cmt = Some(compile_timestamp);
-                if is_compiled
-                    && !registry_only.contains(&module_name)
-                    && let Some(started) = build_state.build_started_at
-                {
-                    build_state.js_confirmed_at.insert(module_name.clone(), started);
+                if is_compiled && !registry_only.contains(&module_name) {
+                    build_state.written_modules.insert(module_name.clone());
+                    if let Some(started) = build_state.build_started_at {
+                        build_state.js_confirmed_at.insert(module_name.clone(), started);
+                    }
                 }
             }
 
@@ -1530,6 +1592,7 @@ pub fn compile(
     // time, exactly as when the write still happened on the worker.
     for (module_name, err) in js_write_failures {
         build_state.js_confirmed_at.remove(&module_name);
+        build_state.written_modules.remove(&module_name);
         if let Some(module) = build_state.build_state.modules.get_mut(&module_name) {
             module.compile_dirty = true;
         }
@@ -2547,7 +2610,7 @@ pub(crate) fn namespace_aliases(package: &packages::Package) -> Option<(String, 
         packages::Namespace::NamespaceWithEntry { namespace: _, entry } => Some(entry.as_str()),
         _ => None,
     };
-    let module_aliases: Vec<(String, String)> = package
+    let mut module_aliases: Vec<(String, String)> = package
         .source_files
         .as_ref()?
         .keys()
@@ -2560,6 +2623,10 @@ pub(crate) fn namespace_aliases(package: &packages::Package) -> Option<(String, 
             (short_name, internal_name)
         })
         .collect();
+    // Source files are a hash map; keep the namespace signature, and so its
+    // interface digest, the same from one process to the next.
+    module_aliases.sort();
+    module_aliases.dedup();
     (!module_aliases.is_empty()).then_some((namespace_suffix, module_aliases))
 }
 
@@ -3425,6 +3492,11 @@ fn compile_module_in_process_to_js_boundary(
     build_command_state: &BuildCommandState,
     scheduler_hooks: Option<&InProcessSchedulerHooks>,
 ) -> Result<PreJsMsg> {
+    build_command_state
+        .loaded_units
+        .lock()
+        .unwrap()
+        .remove(module_name);
     let _span = info_span!(
         "compiler.in_process_module",
         module = %module_name,
@@ -3529,6 +3601,7 @@ fn compile_module_in_process_to_js_boundary(
             }
         };
         interface_warnings = intf_result.warnings;
+        build_command_state.record_loaded_units(module_name, intf_result.loaded_units);
 
         // Register the .resi's PersStruct in the local registry so the
         // .res compilation can find it for moregen constraints.
@@ -3672,6 +3745,16 @@ fn compile_module_in_process_to_js_boundary(
 
     let pre_js = match pre_js {
         Ok(Ok(mut result)) => {
+            // What the backend reads besides the type checker: the modules
+            // the generated code may require.
+            let mut loaded_units = std::mem::take(&mut result.loaded_units);
+            loaded_units.extend(
+                result
+                    .possible_required_modules
+                    .iter()
+                    .map(|module_id| module_id.id.name().to_string()),
+            );
+            build_command_state.record_loaded_units(module_name, loaded_units);
             result.warnings.insert_str(0, &interface_warnings);
             result
         }

@@ -15054,6 +15054,8 @@ pub struct InProcessPreJsCompileResult {
     pub lambda_sexp: String,
     /// The warning reports the file compile prints to stderr.
     pub warnings: String,
+    /// The units whose interface type checking read.
+    pub loaded_units: Vec<String>,
 }
 
 pub struct InProcessJsMetadataReady {
@@ -15094,6 +15096,8 @@ pub struct InProcessInterfaceResult {
     pub gentype_ignore_interface: bool,
     /// The warning reports the file compile prints to stderr.
     pub warnings: String,
+    /// The units whose interface type checking read.
+    pub loaded_units: Vec<String>,
 }
 
 fn process_gentype_typed_artifact_if_enabled<'a>(
@@ -16115,6 +16119,11 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         raw_lambda_sexp,
         lambda_sexp,
         warnings,
+        loaded_units: tctx
+            .persistent_env
+            .as_ref()
+            .map(PersistentEnv::loaded_units)
+            .unwrap_or_default(),
     })
 }
 
@@ -16604,6 +16613,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         new_alias_rewrites,
         gentype_ignore_interface,
         warnings,
+        loaded_units: internal_env.loaded_units(),
     })
 }
 
@@ -16713,6 +16723,7 @@ pub fn typecheck_implementation_in_process(
         new_alias_rewrites,
         gentype_ignore_interface: false,
         warnings: String::new(),
+        loaded_units: internal_env.loaded_units(),
     })
 }
 

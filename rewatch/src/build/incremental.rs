@@ -1,24 +1,30 @@
-//! Timestamp-based incremental builds for the in-process compiler.
+//! Incremental builds for the in-process compiler.
 //!
 //! In-process builds keep no compiler artifacts on disk, so a new process
 //! knows nothing about the previous build except its outputs: the JavaScript
-//! files and each package's build record in [`super::state_db`]. A module is
-//! up to date when its JavaScript is newer than every source it was compiled
-//! from: its own implementation and interface, those of every module it
-//! depends on (transitively), and the configuration files that shape its
-//! compilation.
+//! files and each package's build record in [`super::state_db`]. Besides
+//! timestamps, the record keeps for every module the digest of what other
+//! modules can read of it (its signature and JS metadata, see
+//! `ModuleRegistry::interface_digest`) and the digests of the modules its own
+//! compile read (the units the compiler actually loaded, not the syntactic
+//! dependencies).
 //!
-//! Modules are planned into three groups:
+//! A module is stale when its own sources or configuration changed since its
+//! JavaScript was written, when a module it references is new, or when a
+//! module it read now records a different digest. A build then compiles in
+//! rounds:
 //!
-//! - stale modules, and everything that depends on them, compile and write
-//!   their JavaScript (the existing compile universe);
-//! - support modules, the unchanged dependencies of those, compile without
-//!   rendering or writing JavaScript: the registry needs their signatures and
-//!   backend metadata, which nothing on disk records;
-//! - every other module is not compiled at all.
+//! - the modules to write compile and write their JavaScript;
+//! - support modules, their unchanged dependencies, compile without rendering
+//!   or writing JavaScript: the registry needs their signatures and backend
+//!   metadata, which nothing on disk records;
+//! - once a round is done, the modules that read a module whose digest
+//!   changed are written in the next round (see [`next_round`]). An edit that
+//!   keeps a module's interface recompiles only that module.
 //!
-//! Without a saved signature to compare against, a changed module is assumed
-//! to change its interface, so all of its dependents are recompiled.
+//! Every other module is not compiled, nor parsed. Watch mode keeps the
+//! earlier behavior: it compiles every module into memory anyway, and
+//! recompiles every transitive dependent of a stale module.
 //!
 //! The warnings of the previous build are recorded with it and reported again
 //! for the modules that are not recompiled, as the build does for any module
@@ -83,6 +89,10 @@ pub struct IncrementalPlan {
     /// Watch mode keeps every module in memory for later rebuilds and editor
     /// tooling, so every up-to-date module is a support module.
     pub support_everything: bool,
+    /// Compile the dependents of a recompiled module only when its interface
+    /// digest changed, in rounds (see [`next_round`]), instead of compiling
+    /// every transitive dependent.
+    pub cutoff: bool,
 }
 
 /// The build record to save for `package` after this build.
@@ -111,6 +121,14 @@ pub fn current_record(build_state: &BuildCommandState, package_name: &str) -> Pa
         if let Some(interface) = &source_file.interface {
             record.sources.insert(interface.path.clone(), module_name.clone());
         }
+        // A module this build did not write keeps what its last written
+        // compile read and published.
+        let (interface_digest, imports) = match written_interface(build_state, module_name) {
+            Some((digest, imports)) => (Some(digest), Some(imports)),
+            None => recorded_row(build_state, module_name)
+                .filter(|_| !build_state.written_modules.contains(module_name))
+                .map_or((None, None), |row| (row.interface_digest, row.imports.clone())),
+        };
         record.modules.insert(
             module_name.clone(),
             ModuleRow {
@@ -120,6 +138,8 @@ pub fn current_record(build_state: &BuildCommandState, package_name: &str) -> Pa
                     .interface
                     .as_ref()
                     .and_then(|interface| interface.compile_warnings.clone()),
+                interface_digest,
+                imports,
             },
         );
     }
@@ -301,8 +321,16 @@ pub fn seed_recorded_deps(build_state: &mut BuildCommandState) {
 /// The modules a compile of `stale` touches: those it compiles and writes,
 /// and the support modules it compiles for the registry.
 fn modules_to_compile(build_state: &BuildCommandState, stale: &AHashSet<String>) -> AHashSet<String> {
+    let plan = build_state
+        .incremental_plan
+        .as_ref()
+        .expect("planned before choosing what to parse");
     let mut universe = stale.clone();
-    let mut frontier: Vec<String> = stale.iter().cloned().collect();
+    let mut frontier: Vec<String> = if plan.cutoff {
+        Vec::new()
+    } else {
+        stale.iter().cloned().collect()
+    };
     while let Some(module_name) = frontier.pop() {
         if let Some(module) = build_state.get_module(&module_name) {
             for dependent in &module.dependents {
@@ -312,10 +340,6 @@ fn modules_to_compile(build_state: &BuildCommandState, stale: &AHashSet<String>)
             }
         }
     }
-    let plan = build_state
-        .incremental_plan
-        .as_ref()
-        .expect("planned before choosing what to parse");
     let support = support_modules(build_state, &universe, plan);
     universe.extend(support);
     universe
@@ -363,6 +387,40 @@ pub fn parse_and_plan(build_state: &mut BuildCommandState, inc: impl Fn() + Sync
     }
     warnings.push_str(&restore_unparsed_parse_warnings(build_state));
     Ok(warnings)
+}
+
+/// Parse the modules a later round compiles that this build has not parsed.
+/// Their saved parse warnings were already reported, so the parse only
+/// records them.
+pub fn parse_for_round(
+    build_state: &mut BuildCommandState,
+    modules: &AHashSet<String>,
+) -> anyhow::Result<()> {
+    let unparsed: Vec<String> = {
+        let stored_asts = build_state.stored_asts.lock().unwrap();
+        modules
+            .iter()
+            .filter(|module_name| !stored_asts.contains_key(&format!("{module_name}:impl")))
+            .cloned()
+            .collect()
+    };
+    if unparsed.is_empty() {
+        return Ok(());
+    }
+    for module_name in &unparsed {
+        if let Some(module) = build_state.build_state.modules.get_mut(module_name)
+            && let SourceType::SourceFile(source_file) = &mut module.source_type
+        {
+            source_file.implementation.parse_dirty = true;
+            if let Some(interface) = source_file.interface.as_mut() {
+                interface.parse_dirty = true;
+            }
+        }
+    }
+    build_state.parse_warnings_replayed = true;
+    let result = super::parse::generate_asts(build_state, || ());
+    build_state.parse_warnings_replayed = false;
+    result.map(drop)
 }
 
 /// The saved parse warnings of source files this build did not parse:
@@ -620,18 +678,50 @@ pub fn plan(build_state: &mut BuildCommandState) {
         newest
     }
 
-    let mut memo = AHashMap::new();
-    let mut visiting = AHashSet::new();
+    let cutoff = build_state.build_state.source_map_command != SourceMapCommand::Watch;
     let mut stale = AHashSet::new();
-    let mut names: Vec<&String> = times.keys().collect();
-    names.sort();
-    for module_name in names {
-        let own = &times[module_name];
-        let newest = newest_closure(module_name, build_state, &times, &mut memo, &mut visiting);
-        let up_to_date =
-            own.recorded && matches!((newest, own.output), (Some(newest), Some(output)) if newest <= output);
-        if !up_to_date {
-            stale.insert(module_name.clone());
+    if cutoff {
+        // A module is stale when its own inputs changed, when a module it
+        // references is new (a name may now resolve to it), or when a module
+        // whose interface its compile read now has a different digest.
+        // Dependents of a recompiled module are decided once its new digest
+        // is known (see `next_round`).
+        let digests = recorded_digests(build_state);
+        for (module_name, own) in &times {
+            let own_stale = !own.recorded
+                || !matches!((own.newest_input, own.output), (Some(newest), Some(output)) if newest <= output);
+            let row = recorded_row(build_state, module_name);
+            let unknown_imports =
+                row.is_none_or(|row| row.interface_digest.is_none() || row.imports.is_none());
+            let references_new_module = build_state.get_module(module_name).is_some_and(|module| {
+                module
+                    .deps
+                    .iter()
+                    .any(|dep| times.get(dep).is_some_and(|times| !times.recorded))
+            });
+            let import_changed = row.and_then(|row| row.imports.as_ref()).is_some_and(|imports| {
+                imports.iter().any(|(import, digest)| {
+                    !build_state.modules.contains_key(import)
+                        || digests.get(import).is_some_and(|current| current != digest)
+                })
+            });
+            if own_stale || unknown_imports || references_new_module || import_changed {
+                stale.insert(module_name.clone());
+            }
+        }
+    } else {
+        let mut memo = AHashMap::new();
+        let mut visiting = AHashSet::new();
+        let mut names: Vec<&String> = times.keys().collect();
+        names.sort();
+        for module_name in names {
+            let own = &times[module_name];
+            let newest = newest_closure(module_name, build_state, &times, &mut memo, &mut visiting);
+            let up_to_date = own.recorded
+                && matches!((newest, own.output), (Some(newest), Some(output)) if newest <= output);
+            if !up_to_date {
+                stale.insert(module_name.clone());
+            }
         }
     }
 
@@ -646,8 +736,70 @@ pub fn plan(build_state: &mut BuildCommandState) {
     restore_warnings(build_state, &|module_name| !stale.contains(module_name));
     carry_js_confirmed_at(build_state, &times, &|module_name| !stale.contains(module_name));
     build_state.incremental_plan = Some(IncrementalPlan {
-        support_everything: build_state.build_state.source_map_command == SourceMapCommand::Watch,
+        support_everything: !cutoff,
+        cutoff,
     });
+}
+
+/// The recorded row of a module, from its package's database.
+fn recorded_row<'a>(build_state: &'a BuildCommandState, module_name: &str) -> Option<&'a ModuleRow> {
+    let module = build_state.get_module(module_name)?;
+    build_state
+        .previous_in_process
+        .as_ref()?
+        .packages
+        .get(&module.package_name)?
+        .state
+        .modules
+        .get(module_name)
+}
+
+/// Every module's recorded interface digest.
+fn recorded_digests(build_state: &BuildCommandState) -> AHashMap<String, u64> {
+    let Some(previous) = build_state.previous_in_process.as_ref() else {
+        return AHashMap::new();
+    };
+    previous
+        .packages
+        .values()
+        .flat_map(|record| record.state.modules.iter())
+        .filter_map(|(module_name, row)| Some((module_name.clone(), row.interface_digest?)))
+        .collect()
+}
+
+/// The modules to write in the next round of a cut-off build: those not yet
+/// written whose recorded imports include a module that now has a different
+/// interface digest. A module's current digest is the registry's when this
+/// build registered it, the recorded one otherwise.
+pub fn next_round(build_state: &BuildCommandState, written: &AHashSet<String>) -> AHashSet<String> {
+    let recorded = recorded_digests(build_state);
+    let registry = build_state.module_registry.lock().unwrap();
+    let mut current: AHashMap<&str, Option<u64>> = AHashMap::new();
+    let mut next = AHashSet::new();
+    for (module_name, module) in build_state.modules.iter() {
+        if written.contains(module_name) || module.is_mlmap() {
+            continue;
+        }
+        let Some(imports) = recorded_row(build_state, module_name).and_then(|row| row.imports.as_ref())
+        else {
+            continue;
+        };
+        let changed = imports.iter().any(|(import, digest)| {
+            let digest_now = *current.entry(import.as_str()).or_insert_with(|| {
+                registry
+                    .interface_digest(import)
+                    .or_else(|| recorded.get(import).copied())
+            });
+            if digest_now != Some(*digest) {
+                log::debug!("{module_name} recompiles: the interface of {import} changed");
+            }
+            digest_now != Some(*digest)
+        });
+        if changed {
+            next.insert(module_name.clone());
+        }
+    }
+    next
 }
 
 /// The support modules of a compile universe: the modules to compile without
@@ -679,6 +831,55 @@ pub fn support_modules(
         }
     }
     support
+}
+
+/// The support modules of a later round: the dependencies of `universe`
+/// that this build has not compiled yet.
+pub fn round_support(
+    build_state: &BuildCommandState,
+    universe: &AHashSet<String>,
+    compiled: &AHashSet<String>,
+) -> AHashSet<String> {
+    let mut support = AHashSet::new();
+    let mut frontier: Vec<&String> = universe.iter().collect();
+    while let Some(module_name) = frontier.pop() {
+        let Some(module) = build_state.get_module(module_name) else {
+            continue;
+        };
+        for dep in &module.deps {
+            // A namespace map is a no-op in the scheduler, but its members
+            // are what a reference through the namespace needs.
+            if build_state.get_module(dep).is_some()
+                && !universe.contains(dep)
+                && !compiled.contains(dep)
+                && support.insert(dep.clone())
+            {
+                frontier.push(dep);
+            }
+        }
+    }
+    support
+}
+
+/// What a module written by this build read and published, for its record.
+fn written_interface(
+    build_state: &BuildCommandState,
+    module_name: &str,
+) -> Option<(u64, Vec<(String, u64)>)> {
+    if !build_state.written_modules.contains(module_name) {
+        return None;
+    }
+    let loaded = build_state.loaded_units.lock().unwrap();
+    let registry = build_state.module_registry.lock().unwrap();
+    let digest = registry.interface_digest(module_name)?;
+    let mut imports = loaded
+        .get(module_name)?
+        .iter()
+        .filter(|unit| build_state.modules.contains_key(*unit))
+        .map(|unit| Some((unit.clone(), registry.interface_digest(unit)?)))
+        .collect::<Option<Vec<_>>>()?;
+    imports.sort();
+    Some((digest, imports))
 }
 
 #[cfg(test)]

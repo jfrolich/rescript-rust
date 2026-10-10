@@ -245,6 +245,15 @@ pub struct BuildCommandState {
     // Keyed by "{module_name}:impl" or "{module_name}:intf" (matching stored_asts convention).
     // Values are the raw module names extracted from the parsed AST.
     pub in_memory_deps: Mutex<AHashMap<String, Dependencies>>,
+    // The units each module's last compile in this process read the
+    // interface of (type checking its interface and implementation, plus
+    // the modules its generated code may require).
+    pub loaded_units: Mutex<AHashMap<String, AHashSet<String>>>,
+    // Set while parsing modules whose saved parse warnings were already
+    // reported this build: the parse then only records them.
+    pub parse_warnings_replayed: bool,
+    // The modules whose JavaScript this process wrote.
+    pub written_modules: AHashSet<String>,
     // GenType config and resolver inputs are immutable within one compile wave.
     pub gentype_contexts: Mutex<AHashMap<PathBuf, Arc<GentypeCompileContext>>>,
     // In-process compiler options shared by every module of a package (keyed
@@ -365,6 +374,9 @@ impl BuildCommandState {
             interface_generation: AtomicU64::new(0),
             module_registry: Mutex::new(ModuleRegistry::new()),
             in_memory_deps: Mutex::new(AHashMap::new()),
+            loaded_units: Mutex::new(AHashMap::new()),
+            parse_warnings_replayed: false,
+            written_modules: AHashSet::new(),
             gentype_contexts: Mutex::new(AHashMap::new()),
             package_compiler_options: Mutex::new(AHashMap::new()),
             features,
@@ -432,6 +444,14 @@ impl BuildCommandState {
     /// Only bumps the generation counter if the interface fingerprint actually
     /// changed (or if this is the first registration). Returns the generation
     /// number assigned (which may be the same as before if unchanged).
+    /// Record units a compile of `module_name` read. An interface compile
+    /// records first, then its implementation adds to it.
+    pub fn record_loaded_units(&self, module_name: &str, units: Vec<String>) {
+        let mut loaded = self.loaded_units.lock().unwrap();
+        let entry = loaded.entry(module_name.to_string()).or_default();
+        entry.extend(units.into_iter().filter(|unit| unit != module_name));
+    }
+
     pub fn register_in_memory_interface(&self, module_name: String, fingerprint: u64, is_pure: bool) -> u64 {
         let mut interfaces = self.in_memory_interfaces.lock().unwrap();
         // Check if the existing interface has the same fingerprint

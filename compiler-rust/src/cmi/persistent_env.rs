@@ -459,6 +459,51 @@ impl ModuleRegistry {
         self.local_cached_modules.contains_key(name) || self.cached_modules.contains_key(name)
     }
 
+    /// A digest of everything another module's compile can read about
+    /// `name`: its published signature and its JS metadata (purity,
+    /// constants, arities, inlinable lambdas, hoisted exports, package).
+    /// Equal digests mean a dependent compiles to the same output. `None`
+    /// when the module is not registered.
+    pub fn interface_digest(&self, name: &str) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        fn sorted_debug<K: Ord + std::fmt::Debug, V: std::fmt::Debug>(map: &HashMap<K, V>) -> String {
+            let mut entries: Vec<(&K, &V)> = map.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            format!("{entries:?}")
+        }
+        let pers = self
+            .local_cached_modules
+            .get(name)
+            .cloned()
+            .or_else(|| self.cached_modules.get_cloned(name));
+        let info = self
+            .local_module_info
+            .get(name)
+            .cloned()
+            .or_else(|| self.module_info.get_cloned(name));
+        if pers.is_none() && info.is_none() {
+            return None;
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        if let Some(pers) = pers.as_ref() {
+            pers.fingerprint.hash(&mut hasher);
+            pers.ps_deprecated.hash(&mut hasher);
+            pers.ps_filename.hash(&mut hasher);
+        }
+        if let Some(info) = info {
+            info.source_path.hash(&mut hasher);
+            info.is_pure.hash(&mut hasher);
+            sorted_debug(&info.cmj_export_constants).hash(&mut hasher);
+            sorted_debug(&info.cmj_export_arities).hash(&mut hasher);
+            sorted_debug(&info.cmj_export_lambdas).hash(&mut hasher);
+            format!("{:?}", info.cmj_hoisted_exports).hash(&mut hasher);
+            info.package_name.hash(&mut hasher);
+            info.js_output_suffix.hash(&mut hasher);
+            info.is_runtime.hash(&mut hasher);
+        }
+        Some(hasher.finish())
+    }
+
     pub fn register_disk_module(&mut self, name: &str, info: InMemoryModuleInfo) {
         self.disk_modules.insert(name.to_string(), true);
         self.insert_module_info(name.to_string(), info);
@@ -1243,6 +1288,13 @@ impl PersistentEnv {
             .units
             .entry(name.to_string())
             .or_insert(None);
+    }
+
+    /// The units whose interface this compilation read, sorted.
+    pub fn loaded_units(&self) -> Vec<String> {
+        let mut units: Vec<String> = self.imported_units.lock().unwrap().recorded.iter().cloned().collect();
+        units.sort();
+        units
     }
 
     fn record_import(&self, ps: &PersStruct) {

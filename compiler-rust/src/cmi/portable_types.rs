@@ -385,6 +385,7 @@ fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem, entries: &[Port
         }
         SignatureItem::SigModule(ident, md, _rec) => {
             ident.name().hash(hasher);
+            hash_attributes(hasher, &md.md_attributes);
             hash_module_type(hasher, &md.md_type, entries);
         }
         SignatureItem::SigModtype(ident, mtd) => {
@@ -395,8 +396,19 @@ fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem, entries: &[Port
     }
 }
 
+/// Attributes reach dependents: `@deprecated` warnings, `@as` and
+/// `@unboxed` representations, GenType annotations.
+fn hash_attributes(hasher: &mut impl Hasher, attrs: &[crate::types::decl::Attribute]) {
+    attrs.len().hash(hasher);
+    for attr in attrs {
+        attr.attr_name.txt.hash(hasher);
+        format!("{:?}", attr.attr_payload).hash(hasher);
+    }
+}
+
 fn hash_value_desc(hasher: &mut impl Hasher, vd: &ValueDescription, entries: &[PortableTypeEntry]) {
     hash_type_ref(hasher, vd.val_type.index(), entries, &mut Vec::new());
+    hash_attributes(hasher, &vd.val_attributes);
     match &vd.val_kind {
         ValueKind::ValReg => {
             0u8.hash(hasher);
@@ -420,6 +432,7 @@ fn hash_value_desc(hasher: &mut impl Hasher, vd: &ValueDescription, entries: &[P
 
 fn hash_type_decl(hasher: &mut impl Hasher, td: &TypeDeclaration, entries: &[PortableTypeEntry]) {
     td.type_arity.hash(hasher);
+    hash_attributes(hasher, &td.type_attributes);
     hash_type_expr_refs(hasher, &td.type_params, entries);
     td.type_private.hash(hasher);
     if let Some(manifest) = td.type_manifest {
@@ -473,6 +486,7 @@ fn hash_type_kind(hasher: &mut impl Hasher, kind: &TypeKind, entries: &[Portable
             ctors.len().hash(hasher);
             for ctor in ctors {
                 ctor.cd_id.name().hash(hasher);
+                hash_attributes(hasher, &ctor.cd_attributes);
                 hash_constructor_args(hasher, &ctor.cd_args, entries);
                 if let Some(res) = ctor.cd_res {
                     true.hash(hasher);
@@ -493,6 +507,7 @@ fn hash_label_decls(
     labels.len().hash(hasher);
     for label in labels {
         label.ld_id.name().hash(hasher);
+        hash_attributes(hasher, &label.ld_attributes);
         label.ld_mutable.hash(hasher);
         label.ld_optional.hash(hasher);
         hash_type_ref(hasher, label.ld_type.index(), entries, &mut Vec::new());
@@ -517,6 +532,7 @@ fn hash_extension_constructor(
     entries: &[PortableTypeEntry],
 ) {
     hash_path_by_name(hasher, &ext.ext_type_path);
+    hash_attributes(hasher, &ext.ext_attributes);
     hash_type_expr_refs(hasher, &ext.ext_type_params, entries);
     hash_constructor_args(hasher, &ext.ext_args, entries);
     if let Some(ret) = ext.ext_ret_type {
@@ -534,6 +550,7 @@ fn hash_modtype_decl(
     mtd: &ModtypeDeclaration,
     entries: &[PortableTypeEntry],
 ) {
+    hash_attributes(hasher, &mtd.mtd_attributes);
     if let Some(mty) = &mtd.mtd_type {
         true.hash(hasher);
         hash_module_type(hasher, mty, entries);

@@ -207,7 +207,9 @@ pub fn generate_asts(
                         }) if package.is_local_dep => {
                             source_file.implementation.parse_state = ParseState::Warning;
                             source_file.implementation.parse_dirty = true;
-                            logs::append(package, &stderr_warnings);
+                            if !build_state.parse_warnings_replayed {
+                                logs::append(package, &stderr_warnings);
+                            }
                             stderr.push_str(&stderr_warnings);
                             record_parse_warnings(
                                 &build_state.parse_warnings,
@@ -242,7 +244,9 @@ pub fn generate_asts(
                             // (e.g. legacy `(. ...)` uncurried syntax) so
                             // downstream users can report breakage upstream.
                             if let Some(kept) = retain_critical_external_warnings(&stderr_warnings) {
-                                logs::append(package, &kept);
+                                if !build_state.parse_warnings_replayed {
+                                    logs::append(package, &kept);
+                                }
                                 stderr.push_str(&kept);
                                 record_parse_warnings(
                                     &build_state.parse_warnings,
@@ -315,7 +319,9 @@ pub fn generate_asts(
                                 interface.parse_state = ParseState::Warning;
                                 interface.parse_dirty = true;
                             }
-                            logs::append(package, &stderr_warnings);
+                            if !build_state.parse_warnings_replayed {
+                                logs::append(package, &stderr_warnings);
+                            }
                             stderr.push_str(&stderr_warnings);
                             record_parse_warnings(
                                 &build_state.parse_warnings,
@@ -349,7 +355,9 @@ pub fn generate_asts(
                                 interface.parse_dirty = false;
                             }
                             if let Some(kept) = retain_critical_external_warnings(&stderr_warnings) {
-                                logs::append(package, &kept);
+                                if !build_state.parse_warnings_replayed {
+                                    logs::append(package, &kept);
+                                }
                                 stderr.push_str(&kept);
                                 record_parse_warnings(
                                     &build_state.parse_warnings,
