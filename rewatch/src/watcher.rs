@@ -260,7 +260,6 @@ struct AsyncWatchArgs<'a> {
     show_progress: bool,
     filter: &'a Option<regex::Regex>,
     after_build: Option<String>,
-    create_sourcedirs: bool,
     plain_output: bool,
     clear_screen: bool,
     prod: bool,
@@ -305,7 +304,6 @@ async fn async_watch(
         show_progress,
         filter,
         after_build,
-        create_sourcedirs,
         plain_output,
         clear_screen,
         prod,
@@ -489,7 +487,6 @@ async fn async_watch(
                     false,
                     show_progress,
                     true,
-                    create_sourcedirs,
                     plain_output,
                 );
 
@@ -563,10 +560,8 @@ async fn async_watch(
                             false,
                             show_progress,
                             false,
-                            create_sourcedirs,
                             plain_output,
                         );
-                        build::write_build_ninja(&build_state);
                         result.map_err(|e| anyhow::anyhow!("{e}"))
                     });
                 match rebuild {
@@ -612,7 +607,6 @@ pub fn start(
     show_progress: bool,
     folder: &str,
     after_build: Option<String>,
-    create_sourcedirs: bool,
     plain_output: bool,
     warn_error: Option<String>,
     build_mode: BuildMode,
@@ -681,7 +675,6 @@ pub fn start(
                     true,
                     show_progress,
                     false,
-                    create_sourcedirs,
                     plain_output,
                 )
                 .ok()
@@ -729,7 +722,6 @@ pub fn start(
             show_progress,
             filter,
             after_build,
-            create_sourcedirs,
             plain_output,
             clear_screen,
             prod,

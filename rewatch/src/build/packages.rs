@@ -97,10 +97,6 @@ impl Package {
         get_build_path(&self.path)
     }
 
-    pub fn get_compiler_info_path(&self) -> PathBuf {
-        self.get_build_path().join("compiler-info.json")
-    }
-
     fn get_js_path(&self) -> PathBuf {
         get_js_path(&self.path)
     }

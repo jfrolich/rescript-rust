@@ -307,12 +307,6 @@ fn has_compile_warnings(module: &Module) -> bool {
     )
 }
 
-/// Per-package record of the sources an in-process build compiled. In-process
-/// builds write no `.ast` files, whose recorded source paths drive
-/// [`cleanup_previous_build`]; this manifest lets the next build remove the
-/// outputs of modules whose sources disappeared.
-const IN_PROCESS_MANIFEST: &str = "in-process-sources.txt";
-
 fn in_process_source_paths(build_state: &BuildCommandState) -> AHashMap<String, Vec<(String, PathBuf)>> {
     let mut by_package: AHashMap<String, Vec<(String, PathBuf)>> = AHashMap::new();
     for (module_name, module) in build_state.modules.iter() {
@@ -327,53 +321,29 @@ fn in_process_source_paths(build_state: &BuildCommandState) -> AHashMap<String, 
     by_package
 }
 
-/// Record the compiled sources of an in-process build (see [`IN_PROCESS_MANIFEST`]).
-pub fn write_in_process_manifest(build_state: &BuildCommandState) {
-    for (package_name, mut entries) in in_process_source_paths(build_state) {
-        let Some(package) = build_state.packages.get(&package_name) else {
-            continue;
-        };
-        entries.sort();
-        let content = build::incremental::render_manifest(
-            &entries,
-            &build_state.js_confirmed_at,
-            build_state.build_started_at,
-            build_state.last_build_ok,
-        );
-        let parse_warnings = build_state
-            .parse_warnings
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, (package, _))| *package == package_name)
-            .map(|(key, (_, text))| (key.clone(), text.clone()))
-            .collect();
-        let warnings = build::incremental::render_warnings(
-            parse_warnings,
-            build_state
-                .modules
-                .iter()
-                .filter(|(_, module)| module.package_name == package_name),
-        );
-        let dir = package.get_ocaml_build_path();
-        let path = dir.join(IN_PROCESS_MANIFEST);
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(path, content);
-        let warnings_path = dir.join(build::incremental::WARNINGS_FILE);
-        match warnings {
-            Some(warnings) => {
-                let _ = std::fs::write(warnings_path, warnings);
-            }
-            None => {
-                let _ = std::fs::remove_file(warnings_path);
-            }
-        }
-    }
+/// Record this in-process build in each package's database (see
+/// [`build::state_db`]): the sources it compiled, when each module's
+/// JavaScript was confirmed up to date, and the warnings to report again.
+pub fn write_in_process_record(build_state: &BuildCommandState) {
+    build_state
+        .packages
+        .par_iter()
+        .for_each(|(package_name, package)| {
+            let record = build::incremental::current_record(build_state, package_name);
+            let previous = build_state
+                .previous_in_process
+                .as_ref()
+                .and_then(|previous| previous.packages.get(package_name))
+                .map(|record| &record.state);
+            build::state_db::write_record(package, previous, &record);
+            build::state_db::remove_legacy_files(package);
+        });
 }
 
-/// Remove the outputs of sources recorded by the previous in-process build
-/// that no longer exist: the JS output and the typed artifacts in `lib/bs`
-/// and `lib/ocaml`. Returns (removed sources, recorded sources).
+/// Read the previous in-process build's records and remove the outputs of
+/// sources it compiled that no longer exist: the JS output and any typed
+/// artifacts in `lib/bs` and `lib/ocaml`. Returns (removed sources, recorded
+/// sources).
 pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) -> (usize, usize) {
     let root_config = build_state.get_root_config();
     let suffix = root_config.get_suffix(root_config.get_package_specs().first().unwrap());
@@ -382,39 +352,24 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
     let mut total = 0;
     let mut deleted_modules = AHashSet::new();
     let mut previous = build::incremental::PreviousInProcessBuild::default();
-    for package in build_state.packages.values() {
-        let Ok(content) = std::fs::read_to_string(package.get_ocaml_build_path().join(IN_PROCESS_MANIFEST))
-        else {
-            continue;
-        };
-        let mut record = build::incremental::parse_manifest(&content);
-        if let Ok(warnings) = std::fs::read_to_string(
-            package
-                .get_ocaml_build_path()
-                .join(build::incremental::WARNINGS_FILE),
-        ) {
-            build::incremental::read_warnings(&warnings, &mut record);
-        }
-        previous.packages.insert(package.name.clone(), record);
+    let states: Vec<(&String, build::state_db::PackageState)> = build_state
+        .packages
+        .par_iter()
+        .filter_map(|(name, package)| build::state_db::read(package).map(|state| (name, state)))
+        .collect();
+    for (package_name, state) in states {
+        let package = &build_state.packages[package_name];
         let current_paths: AHashSet<&PathBuf> = current
-            .get(&package.name)
+            .get(package_name)
             .map(|entries| entries.iter().map(|(_, path)| path).collect())
             .unwrap_or_default();
-        for line in content.lines() {
-            let mut columns = line.split('\t');
-            let (Some(module_name), Some(path)) = (columns.next(), columns.next()) else {
-                continue;
-            };
-            if module_name.starts_with('#') {
-                continue;
-            }
+        for (path, module_name) in &state.sources {
             total += 1;
-            let path = PathBuf::from(path);
-            if current_paths.contains(&path) {
+            if current_paths.contains(path) {
                 continue;
             }
             removed += 1;
-            let basename = helpers::file_path_to_compiler_asset_basename(&path, &package.namespace);
+            let basename = helpers::file_path_to_compiler_asset_basename(path, &package.namespace);
             let dir = path.parent().unwrap_or_else(|| Path::new(""));
             for extension in ["cmi", "cmt", "cmti", "cmj", "in-process-js.json"] {
                 let file = format!("{basename}.{extension}");
@@ -426,12 +381,16 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
                 .and_then(|ext| ext.to_str())
                 .is_some_and(helpers::is_implementation_file)
             {
-                remove_mjs_file(&package.path.join(&path), &suffix);
+                remove_mjs_file(&package.path.join(path), &suffix);
             }
             if !build_state.modules.contains_key(module_name) {
                 deleted_modules.insert(module_name.to_string());
             }
         }
+        previous.packages.insert(
+            package_name.clone(),
+            build::incremental::PackageRecord::new(state),
+        );
     }
     build_state.deleted_modules = deleted_modules;
     build_state.previous_in_process = Some(previous);
@@ -440,7 +399,7 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
 
 pub fn cleanup_after_build(build_state: &BuildCommandState) {
     if build_state.build_mode().is_in_process() {
-        write_in_process_manifest(build_state);
+        write_in_process_record(build_state);
     }
     build_state.modules.par_iter().for_each(|(_module_name, module)| {
         let package = build_state.get_package(&module.package_name).unwrap();
@@ -585,6 +544,7 @@ pub fn clean_package(show_progress: bool, plain_output: bool, package: &Package)
     let path = std::path::Path::new(&path_str);
     let _ = std::fs::remove_dir_all(path);
 
-    // remove the per-package compiler metadata file so that a subsequent build writes fresh metadata
-    let _ = std::fs::remove_file(package.get_compiler_info_path());
+    // The build state database lives in the build directory removed above;
+    // remove what older builds kept elsewhere.
+    build::state_db::remove_legacy_files(package);
 }

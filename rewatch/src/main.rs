@@ -81,7 +81,6 @@ fn run_main(otel_enabled: bool) -> Result<()> {
                     Path::new(&build_args.folder as &str),
                     show_progress,
                     build_args.no_timing,
-                    true, // create_sourcedirs is now always enabled
                     plain_output,
                     (*build_args.warn_error).clone(),
                     build_mode,
@@ -118,7 +117,6 @@ fn run_main(otel_enabled: bool) -> Result<()> {
                     show_progress,
                     &watch_args.folder,
                     (*watch_args.after_build).clone(),
-                    true, // create_sourcedirs is now always enabled
                     plain_output,
                     (*watch_args.warn_error).clone(),
                     build_mode,

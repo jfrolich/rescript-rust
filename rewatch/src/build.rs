@@ -10,6 +10,7 @@ pub mod packages;
 pub mod parse;
 pub mod qos;
 pub mod read_compile_state;
+pub mod state_db;
 pub mod tooling;
 
 use self::parse::parser_args;
@@ -20,7 +21,6 @@ use crate::helpers::emojis::*;
 use crate::helpers::{self};
 use crate::lock::{LockKind, drop_lock, get_lock_or_exit};
 use crate::project_context::ProjectContext;
-use crate::sourcedirs;
 use anyhow::{Context, Result, anyhow};
 use build_types::*;
 use console::style;
@@ -28,8 +28,6 @@ use indicatif::{ProgressBar, ProgressStyle};
 use log::log_enabled;
 use serde::Serialize;
 use std::fmt;
-use std::fs::File;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::{info_span, instrument};
@@ -374,7 +372,6 @@ pub fn incremental_build(
     initial_build: bool,
     show_progress: bool,
     only_incremental: bool,
-    create_sourcedirs: bool,
     plain_output: bool,
 ) -> Result<CompilationOutcome, IncrementalBuildError> {
     let build_folder = build_state.root_folder.clone();
@@ -385,7 +382,6 @@ pub fn incremental_build(
             initial_build,
             show_progress,
             only_incremental,
-            create_sourcedirs,
             plain_output,
         )
     })
@@ -411,7 +407,6 @@ pub fn incremental_build_without_lock(
     initial_build: bool,
     show_progress: bool,
     only_incremental: bool,
-    create_sourcedirs: bool,
     plain_output: bool,
 ) -> Result<CompilationOutcome, IncrementalBuildError> {
     let phase_timing_enabled = rescript_compiler::timing::enabled();
@@ -673,9 +668,6 @@ pub fn incremental_build_without_lock(
     phase_mark("compile-end");
 
     logs::finalize(&build_state.packages);
-    if create_sourcedirs {
-        sourcedirs::print(build_state);
-    }
     pb.finish();
     if !compile_errors.is_empty() {
         let _error_span = info_span!("build.compile_error").entered();
@@ -843,21 +835,6 @@ fn log_unknown_config_field(package_name: &str, field_name: &str) {
     eprintln!("\n{}", style(warning).yellow());
 }
 
-// write build.ninja files in the packages after a non-incremental build
-// this is necessary to bust the editor tooling cache. The editor tooling
-// is watching this file.
-// we don't need to do this in an incremental build because there are no file
-// changes (deletes / additions)
-pub fn write_build_ninja(build_state: &BuildCommandState) {
-    for package in build_state.packages.values() {
-        // write empty file:
-        let build_path = package.get_build_path();
-        std::fs::create_dir_all(&build_path).expect("Unable to create build directory");
-        let mut f = File::create(build_path.join("build.ninja")).expect("Unable to write file");
-        f.write_all(b"").expect("unable to write to ninja file");
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 #[instrument(name = "rewatch.build", skip_all, fields(working_dir = %path.display()))]
 pub fn build(
@@ -865,7 +842,6 @@ pub fn build(
     path: &Path,
     show_progress: bool,
     no_timing: bool,
-    create_sourcedirs: bool,
     plain_output: bool,
     warn_error: Option<String>,
     build_mode: BuildMode,
@@ -909,7 +885,6 @@ pub fn build(
             true,
             show_progress,
             false,
-            create_sourcedirs,
             plain_output,
         ) {
             Ok(result) => {
@@ -926,13 +901,10 @@ pub fn build(
                 }
                 clean::cleanup_after_build(&build_state);
                 phase_mark("cleanup-end");
-                write_build_ninja(&build_state);
-                phase_mark("ninja-end");
                 Ok(build_state)
             }
             Err(e) => {
                 clean::cleanup_after_build(&build_state);
-                write_build_ninja(&build_state);
                 Err(anyhow!("Incremental build failed. Error: {e}"))
             }
         }
@@ -1015,7 +987,6 @@ mod tests {
                 &build_project_folder,
                 false,
                 true,
-                false,
                 true,
                 None,
                 BuildMode::ExternalBsc,

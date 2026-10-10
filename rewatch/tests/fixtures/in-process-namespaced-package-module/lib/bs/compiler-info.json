@@ -1,9 +1,0 @@
-{
-  "version": "13.0.0-alpha.6",
-  "bsc_path": "/Users/jake/.opensession/worktrees/rescript-rust-rust-ocaml-compatibility-fuzzing/rewatch/target/release/rescript",
-  "bsc_hash": "4931ced4ddcf2ba5f446b680a769ef67f6edc3da651623f4c8ec4d3560796c77",
-  "rescript_config_hash": "2f33b53563f6f729cb620a0778f5ba090d64d0eb59febcd24a7aafa46a628d66",
-  "source_map_args": [],
-  "runtime_path": "/Users/jake/.opensession/worktrees/rescript-rust-rust-ocaml-compatibility-fuzzing/packages/@rescript/runtime",
-  "generated_at": "1790968376086"
-}
