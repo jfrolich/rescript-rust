@@ -9,7 +9,6 @@ use super::qos;
 use crate::config;
 use crate::config::Config;
 use crate::helpers;
-use crate::helpers::StrippedVerbatimPath;
 use crate::project_context::ProjectContext;
 use ahash::{AHashMap, AHashSet};
 use anyhow::{Context, Result, anyhow};
@@ -34,17 +33,7 @@ use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::time::Duration;
 use std::time::Instant;
-use std::time::SystemTime;
 use tracing::{Span, info_span, instrument};
-
-/// Decode captured compiler output (stdout or stderr) into a String.
-///
-/// The output is not guaranteed to be valid UTF-8: a code frame can truncate a
-/// multi-byte character. Decode lossily so a bad byte becomes a replacement
-/// character instead of crashing the build.
-fn compiler_output_to_string(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).to_string()
-}
 
 /// Execute js-post-build command for a compiled JavaScript file.
 /// The command runs in the directory containing the rescript.json that defines it.
@@ -361,24 +350,6 @@ fn apply_signature_ready(build_command_state: &BuildCommandState, msg: Signature
     generation_before == Some(generation_after)
 }
 
-/// Mark a module's dependents in the compile universe dirty without
-/// releasing them.
-fn mark_dependents_dirty(
-    build_state: &BuildState,
-    compile_universe: &AHashSet<String>,
-    dirty_set: &mut AHashSet<String>,
-    module_name: &str,
-) {
-    let Some(module) = build_state.get_module(module_name) else {
-        return;
-    };
-    for dep in &module.dependents {
-        if compile_universe.contains(dep) {
-            dirty_set.insert(dep.clone());
-        }
-    }
-}
-
 fn unblock_dependents(
     build_state: &BuildState,
     compile_universe: &AHashSet<String>,
@@ -420,36 +391,23 @@ fn unblock_dependents(
 /// filesystem reads while still prioritizing large ready modules over tiny
 /// leaf work.
 fn compute_module_costs(
-    build_state: &BuildCommandState,
     universe: &AHashSet<String>,
-    stored_asts_snapshot: Option<&AHashMap<String, StoredAst>>,
+    stored_asts: &AHashMap<String, StoredAst>,
 ) -> AHashMap<String, i64> {
-    fn compute_from_asts(
-        universe: &AHashSet<String>,
-        stored_asts: &AHashMap<String, StoredAst>,
-    ) -> AHashMap<String, i64> {
-        let mut costs = AHashMap::with_capacity(universe.len());
-        for name in universe {
-            let impl_key = format!("{name}:impl");
-            let intf_key = format!("{name}:intf");
-            let mut source_len = 0usize;
-            if let Some(StoredAst::Structure(stored)) = stored_asts.get(&impl_key) {
-                source_len = source_len.saturating_add(stored.source_len);
-            }
-            if let Some(StoredAst::Signature(stored)) = stored_asts.get(&intf_key) {
-                source_len = source_len.saturating_add(stored.source_len);
-            }
-            costs.insert(name.clone(), source_len.max(1) as i64);
+    let mut costs = AHashMap::with_capacity(universe.len());
+    for name in universe {
+        let impl_key = format!("{name}:impl");
+        let intf_key = format!("{name}:intf");
+        let mut source_len = 0usize;
+        if let Some(StoredAst::Structure(stored)) = stored_asts.get(&impl_key) {
+            source_len = source_len.saturating_add(stored.source_len);
         }
-        costs
+        if let Some(StoredAst::Signature(stored)) = stored_asts.get(&intf_key) {
+            source_len = source_len.saturating_add(stored.source_len);
+        }
+        costs.insert(name.clone(), source_len.max(1) as i64);
     }
-
-    if let Some(stored_asts) = stored_asts_snapshot {
-        return compute_from_asts(universe, stored_asts);
-    }
-
-    let stored_asts = build_state.stored_asts.lock().unwrap();
-    compute_from_asts(universe, &stored_asts)
+    costs
 }
 
 /// Compute the weighted critical-path priority of every module in the universe:
@@ -513,21 +471,20 @@ fn compute_critical_path_priorities(
     priorities
 }
 
-/// Run the short-circuit check or actual `bsc` invocation for a single module.
+/// Run the short-circuit check or the in-process compile for a single module.
 /// Invoked from worker threads inside the dispatcher scope; only reads
 /// `BuildState`, never mutates it (except via the `BuildCommandState` mutex
-/// used by the in-process path to publish results).
+/// used to publish results).
+#[allow(clippy::too_many_arguments)]
 fn compile_one(
     build_state: &BuildState,
     build_command_state: &BuildCommandState,
     registry_snapshot: &ModuleRegistry,
-    stored_asts: Option<&AHashMap<String, StoredAst>>,
+    stored_asts: &AHashMap<String, StoredAst>,
     module_name: &str,
     is_dirty: bool,
-    warn_error_override: Option<String>,
-    dump_typed_sexp: bool,
     parent_span: Span,
-    in_process_hooks: Option<InProcessSchedulerHooks>,
+    in_process_hooks: InProcessSchedulerHooks,
     placement: qos::UnitClass,
 ) -> WorkerMsg {
     let _placement = qos::UnitPlacementGuard::enter(placement);
@@ -541,7 +498,6 @@ fn compile_one(
             "build.compile_file",
             module = %module_name,
             package = %package.name,
-            in_process = build_command_state.build_mode().is_in_process(),
             dirty = is_dirty
         )
         .entered()
@@ -560,26 +516,25 @@ fn compile_one(
         });
     }
 
-    // In-process mode: bypass the bsc subprocess entirely and run the Rust
-    // compiler in-thread. The caller has already staged runtime modules and
-    // namespace signatures into the shared registry, and the DAG scheduler
-    // guarantees all dependencies of this module are registered before it
-    // is dispatched.
-    if build_command_state.build_mode().is_in_process() {
-        if let SourceType::SourceFile(_) = &module.source_type {
+    // Run the compiler in-thread. The caller has already staged runtime
+    // modules and namespace signatures into the shared registry, and the DAG
+    // scheduler guarantees all dependencies of this module are registered
+    // before it is dispatched.
+    match &module.source_type {
+        SourceType::SourceFile(_) => {
             let interface_generation_before = build_command_state.get_interface_generation(module_name);
             let result = compile_module_in_process_to_js_boundary(
                 package,
                 module,
                 module_name,
                 registry_snapshot,
-                stored_asts.expect("in-process compile requires stored AST snapshot"),
+                stored_asts,
                 build_state,
                 build_command_state,
-                in_process_hooks.as_ref(),
+                Some(&in_process_hooks),
             );
             let interface_generation_after = build_command_state.get_interface_generation(module_name);
-            return match result {
+            match result {
                 Ok(mut msg) => {
                     let is_clean_interface = interface_generation_before.is_some()
                         && interface_generation_before == interface_generation_after;
@@ -594,124 +549,18 @@ fn compile_one(
                     is_compiled: true,
                     registry_updates: Vec::new(),
                 }),
-            };
-        }
-    }
-
-    WorkerMsg::Completed(match &module.source_type {
-        SourceType::MlMap(_) => {
-            // The mlmap is compiled during AST generation; the entry here just
-            // marks it compiled so its namespace members can proceed.
-            CompletionMsg {
-                module_name: package.namespace.to_suffix().unwrap(),
-                result: Ok(None),
-                interface_result: Some(Ok(None)),
-                is_clean: false,
-                is_compiled: false,
-                registry_updates: Vec::new(),
             }
         }
-        SourceType::SourceFile(source_file) => {
-            // Construct span + attributes only when a subscriber is listening.
-            // Otherwise root_config.get_package_specs() (which clones) and the
-            // attribute formatting run per-module on the build hot path.
-            let _file_span = if tracing::enabled!(tracing::Level::INFO) {
-                let root_config = build_state.get_root_config();
-                let specs = root_config.get_package_specs();
-                // A package can be built under multiple specs (e.g. ESM + CJS).
-                // Report all of them joined by "," instead of silently picking
-                // the first — the compile_file span covers work for every spec.
-                let suffix = specs
-                    .iter()
-                    .map(|s| root_config.get_suffix(s))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let module_system = specs
-                    .iter()
-                    .map(|s| s.module.as_str())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let namespace = package.namespace.to_suffix().unwrap_or_default();
-                info_span!("build.compile_file", module = %module_name, package = %package.name, suffix, module_system, namespace).entered()
-            } else {
-                tracing::Span::none().entered()
-            };
-
-            let cmi_path = helpers::get_compiler_asset(
-                package,
-                &package.namespace,
-                &source_file.implementation.path,
-                "cmi",
-            );
-            let cmi_digest = helpers::compute_file_hash(Path::new(&cmi_path));
-
-            let interface_result = source_file.interface.as_ref().map(|iface| {
-                compile_file(
-                    package,
-                    &helpers::get_ast_path(&iface.path),
-                    module,
-                    true,
-                    build_state,
-                    warn_error_override.clone(),
-                    dump_typed_sexp,
-                )
-            });
-            let result = compile_file(
-                package,
-                &helpers::get_ast_path(&source_file.implementation.path),
-                module,
-                false,
-                build_state,
-                warn_error_override,
-                dump_typed_sexp,
-            );
-            let cmi_digest_after = helpers::compute_file_hash(Path::new(&cmi_path));
-
-            // If the cmi is byte-for-byte unchanged, downstream modules can
-            // short-circuit — we check both interface and implementation
-            // because e.g. `include MyModule` exposes implementation changes
-            // through the cmi even when the .resi is untouched.
-            let is_clean_cmi = matches!(
-                (cmi_digest, cmi_digest_after),
-                (Some(a), Some(b)) if a == b
-            );
-
-            CompletionMsg {
-                module_name: module_name.to_string(),
-                result,
-                interface_result,
-                is_clean: is_clean_cmi,
-                is_compiled: true,
-                registry_updates: Vec::new(),
-            }
-        }
-    })
-}
-
-/// Extract sexp output from bsc stderr.
-/// When -dtyped-sexp-locs is passed, bsc writes the sexp to stderr.
-/// The sexp starts with "(structure" or "(signature" and continues to the end.
-/// Everything before that is warnings.
-/// Returns (warnings, Option<sexp>).
-fn extract_sexp_from_stderr(stderr: &str) -> (String, Option<String>) {
-    // Find the start of the sexp - it begins with "(structure" or "(signature" at the start of a line
-    let pos = stderr
-        .find("\n(structure")
-        .map(|p| p + 1)
-        .or_else(|| stderr.find("\n(signature").map(|p| p + 1))
-        .or_else(|| {
-            if stderr.starts_with("(structure") || stderr.starts_with("(signature") {
-                Some(0)
-            } else {
-                None
-            }
-        });
-    if let Some(pos) = pos {
-        let warnings = stderr[..pos].to_string();
-        let sexp = stderr[pos..].to_string();
-        (warnings, Some(sexp))
-    } else {
-        (stderr.to_string(), None)
+        // Namespace signatures are registered before compilation starts; the
+        // entry here just marks the mlmap compiled so its members can proceed.
+        SourceType::MlMap(_) => WorkerMsg::Completed(CompletionMsg {
+            module_name: package.namespace.to_suffix().unwrap(),
+            result: Ok(None),
+            interface_result: Some(Ok(None)),
+            is_clean: false,
+            is_compiled: false,
+            registry_updates: Vec::new(),
+        }),
     }
 }
 
@@ -791,8 +640,7 @@ pub fn compile(
     let _span = info_span!(
         "build.compile",
         dirty_modules = dirty_modules.len(),
-        module_count = build_state.modules.len(),
-        in_process = build_state.build_mode().is_in_process()
+        module_count = build_state.modules.len()
     )
     .entered();
     let compile_parent_span = Span::current();
@@ -811,68 +659,64 @@ pub fn compile(
         return Ok((String::new(), warnings, 0));
     }
 
-    // In --in-process mode, purge deleted/renamed modules from the in-memory
-    // registries so stale entries don't remain resolvable in watch mode.
-    if build_state.build_mode().is_in_process() {
-        build_state.purge_deleted_modules(&build_state.build_state.deleted_modules.clone());
-        build_state.clear_gentype_contexts();
-        // Worker type stores hold dependency graphs published by this build
-        // only; a new build starts every worker from an empty store.
-        rescript_compiler::types::thread_store::begin_build();
-    }
+    // Purge deleted/renamed modules from the in-memory registries so stale
+    // entries don't remain resolvable in watch mode.
+    build_state.purge_deleted_modules(&build_state.build_state.deleted_modules.clone());
+    build_state.clear_gentype_contexts();
+    // Worker type stores hold dependency graphs published by this build
+    // only; a new build starts every worker from an empty store.
+    rescript_compiler::types::thread_store::begin_build();
 
-    // In --in-process mode, synthesize namespace module signatures in memory
-    // before any source modules are compiled. Source modules may use `-open Namespace`,
-    // so the namespace signature must be available in the PersistentEnv first.
+    // Synthesize namespace module signatures in memory before any source
+    // modules are compiled. Source modules may use `-open Namespace`, so the
+    // namespace signature must be available in the PersistentEnv first.
     crate::build::phase_mark("compile-start");
-    if build_state.build_mode().is_in_process() {
-        register_namespace_signatures(build_state);
-        register_source_fallback_paths(build_state);
+    register_namespace_signatures(build_state);
+    register_source_fallback_paths(build_state);
 
-        // Pre-compile all @rescript/runtime modules into the registry.
-        // In in-process mode, the registry is the sole source of truth —
-        // no CMI fallback. Every dependency must be in the registry before
-        // project modules start compiling, even when @rescript/runtime is
-        // also present in the package graph (otherwise implicit Stdlib opens
-        // can require modules that the main build graph hasn't reached yet).
-        let parent_span = compile_parent_span.clone();
-        let pre_compile_result: Result<()> = std::thread::scope(|scope| {
-            let handle = std::thread::Builder::new()
-                .name("rewatch-runtime-precompile".to_string())
-                .stack_size(256 * 1024 * 1024)
-                .spawn_scoped(scope, || {
-                    let _parent = parent_span.enter();
-                    pre_compile_runtime_modules(
-                        &build_state.module_registry,
-                        &build_state.build_state.compiler_info.runtime_path,
-                    )
-                })
-                .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))?;
+    // Pre-compile all @rescript/runtime modules into the registry.
+    // In in-process mode, the registry is the sole source of truth —
+    // no CMI fallback. Every dependency must be in the registry before
+    // project modules start compiling, even when @rescript/runtime is
+    // also present in the package graph (otherwise implicit Stdlib opens
+    // can require modules that the main build graph hasn't reached yet).
+    let parent_span = compile_parent_span.clone();
+    let pre_compile_result: Result<()> = std::thread::scope(|scope| {
+        let handle = std::thread::Builder::new()
+            .name("rewatch-runtime-precompile".to_string())
+            .stack_size(256 * 1024 * 1024)
+            .spawn_scoped(scope, || {
+                let _parent = parent_span.enter();
+                pre_compile_runtime_modules(
+                    &build_state.module_registry,
+                    &build_state.build_state.compiler_info.runtime_path,
+                )
+            })
+            .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))?;
 
-            match handle.join() {
-                Ok(result) => result,
-                Err(panic) => {
-                    let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                        s.clone()
-                    } else if let Some(s) = panic.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else {
-                        "unknown".to_string()
-                    };
-                    Err(anyhow!("runtime pre-compilation panicked: {msg}"))
-                }
+        match handle.join() {
+            Ok(result) => result,
+            Err(panic) => {
+                let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic.downcast_ref::<&str>() {
+                    s.to_string()
+                } else {
+                    "unknown".to_string()
+                };
+                Err(anyhow!("runtime pre-compilation panicked: {msg}"))
             }
-        });
-        pre_compile_result?;
-        crate::build::phase_mark("runtime-precompile-end");
+        }
+    });
+    pre_compile_result?;
+    crate::build::phase_mark("runtime-precompile-end");
 
-        // Clear source-fallback paths after pre-compilation.
-        build_state
-            .module_registry
-            .lock()
-            .unwrap()
-            .set_source_fallback_paths(AHashMap::new());
-    }
+    // Clear source-fallback paths after pre-compilation.
+    build_state
+        .module_registry
+        .lock()
+        .unwrap()
+        .set_source_fallback_paths(AHashMap::new());
 
     // Expand the compile universe: every dirty module plus everything that
     // transitively depends on it.
@@ -914,9 +758,6 @@ pub fn compile(
     // (see `incremental::next_round`).
     let cutoff = incremental_plan.as_ref().is_some_and(|plan| plan.cutoff);
 
-    let in_process_mode = build_state.build_mode().is_in_process();
-    let warn_error_override = build_state.get_warn_error_override();
-    let dump_typed_sexp = build_state.dump_typed_sexp();
     let js_writer = JsWriter::spawn();
     // Bound the jobs handed to rayon so the priority heap still orders work —
     // dumping everything into rayon's queue would defeat #2. Allow one queued
@@ -924,12 +765,11 @@ pub fn compile(
     // starts its next job at once instead of idling until this dispatcher
     // has received its message and spawned a replacement.
     let capacity = 2 * rayon::current_num_threads().max(1);
-    let mut scheduler_counters = (in_process_mode
-        && std::env::var_os("RESCRIPT_SCHEDULER_COUNTERS").is_some())
-    .then(InProcessSchedulerCounters::default);
+    let mut scheduler_counters =
+        std::env::var_os("RESCRIPT_SCHEDULER_COUNTERS").map(|_| InProcessSchedulerCounters::default());
     // Critical-path placement: the highest-priority ready typecheck units get
     // performance-core QoS, at most one per performance core at a time.
-    let critical_slots = if in_process_mode { qos::critical_slots() } else { 0 };
+    let critical_slots = qos::critical_slots();
 
     let mut results_buffer: Vec<CompletionMsg> = Vec::with_capacity(compile_universe.len());
     let mut has_errors = false;
@@ -968,10 +808,9 @@ pub fn compile(
         total_universe_count += compile_universe_count;
         set_length(total_universe_count as u64);
 
-        let stored_asts_snapshot = in_process_mode.then(|| build_state.snapshot_stored_asts());
+        let stored_asts_snapshot = build_state.snapshot_stored_asts();
         let compile_universe = Arc::new(std::mem::take(&mut round_universe));
-        let module_costs =
-            compute_module_costs(build_state, &compile_universe, stored_asts_snapshot.as_ref());
+        let module_costs = compute_module_costs(&compile_universe, &stored_asts_snapshot);
         let priorities =
             compute_critical_path_priorities(&compile_universe, &build_state.build_state, &module_costs);
 
@@ -1013,11 +852,7 @@ pub fn compile(
         // dependency updates those shared maps, so a single template snapshot is
         // enough; each worker still clones it before adding local provisional
         // module/interface entries.
-        let worker_registry_template = if in_process_mode {
-            build_state.snapshot_module_registry()
-        } else {
-            ModuleRegistry::new()
-        };
+        let worker_registry_template = build_state.snapshot_module_registry();
 
         if round == 1 {
             crate::build::phase_mark("schedule-start");
@@ -1095,7 +930,6 @@ pub fn compile(
                     }
                     let module_name = work.module_name.clone();
                     let is_dirty = dirty_set.contains(&module_name);
-                    let warn_override = warn_error_override.clone();
                     let tx = tx.clone();
                     let inc_ref = &inc;
                     in_flight += 1;
@@ -1118,13 +952,13 @@ pub fn compile(
                         );
                     }
                     let registry_snapshot = worker_registry_template.clone();
-                    let stored_asts = stored_asts_snapshot.as_ref();
+                    let stored_asts = &stored_asts_snapshot;
                     let parent_span = compile_parent_span.clone();
-                    let in_process_hooks = in_process_mode.then(|| InProcessSchedulerHooks {
+                    let in_process_hooks = InProcessSchedulerHooks {
                         tx: tx.clone(),
                         compile_universe: compile_universe.clone(),
                         registry_only: registry_only.clone(),
-                    });
+                    };
                     scope.spawn(move |_| {
                         let msg = compile_one(
                             build_state_ref,
@@ -1133,8 +967,6 @@ pub fn compile(
                             stored_asts,
                             &module_name,
                             is_dirty,
-                            warn_override,
-                            dump_typed_sexp,
                             parent_span,
                             in_process_hooks,
                             placement,
@@ -1222,12 +1054,10 @@ pub fn compile(
                             }
                         }
                         WorkerMsg::JsMetadataReady(mut msg) => {
-                            if in_process_mode {
-                                apply_pending_registry_updates(
-                                    build_command_state_ref,
-                                    std::mem::take(&mut msg.registry_updates),
-                                );
-                            }
+                            apply_pending_registry_updates(
+                                build_command_state_ref,
+                                std::mem::take(&mut msg.registry_updates),
+                            );
                             let ready_name = msg.module_name;
                             js_metadata_ready.insert(ready_name.clone());
 
@@ -1254,12 +1084,10 @@ pub fn compile(
                             if critical_modules.remove(&msg.module_name) {
                                 critical_in_flight -= 1;
                             }
-                            if in_process_mode {
-                                apply_pending_registry_updates(
-                                    build_command_state_ref,
-                                    std::mem::take(&mut msg.registry_updates),
-                                );
-                            }
+                            apply_pending_registry_updates(
+                                build_command_state_ref,
+                                std::mem::take(&mut msg.registry_updates),
+                            );
 
                             let module_failed = msg.result.is_err()
                                 || msg.interface_result.as_ref().is_some_and(|r| r.is_err());
@@ -1287,36 +1115,9 @@ pub fn compile(
                                 }
                             }
 
-                            if in_process_mode {
-                                let completed_without_signature =
-                                    !signature_ready.contains(&finished_name) && !module_failed;
-                                if completed_without_signature {
-                                    unblock_dependents(
-                                        build_state_ref,
-                                        &compile_universe,
-                                        &priorities,
-                                        &mut pending_deps,
-                                        &mut dirty_set,
-                                        &mut signature_ready,
-                                        &mut ready_heap,
-                                        &finished_name,
-                                        is_clean,
-                                    );
-                                }
-                            } else if module_failed {
-                                // A successful interface can replace the CMI even
-                                // when its implementation fails. Keep dependents
-                                // dirty for recovery, but do not release them
-                                // until the module succeeds.
-                                if !is_clean {
-                                    mark_dependents_dirty(
-                                        build_state_ref,
-                                        &compile_universe,
-                                        &mut dirty_set,
-                                        &finished_name,
-                                    );
-                                }
-                            } else {
+                            let completed_without_signature =
+                                !signature_ready.contains(&finished_name) && !module_failed;
+                            if completed_without_signature {
                                 unblock_dependents(
                                     build_state_ref,
                                     &compile_universe,
@@ -1493,7 +1294,6 @@ pub fn compile(
     // mark_modules_with_expired_deps_dirty, not as precise wall-clock compile
     // times. All modules successfully compiled in one pass are mutually
     // up-to-date for that pass, so they must receive the same timestamp.
-    let compile_timestamp = SystemTime::now();
 
     let mut recompiled_modules = AHashSet::<String>::new();
 
@@ -1592,8 +1392,6 @@ pub fn compile(
 
             if result.is_ok() && interface_result.as_ref().is_none_or(|r| r.is_ok()) {
                 module.compile_dirty = false;
-                module.last_compiled_cmi = Some(compile_timestamp);
-                module.last_compiled_cmt = Some(compile_timestamp);
                 if is_compiled && !registry_only.contains(&module_name) {
                     build_state.written_modules.insert(module_name.clone());
                     if let Some(started) = build_state.build_started_at {
@@ -4191,279 +3989,6 @@ fn finish_in_process_js_inner(
     })
 }
 
-fn compile_file(
-    package: &packages::Package,
-    ast_path: &Path,
-    module: &Module,
-    is_interface: bool,
-    build_state: &BuildState,
-    warn_error_override: Option<String>,
-    dump_typed_sexp: bool,
-) -> Result<Option<String>> {
-    let BuildState {
-        packages,
-        project_context,
-        compiler_info,
-        ..
-    } = build_state;
-    let root_config = build_state.get_root_config();
-    let ocaml_build_path_abs = package.get_ocaml_build_path();
-    let build_path_abs = package.get_build_path();
-    let implementation_file_path = match &module.source_type {
-        SourceType::SourceFile(source_file) => Ok(&source_file.implementation.path),
-        sourcetype => Err(format!(
-            "Tried to compile a file that is not a source file ({}). Path to AST: {}. ",
-            sourcetype,
-            ast_path.to_string_lossy()
-        )),
-    }
-    .map_err(|e| anyhow!(e))?;
-    let basename =
-        helpers::file_path_to_compiler_asset_basename(implementation_file_path, &package.namespace);
-    let has_interface = module.get_interface().is_some();
-    let is_type_dev = module.is_type_dev;
-    // `gentype_dirs` is populated once during package discovery, so we just
-    // borrow the cached slice here (empty when gentype is off).
-    let current_package_dirs: &[PathBuf] = package.gentype_dirs.as_deref().unwrap_or(&[]);
-    let mut to_mjs_args = compiler_args(
-        &package.config,
-        ast_path,
-        implementation_file_path,
-        is_interface,
-        has_interface,
-        project_context,
-        &Some(packages),
-        is_type_dev,
-        package.is_local_dep,
-        warn_error_override,
-        build_state.source_map_command,
-        current_package_dirs,
-    )?;
-
-    // --dump-typed-sexp: add -dtyped-sexp to bsc invocation
-    if dump_typed_sexp {
-        to_mjs_args.push("-dtyped-sexp".to_string());
-    }
-
-    let cwd = build_path_abs
-        .canonicalize()
-        .map(StrippedVerbatimPath::to_stripped_verbatim_path)
-        .ok()
-        .unwrap();
-
-    // Normal mode: run bsc via Command::output()
-    // When generating sexp, redirect stderr directly to file to avoid buffering
-    // huge output in memory (e.g., Icon.res produces 882MB of sexp).
-    let sexp_file = if dump_typed_sexp {
-        let path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        Some(std::fs::File::create(&path).map_err(|e| anyhow!("Failed to create sexp file: {e}"))?)
-    } else {
-        None
-    };
-
-    let to_mjs = Command::new(&compiler_info.bsc_path)
-        .current_dir(&cwd)
-        .args(to_mjs_args)
-        .stderr(match sexp_file {
-            Some(f) => std::process::Stdio::from(f),
-            None => std::process::Stdio::piped(),
-        })
-        .output();
-
-    match to_mjs {
-        Ok(x) if !x.status.success() => {
-            let stderr = if dump_typed_sexp {
-                // stderr was redirected to file — read error from there
-                let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-                std::fs::read_to_string(&sexp_path).unwrap_or_default()
-            } else {
-                String::from_utf8_lossy(&x.stderr).to_string()
-            };
-            let stdout = String::from_utf8_lossy(&x.stdout);
-            Err(anyhow!(stderr + &stdout))
-        }
-        Err(e) => Err(anyhow!(
-            "Could not compile file. Error: {e}. Path to AST: {ast_path:?}"
-        )),
-        Ok(x) => {
-            let raw_stderr = compiler_output_to_string(&x.stderr);
-
-            let err = if dump_typed_sexp {
-                let (warnings, sexp) = extract_sexp_from_stderr(&raw_stderr);
-                if let Some(sexp_content) = sexp {
-                    let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-                    let _ = std::fs::write(&sexp_path, sexp_content);
-                }
-                warnings
-            } else {
-                raw_stderr
-            };
-
-            let dir = Path::new(implementation_file_path).parent().unwrap();
-
-            // perhaps we can do this copying somewhere else
-            if !is_interface {
-                let _ = std::fs::copy(
-                    package
-                        .get_build_path()
-                        .join(dir)
-                        // because editor tooling doesn't support namespace entries yet
-                        // we just remove the @ for now. This makes sure the editor support
-                        // doesn't break
-                        .join(format!("{basename}.cmi")),
-                    ocaml_build_path_abs.join(format!("{basename}.cmi")),
-                );
-                let _ = std::fs::copy(
-                    package.get_build_path().join(dir).join(format!("{basename}.cmj")),
-                    ocaml_build_path_abs.join(format!("{basename}.cmj")),
-                );
-                let _ = std::fs::copy(
-                    package
-                        .get_build_path()
-                        .join(dir)
-                        // because editor tooling doesn't support namespace entries yet
-                        // we just remove the @ for now. This makes sure the editor support
-                        // doesn't break
-                        .join(format!("{basename}.cmt")),
-                    ocaml_build_path_abs.join(format!("{basename}.cmt")),
-                );
-            } else {
-                let _ = std::fs::copy(
-                    package
-                        .get_build_path()
-                        .join(dir)
-                        .join(format!("{basename}.cmti")),
-                    ocaml_build_path_abs.join(format!("{basename}.cmti")),
-                );
-                let _ = std::fs::copy(
-                    package.get_build_path().join(dir).join(format!("{basename}.cmi")),
-                    ocaml_build_path_abs.join(format!("{basename}.cmi")),
-                );
-            }
-
-            if let SourceType::SourceFile(SourceFile {
-                interface: Some(Interface { path, .. }),
-                ..
-            }) = &module.source_type
-            {
-                let _ = std::fs::copy(
-                    Path::new(&package.path).join(path),
-                    package.get_build_path().join(path),
-                )
-                .expect("copying source file failed");
-
-                let _ = std::fs::copy(
-                    Path::new(&package.path).join(path),
-                    package
-                        .get_ocaml_build_path()
-                        .join(std::path::Path::new(path).file_name().unwrap()),
-                )
-                .expect("copying source file failed");
-            }
-            if let SourceType::SourceFile(SourceFile {
-                implementation: Implementation { path, .. },
-                ..
-            }) = &module.source_type
-            {
-                let _ = std::fs::copy(
-                    Path::new(&package.path).join(path),
-                    package.get_build_path().join(path),
-                )
-                .expect("copying source file failed");
-
-                let _ = std::fs::copy(
-                    Path::new(&package.path).join(path),
-                    package
-                        .get_ocaml_build_path()
-                        .join(std::path::Path::new(path).file_name().unwrap()),
-                )
-                .expect("copying source file failed");
-            }
-
-            // copy js file
-            root_config.get_package_specs().iter().for_each(|spec| {
-                if spec.in_source
-                    && let SourceType::SourceFile(SourceFile {
-                        implementation: Implementation { path, .. },
-                        ..
-                    }) = &module.source_type
-                {
-                    let source = helpers::get_source_file_from_rescript_file(
-                        &Path::new(&package.path).join(path),
-                        &root_config.get_suffix(spec),
-                    );
-                    let destination = helpers::get_source_file_from_rescript_file(
-                        &package.get_build_path().join(path),
-                        &root_config.get_suffix(spec),
-                    );
-
-                    if source.exists() {
-                        let _ = std::fs::copy(&source, &destination).expect("copying source file failed");
-                    }
-
-                    let mut source_map = source.clone().into_os_string();
-                    source_map.push(".map");
-                    let source_map = PathBuf::from(source_map);
-                    let mut destination_map = destination.clone().into_os_string();
-                    destination_map.push(".map");
-                    let destination_map = PathBuf::from(destination_map);
-
-                    if source_map.exists() {
-                        let _ = std::fs::copy(&source_map, &destination_map)
-                            .expect("copying source map file failed");
-                    } else {
-                        let _ = std::fs::remove_file(&destination_map);
-                    }
-                }
-            });
-
-            // Execute js-post-build command if configured
-            // Only run for implementation files (not interfaces)
-            if !is_interface
-                && let Some(js_post_build) = &package.config.js_post_build
-                && let SourceType::SourceFile(SourceFile {
-                    implementation: Implementation { path, .. },
-                    ..
-                }) = &module.source_type
-            {
-                // Execute post-build command for each package spec (each output format)
-                for spec in root_config.get_package_specs() {
-                    // Determine the correct JS file path based on in-source setting:
-                    // - in-source: true  -> next to the source file (e.g., src/Foo.js)
-                    // - in-source: false -> in lib/<module>/ directory (e.g., lib/es6/src/Foo.js)
-                    let js_file = if spec.in_source {
-                        helpers::get_source_file_from_rescript_file(
-                            &Path::new(&package.path).join(path),
-                            &root_config.get_suffix(&spec),
-                        )
-                    } else {
-                        helpers::get_source_file_from_rescript_file(
-                            &Path::new(&package.path)
-                                .join("lib")
-                                .join(spec.get_out_of_source_dir())
-                                .join(path),
-                            &root_config.get_suffix(&spec),
-                        )
-                    };
-
-                    if js_file.exists() {
-                        // Fail the build if post-build command fails (matches bsb behavior with &&)
-                        // Run in the package's directory (where rescript.json is defined)
-                        execute_post_build_command(&js_post_build.cmd, &js_file, &package.path)?;
-                    }
-                }
-            }
-
-            Ok(visible_compiler_warnings(&err, package.is_local_dep))
-        }
-    }
-}
-
-/// An in-process compile failure. A compiler diagnostic is reported as the
-/// text bsc prints, like the subprocess path does.
 fn in_process_compile_error(module_name: &str, err: anyhow::Error) -> anyhow::Error {
     match err.downcast::<rescript_compiler::driver::UserDiagnostic>() {
         Ok(diagnostic) => anyhow!("{}", diagnostic.output()),
@@ -4521,95 +4046,6 @@ pub fn mark_modules_with_deleted_deps_dirty(build_state: &mut BuildState) {
     });
 }
 
-// this happens when a compile is not completed successfully in some way
-// a dependent module could be compiled with a new interface, but the dependent
-// modules have not finished compiling. This can cause a stale build.
-// When the build is clean this doesn't happen. But when we interupt the build,
-// such as force quitting the watcher, it can happen.
-//
-// If a build stops in the middle of errors, this will also happen, because
-// basically we interrupt a build and we stop compiling somewhere in the middle.
-//
-// In watch mode, we retain the dirty state of the modules, so we don't need
-// to do this, which will make it more efficient.
-//
-// We could clean up the build after errors. But I think we probably still need
-// to do this, because people can also force quit the watcher of
-pub fn mark_modules_with_expired_deps_dirty(build_state: &mut BuildCommandState) {
-    let mut modules_with_expired_deps: AHashSet<String> = AHashSet::new();
-    build_state
-        .modules
-        .iter()
-        .filter(|m| !m.1.is_mlmap())
-        .for_each(|(module_name, module)| {
-            for dependent in module.dependents.iter() {
-                let dependent_module = build_state.modules.get(dependent).unwrap();
-                match dependent_module.source_type {
-                    SourceType::SourceFile(_) => {
-                        match (module.last_compiled_cmt, module.last_compiled_cmi) {
-                            (None, None) | (Some(_), None) | (None, Some(_)) => {
-                                // println!(
-                                //     "🛑 {} is a dependent of {} but has no cmt/cmi",
-                                //     module_name, dependent
-                                // );
-                                modules_with_expired_deps.insert(module_name.to_string());
-                            }
-                            (Some(_), Some(_)) => (),
-                        }
-
-                        // we compare the last compiled time of the dependent module with the last
-                        // compile of the interface of the module it depends on, if the interface
-                        // didn't change it doesn't matter
-                        match (dependent_module.last_compiled_cmt, module.last_compiled_cmt) {
-                            (Some(last_compiled_dependent), Some(last_compiled)) => {
-                                if last_compiled_dependent < last_compiled {
-                                    // println!(
-                                    //     "✅ {} is a dependent of {} ({:?} / {:?})",
-                                    //     module_name, dependent, last_compiled_dependent, last_compiled
-                                    // );
-
-                                    modules_with_expired_deps.insert(dependent.to_string());
-                                } else {
-                                    // println!(
-                                    //     "🛑 {} is a dependent of {} ({:?} / {:?})",
-                                    //     module_name, dependent, last_compiled_dependent, last_compiled
-                                    // );
-                                }
-                            }
-                            (None, _) => {
-                                // println!(
-                                //     "🛑 {} is a dependent of {} (no last compiled time)",
-                                //     module_name, dependent
-                                // );
-                                modules_with_expired_deps.insert(dependent.to_string());
-                            }
-                            _ => (),
-                        }
-                    }
-                    // a namespace is never a dependent of a module (it can be a dependency, but not the other
-                    // way around)
-                    SourceType::MlMap(_) => {
-                        for dependent_of_namespace in dependent_module.dependents.iter() {
-                            let dependent_module = build_state.modules.get(dependent_of_namespace).unwrap();
-
-                            if let (Some(last_compiled_dependent), Some(last_compiled)) =
-                                (dependent_module.last_compiled_cmt, module.last_compiled_cmt)
-                                && last_compiled_dependent < last_compiled
-                            {
-                                modules_with_expired_deps.insert(dependent.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    build_state.modules.iter_mut().for_each(|(module_name, module)| {
-        if modules_with_expired_deps.contains(module_name) {
-            module.compile_dirty = true;
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4622,16 +4058,6 @@ mod tests {
     use std::sync::RwLock;
     use std::time::SystemTime;
     use tempfile::TempDir;
-
-    // The compiler can write a code frame that truncates a multi-byte character, so the
-    // captured output is not always valid UTF-8. Decoding it must not panic.
-    #[test]
-    fn compiler_output_to_string_handles_invalid_utf8() {
-        // 0xe2 0x80 is the start of an em dash (U+2014); the third byte is missing.
-        let truncated = [b'W', b'a', b'r', b'n', b'i', b'n', b'g', b' ', 0xe2, 0x80];
-        let decoded = compiler_output_to_string(&truncated);
-        assert!(decoded.starts_with("Warning "));
-    }
 
     fn test_project_context(root: &Path) -> ProjectContext {
         let config = config::tests::create_config(config::tests::CreateConfigArgs {
@@ -4693,8 +4119,6 @@ mod tests {
             dependents: Default::default(),
             package_name: package_name.to_string(),
             compile_dirty: false,
-            last_compiled_cmi: None,
-            last_compiled_cmt: None,
             deps_dirty: false,
             is_type_dev: false,
         }

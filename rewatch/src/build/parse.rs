@@ -2,7 +2,6 @@ use super::build_types::ParseWarnings;
 use super::build_types::*;
 use super::compile::retain_critical_external_warnings;
 use super::logs;
-use super::namespaces;
 use crate::build::packages::Package;
 use crate::config;
 use crate::config::{Config, ExperimentalFeature, OneOrMore};
@@ -12,19 +11,13 @@ use ahash::AHashSet;
 use anyhow::{Context, anyhow};
 use log::debug;
 use rayon::prelude::*;
-use rescript_compiler::binary_ast::{
-    Dependencies, extract_signature_deps, extract_structure_deps,
-    write_signature_ast_current_with_extra_deps_and_builtin_ppx,
-    write_structure_ast_current_with_extra_deps_and_builtin_ppx,
-};
+use rescript_compiler::binary_ast::{Dependencies, extract_signature_deps, extract_structure_deps};
 use rescript_compiler::parser::{Parser, module};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use tracing::info_span;
 
 struct GeneratedAst {
-    path: PathBuf,
     stderr: Option<helpers::StdErr>,
     stored_ast: Option<super::build_types::StoredAst>,
     deps: Option<Dependencies>,
@@ -36,16 +29,11 @@ pub fn generate_asts(
 ) -> anyhow::Result<String> {
     let mut has_failure = false;
     let mut stderr = "".to_string();
-    let use_rust_parser = build_state.use_rust_parser();
-    let in_process = build_state.build_mode().is_in_process();
-    if use_rust_parser {
-        // `bsc` defaults to `-color always` (compiler/bsc/rescript_compiler_main.ml:494),
-        // and the in-process frontend stands in for `bsc -bs-ast`.
-        rescript_compiler::parser::code_frame::set_color_mode(
-            rescript_compiler::parser::code_frame::ColorMode::Always,
-        );
-    }
-    let store_ast = use_rust_parser && (in_process || build_state.dump_typed_sexp());
+    // `bsc` defaults to `-color always` (compiler/bsc/rescript_compiler_main.ml:494),
+    // and the in-process frontend stands in for `bsc -bs-ast`.
+    rescript_compiler::parser::code_frame::set_color_mode(
+        rescript_compiler::parser::code_frame::ColorMode::Always,
+    );
 
     // Count dirty modules for the span attribute only when a subscriber is
     // listening. Otherwise iterating every module every parse phase is pure
@@ -75,20 +63,16 @@ pub fn generate_asts(
                 .get_package(&module.package_name)
                 .expect("Package not found");
             match &module.source_type {
-                SourceType::MlMap(_mlmap) => {
-                    let path = package.get_mlmap_path();
-                    (
-                        module_name.to_owned(),
-                        Ok(GeneratedAst {
-                            path: Path::new(&path).to_path_buf(),
-                            stderr: None,
-                            stored_ast: None,
-                            deps: None,
-                        }),
-                        Ok(None),
-                        false,
-                    )
-                }
+                SourceType::MlMap(_mlmap) => (
+                    module_name.to_owned(),
+                    Ok(GeneratedAst {
+                        stderr: None,
+                        stored_ast: None,
+                        deps: None,
+                    }),
+                    Ok(None),
+                    false,
+                ),
 
                 SourceType::SourceFile(source_file) => {
                     let (ast_result, iast_result, dirty) = if source_file.implementation.parse_dirty
@@ -105,9 +89,6 @@ pub fn generate_asts(
                             &source_file.implementation.path.to_owned(),
                             build_state,
                             build_state.get_warn_error_override(),
-                            use_rust_parser,
-                            store_ast,
-                            in_process,
                             &parse_span,
                         )
                         .map_err(|e| e.to_string());
@@ -119,9 +100,6 @@ pub fn generate_asts(
                                     &interface_file_path.to_owned(),
                                     build_state,
                                     build_state.get_warn_error_override(),
-                                    use_rust_parser,
-                                    store_ast,
-                                    in_process,
                                     &parse_span,
                                 ) {
                                     Ok(v) => Ok(Some(v)),
@@ -135,14 +113,11 @@ pub fn generate_asts(
                     } else {
                         (
                             Ok(GeneratedAst {
-                                path: PathBuf::from(helpers::get_basename(&source_file.implementation.path))
-                                    .with_extension("ast"),
                                 stderr: None,
                                 stored_ast: None,
                                 deps: None,
                             }),
-                            Ok(source_file.interface.as_ref().map(|i| GeneratedAst {
-                                path: PathBuf::from(helpers::get_basename(&i.path)).with_extension("iast"),
+                            Ok(source_file.interface.as_ref().map(|_| GeneratedAst {
                                 stderr: None,
                                 stored_ast: None,
                                 deps: None,
@@ -203,7 +178,6 @@ pub fn generate_asts(
                             stderr: Some(stderr_warnings),
                             stored_ast,
                             deps,
-                            ..
                         }) if package.is_local_dep => {
                             source_file.implementation.parse_state = ParseState::Warning;
                             source_file.implementation.parse_dirty = true;
@@ -236,7 +210,6 @@ pub fn generate_asts(
                             stderr: Some(stderr_warnings),
                             stored_ast,
                             deps,
-                            ..
                         }) => {
                             source_file.implementation.parse_state = ParseState::Success;
                             source_file.implementation.parse_dirty = false;
@@ -274,7 +247,6 @@ pub fn generate_asts(
                             stderr: None,
                             stored_ast,
                             deps,
-                            ..
                         }) => {
                             source_file.implementation.parse_state = ParseState::Success;
                             source_file.implementation.parse_dirty = false;
@@ -313,7 +285,6 @@ pub fn generate_asts(
                             stderr: Some(stderr_warnings),
                             stored_ast,
                             deps,
-                            ..
                         })) if package.is_local_dep => {
                             if let Some(interface) = source_file.interface.as_mut() {
                                 interface.parse_state = ParseState::Warning;
@@ -348,7 +319,6 @@ pub fn generate_asts(
                             stderr: Some(stderr_warnings),
                             stored_ast,
                             deps,
-                            ..
                         })) => {
                             if let Some(interface) = source_file.interface.as_mut() {
                                 interface.parse_state = ParseState::Success;
@@ -385,7 +355,6 @@ pub fn generate_asts(
                             stderr: None,
                             stored_ast,
                             deps,
-                            ..
                         })) => {
                             if let Some(interface) = source_file.interface.as_mut() {
                                 interface.parse_state = ParseState::Success;
@@ -441,59 +410,9 @@ pub fn generate_asts(
             let is_dirty = match &module.source_type {
                 SourceType::MlMap(_) => {
                     if dirty_packages.contains(&package_name) {
-                        if in_process {
-                            // In-process builds synthesize namespace signatures directly into
-                            // the module registry during compilation. The file-backed mlmap
-                            // compiler only creates .cmi/.cmj/.cmt assets for subprocess mode.
-                            true
-                        } else {
-                            let package = build_state
-                                .build_state
-                                .packages
-                                .get(&package_name)
-                                .expect("Package not found");
-                            // probably better to do this in a different function
-                            // specific to compiling mlmaps
-                            let compile_path = package.get_mlmap_compile_path();
-                            let mlmap_hash = helpers::compute_file_hash(Path::new(&compile_path));
-                            if let Err(err) = namespaces::compile_mlmap(
-                                &build_state.build_state.project_context,
-                                package,
-                                &module_name,
-                                &build_state.build_state.compiler_info.bsc_path,
-                            ) {
-                                has_failure = true;
-                                stderr.push_str(&format!("{err}\n"));
-                            }
-                            let mlmap_hash_after = helpers::compute_file_hash(Path::new(&compile_path));
-
-                            let suffix = package
-                                .namespace
-                                .to_suffix()
-                                .expect("namespace should be set for mlmap module");
-                            let base_build_path = package.get_build_path().join(&suffix);
-                            let base_ocaml_build_path = package.get_ocaml_build_path().join(&suffix);
-                            let _ = std::fs::copy(
-                                base_build_path.with_extension("cmi"),
-                                base_ocaml_build_path.with_extension("cmi"),
-                            );
-                            let _ = std::fs::copy(
-                                base_build_path.with_extension("cmt"),
-                                base_ocaml_build_path.with_extension("cmt"),
-                            );
-                            let _ = std::fs::copy(
-                                base_build_path.with_extension("cmj"),
-                                base_ocaml_build_path.with_extension("cmj"),
-                            );
-                            let _ = std::fs::copy(
-                                base_build_path.with_extension("mlmap"),
-                                base_ocaml_build_path.with_extension("mlmap"),
-                            );
-                            match (mlmap_hash, mlmap_hash_after) {
-                                (Some(digest), Some(digest_after)) => !digest.eq(&digest_after),
-                                _ => true,
-                            }
-                        }
+                        // In-process builds synthesize namespace signatures directly into
+                        // the module registry during compilation.
+                        true
                     } else {
                         false
                     }
@@ -565,28 +484,10 @@ pub fn parser_args(
 fn make_parse_file_span(
     filename: &Path,
     package: &Package,
-    parser_args: &[String],
     build_state: &BuildState,
     parent: &tracing::Span,
 ) -> tracing::Span {
     let module_name = helpers::file_path_to_module_name(filename, &package.namespace);
-    let mut ppx_names: Vec<String> = Vec::new();
-    let mut experimental: Vec<String> = Vec::new();
-    for pair in parser_args.windows(2) {
-        if pair[0] == "-ppx" {
-            // Use the PPX executable's file name so paths like
-            // `node_modules/foo/ppx.exe` reduce to `ppx.exe` cross-platform.
-            let name = Path::new(&pair[1])
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| pair[1].clone());
-            ppx_names.push(name);
-        } else if pair[0] == "-enable-experimental" {
-            experimental.push(pair[1].clone());
-        }
-    }
-    let ppx = ppx_names.join(",");
-    let experimental = experimental.join(",");
     let root_config = build_state.get_root_config();
     let jsx = root_config.get_jsx_args().get(1).cloned().unwrap_or_default();
     let bsc_flags = config::flatten_flags(&package.config.compiler_flags).join(" ");
@@ -595,8 +496,6 @@ fn make_parse_file_span(
         "build.parse_file",
         module = %module_name,
         package = %package.name,
-        ppx = %ppx,
-        experimental = %experimental,
         jsx = %jsx,
         bsc_flags = %bsc_flags,
     )
@@ -614,9 +513,6 @@ pub(crate) fn parse_for_tooling(
         filename,
         build_state,
         build_state.get_warn_error_override(),
-        true,
-        true,
-        true,
         &tracing::Span::none(),
     )?;
     generated
@@ -629,36 +525,25 @@ fn generate_ast(
     filename: &Path,
     build_state: &BuildState,
     warn_error_override: Option<String>,
-    use_rust_parser: bool,
-    store_ast: bool,
-    in_process: bool,
     parent_span: &tracing::Span,
 ) -> anyhow::Result<GeneratedAst> {
     let file_path = PathBuf::from(&package.path).join(filename);
 
-    let build_path_abs = package.get_build_path();
-    let ast_path = helpers::get_ast_path(filename);
-    let ast_output_path = build_path_abs.join(&ast_path);
     // `bsc -absname` names the source by its normalized absolute path.
     let source_path_str = helpers::ocaml_absname(&file_path).to_string_lossy().to_string();
     let bsc_flags = config::flatten_flags(&package.config.compiler_flags);
     let open_deps = open_dependencies_from_bsc_flags(&bsc_flags);
-    // The Rust parser reads the source once, for both the ppx filter and
-    // parsing.
-    let source_bytes = if use_rust_parser {
-        Some(std::fs::read(&file_path).with_context(|| format!("Failed to read {}", file_path.display()))?)
-    } else {
-        None
-    };
+    // The source is read once, for both the ppx filter and parsing.
+    let source_bytes =
+        std::fs::read(&file_path).with_context(|| format!("Failed to read {}", file_path.display()))?;
 
-    // The Rust parser runs the same frontend as `bsc -bs-ast` in process, so it
+    // The parser runs the same frontend as `bsc -bs-ast` in process, so it
     // reads the flags OCaml's `-bs-ast` would receive (see `parser_args`).
     // `-ppx` rewriters from `ppx-flags`, as `parser_args` passes them to
     // `bsc -bs-ast`.
     let mut external_ppxs: Vec<String> = match &package.config.ppx_flags {
-        Some(flags) if use_rust_parser && !flags.is_empty() => {
-            let contents =
-                std::str::from_utf8(source_bytes.as_deref().unwrap_or_default()).unwrap_or_default();
+        Some(flags) if !flags.is_empty() => {
+            let contents = std::str::from_utf8(&source_bytes).unwrap_or_default();
             let ppx_args = config::flatten_ppx_flags(
                 &build_state.project_context,
                 &package.config,
@@ -679,7 +564,7 @@ fn generate_ast(
         external_ppxs.retain(|command| !command.contains("spice"));
         external_ppxs.len() != before
     };
-    let frontend_options = use_rust_parser.then(|| {
+    let frontend_options = {
         let root_config = build_state.project_context.get_root_config();
         let flags = [
             root_config.get_jsx_args(),
@@ -707,109 +592,27 @@ fn generate_ast(
             external_ppxs,
             ..Default::default()
         }
-    });
-
-    let parser_args = if use_rust_parser {
-        Vec::new()
-    } else {
-        let contents = helpers::read_file(&file_path).expect("Error reading file");
-        let (_expected_ast_path, parser_args) = parser_args(
-            &build_state.project_context,
-            &package.config,
-            filename,
-            &contents,
-            package.is_local_dep,
-            warn_error_override,
-        )?;
-        parser_args
     };
 
     let _parse_span = if tracing::enabled!(tracing::Level::INFO) {
-        make_parse_file_span(filename, package, &parser_args, build_state, parent_span).entered()
+        make_parse_file_span(filename, package, build_state, parent_span).entered()
     } else {
         tracing::Span::none().entered()
     };
 
-    // generate the dir of the ast_path (it mirrors the source file dir)
-    if !in_process {
-        let ast_parent_path = package.get_build_path().join(ast_path.parent().unwrap());
-        helpers::create_path(&ast_parent_path);
-    }
-
-    /* Create .ast */
-    let result = if use_rust_parser {
-        generate_ast_with_rust_parser(
-            &file_path,
-            source_bytes.expect("Rust parser source"),
-            &ast_output_path,
-            &source_path_str,
-            &open_deps,
-            frontend_options.as_ref().expect("Rust parser options"),
-            store_ast,
-            in_process,
-        )
-        .map_err(|err| anyhow!("Error in {}:\n{}", package.name, err))
-        .map(|(stderr, stored_ast, deps)| GeneratedAst {
-            path: ast_path.clone(),
-            stderr,
-            stored_ast,
-            deps,
-        })
-    } else {
-        match Some(
-            Command::new(&build_state.compiler_info.bsc_path)
-                .current_dir(&build_path_abs)
-                .args(parser_args)
-                .output()
-                .map_err(|e| {
-                    anyhow!(
-                        "Error running bsc for parsing {}: {}",
-                        filename.to_string_lossy(),
-                        e
-                    )
-                })?,
-        ) {
-            Some(res_to_ast) => {
-                let stderr = String::from_utf8_lossy(&res_to_ast.stderr).to_string();
-
-                if helpers::contains_ascii_characters(&stderr) {
-                    if res_to_ast.status.success() {
-                        Ok(GeneratedAst {
-                            path: ast_path.clone(),
-                            stderr: Some(stderr.to_string()),
-                            stored_ast: None,
-                            deps: None,
-                        })
-                    } else {
-                        Err(anyhow!("Error in {}:\n{}", package.name, stderr))
-                    }
-                } else {
-                    Ok(GeneratedAst {
-                        path: ast_path.clone(),
-                        stderr: None,
-                        stored_ast: None,
-                        deps: None,
-                    })
-                }
-            }
-            _ => {
-                log::info!("Parsing file {}...", filename.display());
-
-                Err(anyhow!(
-                    "Could not find canonicalize_string_path for file {} in package {}",
-                    filename.display(),
-                    package.name
-                ))
-            }
-        }
-    };
-    if !in_process && let Ok(GeneratedAst { path: ast_path, .. }) = &result {
-        let _ = std::fs::copy(
-            Path::new(&build_path_abs).join(ast_path),
-            package.get_ocaml_build_path().join(ast_path.file_name().unwrap()),
-        );
-    }
-    result
+    parse_source(
+        &file_path,
+        source_bytes,
+        &source_path_str,
+        &open_deps,
+        &frontend_options,
+    )
+    .map_err(|err| anyhow!("Error in {}:\n{}", package.name, err))
+    .map(|(stderr, stored_ast, deps)| GeneratedAst {
+        stderr,
+        stored_ast: Some(stored_ast),
+        deps: Some(deps),
+    })
 }
 
 const SOURCE_TRIGGERED_PPXES: &[(&[&str], &str)] = &[
@@ -863,19 +666,16 @@ fn source_bytes_to_latin1(bytes: Vec<u8>) -> String {
     }
 }
 
-fn generate_ast_with_rust_parser(
+fn parse_source(
     source_file: &Path,
     bytes: Vec<u8>,
-    ast_output_path: &Path,
     source_path_for_ast: &str,
     extra_deps: &[String],
     options: &rescript_compiler::driver::CompilerOptions,
-    store_ast: bool,
-    in_process: bool,
 ) -> anyhow::Result<(
     Option<helpers::StdErr>,
-    Option<super::build_types::StoredAst>,
-    Option<Dependencies>,
+    super::build_types::StoredAst,
+    Dependencies,
 )> {
     rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
         let source = source_bytes_to_latin1(bytes);
@@ -908,36 +708,17 @@ fn generate_ast_with_rust_parser(
             }
             let signature = frontend.signature;
 
-            let deps = if in_process {
-                let mut deps = extract_signature_deps(parser.arena(), &signature);
-                deps.extend(extra_deps.iter().cloned());
-                Some(deps)
-            } else {
-                write_signature_ast_current_with_extra_deps_and_builtin_ppx(
-                    ast_output_path,
-                    source_path_for_ast,
-                    parser.arena_mut(),
-                    &signature,
-                    extra_deps,
-                    false,
-                )
-                .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
-                None
-            };
+            let mut deps = extract_signature_deps(parser.arena(), &signature);
+            deps.extend(extra_deps.iter().cloned());
 
-            let stored = if store_ast {
-                let mut arena = parser.into_arena();
-                rescript_compiler::types::typecore::prepare_typecheck_arena(&mut arena);
-                Some(super::build_types::StoredAst::Signature(Arc::new(
-                    super::build_types::StoredSignatureAst {
-                        arena,
-                        signature,
-                        source_len: source.len(),
-                    },
-                )))
-            } else {
-                None
-            };
+            let mut arena = parser.into_arena();
+            rescript_compiler::types::typecore::prepare_typecheck_arena(&mut arena);
+            let stored =
+                super::build_types::StoredAst::Signature(Arc::new(super::build_types::StoredSignatureAst {
+                    arena,
+                    signature,
+                    source_len: source.len(),
+                }));
             Ok(((!warnings.is_empty()).then_some(warnings), stored, deps))
         } else {
             let structure = module::parse_structure(&mut parser);
@@ -958,37 +739,18 @@ fn generate_ast_with_rust_parser(
             }
             let structure = frontend.structure;
 
-            let (structure, deps) = if in_process {
-                // The frontend already applied `no_export` (js_implementation.ml:130).
-                let mut deps = extract_structure_deps(parser.arena(), &structure);
-                deps.extend(extra_deps.iter().cloned());
-                (structure, Some(deps))
-            } else {
-                write_structure_ast_current_with_extra_deps_and_builtin_ppx(
-                    ast_output_path,
-                    source_path_for_ast,
-                    parser.arena_mut(),
-                    &structure,
-                    extra_deps,
-                    false,
-                )
-                .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
-                (structure, None)
-            };
+            // The frontend already applied `no_export` (js_implementation.ml:130).
+            let mut deps = extract_structure_deps(parser.arena(), &structure);
+            deps.extend(extra_deps.iter().cloned());
 
-            let stored = if store_ast {
-                let mut arena = parser.into_arena();
-                rescript_compiler::types::typecore::prepare_typecheck_arena(&mut arena);
-                Some(super::build_types::StoredAst::Structure(Arc::new(
-                    super::build_types::StoredStructureAst {
-                        arena,
-                        structure,
-                        source_len: source.len(),
-                    },
-                )))
-            } else {
-                None
-            };
+            let mut arena = parser.into_arena();
+            rescript_compiler::types::typecore::prepare_typecheck_arena(&mut arena);
+            let stored =
+                super::build_types::StoredAst::Structure(Arc::new(super::build_types::StoredStructureAst {
+                    arena,
+                    structure,
+                    source_len: source.len(),
+                }));
             Ok(((!warnings.is_empty()).then_some(warnings), stored, deps))
         }
     })

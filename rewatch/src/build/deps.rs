@@ -1,6 +1,5 @@
 use super::build_types::*;
 use super::packages;
-use crate::helpers;
 use ahash::AHashSet;
 use rayon::prelude::*;
 use rescript_compiler::binary_ast::Dependencies;
@@ -74,46 +73,6 @@ fn resolve_dep_modules<'a>(
         .collect::<AHashSet<String>>()
 }
 
-fn get_dep_modules(
-    ast_file: &str,
-    namespace: Option<String>,
-    package_modules: &AHashSet<String>,
-    valid_modules: &AHashSet<String>,
-    package: &packages::Package,
-    build_state: &BuildState,
-) -> AHashSet<String> {
-    let mut deps = Dependencies::new();
-    let ast_file = package.get_build_path().join(ast_file);
-    match helpers::read_lines(&ast_file) {
-        Ok(lines) => {
-            // we skip the first line with is some null characters
-            // the following lines in the AST are the dependency modules
-            // we stop when we hit a line that is an absolute path, this is the path of the file.
-            // this is the point where the dependencies end and the actual AST starts
-            for line in lines.skip(1).flatten() {
-                let line = line.trim().to_string();
-                if std::path::Path::new(&line).is_absolute() {
-                    break;
-                } else if !line.is_empty() {
-                    deps.insert(line);
-                }
-            }
-        }
-        _ => {
-            panic!("Could not read file {}", ast_file.to_string_lossy());
-        }
-    }
-
-    resolve_dep_modules(
-        deps.iter(),
-        namespace,
-        package_modules,
-        valid_modules,
-        package,
-        build_state,
-    )
-}
-
 fn get_dep_modules_from_memory(
     deps: &Dependencies,
     namespace: Option<String>,
@@ -156,8 +115,7 @@ fn rebuild_dependents(modules: &mut ahash::AHashMap<String, Module>) {
 
 pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<String>) {
     let all_mod = &build_state.module_names.union(deleted_modules).cloned().collect();
-    let in_process_mode = build_state.build_mode().is_in_process();
-    let in_memory_deps = in_process_mode.then(|| build_state.snapshot_in_memory_deps());
+    let in_memory_deps = build_state.snapshot_in_memory_deps();
     build_state
         .modules
         .par_iter()
@@ -167,32 +125,13 @@ pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<
                 let package = build_state
                     .get_package(&module.package_name)
                     .expect("Package not found");
-                let ast_path = helpers::get_ast_path(&source_file.implementation.path);
                 if module.deps_dirty || !build_state.deps_initialized {
-                    let impl_key = format!("{module_name}:impl");
-                    let mut deps = if in_process_mode {
-                        in_memory_deps
-                            .as_ref()
-                            .and_then(|deps| deps.get(&impl_key))
-                            .map(|in_memory_dep| {
-                                get_dep_modules_from_memory(
-                                    in_memory_dep,
-                                    package.namespace.to_suffix(),
-                                    package.modules.as_ref().unwrap(),
-                                    all_mod,
-                                    package,
-                                    build_state,
-                                )
-                            })
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "in-process invariant violated: missing stored implementation deps for {module_name}; refusing to read {} from disk",
-                                    ast_path.display()
-                                )
-                            })
-                    } else {
-                        get_dep_modules(
-                            &ast_path.to_string_lossy(),
+                    let deps_for = |key: &str, kind: &str| {
+                        let stored = in_memory_deps
+                            .get(key)
+                            .unwrap_or_else(|| panic!("missing stored {kind} deps for {module_name}"));
+                        get_dep_modules_from_memory(
+                            stored,
                             package.namespace.to_suffix(),
                             package.modules.as_ref().unwrap(),
                             all_mod,
@@ -200,42 +139,9 @@ pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<
                             build_state,
                         )
                     };
-
-                    if let Some(interface) = &source_file.interface {
-                        let iast_path = helpers::get_ast_path(&interface.path);
-
-                        let intf_key = format!("{module_name}:intf");
-                        let intf_deps = if in_process_mode {
-                            in_memory_deps
-                                .as_ref()
-                                .and_then(|deps| deps.get(&intf_key))
-                                .map(|in_memory_dep| {
-                                    get_dep_modules_from_memory(
-                                        in_memory_dep,
-                                        package.namespace.to_suffix(),
-                                        package.modules.as_ref().unwrap(),
-                                        all_mod,
-                                        package,
-                                        build_state,
-                                    )
-                                })
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "in-process invariant violated: missing stored interface deps for {module_name}; refusing to read {} from disk",
-                                        iast_path.display()
-                                    )
-                                })
-                        } else {
-                            get_dep_modules(
-                                &iast_path.to_string_lossy(),
-                                package.namespace.to_suffix(),
-                                package.modules.as_ref().unwrap(),
-                                all_mod,
-                                package,
-                                build_state,
-                            )
-                        };
-                        deps.extend(intf_deps)
+                    let mut deps = deps_for(&format!("{module_name}:impl"), "implementation");
+                    if source_file.interface.is_some() {
+                        deps.extend(deps_for(&format!("{module_name}:intf"), "interface"));
                     }
                     match &package.namespace {
                         packages::Namespace::NamespaceWithEntry { namespace: _, entry }
@@ -267,7 +173,6 @@ pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::SystemTime;
 
     fn module(deps: &[&str], dependents: &[&str]) -> Module {
         Module {
@@ -276,8 +181,6 @@ mod tests {
             dependents: dependents.iter().map(|dep| (*dep).to_string()).collect(),
             package_name: "test".to_string(),
             compile_dirty: false,
-            last_compiled_cmi: None,
-            last_compiled_cmt: Some(SystemTime::UNIX_EPOCH),
             deps_dirty: false,
             is_type_dev: false,
         }

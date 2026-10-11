@@ -202,42 +202,6 @@ pub struct WarnErrorArg {
     pub warn_error: Option<String>,
 }
 
-#[derive(Args, Debug, Clone, Copy)]
-pub struct InProcessArg {
-    /// Accepted for compatibility: builds always compile in-process.
-    #[arg(long, hide = true)]
-    pub in_process: bool,
-}
-
-/// Test-only environment variable that builds with an external compiler
-/// executable (`RESCRIPT_BSC_EXE`) instead of the in-process compiler. It
-/// exists so parity scripts can build their OCaml reference outputs with the
-/// same build system; it is not a user-facing build mode.
-pub const SUBPROCESS_BUILD_ENV: &str = "RESCRIPT_SUBPROCESS_BUILD";
-
-fn subprocess_build_requested() -> bool {
-    std::env::var(SUBPROCESS_BUILD_ENV).is_ok_and(|value| !value.is_empty() && value != "0")
-}
-
-/// Derive the build mode. Builds always compile in-process; only the
-/// test-only [`SUBPROCESS_BUILD_ENV`] selects an external compiler.
-/// `--in-process` is accepted for compatibility.
-pub fn resolve_build_mode(in_process: bool) -> crate::build::build_types::BuildMode {
-    use crate::build::build_types::BuildMode;
-    if !in_process && subprocess_build_requested() {
-        BuildMode::ExternalBsc
-    } else {
-        BuildMode::InProcess
-    }
-}
-
-#[derive(Args, Debug, Clone, Copy)]
-pub struct DumpTypedSexpArg {
-    /// Dump typed tree as sexp to .sexp files in lib/ocaml/ during compilation.
-    #[arg(long)]
-    pub dump_typed_sexp: bool,
-}
-
 fn validate_features_string(s: &str) -> Result<String, String> {
     let trimmed_parts: Vec<&str> = s.split(',').map(str::trim).filter(|p| !p.is_empty()).collect();
     if trimmed_parts.is_empty() {
@@ -285,12 +249,6 @@ pub struct BuildArgs {
 
     #[command(flatten)]
     pub warn_error: WarnErrorArg,
-
-    #[command(flatten)]
-    pub in_process: InProcessArg,
-
-    #[command(flatten)]
-    pub dump_typed_sexp_arg: DumpTypedSexpArg,
 
     #[command(flatten)]
     pub features: FeaturesArg,
@@ -576,12 +534,6 @@ pub struct WatchArgs {
     pub warn_error: WarnErrorArg,
 
     #[command(flatten)]
-    pub in_process: InProcessArg,
-
-    #[command(flatten)]
-    pub dump_typed_sexp_arg: DumpTypedSexpArg,
-
-    #[command(flatten)]
     pub features: FeaturesArg,
 
     /// Clear terminal screen before each rebuild in interactive watch mode.
@@ -679,14 +631,6 @@ impl Deref for WarnErrorArg {
 
     fn deref(&self) -> &Self::Target {
         &self.warn_error
-    }
-}
-
-impl Deref for DumpTypedSexpArg {
-    type Target = bool;
-
-    fn deref(&self) -> &Self::Target {
-        &self.dump_typed_sexp
     }
 }
 

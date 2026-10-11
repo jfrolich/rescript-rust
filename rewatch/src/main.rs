@@ -73,9 +73,8 @@ fn run_main(otel_enabled: bool) -> Result<()> {
         }
         cli::Command::Build(build_args) => {
             let features = build_args.features.parsed();
-            let build_mode = cli::resolve_build_mode(build_args.in_process.in_process);
-            configure_rayon_for_in_process(build_mode);
-            let build_result = run_with_in_process_stack(build_mode, || {
+            configure_rayon_for_in_process();
+            let build_result = run_with_in_process_stack(|| {
                 build::build(
                     &build_args.filter,
                     Path::new(&build_args.folder as &str),
@@ -83,8 +82,6 @@ fn run_main(otel_enabled: bool) -> Result<()> {
                     build_args.no_timing,
                     plain_output,
                     (*build_args.warn_error).clone(),
-                    build_mode,
-                    build_args.dump_typed_sexp_arg.dump_typed_sexp,
                     build_args.prod,
                     features,
                 )
@@ -108,10 +105,9 @@ fn run_main(otel_enabled: bool) -> Result<()> {
         }
         cli::Command::Watch(watch_args) => {
             let features = watch_args.features.parsed();
-            let build_mode = cli::resolve_build_mode(watch_args.in_process.in_process);
-            configure_rayon_for_in_process(build_mode);
+            configure_rayon_for_in_process();
             let _lock = get_lock_or_exit(LockKind::Watch, &watch_args.folder);
-            let watch_result = run_with_in_process_stack(build_mode, || {
+            let watch_result = run_with_in_process_stack(|| {
                 watcher::start(
                     &watch_args.filter,
                     show_progress,
@@ -119,8 +115,6 @@ fn run_main(otel_enabled: bool) -> Result<()> {
                     (*watch_args.after_build).clone(),
                     plain_output,
                     (*watch_args.warn_error).clone(),
-                    build_mode,
-                    watch_args.dump_typed_sexp_arg.dump_typed_sexp,
                     watch_args.clear_screen,
                     watch_args.prod,
                     features,
@@ -146,18 +140,16 @@ fn run_main(otel_enabled: bool) -> Result<()> {
     }
 }
 
-fn configure_rayon_for_in_process(build_mode: rescript::build::build_types::BuildMode) {
-    if build_mode.is_in_process() {
-        let mut builder = rayon::ThreadPoolBuilder::new();
-        if std::env::var_os("RAYON_NUM_THREADS").is_none() {
-            builder = builder.num_threads(default_in_process_threads());
-        }
-        builder
-            .thread_name(|index| format!("rewatch-in-process-worker-{index}"))
-            .stack_size(IN_PROCESS_STACK_SIZE)
-            .build_global()
-            .expect("failed to configure in-process Rayon worker pool");
+fn configure_rayon_for_in_process() {
+    let mut builder = rayon::ThreadPoolBuilder::new();
+    if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+        builder = builder.num_threads(default_in_process_threads());
     }
+    builder
+        .thread_name(|index| format!("rewatch-in-process-worker-{index}"))
+        .stack_size(IN_PROCESS_STACK_SIZE)
+        .build_global()
+        .expect("failed to configure in-process Rayon worker pool");
 }
 
 fn default_in_process_threads() -> usize {
@@ -175,15 +167,11 @@ fn default_in_process_threads() -> usize {
 
 const IN_PROCESS_STACK_SIZE: usize = 256 * 1024 * 1024;
 
-fn run_with_in_process_stack<T, F>(build_mode: rescript::build::build_types::BuildMode, f: F) -> T
+fn run_with_in_process_stack<T, F>(f: F) -> T
 where
     T: Send,
     F: FnOnce() -> T + Send,
 {
-    if !build_mode.is_in_process() {
-        return f();
-    }
-
     std::thread::scope(|scope| {
         let handle = std::thread::Builder::new()
             .name("rewatch-in-process-main".to_string())
