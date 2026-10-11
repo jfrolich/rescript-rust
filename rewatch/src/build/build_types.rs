@@ -249,10 +249,10 @@ pub struct BuildCommandState {
     // interface of (type checking its interface and implementation, plus
     // the modules its generated code may require).
     pub loaded_units: Mutex<AHashMap<String, AHashSet<String>>>,
-    // The items of each unit the last compile of a module read (see
-    // `rescript_compiler::cmi::item_deps`).
-    pub unit_reads:
-        Mutex<AHashMap<String, std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>>,
+    // What the last compile of a module read of other units (see
+    // `rescript_compiler::cmi::item_deps`), resolved when the build is
+    // recorded.
+    pub unit_reads: Mutex<AHashMap<String, PendingReads>>,
     // Recorded imports a build checked item by item and found unaffected:
     // module -> unit -> the unit's interface digest now.
     pub verified_imports: Mutex<AHashMap<String, AHashMap<String, u64>>>,
@@ -475,23 +475,19 @@ impl BuildCommandState {
     /// number assigned (which may be the same as before if unchanged).
     /// Record units a compile of `module_name` read. An interface compile
     /// records first, then its implementation adds to it.
-    pub fn record_loaded_units(
-        &self,
-        module_name: &str,
-        units: Vec<String>,
-        reads: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
-    ) {
+    pub fn record_loaded_units(&self, module_name: &str, units: Vec<String>, reads: PendingReads) {
         let mut loaded = self.loaded_units.lock().unwrap();
         let entry = loaded.entry(module_name.to_string()).or_default();
         entry.extend(units.into_iter().filter(|unit| unit != module_name));
         drop(loaded);
         let mut all_reads = self.unit_reads.lock().unwrap();
         let entry = all_reads.entry(module_name.to_string()).or_default();
-        for (unit, keys) in reads {
+        for (unit, keys) in reads.resolved {
             if unit != module_name {
-                entry.entry(unit).or_default().extend(keys);
+                entry.resolved.entry(unit).or_default().extend(keys);
             }
         }
+        entry.module_level.extend(reads.module_level);
     }
 
     pub fn register_in_memory_interface(&self, module_name: String, fingerprint: u64, is_pure: bool) -> u64 {
@@ -675,4 +671,17 @@ pub struct CompileAssetsState {
     pub cmt_modules: AHashMap<String, SystemTime>,
     pub ast_rescript_file_locations: AHashSet<PathBuf>,
     pub rescript_file_locations: AHashSet<PathBuf>,
+}
+
+/// What a compile read of other units: the item keys read through the
+/// units' signatures (final when the module compiles). What the inlinable
+/// bodies of those items refer to comes from JS metadata a dependency may
+/// publish after this compile, so it is added when the build is recorded
+/// (`ModuleRegistry::lambda_reads`).
+#[derive(Debug, Default)]
+pub struct PendingReads {
+    pub resolved: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// Units read only at module level (the modules the generated code may
+    /// require).
+    pub module_level: Vec<String>,
 }

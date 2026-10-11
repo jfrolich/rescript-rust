@@ -3677,7 +3677,10 @@ fn compile_module_in_process_to_js_boundary(
         build_command_state.record_loaded_units(
             module_name,
             intf_result.loaded_units,
-            local_registry.resolve_reads(intf_result.unit_reads),
+            PendingReads {
+                resolved: local_registry.resolve_signature_reads(intf_result.unit_reads),
+                module_level: Vec::new(),
+            },
         );
 
         // Register the .resi's PersStruct in the local registry so the
@@ -3825,13 +3828,13 @@ fn compile_module_in_process_to_js_boundary(
             // What the backend reads besides the type checker: the modules
             // the generated code may require.
             let mut loaded_units = std::mem::take(&mut result.loaded_units);
-            let mut reads = local_registry.resolve_reads(std::mem::take(&mut result.unit_reads));
+            let mut reads = PendingReads {
+                resolved: local_registry.resolve_signature_reads(std::mem::take(&mut result.unit_reads)),
+                module_level: Vec::new(),
+            };
             for module_id in &result.possible_required_modules {
                 let unit = module_id.id.name().to_string();
-                reads
-                    .entry(unit.clone())
-                    .or_default()
-                    .insert(rescript_compiler::cmi::item_deps::MODULE_LEVEL.to_string());
+                reads.module_level.push(unit.clone());
                 loaded_units.push(unit);
             }
             build_command_state.record_loaded_units(module_name, loaded_units, reads);

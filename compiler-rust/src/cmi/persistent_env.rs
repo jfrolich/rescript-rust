@@ -441,7 +441,10 @@ pub struct ModuleRegistry {
     /// Item references of registered signatures (see `resolve_reads`),
     /// shared by every snapshot. Keyed by the signature's identity, so a
     /// module registered again gets fresh entries.
-    item_refs_cache: Arc<Mutex<HashMap<(String, usize, u64), Arc<super::item_deps::UnitRefs>>>>,
+    /// Keyed by unit, signature identity and fingerprint, and the identity
+    /// of the JS metadata whose inlinable bodies the references follow
+    /// (`usize::MAX` for references without them).
+    item_refs_cache: Arc<Mutex<HashMap<(String, usize, u64, usize), Arc<super::item_deps::UnitRefs>>>>,
 }
 
 impl ModuleRegistry {
@@ -513,49 +516,64 @@ impl ModuleRegistry {
         Some(super::item_deps::item_digests(pers.as_deref(), info.as_ref()))
     }
 
-    /// Resolve the reads of a compile against the registered modules (see
-    /// [`super::item_deps::resolve_reads`]). Runtime modules are not recorded.
-    pub fn resolve_reads(
+    /// Resolve the reads of a compile against the registered modules' signatures
+    /// (see [`super::item_deps::resolve_reads`]), leaving out what inlinable
+    /// bodies refer to: a dependency publishes those with its JS metadata,
+    /// possibly after this compile, while the signatures every reached unit
+    /// is read through are final. [`Self::lambda_reads`] adds the rest once
+    /// all metadata is final. Runtime modules are not recorded.
+    pub fn resolve_signature_reads(
         &self,
         reads: Vec<super::item_deps::UnitRead>,
     ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
-        struct Source<'a>(&'a ModuleRegistry);
-        impl super::item_deps::UnitSource for Source<'_> {
-            fn portable(&self, unit: &str) -> Option<Arc<PortablePersStruct>> {
-                self.0.registered(unit).0
+        super::item_deps::resolve_reads(reads, &RegistryUnitSource { registry: self, lambdas: false })
+    }
+
+    /// What the inlinable bodies of the values and modules in `resolved`
+    /// (reads from [`Self::resolve_signature_reads`]) refer to, closed over
+    /// everything those units' items refer to.
+    pub fn lambda_reads(
+        &self,
+        resolved: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+        use super::item_deps::{Kind, UnitRead, item_key};
+        let source = RegistryUnitSource { registry: self, lambdas: true };
+        let value_prefix = item_key(Kind::Value, "");
+        let module_prefix = item_key(Kind::Module, "");
+        let mut seeds = Vec::new();
+        for (unit, keys) in resolved {
+            let Some(info) = self.registered(unit).1 else {
+                continue;
+            };
+            if info.cmj_export_lambdas.is_empty() {
+                continue;
             }
-            fn lambda_units(&self, unit: &str, name: &str) -> Vec<String> {
-                let Some(info) = self.0.registered(unit).1 else {
-                    return Vec::new();
-                };
-                let Some(lambda) = info.cmj_export_lambdas.get(name) else {
-                    return Vec::new();
-                };
-                crate::lambda::lam_compile::collect_possible_required_modules_for_lambda(lambda)
-                    .into_iter()
-                    .map(|module| module.id.name().to_string())
-                    .collect()
-            }
-            fn ignored(&self, unit: &str) -> bool {
-                self.0.module_info_is_runtime(unit)
-            }
-            fn refs(&self, unit: &str) -> Option<Arc<super::item_deps::UnitRefs>> {
-                let ps = self
-                    .0
-                    .local_cached_modules
-                    .get(unit)
-                    .cloned()
-                    .or_else(|| self.0.cached_modules.get_cloned(unit))?;
-                let key = (unit.to_string(), Arc::as_ptr(&ps) as usize, ps.fingerprint);
-                if let Some(refs) = self.0.item_refs_cache.lock().unwrap().get(&key) {
-                    return Some(refs.clone());
+            let mut names: Vec<&str> = Vec::new();
+            if keys.contains(super::item_deps::WHOLE) {
+                names.extend(info.cmj_export_lambdas.keys().map(String::as_str));
+            } else {
+                for key in keys {
+                    if let Some(name) =
+                        key.strip_prefix(&value_prefix).or_else(|| key.strip_prefix(&module_prefix))
+                    {
+                        names.push(name);
+                    }
                 }
-                let refs = Arc::new(super::item_deps::unit_refs(unit, &ps, self));
-                self.0.item_refs_cache.lock().unwrap().insert(key, refs.clone());
-                Some(refs)
+            }
+            for name in names {
+                for lambda_unit in super::item_deps::UnitSource::lambda_units(&source, unit, name) {
+                    seeds.push(UnitRead {
+                        unit: lambda_unit,
+                        segs: Vec::new(),
+                        kind: Kind::Module,
+                    });
+                }
             }
         }
-        super::item_deps::resolve_reads(reads, &Source(self))
+        if seeds.is_empty() {
+            return std::collections::BTreeMap::new();
+        }
+        super::item_deps::resolve_reads(seeds, &source)
     }
 
     /// The module's published interface encoded for storage (see
@@ -7615,5 +7633,59 @@ mod resolution_view_tests {
         assert!(original.cache_contains_key("Leaf"));
         assert!(Arc::ptr_eq(&original.last_error, &merged.last_error));
         assert!(Arc::ptr_eq(&original.crc_units, &merged.crc_units));
+    }
+}
+
+/// The registered modules as a [`super::item_deps::UnitSource`].
+struct RegistryUnitSource<'a> {
+    registry: &'a ModuleRegistry,
+    /// Whether item references include what inlinable bodies refer to.
+    lambdas: bool,
+}
+
+impl super::item_deps::UnitSource for RegistryUnitSource<'_> {
+    fn portable(&self, unit: &str) -> Option<Arc<PortablePersStruct>> {
+        self.registry.registered(unit).0
+    }
+    fn lambda_units(&self, unit: &str, name: &str) -> Vec<String> {
+        if !self.lambdas {
+            return Vec::new();
+        }
+        let Some(info) = self.registry.registered(unit).1 else {
+            return Vec::new();
+        };
+        let Some(lambda) = info.cmj_export_lambdas.get(name) else {
+            return Vec::new();
+        };
+        crate::lambda::lam_compile::collect_possible_required_modules_for_lambda(lambda)
+            .into_iter()
+            .map(|module| module.id.name().to_string())
+            .collect()
+    }
+    fn ignored(&self, unit: &str) -> bool {
+        self.registry.module_info_is_runtime(unit)
+    }
+    fn refs(&self, unit: &str) -> Option<Arc<super::item_deps::UnitRefs>> {
+        let registry = self.registry;
+        let ps = registry
+            .local_cached_modules
+            .get(unit)
+            .cloned()
+            .or_else(|| registry.cached_modules.get_cloned(unit))?;
+        let lambdas = if self.lambdas {
+            registry
+                .registered(unit)
+                .1
+                .map_or(0, |info| Arc::as_ptr(&info.cmj_export_lambdas) as usize)
+        } else {
+            usize::MAX
+        };
+        let key = (unit.to_string(), Arc::as_ptr(&ps) as usize, ps.fingerprint, lambdas);
+        if let Some(refs) = registry.item_refs_cache.lock().unwrap().get(&key) {
+            return Some(refs.clone());
+        }
+        let refs = Arc::new(super::item_deps::unit_refs(unit, &ps, self));
+        registry.item_refs_cache.lock().unwrap().insert(key, refs.clone());
+        Some(refs)
     }
 }

@@ -148,6 +148,15 @@ impl UnitDigests {
         }
     }
 
+    /// What the inlinable bodies of the items in `resolved` refer to (see
+    /// `ModuleRegistry::lambda_reads`), with every module's JS metadata final.
+    pub fn lambda_reads(
+        &self,
+        resolved: &BTreeMap<String, std::collections::BTreeSet<String>>,
+    ) -> BTreeMap<String, std::collections::BTreeSet<String>> {
+        self.registry.lambda_reads(resolved)
+    }
+
     /// The module's interface encoded for storage.
     pub fn encode(
         &self,
@@ -1193,13 +1202,26 @@ fn written_interface(
         return None;
     }
     let own = digests.get(module_name)?;
-    let mut read_keys: BTreeMap<String, std::collections::BTreeSet<String>> = build_state
-        .unit_reads
-        .lock()
-        .unwrap()
-        .get(module_name)
-        .cloned()
-        .unwrap_or_default();
+    // What inlinable bodies refer to is added now, with dependencies' JS
+    // metadata final (they may publish it after this module compiled).
+    let mut read_keys: BTreeMap<String, std::collections::BTreeSet<String>> = {
+        let pending = build_state.unit_reads.lock().unwrap();
+        match pending.get(module_name) {
+            Some(pending) => {
+                let mut keys = pending.resolved.clone();
+                for (unit, unit_keys) in digests.lambda_reads(&pending.resolved) {
+                    keys.entry(unit).or_default().extend(unit_keys);
+                }
+                for unit in &pending.module_level {
+                    keys.entry(unit.clone())
+                        .or_default()
+                        .insert(item_deps::MODULE_LEVEL.to_string());
+                }
+                keys
+            }
+            None => BTreeMap::new(),
+        }
+    };
     // A unit the compile loaded without a recorded read is read whole.
     for unit in build_state.loaded_units.lock().unwrap().get(module_name)? {
         read_keys.entry(unit.clone()).or_insert_with(|| {
