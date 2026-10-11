@@ -224,6 +224,10 @@ pub struct SourceDeps {
 
 pub const META_BUILD_STARTED_AT: &str = "build_started_at";
 pub const META_BUILD_OK: &str = "build_ok";
+/// The files the package's sources compile to under the configuration of
+/// the build that recorded it, relative to the package, one per line (see
+/// `incremental::expected_outputs`).
+pub const META_OUTPUTS: &str = "outputs";
 
 /// Run SQLite's process-wide initialization once, before any connection is
 /// opened. Opening the per-package databases from several worker threads at

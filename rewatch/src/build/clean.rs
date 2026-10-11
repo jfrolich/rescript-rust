@@ -340,9 +340,63 @@ pub fn write_in_process_record(build_state: &BuildCommandState) {
                 .as_ref()
                 .and_then(|previous| previous.packages.get(package_name))
                 .map(|record| &record.state);
+            remove_obsolete_outputs(package, build_state.recorded_outputs.get(package_name), &record);
             build::state_db::write_record(package, previous, &record);
             build::state_db::remove_legacy_files(package);
         });
+}
+
+/// The output files each package's last recorded build listed.
+pub fn recorded_outputs(packages: &AHashMap<String, Package>) -> AHashMap<String, AHashSet<String>> {
+    packages
+        .par_iter()
+        .filter_map(|(name, package)| {
+            let meta = build::state_db::read_meta(package)?;
+            let outputs = meta.get(build::state_db::META_OUTPUTS)?;
+            Some((
+                name.clone(),
+                outputs.lines().map(str::to_string).collect::<AHashSet<_>>(),
+            ))
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Remove the files the previous build's sources compiled to that the
+/// current configuration no longer produces (another suffix or package spec,
+/// genType turned off, or a removed source). GenType files are removed only
+/// when genType wrote them.
+fn remove_obsolete_outputs(
+    package: &Package,
+    previous: Option<&AHashSet<String>>,
+    record: &build::state_db::PackageState,
+) {
+    let Some(previous) = previous else {
+        return;
+    };
+    let current: AHashSet<&str> = record
+        .meta
+        .get(build::state_db::META_OUTPUTS)
+        .map(|outputs| outputs.lines().collect())
+        .unwrap_or_default();
+    for output in previous {
+        if current.contains(output.as_str()) {
+            continue;
+        }
+        let file = package.path.join(&output);
+        if output.contains(".gen.") {
+            let generated = std::fs::read_to_string(&file)
+                .is_ok_and(|content| content.starts_with("/* TypeScript file generated from"));
+            if !generated {
+                continue;
+            }
+        }
+        let _ = std::fs::remove_file(&file);
+        let mut map_file = file.into_os_string();
+        map_file.push(".map");
+        let _ = std::fs::remove_file(PathBuf::from(map_file));
+    }
 }
 
 /// Read the previous in-process build's records and remove the outputs of
