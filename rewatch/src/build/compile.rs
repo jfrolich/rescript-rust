@@ -874,7 +874,7 @@ pub fn compile(
         // module releases its dependents once its metadata is final
         // (`metadata_same`). Cut-off builds compile every module of a round
         // and decide the next round from item digests that cover the metadata.
-        let defer_clean_signatures = in_process_mode && !cutoff;
+        let defer_clean_signatures = !cutoff;
         let mut deferred_clean: AHashSet<String> = AHashSet::new();
         let mut metadata_same: AHashMap<String, bool> = AHashMap::new();
 
