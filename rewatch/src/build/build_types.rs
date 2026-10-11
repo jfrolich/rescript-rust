@@ -12,6 +12,40 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{fmt::Display, ops::Deref, path::PathBuf, time::SystemTime};
 
+/// Intermediate representations a build writes for every module it compiles
+/// (the hidden `--dump` option of `rescript build`), for comparing them with
+/// the OCaml compiler's `-dtyped-sexp`/`-drawlambda`/`-dlambda-sexp` output.
+#[derive(Debug, Clone)]
+pub struct DumpRequest {
+    pub kinds: Vec<rescript_compiler::driver::DumpKind>,
+    /// Each dump is written to `<dir>/<package>/<source path>.<kind>`.
+    pub dir: PathBuf,
+}
+
+impl DumpRequest {
+    pub fn write(
+        &self,
+        package_name: &str,
+        source_path: &std::path::Path,
+        dumps: &[(rescript_compiler::driver::DumpKind, String)],
+    ) {
+        for (kind, text) in dumps {
+            let mut path = self.dir.join(package_name).join(source_path).into_os_string();
+            path.push(".");
+            path.push(kind.name());
+            let path = PathBuf::from(path);
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            // Dumps are Latin-1 text: one byte per char.
+            let bytes: Vec<u8> = text.chars().map(|c| c as u32 as u8).collect();
+            if let Err(err) = std::fs::write(&path, bytes) {
+                log::warn!("Could not write {}: {err}", path.display());
+            }
+        }
+    }
+}
+
 /// Per-module in-memory compilation state.
 ///
 /// Stores a generation number for invalidation.
@@ -197,6 +231,8 @@ pub struct BuildCommandState {
     pub build_state: BuildState,
     // Command-line --warn-error flag override (takes precedence over rescript.json config)
     pub warn_error_override: Option<String>,
+    // Hidden `--dump`: intermediate representations to write for every module.
+    pub dump: Option<DumpRequest>,
     // Stored ASTs from parse phase, keyed by "{module_name}:impl" or "{module_name}:intf"
     pub stored_asts: Mutex<AHashMap<String, StoredAst>>,
     // In-memory published interfaces, keyed by module name. Only used in --in-process mode.
@@ -352,6 +388,7 @@ impl BuildCommandState {
             root_folder,
             build_state: BuildState::new(project_context, packages, compiler, source_map_command),
             warn_error_override,
+            dump: None,
             stored_asts: Mutex::new(AHashMap::new()),
             in_memory_interfaces: Mutex::new(AHashMap::new()),
             interface_generation: AtomicU64::new(0),

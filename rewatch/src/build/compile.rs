@@ -1899,6 +1899,9 @@ pub(crate) fn build_compiler_options(
         }
     };
     let mut options = (*template).clone();
+    if let Some(dump) = &build_command_state.dump {
+        options.dumps = dump.kinds.clone();
+    }
 
     // Source filename for interface constraint and JS import resolution. OCaml
     // computes output_dir from the package output prefix before rebasing module
@@ -2651,6 +2654,14 @@ struct RuntimeCompletionMsg {
 ///
 /// Runs on a dedicated thread with a large stack to handle any remaining
 /// source-fallback chains during the pre-compilation itself.
+/// A module registry holding the runtime package at `runtime_root`, compiled
+/// in memory: what an in-process compile of a single file resolves against.
+pub fn runtime_registry(runtime_root: &Path) -> Result<ModuleRegistry> {
+    let registry = Mutex::new(ModuleRegistry::new());
+    pre_compile_runtime_modules(&registry, runtime_root)?;
+    Ok(registry.into_inner().unwrap())
+}
+
 pub(crate) fn pre_compile_runtime_modules(
     registry: &Mutex<ModuleRegistry>,
     runtime_root: &Path,
@@ -3472,6 +3483,9 @@ fn compile_module_in_process_to_js_boundary(
             }
         };
         interface_warnings = intf_result.warnings;
+        if let Some(dump) = &build_command_state.dump {
+            dump.write(&package.name, &interface.path, &intf_result.dumps);
+        }
         build_command_state.record_loaded_units(
             module_name,
             intf_result.loaded_units,
@@ -3637,6 +3651,13 @@ fn compile_module_in_process_to_js_boundary(
             }
             build_command_state.record_loaded_units(module_name, loaded_units, reads);
             result.warnings.insert_str(0, &interface_warnings);
+            if let Some(dump) = &build_command_state.dump {
+                dump.write(
+                    &package.name,
+                    implementation_path,
+                    &std::mem::take(&mut result.dumps),
+                );
+            }
             result
         }
         Ok(Err(e)) => {

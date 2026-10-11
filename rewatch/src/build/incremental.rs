@@ -719,7 +719,9 @@ fn restore_unparsed_parse_warnings(build_state: &BuildCommandState) -> String {
 /// Whether incremental planning applies: a fresh build with a record of the
 /// previous one.
 pub fn applies(build_state: &BuildCommandState) -> bool {
-    build_state.previous_in_process.is_some() && std::env::var_os("RESCRIPT_FULL_BUILD").is_none()
+    build_state.previous_in_process.is_some()
+        && build_state.dump.is_none()
+        && std::env::var_os("RESCRIPT_FULL_BUILD").is_none()
 }
 
 fn mtime(path: &Path) -> Option<SystemTime> {

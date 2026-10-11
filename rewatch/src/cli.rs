@@ -260,6 +260,27 @@ pub struct BuildArgs {
     /// Skip dev-dependencies and dev sources (type: "dev")
     #[arg(long, default_value_t = false)]
     pub prod: bool,
+
+    /// Test-only: write these intermediate representations of every compiled
+    /// module (comma-separated: typedtree, typedtree-locs, rawlambda, lambda,
+    /// lambda-locs) to `--dump-dir`. Forces a full build.
+    #[arg(long, hide = true, value_delimiter = ',', value_parser = parse_dump_kind, requires = "dump_dir")]
+    pub dump: Vec<rescript_compiler::driver::DumpKind>,
+
+    /// Test-only: directory for `--dump`, as `<dir>/<package>/<source path>.<kind>`.
+    #[arg(long, hide = true)]
+    pub dump_dir: Option<std::path::PathBuf>,
+}
+
+fn parse_dump_kind(value: &str) -> Result<rescript_compiler::driver::DumpKind, String> {
+    rescript_compiler::driver::DumpKind::from_name(value).ok_or_else(|| {
+        format!(
+            "unknown dump kind {value:?}; expected one of: {}",
+            rescript_compiler::driver::DumpKind::ALL
+                .map(|kind| kind.name())
+                .join(", ")
+        )
+    })
 }
 
 #[cfg(test)]
@@ -579,6 +600,17 @@ pub enum Command {
         /// Files to format. If no files are provided, all files are formatted.
         #[arg(group = "format_input_mode")]
         files: Vec<String>,
+    },
+    /// Test-only: print the file-backed `bsc` build of a project as JSON
+    /// steps in dependency order, for building the OCaml reference outputs.
+    #[command(hide = true)]
+    BuildPlan {
+        /// The project folder
+        #[arg(default_value = ".")]
+        folder: String,
+        /// Skip dev-dependencies and dev sources
+        #[arg(long, default_value_t = false)]
+        prod: bool,
     },
     /// Print the compiler arguments for a ReScript source file.
     CompilerArgs {

@@ -109,8 +109,9 @@ struct Args {
 /// Convert OCaml-style single-dash long options to GNU-style double-dash options.
 /// This allows the same CLI to work with scripts written for the OCaml parser.
 /// e.g., "-print" -> "--print", "-recover" -> "--recover"
-fn normalize_args() -> Vec<String> {
-    std::env::args()
+fn normalize_args(args: Vec<String>) -> Vec<String> {
+    std::iter::once("res_parser".to_string())
+        .chain(args)
         .map(|arg| {
             // Convert OCaml-style options to GNU-style
             match arg.as_str() {
@@ -127,22 +128,22 @@ fn normalize_args() -> Vec<String> {
         .collect()
 }
 
-/// Run this command-line entry point with the process arguments; never returns.
-pub fn main() {
+/// Run the parser CLI with `args` (without the program name); never returns.
+pub fn main(args: Vec<String>) {
     // Parse on a thread with a large stack, like `bsc`, so deeply nested input
     // does not overflow the default main-thread stack.
     let handle = std::thread::Builder::new()
         .name("res_parser".into())
         .stack_size(512 * 1024 * 1024)
-        .spawn(run)
+        .spawn(move || run(args))
         .expect("failed to spawn parser thread");
     if handle.join().is_err() {
         process::exit(2);
     }
 }
 
-fn run() {
-    let args = Args::parse_from(normalize_args());
+fn run(args: Vec<String>) {
+    let args = Args::parse_from(normalize_args(args));
 
     // Read file as raw bytes, converting each byte to a char (Latin-1 encoding).
     // This preserves the original byte sequence through the compilation pipeline,

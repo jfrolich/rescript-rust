@@ -1158,6 +1158,63 @@ pub struct JsOutput {
     pub source_map: Option<String>,
 }
 
+/// An intermediate representation an in-process compile can capture, printed
+/// as the matching `bsc` flag prints it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DumpKind {
+    /// `-dtyped-sexp`
+    TypedTree,
+    /// `-dtyped-sexp-locs`
+    TypedTreeLocs,
+    /// `-drawlambda`
+    RawLambda,
+    /// `-dlambda-sexp`
+    Lambda,
+    /// `-dlambda-sexp-locs`
+    LambdaLocs,
+}
+
+impl DumpKind {
+    pub const ALL: [DumpKind; 5] = [
+        DumpKind::TypedTree,
+        DumpKind::TypedTreeLocs,
+        DumpKind::RawLambda,
+        DumpKind::Lambda,
+        DumpKind::LambdaLocs,
+    ];
+
+    /// The name used on the command line and as the dump file extension.
+    pub fn name(self) -> &'static str {
+        match self {
+            DumpKind::TypedTree => "typedtree",
+            DumpKind::TypedTreeLocs => "typedtree-locs",
+            DumpKind::RawLambda => "rawlambda",
+            DumpKind::Lambda => "lambda",
+            DumpKind::LambdaLocs => "lambda-locs",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<DumpKind> {
+        DumpKind::ALL.into_iter().find(|kind| kind.name() == name)
+    }
+
+    fn is_lambda(self) -> bool {
+        matches!(
+            self,
+            DumpKind::RawLambda | DumpKind::Lambda | DumpKind::LambdaLocs
+        )
+    }
+}
+
+/// Dump printers write Latin-1 bytes (one byte per source char); keep them
+/// byte-exact in the returned string.
+fn latin1_dump(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(err) => err.into_bytes().into_iter().map(char::from).collect(),
+    }
+}
+
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
@@ -1253,6 +1310,9 @@ pub struct CompilerOptions {
     /// When true, `compile_source_in_process` captures the typed tree,
     /// raw lambda, and lambda sexps for display (used by the playground).
     pub capture_intermediates: bool,
+    /// Intermediate representations an in-process compile captures into its
+    /// result's `dumps`, in this order.
+    pub dumps: Vec<DumpKind>,
     /// Build typed/lambda/JS IR metadata but skip rendering JavaScript text.
     /// Used by runtime seeding, which only needs signatures, purity, and
     /// closed constants in memory.
@@ -1453,6 +1513,7 @@ impl Default for CompilerOptions {
             gentype_resolver: None,
             gentype_declarations_only: false,
             capture_intermediates: false,
+            dumps: Vec::new(),
             skip_js_render: false,
             publish_in_process_signature: true,
             frontend_already_reported: false,
@@ -15203,6 +15264,8 @@ pub struct InProcessCompileResult {
     pub typed_tree_sexp: String,
     pub raw_lambda_sexp: String,
     pub lambda_sexp: String,
+    /// The intermediate representations requested by `CompilerOptions::dumps`.
+    pub dumps: Vec<(DumpKind, String)>,
     /// The warning reports the file compile prints to stderr.
     pub warnings: String,
 }
@@ -15227,6 +15290,8 @@ pub struct InProcessPreJsCompileResult {
     pub typed_tree_sexp: String,
     pub raw_lambda_sexp: String,
     pub lambda_sexp: String,
+    /// The intermediate representations requested by `CompilerOptions::dumps`.
+    pub dumps: Vec<(DumpKind, String)>,
     /// The warning reports the file compile prints to stderr.
     pub warnings: String,
     /// The units whose interface type checking read.
@@ -15272,6 +15337,8 @@ pub struct InProcessInterfaceResult {
     /// contains `@@genType.ignoreInterface`, GenType must select the
     /// implementation typed artifact for generated output.
     pub gentype_ignore_interface: bool,
+    /// The typed-tree dumps requested by `CompilerOptions::dumps`.
+    pub dumps: Vec<(DumpKind, String)>,
     /// The warning reports the file compile prints to stderr.
     pub warnings: String,
     /// The units whose interface type checking read.
@@ -15319,6 +15386,46 @@ fn process_gentype_typed_artifact_if_enabled<'a>(
         )
     })
     .with_context(|| format!("GenType failed for {filename}"))
+}
+
+/// Type-check an interface source in process, running the frontend as the
+/// file compile does (its warnings go to stderr).
+pub fn typecheck_interface_source_in_process(
+    source: &str,
+    filename: &str,
+    module_name: &str,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+) -> Result<InProcessInterfaceResult> {
+    let mut parser = Parser::new(filename, source);
+    let signature = module::parse_signature(&mut parser);
+    let mut frontend_output = String::new();
+    let frontend = run_interface_frontend(
+        &mut parser,
+        signature,
+        source,
+        filename,
+        options,
+        &mut frontend_output,
+    );
+    write_stderr(&frontend_output);
+    let frontend = frontend?;
+    let mut effective_options = options.clone();
+    effective_options.experimental_let_unwrap = frontend.experimental_let_unwrap;
+    let mut arena = parser.into_arena();
+    crate::types::typecore::prepare_typecheck_arena(&mut arena);
+    let result = typecheck_preprocessed_signature_in_process(
+        &arena,
+        &frontend.signature,
+        filename,
+        module_name,
+        &effective_options,
+        registry,
+    )?;
+    if frontend.warnings_fatal {
+        return Err(UserDiagnostic::new(String::new(), 2).into());
+    }
+    Ok(result)
 }
 
 pub fn compile_source_in_process(
@@ -16147,6 +16254,29 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     }
     tctx.persistent_env = Some(persistent_env_after_signature);
 
+    let mut dumps: Vec<(DumpKind, String)> = Vec::new();
+    for kind in [DumpKind::TypedTree, DumpKind::TypedTreeLocs] {
+        if options.dumps.contains(&kind) {
+            let mut buf = Vec::new();
+            let _ = if kind == DumpKind::TypedTree {
+                crate::types::sexp_typedtree::print_typed_structure(
+                    arena,
+                    &type_ctx,
+                    &typed_structure,
+                    &mut buf,
+                )
+            } else {
+                crate::types::sexp_typedtree::print_typed_structure_with_locs(
+                    arena,
+                    &type_ctx,
+                    &typed_structure,
+                    &mut buf,
+                )
+            };
+            dumps.push((kind, latin1_dump(buf)));
+        }
+    }
+
     // Capture typed tree sexp for the playground (only if requested).
     let typed_tree_sexp = if options.capture_intermediates {
         let mut buf = Vec::new();
@@ -16217,7 +16347,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 lambda_start_stamp,
                 unit_name,
             );
-        raw_converter.set_preserve_expanded_sparse_records(options.capture_intermediates);
+        raw_converter.set_preserve_expanded_sparse_records(
+            options.capture_intermediates || options.dumps.iter().any(|kind| kind.is_lambda()),
+        );
         raw_converter.set_no_assert_false(options.no_assert_false);
         raw_converter.set_noassert(options.noassert);
         raw_converter.set_warning_config(tctx.warning_config.clone());
@@ -16290,6 +16422,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     if type_warnings_have_errors(&tctx.warnings) || type_warnings_have_errors(&raw_warnings) {
         return Err(UserDiagnostic::new(warnings, 2).into());
     }
+    if options.dumps.contains(&DumpKind::RawLambda) {
+        let mut buf = Vec::new();
+        crate::raw_lambda::print::print_raw_lambda(&raw_lambda, &mut buf);
+        buf.push(b'\n');
+        dumps.push((DumpKind::RawLambda, latin1_dump(buf)));
+    }
     // Capture raw lambda sexp for the playground (only if requested).
     let raw_lambda_sexp = if options.capture_intermediates {
         let mut buf = Vec::new();
@@ -16320,6 +16458,18 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // instead of reading that worker's unrelated thread-local counter.
     let ident_stamp_at_js_boundary = crate::ident::Ident::current_local_stamp();
 
+    for kind in [DumpKind::Lambda, DumpKind::LambdaLocs] {
+        if options.dumps.contains(&kind) {
+            let mut buf = Vec::new();
+            let _ = if kind == DumpKind::Lambda {
+                crate::lambda::sexp_lambda::print_lambda(&lowered_lambda, &mut buf)
+            } else {
+                crate::lambda::sexp_lambda::print_lambda_with_locs(&lowered_lambda, &mut buf)
+            };
+            dumps.push((kind, latin1_dump(buf)));
+        }
+    }
+
     // Capture lambda sexp for the playground (only if requested).
     let lambda_sexp = if options.capture_intermediates {
         let mut buf = Vec::new();
@@ -16345,6 +16495,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         typed_tree_sexp,
         raw_lambda_sexp,
         lambda_sexp,
+        dumps,
         warnings,
         unit_reads,
         loaded_units: tctx
@@ -16565,6 +16716,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         typed_tree_sexp: pre_js.typed_tree_sexp,
         raw_lambda_sexp: pre_js.raw_lambda_sexp,
         lambda_sexp: pre_js.lambda_sexp,
+        dumps: pre_js.dumps,
         warnings: pre_js.warnings,
     })
 }
@@ -16761,6 +16913,18 @@ pub fn typecheck_preprocessed_signature_in_process(
     if type_warnings_have_errors(&tctx.warnings) {
         return Err(UserDiagnostic::new(warnings, 2).into());
     }
+    let mut dumps: Vec<(DumpKind, String)> = Vec::new();
+    for kind in [DumpKind::TypedTree, DumpKind::TypedTreeLocs] {
+        if options.dumps.contains(&kind) {
+            let mut buf = Vec::new();
+            let _ = if kind == DumpKind::TypedTree {
+                print_typed_signature(arena, &type_ctx, &typed_signature, &mut buf)
+            } else {
+                print_typed_signature_with_locs(arena, &type_ctx, &typed_signature, &mut buf)
+            };
+            dumps.push((kind, latin1_dump(buf)));
+        }
+    }
     let gentype_ignore_interface = options.gentype_config.is_some()
         && crate::gentype::annotation::signature_check_annotation(
             arena,
@@ -16867,6 +17031,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         pers_struct,
         new_alias_rewrites,
         gentype_ignore_interface,
+        dumps,
         warnings,
         loaded_units: internal_env.loaded_units(),
         unit_reads,
@@ -16979,6 +17144,7 @@ pub fn typecheck_implementation_in_process(
         pers_struct,
         new_alias_rewrites,
         gentype_ignore_interface: false,
+        dumps: Vec::new(),
         warnings: String::new(),
         loaded_units: internal_env.loaded_units(),
         unit_reads: Vec::new(),

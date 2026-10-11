@@ -17,16 +17,25 @@ use rescript::{
 };
 
 fn main() {
-    // Invoked as `bsc` or `res_parser_rust` (through a symlink), run that
-    // file-at-a-time command of the linked compiler instead. The parity test
-    // scripts use this to compare it against the OCaml reference compiler.
-    match invoked_name().as_deref() {
+    // Hidden test commands: run the linked compiler one file at a time, as
+    // the parity scripts compare it against the OCaml reference compiler.
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
         Some("bsc") => {
-            rescript_compiler::cli::bsc::main();
+            configure_rayon_for_in_process();
+            rescript_compiler::cli::bsc::main(
+                args.collect(),
+                Some(Box::new(|runtime_path| {
+                    let runtime_path = runtime_path
+                        .or_else(|| std::env::var_os("RESCRIPT_RUNTIME").map(Into::into))
+                        .ok_or_else(|| anyhow::anyhow!("bsc: pass -runtime-path or set RESCRIPT_RUNTIME"))?;
+                    rescript::build::compile::runtime_registry(&runtime_path)
+                })),
+            );
             std::process::exit(0);
         }
-        Some("res_parser_rust") => {
-            rescript_compiler::cli::res_parser::main();
+        Some("res-parser") => {
+            rescript_compiler::cli::res_parser::main(args.collect());
             std::process::exit(0);
         }
         _ => {}
@@ -45,12 +54,6 @@ fn main() {
     rescript::build::phase_mark("run-main-end");
     drop(telemetry_guard);
     std::process::exit(exit_code);
-}
-
-/// The file stem this executable was invoked as (`argv[0]`).
-fn invoked_name() -> Option<String> {
-    let arg0 = std::env::args_os().next()?;
-    Some(Path::new(&arg0).file_stem()?.to_string_lossy().into_owned())
 }
 
 fn run_main(otel_enabled: bool) -> Result<()> {
@@ -87,6 +90,10 @@ fn run_main(otel_enabled: bool) -> Result<()> {
     let show_progress = log_level_filter >= LevelFilter::Info;
 
     match cli.command {
+        cli::Command::BuildPlan { folder, prod } => {
+            println!("{}", build::plan::build_plan(Path::new(&folder), prod)?);
+            Ok(())
+        }
         cli::Command::CompilerArgs { path } => {
             println!("{}", build::get_compiler_args(Path::new(&path))?);
             Ok(())
@@ -104,6 +111,13 @@ fn run_main(otel_enabled: bool) -> Result<()> {
                     (*build_args.warn_error).clone(),
                     build_args.prod,
                     features,
+                    build_args
+                        .dump_dir
+                        .clone()
+                        .map(|dir| rescript::build::build_types::DumpRequest {
+                            kinds: build_args.dump.clone(),
+                            dir,
+                        }),
                 )
             });
             match build_result {

@@ -8,6 +8,7 @@ pub mod logs;
 pub mod namespaces;
 pub mod packages;
 pub mod parse;
+pub mod plan;
 pub mod qos;
 pub mod state_db;
 pub mod tooling;
@@ -833,6 +834,7 @@ pub fn build(
     warn_error: Option<String>,
     prod: bool,
     features: Option<Vec<String>>,
+    dump: Option<DumpRequest>,
 ) -> Result<BuildCommandState> {
     let _span = info_span!(
         "rewatch.build",
@@ -860,6 +862,7 @@ pub fn build(
             crate::config::SourceMapCommand::Build,
         )
         .with_context(|| "Could not initialize build")?;
+        build_state.dump = dump;
 
         match incremental_build_without_lock(
             &mut build_state,
@@ -964,7 +967,17 @@ mod tests {
         let build_thread = thread::spawn(move || {
             // This temp project has no config, so initialization would fail immediately
             // if `build` did not wait for the lock first.
-            let result = build(&None, &build_project_folder, false, true, true, None, false, None);
+            let result = build(
+                &None,
+                &build_project_folder,
+                false,
+                true,
+                true,
+                None,
+                false,
+                None,
+                None,
+            );
             sender.send(result.is_err()).expect("result should be sent");
         });
 

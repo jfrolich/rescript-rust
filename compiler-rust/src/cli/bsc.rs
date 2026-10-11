@@ -133,8 +133,17 @@ impl Options {
     }
 }
 
-/// Run this command-line entry point with the process arguments; never returns.
-pub fn main() {
+/// Builds the module registry an in-process compile resolves its
+/// dependencies from (the runtime, compiled in memory).
+/// It receives the runtime package path (`-runtime-path` or the default).
+pub type RegistryProvider =
+    Box<dyn FnOnce(Option<PathBuf>) -> Result<crate::cmi::persistent_env::ModuleRegistry> + Send>;
+
+/// Run `bsc` with `args` (without the program name); never returns.
+///
+/// With `registry`, source files compile in process against it and no
+/// `.cmi`/`.cmj` file is read or written; `.ast` input is not supported.
+pub fn main(args: Vec<String>, registry: Option<RegistryProvider>) {
     crate::hash_seed::install_thread_local_hash_seeds();
     // Spawn the compiler in a thread with a large stack to avoid stack overflow
     // on deeply nested type structures in CMI files
@@ -145,7 +154,7 @@ pub fn main() {
     let handler = builder
         .spawn(|| {
             enable_cli_cleanup_skip();
-            match run() {
+            match run(args, registry) {
                 Ok(()) => {
                     let _ = std::io::stdout().flush();
                     let _ = std::io::stderr().flush();
@@ -202,14 +211,14 @@ fn format_file(input: &str, output: Option<&Path>, ignore_parse_errors: bool) ->
     Ok(())
 }
 
-fn run() -> Result<()> {
+fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
     let mut opts = Options {
         // OCaml compiler/bsc/rescript_compiler_main.ml:494 sets
         // `Clflags.color := Some Always` before parsing command-line flags.
         color_mode: code_frame::ColorMode::Always,
         ..Options::default()
     };
-    let mut args = env::args().skip(1).peekable();
+    let mut args = args.into_iter().peekable();
 
     while let Some(arg) = args.next() {
         if arg.starts_with('-') {
@@ -491,6 +500,17 @@ fn run() -> Result<()> {
     }
 
     let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("");
+    if let Some(registry) = registry {
+        if matches!(ext, "cmi" | "ast" | "iast") {
+            return Err(UserDiagnostic::new(
+                format!("bsc: {} input needs the file-based compiler\n", input.display()),
+                2,
+            )
+            .into());
+        }
+        let runtime_path = opts.runtime_path.clone().or_else(default_runtime_path);
+        return compile_in_process(&input, &opts, registry(runtime_path)?);
+    }
     if ext == "cmi" {
         return read_cmi_input(&input);
     }
@@ -565,6 +585,7 @@ fn run() -> Result<()> {
         gentype_resolver: None,
         gentype_declarations_only: false,
         capture_intermediates: false,
+        dumps: Vec::new(),
         skip_js_render: false,
         publish_in_process_signature: true,
         frontend_already_reported: from_ast,
@@ -579,6 +600,145 @@ fn run() -> Result<()> {
     } else {
         write_outputs(&source_path, &compiler_opts, &opts)
     }
+}
+
+/// Compile a source file in process against `registry`: write its
+/// JavaScript like the file compile, and print its warnings and the requested
+/// `-d...` dumps to stderr.
+fn compile_in_process(
+    source_path: &Path,
+    opts: &Options,
+    registry: crate::cmi::persistent_env::ModuleRegistry,
+) -> Result<()> {
+    use crate::driver::DumpKind;
+    let bytes =
+        fs::read(source_path).with_context(|| format!("Failed to read {}", source_path.display()))?;
+    let source = latin1_bytes_to_string(bytes);
+    let filename = source_path.to_string_lossy().into_owned();
+    let module_name = opts
+        .module_name
+        .clone()
+        .unwrap_or_else(|| crate::driver::module_name_from_source_filename(&filename));
+    let is_interface = source_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|ext| ext == "resi" || ext == "mli");
+
+    let mut options = CompilerOptions {
+        include_paths: opts.include_paths.clone(),
+        open_modules: opts.open_modules.clone(),
+        warning_specs: opts.warning_specs.clone(),
+        warning_error_specs: opts.warning_error_specs.clone(),
+        source_filename: Some(filename.clone()),
+        source_map: opts.source_map,
+        source_map_sources_content: opts.source_map_sources_content,
+        source_map_root: opts.source_map_root.clone(),
+        jsx_version: opts.jsx_version,
+        jsx_module: opts.jsx_module.clone(),
+        experimental_let_unwrap: opts.experimental_let_unwrap,
+        jsx_preserve: opts.jsx_preserve,
+        debug: opts.debug,
+        no_version_header: opts.no_version_header,
+        check_div_by_zero: !opts.no_check_div_by_zero,
+        cross_module_inline: opts.cross_module_inline,
+        no_assert_false: opts.no_assert_false,
+        noassert: opts.noassert,
+        transparent_modules: opts.transparent_modules,
+        no_builtin_ppx: opts.no_builtin_ppx,
+        spice_ppx: opts.builtin_spice_ppx,
+        external_ppxs: opts.external_ppxs.clone(),
+        nopervasives: opts.nopervasives,
+        module_name: opts.module_name.clone(),
+        package_name: opts.package_name.clone(),
+        gentype_config: opts.gentype.then(|| {
+            std::sync::Arc::new(crate::gentype::config::build_config_from_flags(
+                opts.namespace.clone(),
+                opts.gentype_flags.clone(),
+            ))
+        }),
+        ..CompilerOptions::default()
+    };
+    for (requested, kind) in [
+        (opts.dump_typed_sexp, DumpKind::TypedTree),
+        (opts.dump_typed_sexp_locs, DumpKind::TypedTreeLocs),
+        (opts.dump_lambda, DumpKind::RawLambda),
+        (opts.dump_lambda_sexp, DumpKind::Lambda),
+        (opts.dump_lambda_sexp_locs, DumpKind::LambdaLocs),
+    ] {
+        if requested {
+            options.dumps.push(kind);
+        }
+    }
+
+    let print_dumps = |dumps: &[(DumpKind, String)]| {
+        let mut stderr = io::stderr();
+        for (_, text) in dumps {
+            let bytes: Vec<u8> = text.chars().map(|c| c as u32 as u8).collect();
+            let _ = stderr.write_all(&bytes);
+        }
+    };
+
+    if is_interface {
+        let result = crate::driver::typecheck_interface_source_in_process(
+            &source,
+            &filename,
+            &module_name,
+            &options,
+            &registry,
+        )?;
+        eprint!("{}", result.warnings);
+        print_dumps(&result.dumps);
+        return Ok(());
+    }
+
+    // Where the JavaScript goes, as for the file compile.
+    let mut targets = Vec::new();
+    if let Some(out) = &opts.output {
+        options.output_path = Some(out.clone());
+        targets.push(crate::driver::JsOutputTarget {
+            path: out.clone(),
+            module_format: if out.extension().is_some_and(|ext| ext == "mjs") {
+                ModuleFormat::EsModule
+            } else {
+                ModuleFormat::CommonJs
+            },
+        });
+    } else {
+        for spec in &opts.package_outputs {
+            if let Some((module_format, dir, suffix)) = parse_package_output(spec) {
+                targets.push(crate::driver::JsOutputTarget {
+                    path: package_output_path(source_path, &dir, &suffix),
+                    module_format,
+                });
+            }
+        }
+    }
+    options.js_output_targets = targets.clone();
+
+    let result = crate::driver::compile_source_in_process(
+        &source,
+        &filename,
+        &module_name,
+        &options,
+        &registry,
+        false,
+    )?;
+    eprint!("{}", result.warnings);
+    print_dumps(&result.dumps);
+    if opts.has_dump_output() {
+        return Ok(());
+    }
+    if targets.is_empty() {
+        print!("{}", result.js_output);
+        return Ok(());
+    }
+    for output in &result.js_outputs {
+        if let Some(parent) = output.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&output.path, &output.code)?;
+    }
+    Ok(())
 }
 
 fn read_cmi_input(input: &Path) -> Result<()> {
