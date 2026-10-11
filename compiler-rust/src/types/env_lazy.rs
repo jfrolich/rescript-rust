@@ -1336,84 +1336,90 @@ impl QualifiedModuleComponents {
             // the compiler/ml/mtype.ml:98-102 strengthened self alias, keep
             // going so the raw component item below runs compiler/ml/subst.ml:351-364.
         }
-        // OCaml compiler/ml/env.ml:1513-1514 stores component tables as lazy
-        // values, and env.ml:568-571/865-882 reuses the forced module-decl thunk
-        // for the selected parent path. Rust can reach the same parent through
-        // separate component views (`Stdlib.JSON` and `Stdlib_JSON`), so share the
-        // forced declaration at the TypeContext level to preserve the same stamp
-        // consumption.
-        if let Some((id, md)) = ctx.find_qualified_module_decl(self.access_path.as_ref(), name) {
-            let selected_path =
-                qualified_submodule_access_path(self.access_path.as_ref(), name, runtime_pos, &md);
-            if !module_decl_is_self_alias_for_access_path(&md, &selected_path) {
-                self.tables
-                    .qualified_modules
-                    .borrow_mut()
-                    .insert(name.to_string(), (id.clone(), md.clone()));
-                return Some((runtime_pos, id, md));
-            }
-            // Same OCaml env.ml:865-882 / subst.ml:351-364 force boundary as
-            // above: do not let a TypeContext-level self-alias placeholder hide
-            // the raw component module-declaration thunk.
-        }
-        for source_prefix in ctx.alias_sources_for_component_path(self.access_path.as_ref()) {
-            if let Some((id, md)) = ctx.find_qualified_module_decl(&source_prefix, name) {
-                let selected_path = qualified_submodule_access_path(
-                    self.access_path.as_ref(),
-                    name,
-                    runtime_pos,
-                    &md,
-                );
-                if module_decl_is_self_alias_for_access_path(&md, &selected_path) {
-                    continue;
+        // Declarations forced through other views of the same module are
+        // this compilation's state: a store build forces its own, so that
+        // what the shared view holds does not depend on which compilation
+        // built it.
+        if !ctx.in_store_build() {
+            // OCaml compiler/ml/env.ml:1513-1514 stores component tables as lazy
+            // values, and env.ml:568-571/865-882 reuses the forced module-decl thunk
+            // for the selected parent path. Rust can reach the same parent through
+            // separate component views (`Stdlib.JSON` and `Stdlib_JSON`), so share the
+            // forced declaration at the TypeContext level to preserve the same stamp
+            // consumption.
+            if let Some((id, md)) = ctx.find_qualified_module_decl(self.access_path.as_ref(), name) {
+                let selected_path =
+                    qualified_submodule_access_path(self.access_path.as_ref(), name, runtime_pos, &md);
+                if !module_decl_is_self_alias_for_access_path(&md, &selected_path) {
+                    self.tables
+                        .qualified_modules
+                        .borrow_mut()
+                        .insert(name.to_string(), (id.clone(), md.clone()));
+                    return Some((runtime_pos, id, md));
                 }
-                // OCaml compiler/ml/env.ml:1513-1519 creates one component
-                // table after `scrape_alias`; env.ml:1568-1578 stores both
-                // `comp_modules` and `comp_components` thunks under that table.
-                // A selected namespace path such as `Layout.Types` and its
-                // flattened backing unit `Layout__Types` therefore share the
-                // same forced env.ml:1568 module-declaration thunk. Rust has
-                // separate component views, so reuse the backing declaration
-                // instead of running compiler/ml/subst.ml:351-364 again.
-                self.tables
-                    .qualified_modules
-                    .borrow_mut()
-                    .insert(name.to_string(), (id.clone(), md.clone()));
-                ctx.register_qualified_module_decl(
-                    self.access_path.as_ref(),
-                    name,
-                    id.clone(),
-                    md.clone(),
-                );
-                return Some((runtime_pos, id, md));
+                // Same OCaml env.ml:865-882 / subst.ml:351-364 force boundary as
+                // above: do not let a TypeContext-level self-alias placeholder hide
+                // the raw component module-declaration thunk.
             }
-        }
-        for component_path in ctx.component_paths_for_alias_source(self.access_path.as_ref()) {
-            let Some((id, md)) = ctx.find_qualified_module_decl(&component_path, name) else {
-                continue;
-            };
-            let selected_path =
-                qualified_submodule_access_path(self.access_path.as_ref(), name, runtime_pos, &md);
-            if !module_decl_is_self_alias_for_access_path(&md, &selected_path) {
-                // Same sharing as above, but reached from the flattened backing
-                // component view after the selected path forced the declaration.
-                self.tables
-                    .qualified_modules
-                    .borrow_mut()
-                    .insert(name.to_string(), (id.clone(), md.clone()));
-                ctx.register_qualified_module_decl(
-                    self.access_path.as_ref(),
-                    name,
-                    id.clone(),
-                    md.clone(),
-                );
-                return Some((runtime_pos, id, md));
+            for source_prefix in ctx.alias_sources_for_component_path(self.access_path.as_ref()) {
+                if let Some((id, md)) = ctx.find_qualified_module_decl(&source_prefix, name) {
+                    let selected_path = qualified_submodule_access_path(
+                        self.access_path.as_ref(),
+                        name,
+                        runtime_pos,
+                        &md,
+                    );
+                    if module_decl_is_self_alias_for_access_path(&md, &selected_path) {
+                        continue;
+                    }
+                    // OCaml compiler/ml/env.ml:1513-1519 creates one component
+                    // table after `scrape_alias`; env.ml:1568-1578 stores both
+                    // `comp_modules` and `comp_components` thunks under that table.
+                    // A selected namespace path such as `Layout.Types` and its
+                    // flattened backing unit `Layout__Types` therefore share the
+                    // same forced env.ml:1568 module-declaration thunk. Rust has
+                    // separate component views, so reuse the backing declaration
+                    // instead of running compiler/ml/subst.ml:351-364 again.
+                    self.tables
+                        .qualified_modules
+                        .borrow_mut()
+                        .insert(name.to_string(), (id.clone(), md.clone()));
+                    ctx.register_qualified_module_decl(
+                        self.access_path.as_ref(),
+                        name,
+                        id.clone(),
+                        md.clone(),
+                    );
+                    return Some((runtime_pos, id, md));
+                }
             }
-            // OCaml compiler/ml/env.ml:1568 stores the module-declaration thunk
-            // from the raw component item. A cached self alias can be produced by
-            // compiler/ml/mtype.ml:98-102 strengthening, but env.ml:865-882
-            // `find_module` still forces the raw thunk and applies
-            // compiler/ml/subst.ml:351-364 before returning it.
+            for component_path in ctx.component_paths_for_alias_source(self.access_path.as_ref()) {
+                let Some((id, md)) = ctx.find_qualified_module_decl(&component_path, name) else {
+                    continue;
+                };
+                let selected_path =
+                    qualified_submodule_access_path(self.access_path.as_ref(), name, runtime_pos, &md);
+                if !module_decl_is_self_alias_for_access_path(&md, &selected_path) {
+                    // Same sharing as above, but reached from the flattened backing
+                    // component view after the selected path forced the declaration.
+                    self.tables
+                        .qualified_modules
+                        .borrow_mut()
+                        .insert(name.to_string(), (id.clone(), md.clone()));
+                    ctx.register_qualified_module_decl(
+                        self.access_path.as_ref(),
+                        name,
+                        id.clone(),
+                        md.clone(),
+                    );
+                    return Some((runtime_pos, id, md));
+                }
+                // OCaml compiler/ml/env.ml:1568 stores the module-declaration thunk
+                // from the raw component item. A cached self alias can be produced by
+                // compiler/ml/mtype.ml:98-102 strengthening, but env.ml:865-882
+                // `find_module` still forces the raw thunk and applies
+                // compiler/ml/subst.ml:351-364 before returning it.
+            }
         }
 
         let (id, md) = match &self.signature[idx] {

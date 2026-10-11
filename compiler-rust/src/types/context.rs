@@ -1864,9 +1864,9 @@ impl TypeContext {
     /// through `scrape_alias`, while env.ml:1573-1578 stores child
     /// declaration/component thunks under the selected access path.
     pub(crate) fn alias_sources_for_component_path(&self, component_path: &Path) -> Vec<Path> {
-        // Registered as this compilation builds component tables: a store
-        // build that reads it depends on this compilation.
-        self.poison_store_build_for("read:alias_sources_for_component_path");
+        // Registered when the component tables of the path's ancestors are
+        // built (or their store pieces replayed), which any build reaching
+        // the path does first: the same for every compilation.
         self.component_alias_sources
             .borrow()
             .get(&SamePathKey(component_path.clone()))
