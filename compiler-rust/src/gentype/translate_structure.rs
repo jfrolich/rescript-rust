@@ -5,7 +5,7 @@ use crate::gentype::gen_type_common::{ArgType, StringSet, Type};
 use crate::parse_arena::ParseArena;
 use crate::types::decl::ModuleType as DeclModuleType;
 use crate::types::typedtree::{
-    ApplyArg, Expression, ExpressionDesc, FunctionParam, ModuleBinding, ModuleExprDesc,
+    Expression, ExpressionDesc, FunctionParam, ModuleBinding, ModuleExprDesc,
     ModuleTypeConstraint, Pattern, PatternDesc, Structure, StructureItem, StructureItemDesc,
     ValueBinding,
 };
@@ -17,27 +17,25 @@ pub fn addAnnotationsToTypes_(
     expr: &Expression,
     arg_types: &[ArgType],
 ) -> Vec<ArgType> {
-    // Mirrors compiler/gentype/TranslateStructure.ml:3-32.
-    match (&expr.exp_desc, arg_types.split_first()) {
-        (
-            ExpressionDesc::Texp_function { params, body, .. },
-            Some((ArgType { a_type, .. }, next_types)),
-        ) if !params.is_empty() => {
-            let mut out = vec![ArgType {
-                a_name: function_param_name(arena, &params[0]),
-                a_type: a_type.clone(),
-            }];
-            out.extend(addAnnotationsToTypes_(arena, config, body, next_types));
-            out
-        }
-        (ExpressionDesc::Texp_apply { funct, args, .. }, _)
-            if is_uncurried_fn_mk_apply(funct, args) =>
-        {
-            if let Some(expr1) = args.iter().find_map(|arg| arg.expression.as_ref()) {
-                addAnnotationsToTypes_(arena, config, expr1, arg_types)
-            } else {
-                arg_types.to_vec()
+    // Mirrors compiler/gentype/translate_structure.ml:3-25: name the argument
+    // types after the function's parameters, continuing into the body once
+    // they run out.
+    match &expr.exp_desc {
+        ExpressionDesc::Texp_function { params, body, .. } => {
+            let mut out = Vec::with_capacity(arg_types.len());
+            for (index, ArgType { a_type, .. }) in arg_types.iter().enumerate() {
+                match params.get(index) {
+                    Some(param) => out.push(ArgType {
+                        a_name: function_param_name(arena, param),
+                        a_type: a_type.clone(),
+                    }),
+                    None => {
+                        out.extend(addAnnotationsToTypes_(arena, config, body, &arg_types[index..]));
+                        break;
+                    }
+                }
             }
+            out
         }
         _ => arg_types.to_vec(),
     }
@@ -77,27 +75,20 @@ pub fn add_annotations_to_fields(
     fields: &[crate::gentype::gen_type_common::Field],
     arg_types: &[ArgType],
 ) -> (Vec<crate::gentype::gen_type_common::Field>, Vec<ArgType>) {
-    // Mirrors compiler/gentype/TranslateStructure.ml:48-62.
-    match (&expr.exp_desc, fields.split_first()) {
-        (_, None) => (
-            vec![],
-            add_annotations_to_types(arena, config, expr, arg_types),
-        ),
-        (ExpressionDesc::Texp_function { body, .. }, Some((field, next_fields))) => {
-            let (next_fields1, types1) =
-                add_annotations_to_fields(arena, config, body, next_fields, arg_types);
-            let mut field = field.clone();
-            field.name_js = crate::gentype::translate_type_declarations::rename_record_field(
-                arena,
-                &expr.exp_attributes,
-                &field.name_js,
-            );
-            let mut fields = vec![field];
-            fields.extend(next_fields1);
-            (fields, types1)
-        }
-        _ => (fields.to_vec(), arg_types.to_vec()),
-    }
+    // Mirrors compiler/gentype/translate_structure.ml:41-53.
+    let Some((field, next_fields)) = fields.split_first() else {
+        return (vec![], add_annotations_to_types(arena, config, expr, arg_types));
+    };
+    let (next_fields1, types1) = add_annotations_to_fields(arena, config, expr, next_fields, arg_types);
+    let mut field = field.clone();
+    field.name_js = crate::gentype::translate_type_declarations::rename_record_field(
+        arena,
+        &expr.exp_attributes,
+        &field.name_js,
+    );
+    let mut fields = vec![field];
+    fields.extend(next_fields1);
+    (fields, types1)
 }
 
 pub fn add_annotations_to_function_type(
@@ -683,20 +674,6 @@ fn function_param_name(arena: &ParseArena, param: &FunctionParam) -> String {
     match param.fp_lbl.label_name() {
         Some(label) if param.fp_has_default && param.fp_lbl.is_optional() => label.to_string(),
         _ => param.fp_param.name().to_string(),
-    }
-}
-
-fn is_uncurried_fn_mk_apply(funct: &Expression, args: &[ApplyArg]) -> bool {
-    if args.len() != 1 || args[0].expression.is_none() {
-        return false;
-    }
-    match &funct.exp_desc {
-        ExpressionDesc::Texp_ident(path, _, _) => {
-            let mut path = crate::gentype::translate_type_expr_from_types::path_to_list(path);
-            path.reverse();
-            matches!(path.as_slice(), [a, b, fn_mk] if a == "Js" && b == "Internal" && fn_mk.starts_with("fn_mk"))
-        }
-        _ => false,
     }
 }
 

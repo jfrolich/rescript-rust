@@ -47,7 +47,7 @@ pub fn type_react_context(type_: Type) -> Type {
 }
 
 pub fn type_react_element_type_script() -> Type {
-    ident("JSX.Element")
+    ident("React.JSX.Element")
 }
 
 pub fn type_react_child_type_script() -> Type {
