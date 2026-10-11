@@ -87,9 +87,10 @@ DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 
 RUST_TARGET="${RUST_TARGET:-debug}"
 OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
-RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/bsc}"
+RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc}"
+"$PROJECT_ROOT/scripts/rust_compiler_links.sh" "$RUST_TARGET"
 OCAML_PARSER="${OCAML_PARSER:-$DUNE_BIN_DIR/res_parser}"
-RUST_PARSER="${RUST_PARSER:-$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/res_parser_rust}"
+RUST_PARSER="${RUST_PARSER:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/res_parser_rust}"
 
 PARSER_MATRIX="$PROJECT_ROOT/tests/syntax_tests/data/parsing/diagnostics_numbers.csv"
 COMPILER_CASES_FILE="$PROJECT_ROOT/tests/error_output_parity/compiler/cases.tsv"
@@ -127,9 +128,9 @@ if [[ "$missing" -ne 0 ]]; then
     echo "Build first:"
     echo "  eval \$(opam env --shell=sh) && make lib"
     if [[ "$RUST_TARGET" == "release" ]]; then
-        echo "  cargo build --release --manifest-path compiler-rust/Cargo.toml"
+        echo "  cargo build --release --manifest-path rewatch/Cargo.toml"
     else
-        echo "  cargo build --manifest-path compiler-rust/Cargo.toml"
+        echo "  cargo build --manifest-path rewatch/Cargo.toml"
     fi
     exit 2
 fi

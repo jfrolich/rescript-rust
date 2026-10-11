@@ -17,7 +17,8 @@ script_dir=$(cd "$(dirname "$0")"; pwd -P)
 project_root=$(cd "$script_dir/.."; pwd -P)
 
 RUST_TARGET="${RUST_TARGET:-debug}"
-RUST_BSC="$project_root/compiler-rust/target/$RUST_TARGET/bsc"
+RUST_BSC="$project_root/rewatch/target/$RUST_TARGET/bsc"
+"$project_root/scripts/rust_compiler_links.sh" "$RUST_TARGET"
 RESCRIPT_CLI="$project_root/packages/@rescript/$($script_dir/platform.sh)/bin/rescript.exe"
 TESTS_DIR="$project_root/tests/tests"
 TIMEOUT_SECONDS=10

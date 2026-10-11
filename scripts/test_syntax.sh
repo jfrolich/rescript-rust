@@ -15,10 +15,11 @@ DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 # Usage: PARSER=rust ./scripts/test_syntax.sh
 if [[ "$PARSER" == "rust" ]]; then
   RUST_TARGET="${RUST_TARGET:-debug}"
-  RES_PARSER="$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/res_parser_rust"
+  RES_PARSER="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/res_parser_rust"
+  "$PROJECT_ROOT/scripts/rust_compiler_links.sh" "$RUST_TARGET"
   if [[ ! -x "$RES_PARSER" ]]; then
     echo "Error: Rust parser not found at $RES_PARSER"
-    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
+    echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' first."
     echo "This syntax script expects debug artifacts for iteration."
     exit 1
   fi

@@ -44,7 +44,8 @@ RUNTIME_DIR="$PROJECT_ROOT/packages/@rescript/runtime"
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
 RUST_TARGET="${RUST_TARGET:-debug}"
-RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/bsc}"
+RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc}"
+"$PROJECT_ROOT/scripts/rust_compiler_links.sh" "$RUST_TARGET"
 RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/$("$script_dir/platform.sh")/bin/rescript.exe}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-10}"
 CACHE_DIR="$PROJECT_ROOT/.parity-cache/stdlib-output"
@@ -62,7 +63,7 @@ fi
 
 if [[ ! -x "$RUST_BSC" ]]; then
     echo -e "${RED}Error: Rust bsc not found at $RUST_BSC${RESET}"
-    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
+    echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' first."
     echo "This output parity script expects debug artifacts for iteration."
     exit 1
 fi

@@ -1090,7 +1090,8 @@ def cmd_test(args):
     plat = _get_platform()
 
     rust_target = os.environ.get("RUST_TARGET", "debug")
-    rust_bsc = os.path.join(project_root, "compiler-rust", "target", rust_target, "bsc")
+    subprocess.run([os.path.join(project_root, "scripts", "rust_compiler_links.sh"), rust_target], check=True)
+    rust_bsc = os.path.join(project_root, "rewatch", "target", rust_target, "bsc")
     ocaml_bsc = os.path.join(project_root, "packages", "@rescript", plat, "bin", "bsc.exe")
 
     # Check executables

@@ -25,8 +25,14 @@ OCAML_BSC = Path(os.environ.get("OCAML_BSC", ROOT / "_build/install/default/bin/
 RUST_BSC = Path(
     os.environ.get(
         "RUST_BSC",
-        ROOT / "compiler-rust/target" / os.environ.get("RUST_TARGET", "release") / "bsc",
+        ROOT / "rewatch/target" / os.environ.get("RUST_TARGET", "release") / "bsc",
     )
+)
+# `bsc` is a symlink to the rescript executable, which runs its linked compiler
+# when invoked under that name.
+subprocess.run(
+    [ROOT / "scripts/rust_compiler_links.sh", os.environ.get("RUST_TARGET", "release")],
+    check=False,
 )
 BELT_LIB = ROOT / "packages/@rescript/belt/lib/ocaml"
 DEFAULT_FLAGS = ["-w", "+A", "-bs-jsx", "4", "-color", "never", "-I", str(BELT_LIB)]

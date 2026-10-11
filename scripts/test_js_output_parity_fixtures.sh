@@ -75,7 +75,8 @@ PROJECT_ROOT=$(cd "$script_dir/.."; pwd -P)
 RUST_TARGET="${RUST_TARGET:-debug}"
 REWATCH_TARGET="${REWATCH_TARGET:-$RUST_TARGET}"
 OCAML_BSC="${OCAML_BSC:-$PROJECT_ROOT/packages/@rescript/$("$PROJECT_ROOT/scripts/platform.sh")/bin/bsc.exe}"
-RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/bsc}"
+RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc}"
+"$PROJECT_ROOT/scripts/rust_compiler_links.sh" "$RUST_TARGET"
 REWATCH_BIN="${REWATCH_BIN:-$PROJECT_ROOT/rewatch/target/$REWATCH_TARGET/rescript}"
 RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/$("$PROJECT_ROOT/scripts/platform.sh")/bin/rescript.exe}"
 RESCRIPT_RUNTIME="${RESCRIPT_RUNTIME:-$PROJECT_ROOT/packages/@rescript/runtime}"
@@ -108,7 +109,7 @@ done
 if [[ "$missing" -ne 0 ]]; then
     echo "Build first:"
     echo "  make"
-    echo "  cargo build$RUST_BUILD_FLAG --manifest-path compiler-rust/Cargo.toml"
+    echo "  cargo build$RUST_BUILD_FLAG --manifest-path rewatch/Cargo.toml"
     echo "  cargo build$REWATCH_BUILD_FLAG --manifest-path rewatch/Cargo.toml"
     exit 2
 fi

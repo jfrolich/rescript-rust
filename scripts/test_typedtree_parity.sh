@@ -137,7 +137,8 @@ PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
 RUST_TARGET="${RUST_TARGET:-debug}"
-RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/bsc}"
+RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc}"
+"$PROJECT_ROOT/scripts/rust_compiler_links.sh" "$RUST_TARGET"
 RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/$("$scriptDir/platform.sh")/bin/rescript.exe}"
 RESCRIPT_RUNTIME="${RESCRIPT_RUNTIME:-$PROJECT_ROOT/packages/@rescript/runtime}"
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
@@ -196,9 +197,9 @@ fi
 if [[ ! -x "$RUST_BSC" ]]; then
     echo -e "${YELLOW}Warning: Rust bsc not found at $RUST_BSC${RESET}"
     if [[ "$RUST_TARGET" == "release" ]]; then
-        echo "Run 'cargo build --release --manifest-path compiler-rust/Cargo.toml' to build the release Rust compiler."
+        echo "Run 'cargo build --release --manifest-path rewatch/Cargo.toml' to build the release Rust compiler."
     else
-        echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' to build the debug Rust compiler."
+        echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' to build the debug Rust compiler."
     fi
     echo "For now, testing OCaml compiler only."
     RUST_AVAILABLE=false

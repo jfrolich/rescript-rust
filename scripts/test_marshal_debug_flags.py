@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-BSC = Path(os.environ.get("RUST_BSC", ROOT / "compiler-rust/target/release/bsc"))
+BSC = Path(os.environ.get("RUST_BSC", ROOT / "rewatch/target/release/bsc"))
 
 
 class MarshalDebugFlags(unittest.TestCase):

@@ -13,8 +13,8 @@ PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 RUST_DIR="$PROJECT_ROOT/compiler-rust"
 RUST_TARGET="${RUST_TARGET:-debug}"
-RUST_BSC="$RUST_DIR/target/$RUST_TARGET/bsc"
-RUST_PARSER="$RUST_DIR/target/$RUST_TARGET/res_parser_rust"
+RUST_BSC="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc"
+RUST_PARSER="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/res_parser_rust"
 OCAML_BSC="$PROJECT_ROOT/packages/@rescript/$("$scriptDir/platform.sh")/bin/bsc.exe"
 RESCRIPT_CLI="$PROJECT_ROOT/packages/@rescript/$("$scriptDir/platform.sh")/bin/rescript.exe"
 OCAML_PARSER="$DUNE_BIN_DIR/res_parser"
@@ -73,8 +73,8 @@ while [[ $# -gt 0 ]]; do
             ;;
         --release)
             RUST_TARGET=release
-            RUST_BSC="$RUST_DIR/target/$RUST_TARGET/bsc"
-            RUST_PARSER="$RUST_DIR/target/$RUST_TARGET/res_parser_rust"
+            RUST_BSC="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc"
+            RUST_PARSER="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/res_parser_rust"
             shift
             ;;
         --verbose|-v)
@@ -125,12 +125,13 @@ check_prerequisites() {
         missing=true
     fi
 
+    "$PROJECT_ROOT/scripts/rust_compiler_links.sh" "$RUST_TARGET"
     if [[ ! -x "$RUST_BSC" ]]; then
         echo -e "${RED}Error: Rust bsc not found at $RUST_BSC${RESET}"
         if [[ "$RUST_TARGET" == "release" ]]; then
-            echo "Run 'cargo build --release --manifest-path compiler-rust/Cargo.toml' first."
+            echo "Run 'cargo build --release --manifest-path rewatch/Cargo.toml' first."
         else
-            echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
+            echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' first."
         fi
         missing=true
     fi
@@ -138,9 +139,9 @@ check_prerequisites() {
     if [[ ! -x "$RUST_PARSER" ]]; then
         echo -e "${RED}Error: Rust parser not found at $RUST_PARSER${RESET}"
         if [[ "$RUST_TARGET" == "release" ]]; then
-            echo "Run 'cargo build --release --manifest-path compiler-rust/Cargo.toml' first."
+            echo "Run 'cargo build --release --manifest-path rewatch/Cargo.toml' first."
         else
-            echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
+            echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' first."
         fi
         missing=true
     fi

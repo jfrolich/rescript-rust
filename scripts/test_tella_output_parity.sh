@@ -64,7 +64,8 @@ DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
 RUST_TARGET="${RUST_TARGET:-debug}"
 REWATCH_TARGET="${REWATCH_TARGET:-$RUST_TARGET}"
-RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/bsc}"
+RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc}"
+"$PROJECT_ROOT/scripts/rust_compiler_links.sh" "$RUST_TARGET"
 REWATCH_BIN="${REWATCH_BIN:-$PROJECT_ROOT/rewatch/target/$REWATCH_TARGET/rescript}"
 RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/$("$script_dir/platform.sh")/bin/rescript.exe}"
 RESCRIPT_RUNTIME="${RESCRIPT_RUNTIME:-$PROJECT_ROOT/packages/@rescript/runtime}"
@@ -86,9 +87,9 @@ fi
 if [[ ! -x "$RUST_BSC" ]]; then
     echo -e "${RED}Error: Rust bsc not found at $RUST_BSC${RESET}" >&2
     if [[ "$RUST_TARGET" == "release" ]]; then
-        echo "Run 'cargo build --release --manifest-path compiler-rust/Cargo.toml' first." >&2
+        echo "Run 'cargo build --release --manifest-path rewatch/Cargo.toml' first." >&2
     else
-        echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first." >&2
+        echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' first." >&2
     fi
     exit 2
 fi
