@@ -774,46 +774,6 @@ impl<'a> DependencyCollector<'a> {
             ExpressionDesc::Pexp_jsx_element(jsx) => {
                 self.add_jsx_element(jsx);
             }
-            ExpressionDesc::Pexp_inline_for(inner) => {
-                let (ref _pat, ref collection, ref body) = **inner;
-                self.add_expr_idx(*collection);
-                self.add_expr_idx(*body);
-            }
-            ExpressionDesc::Pexp_comptime_typeinfo(_)
-            | ExpressionDesc::Pexp_comptime_typename(_) => {
-                // No expression dependencies to scan
-            }
-            ExpressionDesc::Pexp_comptime_field(inner) => {
-                let (ref value, ref field) = **inner;
-                self.add_expr_idx(*value);
-                self.add_expr_idx(*field);
-            }
-            ExpressionDesc::Pexp_comptime_compile_error(expr) => {
-                self.add_expr_idx(*expr);
-            }
-            ExpressionDesc::Pexp_comptime_record(inner) => {
-                let (ref _ct, ref fields_expr) = **inner;
-                self.add_expr_idx(*fields_expr);
-            }
-            ExpressionDesc::Pexp_comptime_variant(inner) => {
-                let (ref _ct, ref expr, ref opt_expr) = **inner;
-                self.add_expr_idx(*expr);
-                if let Some(e) = opt_expr {
-                    self.add_expr_idx(*e);
-                }
-            }
-            ExpressionDesc::Pexp_comptime_build_variant(e) => {
-                self.add_expr_idx(*e);
-            }
-            ExpressionDesc::Pexp_comptime_variant_case(e) => {
-                self.add_expr_idx(*e);
-            }
-            ExpressionDesc::Pexp_comptime_build_record(e) => {
-                self.add_expr_idx(*e);
-            }
-            ExpressionDesc::Pexp_comptime_record_field(e) => {
-                self.add_expr_idx(*e);
-            }
         }
     }
 

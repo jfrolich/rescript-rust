@@ -1016,8 +1016,7 @@ impl<'a> Checker<'a> {
                 self.pat(*pat)
             }
             ExpressionDesc::Pexp_for_of(inner)
-            | ExpressionDesc::Pexp_for_await_of(inner)
-            | ExpressionDesc::Pexp_inline_for(inner) => {
+            | ExpressionDesc::Pexp_for_await_of(inner) => {
                 let (pat, collection, body) = &**inner;
                 self.expr(*body)?;
                 self.expr(*collection)?;
@@ -1060,12 +1059,7 @@ impl<'a> Checker<'a> {
                 self.extension_constructor(constructor)
             }
             ExpressionDesc::Pexp_assert(inner)
-            | ExpressionDesc::Pexp_await(inner)
-            | ExpressionDesc::Pexp_comptime_compile_error(inner)
-            | ExpressionDesc::Pexp_comptime_build_variant(inner)
-            | ExpressionDesc::Pexp_comptime_variant_case(inner)
-            | ExpressionDesc::Pexp_comptime_build_record(inner)
-            | ExpressionDesc::Pexp_comptime_record_field(inner) => self.expr(*inner),
+            | ExpressionDesc::Pexp_await(inner) => self.expr(*inner),
             ExpressionDesc::Pexp_newtype(inner) => self.expr(inner.1),
             ExpressionDesc::Pexp_pack(mod_expr) => self.module_expr(*mod_expr),
             ExpressionDesc::Pexp_open(inner) => self.expr(inner.2),
@@ -1084,25 +1078,6 @@ impl<'a> Checker<'a> {
                     self.jsx_props(&element.props)
                 }
             },
-            ExpressionDesc::Pexp_comptime_typeinfo(typ) | ExpressionDesc::Pexp_comptime_typename(typ) => {
-                self.typ(*typ)
-            }
-            ExpressionDesc::Pexp_comptime_field(inner) => {
-                self.expr(inner.1)?;
-                self.expr(inner.0)
-            }
-            ExpressionDesc::Pexp_comptime_record(inner) => {
-                self.expr(inner.1)?;
-                self.typ(inner.0)
-            }
-            ExpressionDesc::Pexp_comptime_variant(inner) => {
-                let (typ, name, payload) = &**inner;
-                if let Some(payload) = payload {
-                    self.expr(*payload)?;
-                }
-                self.expr(*name)?;
-                self.typ(*typ)
-            }
             // Handled by `expr_inner`.
             ExpressionDesc::Pexp_let(_)
             | ExpressionDesc::Pexp_fun(_)

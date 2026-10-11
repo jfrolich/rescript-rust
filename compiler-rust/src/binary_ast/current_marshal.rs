@@ -1715,19 +1715,6 @@ impl Marshal for ExpressionDesc {
                 template.raw_sources.marshal(w);
                 template.values.marshal(w);
             }
-            ExpressionDesc::Pexp_inline_for(_)
-            | ExpressionDesc::Pexp_comptime_typeinfo(_)
-            | ExpressionDesc::Pexp_comptime_field(_)
-            | ExpressionDesc::Pexp_comptime_compile_error(_)
-            | ExpressionDesc::Pexp_comptime_typename(_)
-            | ExpressionDesc::Pexp_comptime_record(_)
-            | ExpressionDesc::Pexp_comptime_variant(_)
-            | ExpressionDesc::Pexp_comptime_build_variant(_)
-            | ExpressionDesc::Pexp_comptime_variant_case(_)
-            | ExpressionDesc::Pexp_comptime_build_record(_)
-            | ExpressionDesc::Pexp_comptime_record_field(_) => {
-                unreachable!("comptime builtins eliminated before serialization")
-            }
         }
     }
 }

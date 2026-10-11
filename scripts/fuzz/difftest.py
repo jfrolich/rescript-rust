@@ -201,7 +201,7 @@ def _compare_pipeline(
     elif ov == "ok" and rv != "ok":
         kind = "rust_rejects"
         sig = "rust: " + signature(r[-1].stderr)
-    elif not check_text or any(_RUST_ONLY_SYNTAX.search(src) for src in case.values()):
+    elif not check_text:
         kind = "same"
     elif ov != "ok":
         kind = "same" if _norm(o[-1].stderr) == _norm(r[-1].stderr) else "msg_diff"
@@ -246,11 +246,6 @@ def _accepted(s: str) -> str:
                 break
         out.append("\n".join(b))
     return "\n".join(out)
-
-
-# `inline for` is Rust-only comptime syntax (projects/comptime), so OCaml's
-# diagnostics for such sources are not a reference.
-_RUST_ONLY_SYNTAX = re.compile(r"\binline\s+for\b")
 
 
 def case_hash(case: dict[str, str]) -> str:

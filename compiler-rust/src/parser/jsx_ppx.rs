@@ -5231,18 +5231,7 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
         ExpressionDesc::Pexp_jsx_element(_)
         | ExpressionDesc::Pexp_letmodule(_)
         | ExpressionDesc::Pexp_pack(_)
-        | ExpressionDesc::Pexp_extension(_)
-        | ExpressionDesc::Pexp_inline_for(_)
-        | ExpressionDesc::Pexp_comptime_typeinfo(_)
-        | ExpressionDesc::Pexp_comptime_field(_)
-        | ExpressionDesc::Pexp_comptime_compile_error(_)
-        | ExpressionDesc::Pexp_comptime_typename(_)
-        | ExpressionDesc::Pexp_comptime_record(_)
-        | ExpressionDesc::Pexp_comptime_variant(_)
-        | ExpressionDesc::Pexp_comptime_build_variant(_)
-        | ExpressionDesc::Pexp_comptime_variant_case(_)
-        | ExpressionDesc::Pexp_comptime_build_record(_)
-        | ExpressionDesc::Pexp_comptime_record_field(_) => true,
+        | ExpressionDesc::Pexp_extension(_) => true,
     }
 }
 

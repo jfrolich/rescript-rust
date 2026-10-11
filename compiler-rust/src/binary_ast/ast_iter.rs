@@ -499,8 +499,7 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
             v.expr(arena, *e3);
         }
         ExpressionDesc::Pexp_for_of(inner)
-        | ExpressionDesc::Pexp_for_await_of(inner)
-        | ExpressionDesc::Pexp_inline_for(inner) => {
+        | ExpressionDesc::Pexp_for_await_of(inner) => {
             let (pat, e1, e2) = &**inner;
             v.pat(arena, *pat);
             v.expr(arena, *e1);
@@ -565,30 +564,6 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
                 }
             }
         },
-        ExpressionDesc::Pexp_comptime_typeinfo(t) | ExpressionDesc::Pexp_comptime_typename(t) => {
-            v.typ(arena, *t)
-        }
-        ExpressionDesc::Pexp_comptime_field(inner) => {
-            v.expr(arena, inner.0);
-            v.expr(arena, inner.1);
-        }
-        ExpressionDesc::Pexp_comptime_compile_error(e)
-        | ExpressionDesc::Pexp_comptime_build_variant(e)
-        | ExpressionDesc::Pexp_comptime_variant_case(e)
-        | ExpressionDesc::Pexp_comptime_build_record(e)
-        | ExpressionDesc::Pexp_comptime_record_field(e) => v.expr(arena, *e),
-        ExpressionDesc::Pexp_comptime_record(inner) => {
-            v.typ(arena, inner.0);
-            v.expr(arena, inner.1);
-        }
-        ExpressionDesc::Pexp_comptime_variant(inner) => {
-            let (t, name, payload) = &**inner;
-            v.typ(arena, *t);
-            v.expr(arena, *name);
-            if let Some(payload) = payload {
-                v.expr(arena, *payload);
-            }
-        }
     }
 }
 

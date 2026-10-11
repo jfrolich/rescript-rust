@@ -547,54 +547,6 @@ fn rewrite_expression(
         ExpressionDesc::Pexp_jsx_element(element) => ExpressionDesc::Pexp_jsx_element(Box::new(
             rewrite_jsx_element(element, arena, let_unwrap_enabled)?,
         )),
-        ExpressionDesc::Pexp_inline_for(inner) => {
-            let (ref pat, ref collection, ref body) = **inner;
-            let new_collection = rewrite_expr_idx(*collection, arena, let_unwrap_enabled)?;
-            let new_body = rewrite_expr_idx(*body, arena, let_unwrap_enabled)?;
-            ExpressionDesc::Pexp_inline_for(Box::new((*pat, new_collection, new_body)))
-        }
-        ExpressionDesc::Pexp_comptime_typeinfo(_) | ExpressionDesc::Pexp_comptime_typename(_) => {
-            (*expr.pexp_desc).clone()
-        }
-        ExpressionDesc::Pexp_comptime_field(inner) => {
-            let (ref value, ref field) = **inner;
-            let new_value = rewrite_expr_idx(*value, arena, let_unwrap_enabled)?;
-            let new_field = rewrite_expr_idx(*field, arena, let_unwrap_enabled)?;
-            ExpressionDesc::Pexp_comptime_field(Box::new((new_value, new_field)))
-        }
-        ExpressionDesc::Pexp_comptime_compile_error(expr_idx) => {
-            let new_expr = rewrite_expr_idx(*expr_idx, arena, let_unwrap_enabled)?;
-            ExpressionDesc::Pexp_comptime_compile_error(new_expr)
-        }
-        ExpressionDesc::Pexp_comptime_record(inner) => {
-            let (ref ct, ref fields_expr) = **inner;
-            let new_fields = rewrite_expr_idx(*fields_expr, arena, let_unwrap_enabled)?;
-            ExpressionDesc::Pexp_comptime_record(Box::new((*ct, new_fields)))
-        }
-        ExpressionDesc::Pexp_comptime_variant(inner) => {
-            let (ref ct, ref expr_idx, ref opt_expr_idx) = **inner;
-            let new_expr = rewrite_expr_idx(*expr_idx, arena, let_unwrap_enabled)?;
-            let new_opt = opt_expr_idx
-                .map(|e| rewrite_expr_idx(e, arena, let_unwrap_enabled))
-                .transpose()?;
-            ExpressionDesc::Pexp_comptime_variant(Box::new((*ct, new_expr, new_opt)))
-        }
-        ExpressionDesc::Pexp_comptime_build_variant(e) => {
-            let new_e = rewrite_expr_idx(*e, arena, let_unwrap_enabled)?;
-            ExpressionDesc::Pexp_comptime_build_variant(new_e)
-        }
-        ExpressionDesc::Pexp_comptime_variant_case(e) => {
-            let new_e = rewrite_expr_idx(*e, arena, let_unwrap_enabled)?;
-            ExpressionDesc::Pexp_comptime_variant_case(new_e)
-        }
-        ExpressionDesc::Pexp_comptime_build_record(e) => {
-            let new_e = rewrite_expr_idx(*e, arena, let_unwrap_enabled)?;
-            ExpressionDesc::Pexp_comptime_build_record(new_e)
-        }
-        ExpressionDesc::Pexp_comptime_record_field(e) => {
-            let new_e = rewrite_expr_idx(*e, arena, let_unwrap_enabled)?;
-            ExpressionDesc::Pexp_comptime_record_field(new_e)
-        }
     };
 
     Ok(Expression {

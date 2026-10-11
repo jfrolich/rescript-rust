@@ -981,18 +981,7 @@ fn expression_has_string_literal(
         ED::Pexp_ident(_)
         | ED::Pexp_break
         | ED::Pexp_continue
-        | ED::Pexp_jsx_element(_)
-        | ED::Pexp_inline_for(_)
-        | ED::Pexp_comptime_typeinfo(_)
-        | ED::Pexp_comptime_field(_)
-        | ED::Pexp_comptime_compile_error(_)
-        | ED::Pexp_comptime_typename(_)
-        | ED::Pexp_comptime_record(_)
-        | ED::Pexp_comptime_variant(_)
-        | ED::Pexp_comptime_build_variant(_)
-        | ED::Pexp_comptime_variant_case(_)
-        | ED::Pexp_comptime_build_record(_)
-        | ED::Pexp_comptime_record_field(_) => false,
+        | ED::Pexp_jsx_element(_) => false,
     }
 }
 
@@ -2515,12 +2504,7 @@ fn invalid_enabled_let_unwrap_in_expr(
             }),
         ExpressionDesc::Pexp_field(owner, _)
         | ExpressionDesc::Pexp_assert(owner)
-        | ExpressionDesc::Pexp_await(owner)
-        | ExpressionDesc::Pexp_comptime_compile_error(owner)
-        | ExpressionDesc::Pexp_comptime_build_variant(owner)
-        | ExpressionDesc::Pexp_comptime_variant_case(owner)
-        | ExpressionDesc::Pexp_comptime_build_record(owner)
-        | ExpressionDesc::Pexp_comptime_record_field(owner) => {
+        | ExpressionDesc::Pexp_await(owner) => {
             invalid_enabled_let_unwrap_in_expr(*owner, arena)
         }
         ExpressionDesc::Pexp_object_get(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena),
@@ -2547,8 +2531,7 @@ fn invalid_enabled_let_unwrap_in_expr(
             .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena))
             .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.4, arena)),
         ExpressionDesc::Pexp_for_of(inner)
-        | ExpressionDesc::Pexp_for_await_of(inner)
-        | ExpressionDesc::Pexp_inline_for(inner) => {
+        | ExpressionDesc::Pexp_for_await_of(inner) => {
             invalid_enabled_let_unwrap_in_expr(inner.1, arena)
                 .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena))
         }
@@ -2568,20 +2551,6 @@ fn invalid_enabled_let_unwrap_in_expr(
             invalid_enabled_let_unwrap_in_mod_expr(*mod_expr, arena)
         }
         ExpressionDesc::Pexp_open(inner) => invalid_enabled_let_unwrap_in_expr(inner.2, arena),
-        ExpressionDesc::Pexp_comptime_field(inner) => {
-            invalid_enabled_let_unwrap_in_expr(inner.0, arena)
-                .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.1, arena))
-        }
-        ExpressionDesc::Pexp_comptime_record(inner) => {
-            invalid_enabled_let_unwrap_in_expr(inner.1, arena)
-        }
-        ExpressionDesc::Pexp_comptime_variant(inner) => {
-            invalid_enabled_let_unwrap_in_expr(inner.1, arena).or_else(|| {
-                inner
-                    .2
-                    .and_then(|payload| invalid_enabled_let_unwrap_in_expr(payload, arena))
-            })
-        }
         _ => None,
     }
 }
@@ -2713,12 +2682,7 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
             }),
         ExpressionDesc::Pexp_field(owner, _)
         | ExpressionDesc::Pexp_assert(owner)
-        | ExpressionDesc::Pexp_await(owner)
-        | ExpressionDesc::Pexp_comptime_compile_error(owner)
-        | ExpressionDesc::Pexp_comptime_build_variant(owner)
-        | ExpressionDesc::Pexp_comptime_variant_case(owner)
-        | ExpressionDesc::Pexp_comptime_build_record(owner)
-        | ExpressionDesc::Pexp_comptime_record_field(owner) => {
+        | ExpressionDesc::Pexp_await(owner) => {
             disabled_let_unwrap_loc_in_expr(*owner, arena)
         }
         ExpressionDesc::Pexp_object_get(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena),
@@ -2743,8 +2707,7 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
             .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena))
             .or_else(|| disabled_let_unwrap_loc_in_expr(inner.4, arena)),
         ExpressionDesc::Pexp_for_of(inner)
-        | ExpressionDesc::Pexp_for_await_of(inner)
-        | ExpressionDesc::Pexp_inline_for(inner) => disabled_let_unwrap_loc_in_expr(inner.1, arena)
+        | ExpressionDesc::Pexp_for_await_of(inner) => disabled_let_unwrap_loc_in_expr(inner.1, arena)
             .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena)),
         ExpressionDesc::Pexp_constraint(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena),
         ExpressionDesc::Pexp_coerce(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena),
@@ -2758,20 +2721,6 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
             disabled_let_unwrap_loc_in_mod_expr(*mod_expr, arena)
         }
         ExpressionDesc::Pexp_open(inner) => disabled_let_unwrap_loc_in_expr(inner.2, arena),
-        ExpressionDesc::Pexp_comptime_field(inner) => {
-            disabled_let_unwrap_loc_in_expr(inner.0, arena)
-                .or_else(|| disabled_let_unwrap_loc_in_expr(inner.1, arena))
-        }
-        ExpressionDesc::Pexp_comptime_record(inner) => {
-            disabled_let_unwrap_loc_in_expr(inner.1, arena)
-        }
-        ExpressionDesc::Pexp_comptime_variant(inner) => {
-            disabled_let_unwrap_loc_in_expr(inner.1, arena).or_else(|| {
-                inner
-                    .2
-                    .and_then(|payload| disabled_let_unwrap_loc_in_expr(payload, arena))
-            })
-        }
         _ => None,
     }
 }
