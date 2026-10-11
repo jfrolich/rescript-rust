@@ -503,7 +503,10 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
     if let Some(registry) = registry {
         if matches!(ext, "cmi" | "ast" | "iast") {
             return Err(UserDiagnostic::new(
-                format!("bsc: {} input needs the file-based compiler\n", input.display()),
+                format!(
+                    "bsc: {} input needs the file-based compiler\n",
+                    input.display()
+                ),
                 2,
             )
             .into());
@@ -609,11 +612,11 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
 fn compile_in_process(
     source_path: &Path,
     opts: &Options,
-    registry: crate::cmi::persistent_env::ModuleRegistry,
+    mut registry: crate::cmi::persistent_env::ModuleRegistry,
 ) -> Result<()> {
     use crate::driver::DumpKind;
-    let bytes =
-        fs::read(source_path).with_context(|| format!("Failed to read {}", source_path.display()))?;
+    let bytes = fs::read(source_path)
+        .with_context(|| format!("Failed to read {}", source_path.display()))?;
     let source = latin1_bytes_to_string(bytes);
     let filename = source_path.to_string_lossy().into_owned();
     let module_name = opts
@@ -692,6 +695,40 @@ fn compile_in_process(
         return Ok(());
     }
 
+    // The file compile reads the interface's `.cmi`; in process, type the
+    // sibling `.resi` and publish its signature as the build does. Its
+    // warnings belong to the interface compile, so they are not printed.
+    let interface_path = source_path.with_extension("resi");
+    let has_interface = interface_path.is_file();
+    if has_interface {
+        let bytes = fs::read(&interface_path)
+            .with_context(|| format!("Failed to read {}", interface_path.display()))?;
+        let interface_source = latin1_bytes_to_string(bytes);
+        let mut interface_options = options.clone();
+        interface_options.dumps.clear();
+        interface_options.source_filename = Some(interface_path.to_string_lossy().into_owned());
+        let interface = crate::driver::typecheck_interface_source_in_process(
+            &interface_source,
+            &interface_path.to_string_lossy(),
+            &module_name,
+            &interface_options,
+            &registry,
+        )?;
+        if let Some(pers_struct) = interface.pers_struct {
+            registry.register_module_arc(
+                &module_name,
+                std::sync::Arc::new(pers_struct),
+                crate::cmi::persistent_env::InMemoryModuleInfo::new(
+                    source_path.to_path_buf(),
+                    true,
+                    Default::default(),
+                    false,
+                ),
+                interface.new_alias_rewrites.into_iter().collect(),
+            );
+        }
+    }
+
     // Where the JavaScript goes, as for the file compile.
     let mut targets = Vec::new();
     if let Some(out) = &opts.output {
@@ -722,7 +759,7 @@ fn compile_in_process(
         &module_name,
         &options,
         &registry,
-        false,
+        has_interface,
     )?;
     eprint!("{}", result.warnings);
     print_dumps(&result.dumps);

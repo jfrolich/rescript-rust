@@ -1206,13 +1206,11 @@ impl DumpKind {
     }
 }
 
-/// Dump printers write Latin-1 bytes (one byte per source char); keep them
-/// byte-exact in the returned string.
+/// The dump's bytes, one `char` per byte. Dump printers write source text
+/// byte for byte, so the bytes need not be UTF-8; writers turn each `char`
+/// back into its byte.
 fn latin1_dump(bytes: Vec<u8>) -> String {
-    match String::from_utf8(bytes) {
-        Ok(text) => text,
-        Err(err) => err.into_bytes().into_iter().map(char::from).collect(),
-    }
+    bytes.into_iter().map(char::from).collect()
 }
 
 /// Compiler options that can be passed to the driver.
@@ -16156,6 +16154,33 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // translation, as the file compile does.
     tctx.flush_value_usage_checks();
     let post_type_warning_start = tctx.warnings.len();
+    // js_implementation.ml:148-156 prints `-dtyped-sexp` here, before the
+    // signature is saved: `register_in_memory_signature` below finalizes the
+    // current unit's type paths in place (`allOptRec` becomes
+    // `Current.allOptRec`), which must not show in the dump.
+    let mut dumps: Vec<(DumpKind, String)> = Vec::new();
+    for kind in [DumpKind::TypedTree, DumpKind::TypedTreeLocs] {
+        if options.dumps.contains(&kind) {
+            let mut buf = Vec::new();
+            let _ = if kind == DumpKind::TypedTree {
+                crate::types::sexp_typedtree::print_typed_structure(
+                    arena,
+                    &type_ctx,
+                    &typed_structure,
+                    &mut buf,
+                )
+            } else {
+                crate::types::sexp_typedtree::print_typed_structure_with_locs(
+                    arena,
+                    &type_ctx,
+                    &typed_structure,
+                    &mut buf,
+                )
+            };
+            dumps.push((kind, latin1_dump(buf)));
+        }
+    }
+
     let unit_reads = if options.collect_unit_reads {
         crate::types::unit_reads::structure_reads(
             &type_ctx,
@@ -16260,29 +16285,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         })?;
     }
     tctx.persistent_env = Some(persistent_env_after_signature);
-
-    let mut dumps: Vec<(DumpKind, String)> = Vec::new();
-    for kind in [DumpKind::TypedTree, DumpKind::TypedTreeLocs] {
-        if options.dumps.contains(&kind) {
-            let mut buf = Vec::new();
-            let _ = if kind == DumpKind::TypedTree {
-                crate::types::sexp_typedtree::print_typed_structure(
-                    arena,
-                    &type_ctx,
-                    &typed_structure,
-                    &mut buf,
-                )
-            } else {
-                crate::types::sexp_typedtree::print_typed_structure_with_locs(
-                    arena,
-                    &type_ctx,
-                    &typed_structure,
-                    &mut buf,
-                )
-            };
-            dumps.push((kind, latin1_dump(buf)));
-        }
-    }
 
     // Capture typed tree sexp for the playground (only if requested).
     let typed_tree_sexp = if options.capture_intermediates {
