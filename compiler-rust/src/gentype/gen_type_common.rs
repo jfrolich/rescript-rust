@@ -297,7 +297,7 @@ pub fn unknown() -> Type {
 }
 
 pub fn bigint_t() -> Type {
-    ident("BigInt")
+    ident("bigint")
 }
 
 pub fn boolean_t() -> Type {

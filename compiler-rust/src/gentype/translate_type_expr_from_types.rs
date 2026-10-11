@@ -99,290 +99,102 @@ pub fn translate_constr(
     path: &Path,
     type_env: &crate::gentype::type_env::T,
 ) -> Translation {
-    // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:59-439.
+    // Mirrors compiler/gentype/translate_type_expr_from_types.ml:48-423.
     let stripped_path = crate::gentype::type_env::strip_current_module_prefix(path, type_env);
     let path = stripped_path.as_ref().unwrap_or(path);
     let mut path_list = path_to_list(path);
     path_list.reverse();
-
-    if params_translation.is_empty() {
-        match path_list.as_slice() {
-            [s] if s == "bool" => return tr(crate::gentype::gen_type_common::boolean_t()),
-            [s] if s == "int" || s == "float" => {
-                return tr(crate::gentype::gen_type_common::number_t());
-            }
-            [s] if s == "unit" => return tr(crate::gentype::gen_type_common::unit_t()),
-            [s] if s == "string" => return tr(crate::gentype::gen_type_common::string_t()),
-            [a, b] if a == "String" && b == "t" => {
-                return tr(crate::gentype::gen_type_common::string_t());
-            }
-            [a, b, c]
-                if (a == "Stdlib" && b == "String" && c == "t")
-                    || (a == "Js" && (b == "String" || b == "String2") && c == "t") =>
-            {
-                return tr(crate::gentype::gen_type_common::string_t());
-            }
-            [a, b] if a == "BigInt" && b == "t" => {
-                return tr(crate::gentype::gen_type_common::bigint_t());
-            }
-            [a, b, c]
-                if (a == "Js" && b == "Types" && c == "bigint_val")
-                    || (a == "Stdlib" && b == "BigInt" && c == "t") =>
-            {
-                return tr(crate::gentype::gen_type_common::bigint_t());
-            }
-            [a, b] if (a == "Date" || a == "RegExp") && b == "t" => {
-                return tr(match a.as_str() {
-                    "Date" => crate::gentype::gen_type_common::date_t(),
-                    _ => crate::gentype::gen_type_common::regexp_t(),
-                });
-            }
-            [a, b, c]
-                if (a == "Js" && b == "Date" && c == "t")
-                    || (a == "Stdlib" && b == "Date" && c == "t") =>
-            {
-                return tr(crate::gentype::gen_type_common::date_t());
-            }
-            [a, b, c]
-                if (a == "Js" && b == "Re" && c == "t")
-                    || (a == "Stdlib" && b == "RegExp" && c == "t") =>
-            {
-                return tr(crate::gentype::gen_type_common::regexp_t());
-            }
-            [a, b, c] if a == "Stdlib" && c == "t" => {
-                return match b.as_str() {
-                    "ArrayBuffer" | "DataView" | "Int8Array" | "Uint8Array"
-                    | "Uint8ClampedArray" | "Int16Array" | "Uint16Array" | "Int32Array"
-                    | "Uint32Array" | "Float32Array" | "Float64Array" | "BigInt64Array"
-                    | "BigUint64Array" => tr(ident(b)),
-                    "Symbol" => tr(ident("symbol")),
-                    "Error" | "JsError" => tr(ident("Error")),
-                    "Ordering" => tr(crate::gentype::gen_type_common::number_t()),
-                    "JSON" => tr(unknown()),
-                    _ => default_case(config, params_translation, path, type_env),
-                };
-            }
-            [a, b, c, d] if a == "Stdlib" && b == "Intl" && d == "t" => {
-                return tr(ident(&format!("Intl.{c}")));
-            }
-            // OCaml compiler/gentype/TranslateTypeExprFromTypes.ml:389-390
-            // maps both `ReactDOM.domRef` and `ReactDOM.Ref.t` to the same
-            // React DOM ref type.
-            [a, b] if a == "ReactDOM" && b == "domRef" => {
-                return tr(crate::gentype::emit_type::type_react_d_o_m_re_dom_ref());
-            }
-            [a, b, c] if a == "ReactDOM" && b == "Ref" && c == "t" => {
-                return tr(crate::gentype::emit_type::type_react_d_o_m_re_dom_ref());
-            }
-            [a, b, c] if a == "ReactDOM" && b == "Ref" && c == "currentDomRef" => {
-                return tr(crate::gentype::emit_type::type_any());
-            }
-            [a, b] if a == "ReactDOMRe" && b == "domRef" => {
-                return tr(crate::gentype::emit_type::type_react_d_o_m_re_dom_ref());
-            }
-            [a, b, c] if a == "ReactDOMRe" && b == "Ref" && c == "currentDomRef" => {
-                return tr(crate::gentype::emit_type::type_any());
-            }
-            [a, b, c] if a == "ReactEvent" && b == "Mouse" && c == "t" => {
-                return tr(crate::gentype::emit_type::type_react_event_mouse_t());
-            }
-            [a, b]
-                if (a == "React" && b == "element")
-                    || (a == "ReasonReact" && b == "reactElement")
-                    || (a == "Jsx" && b == "element") =>
-            {
-                return tr(crate::gentype::emit_type::type_react_element());
-            }
-            [a, b, c] if a == "Pervasives" && b == "Jsx" && c == "element" => {
-                return tr(crate::gentype::emit_type::type_react_element());
-            }
-            _ => {}
-        }
-    }
+    let path_list: Vec<&str> = path_list.iter().map(String::as_str).collect();
+    let builtin = |type_args: Vec<Type>, name: &str| ident_with(true, type_args, name);
+    let with_type = |param: &Translation, type_: Type| Translation {
+        dependencies: param.dependencies.clone(),
+        type_,
+    };
+    use crate::gentype::gen_type_common as common;
 
     match (path_list.as_slice(), params_translation) {
-        ([a, b], [param1, param2]) if (a == "Map" || a == "WeakMap") && b == "t" => {
-            let type_ = match a.as_str() {
-                "Map" => crate::gentype::gen_type_common::map_t(
-                    param1.type_.clone(),
-                    param2.type_.clone(),
-                ),
-                _ => crate::gentype::gen_type_common::weakmap_t(
-                    param1.type_.clone(),
-                    param2.type_.clone(),
-                ),
-            };
-            Translation {
-                dependencies: concat_deps(&[param1, param2]),
-                type_,
-            }
-        }
-        ([a, b, c], [param1, param2])
-            if a == "Stdlib" && (b == "Map" || b == "WeakMap") && c == "t" =>
-        {
-            let type_ = match b.as_str() {
-                "Map" => crate::gentype::gen_type_common::map_t(
-                    param1.type_.clone(),
-                    param2.type_.clone(),
-                ),
-                _ => crate::gentype::gen_type_common::weakmap_t(
-                    param1.type_.clone(),
-                    param2.type_.clone(),
-                ),
-            };
-            Translation {
-                dependencies: concat_deps(&[param1, param2]),
-                type_,
-            }
-        }
-        ([a, b], [param]) if (a == "Set" || a == "WeakSet") && b == "t" => Translation {
-            dependencies: param.dependencies.clone(),
-            type_: match a.as_str() {
-                "Set" => crate::gentype::gen_type_common::set_t(param.type_.clone()),
-                _ => crate::gentype::gen_type_common::weakset_t(param.type_.clone()),
-            },
+        (["bool"], []) => tr(common::boolean_t()),
+        (["int"] | ["float"], []) => tr(common::number_t()),
+        (["string"] | ["Stdlib", "String", "t"], []) => tr(common::string_t()),
+        (["Stdlib", "BigInt", "t"], []) => tr(common::bigint_t()),
+        (["Stdlib", "Date", "t"], []) => tr(common::date_t()),
+        (["Map", "t"] | ["Stdlib", "Map", "t"], [key, value]) => Translation {
+            dependencies: concat_deps(&[key, value]),
+            type_: common::map_t(key.type_.clone(), value.type_.clone()),
         },
-        ([a, b, c], [param]) if a == "Stdlib" && (b == "Set" || b == "WeakSet") && c == "t" => {
-            Translation {
-                dependencies: param.dependencies.clone(),
-                type_: match b.as_str() {
-                    "Set" => crate::gentype::gen_type_common::set_t(param.type_.clone()),
-                    _ => crate::gentype::gen_type_common::weakset_t(param.type_.clone()),
-                },
-            }
+        (["WeakMap", "t"] | ["Stdlib", "WeakMap", "t"], [key, value]) => Translation {
+            dependencies: concat_deps(&[key, value]),
+            type_: common::weakmap_t(key.type_.clone(), value.type_.clone()),
+        },
+        (["Set", "t"] | ["Stdlib", "Set", "t"], [param]) => with_type(param, common::set_t(param.type_.clone())),
+        (["WeakSet", "t"] | ["Stdlib", "WeakSet", "t"], [param]) => {
+            with_type(param, common::weakset_t(param.type_.clone()))
         }
-        ([a, b], [param]) if (a == "array" || a == "ImmutableArray") && b == "t" => Translation {
-            dependencies: param.dependencies.clone(),
-            type_: Type::Array(
-                Box::new(param.type_.clone()),
-                match a.as_str() {
-                    "ImmutableArray" => Mutable::Immutable,
-                    _ => Mutable::Mutable,
-                },
+        (["Stdlib", "RegExp", "t"], []) => tr(common::regexp_t()),
+        (
+            [
+                "Stdlib",
+                name @ ("ArrayBuffer" | "DataView" | "Int8Array" | "Uint8Array" | "Uint8ClampedArray"
+                | "Int16Array" | "Uint16Array" | "Int32Array" | "Uint32Array" | "Float32Array"
+                | "Float64Array" | "BigInt64Array" | "BigUint64Array"),
+                "t",
+            ],
+            [],
+        ) => tr(ident(name)),
+        (["Stdlib", "Symbol", "t"], []) => tr(ident("symbol")),
+        (["Stdlib", "Intl", intl_module, "t"], []) => tr(ident(&format!("Intl.{intl_module}"))),
+        (["Stdlib", "Error", "t"] | ["Stdlib", "JsError", "t"], []) => tr(ident("Error")),
+        (["Stdlib", "Iterable", "t"] | ["iterable"], [param]) => {
+            with_type(param, builtin(vec![param.type_.clone()], "Iterable"))
+        }
+        (
+            [
+                "Stdlib",
+                name @ ("Iterator" | "IteratorObject" | "IterableIterator" | "Generator" | "AsyncIterator"
+                | "AsyncIterableIterator" | "AsyncGenerator"),
+                "t",
+            ],
+            [yield_t, return_t, next_t],
+        ) => Translation {
+            dependencies: concat_deps(&[yield_t, return_t, next_t]),
+            type_: builtin(
+                vec![yield_t.type_.clone(), return_t.type_.clone(), next_t.type_.clone()],
+                name,
             ),
         },
-        ([a], [param]) if a == "array" => Translation {
-            dependencies: param.dependencies.clone(),
-            type_: Type::Array(Box::new(param.type_.clone()), Mutable::Mutable),
-        },
-        ([a, b, c], [param]) if a == "Js" && (b == "Array" || b == "Array2") && c == "t" => {
-            Translation {
-                dependencies: param.dependencies.clone(),
-                type_: Type::Array(Box::new(param.type_.clone()), Mutable::Mutable),
-            }
+        (["Stdlib", "AsyncIterable", "t"] | ["asyncIterable"], [param]) => {
+            with_type(param, builtin(vec![param.type_.clone()], "AsyncIterable"))
         }
-        ([a, b], [param]) if a == "Pervasives" && b == "ref" => Translation {
-            dependencies: param.dependencies.clone(),
-            type_: Type::Object(
+        (["Stdlib", "Ordering", "t"], []) => tr(common::number_t()),
+        (["unit"], []) => tr(common::unit_t()),
+        (["array"] | ["Stdlib", "Array", "t"], [param]) => {
+            with_type(param, Type::Array(Box::new(param.type_.clone()), Mutable::Mutable))
+        }
+        (["ImmutableArray", "t"], [param]) => {
+            with_type(param, Type::Array(Box::new(param.type_.clone()), Mutable::Immutable))
+        }
+        (["Pervasives", "ref"], [param]) => with_type(
+            param,
+            Type::Object(
                 ClosedFlag::Closed,
                 vec![Field {
                     mutable_: Mutable::Mutable,
                     name_js: "contents".to_string(),
                     optional: Optional::Mandatory,
                     type_: param.type_.clone(),
-                    doc_string: crate::gentype::gen_type_common::doc_string::empty,
+                    doc_string: common::doc_string::empty,
                 }],
             ),
-        },
-        ([a], [param]) if a == "option" => Translation {
-            dependencies: param.dependencies.clone(),
-            type_: Type::Option(Box::new(param.type_.clone())),
-        },
-        ([a], [ok_t, error_t]) if a == "result" => result_translation(ok_t, error_t),
-        ([a, b], [ok_t, error_t]) if a == "Pervasives" && b == "result" => {
-            result_translation(ok_t, error_t)
-        }
-        ([a, b, c], [ok_t, error_t])
-            if (a == "Belt" && b == "Result" && c == "t")
-                || (a == "Stdlib" && b == "Result" && c == "t") =>
-        {
-            result_translation(ok_t, error_t)
-        }
-        ([a, b], [param])
-            if (a == "Js" && (b == "undefined" || b == "null" || b == "nullable"))
-                || (a == "Stdlib" && (b == "undefined" || b == "null" || b == "nullable")) =>
-        {
-            wrap_builtin_nullable(b, param)
-        }
-        ([a, b, c], [param])
-            if (a == "Js"
-                && (b == "Undefined"
-                    || b == "Null"
-                    || b == "Nullable"
-                    || b == "Promise"
-                    || b == "Dict")
-                && c == "t")
-                || (a == "Stdlib"
-                    && (b == "Null" || b == "Nullable" || b == "Promise" || b == "Dict")
-                    && c == "t") =>
-        {
-            wrap_builtin_nullable(b, param)
-        }
-        ([a, b], [param])
-            if (a == "Undefined" && b == "t")
-                || (a == "Null" && b == "t")
-                || (a == "Nullable" && b == "t")
-                || (a == "Promise" && b == "t")
-                || (a == "Dict" && b == "t") =>
-        {
-            wrap_builtin_nullable(a, param)
-        }
-        ([a], [param]) if a == "promise" || a == "dict" => wrap_builtin_nullable(a, param),
-        ([a, b, c], [param])
-            if a == "Stdlib" && (b == "Iterable" || b == "AsyncIterable") && c == "t" =>
-        {
-            Translation {
-                dependencies: param.dependencies.clone(),
-                type_: ident_with(true, vec![param.type_.clone()], b),
-            }
-        }
-        ([a], [param]) if a == "iterable" || a == "asyncIterable" => Translation {
-            dependencies: param.dependencies.clone(),
-            type_: ident_with(
-                false,
-                vec![param.type_.clone()],
-                match a.as_str() {
-                    "iterable" => "Iterable",
-                    _ => "AsyncIterable",
-                },
-            ),
-        },
-        ([a, b, c], [yield_t, return_t, next_t])
-            if a == "Stdlib"
-                && matches!(
-                    b.as_str(),
-                    "Iterator"
-                        | "IteratorObject"
-                        | "IterableIterator"
-                        | "Generator"
-                        | "AsyncIterator"
-                        | "AsyncIterableIterator"
-                        | "AsyncGenerator"
-                )
-                && c == "t" =>
-        {
-            Translation {
-                dependencies: concat_deps(&[yield_t, return_t, next_t]),
-                type_: ident_with(
-                    false,
-                    vec![
-                        yield_t.type_.clone(),
-                        return_t.type_.clone(),
-                        next_t.type_.clone(),
-                    ],
-                    b,
-                ),
-            }
-        }
-        ([a, b], [from_t, to_t]) if a == "React" && b == "callback" => {
-            function_translation(from_t, to_t)
-        }
-        ([a, b], [props_t, ret_t]) if a == "React" && b == "componentLike" => {
-            function_translation(props_t, ret_t)
-        }
-        ([a, b], [props_t]) if a == "React" && b == "component" => Translation {
-            dependencies: props_t.dependencies.clone(),
-            type_: Type::Function(Function {
+        ),
+        (
+            ["Pervasives", "result"] | ["Belt", "Result", "t"] | ["result"] | ["Stdlib", "Result", "t"],
+            [ok_t, error_t],
+        ) => result_translation(ok_t, error_t),
+        (["React", "callback"], [from_t, to_t]) => function_translation(from_t, to_t),
+        (["React", "componentLike"], [props_t, ret_t]) => function_translation(props_t, ret_t),
+        (["React", "component"], [props_t]) => with_type(
+            props_t,
+            Type::Function(Function {
                 arg_types: vec![ArgType {
                     a_name: String::new(),
                     a_type: props_t.type_.clone(),
@@ -390,18 +202,58 @@ pub fn translate_constr(
                 ret_type: Box::new(crate::gentype::emit_type::type_react_element()),
                 type_vars: vec![],
             }),
-        },
-        ([a, b, c], [param]) if a == "React" && b == "Context" && c == "t" => Translation {
-            dependencies: param.dependencies.clone(),
-            type_: crate::gentype::emit_type::type_react_context(param.type_.clone()),
-        },
-        ([a, b, c], [param]) if a == "React" && b == "Ref" && c == "t" => Translation {
-            dependencies: param.dependencies.clone(),
-            type_: crate::gentype::emit_type::type_react_ref(param.type_.clone()),
-        },
-        ([a, b], [param]) if a == "React" && b == "ref" => Translation {
-            dependencies: param.dependencies.clone(),
-            type_: crate::gentype::emit_type::type_react_ref(param.type_.clone()),
+        ),
+        (["React", "Context", "t"], [param]) => {
+            with_type(param, crate::gentype::emit_type::type_react_context(param.type_.clone()))
+        }
+        (["React", "Ref", "t"] | ["React", "ref"], [param]) => {
+            with_type(param, crate::gentype::emit_type::type_react_ref(param.type_.clone()))
+        }
+        (["ReactDOM", "domRef"] | ["ReactDOM", "Ref", "t"], []) => {
+            tr(crate::gentype::emit_type::type_react_d_o_m_re_dom_ref())
+        }
+        (["ReactDOM", "Ref", "currentDomRef"], []) => tr(crate::gentype::emit_type::type_any()),
+        (["ReactDOMRe", "domRef"], []) => tr(crate::gentype::emit_type::type_react_d_o_m_re_dom_ref()),
+        (["ReactDOMRe", "Ref", "currentDomRef"], []) => tr(crate::gentype::emit_type::type_any()),
+        (["ReactEvent", "Mouse", "t"], []) => tr(crate::gentype::emit_type::type_react_event_mouse_t()),
+        (
+            ["React", "element"] | ["ReasonReact", "reactElement"] | ["Pervasives", "Jsx", "element"]
+            | ["Jsx", "element"],
+            [],
+        ) => tr(crate::gentype::emit_type::type_react_element()),
+        (["option"], [param]) => with_type(param, Type::Option(Box::new(param.type_.clone()))),
+        (["Stdlib", "undefined"], [param]) => with_type(param, Type::Option(Box::new(param.type_.clone()))),
+        (["Stdlib", "Null", "t"] | ["Stdlib", "null"], [param]) => {
+            with_type(param, Type::Null(Box::new(param.type_.clone())))
+        }
+        (["Stdlib", "Nullable", "t"] | ["Stdlib", "nullable"], [param]) => {
+            with_type(param, Type::Nullable(Box::new(param.type_.clone())))
+        }
+        (["promise"] | ["Stdlib", "Promise", "t"], [param]) => {
+            with_type(param, Type::Promise(Box::new(param.type_.clone())))
+        }
+        (["dict"] | ["Stdlib", "Dict", "t"], [param]) => with_type(param, Type::Dict(Box::new(param.type_.clone()))),
+        (["Stdlib", "JSON", "t"], []) => tr(unknown()),
+        // A tagged-template tag is a variadic function usable with backtick
+        // syntax: (strings: TemplateStringsArray, ...values: 'param[]) =>
+        // 'output. The spread is encoded in the parameter name, which is
+        // emitted verbatim before the type.
+        (["taggedTemplate"] | ["Stdlib", "TaggedTemplate", "t"], [param, output]) => Translation {
+            dependencies: concat_deps(&[param, output]),
+            type_: Type::Function(Function {
+                arg_types: vec![
+                    ArgType {
+                        a_name: "strings".to_string(),
+                        a_type: ident("TemplateStringsArray"),
+                    },
+                    ArgType {
+                        a_name: "...values".to_string(),
+                        a_type: Type::Array(Box::new(param.type_.clone()), Mutable::Mutable),
+                    },
+                ],
+                ret_type: Box::new(output.type_.clone()),
+                type_vars: vec![],
+            }),
         },
         _ => default_case(config, params_translation, path, type_env),
     }
@@ -445,68 +297,41 @@ pub fn translate_arrow_type(
     config: &crate::gentype::config::T,
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
     type_env: &crate::gentype::type_env::T,
-    rev_arg_deps: Vec<Dep>,
-    rev_args: Vec<(Label, Type)>,
-    type_expr: &TypeExprRef,
+    args: &[crate::types::type_expr::TypeArg],
+    ret: &TypeExprRef,
 ) -> Translation {
-    // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:470-524.
-    match type_expr_desc(ctx, type_expr) {
-        TypeDesc::Tlink(t) => translate_arrow_type(
-            ctx,
-            config,
-            type_vars_gen,
-            type_env,
-            rev_arg_deps,
-            rev_args,
-            &t,
-        ),
-        TypeDesc::Tarrow { args, ret } => {
-            let mut next_rev_deps = rev_arg_deps;
-            let mut next_rev_args = rev_args;
-            for arg in args {
-                let (label, typ) = match remove_option(ctx, arg.label(), &arg.typ) {
-                    Some((lbl, typ)) => (Label::OptLabel(lbl), typ),
-                    None if matches!(arg.label(), ArgLabel::Nolabel) => (Label::Nolabel, arg.typ),
-                    None => (Label::Label(label_name(arg.label())), arg.typ),
-                };
-                let Translation {
-                    dependencies,
-                    type_,
-                } = translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &typ);
-                let mut deps = dependencies;
-                deps.extend(next_rev_deps);
-                next_rev_deps = deps;
-                next_rev_args.insert(0, (label, type_));
-            }
-            translate_arrow_type(
-                ctx,
-                config,
-                type_vars_gen,
-                type_env,
-                next_rev_deps,
-                next_rev_args,
-                &ret,
-            )
-        }
-        _ => {
-            let Translation {
-                dependencies,
-                type_: ret_type,
-            } = translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, type_expr);
-            let mut all_deps = rev_arg_deps;
-            all_deps.extend(dependencies);
-            let mut labeled_convertable_types = rev_args;
-            labeled_convertable_types.reverse();
-            let arg_types = crate::gentype::named_args::group(labeled_convertable_types);
-            Translation {
-                dependencies: all_deps,
-                type_: Type::Function(Function {
-                    arg_types,
-                    ret_type: Box::new(ret_type),
-                    type_vars: vec![],
-                }),
-            }
-        }
+    // Mirrors compiler/gentype/translate_type_expr_from_types.ml:454-490: one
+    // n-ary arrow is one function; a function-typed result stays nested.
+    let mut arg_deps = Vec::new();
+    let mut labeled_convertable_types = Vec::with_capacity(args.len());
+    for arg in args {
+        let (label, typ) = match arg.label() {
+            ArgLabel::Nolabel => (Label::Nolabel, arg.typ),
+            label => match remove_option(ctx, label, &arg.typ) {
+                Some((lbl, typ)) => (Label::OptLabel(lbl), typ),
+                None => (Label::Label(label_name(label)), arg.typ),
+            },
+        };
+        let Translation {
+            dependencies,
+            type_,
+        } = translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &typ);
+        arg_deps.extend(dependencies);
+        labeled_convertable_types.push((label, type_));
+    }
+    let Translation {
+        dependencies,
+        type_: ret_type,
+    } = translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, ret);
+    arg_deps.extend(dependencies);
+    let arg_types = crate::gentype::named_args::group(labeled_convertable_types);
+    Translation {
+        dependencies: arg_deps,
+        type_: Type::Function(Function {
+            arg_types,
+            ret_type: Box::new(ret_type),
+            type_vars: vec![],
+        }),
     }
 }
 
@@ -559,15 +384,9 @@ pub fn translateTypeExprFromTypes_(
         TypeDesc::Tpoly { body, vars } if vars.is_empty() => {
             translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &body)
         }
-        TypeDesc::Tarrow { .. } => translate_arrow_type(
-            ctx,
-            config,
-            type_vars_gen,
-            type_env,
-            vec![],
-            vec![],
-            type_expr,
-        ),
+        TypeDesc::Tarrow { args, ret } => {
+            translate_arrow_type(ctx, config, type_vars_gen, type_env, &args, &ret)
+        }
         TypeDesc::Ttuple(list_exp) => {
             let inner_types_translation =
                 translateTypeExprsFromTypes_(ctx, config, type_vars_gen, type_env, &list_exp);

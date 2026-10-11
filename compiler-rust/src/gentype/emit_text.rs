@@ -18,6 +18,11 @@ pub fn generics_string(type_vars: &[String]) -> String {
     }
 }
 
+/// Mirrors compiler/gentype/emit_text.ml:11 (`String_literal.encode_js_string`).
+pub fn escape_string_contents(s: &str) -> String {
+    crate::string_literal::encode_js_string(s)
+}
+
 pub fn quotes(x: &str) -> String {
     format!("\"{x}\"")
 }
