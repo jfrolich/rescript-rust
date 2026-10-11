@@ -14,8 +14,17 @@ use crate::types::typedtree::{
 };
 
 type InProcessTypeDeclarations = Vec<crate::gentype::code_item::TypeDeclaration>;
-type InProcessTypeDeclarationsCache =
-    Mutex<HashMap<String, std::sync::Arc<InProcessTypeDeclarations>>>;
+
+/// Type declarations of the typed artifacts processed in this process, by
+/// normalized `.cmt`/`.cmti` path (OCaml GenType reads them from those files,
+/// which in-process builds do not write), and the paths each module owns.
+#[derive(Default)]
+struct InProcessTypeDeclarationsTables {
+    by_cmt: HashMap<String, std::sync::Arc<InProcessTypeDeclarations>>,
+    by_module: HashMap<String, Vec<String>>,
+}
+
+type InProcessTypeDeclarationsCache = Mutex<InProcessTypeDeclarationsTables>;
 
 pub enum BinaryAnnots {
     Implementation(Structure),
@@ -47,11 +56,15 @@ pub struct TypedArtifact<'a> {
     pub compiler_module_name: crate::gentype::module_name::T,
     pub file_name: crate::gentype::module_name::T,
     pub is_interface: bool,
+    /// Only register the artifact's type declarations, for modules that
+    /// import its types; generate no output (a module compiled only for its
+    /// interface).
+    pub declarations_only: bool,
 }
 
 fn in_process_type_declarations_cache() -> &'static InProcessTypeDeclarationsCache {
     static CACHE: OnceLock<InProcessTypeDeclarationsCache> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    CACHE.get_or_init(|| Mutex::new(InProcessTypeDeclarationsTables::default()))
 }
 
 fn normalize_cmt_path_lexically(path: PathBuf) -> PathBuf {
@@ -129,7 +142,7 @@ fn has_in_process_type_declarations(cmt_file: &Path) -> bool {
     let key = normalize_cmt_cache_key(cmt_file);
     in_process_type_declarations_cache()
         .lock()
-        .map(|cache| cache.contains_key(&key))
+        .map(|cache| cache.by_cmt.contains_key(&key))
         .unwrap_or(false)
 }
 
@@ -138,21 +151,65 @@ fn lookup_in_process_type_declarations(cmt_file: &str) -> Option<InProcessTypeDe
     let shared = in_process_type_declarations_cache()
         .lock()
         .ok()
-        .and_then(|cache| cache.get(&key).cloned())?;
+        .and_then(|cache| cache.by_cmt.get(&key).cloned())?;
     Some(shared.as_ref().clone())
 }
 
 fn register_in_process_type_declarations(
+    module_name: &str,
     cmt_file: &str,
     type_declarations: InProcessTypeDeclarations,
 ) {
     let key = normalize_cmt_cache_key(cmt_file);
     let type_declarations = std::sync::Arc::new(type_declarations);
-    let replaced = in_process_type_declarations_cache()
-        .lock()
-        .ok()
-        .and_then(|mut cache| cache.insert(key, type_declarations));
+    let replaced = in_process_type_declarations_cache().lock().ok().and_then(|mut cache| {
+        let keys = cache.by_module.entry(module_name.to_string()).or_default();
+        if !keys.contains(&key) {
+            keys.push(key.clone());
+        }
+        cache.by_cmt.insert(key, type_declarations)
+    });
     drop(replaced);
+}
+
+/// The type declarations `module_name`'s typed artifacts registered, by
+/// normalized `.cmt`/`.cmti` path, for an incremental build to store with the
+/// module's interface: a later build that does not compile the module
+/// restores them with [`restore_type_declarations`], so modules that import
+/// its types translate them as when it was compiled.
+pub fn type_declarations_of_module(
+    module_name: &str,
+) -> Vec<(String, std::sync::Arc<InProcessTypeDeclarations>)> {
+    let Ok(cache) = in_process_type_declarations_cache().lock() else {
+        return Vec::new();
+    };
+    let Some(keys) = cache.by_module.get(module_name) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<_> = keys
+        .iter()
+        .filter_map(|key| Some((key.clone(), cache.by_cmt.get(key)?.clone())))
+        .collect();
+    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    entries
+}
+
+/// Register type declarations stored by [`type_declarations_of_module`].
+pub fn restore_type_declarations(
+    module_name: &str,
+    entries: Vec<(String, InProcessTypeDeclarations)>,
+) {
+    if entries.is_empty() {
+        return;
+    }
+    let Ok(mut cache) = in_process_type_declarations_cache().lock() else {
+        return;
+    };
+    let keys = entries.iter().map(|(key, _)| key.clone()).collect();
+    cache.by_module.insert(module_name.to_string(), keys);
+    for (key, declarations) in entries {
+        cache.by_cmt.insert(key, std::sync::Arc::new(declarations));
+    }
 }
 
 fn get_cmt_file_for_typed_artifact_import(project_root: &str, cmt: &str) -> String {
@@ -745,9 +802,13 @@ pub fn process_typed_artifact(
         cmt_file_for_typed_artifact(&config, &source_file, artifact.is_interface)
     {
         register_in_process_type_declarations(
+            &artifact.compiler_module_name,
             &cmt_file,
             type_declaration_translation.type_declarations,
         );
+    }
+    if artifact.declarations_only {
+        return Ok(());
     }
     let has_gentype_annotations = typed_artifact_check_annotations(
         &|arena, _loc, attributes| {

@@ -563,16 +563,19 @@ impl ModuleRegistry {
     pub fn encode_stored_module(&self, name: &str, alias_rewrites: &[(String, Path)]) -> Option<Vec<u8>> {
         let (pers, info) = self.registered(name);
         let info = info?;
+        let gentype_declarations = crate::gentype::main::type_declarations_of_module(name);
         Some(super::stored_module::encode(&super::stored_module::StoredModuleRef {
             pers_struct: pers.as_deref(),
             info: &info,
             alias_rewrites,
+            gentype_declarations: &gentype_declarations,
         }))
     }
 
     /// Register a stored module's interface, as compiling it would.
     pub fn register_stored_module(&mut self, name: &str, module: super::stored_module::StoredModule) {
         let alias_rewrites = module.alias_rewrite_map();
+        crate::gentype::main::restore_type_declarations(name, module.gentype_declarations);
         match module.pers_struct {
             Some(pers) => self.register_module_arc(name, Arc::new(pers), module.info, alias_rewrites),
             None => {

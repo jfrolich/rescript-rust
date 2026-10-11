@@ -1,6 +1,7 @@
 //! A module's published interface as an incremental build stores it: its
 //! portable signature, the JS metadata other modules' code generation reads,
-//! and the alias rewrites it registered. Loading one stands in for compiling
+//! the alias rewrites it registered, and the GenType type declarations of its
+//! typed artifacts (GenType translates imported types with them). Loading one stands in for compiling
 //! an unchanged dependency.
 
 use ahash::AHashMap as HashMap;
@@ -15,7 +16,11 @@ pub struct StoredModuleRef<'a> {
     pub pers_struct: Option<&'a PortablePersStruct>,
     pub info: &'a InMemoryModuleInfo,
     pub alias_rewrites: &'a [(String, Path)],
+    pub gentype_declarations: &'a [(String, GentypeDeclarations)],
 }
+
+/// GenType type declarations of one typed artifact, by `.cmt` path.
+pub type GentypeDeclarations = std::sync::Arc<Vec<crate::gentype::code_item::TypeDeclaration>>;
 
 /// A decoded stored module.
 #[derive(serde::Deserialize)]
@@ -23,6 +28,7 @@ pub struct StoredModule {
     pub pers_struct: Option<PortablePersStruct>,
     pub info: InMemoryModuleInfo,
     pub alias_rewrites: Vec<(String, Path)>,
+    pub gentype_declarations: Vec<(String, Vec<crate::gentype::code_item::TypeDeclaration>)>,
 }
 
 impl StoredModule {

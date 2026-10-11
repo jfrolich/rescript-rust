@@ -1256,6 +1256,9 @@ pub struct CompilerOptions {
     pub gentype_config: Option<std::sync::Arc<crate::gentype::config::T>>,
     /// Build-scoped GenType module resolver shared by in-process compilations.
     pub gentype_resolver: Option<std::sync::Arc<crate::gentype::module_resolver::Resolver>>,
+    /// Run GenType only to register the module's type declarations (for the
+    /// modules that import its types), without generating output.
+    pub gentype_declarations_only: bool,
     /// When true, `compile_source_in_process` captures the typed tree,
     /// raw lambda, and lambda sexps for display (used by the playground).
     pub capture_intermediates: bool,
@@ -1455,6 +1458,7 @@ impl Default for CompilerOptions {
             assume_compiled_interface: false,
             gentype_config: None,
             gentype_resolver: None,
+            gentype_declarations_only: false,
             capture_intermediates: false,
             skip_js_render: false,
             publish_in_process_signature: true,
@@ -15143,6 +15147,7 @@ fn process_gentype_typed_artifact_if_enabled<'a>(
                 // capitalized compiler module name.
                 file_name: crate::gentype::paths::get_module_name_from_source_path(filename),
                 is_interface,
+                declarations_only: options.gentype_declarations_only,
             },
         )
     })

@@ -3596,9 +3596,9 @@ fn compile_module_in_process_to_js_boundary(
     let mut options = build_compiler_options(package, module_name, implementation_path, build_command_state)?;
     let registry_only = scheduler_hooks.is_some_and(|hooks| hooks.registry_only.contains(module_name));
     if registry_only {
-        // A support module's outputs are up to date; GenType writes files.
-        options.gentype_config = None;
-        options.gentype_resolver = None;
+        // A support module's outputs are up to date: GenType only registers
+        // its type declarations, which modules importing its types read.
+        options.gentype_declarations_only = true;
     }
     let root_config = build_state.get_root_config();
 
@@ -4010,8 +4010,7 @@ fn finish_in_process_js_inner(
         // The backend still runs for the metadata dependents read (purity,
         // exported arities and inlinable bodies); only the output is skipped.
         options.skip_js_render = true;
-        options.gentype_config = None;
-        options.gentype_resolver = None;
+        options.gentype_declarations_only = true;
     }
     let metadata_interface_registry_update = interface_registry_update;
     let mut metadata_registry_updates: Option<Vec<PendingRegistryUpdate>> = None;
