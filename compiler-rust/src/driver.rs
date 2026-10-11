@@ -1206,6 +1206,9 @@ pub struct CompilerOptions {
     /// Extra concrete JS outputs for in-process callers that need the same
     /// typed/lambda result rendered for multiple package specs.
     pub js_output_targets: Vec<JsOutputTarget>,
+    /// The package's `-bs-package-output` specs, which import paths follow
+    /// (see `js_ir::JsPackageSpec`).
+    pub js_package_specs: Vec<crate::js_ir::JsPackageSpec>,
     /// Source map output mode.
     pub source_map: crate::js_ir::source_map::SourceMapMode,
     /// Include original source text in generated source maps.
@@ -1434,6 +1437,7 @@ impl Default for CompilerOptions {
             output_path: None,
             output_module_format: None,
             js_output_targets: Vec::new(),
+            js_package_specs: Vec::new(),
             source_map: crate::js_ir::source_map::SourceMapMode::None,
             source_map_sources_content: false,
             source_map_root: String::new(),
@@ -12245,6 +12249,7 @@ fn compile_source_to_js_with_options_inner(
         tctx.persistent_env.clone(),
         options.make_runtime,
     );
+    module_path_resolver.set_package_specs(&options.js_package_specs);
     for module in &possible_required_modules {
         if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
             if let Some(path) =
@@ -15306,6 +15311,7 @@ fn compile_js_program_for_output(
         persistent_env,
         options.make_runtime,
     );
+    module_path_resolver.set_package_specs(&options.js_package_specs);
     for module in possible_required_modules {
         if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
             if let Some(path) =
@@ -15410,6 +15416,7 @@ fn compile_js_program_for_output_owned_with_collected_modules(
         persistent_env,
         options.make_runtime,
     );
+    module_path_resolver.set_package_specs(&options.js_package_specs);
     for module in &possible_required_modules {
         if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
             if let Some(path) =

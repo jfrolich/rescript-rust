@@ -2118,6 +2118,7 @@ pub(crate) fn build_compiler_options(
     options.output_module_format = js_output_targets.first().map(|target| target.module_format);
     options.output_path = js_output_targets.first().map(|target| target.path.clone());
     options.js_output_targets = js_output_targets;
+    options.js_package_specs = js_package_specs(build_state.get_root_config());
     options.module_name = Some(module_name.to_string());
     Ok(options)
 }
@@ -2371,6 +2372,21 @@ fn js_output_path_for_spec(
             .join(spec.get_out_of_source_dir())
             .join(js_relative)
     }
+}
+
+/// The `-bs-package-output` specs every package of the build compiles with:
+/// the root configuration's, in order.
+fn js_package_specs(root_config: &config::Config) -> Vec<rescript_compiler::js_ir::JsPackageSpec> {
+    root_config
+        .get_package_specs()
+        .iter()
+        .map(|spec| rescript_compiler::js_ir::JsPackageSpec {
+            module_format: package_spec_to_module_format(spec),
+            in_source: spec.in_source,
+            out_of_source_dir: spec.get_out_of_source_dir(),
+            suffix: root_config.get_suffix(spec),
+        })
+        .collect()
 }
 
 pub(crate) fn js_output_targets_for_source(
