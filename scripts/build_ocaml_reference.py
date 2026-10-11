@@ -4,7 +4,8 @@
 `rescript build` compiles in-process and writes no .ast/.cmi/.cmj/.cmt files.
 The parity scripts compare against the OCaml `bsc`, which needs them, so this
 runs the file-backed build that `rescript build-plan` prints: each module's
-`bsc` commands in dependency order, then its artifact copies into lib/ocaml.
+`bsc` commands in dependency order, copying its artifacts into lib/ocaml
+after each command.
 
 Usage: build_ocaml_reference.py [--bsc PATH] [--rescript PATH] [--jobs N]
                                 [--prod] [PROJECT]
@@ -39,7 +40,7 @@ def default_bsc():
 
 
 def run_step(bsc, step):
-    for directory in step["mkdirs"]:
+    for directory in [step["cwd"], *step["mkdirs"]]:
         os.makedirs(directory, exist_ok=True)
     for args in step["commands"]:
         result = subprocess.run(
@@ -48,9 +49,11 @@ def run_step(bsc, step):
         if result.returncode != 0:
             output = (result.stderr + result.stdout).decode("utf-8", "replace")
             return f"{step['package']}: {step['module']}\n{output}"
-    for source, target in step["copies"]:
-        if os.path.exists(source):
-            shutil.copyfile(source, target)
+        # Publish what each command wrote before the next one runs: an
+        # implementation compile finds its interface's .cmi in lib/ocaml.
+        for source, target in step["copies"]:
+            if os.path.exists(source):
+                shutil.copyfile(source, target)
     return None
 
 
@@ -66,7 +69,8 @@ def main():
     parser.add_argument("--prod", action="store_true")
     args = parser.parse_args()
 
-    plan_cmd = [str(args.rescript), "build-plan", args.project]
+    args.bsc = os.path.abspath(args.bsc)
+    plan_cmd = [os.path.abspath(args.rescript), "build-plan", args.project]
     if args.prod:
         plan_cmd.append("--prod")
     plan = subprocess.run(plan_cmd, stdout=subprocess.PIPE, check=True)

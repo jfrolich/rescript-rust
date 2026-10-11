@@ -87,12 +87,8 @@ done
 
 scriptDir=$(dirname "$0")
 PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
-DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
-OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
 RUST_TARGET="${RUST_TARGET:-debug}"
-RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc}"
-"$PROJECT_ROOT/scripts/rust_compiler_links.sh" "$RUST_TARGET"
-RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/$("$scriptDir/platform.sh")/bin/rescript.exe}"
+source "$PROJECT_ROOT/scripts/parity_lib.sh"
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
 BUILD_DIR="$TEST_PROJECT"
 STDLIB_PROJECT="$PROJECT_ROOT/packages/@rescript/runtime"
@@ -120,24 +116,18 @@ if [[ ! -x "$OCAML_BSC" ]]; then
     exit 1
 fi
 
-if [[ ! -x "$RUST_BSC" ]]; then
-    echo -e "${YELLOW}Warning: Rust bsc not found at $RUST_BSC${RESET}"
-    if [[ "$RUST_TARGET" == "release" ]]; then
-        echo "Run 'cargo build --release --manifest-path rewatch/Cargo.toml' to build the release Rust compiler."
-    else
-        echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' to build the debug Rust compiler."
-    fi
-    echo "For now, testing OCaml compiler only."
-    RUST_AVAILABLE=false
-else
-    RUST_AVAILABLE=true
-fi
-
+# The Rust side is the compiler linked into rescript, run in process.
 if [[ ! -x "$RESCRIPT_CLI" ]]; then
-    echo -e "${RED}Error: rescript CLI not found at $RESCRIPT_CLI${RESET}"
-    echo "Run 'make' first to build the toolchain."
+    echo -e "${RED}Error: rescript not found at $RESCRIPT_CLI${RESET}"
+    if [[ "$RUST_TARGET" == "release" ]]; then
+        echo "Run 'cargo build --release --manifest-path rewatch/Cargo.toml' first."
+    else
+        echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' first."
+    fi
     exit 1
 fi
+RUST_AVAILABLE=true
+
 
 TEMP_DIR=$(mktemp -d)
 CACHE_DIR="$PROJECT_ROOT/.parity-cache"
@@ -156,10 +146,10 @@ echo -e "${BOLD}Lambda IR Parity Test${RESET}"
 echo "============================================"
 echo "OCaml bsc: $OCAML_BSC"
 if [[ "$RUST_AVAILABLE" == "true" ]]; then
-    echo "Rust bsc:  $RUST_BSC"
+    echo "Rust:      $RESCRIPT_CLI (in-process build dumps)"
     echo "Rust target: $RUST_TARGET"
 else
-    echo "Rust bsc:  (not available)"
+    echo "Rust:      (not available)"
 fi
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Parallel jobs: $PARALLEL_JOBS"
@@ -176,14 +166,23 @@ fi
 echo "Artifact cache: $CACHE_DIR/lambda"
 echo ""
 
-echo -e "${BOLD}Step 1: Building project with rescript...${RESET}"
-cd "$BUILD_DIR"
-if [[ "$STDLIB_MODE" != "true" ]]; then
-    RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
+DUMP_KIND="lambda"
+if [[ "$TEST_RAW" == "true" ]]; then
+    DUMP_KIND="rawlambda"
+elif [[ "$TEST_LOCS" == "true" ]]; then
+    DUMP_KIND="lambda-locs"
 fi
-if ! RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
+RUST_DUMP_DIR="$CACHE_DIR/lambda/rust-dumps"
+
+echo -e "${BOLD}Step 1: Building with the Rust compiler (in process, --dump $DUMP_KIND)...${RESET}"
+if ! parity_build_rust_dumps "$BUILD_DIR" "$RUST_DUMP_DIR" "$DUMP_KIND" 2>&1 | tail -5; then
     echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
 fi
+echo -e "${BOLD}Step 2: Building the OCaml reference...${RESET}"
+if ! parity_build_ocaml_reference "$BUILD_DIR" 2>&1 | tail -5; then
+    echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
+fi
+TEST_PACKAGE_NAME=$(parity_package_name "$TEST_PROJECT")
 cd "$PROJECT_ROOT"
 echo ""
 
@@ -223,7 +222,7 @@ echo ""
 RESULTS_DIR="$TEMP_DIR/results"
 mkdir -p "$RESULTS_DIR" "$TEMP_DIR/work"
 
-export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT CACHE_DIR TEST_LOCS TEST_RAW STDLIB_MODE
+export OCAML_BSC RESCRIPT_CLI RUST_DUMP_DIR DUMP_KIND TEST_PACKAGE_NAME TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT CACHE_DIR TEST_LOCS TEST_RAW STDLIB_MODE
 
 test_single_file() {
     local file="$1"
@@ -259,19 +258,14 @@ test_single_file() {
     local diff_cache="$CACHE_DIR/lambda/diffs/$safe_name.diff"
     rm -f "$ocaml_cache_base.sexp" "$ocaml_cache_base.stderr" "$rust_cache_base.sexp" "$rust_cache_base.stderr" "$diff_cache"
 
+    # The Rust output is the dump of the in-process build (Step 1).
     run_rust_bsc() {
-        local rust_exit=0
-        if [[ "$TEST_RAW" == "true" ]]; then
-            env RUST_RAWLAMBDA_ONLY=1 timeout "$TIMEOUT_SECONDS" "$RUST_BSC" "$@" || rust_exit=$?
-        else
-            env RUST_LAMBDA_DUMP_ONLY=1 timeout "$TIMEOUT_SECONDS" "$RUST_BSC" "$@" || rust_exit=$?
-        fi
-        if [[ "$rust_exit" -eq 0 ]]; then
+        local dump="$RUST_DUMP_DIR/$TEST_PACKAGE_NAME/$rel_path.$DUMP_KIND"
+        if [[ -f "$dump" ]]; then
+            cat "$dump" >&2
             rust_pass=1
-        elif [[ "$rust_exit" -eq 124 ]]; then
-            rust_timeout=1
-            rust_fail=1
         else
+            echo "no $DUMP_KIND dump: the in-process build did not compile $rel_path" >&2
             rust_crash=1
             rust_fail=1
         fi
@@ -391,7 +385,7 @@ test_single_file() {
 
 export -f test_single_file
 
-echo -e "${BOLD}Step 2: Running lambda parity tests...${RESET}"
+echo -e "${BOLD}Step 3: Running lambda parity tests...${RESET}"
 echo ""
 if [[ "$PARALLEL_JOBS" -eq 1 ]]; then
     while IFS= read -r file; do
