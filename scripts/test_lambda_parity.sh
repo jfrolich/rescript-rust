@@ -222,7 +222,7 @@ echo ""
 RESULTS_DIR="$TEMP_DIR/results"
 mkdir -p "$RESULTS_DIR" "$TEMP_DIR/work"
 
-export OCAML_BSC RESCRIPT_CLI RUST_DUMP_DIR DUMP_KIND TEST_PACKAGE_NAME TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT CACHE_DIR TEST_LOCS TEST_RAW STDLIB_MODE
+export OCAML_BSC RESCRIPT_CLI RUST_DUMP_DIR DUMP_KIND TEST_PACKAGE_NAME PARITY_EXACT_STAMPS TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT CACHE_DIR TEST_LOCS TEST_RAW STDLIB_MODE
 
 test_single_file() {
     local file="$1"
@@ -328,6 +328,11 @@ test_single_file() {
     fi
 
     if [[ "$RUST_AVAILABLE" == "true" && "$ocaml_pass" -eq 1 && "$rust_pass" -eq 1 ]]; then
+        # Compare up to a consistent renumbering of identifier stamps; see
+        # scripts/canonical_stamps.py. PARITY_EXACT_STAMPS=1 compares as is.
+        if [[ "${PARITY_EXACT_STAMPS:-}" != "1" ]]; then
+            python3 "$PROJECT_ROOT/scripts/canonical_stamps.py" "$file_temp/ocaml.out" "$file_temp/rust.out"
+        fi
         if diff -q "$file_temp/ocaml.out" "$file_temp/rust.out" > /dev/null 2>&1; then
             parity_pass=1
         else
