@@ -255,13 +255,26 @@ fn source_step(
         ));
     }
 
-    let mut deps: Vec<String> = module
-        .deps
-        .iter()
-        .filter(|dep| build_state.modules.contains_key(*dep))
-        .cloned()
-        .collect();
+    // A namespace's step only compiles its alias map; a dependency on another
+    // package's namespace also needs that package's members (the map's deps).
+    let mut deps: Vec<String> = Vec::new();
+    for dep in &module.deps {
+        let Some(dep_module) = build_state.modules.get(dep) else {
+            continue;
+        };
+        deps.push(dep.clone());
+        if dep_module.is_mlmap() && dep_module.package_name != module.package_name {
+            deps.extend(
+                dep_module
+                    .deps
+                    .iter()
+                    .filter(|member| build_state.modules.contains_key(*member))
+                    .cloned(),
+            );
+        }
+    }
     deps.sort();
+    deps.dedup();
     mkdirs.sort();
     mkdirs.dedup();
     Ok(Step {
