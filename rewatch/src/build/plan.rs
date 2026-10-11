@@ -10,9 +10,10 @@
 //! plan with the OCaml `bsc`; rewatch never runs a compiler executable.
 
 use super::build_types::*;
-use super::{compile, deps, initialize_build, mark_modules_dirty, packages, parse};
+use super::{compile, deps, mark_modules_dirty, packages, parse};
 use crate::config::SourceMapCommand;
 use crate::helpers;
+use crate::project_context::ProjectContext;
 use ahash::{AHashMap, AHashSet};
 use anyhow::{Result, anyhow};
 use serde::Serialize;
@@ -39,17 +40,25 @@ struct Step {
 }
 
 pub fn build_plan(path: &Path, prod: bool) -> Result<String> {
-    let mut build_state = initialize_build(
+    // Discover packages without `initialize_build`: its compiler check and
+    // cleanup would delete the build folders (and the runtime's `lib/ocaml`
+    // sources the in-process build reads).
+    let project_context = ProjectContext::new(path)?;
+    let compiler = super::get_compiler_info(&project_context)?;
+    let packages = packages::make(&None, &project_context, false, prod, None)?;
+    if !packages::validate_packages_dependencies(&packages) {
+        return Err(anyhow!("Failed to validate package dependencies"));
+    }
+    let mut build_state = BuildCommandState::new(
+        path.to_path_buf(),
+        project_context,
+        packages,
+        compiler,
         None,
-        &None,
-        false,
-        path,
-        true,
-        None,
-        prod,
         None,
         SourceMapCommand::Build,
-    )?;
+    );
+    packages::parse_packages(&mut build_state)?;
     mark_modules_dirty(&mut build_state);
     let parse_errors = parse::generate_asts(&mut build_state, || ())?;
     if build_state.stopped_at_parse {
