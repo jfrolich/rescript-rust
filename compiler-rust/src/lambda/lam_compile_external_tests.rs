@@ -45,18 +45,13 @@ fn lowers_js_var_without_args_to_a_value() {
         Primitive::PjsCall {
             prim_name: "process".to_string(),
             arg_types: vec![],
-            ffi: ExternalFfiSpec {
-                kind: ExternalFfiKind::Default,
-                spec: Some(ExternalSpec::JsVar {
-                    name: "process".to_string(),
-                    external_module_name: None,
-                    scopes: vec![],
-                }),
-                obj_params: None,
-                return_wrapper: ExternalReturnWrapper::Identity,
-                inline_constant: None,
-            },
-            dynamic_import: false,
+            ffi: Box::new(ExternalDecl {
+                kind: DeclKind::DeclVal { name: "process".to_string() },
+                module_: None,
+                scopes: vec![],
+                variadic: false,
+                effective_arity: 0,
+            }),
             transformed_jsx: false,
         },
         vec![],
@@ -81,18 +76,13 @@ fn lowers_js_var_calls_with_runtime_args_even_without_external_arg_metadata() {
         Primitive::PjsCall {
             prim_name: "foo1".to_string(),
             arg_types: vec![],
-            ffi: ExternalFfiSpec {
-                kind: ExternalFfiKind::Default,
-                spec: Some(ExternalSpec::JsVar {
-                    name: "foo1".to_string(),
-                    external_module_name: None,
-                    scopes: vec![],
-                }),
-                obj_params: None,
-                return_wrapper: ExternalReturnWrapper::Identity,
-                inline_constant: None,
-            },
-            dynamic_import: false,
+            ffi: Box::new(ExternalDecl {
+                kind: DeclKind::DeclVal { name: "foo1".to_string() },
+                module_: None,
+                scopes: vec![],
+                variadic: false,
+                effective_arity: 0,
+            }),
             transformed_jsx: false,
         },
         vec![Lambda::Lconst(Constant::Int {
@@ -138,19 +128,13 @@ fn lowers_module_external_calls_to_namespace_imports() {
         Primitive::PjsCall {
             prim_name: "describe".to_string(),
             arg_types: vec![],
-            ffi: ExternalFfiSpec {
-                kind: ExternalFfiKind::Default,
-                spec: Some(ExternalSpec::JsCall {
-                    name: "describe".to_string(),
-                    external_module_name: Some(external_module("mocha")),
-                    splice: false,
-                    scopes: vec![],
-                }),
-                obj_params: None,
-                return_wrapper: ExternalReturnWrapper::Identity,
-                inline_constant: None,
-            },
-            dynamic_import: false,
+            ffi: Box::new(ExternalDecl {
+                kind: DeclKind::DeclVal { name: "describe".to_string() },
+                module_: (Some(external_module("mocha"))).map(ModuleSource::ModuleNamed),
+                scopes: vec![],
+                variadic: false,
+                effective_arity: 1,
+            }),
             transformed_jsx: false,
         },
         vec![],
@@ -178,15 +162,14 @@ fn lowers_module_external_calls_to_namespace_imports() {
             assert!(matches!(
                 func.as_ref(),
                 Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(
-                        ModuleId {
-                            kind: Kind::External { name, default, .. },
-                            ..
-                        },
-                        Some(field),
-                    )),
+                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, Some(field))),
                     ..
-                } if field == "describe" && name == "mocha" && !default
+                } if field == "describe"
+                    && matches!(
+                        &**module,
+                        ModuleId { kind: Kind::External { name, default, .. }, .. }
+                            if name == "mocha" && !default
+                    )
             ));
         }
         other => panic!("expected external module call, got {other:?}"),
@@ -200,51 +183,36 @@ fn translates_external_module_values_to_qualified_members_like_ocaml() {
         Some(&external_module("react/jsx-runtime")),
         "jsx",
         &[],
-        false,
     );
 
     assert!(matches!(
         expr,
         Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(
-                ModuleId {
-                    kind: Kind::External {
-                        name: ref name,
-                        default,
-                        ..
-                    },
-                    ..
-                },
-                Some(ref member),
-            )),
+            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(ref module, Some(ref member))),
             ..
-        } if name == "react/jsx-runtime" && !default && member == "jsx"
+        } if member == "jsx"
+            && matches!(
+                &**module,
+                ModuleId { kind: Kind::External { name, default, .. }, .. }
+                    if name == "react/jsx-runtime" && !default
+            )
     ));
     assert_eq!(print_expression(&expr), "JsxRuntime.jsx");
 }
 
 #[test]
-fn lowers_pjs_unsafe_downgrade_getters_to_method_calls() {
+fn lowers_pjs_object_get_to_method_calls() {
     let mut compiler = LambdaCompiler::new();
     let john = Ident::create_persistent("john");
-    let lam = Lambda::Lapply(Apply {
+    let lam = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::prim(
-            Primitive::PjsUnsafeDowngrade {
-                name: "say".to_string(),
-                setter: false,
-            },
+            Primitive::PjsObjectGet("say".to_string()),
             vec![Lambda::var(john.clone())],
             Location::none(),
         )),
         ap_args: vec![
-            Lambda::const_(Constant::String {
-                s: "hey".to_string(),
-                delim: None,
-            }),
-            Lambda::const_(Constant::String {
-                s: "jude".to_string(),
-                delim: None,
-            }),
+            Lambda::const_(Constant::String("hey".to_string())),
+            Lambda::const_(Constant::String("jude".to_string())),
         ],
         ap_info: ApInfo {
             loc: Location::none(),
@@ -252,7 +220,7 @@ fn lowers_pjs_unsafe_downgrade_getters_to_method_calls() {
             status: ApplyStatus::Uncurry,
         },
         ap_transformed_jsx: false,
-    });
+    }));
 
     let program = compiler.compile_program(&lam);
     let rendered = print_block(&program.block);
@@ -260,20 +228,14 @@ fn lowers_pjs_unsafe_downgrade_getters_to_method_calls() {
 }
 
 #[test]
-fn lowers_pjs_unsafe_downgrade_setters_to_property_assignments() {
+fn lowers_pjs_object_set_to_property_assignments() {
     let mut compiler = LambdaCompiler::new();
     let student = Ident::create_persistent("student1");
     let lam = Lambda::prim(
-        Primitive::PjsUnsafeDowngrade {
-            name: "name".to_string(),
-            setter: true,
-        },
+        Primitive::PjsObjectSet("name".to_string()),
         vec![
             Lambda::var(student),
-            Lambda::const_(Constant::String {
-                s: "Mary".to_string(),
-                delim: None,
-            }),
+            Lambda::const_(Constant::String("Mary".to_string())),
         ],
         Location::none(),
     );
@@ -289,33 +251,21 @@ fn lowers_spliced_js_calls_by_flattening_literal_variadic_arrays() {
     let lam = Lambda::prim(
         Primitive::PjsCall {
             prim_name: "join".to_string(),
-            arg_types: vec![ExternalArgSpec::dummy()],
-            ffi: ExternalFfiSpec {
-                kind: ExternalFfiKind::Default,
-                spec: Some(ExternalSpec::JsCall {
-                    name: "join".to_string(),
-                    external_module_name: Some(external_module("path")),
-                    splice: true,
-                    scopes: vec![],
-                }),
-                obj_params: None,
-                return_wrapper: ExternalReturnWrapper::Identity,
-                inline_constant: None,
-            },
-            dynamic_import: false,
+            arg_types: vec![Param::dummy()],
+            ffi: Box::new(ExternalDecl {
+                kind: DeclKind::DeclVal { name: "join".to_string() },
+                module_: (Some(external_module("path"))).map(ModuleSource::ModuleNamed),
+                scopes: vec![],
+                variadic: true,
+                effective_arity: 1,
+            }),
             transformed_jsx: false,
         },
         vec![Lambda::prim(
             Primitive::Pmakearray,
             vec![
-                Lambda::const_(Constant::String {
-                    s: ".".to_string(),
-                    delim: None,
-                }),
-                Lambda::const_(Constant::String {
-                    s: "Node_path_test".to_string(),
-                    delim: None,
-                }),
+                Lambda::const_(Constant::String(".".to_string())),
+                Lambda::const_(Constant::String("Node_path_test".to_string())),
             ],
             Location::none(),
         )],
@@ -330,77 +280,16 @@ fn lowers_spliced_js_calls_by_flattening_literal_variadic_arrays() {
 #[test]
 fn lowers_default_module_values_in_dynamic_imports() {
     let mut compiler = LambdaCompiler::new();
-    let external_value = Lambda::prim(
-        Primitive::PjsCall {
-            prim_name: "default".to_string(),
-            arg_types: vec![],
-            ffi: ExternalFfiSpec {
-                kind: ExternalFfiKind::Default,
-                spec: Some(ExternalSpec::JsVar {
-                    name: "default".to_string(),
-                    external_module_name: Some(external_module("a")),
-                    scopes: vec![],
-                }),
-                obj_params: None,
-                return_wrapper: ExternalReturnWrapper::Identity,
-                inline_constant: None,
-            },
-            dynamic_import: false,
-            transformed_jsx: false,
-        },
-        vec![],
-        Location::none(),
-    );
     let program = compiler.compile_program(&Lambda::prim(
-        Primitive::Pimport,
-        vec![external_value],
+        Primitive::Pimport(Box::new(ImportSource::ImportExternal {
+            module_: external_module("a"),
+            path: vec!["default".to_string()],
+        })),
+        vec![],
         Location::none(),
     ));
     let rendered = print_block(&program.block);
     assert_eq!(rendered, "import(\"a\").then(m => m.default);");
-}
-
-#[test]
-fn lowers_unit_returning_default_module_functions_in_dynamic_imports() {
-    let mut compiler = LambdaCompiler::new();
-    let param = Ident::create_local("prim");
-    let eta_expanded_default = Lambda::Lfunction(crate::lambda::LFunction {
-        arity: 1,
-        params: vec![param.clone()],
-        body: Box::new(Lambda::seq(
-            Lambda::prim(
-                Primitive::PjsCall {
-                    prim_name: "default".to_string(),
-                    arg_types: vec![ExternalArgSpec::dummy()],
-                    ffi: ExternalFfiSpec {
-                        kind: ExternalFfiKind::Default,
-                        spec: Some(ExternalSpec::JsVar {
-                            name: "default".to_string(),
-                            external_module_name: Some(external_module("b")),
-                            scopes: vec![],
-                        }),
-                        obj_params: None,
-                        return_wrapper: ExternalReturnWrapper::Identity,
-                        inline_constant: None,
-                    },
-                    dynamic_import: false,
-                    transformed_jsx: false,
-                },
-                vec![Lambda::var(param)],
-                Location::none(),
-            ),
-            Lambda::const_(Constant::JsUndefined { is_unit: true }),
-        )),
-        attr: crate::lambda::FunctionAttribute::default(),
-    });
-    let program = compiler.compile_program(&Lambda::prim(
-        Primitive::Pimport,
-        vec![eta_expanded_default],
-        Location::none(),
-    ));
-
-    let rendered = print_block(&program.block);
-    assert_eq!(rendered, "import(\"b\").then(m => m.default);");
 }
 
 #[test]
@@ -412,19 +301,13 @@ fn lowers_js_new_to_new_expression() {
         Primitive::PjsCall {
             prim_name: "URL".to_string(),
             arg_types: vec![],
-            ffi: ExternalFfiSpec {
-                kind: ExternalFfiKind::Default,
-                spec: Some(ExternalSpec::JsNew {
-                    name: "URL".to_string(),
-                    external_module_name: None,
-                    splice: false,
-                    scopes: vec![],
-                }),
-                obj_params: None,
-                return_wrapper: ExternalReturnWrapper::Identity,
-                inline_constant: None,
-            },
-            dynamic_import: false,
+            ffi: Box::new(ExternalDecl {
+                kind: DeclKind::DeclNew { name: "URL".to_string() },
+                module_: None,
+                scopes: vec![],
+                variadic: false,
+                effective_arity: 1,
+            }),
             transformed_jsx: false,
         },
         vec![Lambda::var(arg.clone())],
@@ -465,32 +348,26 @@ fn lowers_js_call_omits_trailing_optional_undefined_args_like_ocaml() {
         Primitive::PjsCall {
             prim_name: "formatDate".to_string(),
             arg_types: vec![
-                ExternalArgSpec {
-                    arg_type: ExternalArgAttr::Nothing,
-                    arg_label: ExternalArgLabel::Empty,
+                Param {
+                    arg_type: Attr::Nothing,
+                    arg_label: LabelNoname::ArgEmpty,
                 },
-                ExternalArgSpec {
-                    arg_type: ExternalArgAttr::Nothing,
-                    arg_label: ExternalArgLabel::Optional,
+                Param {
+                    arg_type: Attr::Nothing,
+                    arg_label: LabelNoname::ArgOptional,
                 },
-                ExternalArgSpec {
-                    arg_type: ExternalArgAttr::Nothing,
-                    arg_label: ExternalArgLabel::Optional,
+                Param {
+                    arg_type: Attr::Nothing,
+                    arg_label: LabelNoname::ArgOptional,
                 },
             ],
-            ffi: ExternalFfiSpec {
-                kind: ExternalFfiKind::Default,
-                spec: Some(ExternalSpec::JsCall {
-                    name: "formatDate".to_string(),
-                    external_module_name: Some(external_module("SomeModule")),
-                    splice: false,
-                    scopes: vec![],
-                }),
-                obj_params: None,
-                return_wrapper: ExternalReturnWrapper::Identity,
-                inline_constant: None,
-            },
-            dynamic_import: false,
+            ffi: Box::new(ExternalDecl {
+                kind: DeclKind::DeclVal { name: "formatDate".to_string() },
+                module_: (Some(external_module("SomeModule"))).map(ModuleSource::ModuleNamed),
+                scopes: vec![],
+                variadic: false,
+                effective_arity: 1,
+            }),
             transformed_jsx: false,
         },
         vec![
@@ -518,27 +395,22 @@ fn lowers_js_send_omits_trailing_optional_undefined_args_like_ocaml() {
         Primitive::PjsCall {
             prim_name: "toString".to_string(),
             arg_types: vec![
-                ExternalArgSpec {
-                    arg_type: ExternalArgAttr::Nothing,
-                    arg_label: ExternalArgLabel::Empty,
+                Param {
+                    arg_type: Attr::Nothing,
+                    arg_label: LabelNoname::ArgEmpty,
                 },
-                ExternalArgSpec {
-                    arg_type: ExternalArgAttr::Nothing,
-                    arg_label: ExternalArgLabel::Optional,
+                Param {
+                    arg_type: Attr::Nothing,
+                    arg_label: LabelNoname::ArgOptional,
                 },
             ],
-            ffi: ExternalFfiSpec {
-                kind: ExternalFfiKind::Default,
-                spec: Some(ExternalSpec::JsSend {
-                    name: "toString".to_string(),
-                    splice: false,
-                    js_send_scopes: vec![],
-                }),
-                obj_params: None,
-                return_wrapper: ExternalReturnWrapper::Identity,
-                inline_constant: None,
-            },
-            dynamic_import: false,
+            ffi: Box::new(ExternalDecl {
+                kind: DeclKind::DeclSend { name: "toString".to_string() },
+                module_: None,
+                scopes: vec![],
+                variadic: false,
+                effective_arity: 2,
+            }),
             transformed_jsx: false,
         },
         vec![
@@ -559,35 +431,26 @@ fn lowers_js_new_omits_trailing_optional_undefined_args_like_ocaml() {
         Primitive::PjsCall {
             prim_name: "RegExp".to_string(),
             arg_types: vec![
-                ExternalArgSpec {
-                    arg_type: ExternalArgAttr::Nothing,
-                    arg_label: ExternalArgLabel::Empty,
+                Param {
+                    arg_type: Attr::Nothing,
+                    arg_label: LabelNoname::ArgEmpty,
                 },
-                ExternalArgSpec {
-                    arg_type: ExternalArgAttr::Nothing,
-                    arg_label: ExternalArgLabel::Optional,
+                Param {
+                    arg_type: Attr::Nothing,
+                    arg_label: LabelNoname::ArgOptional,
                 },
             ],
-            ffi: ExternalFfiSpec {
-                kind: ExternalFfiKind::Default,
-                spec: Some(ExternalSpec::JsNew {
-                    name: "RegExp".to_string(),
-                    external_module_name: None,
-                    splice: false,
-                    scopes: vec![],
-                }),
-                obj_params: None,
-                return_wrapper: ExternalReturnWrapper::Identity,
-                inline_constant: None,
-            },
-            dynamic_import: false,
+            ffi: Box::new(ExternalDecl {
+                kind: DeclKind::DeclNew { name: "RegExp".to_string() },
+                module_: None,
+                scopes: vec![],
+                variadic: false,
+                effective_arity: 1,
+            }),
             transformed_jsx: false,
         },
         vec![
-            Lambda::const_(Constant::String {
-                s: "ab+c".to_string(),
-                delim: None,
-            }),
+            Lambda::const_(Constant::String("ab+c".to_string())),
             Lambda::const_(Constant::JsUndefined { is_unit: false }),
         ],
         Location::none(),
@@ -604,38 +467,32 @@ fn lowers_external_polyvar_string_and_int_args_like_ocaml() {
         Primitive::PjsCall {
             prim_name: "consume".to_string(),
             arg_types: vec![
-                ExternalArgSpec {
-                    arg_type: ExternalArgAttr::PolyVarString {
+                Param {
+                    arg_type: Attr::PolyVarString {
                         descr: vec![
                             ("on_closed".to_string(), "on_closed".to_string()),
                             ("on_open".to_string(), "on_open".to_string()),
                             ("in_".to_string(), "in".to_string()),
                         ],
                     },
-                    arg_label: ExternalArgLabel::Empty,
+                    arg_label: LabelNoname::ArgEmpty,
                 },
-                ExternalArgSpec {
-                    arg_type: ExternalArgAttr::Int(vec![
+                Param {
+                    arg_type: Attr::Int(vec![
                         ("on_closed".to_string(), 0),
                         ("on_open".to_string(), 3),
                         ("in_".to_string(), 4),
                     ]),
-                    arg_label: ExternalArgLabel::Empty,
+                    arg_label: LabelNoname::ArgEmpty,
                 },
             ],
-            ffi: ExternalFfiSpec {
-                kind: ExternalFfiKind::Default,
-                spec: Some(ExternalSpec::JsCall {
-                    name: "consume".to_string(),
-                    external_module_name: None,
-                    splice: false,
-                    scopes: vec![],
-                }),
-                obj_params: None,
-                return_wrapper: ExternalReturnWrapper::Identity,
-                inline_constant: None,
-            },
-            dynamic_import: false,
+            ffi: Box::new(ExternalDecl {
+                kind: DeclKind::DeclVal { name: "consume".to_string() },
+                module_: None,
+                scopes: vec![],
+                variadic: false,
+                effective_arity: 1,
+            }),
             transformed_jsx: false,
         },
         vec![
@@ -655,29 +512,23 @@ fn lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml() {
     let lam = Lambda::prim(
         Primitive::PjsCall {
             prim_name: "handle".to_string(),
-            arg_types: vec![ExternalArgSpec {
-                arg_type: ExternalArgAttr::PolyVar {
+            arg_types: vec![Param {
+                arg_type: Attr::PolyVar {
                     descr: Some(vec![("b".to_string(), "renamed".to_string())]),
                 },
-                arg_label: ExternalArgLabel::Empty,
+                arg_label: LabelNoname::ArgEmpty,
             }],
-            ffi: ExternalFfiSpec {
-                kind: ExternalFfiKind::Default,
-                spec: Some(ExternalSpec::JsCall {
-                    name: "handle".to_string(),
-                    external_module_name: None,
-                    splice: false,
-                    scopes: vec![],
-                }),
-                obj_params: None,
-                return_wrapper: ExternalReturnWrapper::Identity,
-                inline_constant: None,
-            },
-            dynamic_import: false,
+            ffi: Box::new(ExternalDecl {
+                kind: DeclKind::DeclVal { name: "handle".to_string() },
+                module_: None,
+                scopes: vec![],
+                variadic: false,
+                effective_arity: 1,
+            }),
             transformed_jsx: false,
         },
         vec![Lambda::const_(Constant::Block {
-            tag_info: TagInfo::PolyVar("b".to_string()),
+            tag_info: Box::new(TagInfo::PolyVar("b".to_string())),
             elements: vec![Constant::Pointer("b".to_string()), Constant::int(2)],
         })],
         Location::none(),
@@ -731,26 +582,17 @@ fn lowers_marshaled_constant_args_in_js_call() {
     let lam = Lambda::prim(
         Primitive::PjsCall {
             prim_name: "somefn".to_string(),
-            arg_types: vec![ExternalArgSpec {
-                arg_type: ExternalArgAttr::ArgCst(ExternalArgConst::StringLit(
-                    "{foo:true}".to_string(),
-                    ExternalArgDelim::NoQuotes,
-                )),
-                arg_label: ExternalArgLabel::Empty,
+            arg_types: vec![Param {
+                arg_type: Attr::ArgCst(Cst::ArgJsonLit("{foo:true}".to_string())),
+                arg_label: LabelNoname::ArgEmpty,
             }],
-            ffi: ExternalFfiSpec {
-                kind: ExternalFfiKind::Default,
-                spec: Some(ExternalSpec::JsCall {
-                    name: "somefn".to_string(),
-                    external_module_name: None,
-                    splice: false,
-                    scopes: vec!["somescope".to_string()],
-                }),
-                obj_params: None,
-                return_wrapper: ExternalReturnWrapper::Identity,
-                inline_constant: None,
-            },
-            dynamic_import: false,
+            ffi: Box::new(ExternalDecl {
+                kind: DeclKind::DeclVal { name: "somefn".to_string() },
+                module_: None,
+                scopes: vec!["somescope".to_string()],
+                variadic: false,
+                effective_arity: 1,
+            }),
             transformed_jsx: false,
         },
         vec![],
@@ -774,10 +616,7 @@ fn lowers_marshaled_constant_args_in_js_call() {
             assert!(matches!(
                 args.as_slice(),
                 [Expression {
-                    desc: ExpressionDesc::Str {
-                        delim: Delim::NoQuotes,
-                        txt,
-                    },
+                    desc: ExpressionDesc::JsonLiteral(txt),
                     ..
                 }] if txt == "{foo:true}"
             ));
@@ -792,33 +631,27 @@ fn lowers_js_object_create_with_marshaled_fields() {
     let name_ident = Ident::create_local("name");
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::PjsObjectCreate(vec![
-            ExternalObjSpec {
-                obj_arg_type: ExternalArgAttr::ArgCst(ExternalArgConst::StringLit(
-                    "false".to_string(),
-                    ExternalArgDelim::NoQuotes,
-                )),
-                obj_arg_label: ExternalObjLabel::Label {
+            ObjParam {
+                obj_arg_type: Attr::ArgCst(Cst::ArgJsonLit("false".to_string())),
+                obj_arg_label: Label::ObjLabel {
                     name: "objectMode".to_string(),
                 },
             },
-            ExternalObjSpec {
-                obj_arg_type: ExternalArgAttr::Nothing,
-                obj_arg_label: ExternalObjLabel::Label {
+            ObjParam {
+                obj_arg_type: Attr::Nothing,
+                obj_arg_label: Label::ObjLabel {
                     name: "name".to_string(),
                 },
             },
-            ExternalObjSpec {
-                obj_arg_type: ExternalArgAttr::ArgCst(ExternalArgConst::StringLit(
-                    "true".to_string(),
-                    ExternalArgDelim::NoQuotes,
-                )),
-                obj_arg_label: ExternalObjLabel::Label {
+            ObjParam {
+                obj_arg_type: Attr::ArgCst(Cst::ArgJsonLit("true".to_string())),
+                obj_arg_label: Label::ObjLabel {
                     name: "someOther".to_string(),
                 },
             },
-            ExternalObjSpec {
-                obj_arg_type: ExternalArgAttr::ExternUnit,
-                obj_arg_label: ExternalObjLabel::Empty,
+            ObjParam {
+                obj_arg_type: Attr::ExternUnit,
+                obj_arg_label: Label::ObjEmpty,
             },
         ]),
         vec![
@@ -837,10 +670,7 @@ fn lowers_js_object_create_with_marshaled_fields() {
                 (
                     PropertyName::Lit(name),
                     Expression {
-                        desc: ExpressionDesc::Str {
-                            delim: Delim::NoQuotes,
-                            txt,
-                        },
+                        desc: ExpressionDesc::JsonLiteral(txt),
                         ..
                     },
                 ) if name == "objectMode" && txt == "false"
@@ -860,10 +690,7 @@ fn lowers_js_object_create_with_marshaled_fields() {
                 (
                     PropertyName::Lit(name),
                     Expression {
-                        desc: ExpressionDesc::Str {
-                            delim: Delim::NoQuotes,
-                            txt,
-                        },
+                        desc: ExpressionDesc::JsonLiteral(txt),
                         ..
                     },
                 ) if name == "someOther" && txt == "true"
@@ -877,14 +704,14 @@ fn lowers_js_object_create_with_marshaled_fields() {
 fn lowers_js_object_create_with_polyvar_string_field_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let compiled = compiler.compile_expr(&Lambda::prim(
-        Primitive::PjsObjectCreate(vec![ExternalObjSpec {
-            obj_arg_type: ExternalArgAttr::PolyVarString {
+        Primitive::PjsObjectCreate(vec![ObjParam {
+            obj_arg_type: Attr::PolyVarString {
                 descr: vec![
                     ("lookup".to_string(), "lookup".to_string()),
                     ("best_fit".to_string(), "best fit".to_string()),
                 ],
             },
-            obj_arg_label: ExternalObjLabel::Label {
+            obj_arg_label: Label::ObjLabel {
                 name: "localeMatcher".to_string(),
             },
         }]),
@@ -901,7 +728,7 @@ fn lowers_js_object_create_with_polyvar_string_field_like_ocaml() {
                 (
                     PropertyName::Lit(name),
                     Expression {
-                        desc: ExpressionDesc::Str { txt, .. },
+                        desc: ExpressionDesc::Str(txt),
                         ..
                     },
                 ) if name == "localeMatcher" && txt == "best fit"
@@ -915,14 +742,14 @@ fn lowers_js_object_create_with_polyvar_string_field_like_ocaml() {
 fn lowers_js_object_create_with_optional_polyvar_string_field_inline_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let compiled = compiler.compile_expr(&Lambda::prim(
-        Primitive::PjsObjectCreate(vec![ExternalObjSpec {
-            obj_arg_type: ExternalArgAttr::PolyVarString {
+        Primitive::PjsObjectCreate(vec![ObjParam {
+            obj_arg_type: Attr::PolyVarString {
                 descr: vec![
                     ("numeric".to_string(), "numeric".to_string()),
                     ("two_digit".to_string(), "2-digit".to_string()),
                 ],
             },
-            obj_arg_label: ExternalObjLabel::Optional {
+            obj_arg_label: Label::ObjOptional {
                 name: "day".to_string(),
                 for_sure_no_nested_option: false,
             },
@@ -944,7 +771,7 @@ fn lowers_js_object_create_with_optional_polyvar_string_field_inline_like_ocaml(
                 (
                     PropertyName::Lit(name),
                     Expression {
-                        desc: ExpressionDesc::Str { txt, .. },
+                        desc: ExpressionDesc::Str(txt),
                         ..
                     },
                 ) if name == "day" && txt == "2-digit"
@@ -993,9 +820,9 @@ fn bind_switch_scrutinee_once_uses_tmp_name_like_ocaml() {
 fn lowers_js_object_create_with_statically_present_optional_field_inline_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let compiled = compiler.compile_expr(&Lambda::prim(
-        Primitive::PjsObjectCreate(vec![ExternalObjSpec {
-            obj_arg_type: ExternalArgAttr::Nothing,
-            obj_arg_label: ExternalObjLabel::Optional {
+        Primitive::PjsObjectCreate(vec![ObjParam {
+            obj_arg_type: Attr::Nothing,
+            obj_arg_label: Label::ObjOptional {
                 name: "alt".to_string(),
                 for_sure_no_nested_option: false,
             },
@@ -1017,7 +844,7 @@ fn lowers_js_object_create_with_statically_present_optional_field_inline_like_oc
                 (
                     PropertyName::Lit(name),
                     Expression {
-                        desc: ExpressionDesc::Str { txt, .. },
+                        desc: ExpressionDesc::Str(txt),
                         ..
                     },
                 ) if name == "alt" && txt == "pic"
@@ -1032,9 +859,9 @@ fn lowers_js_object_create_with_unknown_optional_field_to_conditional_assignment
     let mut compiler = LambdaCompiler::new();
     let opt = Ident::create_local("opt");
     let compiled = compiler.compile_expr(&Lambda::prim(
-        Primitive::PjsObjectCreate(vec![ExternalObjSpec {
-            obj_arg_type: ExternalArgAttr::Nothing,
-            obj_arg_label: ExternalObjLabel::Optional {
+        Primitive::PjsObjectCreate(vec![ObjParam {
+            obj_arg_type: Attr::Nothing,
+            obj_arg_label: Label::ObjOptional {
                 name: "alt".to_string(),
                 for_sure_no_nested_option: false,
             },
@@ -1129,9 +956,9 @@ fn lowers_js_object_create_with_unknown_optional_field_to_conditional_assignment
 fn lowers_js_object_create_with_nonduplicable_optional_field_after_object_temp_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let compiled = compiler.compile_expr(&Lambda::prim(
-        Primitive::PjsObjectCreate(vec![ExternalObjSpec {
-            obj_arg_type: ExternalArgAttr::Nothing,
-            obj_arg_label: ExternalObjLabel::Optional {
+        Primitive::PjsObjectCreate(vec![ObjParam {
+            obj_arg_type: Attr::Nothing,
+            obj_arg_label: Label::ObjOptional {
                 name: "alt".to_string(),
                 for_sure_no_nested_option: false,
             },
@@ -1258,28 +1085,22 @@ fn lowers_ignored_js_call_args_to_ocaml_sequence_effects() {
         Primitive::PjsCall {
             prim_name: "somefn".to_string(),
             arg_types: vec![
-                ExternalArgSpec {
-                    arg_type: ExternalArgAttr::Ignore,
-                    arg_label: ExternalArgLabel::Empty,
+                Param {
+                    arg_type: Attr::Ignore,
+                    arg_label: LabelNoname::ArgEmpty,
                 },
-                ExternalArgSpec {
-                    arg_type: ExternalArgAttr::Nothing,
-                    arg_label: ExternalArgLabel::Empty,
+                Param {
+                    arg_type: Attr::Nothing,
+                    arg_label: LabelNoname::ArgEmpty,
                 },
             ],
-            ffi: ExternalFfiSpec {
-                kind: ExternalFfiKind::Default,
-                spec: Some(ExternalSpec::JsCall {
-                    name: "somefn".to_string(),
-                    external_module_name: None,
-                    splice: false,
-                    scopes: vec![],
-                }),
-                obj_params: None,
-                return_wrapper: ExternalReturnWrapper::Identity,
-                inline_constant: None,
-            },
-            dynamic_import: false,
+            ffi: Box::new(ExternalDecl {
+                kind: DeclKind::DeclVal { name: "somefn".to_string() },
+                module_: None,
+                scopes: vec![],
+                variadic: false,
+                effective_arity: 1,
+            }),
             transformed_jsx: false,
         },
         vec![
@@ -1324,7 +1145,7 @@ fn lowers_ignored_js_call_args_to_ocaml_sequence_effects() {
     assert!(matches!(
         kind.as_ref(),
         Expression {
-            desc: ExpressionDesc::Str { txt, .. },
+            desc: ExpressionDesc::Str(txt),
             ..
         } if txt == "Float"
     ));
@@ -1349,15 +1170,15 @@ fn lowers_ignored_js_object_fields_to_ocaml_sequence_effects() {
     let mut compiler = LambdaCompiler::new();
     let lam = Lambda::prim(
         Primitive::PjsObjectCreate(vec![
-            ExternalObjSpec {
-                obj_arg_type: ExternalArgAttr::Ignore,
-                obj_arg_label: ExternalObjLabel::Label {
+            ObjParam {
+                obj_arg_type: Attr::Ignore,
+                obj_arg_label: Label::ObjLabel {
                     name: "kind".to_string(),
                 },
             },
-            ExternalObjSpec {
-                obj_arg_type: ExternalArgAttr::Nothing,
-                obj_arg_label: ExternalObjLabel::Label {
+            ObjParam {
+                obj_arg_type: Attr::Nothing,
+                obj_arg_label: Label::ObjLabel {
                     name: "hi".to_string(),
                 },
             },
@@ -1405,7 +1226,7 @@ fn lowers_ignored_js_object_fields_to_ocaml_sequence_effects() {
         ) && matches!(
             kind.as_ref(),
             Expression {
-                desc: ExpressionDesc::Str { txt, .. },
+                desc: ExpressionDesc::Str(txt),
                 ..
             } if txt == "Float"
         )
@@ -1484,7 +1305,7 @@ fn compile_deps_program_keeps_exported_dict_initializer_object_literals() {
                 (
                     PropertyName::Lit(name),
                     Expression {
-                        desc: ExpressionDesc::Str { txt, .. },
+                        desc: ExpressionDesc::Str(txt),
                         ..
                     },
                 ) if name == "first" && txt == "hello"
@@ -1560,10 +1381,8 @@ fn js_pass_pipeline_preserves_dict_has_in_operator_through_typeof() {
 #[test]
 fn collects_static_module_dependencies() {
     let mut compiler = LambdaCompiler::new();
-    let deps = compiler.compile_deps_program(&Lambda::global_module(
-        Ident::create_persistent("Belt_List"),
-        false,
-    ));
+    let deps =
+        compiler.compile_deps_program(&Lambda::global_module(Ident::create_persistent("Belt_List")));
 
     assert_eq!(deps.modules.len(), 1);
     assert_eq!(deps.modules[0].id.name(), "Belt_List");
@@ -1574,7 +1393,7 @@ fn collects_static_module_dependencies() {
 fn external_module_import_attributes_preserve_all_fields() {
     let module = ExternalModuleName {
         bundle: "./myJson.json".to_string(),
-        module_bind_name: ExternalModuleBindName::Nothing,
+        module_bind_name: ModuleBindName::PhintNothing,
         import_attributes: Some(vec![
             ("type".to_string(), "json".to_string()),
             ("some-identifier".to_string(), "yep".to_string()),
@@ -1830,7 +1649,7 @@ fn preserves_impure_side_effect_only_ml_dependencies_from_lambda() {
     let deps = compiler.compile_deps_program(&Lambda::let_(
         LetKind::Alias,
         include_binding,
-        Lambda::global_module(side_effect.clone(), false),
+        Lambda::global_module(side_effect.clone()),
         Lambda::unit(),
     ));
 
@@ -1925,11 +1744,11 @@ fn resolves_runtime_dynamic_import_to_string_path() {
     );
     let mut compiler = LambdaCompiler::with_module_path_resolver(Some(resolver));
     let program = compiler.compile_program(&Lambda::prim(
-        Primitive::Pimport,
-        vec![Lambda::global_module(
-            Ident::create_persistent("Belt_List"),
-            true,
-        )],
+        Primitive::Pimport(Box::new(ImportSource::ImportModule {
+            module_: Ident::create_persistent("Belt_List"),
+            path: vec![],
+        })),
+        vec![],
         Location::none(),
     ));
 
@@ -1948,7 +1767,7 @@ fn resolves_runtime_dynamic_import_to_string_path() {
             assert!(matches!(
                 args.as_slice(),
                 [Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 }] if txt == "@rescript/runtime/lib/es6/Belt_List.js"
             ));
@@ -2000,12 +1819,12 @@ fn external_module_ids_reuse_first_binding_for_same_bundle_and_default() {
     let mut compiler = LambdaCompiler::new();
     let plain = ExternalModuleName {
         bundle: "x".to_string(),
-        module_bind_name: ExternalModuleBindName::Nothing,
+        module_bind_name: ModuleBindName::PhintNothing,
         import_attributes: None,
     };
     let hinted = ExternalModuleName {
         bundle: "x".to_string(),
-        module_bind_name: ExternalModuleBindName::HintName("U".to_string()),
+        module_bind_name: ModuleBindName::PhintName("U".to_string()),
         import_attributes: None,
     };
 

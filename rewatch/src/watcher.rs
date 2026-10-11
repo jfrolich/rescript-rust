@@ -174,7 +174,7 @@ fn unregister_watches(watcher: &mut RecommendedWatcher, watch_paths: &[(PathBuf,
     }
 }
 
-fn carry_forward_compile_warnings(previous: &BuildCommandState, next: &mut BuildCommandState) {
+fn carry_forward_compile_state(previous: &BuildCommandState, next: &mut BuildCommandState) {
     for (module_name, next_module) in next.build_state.modules.iter_mut() {
         let Some(previous_module) = previous.build_state.modules.get(module_name) else {
             continue;
@@ -186,6 +186,12 @@ fn carry_forward_compile_warnings(previous: &BuildCommandState, next: &mut Build
         match (&previous_module.source_type, &mut next_module.source_type) {
             (SourceType::SourceFile(previous_source), SourceType::SourceFile(next_source)) => {
                 if previous_source.implementation.path == next_source.implementation.path {
+                    // A changed CMI can leave a dependent blocked behind a failed
+                    // implementation. Asset timestamps alone cannot recover this
+                    // dirtiness when a full watcher rebuild recreates the state.
+                    if previous_module.compile_dirty {
+                        next_module.compile_dirty = true;
+                    }
                     next_source.implementation.compile_warnings =
                         previous_source.implementation.compile_warnings.clone();
 
@@ -254,11 +260,37 @@ struct AsyncWatchArgs<'a> {
     show_progress: bool,
     filter: &'a Option<regex::Regex>,
     after_build: Option<String>,
-    create_sourcedirs: bool,
     plain_output: bool,
     clear_screen: bool,
     prod: bool,
     features: Option<Vec<String>>,
+    tooling_requests: Option<std::sync::mpsc::Receiver<crate::tooling_server::ToolingRequest>>,
+}
+
+/// Answer one editor tooling request from the current build state.
+fn serve_tooling_request(
+    build_state: &BuildCommandState,
+    crate::tooling_server::ToolingRequest { request, reply }: crate::tooling_server::ToolingRequest,
+) {
+    use crate::tooling_server::{Reply, Request};
+    let Request::Run { cwd, args } = request;
+    let answer = match crate::build::tooling::run_command(build_state, cwd, args) {
+        Ok(output) => Reply::Output(output),
+        Err(err) => Reply::Error(format!("{err:#}")),
+    };
+    let _ = reply.send(answer);
+}
+
+/// Answer editor tooling's pending requests from the current build state.
+fn serve_tooling_requests(
+    build_state: &BuildCommandState,
+    requests: Option<&std::sync::mpsc::Receiver<crate::tooling_server::ToolingRequest>>,
+) {
+    if let Some(requests) = requests {
+        while let Ok(request) = requests.try_recv() {
+            serve_tooling_request(build_state, request);
+        }
+    }
 }
 
 async fn async_watch(
@@ -272,16 +304,17 @@ async fn async_watch(
         show_progress,
         filter,
         after_build,
-        create_sourcedirs,
         plain_output,
         clear_screen,
         prod,
         features,
+        tooling_requests,
     }: AsyncWatchArgs<'_>,
 ) -> Result<()> {
     let mut build_state = initial_build_state;
     let mut needs_compile_type = CompileType::None;
     loop {
+        serve_tooling_requests(&build_state, tooling_requests.as_ref());
         if ctrlc_pressed.load(Ordering::SeqCst) {
             cleanup_before_watch_exit(path, &build_state, show_progress, "\nExiting...");
             break Ok(());
@@ -454,7 +487,6 @@ async fn async_watch(
                     false,
                     show_progress,
                     true,
-                    create_sourcedirs,
                     plain_output,
                 );
 
@@ -498,7 +530,6 @@ async fn async_watch(
                             plain_output,
                             build_state.get_warn_error_override(),
                             build_state.build_mode(),
-                            build_state.subprocess(),
                             build_state.dump_typed_sexp,
                             prod,
                             features.clone(),
@@ -515,7 +546,7 @@ async fn async_watch(
                         // Full rebuilds can be triggered by editor atomic saves that surface as rename events.
                         // Preserve warning state for unchanged modules so their warnings are re-emitted after the
                         // fresh build state replaces the previous one.
-                        carry_forward_compile_warnings(&build_state, &mut next_build_state);
+                        carry_forward_compile_state(&build_state, &mut next_build_state);
                         build_state = next_build_state;
 
                         // Re-register watches based on the new build state
@@ -529,10 +560,8 @@ async fn async_watch(
                             false,
                             show_progress,
                             false,
-                            create_sourcedirs,
                             plain_output,
                         );
-                        build::write_build_ninja(&build_state);
                         result.map_err(|e| anyhow::anyhow!("{e}"))
                     });
                 match rebuild {
@@ -558,8 +587,15 @@ async fn async_watch(
             }
             CompileType::None => {
                 // We want to sleep for a little while so the CPU can schedule other work. That way we end
-                // up not burning CPU cycles.
-                Delay::new(Duration::from_millis(50)).await;
+                // up not burning CPU cycles. Editor tooling requests end the wait early.
+                match &tooling_requests {
+                    Some(requests) => {
+                        if let Ok(request) = requests.recv_timeout(Duration::from_millis(50)) {
+                            serve_tooling_request(&build_state, request);
+                        }
+                    }
+                    None => Delay::new(Duration::from_millis(50)).await,
+                }
             }
         }
     }
@@ -571,11 +607,9 @@ pub fn start(
     show_progress: bool,
     folder: &str,
     after_build: Option<String>,
-    create_sourcedirs: bool,
     plain_output: bool,
     warn_error: Option<String>,
     build_mode: BuildMode,
-    subprocess: bool,
     dump_typed_sexp: bool,
     clear_screen: bool,
     prod: bool,
@@ -598,6 +632,19 @@ pub fn start(
         })
         .expect("Error setting Ctrl-C handler");
 
+        // In-process builds write no typed artifacts: editor tooling asks the
+        // watcher, which compiles them on demand.
+        let (tooling_server, tooling_requests) = match build_mode.is_in_process() {
+            true => match crate::tooling_server::start(path) {
+                Ok((server, requests)) => (Some(server), Some(requests)),
+                Err(err) => {
+                    log::warn!("Could not start the editor tooling server: {err}");
+                    (None, None)
+                }
+            },
+            false => (None, None),
+        };
+
         // Initialization can clean previous build artifacts, so it has to be serialized
         // with the initial compile too.
         let (build_state, current_watch_paths, initial_compile_result): StartupBuildResult =
@@ -610,7 +657,6 @@ pub fn start(
                     plain_output,
                     warn_error.clone(),
                     build_mode,
-                    subprocess,
                     dump_typed_sexp,
                     prod,
                     features.clone(),
@@ -629,7 +675,6 @@ pub fn start(
                     true,
                     show_progress,
                     false,
-                    create_sourcedirs,
                     plain_output,
                 )
                 .ok()
@@ -645,6 +690,14 @@ pub fn start(
         if ctrlc_pressed.load(Ordering::SeqCst) {
             cleanup_before_watch_exit(path, &build_state, show_progress, "\nExiting...");
             return Ok(());
+        }
+
+        // The initial build has published the interfaces typed artifacts are
+        // compiled against: announce the tooling server.
+        if let Some(server) = &tooling_server
+            && let Err(err) = server.publish()
+        {
+            log::warn!("Could not publish the editor tooling server: {err}");
         }
 
         // Run after-build outside build.lock. Hooks may invoke ReScript commands that need the same lock.
@@ -669,11 +722,11 @@ pub fn start(
             show_progress,
             filter,
             after_build,
-            create_sourcedirs,
             plain_output,
             clear_screen,
             prod,
             features,
+            tooling_requests,
         })
         .await
     })
@@ -752,8 +805,7 @@ mod tests {
             packages,
             compiler,
             None,
-            BuildMode::Default,
-            false,
+            BuildMode::ExternalBsc,
             false,
             None,
             SourceMapCommand::Watch,
@@ -825,7 +877,7 @@ mod tests {
         );
         let mut next = test_build_state("ModuleA", test_module("src/ModuleA.res", None, None, None));
 
-        carry_forward_compile_warnings(&previous, &mut next);
+        carry_forward_compile_state(&previous, &mut next);
 
         let module = next.get_module("ModuleA").expect("module should exist");
         let SourceType::SourceFile(source_file) = &module.source_type else {
@@ -847,7 +899,7 @@ mod tests {
         );
         let mut next = test_build_state("ModuleA", test_module("src/ModuleARenamed.res", None, None, None));
 
-        carry_forward_compile_warnings(&previous, &mut next);
+        carry_forward_compile_state(&previous, &mut next);
 
         let module = next.get_module("ModuleA").expect("module should exist");
         let SourceType::SourceFile(source_file) = &module.source_type else {
@@ -874,7 +926,7 @@ mod tests {
             test_module("src/ModuleA.res", None, Some("src/ModuleA.resi"), None),
         );
 
-        carry_forward_compile_warnings(&previous, &mut next);
+        carry_forward_compile_state(&previous, &mut next);
 
         let module = next.get_module("ModuleA").expect("module should exist");
         let SourceType::SourceFile(source_file) = &module.source_type else {
@@ -884,5 +936,25 @@ mod tests {
 
         assert_eq!(interface.compile_warnings.as_deref(), Some("warning: interface"));
         assert_eq!(interface.compile_state, CompileState::Warning);
+    }
+
+    #[test]
+    fn carries_forward_blocked_dirtiness_only_for_matching_sources() {
+        let mut previous = test_build_state("ModuleA", test_module("src/ModuleA.res", None, None, None));
+        previous
+            .build_state
+            .modules
+            .get_mut("ModuleA")
+            .unwrap()
+            .compile_dirty = true;
+
+        let mut same_source = test_build_state("ModuleA", test_module("src/ModuleA.res", None, None, None));
+        carry_forward_compile_state(&previous, &mut same_source);
+        assert!(same_source.get_module("ModuleA").unwrap().compile_dirty);
+
+        let mut different_source =
+            test_build_state("ModuleA", test_module("src/Other.res", None, None, None));
+        carry_forward_compile_state(&previous, &mut different_source);
+        assert!(!different_source.get_module("ModuleA").unwrap().compile_dirty);
     }
 }

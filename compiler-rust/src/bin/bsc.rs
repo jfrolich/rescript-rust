@@ -10,14 +10,14 @@
 
 use anyhow::{Context, Result, anyhow};
 use rescript_compiler::binary_ast::{
-    ppx, write_signature_ast_current_with_extra_deps_and_builtin_ppx,
+    deps, write_signature_ast_current_with_extra_deps_and_builtin_ppx,
     write_structure_ast_current_with_extra_deps_and_builtin_ppx,
 };
 use rescript_compiler::cmi::cmi_format;
 use rescript_compiler::driver::{
-    CompilerOptions, UserDiagnostic, apply_external_signature_ppxs, apply_external_structure_ppxs,
-    compile_file_to_js_with_options, enable_cli_cleanup_skip, parser_error_to_anyhow,
-    typecheck_interface_file,
+    CompilerOptions, UserDiagnostic, compile_file_to_js_with_options, enable_cli_cleanup_skip,
+    error_extension_to_anyhow,
+    run_implementation_frontend, run_interface_frontend, typecheck_interface_file,
 };
 use rescript_compiler::js_ir::ModuleFormat;
 use rescript_compiler::js_ir::source_map::SourceMapMode;
@@ -78,6 +78,8 @@ fn default_runtime_path() -> Option<PathBuf> {
 
 #[derive(Default, Debug)]
 struct Options {
+    ignore_parse_errors: bool,
+    formatted: bool,
     bs_ast: bool,
     debug: bool,
     dump_lambda: bool,
@@ -101,6 +103,7 @@ struct Options {
     warning_specs: Vec<String>,
     warning_error_specs: Vec<String>,
     jsx_version: Option<i32>,
+    jsx_module: Option<String>,
     experimental_let_unwrap: bool,
     jsx_preserve: bool,
     nopervasives: bool,
@@ -111,6 +114,7 @@ struct Options {
     noassert: bool,
     transparent_modules: bool,
     no_builtin_ppx: bool,
+    builtin_spice_ppx: bool,
     external_ppxs: Vec<String>,
     gentype: bool,
     gentype_flags: rescript_compiler::gentype::config::FlagState,
@@ -130,6 +134,7 @@ impl Options {
 }
 
 fn main() {
+    rescript_compiler::hash_seed::install_thread_local_hash_seeds();
     // Spawn the compiler in a thread with a large stack to avoid stack overflow
     // on deeply nested type structures in CMI files
     let builder = std::thread::Builder::new()
@@ -159,7 +164,44 @@ fn main() {
         })
         .expect("Failed to spawn compiler thread");
 
-    handler.join().expect("Compiler thread panicked");
+    if let Err(payload) = handler.join() {
+        if let Some(report) = rescript_compiler::misc::uncaught_exception_report(&*payload) {
+            // OCaml's runtime report for an uncaught exception.
+            eprintln!("{report}");
+            let _ = std::io::stderr().flush();
+            std::process::exit(2);
+        }
+        panic!("Compiler thread panicked: {payload:?}");
+    }
+}
+
+/// rescript_compiler_main.ml:168-182 `format_file`.
+fn format_file(input: &str, output: Option<&Path>, ignore_parse_errors: bool) -> Result<()> {
+    let is_res = input.ends_with(".res") || input.ends_with(".resi");
+    if !is_res {
+        return Err(UserDiagnostic::new(
+            format!("bsc: don't know what to do with {input}\n"),
+            2,
+        )
+        .into());
+    }
+    let source = fs::read(input).with_context(|| input.to_string())?;
+    let (report, formatted) =
+        rescript_compiler::driver::format_source_with(&source, input, ignore_parse_errors);
+    if !report.is_empty() {
+        eprint!("{report}");
+    }
+    let Some(formatted) = formatted else {
+        let _ = std::io::stderr().flush();
+        std::process::exit(1);
+    };
+    match output {
+        None => {
+            std::io::stdout().write_all(&formatted)?;
+        }
+        Some(path) => fs::write(path, &formatted)?,
+    }
+    Ok(())
 }
 
 fn run() -> Result<()> {
@@ -269,6 +311,15 @@ fn run() -> Result<()> {
                         opts.jsx_version = val.parse::<i32>().ok();
                     }
                 }
+                "-bs-jsx-module" => {
+                    if let Some(val) = args.next() {
+                        rescript_compiler::driver::apply_jsx_module_flag(
+                            &val,
+                            &mut opts.jsx_module,
+                            &mut opts.jsx_version,
+                        );
+                    }
+                }
                 "-enable-experimental" => {
                     if let Some(val) = args.next() {
                         if val == "LetUnwrap" {
@@ -285,6 +336,9 @@ fn run() -> Result<()> {
                 // parses -noassert into Clflags.noassert.
                 "-noassert" => opts.noassert = true,
                 "-bs-no-builtin-ppx" => opts.no_builtin_ppx = true,
+                // Run the configured in-process Spice mapper, as rewatch does
+                // when a project selects the Spice PPX (used for profiling).
+                "-bs-builtin-spice-ppx" => opts.builtin_spice_ppx = true,
                 "-bs-gentype" => opts.gentype = true,
                 // Mirrors compiler/bsc/rescript_compiler_main.ml:300-343.
                 "-bs-gentype-module" => {
@@ -386,6 +440,14 @@ fn run() -> Result<()> {
                 | "-bs-no-check-cmi" => {
                     // Boolean flags - no argument to consume
                 }
+                // rescript_compiler_main.ml:440-450
+                "-ignore-parse-errors" | "-editor-mode" => opts.ignore_parse_errors = true,
+                "-format" => {
+                    let file = args.next().ok_or_else(|| anyhow!("-format requires a file"))?;
+                    code_frame::set_color_mode(opts.color_mode);
+                    format_file(&file, opts.output.as_deref(), opts.ignore_parse_errors)?;
+                    opts.formatted = true;
+                }
                 "-make-runtime" => opts.make_runtime = true,
                 "-nopervasives" => opts.nopervasives = true,
                 _ => {
@@ -397,6 +459,9 @@ fn run() -> Result<()> {
         }
     }
 
+    if opts.input.is_none() && opts.formatted {
+        return Ok(());
+    }
     let input = opts
         .input
         .clone()
@@ -404,12 +469,24 @@ fn run() -> Result<()> {
     code_frame::set_color_mode(opts.color_mode);
 
     if opts.bs_ast {
+        // `-bs-ast` runs the whole frontend (parser warnings, external and
+        // builtin PPXs, JSX) before writing, like OCaml
+        // compiler/core/js_implementation.ml:172-186.
         return generate_ast(
             &input,
             opts.output,
             opts.dump_parsetree_sexp_locs,
-            opts.no_builtin_ppx,
-            &opts.external_ppxs,
+            &CompilerOptions {
+                warning_specs: opts.warning_specs.clone(),
+                warning_error_specs: opts.warning_error_specs.clone(),
+                jsx_version: opts.jsx_version,
+                jsx_module: opts.jsx_module.clone(),
+                experimental_let_unwrap: opts.experimental_let_unwrap,
+                jsx_preserve: opts.jsx_preserve,
+                no_builtin_ppx: opts.no_builtin_ppx,
+                external_ppxs: opts.external_ppxs.clone(),
+                ..CompilerOptions::default()
+            },
         );
     }
 
@@ -418,7 +495,8 @@ fn run() -> Result<()> {
         return read_cmi_input(&input);
     }
 
-    let source_path = if ext == "ast" || ext == "iast" {
+    let from_ast = ext == "ast" || ext == "iast";
+    let source_path = if from_ast {
         read_ast_source_path(&input)?
     } else {
         input
@@ -445,6 +523,7 @@ fn run() -> Result<()> {
         include_paths: opts.include_paths.clone(),
         runtime_path,
         open_modules: opts.open_modules.clone(),
+        collect_unit_reads: false,
         warning_specs: opts.warning_specs.clone(),
         warning_error_specs: opts.warning_error_specs.clone(),
         source_filename: Some(source_path.to_string_lossy().into_owned()),
@@ -457,6 +536,7 @@ fn run() -> Result<()> {
         source_map_sources_content: opts.source_map_sources_content,
         source_map_root: opts.source_map_root.clone(),
         jsx_version: opts.jsx_version,
+        jsx_module: opts.jsx_module.clone(),
         experimental_let_unwrap: opts.experimental_let_unwrap,
         jsx_preserve: opts.jsx_preserve,
         debug: opts.debug,
@@ -467,9 +547,12 @@ fn run() -> Result<()> {
         noassert: opts.noassert,
         transparent_modules: opts.transparent_modules,
         no_builtin_ppx: opts.no_builtin_ppx,
+        // Standalone -ppx commands run externally, not through the in-process mapper.
+        spice_ppx: opts.builtin_spice_ppx,
         external_ppxs: opts.external_ppxs.clone(),
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
+        // js_packages_state.ml:38-42: `-bs-ns` sets `dont_record_crc_unit`.
         package_name: opts.package_name.clone(),
         make_runtime: opts.make_runtime,
         assume_compiled_interface: opts.read_cmi,
@@ -480,9 +563,13 @@ fn run() -> Result<()> {
             ))
         }),
         gentype_resolver: None,
+        gentype_declarations_only: false,
         capture_intermediates: false,
         skip_js_render: false,
         publish_in_process_signature: true,
+        frontend_already_reported: from_ast,
+        visible_package_roots: None,
+        keep_locs: true,
     };
 
     if is_interface {
@@ -511,8 +598,7 @@ fn generate_ast(
     input: &Path,
     output: Option<PathBuf>,
     dump_parsetree_sexp_locs: bool,
-    no_builtin_ppx: bool,
-    external_ppxs: &[String],
+    options: &CompilerOptions,
 ) -> Result<()> {
     // Read file as raw bytes, converting each byte to a char (Latin-1 encoding).
     // This matches OCaml's byte-level string handling where each byte is a character.
@@ -558,67 +644,94 @@ fn generate_ast(
     }
 
     let mut parser = Parser::new(&filename, &source);
+    let mut frontend_output = String::new();
+    let warnings_are_fatal;
 
     if is_interface {
-        // Parse signature (interface file)
         let signature = module::parse_signature(&mut parser);
-        if parser.has_errors() {
-            return Err(parser_error_to_anyhow(&parser, &source, &filename));
-        }
-        apply_external_signature_ppxs(external_ppxs, &filename, parser.arena_mut(), &signature)?;
+        let frontend = run_interface_frontend(
+            &mut parser,
+            signature,
+            &source,
+            &filename,
+            options,
+            &mut frontend_output,
+        );
+        eprint!("{frontend_output}");
+        let frontend = frontend?;
+        warnings_are_fatal = frontend.warnings_fatal;
 
         if dump_parsetree_sexp_locs {
-            let rewritten = if no_builtin_ppx {
-                signature.clone()
-            } else {
-                ppx::rewrite_signature(&signature, parser.arena_mut())
-                    .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
-            };
             let mut stderr = std::io::stderr();
-            sexp_locs::print_signature(&rewritten, parser.arena(), &mut stderr);
+            sexp_locs::print_signature(&frontend.signature, parser.arena(), &mut stderr);
             let _ = stderr.write_all(b"\n");
         }
 
+        if let Some(extension) =
+            deps::signature_error_extension(parser.arena(), &frontend.signature)
+        {
+            return Err(error_extension_to_anyhow(
+                parser.arena(),
+                &source,
+                &filename,
+                &extension,
+            ));
+        }
+        // The frontend already applied the builtin PPX.
         write_signature_ast_current_with_extra_deps_and_builtin_ppx(
             &out_path,
             &source_path,
             parser.arena_mut(),
-            &signature,
+            &frontend.signature,
             &[],
-            !no_builtin_ppx,
+            false,
         )
         .with_context(|| format!("Failed to write {}", out_path.display()))?;
     } else {
-        // Parse structure (implementation file)
         let structure = module::parse_structure(&mut parser);
-        if parser.has_errors() {
-            return Err(parser_error_to_anyhow(&parser, &source, &filename));
-        }
-        apply_external_structure_ppxs(external_ppxs, &filename, parser.arena_mut(), &structure)?;
+        let frontend = run_implementation_frontend(
+            &mut parser,
+            structure,
+            &source,
+            &filename,
+            options,
+            &mut frontend_output,
+        );
+        eprint!("{frontend_output}");
+        let frontend = frontend?;
+        warnings_are_fatal = frontend.warnings_fatal;
 
         if dump_parsetree_sexp_locs {
-            let rewritten = if no_builtin_ppx {
-                structure.clone()
-            } else {
-                ppx::rewrite_structure(&structure, parser.arena_mut())
-                    .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
-            };
             let mut stderr = std::io::stderr();
-            sexp_locs::print_structure(&rewritten, parser.arena(), &mut stderr);
+            sexp_locs::print_structure(&frontend.structure, parser.arena(), &mut stderr);
             let _ = stderr.write_all(b"\n");
         }
 
+        if let Some(extension) =
+            deps::structure_error_extension(parser.arena(), &frontend.structure)
+        {
+            return Err(error_extension_to_anyhow(
+                parser.arena(),
+                &source,
+                &filename,
+                &extension,
+            ));
+        }
+        // The frontend already applied the builtin PPX.
         write_structure_ast_current_with_extra_deps_and_builtin_ppx(
             &out_path,
             &source_path,
             parser.arena_mut(),
-            &structure,
+            &frontend.structure,
             &[],
-            !no_builtin_ppx,
+            false,
         )
         .with_context(|| format!("Failed to write {}", out_path.display()))?;
     }
 
+    if warnings_are_fatal {
+        return Err(UserDiagnostic::new(String::new(), 2).into());
+    }
     Ok(())
 }
 
@@ -766,8 +879,8 @@ fn maybe_process_gentype(source_path: &Path, opts: &Options) -> Result<()> {
 fn check_gentype_cmt_file(cmt_file: &Path) -> Result<()> {
     // Cmt_format.read_cmt raises Cmt_format.Error(Not_a_typedtree _) when the
     // selected file contains a compiled interface without typedtree data.
-    const CMT_MAGIC: &[u8; 12] = b"Caml1999T022";
-    const CMI_MAGIC: &[u8; 12] = b"Caml1999I024";
+    const CMT_MAGIC: &[u8; 12] = b"Caml1999T039";
+    const CMI_MAGIC: &[u8; 12] = b"Caml1999I035";
 
     let data = fs::read(cmt_file).with_context(|| cmt_file.display().to_string())?;
     if data.len() < CMT_MAGIC.len() {
@@ -794,7 +907,7 @@ fn check_gentype_cmt_file(cmt_file: &Path) -> Result<()> {
     );
     let _ = io::stdout().flush();
     Err(UserDiagnostic::new(
-        "Fatal error: exception File \"compiler/gentype/gentype_main.ml\", line 91, characters 4-10: Assertion failed\n".to_string(),
+        "Fatal error: exception File \"compiler/gentype/gentype_main.ml\", line 89, characters 4-10: Assertion failed\n".to_string(),
         2,
     )
     .into())

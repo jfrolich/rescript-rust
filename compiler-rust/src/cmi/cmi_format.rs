@@ -5,7 +5,7 @@
 //! # File Format
 //!
 //! A CMI file consists of:
-//! 1. Magic number: "Caml1999I024" (12 bytes)
+//! 1. Magic number: "Caml1999I035" (12 bytes)
 //! 2. Marshal'd value: (cmi_name: string, cmi_sign: Types.signature_item list)
 //! 3. Marshal'd value: crcs: (string * Digest.t option) list
 //! 4. Marshal'd value: flags: pers_flags list
@@ -15,7 +15,7 @@ use std::io::{self, Cursor};
 use super::marshal_reader::{MarshalError, MarshalReader, OcamlValue};
 
 /// CMI magic number
-const CMI_MAGIC: &[u8; 12] = b"Caml1999I024";
+const CMI_MAGIC: &[u8; 12] = b"Caml1999I035";
 
 /// CMI file contents (generic, before type interpretation).
 #[derive(Debug)]
@@ -152,6 +152,32 @@ pub fn read_cmi_from_bytes(data: &[u8], filename: &str) -> Result<CmiInfos, CmiE
     })
 }
 
+/// The CRC list of a `.cmi` file (`cmi_crcs`, the second marshalled value,
+/// cmi_format.ml:67-76), without decoding its signature.
+pub fn read_cmi_crcs(filename: &str) -> Option<Vec<(String, Option<[u8; 16]>)>> {
+    let data = std::fs::read(filename).ok()?;
+    if data.len() < 12 || &data[..12] != CMI_MAGIC {
+        return None;
+    }
+    // Skip the (name, signature) value: a 20-byte marshal header whose
+    // second word is the data length (intern.c `caml_input_val_from_bytes`).
+    let header = data.get(12..32)?;
+    if header[..4] != [0x84, 0x95, 0xA6, 0xBE] {
+        return None;
+    }
+    let data_len = u32::from_be_bytes([header[4], header[5], header[6], header[7]]) as usize;
+    let crcs_start = 32usize.checked_add(data_len)?;
+    let mut cursor = Cursor::new(data.get(crcs_start..)?);
+    let mut reader = MarshalReader::new();
+    let crcs_value = reader.read_with_header(&mut cursor).ok()?;
+    Some(
+        read_crcs(&crcs_value)
+            .into_iter()
+            .map(|(name, crc)| (name, crc.and_then(|crc| <[u8; 16]>::try_from(crc).ok())))
+            .collect(),
+    )
+}
+
 /// Parse CRC list from generic OCaml value.
 fn read_crcs(value: &OcamlValue) -> Vec<(String, Option<Vec<u8>>)> {
     let items = value.as_list();
@@ -163,8 +189,9 @@ fn read_crcs(value: &OcamlValue) -> Vec<(String, Option<Vec<u8>>)> {
             assert_eq!(fields.len(), 2);
             let name = fields[0].as_string().to_string();
             let digest = fields[1].as_option().map(|d| {
-                // Digest is a 16-byte string (MD5)
-                d.as_string().as_bytes().to_vec()
+                // Digest is a 16-byte string (MD5); marshalled strings are
+                // decoded one char per byte.
+                d.as_string().chars().map(|c| c as u8).collect::<Vec<u8>>()
             });
             (name, digest)
         })
@@ -193,7 +220,7 @@ mod tests {
 
     #[test]
     fn test_magic_check() {
-        let data = b"Caml1999I024"; // too short, no marshal data
+        let data = b"Caml1999I035"; // too short, no marshal data
         let result = read_cmi_from_bytes(data, "test.cmi");
         // Should fail due to missing marshal data, but magic is valid
         assert!(result.is_err());

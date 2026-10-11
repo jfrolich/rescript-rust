@@ -78,17 +78,48 @@ let map_opt f = function
   | Some x -> Some (f x)
 let map_constant = function
   | Pconst_integer (s, suffix) -> Pt.Pconst_integer (s, suffix)
-  | Pconst_char c -> Pconst_char c
-  | Pconst_string (s, q) -> Pconst_string (s, q)
+  | Pconst_char {semantic} -> Pconst_char semantic
+  | Pconst_string payload ->
+    Pconst_string (String_literal.string_source payload, Some "js")
+  | Pconst_raw_source s -> Pconst_string (s, Some "js")
+  | Pconst_json s -> Pconst_string (s, Some "json")
   | Pconst_float (s, suffix) -> Pconst_float (s, suffix)
+
+let template_attr = (Location.mknoloc "res.template", Pt.PStr [])
+
+let add_template_attr attrs =
+  if Ext_list.exists attrs (fun ({txt}, _) -> txt = "res.template") then attrs
+  else template_attr :: attrs
 
 let for_of_attr_name = "_res.for_of"
 let for_await_of_attr_name = "_res.for_await_of"
+let ppx_context_string_attr_name = "_res.ppx_context_string"
+
+let has_ppx_context_string_attr attrs =
+  Ext_list.exists attrs (fun ({txt}, _) -> txt = ppx_context_string_attr_name)
+
+let remove_ppx_context_string_attr attrs =
+  List.filter
+    (fun ({Location.txt}, _) -> txt <> ppx_context_string_attr_name)
+    attrs
 
 let map_loc sub {loc; txt} = {loc = sub.location sub loc; txt}
 
 (* Internal Parsetree0 bridge metadata; public res.* attributes pass through. *)
 let record_rest_attr_name = "_res.record_rest"
+let constructor_args_attr_name = "_res.constructor_args"
+
+let add_constructor_args_attr attrs =
+  (Location.mknoloc constructor_args_attr_name, Pt.PStr []) :: attrs
+
+(* See the constructor argument bridge contract at Ast_mapper_from0.decode_args. *)
+let encode_args ~map ~tuple ~attrs ~mark_args args =
+  match List.map map args with
+  | [] -> (None, attrs)
+  | [arg] -> (Some arg, attrs)
+  | args ->
+    let attrs = if mark_args then add_constructor_args_attr attrs else attrs in
+    (Some (tuple args), attrs)
 
 let add_record_rest_attr ~rest attrs =
   (Location.mknoloc record_rest_attr_name, Pt.PPat (rest, None)) :: attrs
@@ -105,9 +136,20 @@ module T = struct
   (* Type expressions for the core language *)
 
   let row_field sub = function
-    | Rtag (l, attrs, b, tl) ->
+    | Rtag (l, attrs, b, groups) ->
+      let map_group {loc; txt = args} =
+        let loc = sub.location sub loc in
+        match List.map (sub.typ sub) args with
+        | [arg] -> arg
+        | args ->
+          let typ = Ast_helper0.Typ.tuple ~loc args in
+          {
+            typ with
+            ptyp_attributes = add_constructor_args_attr typ.ptyp_attributes;
+          }
+      in
       Pt.Rtag
-        (map_loc sub l, sub.attributes sub attrs, b, List.map (sub.typ sub) tl)
+        (map_loc sub l, sub.attributes sub attrs, b, List.map map_group groups)
     | Rinherit t -> Rinherit (sub.typ sub t)
 
   let object_field sub = function
@@ -180,16 +222,15 @@ module T = struct
     | Ptyp_extension x -> extension ~loc ~attrs (sub.extension sub x)
 
   let map_type_declaration sub
-      {
-        ptype_name;
-        ptype_params;
-        ptype_cstrs;
-        ptype_kind;
-        ptype_private;
-        ptype_manifest;
-        ptype_attributes;
-        ptype_loc;
-      } =
+      ({
+         ptype_name;
+         ptype_params;
+         ptype_cstrs;
+         ptype_kind;
+         ptype_private;
+         ptype_manifest;
+         ptype_loc;
+       } as decl) =
     Type.mk (map_loc sub ptype_name)
       ~params:(List.map (map_fst (sub.typ sub)) ptype_params)
       ~priv:ptype_private
@@ -200,7 +241,7 @@ module T = struct
       ~kind:(sub.type_kind sub ptype_kind)
       ?manifest:(map_opt (sub.typ sub) ptype_manifest)
       ~loc:(sub.location sub ptype_loc)
-      ~attrs:(sub.attributes sub ptype_attributes)
+      ~attrs:(sub.attributes sub (Ast_helper.Type.declaration_attributes decl))
 
   let map_type_kind sub = function
     | Ptype_abstract -> Pt.Ptype_abstract
@@ -366,27 +407,26 @@ module E = struct
   let map_jsx_props sub props =
     props
     |> List.map (function
-         | JSXPropPunning (is_optional, name) ->
-           let ident =
-             Exp.ident ~loc:name.loc
-               {txt = Longident.Lident name.txt; loc = name.loc}
-           in
-           let label =
-             if is_optional then Asttypes.Noloc.Optional name.txt
-             else Asttypes.Noloc.Labelled name.txt
-           in
-           (label, ident)
-         | JSXPropValue (name, is_optional, value) ->
-           let label =
-             if is_optional then Asttypes.Noloc.Optional name.txt
-             else Asttypes.Noloc.Labelled name.txt
-           in
-           ( label,
-             sub.expr sub value |> wrap_with_loc_attr jsx_prop_loc_attr name.loc
-           )
-         | JSXPropSpreading (loc, value) ->
-           ( Asttypes.Noloc.Labelled "_spreadProps",
-             sub.expr sub value |> wrap_with_loc_attr jsx_spread_loc_attr loc ))
+      | JSXPropPunning (is_optional, name) ->
+        let ident =
+          Exp.ident ~loc:name.loc
+            {txt = Longident.Lident name.txt; loc = name.loc}
+        in
+        let label =
+          if is_optional then Asttypes.Noloc.Optional name.txt
+          else Asttypes.Noloc.Labelled name.txt
+        in
+        (label, ident)
+      | JSXPropValue (name, is_optional, value) ->
+        let label =
+          if is_optional then Asttypes.Noloc.Optional name.txt
+          else Asttypes.Noloc.Labelled name.txt
+        in
+        ( label,
+          sub.expr sub value |> wrap_with_loc_attr jsx_prop_loc_attr name.loc )
+      | JSXPropSpreading (loc, value) ->
+        ( Asttypes.Noloc.Labelled "_spreadProps",
+          sub.expr sub value |> wrap_with_loc_attr jsx_spread_loc_attr loc ))
 
   let map_jsx_children sub loc children =
     match children with
@@ -399,9 +439,26 @@ module E = struct
   let map sub {pexp_loc = loc; pexp_desc = desc; pexp_attributes = attrs} =
     let open Exp in
     let loc = sub.location sub loc in
-    let attrs = sub.attributes sub attrs in
+    let is_ppx_context_string = has_ppx_context_string_attr attrs in
+    let attrs = sub.attributes sub (remove_ppx_context_string_attr attrs) in
     match desc with
+    | Pexp_braces {expr; braces_loc} ->
+      let inner = sub.expr sub expr in
+      {
+        inner with
+        pexp_attributes =
+          attrs
+          @ ( Location.mkloc "res.braces" (sub.location sub braces_loc),
+              Pt.PStr [] )
+            :: inner.pexp_attributes;
+      }
     | Pexp_ident x -> ident ~loc ~attrs (map_loc sub x)
+    | Pexp_constant (Pconst_string payload) when is_ppx_context_string ->
+      (* The PPX protocol predates source-preserving strings. Existing PPXs
+         require compiler-generated context fields to be ordinary semantic
+         ast0 strings rather than quotation-delimited source strings. *)
+      constant ~loc ~attrs
+        (Pt.Pconst_string (String_literal.string_semantic payload, None))
     | Pexp_constant x -> constant ~loc ~attrs (map_constant x)
     | Pexp_let (r, vbs, e) ->
       let_ ~loc ~attrs r (List.map (sub.value_binding sub) vbs) (sub.expr sub e)
@@ -531,10 +588,25 @@ module E = struct
       match_ ~loc ~attrs (sub.expr sub e) (sub.cases sub pel)
     | Pexp_try (e, pel) -> try_ ~loc ~attrs (sub.expr sub e) (sub.cases sub pel)
     | Pexp_tuple el -> tuple ~loc ~attrs (List.map (sub.expr sub) el)
-    | Pexp_construct (lid, arg) ->
-      construct ~loc ~attrs (map_loc sub lid) (map_opt (sub.expr sub) arg)
-    | Pexp_variant (lab, eo) ->
-      variant ~loc ~attrs lab (map_opt (sub.expr sub) eo)
+    | Pexp_construct (lid, {txt = args; loc = args_loc}) ->
+      let lid = map_loc sub lid in
+      let args_loc = sub.location sub args_loc in
+      let arg, attrs =
+        encode_args ~map:(sub.expr sub)
+          ~tuple:(fun args -> Ast_helper0.Exp.tuple ~loc:args_loc args)
+          ~attrs
+          ~mark_args:(lid.txt <> Longident.Lident "::")
+          args
+      in
+      construct ~loc ~attrs lid arg
+    | Pexp_variant (lab, {txt = args; loc = args_loc}) ->
+      let args_loc = sub.location sub args_loc in
+      let arg, attrs =
+        encode_args ~map:(sub.expr sub)
+          ~tuple:(fun args -> Ast_helper0.Exp.tuple ~loc:args_loc args)
+          ~attrs ~mark_args:true args
+      in
+      variant ~loc ~attrs lab arg
     | Pexp_record (l, eo) ->
       record ~loc ~attrs
         (Ext_list.map l (fun {lid; x = e; opt = optional} ->
@@ -553,6 +625,11 @@ module E = struct
     | Pexp_ifthenelse (e1, e2, e3) ->
       ifthenelse ~loc ~attrs (sub.expr sub e1) (sub.expr sub e2)
         (map_opt (sub.expr sub) e3)
+    | Pexp_ternary (condition, consequent, alternate) ->
+      let marker = (Location.mknoloc "res.ternary", Pt.PStr []) in
+      ifthenelse ~loc ~attrs:(marker :: attrs) (sub.expr sub condition)
+        (sub.expr sub consequent)
+        (Some (sub.expr sub alternate))
     | Pexp_sequence (e1, e2) ->
       sequence ~loc ~attrs (sub.expr sub e1) (sub.expr sub e2)
     | Pexp_break ->
@@ -589,11 +666,91 @@ module E = struct
         ~attrs:(for_await_of_attr :: attrs)
         (sub.pat sub pat) start_expr end_expr Asttypes.Upto
         (sub.expr sub body_expr)
+    | Pexp_regexp {pattern; flags} ->
+      (* %re is only a frozen PPX wire encoding, not source syntax. *)
+      extension ~loc ~attrs
+        ( Location.mkloc "re" loc,
+          Pt.PStr
+            [
+              Ast_helper0.Str.eval ~loc
+                (Ast_helper0.Exp.constant ~loc
+                   (Pt.Pconst_string ("/" ^ pattern ^ "/" ^ flags, Some "js")));
+            ] )
+    | Pexp_template {source_segments; values} ->
+      let segments =
+        List.map
+          (fun (source : string Location.loc) ->
+            Ast_helper0.Exp.constant
+              ~loc:(sub.location sub source.loc)
+              ~attrs:[template_attr]
+              (Pt.Pconst_string (source.txt, Some "js")))
+          source_segments
+      in
+      let rec interleave acc segments values =
+        match (segments, values) with
+        | [segment], [] -> List.rev (segment :: acc)
+        | segment :: segments, value :: values ->
+          interleave (sub.expr sub value :: segment :: acc) segments values
+        | _ -> assert false
+      in
+      let parts = interleave [] segments values in
+      let concat lhs rhs =
+        apply ~loc ~attrs:[template_attr]
+          (Ast_helper0.Exp.ident ~loc (Location.mknoloc (Longident.Lident "^")))
+          [(Asttypes.Noloc.Nolabel, lhs); (Asttypes.Noloc.Nolabel, rhs)]
+      in
+      let expression =
+        match parts with
+        | first :: rest -> List.fold_left concat first rest
+        | [] -> assert false
+      in
+      {expression with pexp_attributes = add_template_attr attrs}
+    | Pexp_tagged_template {tag; raw_sources; values} ->
+      let segments =
+        List.map
+          (fun (source : string Location.loc) ->
+            Ast_helper0.Exp.constant
+              ~loc:(sub.location sub source.loc)
+              ~attrs:[template_attr]
+              (Pt.Pconst_string (source.txt, Some "js")))
+          raw_sources
+      in
+      let tagged_attr = (Location.mknoloc "res.taggedTemplate", Pt.PStr []) in
+      apply ~loc ~attrs:(tagged_attr :: attrs) (sub.expr sub tag)
+        [
+          (Asttypes.Noloc.Nolabel, Ast_helper0.Exp.array ~loc segments);
+          ( Asttypes.Noloc.Nolabel,
+            Ast_helper0.Exp.array ~loc (List.map (sub.expr sub) values) );
+        ]
     | Pexp_coerce (e, (), t2) ->
       coerce ~loc ~attrs (sub.expr sub e) (sub.typ sub t2)
     | Pexp_constraint (e, t) ->
       constraint_ ~loc ~attrs (sub.expr sub e) (sub.typ sub t)
-    | Pexp_send (e, s) -> send ~loc ~attrs (sub.expr sub e) (map_loc sub s)
+    | Pexp_object_get (e, s) ->
+      send ~loc ~attrs (sub.expr sub e) (map_loc sub s)
+    | Pexp_object_set (e, s, v) ->
+      (* v0 encoding: application of the "#=" operator to a send. *)
+      let s = map_loc sub s in
+      apply ~loc ~attrs
+        (Ast_helper0.Exp.ident ~loc {txt = Longident.Lident "#="; loc})
+        [
+          (Asttypes.Noloc.Nolabel, Ast_helper0.Exp.send ~loc (sub.expr sub e) s);
+          (Asttypes.Noloc.Nolabel, sub.expr sub v);
+        ]
+    | Pexp_object_literal fields ->
+      (* v0 encoding: the reserved %obj extension over a record expression. *)
+      let rows =
+        List.map
+          (fun (s, e) ->
+            let s = map_loc sub s in
+            ({s with txt = Longident.Lident s.txt}, sub.expr sub e))
+          fields
+      in
+      extension ~loc ~attrs
+        ( {txt = "obj"; loc},
+          PStr
+            [Ast_helper0.Str.eval ~loc (Ast_helper0.Exp.record ~loc rows None)]
+        )
     | Pexp_letmodule (s, me, e) ->
       letmodule ~loc ~attrs (map_loc sub s) (sub.module_expr sub me)
         (sub.expr sub e)
@@ -698,9 +855,25 @@ module P = struct
     | Ppat_interval (c1, c2) ->
       interval ~loc ~attrs (map_constant c1) (map_constant c2)
     | Ppat_tuple pl -> tuple ~loc ~attrs (List.map (sub.pat sub) pl)
-    | Ppat_construct (l, p) ->
-      construct ~loc ~attrs (map_loc sub l) (map_opt (sub.pat sub) p)
-    | Ppat_variant (l, p) -> variant ~loc ~attrs l (map_opt (sub.pat sub) p)
+    | Ppat_construct (l, {txt = args; loc = args_loc}) ->
+      let l = map_loc sub l in
+      let args_loc = sub.location sub args_loc in
+      let arg, attrs =
+        encode_args ~map:(sub.pat sub)
+          ~tuple:(fun args -> Ast_helper0.Pat.tuple ~loc:args_loc args)
+          ~attrs
+          ~mark_args:(l.txt <> Longident.Lident "::")
+          args
+      in
+      construct ~loc ~attrs l arg
+    | Ppat_variant (l, {txt = args; loc = args_loc}) ->
+      let args_loc = sub.location sub args_loc in
+      let arg, attrs =
+        encode_args ~map:(sub.pat sub)
+          ~tuple:(fun args -> Ast_helper0.Pat.tuple ~loc:args_loc args)
+          ~attrs ~mark_args:true args
+      in
+      variant ~loc ~attrs l arg
     | Ppat_record (lpl, cf, rest) ->
       let attrs =
         match rest with
@@ -723,7 +896,6 @@ module P = struct
       constraint_ ~loc ~attrs (sub.pat sub p) (sub.typ sub t)
     | Ppat_type s -> type_ ~loc ~attrs (map_loc sub s)
     | Ppat_unpack s -> unpack ~loc ~attrs (map_loc sub s)
-    | Ppat_open (lid, p) -> open_ ~loc ~attrs (map_loc sub lid) (sub.pat sub p)
     | Ppat_exception p -> exception_ ~loc ~attrs (sub.pat sub p)
     | Ppat_extension x -> extension ~loc ~attrs (sub.extension sub x)
 end
@@ -748,10 +920,22 @@ let default_mapper =
     extension_constructor = T.map_extension_constructor;
     value_description =
       (fun this {pval_name; pval_type; pval_prim; pval_loc; pval_attributes} ->
+        let prim =
+          match pval_prim with
+          | None -> []
+          | Some (Prim_name s) -> [s]
+          | Some (Prim_ffi _ | Prim_inline_const _) ->
+            (* External PPXes run before the frontend digests externals, and
+               nothing else crosses this bridge, so a digested external can
+               never legitimately reach it. *)
+            Location.raise_errorf ~loc:pval_loc
+              "External declarations already processed for compilation cannot \
+               be converted for an external PPX"
+        in
         Val.mk (map_loc this pval_name) (this.typ this pval_type)
           ~attrs:(this.attributes this pval_attributes)
           ~loc:(this.location this pval_loc)
-          ~prim:pval_prim);
+          ~prim);
     pat = P.map;
     expr = E.map;
     module_declaration =
@@ -818,22 +1002,23 @@ let default_mapper =
         in
         Vb.mk pvb_pat pvb_expr ~loc ~attrs:(this.attributes this pvb_attributes));
     constructor_declaration =
-      (fun this {pcd_name; pcd_args; pcd_res; pcd_loc; pcd_attributes} ->
+      (fun this ({pcd_name; pcd_args; pcd_res; pcd_loc} as cd) ->
         Type.constructor (map_loc this pcd_name)
           ~args:(T.map_constructor_arguments this pcd_args)
           ?res:(map_opt (this.typ this) pcd_res)
           ~loc:(this.location this pcd_loc)
-          ~attrs:(this.attributes this pcd_attributes));
+          ~attrs:
+            (this.attributes this (Ast_helper.Type.constructor_attributes cd)));
     label_declaration =
       (fun this
-        {pld_name; pld_type; pld_loc; pld_mutable; pld_optional; pld_attributes}
+        ({pld_name; pld_type; pld_loc; pld_mutable; pld_optional} as ld)
       ->
         Type.field (map_loc this pld_name) (this.typ this pld_type)
           ~mut:pld_mutable
           ~loc:(this.location this pld_loc)
           ~attrs:
             (Parsetree0.add_optional_attr ~optional:pld_optional
-               (this.attributes this pld_attributes)));
+               (this.attributes this (Ast_helper.Type.field_attributes ld))));
     cases = (fun this l -> List.map (this.case this) l);
     case =
       (fun this {pc_lhs; pc_guard; pc_rhs} ->

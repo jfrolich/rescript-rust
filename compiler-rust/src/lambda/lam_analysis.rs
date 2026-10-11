@@ -41,7 +41,7 @@ pub fn no_side_effects(lam: &Lambda) -> bool {
         Lambda::Lvar(_) | Lambda::Lconst(_) | Lambda::Lfunction(_) => true,
 
         // Global module references are pure (side effects tracked at module level)
-        Lambda::LglobalModule(_, _) => true,
+        Lambda::LglobalModule(_) => true,
 
         // Primitive operations - check if the primitive is pure
         Lambda::Lprim(prim_info) => {
@@ -131,6 +131,11 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         Primitive::Pmodint | Primitive::Pdivint | Primitive::Pdivbigint | Primitive::Pmodbigint => {
             second_constant.is_some_and(not_zero_constant)
         }
+        // lam_analysis.ml: raises on a negative exponent, so pure only when
+        // the exponent is a nonnegative constant.
+        Primitive::Ppowbigint => {
+            matches!(second_constant, Some(Constant::BigInt { negative: false, .. }))
+        }
 
         // Creation and type checking primitives
         Primitive::PcreateExtension(_)
@@ -145,9 +150,7 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         | Primitive::PnullToOpt
         | Primitive::PnullUndefinedToOpt
         | Primitive::PjsObjectCreate(_)
-        | Primitive::Pimport
-        | Primitive::Pnull
-        | Primitive::Pundefined => true,
+        | Primitive::Pimport(_) => true,
 
         // Block operations
         Primitive::Pmakeblock(_, _)
@@ -213,7 +216,6 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         | Primitive::Paddbigint
         | Primitive::Psubbigint
         | Primitive::Pmulbigint
-        | Primitive::Ppowbigint
         | Primitive::Pnotbigint
         | Primitive::Pandbigint
         | Primitive::Porbigint
@@ -227,8 +229,6 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
 
         // String primitives
         Primitive::Pstringlength
-        | Primitive::Pstringrefu
-        | Primitive::Pstringrefs
         | Primitive::Pstringcomp(_)
         | Primitive::Pstringorder
         | Primitive::Pstringmin
@@ -237,20 +237,18 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         // Array primitives (read-only)
         Primitive::Pmakearray
         | Primitive::Parraylength
-        | Primitive::Parrayrefu
-        | Primitive::Parrayrefs => true,
+        | Primitive::Parrayrefu => true,
 
         // List and dict primitives
         Primitive::Pmakelist | Primitive::Pmakedict | Primitive::PdictHas => true,
 
         // Type testing primitives
-        Primitive::Pisint | Primitive::PisPolyVarBlock | Primitive::Pisout(_) => true,
+        Primitive::Pisint | Primitive::PisPolyVarBlock => true,
 
         // Offset and misc
-        Primitive::Poffsetint(_)
-        | Primitive::Pstringadd
+        Primitive::Pstringadd
+        | Primitive::Ptemplate(_)
         | Primitive::PfnArity
-        | Primitive::PwrapExn
         | Primitive::Phash
         | Primitive::PhashMixstring
         | Primitive::PhashMixint
@@ -260,21 +258,25 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         Primitive::PrawJsCode(info) => raw_js_is_pure(info),
 
         // Impure primitives
-        Primitive::PtaggedTemplate
+        Primitive::PtaggedTemplate(_)
         | Primitive::PjsApply
         | Primitive::PjsRuntimeApply
         | Primitive::PjsCall { .. }
         | Primitive::PinitMod
         | Primitive::PupdateMod
-        | Primitive::PjsUnsafeDowngrade { .. }
+        | Primitive::PjsObjectGet(_)
+        | Primitive::PjsObjectSet(_)
         | Primitive::Pdebugger
         | Primitive::PjsFnMethod
         | Primitive::Pawait
         | Primitive::Parraysets
         | Primitive::Parraysetu
-        | Primitive::Poffsetref(_)
         | Primitive::Praise
-        | Primitive::Psetfield(_, _) => false,
+        | Primitive::Psetfield(_, _)
+        // Bounds-checked reads throw when the index is out of range.
+        | Primitive::Parrayrefs
+        | Primitive::Pstringrefs
+        | Primitive::Pstringrefu => false,
     }
 }
 
@@ -331,7 +333,7 @@ fn size_inner(lam: &Lambda) -> Option<i32> {
                 Primitive::Pfield(_, FieldDbgInfo::Module { .. }) => {
                     if prim_info.args.len() == 1 {
                         match &prim_info.args[0] {
-                            Lambda::LglobalModule(_, _) | Lambda::Lvar(_) => return Some(1),
+                            Lambda::LglobalModule(_) | Lambda::Lvar(_) => return Some(1),
                             _ => {}
                         }
                     }
@@ -356,7 +358,7 @@ fn size_inner(lam: &Lambda) -> Option<i32> {
                         .filter(|param| {
                             !matches!(
                                 param.obj_arg_type,
-                                crate::lambda::lam_primitive::ExternalArgAttr::ArgCst(_)
+                                crate::types::external_ffi_types::Attr::ArgCst(_)
                             )
                         })
                         .count();
@@ -369,7 +371,7 @@ fn size_inner(lam: &Lambda) -> Option<i32> {
             size_lams(1, &prim_info.args)
         }
 
-        Lambda::LglobalModule(_, _) => Some(1),
+        Lambda::LglobalModule(_) => Some(1),
 
         Lambda::Lapply(apply) => {
             let func_size = size_inner(&apply.ap_func)?;
@@ -434,7 +436,7 @@ fn size_constant(c: &Constant) -> i32 {
         | Constant::JsTrue
         | Constant::JsFalse => 1,
 
-        Constant::String { .. } => 1,
+        Constant::String(_) => 1,
         Constant::ImmString(_) => 1,
 
         Constant::Some(inner) => size_constant(inner),
@@ -442,7 +444,7 @@ fn size_constant(c: &Constant) -> i32 {
         Constant::Block {
             tag_info, elements, ..
         } => {
-            let missing_fields = match tag_info {
+            let missing_fields = match &**tag_info {
                 TagInfo::Record { .. } | TagInfo::RecordInlined { .. } => tag_info
                     .logical_field_count()
                     .saturating_sub(elements.len()),
@@ -509,7 +511,7 @@ pub(crate) fn destruct_pattern(body: &Lambda, params: &[Ident], args: &[Lambda])
                     // Would need to evaluate the switch to check size
                     return size(&Lambda::switch(
                         Lambda::Lconst(constant.clone()),
-                        switch.clone(),
+                        *switch.clone(),
                     )) < SMALL_INLINE_SIZE;
                 }
             }
@@ -517,10 +519,11 @@ pub(crate) fn destruct_pattern(body: &Lambda, params: &[Ident], args: &[Lambda])
         }
         Lambda::LifThenElse(cond, then_, else_) => {
             if let Lambda::Lvar(v) = &**cond {
-                if let Some(Lambda::Lconst(_)) = find_arg(v, params, args) {
-                    // Would enable constant folding
+                if let Some(Lambda::Lconst(constant)) = find_arg(v, params, args) {
+                    // OCaml lam_analysis.ml:238-242 measures the folded branch,
+                    // not the original conditional with its parameter scrutinee.
                     return size(&Lambda::if_(
-                        (**cond).clone(),
+                        Lambda::Lconst(constant.clone()),
                         (**then_).clone(),
                         (**else_).clone(),
                     )) < SMALL_INLINE_SIZE;
@@ -536,17 +539,19 @@ pub(crate) fn destruct_pattern(body: &Lambda, params: &[Ident], args: &[Lambda])
 pub fn safe_to_inline(lam: &Lambda) -> bool {
     match lam {
         Lambda::Lfunction(_) => true,
-        Lambda::Lconst(c) => matches!(
-            c,
-            Constant::Pointer(_)
-                | Constant::Int {
-                    comment: Some(crate::lambda::lam_constant::PointerInfo::Constructor(_)),
-                    ..
-                }
-                | Constant::JsTrue
-                | Constant::JsFalse
-                | Constant::JsUndefined { .. }
-        ),
+        Lambda::Lconst(c) => {
+            matches!(
+                c,
+                Constant::Pointer(_)
+                    | Constant::JsTrue
+                    | Constant::JsFalse
+                    | Constant::JsUndefined { .. }
+            ) || matches!(
+                c,
+                Constant::Int { comment: Some(info), .. }
+                    if matches!(**info, crate::lambda::lam_constant::PointerInfo::Constructor(_))
+            )
+        }
         _ => false,
     }
 }
@@ -720,14 +725,14 @@ mod tests {
         // Switch is too big
         let switch = Lambda::Lswitch(
             Box::new(Lambda::const_(Constant::int(0))),
-            crate::lambda::LambdaSwitch {
+            Box::new(crate::lambda::LambdaSwitch {
                 sw_consts_full: true,
                 sw_consts: vec![],
                 sw_blocks_full: true,
                 sw_blocks: vec![],
                 sw_failaction: None,
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            },
+            }),
         );
         assert_eq!(size(&switch), TOO_BIG_TO_INLINE);
     }
@@ -816,7 +821,7 @@ mod tests {
         // Block sums up fields
         assert_eq!(
             size_constant(&Constant::Block {
-                tag_info: crate::lambda::lam_tag_info::TagInfo::Tuple,
+                tag_info: Box::new(crate::lambda::lam_tag_info::TagInfo::Tuple),
                 elements: vec![Constant::int(1), Constant::int(2), Constant::int(3)],
             }),
             3
@@ -824,15 +829,48 @@ mod tests {
 
         assert_eq!(
             size_constant(&Constant::Block {
-                tag_info: TagInfo::Record {
+                tag_info: Box::new(TagInfo::Record {
                     fields: vec![("className".to_string(), true)],
                     logical_field_count: Some(4),
                     mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                },
+                }),
                 elements: vec![Constant::Some(Box::new(Constant::string("button")))],
             }),
             4
         );
+    }
+
+    #[test]
+    fn test_ok_to_inline_fun_when_app_measures_folded_if_branch() {
+        let checked = Ident::create_local("checked");
+        let value = Ident::create_local("value");
+        let branch = || {
+            Lambda::prim(
+                Primitive::Pdebugger,
+                vec![Lambda::var(value.clone())],
+                crate::location::Location::none(),
+            )
+        };
+        let func = LFunction {
+            arity: 1,
+            params: vec![checked.clone()],
+            body: Box::new(Lambda::if_(Lambda::var(checked), branch(), branch())),
+            attr: FunctionAttribute::default(),
+        };
+
+        assert!(size(&func.body) >= SMALL_INLINE_SIZE);
+        assert!(ok_to_inline_fun_when_app(
+            &func,
+            &[Lambda::const_(Constant::JsFalse)]
+        ));
+        assert!(ok_to_inline_fun_when_app(
+            &func,
+            &[Lambda::const_(Constant::JsTrue)]
+        ));
+        assert!(!ok_to_inline_fun_when_app(
+            &func,
+            &[Lambda::var(Ident::create_local("unknown"))]
+        ));
     }
 
     #[test]
@@ -843,7 +881,7 @@ mod tests {
             params: vec![x.clone()],
             body: Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(x)),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: true,
                     sw_consts: vec![
                         (
@@ -859,7 +897,7 @@ mod tests {
                     sw_blocks: vec![],
                     sw_failaction: None,
                     sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-                },
+                }),
             )),
             attr: FunctionAttribute::default(),
         };

@@ -35,12 +35,14 @@ let create_polyvariant_case (label, attributes) =
       | Some (_, BoolPayload b) -> BoolLabel b
       | Some (_, FloatPayload s) -> FloatLabel s
       | Some (_, IntPayload i) -> IntLabel i
-      | Some (_, StringPayload as_label) -> StringLabel as_label
+      | Some (_, StringPayload as_label) ->
+        StringLabel (Emit_text.escape_string_contents as_label)
       | _ -> if is_number label then IntLabel label else StringLabel label);
   }
 
 let create_variant_case label = function
-  | Some (Variant_runtime.String label) -> {label_js = StringLabel label}
+  | Some (Variant_runtime.String label) ->
+    {label_js = StringLabel (Emit_text.escape_string_contents label)}
   | Some (Variant_runtime.Int label) ->
     {label_js = IntLabel (string_of_int label)}
   | Some (Variant_runtime.Float label) -> {label_js = FloatLabel label}
@@ -48,7 +50,7 @@ let create_variant_case label = function
   | Some (Variant_runtime.Bool label) -> {label_js = BoolLabel label}
   | Some Variant_runtime.Null -> {label_js = NullLabel}
   | Some Variant_runtime.Undefined -> {label_js = UndefinedLabel}
-  | Some (Variant_runtime.Untagged _) | None -> {label_js = StringLabel label}
+  | None -> {label_js = StringLabel label}
 
 (**
  * Rename record fields.
@@ -62,8 +64,16 @@ let create_variant_case label = function
 let rename_record_field ~attributes ~name =
   attributes |> Annotation.check_unsupported_gentype_as_renaming;
   match attributes |> Annotation.get_as_string with
-  | Some s -> s |> String.escaped
+  | Some s -> Emit_text.escape_string_contents s
   | None -> name |> Ext_ident.unwrap_uppercase_exotic
+
+(* A declared field carries its runtime name; only the renaming that reaches
+   gentype through an expression's attributes still has to be read off one. *)
+let declared_field_name (ld : Types.label_declaration) =
+  ld.ld_attributes |> Annotation.check_unsupported_gentype_as_renaming;
+  match ld.ld_runtime_name with
+  | Some s -> Emit_text.escape_string_contents s
+  | None -> Ident.name ld.ld_id |> Ext_ident.unwrap_uppercase_exotic
 
 let traslate_declaration_kind ~config ~loc ~output_file_relative ~resolver
     ~type_attributes ~type_env ~type_name ~type_vars declaration_kind :
@@ -104,11 +114,8 @@ let traslate_declaration_kind ~config ~loc ~output_file_relative ~resolver
       label_declarations
       |> List.map
            (fun
-             {Types.ld_id; ld_mutable; ld_optional; ld_type; ld_attributes} ->
-             let name =
-               rename_record_field ~attributes:ld_attributes
-                 ~name:(ld_id |> Ident.name)
-             in
+             ({Types.ld_mutable; ld_optional; ld_type; ld_attributes} as ld) ->
+             let name = declared_field_name ld in
              let mutability =
                match ld_mutable = Mutable with
                | true -> Mutable
@@ -222,8 +229,8 @@ let traslate_declaration_kind ~config ~loc ~output_file_relative ~resolver
             (List.combine variant.payloads row_fields_variants.payloads
              [@doesNotRaise])
             |> List.map (fun (payload, (label, attributes, _)) ->
-                   let case = create_polyvariant_case (label, attributes) in
-                   {payload with case})
+                let case = create_polyvariant_case (label, attributes) in
+                {payload with case})
           else variant.payloads
         in
         create_variant ~inherits:variant.inherits ~no_payloads ~payloads
@@ -262,38 +269,35 @@ let traslate_declaration_kind ~config ~loc ~output_file_relative ~resolver
     let variants =
       constructor_declarations
       |> List.mapi (fun position constructor_declaration ->
-             let constructor_args = constructor_declaration.Types.cd_args in
-             let name = constructor_declaration.cd_id |> Ident.name in
-             let tag = Variant_runtime.constructor_tag layout position in
-             let args_translation =
-               match constructor_args with
-               | Cstr_tuple type_exprs ->
-                 type_exprs
-                 |> Translate_type_expr_from_types
-                    .translate_type_exprs_from_types ~config ~type_env
-               | Cstr_record label_declarations ->
-                 [
-                   label_declarations
-                   |> translate_label_declarations ~inline:true
-                        ~unboxed:
-                          (type_representation = Unboxed
-                          || Variant_runtime.constructor_is_untagged layout
-                               position);
-                 ]
-             in
-             let arg_types =
-               args_translation
-               |> List.map (fun {Translate_type_expr_from_types.type_} -> type_)
-             in
-             let import_types =
-               args_translation
-               |> List.map (fun {Translate_type_expr_from_types.dependencies} ->
-                      dependencies)
-               |> List.concat
-               |> Translation.translate_dependencies ~config
-                    ~output_file_relative ~resolver
-             in
-             (name, tag, arg_types, import_types))
+          let constructor_args = constructor_declaration.Types.cd_args in
+          let name = constructor_declaration.cd_id |> Ident.name in
+          let tag = Variant_runtime.constructor_tag layout position in
+          let args_translation =
+            match constructor_args with
+            | Cstr_tuple type_exprs ->
+              type_exprs
+              |> Translate_type_expr_from_types.translate_type_exprs_from_types
+                   ~config ~type_env
+            | Cstr_record label_declarations ->
+              [
+                label_declarations
+                |> translate_label_declarations ~inline:true
+                     ~unboxed:(type_representation = Unboxed);
+              ]
+          in
+          let arg_types =
+            args_translation
+            |> List.map (fun {Translate_type_expr_from_types.type_} -> type_)
+          in
+          let import_types =
+            args_translation
+            |> List.map (fun {Translate_type_expr_from_types.dependencies} ->
+                dependencies)
+            |> List.concat
+            |> Translation.translate_dependencies ~config ~output_file_relative
+                 ~resolver
+          in
+          (name, tag, arg_types, import_types))
     in
     let variants_no_payload, variants_with_payload =
       variants |> List.partition (fun (_, _, arg_types, _) -> arg_types = [])
@@ -301,17 +305,17 @@ let traslate_declaration_kind ~config ~loc ~output_file_relative ~resolver
     let no_payloads =
       variants_no_payload
       |> List.map (fun (name, tag, _argTypes, _importTypes) ->
-             create_variant_case name tag)
+          create_variant_case name tag)
     in
     let payloads =
       variants_with_payload
       |> List.map (fun (name, tag, arg_types, _importTypes) ->
-             let type_ =
-               match arg_types with
-               | [type_] -> type_
-               | _ -> Tuple arg_types
-             in
-             {case = create_variant_case name tag; t = type_})
+          let type_ =
+            match arg_types with
+            | [type_] -> type_
+            | _ -> Tuple arg_types
+          in
+          {case = create_variant_case name tag; t = type_})
     in
     let variant_typ =
       let unboxed =
@@ -394,12 +398,12 @@ let translate_type_declarations ~config ~output_file_relative ~recursive
     |> List.iter (add_type_declaration_id_to_type_env ~type_env);
   type_declarations
   |> List.map (fun type_declaration ->
-         let res =
-           type_declaration
-           |> translate_type_declaration ~config ~output_file_relative ~resolver
-                ~type_env
-         in
-         if not recursive then
-           type_declaration |> add_type_declaration_id_to_type_env ~type_env;
-         res)
+      let res =
+        type_declaration
+        |> translate_type_declaration ~config ~output_file_relative ~resolver
+             ~type_env
+      in
+      if not recursive then
+        type_declaration |> add_type_declaration_id_to_type_env ~type_env;
+      res)
   |> List.concat

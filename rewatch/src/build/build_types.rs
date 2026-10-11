@@ -1,4 +1,4 @@
-use crate::build::packages::{Namespace, Package};
+use crate::build::packages::Package;
 use crate::config::{Config, SourceMapCommand};
 use crate::project_context::ProjectContext;
 use ahash::{AHashMap, AHashSet};
@@ -12,25 +12,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{fmt::Display, ops::Deref, path::PathBuf, time::SystemTime};
 
-/// The three explicit build modes for rewatch.
+/// How rewatch compiles.
 ///
-/// - `Default`: OCaml/file-backed build (no special flags)
-/// - `Rust`: Rust parser with bsc compilation, file-backed (`--rust`)
-/// - `InProcess`: Rust compiler fully in-process, memory-backed (`--in-process`)
+/// - `InProcess`: the Rust compiler linked into rewatch. This is the build.
+/// - `ExternalBsc`: test-only, file-backed builds with an external compiler
+///   executable, selected by `RESCRIPT_SUBPROCESS_BUILD` so parity scripts can
+///   produce OCaml reference outputs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BuildMode {
-    /// Current OCaml/file-based build (default, no flags)
-    Default,
-    /// Rust parser, bsc compilation, file-backed (`--rust`)
-    Rust,
-    /// Rust compiler fully in-process, memory-backed (`--in-process`)
+    /// External compiler executable, file-backed (test-only)
+    ExternalBsc,
+    /// Rust compiler fully in-process
     InProcess,
 }
 
 impl BuildMode {
-    /// Whether this mode uses the Rust parser (true for Rust and InProcess)
+    /// Whether parsing runs in this process with the Rust parser.
     pub fn use_rust_parser(&self) -> bool {
-        matches!(self, BuildMode::Rust | BuildMode::InProcess)
+        matches!(self, BuildMode::InProcess)
     }
 
     /// Whether this mode uses in-process compilation with no disk artifacts
@@ -205,6 +204,10 @@ pub struct BuildState {
     pub source_map_command: SourceMapCommand,
 }
 
+/// Parse warnings by source file (`Module:impl` or `Module:intf`), with the
+/// package that reported them.
+pub type ParseWarnings = Mutex<AHashMap<String, (String, String)>>;
+
 pub struct GentypeCompileContext {
     pub config: Arc<rescript_compiler::gentype::config::T>,
     pub resolver: Arc<rescript_compiler::gentype::module_resolver::Resolver>,
@@ -223,10 +226,8 @@ pub struct BuildCommandState {
     pub build_state: BuildState,
     // Command-line --warn-error flag override (takes precedence over rescript.json config)
     pub warn_error_override: Option<String>,
-    // The explicit build mode (Default, Rust, or InProcess)
+    // The build mode (in-process, or the test-only external compiler)
     pub build_mode: BuildMode,
-    // Command-line --subprocess flag: run bsc as subprocess with timeout (instead of in-process).
-    pub subprocess: bool,
     // Command-line --dump-typed-sexp flag: add -dtyped-sexp to bsc invocations.
     pub dump_typed_sexp: bool,
     // Stored ASTs from parse phase, keyed by "{module_name}:impl" or "{module_name}:intf"
@@ -244,11 +245,66 @@ pub struct BuildCommandState {
     // Keyed by "{module_name}:impl" or "{module_name}:intf" (matching stored_asts convention).
     // Values are the raw module names extracted from the parsed AST.
     pub in_memory_deps: Mutex<AHashMap<String, Dependencies>>,
+    // The units each module's last compile in this process read the
+    // interface of (type checking its interface and implementation, plus
+    // the modules its generated code may require).
+    pub loaded_units: Mutex<AHashMap<String, AHashSet<String>>>,
+    // What the last compile of a module read of other units (see
+    // `rescript_compiler::cmi::item_deps`), resolved when the build is
+    // recorded.
+    pub unit_reads: Mutex<AHashMap<String, PendingReads>>,
+    // Recorded imports a build checked item by item and found unaffected:
+    // module -> unit -> the unit's interface digest now.
+    pub verified_imports: Mutex<AHashMap<String, AHashMap<String, u64>>>,
+    // The alias rewrites each module registered, for its stored interface.
+    pub module_alias_rewrites: Mutex<AHashMap<String, Vec<(String, rescript_compiler::types::path::Path)>>>,
+    // The modules this build compiled (written or not).
+    pub compiled_modules: AHashSet<String>,
+    // The build stopped at a parse error, before planning: it compiled
+    // nothing and leaves the previous build record in place.
+    pub stopped_at_parse: bool,
+    // Modules compiled after a dependency failed: their results were dropped,
+    // but their JavaScript may have been written from the failed module's
+    // incomplete metadata. The build record forgets what they imported, so
+    // the next build recompiles them.
+    pub invalidated_modules: AHashSet<String>,
+    // The modules whose stored interface this build loaded instead of
+    // compiling them.
+    pub loaded_modules: AHashSet<String>,
+    // Set while parsing modules whose saved parse warnings were already
+    // reported this build: the parse then only records them.
+    pub parse_warnings_replayed: bool,
+    // The modules whose JavaScript this process wrote.
+    pub written_modules: AHashSet<String>,
     // GenType config and resolver inputs are immutable within one compile wave.
     pub gentype_contexts: Mutex<AHashMap<PathBuf, Arc<GentypeCompileContext>>>,
+    // In-process compiler options shared by every module of a package (keyed
+    // by package path and whether the module is a dev source); immutable
+    // within one compile wave like the GenType contexts.
+    pub package_compiler_options:
+        Mutex<AHashMap<(PathBuf, bool), Arc<rescript_compiler::driver::CompilerOptions>>>,
     // Command-line --features override. `None` means all features are active; `Some(list)`
     // restricts the root package to those features (and whatever they transitively imply).
     pub features: Option<Vec<String>>,
+    // What the previous in-process build recorded (see `incremental`). Read
+    // during initialization, in-process builds only.
+    pub previous_in_process: Option<super::incremental::PreviousInProcessBuild>,
+    // The incremental plan of a fresh in-process build, consumed by `compile`.
+    pub incremental_plan: Option<super::incremental::IncrementalPlan>,
+    // When the latest build started, and whether it finished without errors;
+    // recorded in the in-process manifest.
+    pub build_started_at: Option<std::time::SystemTime>,
+    pub last_build_ok: bool,
+    // The parse warnings of the latest parse of each source file, saved so a
+    // build that parses nothing can report them again.
+    pub parse_warnings: ParseWarnings,
+    // When each module's JavaScript was last known to be up to date: the start
+    // of the build that compiled it. Identical output is not rewritten, so the
+    // file's own modification time can be older (see `incremental`).
+    pub js_confirmed_at: AHashMap<String, std::time::SystemTime>,
+    // Each source file's modification time (`Module:impl` / `Module:intf`),
+    // read before it is parsed; recorded with its dependencies.
+    pub source_mtimes: AHashMap<String, i64>,
 }
 
 impl std::fmt::Debug for BuildCommandState {
@@ -258,7 +314,6 @@ impl std::fmt::Debug for BuildCommandState {
             .field("build_state", &self.build_state)
             .field("warn_error_override", &self.warn_error_override)
             .field("build_mode", &self.build_mode)
-            .field("subprocess", &self.subprocess)
             .field("dump_typed_sexp", &self.dump_typed_sexp)
             .field("stored_asts", &"<Mutex<..>>")
             .field("in_memory_interfaces", &"<Mutex<..>>")
@@ -326,7 +381,6 @@ impl BuildCommandState {
         compiler: CompilerInfo,
         warn_error_override: Option<String>,
         build_mode: BuildMode,
-        subprocess: bool,
         dump_typed_sexp: bool,
         features: Option<Vec<String>>,
         source_map_command: SourceMapCommand,
@@ -336,15 +390,32 @@ impl BuildCommandState {
             build_state: BuildState::new(project_context, packages, compiler, source_map_command),
             warn_error_override,
             build_mode,
-            subprocess,
             dump_typed_sexp,
             stored_asts: Mutex::new(AHashMap::new()),
             in_memory_interfaces: Mutex::new(AHashMap::new()),
             interface_generation: AtomicU64::new(0),
             module_registry: Mutex::new(ModuleRegistry::new()),
             in_memory_deps: Mutex::new(AHashMap::new()),
+            loaded_units: Mutex::new(AHashMap::new()),
+            unit_reads: Mutex::new(AHashMap::new()),
+            verified_imports: Mutex::new(AHashMap::new()),
+            module_alias_rewrites: Mutex::new(AHashMap::new()),
+            compiled_modules: AHashSet::new(),
+            stopped_at_parse: false,
+            invalidated_modules: AHashSet::new(),
+            loaded_modules: AHashSet::new(),
+            parse_warnings_replayed: false,
+            written_modules: AHashSet::new(),
             gentype_contexts: Mutex::new(AHashMap::new()),
+            package_compiler_options: Mutex::new(AHashMap::new()),
             features,
+            previous_in_process: None,
+            incremental_plan: None,
+            build_started_at: None,
+            last_build_ok: false,
+            parse_warnings: Mutex::new(AHashMap::new()),
+            js_confirmed_at: AHashMap::new(),
+            source_mtimes: AHashMap::new(),
         }
     }
 
@@ -370,6 +441,7 @@ impl BuildCommandState {
 
     pub fn clear_gentype_contexts(&self) {
         self.gentype_contexts.lock().unwrap().clear();
+        self.package_compiler_options.lock().unwrap().clear();
     }
 
     pub fn get_warn_error_override(&self) -> Option<String> {
@@ -382,10 +454,6 @@ impl BuildCommandState {
 
     pub fn use_rust_parser(&self) -> bool {
         self.build_mode.use_rust_parser()
-    }
-
-    pub fn subprocess(&self) -> bool {
-        self.subprocess
     }
 
     pub fn dump_typed_sexp(&self) -> bool {
@@ -405,6 +473,23 @@ impl BuildCommandState {
     /// Only bumps the generation counter if the interface fingerprint actually
     /// changed (or if this is the first registration). Returns the generation
     /// number assigned (which may be the same as before if unchanged).
+    /// Record units a compile of `module_name` read. An interface compile
+    /// records first, then its implementation adds to it.
+    pub fn record_loaded_units(&self, module_name: &str, units: Vec<String>, reads: PendingReads) {
+        let mut loaded = self.loaded_units.lock().unwrap();
+        let entry = loaded.entry(module_name.to_string()).or_default();
+        entry.extend(units.into_iter().filter(|unit| unit != module_name));
+        drop(loaded);
+        let mut all_reads = self.unit_reads.lock().unwrap();
+        let entry = all_reads.entry(module_name.to_string()).or_default();
+        for (unit, keys) in reads.resolved {
+            if unit != module_name {
+                entry.resolved.entry(unit).or_default().extend(keys);
+            }
+        }
+        entry.module_level.extend(reads.module_level);
+    }
+
     pub fn register_in_memory_interface(&self, module_name: String, fingerprint: u64, is_pure: bool) -> u64 {
         let mut interfaces = self.in_memory_interfaces.lock().unwrap();
         // Check if the existing interface has the same fingerprint
@@ -504,11 +589,17 @@ impl BuildCommandState {
     }
 
     /// Register a namespace in the module registry.
-    pub fn register_namespace_in_registry(&self, namespace_name: &str, module_aliases: &[(String, String)]) {
+    pub fn register_namespace_in_registry(
+        &self,
+        namespace_name: &str,
+        module_aliases: &[(String, String)],
+        package_root: PathBuf,
+        crcs: Vec<(String, Option<[u8; 16]>)>,
+    ) {
         self.module_registry
             .lock()
             .unwrap()
-            .register_namespace(namespace_name, module_aliases);
+            .register_namespace_for_package(namespace_name, module_aliases, Some(package_root), crcs);
     }
 
     /// Store extracted dependencies from the parse phase for a module file.
@@ -568,10 +659,8 @@ impl std::ops::DerefMut for BuildCommandState {
 pub struct AstModule {
     pub module_name: String,
     pub package_name: String,
-    pub namespace: Namespace,
     pub last_modified: SystemTime,
     pub ast_file_path: PathBuf,
-    pub is_root: bool,
     pub suffix: String,
 }
 
@@ -582,4 +671,17 @@ pub struct CompileAssetsState {
     pub cmt_modules: AHashMap<String, SystemTime>,
     pub ast_rescript_file_locations: AHashSet<PathBuf>,
     pub rescript_file_locations: AHashSet<PathBuf>,
+}
+
+/// What a compile read of other units: the item keys read through the
+/// units' signatures (final when the module compiles). What the inlinable
+/// bodies of those items refer to comes from JS metadata a dependency may
+/// publish after this compile, so it is added when the build is recorded
+/// (`ModuleRegistry::lambda_reads`).
+#[derive(Debug, Default)]
+pub struct PendingReads {
+    pub resolved: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// Units read only at module level (the modules the generated code may
+    /// require).
+    pub module_level: Vec<String>,
 }

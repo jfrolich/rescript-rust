@@ -14,6 +14,14 @@
 | Phase 4: Type Checker | ✅ Complete | 100% | None |
 | Phase 5: Integration | 🚧 In Progress | ~95% | Release hardening and external-project compatibility |
 
+### Release parity hardening (September 2026)
+
+- Corrected nullable `forwardRef` props, n-ary JSX newtypes/callback arrows, record-spread type errors, and expression environments used by optional-value representation.
+- Matched reference constructor-tag escaping, object-spread precedence, index indentation, export aliases, staticcatch dispatch/grouping, boolean-argument inlining, and short-circuit assignment continuations.
+- Removed Rust-only printer control-flow rewrites. The printer now follows `js_dump.ml:1743-1771`; conditional construction follows `js_stmt_make.ml:248-274` without await/nullish exceptions.
+- Activate built-in Spice only when configured, while preserving ordinary attribute validation. Long type-clash headings now use reference line breaks.
+- Release checks: **432/432** focused JS modes, **610/610** JS snapshots, and **1433/1433** diagnostic cases. Release library tests: **1348 passed**, **104 ignored**, no failures. New synthetic fixtures exercise each backend regression; JSX expected files remain unchanged.
+
 ### Milestone: Strict Compiler Parity and External Build (August 2026)
 
 The Rust compiler now matches the current OCaml compiler across the complete canonical corpus:

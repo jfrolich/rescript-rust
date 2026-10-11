@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 // ============================================================================
 
 /// A value description (type of a let-bound value).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ValueDescription {
     /// Type of the value
     pub val_type: TypeExprRef,
@@ -31,12 +31,20 @@ pub struct ValueDescription {
 }
 
 /// Kind of value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ValueKind {
     /// Regular value
     ValReg,
     /// Primitive value
     ValPrim(PrimitiveDescription),
+}
+
+/// `Primitive.prim_kind`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PrimKind {
+    KindIntrinsic,
+    KindExternal(Box<crate::types::external_ffi_types::ExternalFfi>),
+    KindInlineConst(Box<crate::types::external_ffi_types::InlineConst>),
 }
 
 /// Description of a primitive operation.
@@ -46,8 +54,9 @@ pub struct PrimitiveDescription {
     pub prim_name: String,
     /// Arity
     pub prim_arity: i32,
-    /// Native name (if different)
-    pub prim_native_name: String,
+    /// What the primitive is: an intrinsic, a digested external or an inline
+    /// constant (`Primitive.prim_kind`).
+    pub prim_kind: PrimKind,
     /// Native float flag
     pub prim_native_float: bool,
     /// Is it from a type constructor instead of a concrete function type?
@@ -59,7 +68,7 @@ pub struct PrimitiveDescription {
 // ============================================================================
 
 /// A type declaration (`type t = ...`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TypeDeclaration {
     /// Type parameters
     pub type_params: Vec<TypeExprRef>,
@@ -128,7 +137,7 @@ impl std::ops::Deref for TypeDeclarationRef<'_> {
 }
 
 /// An inlined type representation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TypeInlinedType {
     /// Inlined record
     Record {
@@ -137,16 +146,98 @@ pub enum TypeInlinedType {
     },
 }
 
+/// A `Vec` shared by reference count and copied on write.
+///
+/// Type declarations are cloned whenever they are strengthened, qualified, or
+/// copied through a component substitution; OCaml shares the untouched
+/// constructor and label lists physically in those copies. Sharing the lists
+/// keeps those declaration copies from deep-cloning every constructor.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SharedVec<T>(std::sync::Arc<Vec<T>>);
+
+impl<T> SharedVec<T> {
+    pub fn new(items: Vec<T>) -> Self {
+        Self(std::sync::Arc::new(items))
+    }
+}
+
+impl<T> Default for SharedVec<T> {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for SharedVec<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<T> std::ops::Deref for SharedVec<T> {
+    type Target = Vec<T>;
+    fn deref(&self) -> &Vec<T> {
+        &self.0
+    }
+}
+
+impl<T: Clone> std::ops::DerefMut for SharedVec<T> {
+    fn deref_mut(&mut self) -> &mut Vec<T> {
+        std::sync::Arc::make_mut(&mut self.0)
+    }
+}
+
+impl<T> From<Vec<T>> for SharedVec<T> {
+    fn from(items: Vec<T>) -> Self {
+        Self::new(items)
+    }
+}
+
+impl<T> FromIterator<T> for SharedVec<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self::new(iter.into_iter().collect())
+    }
+}
+
+impl<'a, T> IntoIterator for &'a SharedVec<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<'a, T: Clone> IntoIterator for &'a mut SharedVec<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        std::sync::Arc::make_mut(&mut self.0).iter_mut()
+    }
+}
+
+impl<T: Clone> IntoIterator for SharedVec<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter {
+        std::sync::Arc::unwrap_or_clone(self.0).into_iter()
+    }
+}
+
+impl<T: Clone> SharedVec<T> {
+    pub fn into_vec(self) -> Vec<T> {
+        std::sync::Arc::unwrap_or_clone(self.0)
+    }
+}
+
 /// Kind of type definition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TypeKind {
     /// Abstract type
     TypeAbstract,
     /// Record type
-    TypeRecord(Vec<LabelDeclaration>, RecordRepresentation),
+    TypeRecord(SharedVec<LabelDeclaration>, RecordRepresentation),
     /// Variant type with its canonical runtime layout.
     TypeVariant(
-        Vec<ConstructorDeclaration>,
+        SharedVec<ConstructorDeclaration>,
         super::variant_runtime::LayoutRef,
     ),
     /// Open type (extensible)
@@ -163,7 +254,7 @@ impl TypeDeclaration {
 }
 
 /// Record representation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RecordRepresentation {
     /// Regular record (all fields boxed/tagged)
     RecordRegular,
@@ -181,17 +272,20 @@ pub enum RecordRepresentation {
 }
 
 /// Runtime representation for single-payload unboxing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TypeRepresentation {
     Boxed,
     Unboxed,
 }
 
 /// A label (field) declaration in a record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LabelDeclaration {
     /// Label identifier
     pub ld_id: Ident,
+    /// The name the field has at run time when an `@as` renames it, as its
+    /// decoded value (OCaml `ld_runtime_name`).
+    pub ld_runtime_name: Option<String>,
     /// Is the field mutable?
     pub ld_mutable: MutableFlag,
     /// Is the field optional?
@@ -204,11 +298,24 @@ pub struct LabelDeclaration {
     pub ld_attributes: Vec<Attribute>,
 }
 
+impl LabelDeclaration {
+    /// OCaml `Record_runtime.declaration_name`: the field's runtime name,
+    /// its `@as` rename or else its declared name.
+    pub fn declaration_name(&self) -> String {
+        match &self.ld_runtime_name {
+            Some(name) => name.clone(),
+            None => self.ld_id.name().to_string(),
+        }
+    }
+}
+
 /// A constructor declaration in a variant.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConstructorDeclaration {
     /// Constructor identifier
     pub cd_id: Ident,
+    /// The decoded `@as` value of the constructor (OCaml `cd_runtime_tag`).
+    pub cd_runtime_tag: Option<super::variant_runtime::LiteralTag>,
     /// Constructor arguments
     pub cd_args: ConstructorArguments,
     /// Result type (for GADTs)
@@ -220,7 +327,7 @@ pub struct ConstructorDeclaration {
 }
 
 /// Constructor arguments.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConstructorArguments {
     /// Tuple arguments
     CstrTuple(Vec<TypeExprRef>),
@@ -233,7 +340,7 @@ pub enum ConstructorArguments {
 // ============================================================================
 
 /// An extension constructor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExtensionConstructor {
     /// Path to the extensible type
     pub ext_type_path: Path,
@@ -258,7 +365,7 @@ pub struct ExtensionConstructor {
 // ============================================================================
 
 /// A constructor description (used in typing environment).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConstructorDescription {
     /// Constructor name
     pub cstr_name: String,
@@ -285,7 +392,7 @@ pub struct ConstructorDescription {
 }
 
 /// Semantic constructor identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConstructorKind {
     /// Constructor declared by an ordinary variant.
     Ordinary(super::variant_runtime::ConstructorReference),
@@ -316,10 +423,13 @@ pub fn may_equal_constructor(c1: &ConstructorDescription, c2: &ConstructorDescri
 }
 
 /// A label description (used in typing environment).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LabelDescription {
     /// Short name
     pub lbl_name: String,
+    /// The name the field has at run time: its `@as` payload when it has
+    /// one, otherwise `lbl_name` (OCaml `lbl_runtime_name`).
+    pub lbl_runtime_name: String,
     /// Result type (the record type)
     pub lbl_res: TypeExprRef,
     /// Argument type (the field type)
@@ -343,7 +453,7 @@ pub struct LabelDescription {
 }
 
 /// Reference to an array of label descriptions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LabelArrayRef(pub u32);
 
 // ============================================================================
@@ -351,12 +461,13 @@ pub struct LabelArrayRef(pub u32);
 // ============================================================================
 
 /// A module type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModuleType {
     /// Module type identifier
     MtyIdent(Path),
-    /// Signature
-    MtySignature(Signature),
+    /// Signature. Shared like OCaml's immutable signature list, so copying a
+    /// module type during lookup does not copy every item.
+    MtySignature(std::sync::Arc<Signature>),
     /// Functor
     MtyFunctor {
         param: Ident,
@@ -368,7 +479,7 @@ pub enum ModuleType {
 }
 
 /// Alias presence flag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AliasPresence {
     /// Alias is present
     MtaPresent,
@@ -379,13 +490,19 @@ pub enum AliasPresence {
 /// A signature (list of signature items).
 pub type Signature = Vec<SignatureItem>;
 
+/// Copy-on-write access to a shared module-type signature.
+pub fn signature_mut(signature: &mut std::sync::Arc<Signature>) -> &mut Signature {
+    std::sync::Arc::make_mut(signature)
+}
+
 /// A signature item.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SignatureItem {
     /// Value in signature
     SigValue(Ident, ValueDescription),
-    /// Type in signature
-    SigType(Ident, TypeDeclaration, RecStatus),
+    /// Type in signature. The declaration is shared like OCaml's immutable
+    /// record, so lookups can return it without copying.
+    SigType(Ident, std::sync::Arc<TypeDeclaration>, RecStatus),
     /// Type extension in signature
     SigTypext(Ident, ExtensionConstructor, ExtStatus),
     /// Module in signature
@@ -460,7 +577,7 @@ pub fn signature_runtime_bound_idents(sig: &[SignatureItem]) -> Vec<(Ident, usiz
 }
 
 /// A module declaration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModuleDeclaration {
     /// Module type
     pub md_type: ModuleType,
@@ -474,7 +591,7 @@ pub struct ModuleDeclaration {
 }
 
 /// A module type declaration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModtypeDeclaration {
     /// Module type (None for abstract)
     pub mtd_type: Option<ModuleType>,
@@ -485,7 +602,7 @@ pub struct ModtypeDeclaration {
 }
 
 /// Recursive status for type/module declarations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RecStatus {
     /// Not first in a nonrecursive group
     TrecNot,
@@ -496,7 +613,7 @@ pub enum RecStatus {
 }
 
 /// Extension status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExtStatus {
     /// First constructor of an extension
     TextFirst,
@@ -540,13 +657,123 @@ pub enum AttributePayload {
     Bool(bool),
     /// Identifier payload
     Ident(String),
-    /// Deprecated payload with optional migration metadata.
+    /// Record-form `@deprecated({reason, migrate})` payload with optional
+    /// migration metadata (the plain string form is `Str`).
     Deprecated {
         reason: String,
         can_be_automigrated: bool,
+        /// The `migrate` template expression, marshalled in the current
+        /// parsetree layout (`Cmt_utils.deprecated_used.migration_template`).
+        migrate: Option<crate::binary_ast::marshal::MarshalFragment>,
+        /// The `migrateInPipeChain` template expression, marshalled likewise.
+        migrate_in_pipe_chain: Option<crate::binary_ast::marshal::MarshalFragment>,
     },
     /// Structure payload (list of string pairs)
     Structure(Vec<(String, String)>),
+}
+
+/// Visitor over the locations of a signature (see [`walk_signature_locations`]).
+pub trait SignatureLocationVisitor {
+    /// A declaration or attribute-name location.
+    fn location(&mut self, loc: &mut Location);
+    /// An attribute: by default its own locations.
+    fn attribute(&mut self, attr: &mut Attribute) {
+        self.location(&mut attr.attr_loc);
+        self.location(&mut attr.attr_name.loc);
+    }
+}
+
+/// Visit every `Location` of a signature: declaration locations and the
+/// locations of their attributes, recursively through module types.
+pub fn for_each_signature_location(sig: &mut [SignatureItem], f: &mut dyn FnMut(&mut Location)) {
+    struct Locations<'a>(&'a mut dyn FnMut(&mut Location));
+    impl SignatureLocationVisitor for Locations<'_> {
+        fn location(&mut self, loc: &mut Location) {
+            (self.0)(loc);
+        }
+    }
+    walk_signature_locations(sig, &mut Locations(f));
+}
+
+/// Walk the declarations of a signature, recursively through module types,
+/// reporting their locations and attributes to `v`.
+pub fn walk_signature_locations(sig: &mut [SignatureItem], v: &mut dyn SignatureLocationVisitor) {
+    fn attrs(attrs: &mut [Attribute], v: &mut dyn SignatureLocationVisitor) {
+        for attr in attrs {
+            v.attribute(attr);
+        }
+    }
+    fn labels(labels: &mut [LabelDeclaration], v: &mut dyn SignatureLocationVisitor) {
+        for ld in labels {
+            v.location(&mut ld.ld_loc);
+            attrs(&mut ld.ld_attributes, v);
+        }
+    }
+    fn args(args: &mut ConstructorArguments, v: &mut dyn SignatureLocationVisitor) {
+        if let ConstructorArguments::CstrRecord(lds) = args {
+            labels(lds, v);
+        }
+    }
+    fn module_type(mty: &mut ModuleType, v: &mut dyn SignatureLocationVisitor) {
+        match mty {
+            ModuleType::MtySignature(sig) => walk_signature_locations(&mut std::sync::Arc::make_mut(sig)[..], v),
+            ModuleType::MtyFunctor {
+                param_type, result, ..
+            } => {
+                if let Some(param) = param_type {
+                    module_type(param, v);
+                }
+                module_type(result, v);
+            }
+            ModuleType::MtyIdent(_) | ModuleType::MtyAlias(..) => {}
+        }
+    }
+    for item in sig {
+        match item {
+            SignatureItem::SigValue(_, vd) => {
+                v.location(&mut vd.val_loc);
+                attrs(&mut vd.val_attributes, v);
+            }
+            SignatureItem::SigType(_, td, _) => {
+                let td = std::sync::Arc::make_mut(td);
+                v.location(&mut td.type_loc);
+                attrs(&mut td.type_attributes, v);
+                match &mut td.type_kind {
+                    TypeKind::TypeRecord(lds, _) => labels(lds, v),
+                    TypeKind::TypeVariant(cds, _) => {
+                        for cd in cds {
+                            v.location(&mut cd.cd_loc);
+                            attrs(&mut cd.cd_attributes, v);
+                            args(&mut cd.cd_args, v);
+                        }
+                    }
+                    TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
+                }
+                for inlined in &mut td.type_inlined_types {
+                    let TypeInlinedType::Record { labels: lds, .. } = inlined;
+                    labels(lds, v);
+                }
+            }
+            SignatureItem::SigTypext(_, ext, _) => {
+                v.location(&mut ext.ext_loc);
+                attrs(&mut ext.ext_attributes, v);
+                args(&mut ext.ext_args, v);
+            }
+            SignatureItem::SigModule(_, md, _) => {
+                v.location(&mut md.md_loc);
+                attrs(&mut md.md_attributes, v);
+                module_type(&mut md.md_type, v);
+            }
+            SignatureItem::SigModtype(_, mtd) => {
+                v.location(&mut mtd.mtd_loc);
+                attrs(&mut mtd.mtd_attributes, v);
+                if let Some(mty) = &mut mtd.mtd_type {
+                    module_type(mty, v);
+                }
+            }
+            SignatureItem::SigClass | SignatureItem::SigClassType => {}
+        }
+    }
 }
 
 pub const INTERNAL_OPTIONAL_ATTR_NAME: &str = "internal.optional";

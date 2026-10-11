@@ -18,16 +18,6 @@ use super::grammar::Grammar;
 use super::scanner::Scanner;
 use super::token::Token;
 
-/// Parser mode determines some parsing behaviors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ParserMode {
-    /// Parsing for the type checker (standard mode).
-    #[default]
-    ParseForTypeChecker,
-    /// Default mode.
-    Default,
-}
-
 /// Region status for error reporting.
 ///
 /// Used to avoid reporting duplicate errors in the same region.
@@ -44,7 +34,7 @@ pub enum RegionStatus {
 /// Used by `parse_attributes_and_binding` to speculatively parse attributes
 /// and restore state if they're not followed by `and`.
 pub struct ParserSnapshot<'src> {
-    scanner_snapshot: super::scanner::ScannerSnapshot<'src>,
+    scanner_snapshot: super::scanner::ScannerSnapshot,
     token: Token<'src>,
     start_pos: Position,
     end_pos: Position,
@@ -56,6 +46,7 @@ pub struct ParserSnapshot<'src> {
     /// Arena index for prev end position (for identity-based sharing).
     prev_end_pos_idx: PosIdx,
     breadcrumbs: Vec<(Grammar, Position)>,
+    regions: Vec<RegionStatus>,
     diagnostics_len: usize,
     warnings_len: usize,
     comments_len: usize,
@@ -89,8 +80,6 @@ pub struct ParserSnapshot<'src> {
 /// - Collected errors, diagnostics, and comments
 /// - Arena for interned positions and locations
 pub struct Parser<'src> {
-    /// Parser mode.
-    pub mode: ParserMode,
     /// The scanner for lexical analysis.
     scanner: Scanner<'src>,
     /// Current token.
@@ -110,6 +99,12 @@ pub struct Parser<'src> {
     pub prev_end_pos_idx: PosIdx,
     /// Stack of breadcrumbs for error recovery.
     breadcrumbs: Vec<(Grammar, Position)>,
+    /// Inside `lookahead`: number of breadcrumbs, from the bottom, that are
+    /// still as they were when the innermost lookahead started (0 outside).
+    lookahead_breadcrumb_floor: usize,
+    /// Breadcrumbs popped from below the floor during lookaheads, in pop
+    /// order, so `lookahead` can put them back without cloning the stack.
+    lookahead_popped_breadcrumbs: Vec<(Grammar, Position)>,
     /// Collected diagnostics.
     diagnostics: Vec<ParserDiagnostic>,
     /// Collected parser warnings.
@@ -131,12 +126,6 @@ pub struct Parser<'src> {
     /// Depth of lookahead nesting. When > 0, next() skips arena position allocations.
     /// This prevents lookahead from affecting position indices for subsequent allocations.
     lookahead_depth: u32,
-    /// Current recursion depth for JSX parsing.
-    /// Used to prevent stack overflow from deeply nested JSX elements.
-    pub jsx_depth: usize,
-    /// General parse depth counter to prevent stack overflow from deeply nested parsing.
-    /// Incremented at major parsing entry points like parse_expr, parse_typ_expr, etc.
-    pub parse_depth: usize,
     /// Current type name path for inline record extraction (e.g., ["options", "extra"]).
     /// Set during type equation parsing to enable nested inline record extraction.
     pub current_type_name_path: Option<Vec<String>>,
@@ -163,13 +152,9 @@ pub struct Parser<'src> {
 impl<'src> Parser<'src> {
     /// Create a new parser for the given source code.
     pub fn new(filename: impl Into<String>, src: &'src str) -> Self {
-        Self::with_mode(filename, src, ParserMode::default())
-    }
-
-    /// Create a new parser with a specific mode.
-    pub fn with_mode(filename: impl Into<String>, src: &'src str, mode: ParserMode) -> Self {
         // Create arena first so we can intern the filename
         let mut arena = ParseArena::new();
+        arena.reserve_for_source(src.len());
         // Intern the filename - this StrIdx will be shared by all positions in this file
         let filename_idx = arena.intern_string(&filename.into());
         let scanner = Scanner::new(filename_idx, src);
@@ -177,7 +162,6 @@ impl<'src> Parser<'src> {
         let default_pos = Position::default();
         let default_pos_idx = arena.push_position(default_pos);
         let mut parser = Parser {
-            mode,
             scanner,
             token: Token::Semicolon, // Placeholder, will be replaced by first scan
             start_pos: default_pos,
@@ -187,6 +171,8 @@ impl<'src> Parser<'src> {
             end_pos_idx: default_pos_idx,
             prev_end_pos_idx: default_pos_idx,
             breadcrumbs: Vec::new(),
+            lookahead_breadcrumb_floor: 0,
+            lookahead_popped_breadcrumbs: Vec::new(),
             diagnostics: Vec::new(),
             warnings: Vec::new(),
             comments: Vec::new(),
@@ -195,8 +181,6 @@ impl<'src> Parser<'src> {
             arena,
             in_external: false,
             lookahead_depth: 0,
-            jsx_depth: 0,
-            parse_depth: 0,
             current_type_name_path: None,
             inline_types_found: None,
             inline_types_params: vec![],
@@ -343,6 +327,11 @@ impl<'src> Parser<'src> {
 
     /// Return the current end position index (no allocation).
     /// This enables sharing - multiple uses of `p.end_pos` return the same PosIdx.
+    /// OCaml `Scanner.peek_slash p.scanner`.
+    pub fn peek_slash(&self) -> bool {
+        self.scanner.peek_slash()
+    }
+
     pub fn end_pos_idx(&mut self) -> PosIdx {
         self.end_pos_idx
     }
@@ -555,6 +544,23 @@ impl<'src> Parser<'src> {
         }
     }
 
+    /// res_parser.ml `err p (Diagnostics.lazy_message ...)`: report an error
+    /// at the current token now (so it silences the region before recovery),
+    /// with its message filled in later via `set_diagnostic_message`. Returns
+    /// the diagnostic's index, or `None` when the region is silent.
+    pub fn err_lazy_message(&mut self) -> Option<usize> {
+        let len = self.diagnostics.len();
+        self.err(DiagnosticCategory::Message(String::new()));
+        (self.diagnostics.len() > len).then_some(len)
+    }
+
+    /// Fill in the message of a diagnostic reported by `err_lazy_message`.
+    pub fn set_diagnostic_message(&mut self, index: usize, message: String) {
+        if let Some(diagnostic) = self.diagnostics.get_mut(index) {
+            diagnostic.category = DiagnosticCategory::Message(message);
+        }
+    }
+
     /// Record a diagnostic error without silencing subsequent errors.
     /// Use this for errors that should allow additional errors to be reported.
     pub fn err_multiple(
@@ -621,29 +627,6 @@ impl<'src> Parser<'src> {
         }
     }
 
-    /// Maximum parse depth to prevent stack overflow from deeply nested constructs.
-    pub const MAX_PARSE_DEPTH: usize = 50;
-
-    /// Check if we've exceeded the maximum parse depth.
-    /// Returns true if we're at or beyond the limit.
-    #[inline]
-    pub fn exceeded_parse_depth(&self) -> bool {
-        self.parse_depth >= Self::MAX_PARSE_DEPTH
-    }
-
-    /// Increment parse depth before a potentially recursive parse.
-    /// Call `dec_parse_depth` when done.
-    #[inline]
-    pub fn inc_parse_depth(&mut self) {
-        self.parse_depth += 1;
-    }
-
-    /// Decrement parse depth after a recursive parse.
-    #[inline]
-    pub fn dec_parse_depth(&mut self) {
-        self.parse_depth = self.parse_depth.saturating_sub(1);
-    }
-
     /// Advance to the next non-comment token.
     ///
     /// Comments are collected in the parser's comment list.
@@ -670,6 +653,9 @@ impl<'src> Parser<'src> {
 
         // In lookahead mode, skip arena allocations to prevent affecting position indices
         let in_lookahead = self.lookahead_depth > 0;
+        // res_parser.ml `read`: a comment records whether the item scanned
+        // right before it (the previous token, or an earlier comment) is `?`.
+        let mut preceding_is_question = matches!(self.token, Token::Question);
 
         loop {
             let result = self.scanner.scan();
@@ -683,6 +669,8 @@ impl<'src> Parser<'src> {
                     // Collect comment and continue scanning.
                     let mut comment = c.clone();
                     comment.set_prev_tok_end_pos(self.end_pos.clone());
+                    comment.set_prev_tok_is_question(preceding_is_question);
+                    preceding_is_question = false;
                     self.comments.push(comment);
                     self.prev_end_pos = self.end_pos.clone();
                     self.prev_end_pos_idx = self.end_pos_idx;
@@ -747,20 +735,22 @@ impl<'src> Parser<'src> {
     /// expression position and needs to interpret it as a regex start.
     /// The scanner's current position should be just after the `/` that was already consumed.
     pub fn next_regex_token(&mut self) {
-        let result = self.scanner.scan_regex();
+        let prefix_length = match self.token {
+            Token::Forwardslash => 1,
+            Token::ForwardslashDot => 2,
+            _ => unreachable!("next_regex_token on a non-slash token"),
+        };
+        let result = self.scanner.scan_regex(self.start_pos.clone(), prefix_length);
 
         // Propagate scanner diagnostics to parser
         let scanner_diagnostics = self.scanner.take_diagnostics();
         self.diagnostics.extend(scanner_diagnostics);
 
+        // res_parser.ml `next_regex_token` replaces the current token in
+        // place: nothing is consumed, and the token keeps its start.
         self.token = result.token;
-        self.prev_end_pos = self.end_pos.clone();
-        self.prev_end_pos_idx = self.end_pos_idx;
-        self.start_pos = result.start_pos;
         self.end_pos = result.end_pos;
-        // Only push positions to arena when not in lookahead mode
         if self.lookahead_depth == 0 {
-            self.start_pos_idx = self.arena.push_position(result.start_pos);
             self.end_pos_idx = self.arena.push_position(result.end_pos);
         }
     }
@@ -812,7 +802,12 @@ impl<'src> Parser<'src> {
 
     /// Pop the most recent breadcrumb.
     pub fn eat_breadcrumb(&mut self) {
-        self.breadcrumbs.pop();
+        if let Some(popped) = self.breadcrumbs.pop()
+            && self.breadcrumbs.len() < self.lookahead_breadcrumb_floor
+        {
+            self.lookahead_breadcrumb_floor = self.breadcrumbs.len();
+            self.lookahead_popped_breadcrumbs.push(popped);
+        }
     }
 
     /// Get the current breadcrumbs.
@@ -840,8 +835,13 @@ impl<'src> Parser<'src> {
         let start_pos_idx = self.start_pos_idx;
         let end_pos_idx = self.end_pos_idx;
         let prev_end_pos_idx = self.prev_end_pos_idx;
-        let breadcrumbs = self.breadcrumbs.clone();
+        // Breadcrumbs are restored from the untouched bottom of the stack
+        // plus the entries popped from it (see `eat_breadcrumb`).
+        let outer_breadcrumb_floor =
+            std::mem::replace(&mut self.lookahead_breadcrumb_floor, self.breadcrumbs.len());
+        let popped_breadcrumbs_len = self.lookahead_popped_breadcrumbs.len();
         let diagnostics_len = self.diagnostics.len();
+        let regions = self.regions.clone();
         let warnings_len = self.warnings.len();
         let comments_len = self.comments.len();
         let in_external = self.in_external;
@@ -872,7 +872,18 @@ impl<'src> Parser<'src> {
         self.start_pos_idx = start_pos_idx;
         self.end_pos_idx = end_pos_idx;
         self.prev_end_pos_idx = prev_end_pos_idx;
-        self.breadcrumbs = breadcrumbs;
+        self.breadcrumbs.truncate(self.lookahead_breadcrumb_floor);
+        while self.lookahead_popped_breadcrumbs.len() > popped_breadcrumbs_len {
+            let popped = self
+                .lookahead_popped_breadcrumbs
+                .pop()
+                .expect("length checked above");
+            self.breadcrumbs.push(popped);
+        }
+        self.lookahead_breadcrumb_floor = outer_breadcrumb_floor;
+        // res_parser.ml `with_checkpoint`: immutable region states also roll
+        // back error suppression, including nested regions.
+        self.regions = regions;
         self.diagnostics.truncate(diagnostics_len);
         self.warnings.truncate(warnings_len);
         self.comments.truncate(comments_len);
@@ -902,6 +913,7 @@ impl<'src> Parser<'src> {
             end_pos_idx: self.end_pos_idx,
             prev_end_pos_idx: self.prev_end_pos_idx,
             breadcrumbs: self.breadcrumbs.clone(),
+            regions: self.regions.clone(),
             diagnostics_len: self.diagnostics.len(),
             warnings_len: self.warnings.len(),
             comments_len: self.comments.len(),
@@ -933,6 +945,9 @@ impl<'src> Parser<'src> {
         self.end_pos_idx = snapshot.end_pos_idx;
         self.prev_end_pos_idx = snapshot.prev_end_pos_idx;
         self.breadcrumbs = snapshot.breadcrumbs;
+        // res_parser.ml `with_checkpoint`: immutable region states also roll
+        // back error suppression.
+        self.regions = snapshot.regions;
         self.diagnostics.truncate(snapshot.diagnostics_len);
         self.warnings.truncate(snapshot.warnings_len);
         self.comments.truncate(snapshot.comments_len);
@@ -1008,21 +1023,25 @@ impl<'src> Parser<'src> {
     /// - Binary (subtraction) when there's whitespace on both sides
     /// - Unary (negation) when at the start of a line without surrounding whitespace
     pub fn is_binary_op(&self) -> bool {
-        Scanner::is_binary_op(
-            self.scanner.src(),
-            self.start_pos.cnum as usize,
-            self.end_pos.cnum as usize,
-        )
+        self.scanner
+            .is_binary_op(self.start_pos.cnum as usize, self.end_pos.cnum as usize)
     }
 
-    /// Set diamond mode on the scanner (for type parameters).
-    pub fn set_diamond_mode(&mut self) {
-        self.scanner.set_diamond_mode();
-    }
-
-    /// Pop diamond mode from the scanner.
-    pub fn pop_diamond_mode(&mut self) {
-        self.scanner.pop_diamond_mode();
+    /// res_parser.ml `peek_binary_operator`: the current token, with a `<` or
+    /// `>` extended by an immediately adjacent operator suffix (`<<`, `>=`,
+    /// `>>`, `>>>`). The extended token replaces the current one.
+    pub fn peek_binary_operator(&mut self) -> Token<'src> {
+        if matches!(self.token, Token::LessThan | Token::GreaterThan) {
+            let current = self.token.clone();
+            if let Some(operator) = self.scanner.scan_binary_operator(&current) {
+                self.token = operator;
+                self.end_pos = self.scanner.position();
+                if self.lookahead_depth == 0 {
+                    self.end_pos_idx = self.arena.push_position(self.end_pos.clone());
+                }
+            }
+        }
+        self.token.clone()
     }
 
     /// Get the filename index being parsed.
@@ -1093,6 +1112,42 @@ mod tests {
     }
 
     #[test]
+    fn lookahead_restores_breadcrumbs_popped_below_its_start() {
+        fn names(parser: &Parser<'_>) -> Vec<String> {
+            parser
+                .breadcrumbs()
+                .iter()
+                .map(|(g, _)| format!("{g:?}"))
+                .collect()
+        }
+        let mut parser = Parser::new("test.res", "let x = 42");
+        parser.leave_breadcrumb(Grammar::Implementation);
+        parser.leave_breadcrumb(Grammar::LetBinding);
+        parser.leave_breadcrumb(Grammar::ExprOperand);
+        let before = names(&parser);
+        parser.lookahead(|p| {
+            p.eat_breadcrumb();
+            p.eat_breadcrumb();
+            p.leave_breadcrumb(Grammar::TypeExpression);
+            p.lookahead(|p| {
+                p.eat_breadcrumb();
+                p.eat_breadcrumb();
+                p.leave_breadcrumb(Grammar::Pattern);
+                p.leave_breadcrumb(Grammar::ExprBlock);
+            });
+            assert_eq!(names(p), vec!["Implementation", "TypeExpression"]);
+            p.eat_breadcrumb();
+            p.eat_breadcrumb();
+            assert!(p.breadcrumbs().is_empty());
+            p.leave_breadcrumb(Grammar::Pattern);
+        });
+        assert_eq!(names(&parser), before);
+        // Outside a lookahead, pops are final.
+        parser.eat_breadcrumb();
+        assert_eq!(names(&parser), before[..2].to_vec());
+    }
+
+    #[test]
     fn test_parser_lookahead() {
         let mut parser = Parser::new("test.res", "let x = 42");
         assert!(matches!(parser.token, Token::Let { .. }));
@@ -1141,7 +1196,6 @@ mod tests {
         fn assert_send<T: Send>() {}
         // Parser contains Scanner which contains a reference, so not Send
         // But we can still verify the basic types are
-        assert_send::<ParserMode>();
         assert_send::<RegionStatus>();
     }
 }

@@ -75,9 +75,15 @@ module T = struct
   (* Type expressions for the core language *)
 
   let row_field sub = function
-    | Rtag (l, attrs, b, tl) ->
+    | Rtag (l, attrs, b, groups) ->
       Rtag
-        (map_loc sub l, sub.attributes sub attrs, b, List.map (sub.typ sub) tl)
+        ( map_loc sub l,
+          sub.attributes sub attrs,
+          b,
+          List.map
+            (fun {loc; txt} ->
+              {loc = sub.location sub loc; txt = List.map (sub.typ sub) txt})
+            groups )
     | Rinherit t -> Rinherit (sub.typ sub t)
 
   let object_field sub = function
@@ -120,6 +126,7 @@ module T = struct
         ptype_kind;
         ptype_private;
         ptype_manifest;
+        ptype_origin;
         ptype_attributes;
         ptype_loc;
       } =
@@ -132,6 +139,7 @@ module T = struct
            ptype_cstrs)
       ~kind:(sub.type_kind sub ptype_kind)
       ?manifest:(map_opt (sub.typ sub) ptype_manifest)
+      ~origin:ptype_origin
       ~loc:(sub.location sub ptype_loc)
       ~attrs:(sub.attributes sub ptype_attributes)
 
@@ -284,6 +292,10 @@ module E = struct
     let loc = sub.location sub loc in
     let attrs = sub.attributes sub attrs in
     match desc with
+    | Pexp_braces {expr; braces_loc} ->
+      braces
+        ~braces_loc:(sub.location sub braces_loc)
+        ~attrs (sub.expr sub expr)
     | Pexp_ident x -> ident ~loc ~attrs (map_loc sub x)
     | Pexp_constant x -> constant ~loc ~attrs x
     | Pexp_let (r, vbs, e) ->
@@ -310,10 +322,12 @@ module E = struct
       match_ ~loc ~attrs (sub.expr sub e) (sub.cases sub pel)
     | Pexp_try (e, pel) -> try_ ~loc ~attrs (sub.expr sub e) (sub.cases sub pel)
     | Pexp_tuple el -> tuple ~loc ~attrs (List.map (sub.expr sub) el)
-    | Pexp_construct (lid, arg) ->
-      construct ~loc ~attrs (map_loc sub lid) (map_opt (sub.expr sub) arg)
-    | Pexp_variant (lab, eo) ->
-      variant ~loc ~attrs lab (map_opt (sub.expr sub) eo)
+    | Pexp_construct (lid, {txt = args; loc = args_loc}) ->
+      construct ~loc ~attrs (map_loc sub lid)
+        {txt = List.map (sub.expr sub) args; loc = sub.location sub args_loc}
+    | Pexp_variant (lab, {txt = args; loc = args_loc}) ->
+      variant ~loc ~attrs lab
+        {txt = List.map (sub.expr sub) args; loc = sub.location sub args_loc}
     | Pexp_record (l, eo) ->
       record ~loc ~attrs
         (List.map
@@ -329,6 +343,8 @@ module E = struct
     | Pexp_ifthenelse (e1, e2, e3) ->
       ifthenelse ~loc ~attrs (sub.expr sub e1) (sub.expr sub e2)
         (map_opt (sub.expr sub) e3)
+    | Pexp_ternary (e1, e2, e3) ->
+      ternary ~loc ~attrs (sub.expr sub e1) (sub.expr sub e2) (sub.expr sub e3)
     | Pexp_sequence (e1, e2) ->
       sequence ~loc ~attrs (sub.expr sub e1) (sub.expr sub e2)
     | Pexp_break -> break ~loc ~attrs ()
@@ -344,11 +360,26 @@ module E = struct
     | Pexp_for_await_of (p, e1, e2) ->
       Exp.mk ~loc ~attrs
         (Pexp_for_await_of (sub.pat sub p, sub.expr sub e1, sub.expr sub e2))
+    | Pexp_regexp {pattern; flags} -> regexp ~loc ~attrs pattern flags
+    | Pexp_template {source_segments; values} ->
+      Exp.template ~loc ~attrs
+        (List.map (map_loc sub) source_segments)
+        (List.map (sub.expr sub) values)
+    | Pexp_tagged_template {tag; raw_sources; values} ->
+      Exp.tagged_template ~loc ~attrs (sub.expr sub tag)
+        (List.map (map_loc sub) raw_sources)
+        (List.map (sub.expr sub) values)
     | Pexp_coerce (e, (), t2) ->
       coerce ~loc ~attrs (sub.expr sub e) (sub.typ sub t2)
     | Pexp_constraint (e, t) ->
       constraint_ ~loc ~attrs (sub.expr sub e) (sub.typ sub t)
-    | Pexp_send (e, s) -> send ~loc ~attrs (sub.expr sub e) (map_loc sub s)
+    | Pexp_object_get (e, s) ->
+      object_get ~loc ~attrs (sub.expr sub e) (map_loc sub s)
+    | Pexp_object_set (e, s, v) ->
+      object_set ~loc ~attrs (sub.expr sub e) (map_loc sub s) (sub.expr sub v)
+    | Pexp_object_literal fields ->
+      object_literal ~loc ~attrs
+        (List.map (fun (s, e) -> (map_loc sub s, sub.expr sub e)) fields)
     | Pexp_letmodule (s, me, e) ->
       letmodule ~loc ~attrs (map_loc sub s) (sub.module_expr sub me)
         (sub.expr sub e)
@@ -404,9 +435,12 @@ module P = struct
     | Ppat_constant c -> constant ~loc ~attrs c
     | Ppat_interval (c1, c2) -> interval ~loc ~attrs c1 c2
     | Ppat_tuple pl -> tuple ~loc ~attrs (List.map (sub.pat sub) pl)
-    | Ppat_construct (l, p) ->
-      construct ~loc ~attrs (map_loc sub l) (map_opt (sub.pat sub) p)
-    | Ppat_variant (l, p) -> variant ~loc ~attrs l (map_opt (sub.pat sub) p)
+    | Ppat_construct (l, {txt = args; loc = args_loc}) ->
+      construct ~loc ~attrs (map_loc sub l)
+        {txt = List.map (sub.pat sub) args; loc = sub.location sub args_loc}
+    | Ppat_variant (l, {txt = args; loc = args_loc}) ->
+      variant ~loc ~attrs l
+        {txt = List.map (sub.pat sub) args; loc = sub.location sub args_loc}
     | Ppat_record (lpl, cf, rest) ->
       record ~loc ~attrs
         ?rest:
@@ -430,7 +464,6 @@ module P = struct
       constraint_ ~loc ~attrs (sub.pat sub p) (sub.typ sub t)
     | Ppat_type s -> type_ ~loc ~attrs (map_loc sub s)
     | Ppat_unpack s -> unpack ~loc ~attrs (map_loc sub s)
-    | Ppat_open (lid, p) -> open_ ~loc ~attrs (map_loc sub lid) (sub.pat sub p)
     | Ppat_exception p -> exception_ ~loc ~attrs (sub.pat sub p)
     | Ppat_extension x -> extension ~loc ~attrs (sub.extension sub x)
 end
@@ -458,7 +491,7 @@ let default_mapper =
         Val.mk (map_loc this pval_name) (this.typ this pval_type)
           ~attrs:(this.attributes this pval_attributes)
           ~loc:(this.location this pval_loc)
-          ~prim:pval_prim);
+          ?prim:pval_prim);
     pat = P.map;
     expr = E.map;
     module_declaration =
@@ -513,20 +546,22 @@ let default_mapper =
           ~loc:(this.location this pvb_loc)
           ~attrs:(this.attributes this pvb_attributes));
     constructor_declaration =
-      (fun this {pcd_name; pcd_args; pcd_res; pcd_loc; pcd_attributes} ->
+      (fun this ({pcd_name; pcd_args; pcd_res; pcd_loc} as cd) ->
         Type.constructor (map_loc this pcd_name)
           ~args:(T.map_constructor_arguments this pcd_args)
           ?res:(map_opt (this.typ this) pcd_res)
           ~loc:(this.location this pcd_loc)
-          ~attrs:(this.attributes this pcd_attributes));
+          ~attrs:(this.attributes this (Type.constructor_attributes cd)));
     label_declaration =
       (fun this
-        {pld_name; pld_type; pld_loc; pld_mutable; pld_optional; pld_attributes}
+        ({pld_name; pld_type; pld_loc; pld_mutable; pld_optional} as ld)
       ->
+        (* The runtime name goes back into the attributes so that a mapper sees
+           [@as] where it has always been, and [field] takes it out again. *)
         Type.field (map_loc this pld_name) (this.typ this pld_type)
           ~mut:pld_mutable ~optional:pld_optional
           ~loc:(this.location this pld_loc)
-          ~attrs:(this.attributes this pld_attributes));
+          ~attrs:(this.attributes this (Type.field_attributes ld)));
     cases = (fun this l -> List.map (this.case this) l);
     case =
       (fun this {pc_bar; pc_lhs; pc_guard; pc_rhs} ->
@@ -552,8 +587,8 @@ let rec extension_of_error {loc; msg; if_highlight; sub} =
   ( {loc; txt = "ocaml.error"},
     PStr
       ([
-         Str.eval (Exp.constant (Pconst_string (msg, None)));
-         Str.eval (Exp.constant (Pconst_string (if_highlight, None)));
+         Str.eval (Exp.constant (Const.string msg));
+         Str.eval (Exp.constant (Const.string if_highlight));
        ]
       @ List.map (fun ext -> Str.extension (extension_of_error ext)) sub) )
 
@@ -575,17 +610,20 @@ module Ppx_context = struct
 
   let lid name = {txt = Lident name; loc = Location.none}
 
-  let make_string x = Exp.constant (Pconst_string (x, None))
+  let make_string x =
+    Exp.constant
+      ~attrs:[(Location.mknoloc "_res.ppx_context_string", Parsetree.PStr [])]
+      (Const.string x)
 
   let make_bool x =
-    if x then Exp.construct (lid "true") None
-    else Exp.construct (lid "false") None
+    if x then Exp.construct (lid "true") (Location.mknoloc [])
+    else Exp.construct (lid "false") (Location.mknoloc [])
 
   let rec make_list f lst =
     match lst with
     | x :: rest ->
-      Exp.construct (lid "::") (Some (Exp.tuple [f x; make_list f rest]))
-    | [] -> Exp.construct (lid "[]") None
+      Exp.construct (lid "::") (Location.mknoloc [f x; make_list f rest])
+    | [] -> Exp.construct (lid "[]") (Location.mknoloc [])
 
   let make_pair f1 f2 (x1, x2) = Exp.tuple [f1 x1; f2 x2]
 
@@ -638,7 +676,8 @@ module Ppx_context = struct
   let restore fields =
     let field name payload =
       let rec get_string = function
-        | {pexp_desc = Pexp_constant (Pconst_string (str, None))} -> str
+        | {pexp_desc = Pexp_constant (Pconst_string payload)} ->
+          String_literal.string_semantic payload
         | _ ->
           raise_errorf
             "Internal error: invalid [@@@ocaml.ppx.context { %s }] string \
@@ -646,11 +685,14 @@ module Ppx_context = struct
             name
       and get_bool pexp =
         match pexp with
-        | {pexp_desc = Pexp_construct ({txt = Longident.Lident "true"}, None)}
-          ->
+        | {
+         pexp_desc = Pexp_construct ({txt = Longident.Lident "true"}, {txt = []});
+        } ->
           true
-        | {pexp_desc = Pexp_construct ({txt = Longident.Lident "false"}, None)}
-          ->
+        | {
+         pexp_desc =
+           Pexp_construct ({txt = Longident.Lident "false"}, {txt = []});
+        } ->
           false
         | _ ->
           raise_errorf
@@ -659,12 +701,13 @@ module Ppx_context = struct
       and get_list elem = function
         | {
             pexp_desc =
-              Pexp_construct
-                ( {txt = Longident.Lident "::"},
-                  Some {pexp_desc = Pexp_tuple [exp; rest]} );
+              Pexp_construct ({txt = Longident.Lident "::"}, {txt = [exp; rest]});
           } ->
           elem exp :: get_list elem rest
-        | {pexp_desc = Pexp_construct ({txt = Longident.Lident "[]"}, None)} ->
+        | {
+            pexp_desc =
+              Pexp_construct ({txt = Longident.Lident "[]"}, {txt = []});
+          } ->
           []
         | _ ->
           raise_errorf

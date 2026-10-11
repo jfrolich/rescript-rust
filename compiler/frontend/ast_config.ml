@@ -45,12 +45,13 @@ let process_directives str =
   (* Reset: multiple calls possible e.g. with bsc from the command-line *)
   str
   |> List.iter (fun (item : Parsetree.structure_item) ->
-         match item.pstr_desc with
-         | Pstr_attribute ({txt = "directive"}, payload) -> (
-           match Ast_payload.is_single_string payload with
-           | Some (d, _) -> Js_config.directives := !Js_config.directives @ [d]
-           | None -> Bs_syntaxerr.err item.pstr_loc Expect_string_literal)
-         | _ -> ())
+      match item.pstr_desc with
+      | Pstr_attribute ({txt = "directive"}, payload) -> (
+        Ast_payload.reject_json_literal_payload payload;
+        match Ast_payload.semantic_string_of_payload payload with
+        | Some d -> Js_config.directives := !Js_config.directives @ [d]
+        | None -> Bs_syntaxerr.err item.pstr_loc Expect_string_literal)
+      | _ -> ())
 
 let rec iter_on_config_str (x : Parsetree.structure) =
   match x with

@@ -11,6 +11,7 @@ dependencies = [
  "cfg-if",
  "getrandom",
  "once_cell",
+ "serde",
  "version_check",
  "zerocopy",
 ]
@@ -1743,6 +1744,7 @@ dependencies = [
  "dashmap",
  "elsa",
  "env_logger",
+ "hashbrown 0.15.5",
  "im-rc",
  "indexmap",
  "insta",
@@ -1755,6 +1757,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "smallvec",
  "smol_str",
  "tempfile",
  "thiserror 2.0.17",

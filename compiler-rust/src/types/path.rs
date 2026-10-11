@@ -32,15 +32,44 @@ use std::sync::Arc;
 /// Paths are used to refer to types, modules, and values throughout
 /// the type checker. Unlike `Longident`, they use `Ident` with stamps
 /// for unique identification.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Path {
     /// A simple identifier: `String`, `int`
     Pident(Ident),
     /// A dotted access: `Array.t` is `Pdot(Pident(Array), "t", -1)`
     /// The integer is a position hint (usually -1 for no hint).
-    Pdot(Arc<Path>, SmolStr, i32),
+    Pdot(Arc<Path>, crate::name::Name, i32),
     /// Functor application: `F(X)` is `Papply(F, X)`
     Papply(Arc<Path>, Arc<Path>),
+}
+
+/// Consistent with the derived equality (`Ident` compares with `same`: by
+/// stamp when stamped, else by name). Identifiers hash by stamp or by the
+/// interned name's precomputed hash, so hashing a path never reads name text.
+impl std::hash::Hash for Path {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Path::Pident(id) => {
+                if id.stamp() != 0 {
+                    state.write_u8(0);
+                    state.write_i32(id.stamp());
+                } else {
+                    state.write_u8(1);
+                    std::hash::Hash::hash(&id.name_atom(), state);
+                }
+            }
+            Path::Pdot(parent, name, _) => {
+                state.write_u8(2);
+                std::hash::Hash::hash(name, state);
+                std::hash::Hash::hash(&**parent, state);
+            }
+            Path::Papply(functor, argument) => {
+                state.write_u8(3);
+                std::hash::Hash::hash(&**functor, state);
+                std::hash::Hash::hash(&**argument, state);
+            }
+        }
+    }
 }
 
 /// Position constant for no position hint.
@@ -76,7 +105,7 @@ impl Path {
 
     /// Create a dotted path.
     #[inline]
-    pub fn pdot(prefix: Path, name: impl Into<SmolStr>) -> Self {
+    pub fn pdot(prefix: Path, name: impl Into<crate::name::Name>) -> Self {
         Path::Pdot(Arc::new(prefix), name.into(), NOPOS)
     }
 
@@ -92,7 +121,7 @@ impl Path {
 
     /// Create a dotted path with position.
     #[inline]
-    pub fn pdot_pos(prefix: Path, name: impl Into<SmolStr>, pos: i32) -> Self {
+    pub fn pdot_pos(prefix: Path, name: impl Into<crate::name::Name>, pos: i32) -> Self {
         Path::Pdot(Arc::new(prefix), name.into(), pos)
     }
 
@@ -108,7 +137,9 @@ impl Path {
     pub fn same(&self, other: &Path) -> bool {
         match (self, other) {
             (Path::Pident(id1), Path::Pident(id2)) => id1.same(id2),
-            (Path::Pdot(p1, s1, _), Path::Pdot(p2, s2, _)) => s1 == s2 && p1.same(p2),
+            (Path::Pdot(p1, s1, _), Path::Pdot(p2, s2, _)) => {
+                s1 == s2 && (Arc::ptr_eq(p1, p2) || p1.same(p2))
+            }
             (Path::Papply(f1, a1), Path::Papply(f2, a2)) => f1.same(f2) && a1.same(a2),
             _ => false,
         }
@@ -139,6 +170,18 @@ impl Path {
         self.name_with_paren(|_| false)
     }
 
+    /// Whether `name()` equals `target`, without building the name.
+    pub fn name_eq(&self, target: &str) -> bool {
+        match self {
+            Path::Pident(id) => id.name() == target,
+            Path::Pdot(parent, s, _) => target
+                .strip_suffix(s.as_str())
+                .and_then(|prefix| prefix.strip_suffix('.'))
+                .is_some_and(|prefix| parent.name_eq(prefix)),
+            Path::Papply(_, _) => self.name() == target,
+        }
+    }
+
     /// Get the last component name of the path (e.g., "ref" for both "ref" and "Pervasives.ref").
     pub fn head_name(&self) -> &str {
         match self {
@@ -150,23 +193,40 @@ impl Path {
 
     /// Get the string name with parenthesization for operators.
     pub fn name_with_paren(&self, paren: impl Fn(&str) -> bool + Copy) -> String {
+        let mut out = String::with_capacity(self.name_len_hint());
+        self.write_name_with_paren(&mut out, paren);
+        out
+    }
+
+    /// Append the (parenthesized) name to `out` without intermediate strings.
+    pub fn write_name_with_paren(&self, out: &mut String, paren: impl Fn(&str) -> bool + Copy) {
         match self {
-            Path::Pident(id) => id.name().to_string(),
+            Path::Pident(id) => out.push_str(id.name()),
             Path::Pdot(p, s, _) => {
-                let prefix = p.name_with_paren(paren);
+                p.write_name_with_paren(out, paren);
                 if paren(s) {
-                    format!("{}.( {} )", prefix, s)
+                    out.push_str(".( ");
+                    out.push_str(s);
+                    out.push_str(" )");
                 } else {
-                    format!("{}.{}", prefix, s)
+                    out.push('.');
+                    out.push_str(s);
                 }
             }
             Path::Papply(p1, p2) => {
-                format!(
-                    "{}({})",
-                    p1.name_with_paren(paren),
-                    p2.name_with_paren(paren)
-                )
+                p1.write_name_with_paren(out, paren);
+                out.push('(');
+                p2.write_name_with_paren(out, paren);
+                out.push(')');
             }
+        }
+    }
+
+    fn name_len_hint(&self) -> usize {
+        match self {
+            Path::Pident(id) => id.name().len(),
+            Path::Pdot(p, s, _) => p.name_len_hint() + 1 + s.len(),
+            Path::Papply(p1, p2) => p1.name_len_hint() + p2.name_len_hint() + 2,
         }
     }
 
@@ -200,6 +260,16 @@ impl Path {
     /// Flatten this path to an identifier and list of component names.
     ///
     /// Returns `Err(())` if the path contains a `Papply`.
+    /// Whether `flatten` would fail, i.e. the non-`Pdot` root is a functor
+    /// application. Allocation-free.
+    pub fn has_apply_prefix(&self) -> bool {
+        match self {
+            Path::Pident(_) => false,
+            Path::Pdot(parent, _, _) => parent.has_apply_prefix(),
+            Path::Papply(_, _) => true,
+        }
+    }
+
     pub fn flatten(&self) -> Result<(&Ident, Vec<&str>), ()> {
         fn go<'a>(path: &'a Path, acc: &mut Vec<&'a str>) -> Result<&'a Ident, ()> {
             match path {
@@ -328,6 +398,22 @@ fn is_uident_str(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_name_eq_matches_name() {
+        let a = Path::pident(Ident::create_persistent("A"));
+        let ab = Path::pdot(a.clone(), "B");
+        let abc = Path::pdot(ab.clone(), "c");
+        for path in [&a, &ab, &abc] {
+            assert!(path.name_eq(&path.name()));
+        }
+        assert!(!abc.name_eq("A.Bc"));
+        assert!(!abc.name_eq("AB.c"));
+        assert!(!abc.name_eq("B.c"));
+        assert!(!ab.name_eq("A.B.c"));
+        let applied = Path::papply(a.clone(), ab.clone());
+        assert!(applied.name_eq(&applied.name()));
+    }
 
     #[test]
     fn test_pident() {

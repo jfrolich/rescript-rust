@@ -14,7 +14,17 @@ use crate::types::typedtree::{
 };
 
 type InProcessTypeDeclarations = Vec<crate::gentype::code_item::TypeDeclaration>;
-type InProcessTypeDeclarationsCache = Mutex<HashMap<String, InProcessTypeDeclarations>>;
+
+/// Type declarations of the typed artifacts processed in this process, by
+/// normalized `.cmt`/`.cmti` path (OCaml GenType reads them from those files,
+/// which in-process builds do not write), and the paths each module owns.
+#[derive(Default)]
+struct InProcessTypeDeclarationsTables {
+    by_cmt: HashMap<String, std::sync::Arc<InProcessTypeDeclarations>>,
+    by_module: HashMap<String, Vec<String>>,
+}
+
+type InProcessTypeDeclarationsCache = Mutex<InProcessTypeDeclarationsTables>;
 
 pub enum BinaryAnnots {
     Implementation(Structure),
@@ -46,11 +56,15 @@ pub struct TypedArtifact<'a> {
     pub compiler_module_name: crate::gentype::module_name::T,
     pub file_name: crate::gentype::module_name::T,
     pub is_interface: bool,
+    /// Only register the artifact's type declarations, for modules that
+    /// import its types; generate no output (a module compiled only for its
+    /// interface).
+    pub declarations_only: bool,
 }
 
 fn in_process_type_declarations_cache() -> &'static InProcessTypeDeclarationsCache {
     static CACHE: OnceLock<InProcessTypeDeclarationsCache> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    CACHE.get_or_init(|| Mutex::new(InProcessTypeDeclarationsTables::default()))
 }
 
 fn normalize_cmt_path_lexically(path: PathBuf) -> PathBuf {
@@ -62,51 +76,139 @@ fn normalize_cmt_path_lexically(path: PathBuf) -> PathBuf {
         })
 }
 
+/// `std::fs::canonicalize(path).ok()`, resolving the parent directory once
+/// per thread. For an existing file that is not a symlink, the canonical path
+/// is the canonical parent joined with the file name.
+fn canonicalize_with_cached_parent(path: &Path) -> Option<PathBuf> {
+    thread_local! {
+        static CANONICAL_DIRS: std::cell::RefCell<HashMap<PathBuf, PathBuf>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return std::fs::canonicalize(path).ok();
+    };
+    // The key is the canonical directory plus the file name, whether or not
+    // the file exists (in-process builds write no .cmt): registration and
+    // lookup both go through here, so it only has to be stable.
+    if let Some(dir) = CANONICAL_DIRS.with(|dirs| dirs.borrow().get(parent).cloned()) {
+        return Some(dir.join(name));
+    }
+    let dir = std::fs::canonicalize(parent).ok()?;
+    CANONICAL_DIRS.with(|dirs| {
+        dirs.borrow_mut().insert(parent.to_path_buf(), dir.clone());
+    });
+    Some(dir.join(name))
+}
+
 fn normalize_cmt_cache_key(cmt_file: &str) -> String {
-    // Keep the in-process cache key on the same absolute path base that
-    // compiler/gentype/Paths.ml:61-64 applies before selecting .cmti/.cmt
-    // artifacts. OCaml then checks physical files at
-    // compiler/gentype/Paths.ml:79-83, where `./` segments are resolved by
-    // the filesystem; the virtual in-process CMT cache has to remove those
-    // lexical no-op segments before comparing keys.
+    // The key is requested several times per artifact; remember the keys that
+    // resolved through an existing directory (a missing directory may appear
+    // later, so its lexical fallback is not remembered).
+    thread_local! {
+        static RESOLVED_KEYS: std::cell::RefCell<HashMap<String, String>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    if let Some(key) = RESOLVED_KEYS.with(|keys| keys.borrow().get(cmt_file).cloned()) {
+        return key;
+    }
     let path = PathBuf::from(cmt_file);
     let path = if path.is_relative() {
-        std::env::current_dir()
+        crate::process_cwd::current_dir()
             .unwrap_or_else(|_| PathBuf::new())
             .join(path)
     } else {
         path
     };
-    std::fs::canonicalize(&path)
-        .unwrap_or_else(|_| normalize_cmt_path_lexically(path))
-        .to_string_lossy()
-        .to_string()
+    match canonicalize_with_cached_parent(&path) {
+        Some(resolved) => {
+            let key = resolved.to_string_lossy().to_string();
+            RESOLVED_KEYS.with(|keys| {
+                keys.borrow_mut().insert(cmt_file.to_string(), key.clone());
+            });
+            key
+        }
+        None => normalize_cmt_path_lexically(path)
+            .to_string_lossy()
+            .to_string(),
+    }
 }
 
 fn has_in_process_type_declarations(cmt_file: &Path) -> bool {
     let Some(cmt_file) = cmt_file.to_str() else {
         return false;
     };
+    // Resolve the key (a filesystem canonicalize) before taking the shared
+    // lock, so parallel GenType workers do not serialize on the syscall.
     let key = normalize_cmt_cache_key(cmt_file);
     in_process_type_declarations_cache()
         .lock()
-        .map(|cache| cache.contains_key(&key))
+        .map(|cache| cache.by_cmt.contains_key(&key))
         .unwrap_or(false)
 }
 
 fn lookup_in_process_type_declarations(cmt_file: &str) -> Option<InProcessTypeDeclarations> {
-    in_process_type_declarations_cache()
+    let key = normalize_cmt_cache_key(cmt_file);
+    let shared = in_process_type_declarations_cache()
         .lock()
         .ok()
-        .and_then(|cache| cache.get(&normalize_cmt_cache_key(cmt_file)).cloned())
+        .and_then(|cache| cache.by_cmt.get(&key).cloned())?;
+    Some(shared.as_ref().clone())
 }
 
 fn register_in_process_type_declarations(
+    module_name: &str,
     cmt_file: &str,
     type_declarations: InProcessTypeDeclarations,
 ) {
-    if let Ok(mut cache) = in_process_type_declarations_cache().lock() {
-        cache.insert(normalize_cmt_cache_key(cmt_file), type_declarations);
+    let key = normalize_cmt_cache_key(cmt_file);
+    let type_declarations = std::sync::Arc::new(type_declarations);
+    let replaced = in_process_type_declarations_cache().lock().ok().and_then(|mut cache| {
+        let keys = cache.by_module.entry(module_name.to_string()).or_default();
+        if !keys.contains(&key) {
+            keys.push(key.clone());
+        }
+        cache.by_cmt.insert(key, type_declarations)
+    });
+    drop(replaced);
+}
+
+/// The type declarations `module_name`'s typed artifacts registered, by
+/// normalized `.cmt`/`.cmti` path, for an incremental build to store with the
+/// module's interface: a later build that does not compile the module
+/// restores them with [`restore_type_declarations`], so modules that import
+/// its types translate them as when it was compiled.
+pub fn type_declarations_of_module(
+    module_name: &str,
+) -> Vec<(String, std::sync::Arc<InProcessTypeDeclarations>)> {
+    let Ok(cache) = in_process_type_declarations_cache().lock() else {
+        return Vec::new();
+    };
+    let Some(keys) = cache.by_module.get(module_name) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<_> = keys
+        .iter()
+        .filter_map(|key| Some((key.clone(), cache.by_cmt.get(key)?.clone())))
+        .collect();
+    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    entries
+}
+
+/// Register type declarations stored by [`type_declarations_of_module`].
+pub fn restore_type_declarations(
+    module_name: &str,
+    entries: Vec<(String, InProcessTypeDeclarations)>,
+) {
+    if entries.is_empty() {
+        return;
+    }
+    let Ok(mut cache) = in_process_type_declarations_cache().lock() else {
+        return;
+    };
+    let keys = entries.iter().map(|(key, _)| key.clone()).collect();
+    cache.by_module.insert(module_name.to_string(), keys);
+    for (key, declarations) in entries {
+        cache.by_cmt.insert(key, std::sync::Arc::new(declarations));
     }
 }
 
@@ -119,7 +221,8 @@ fn get_cmt_file_for_typed_artifact_import(project_root: &str, cmt: &str) -> Stri
     // from the workspace root, so use Config.project_root as the package cwd
     // that compiler/gentype/GenTypeConfig.ml:124-131 gives OCaml GenType.
     crate::gentype::paths::get_cmt_file_from_cwd_with_exists(Path::new(project_root), cmt, |path| {
-        path.exists() || has_in_process_type_declarations(path)
+        // In-process builds write no .cmt; ask the registry before the disk.
+        has_in_process_type_declarations(path) || path.exists()
     })
 }
 
@@ -499,14 +602,14 @@ pub fn read_cmt(cmt_file: &str) -> InputCmt<'static> {
     // Mirrors compiler/gentype/GenTypeMain.ml:85-91. Actual CMT decoding is
     // wired later; this staged port preserves the stale-artifact error boundary.
     match std::fs::read(cmt_file) {
-        Ok(data) if data.starts_with(b"Caml1999T022") => {
+        Ok(data) if data.starts_with(b"Caml1999T039") => {
             crate::gentype::log_::item(&format!("Error loading {cmt_file}\n\n"));
             crate::gentype::log_::item(
                 "Standalone CMT decoding is not available in the Rust GenType path yet.\n",
             );
             panic!("Fatal error: exception Cmt_format.Error(_)")
         }
-        Ok(data) if data.starts_with(b"Caml1999I024") => {
+        Ok(data) if data.starts_with(b"Caml1999I035") => {
             panic!("Fatal error: exception Cmt_format.Error(_)")
         }
         _ => {
@@ -516,7 +619,7 @@ pub fn read_cmt(cmt_file: &str) -> InputCmt<'static> {
             );
             crate::gentype::log_::item("Try to clean and rebuild.\n\n");
             panic!(
-                "Fatal error: exception File \"compiler/gentype/gentype_main.ml\", line 91, characters 4-10: Assertion failed"
+                "Fatal error: exception File \"compiler/gentype/gentype_main.ml\", line 89, characters 4-10: Assertion failed"
             )
         }
     }
@@ -657,7 +760,6 @@ pub fn process_typed_artifact(
     // The OCaml call site is compiler/core/js_implementation.ml:33-34 and
     // compiler/core/js_implementation.ml:170 after Typemod saved the CMT at
     // compiler/ml/typemod.ml:1763-1764 or compiler/ml/typemod.ml:1785-1787.
-    let mut config = config.clone();
     if crate::gentype::debug::basic.load(std::sync::atomic::Ordering::Relaxed) {
         crate::gentype::log_::item(&format!(
             "Typed artifact {}\n",
@@ -700,9 +802,13 @@ pub fn process_typed_artifact(
         cmt_file_for_typed_artifact(&config, &source_file, artifact.is_interface)
     {
         register_in_process_type_declarations(
+            &artifact.compiler_module_name,
             &cmt_file,
             type_declaration_translation.type_declarations,
         );
+    }
+    if artifact.declarations_only {
+        return Ok(());
     }
     let has_gentype_annotations = typed_artifact_check_annotations(
         &|arena, _loc, attributes| {
@@ -720,6 +826,9 @@ pub fn process_typed_artifact(
             translate_typed_artifact(&config, &output_file_relative, resolver, &artifact);
         let project_root = config.project_root.clone();
         let get_cmt_file = |cmt: &str| get_cmt_file_for_typed_artifact_import(&project_root, cmt);
+        // Only emitting mutates the config; modules without GenType
+        // annotations skip the copy.
+        let mut config = config.clone();
         emit_translation(
             &mut config,
             &artifact.file_name,

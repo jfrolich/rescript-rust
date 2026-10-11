@@ -17,6 +17,8 @@ use rescript::{
 };
 
 fn main() {
+    rescript::build::phase_mark("main");
+    rescript_compiler::hash_seed::install_thread_local_hash_seeds();
     let telemetry_guard = telemetry::init_telemetry();
     let otel_enabled = telemetry_guard.otel_enabled();
     let exit_code = match run_main(otel_enabled) {
@@ -26,6 +28,7 @@ fn main() {
             1
         }
     };
+    rescript::build::phase_mark("run-main-end");
     drop(telemetry_guard);
     std::process::exit(exit_code);
 }
@@ -70,13 +73,7 @@ fn run_main(otel_enabled: bool) -> Result<()> {
         }
         cli::Command::Build(build_args) => {
             let features = build_args.features.parsed();
-            let build_mode = match cli::resolve_build_mode(*build_args.rust, build_args.in_process.in_process)
-            {
-                Ok(mode) => mode,
-                Err(err) => {
-                    return Err(anyhow::anyhow!(err));
-                }
-            };
+            let build_mode = cli::resolve_build_mode(build_args.in_process.in_process);
             configure_rayon_for_in_process(build_mode);
             let build_result = run_with_in_process_stack(build_mode, || {
                 build::build(
@@ -84,11 +81,9 @@ fn run_main(otel_enabled: bool) -> Result<()> {
                     Path::new(&build_args.folder as &str),
                     show_progress,
                     build_args.no_timing,
-                    true, // create_sourcedirs is now always enabled
                     plain_output,
                     (*build_args.warn_error).clone(),
                     build_mode,
-                    build_args.subprocess.subprocess,
                     build_args.dump_typed_sexp_arg.dump_typed_sexp,
                     build_args.prod,
                     features,
@@ -113,13 +108,7 @@ fn run_main(otel_enabled: bool) -> Result<()> {
         }
         cli::Command::Watch(watch_args) => {
             let features = watch_args.features.parsed();
-            let build_mode = match cli::resolve_build_mode(*watch_args.rust, watch_args.in_process.in_process)
-            {
-                Ok(mode) => mode,
-                Err(err) => {
-                    return Err(anyhow::anyhow!(err));
-                }
-            };
+            let build_mode = cli::resolve_build_mode(watch_args.in_process.in_process);
             configure_rayon_for_in_process(build_mode);
             let _lock = get_lock_or_exit(LockKind::Watch, &watch_args.folder);
             let watch_result = run_with_in_process_stack(build_mode, || {
@@ -128,11 +117,9 @@ fn run_main(otel_enabled: bool) -> Result<()> {
                     show_progress,
                     &watch_args.folder,
                     (*watch_args.after_build).clone(),
-                    true, // create_sourcedirs is now always enabled
                     plain_output,
                     (*watch_args.warn_error).clone(),
                     build_mode,
-                    watch_args.subprocess.subprocess,
                     watch_args.dump_typed_sexp_arg.dump_typed_sexp,
                     watch_args.clear_screen,
                     watch_args.prod,
@@ -152,6 +139,10 @@ fn run_main(otel_enabled: bool) -> Result<()> {
             result
         }
         cli::Command::Format { stdin, check, files } => format::format(stdin, check, files),
+        cli::Command::Analysis { args } => {
+            let cwd = std::env::current_dir()?;
+            std::process::exit(rescript::tooling_server::run_client(&cwd, &args))
+        }
     }
 }
 

@@ -28,7 +28,7 @@ impl Lets<'_> {
 
 fn string_value(store: &IndexedLambda, state: &Lets<'_>, node: NodeId) -> Option<String> {
     match store.view(node) {
-        NodeView::Const(Constant::String { s, delim: None }) => Some(s.clone()),
+        NodeView::Const(Constant::String(s)) => Some(s.clone()),
         NodeView::Var(id) => state.strings.get(id).cloned(),
         _ => None,
     }
@@ -84,7 +84,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
             let module_field = matches!(
                 store.view(value),
                 NodeView::Prim(Primitive::Pfield(_, _), [base], _)
-                    if matches!(store.view(*base), NodeView::GlobalModule(_, _))
+                    if matches!(store.view(*base), NodeView::GlobalModule(_))
             );
             let substitute = (info.times == 1 && !info.captured)
                 || (info.times == 1
@@ -97,7 +97,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
                 state.substitutions.insert(id, value);
                 return simplify(store, state, body);
             }
-            if let NodeView::Const(Constant::String { s, delim: None }) = store.view(value) {
+            if let NodeView::Const(Constant::String(s)) = store.view(value) {
                 state.strings.insert(id.clone(), s.clone());
                 let body = simplify(store, state, body);
                 return append_rebuilt(store, NodeSnapshot::Let(LetKind::Alias, id, value, body));
@@ -126,7 +126,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
                 };
             }
             let value = simplify(store, state, value);
-            if let NodeView::Const(Constant::String { s, delim: None }) = store.view(value) {
+            if let NodeView::Const(Constant::String(s)) = store.view(value) {
                 state.strings.insert(id.clone(), s.clone());
                 let body = simplify(store, state, body);
                 return append_rebuilt(store, NodeSnapshot::Let(LetKind::Alias, id, value, body));
@@ -146,7 +146,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
             }
             let value = simplify(store, state, value);
             if kind == LetKind::Strict
-                && let NodeView::Const(Constant::String { s, delim: None }) = store.view(value)
+                && let NodeView::Const(Constant::String(s)) = store.view(value)
             {
                 state.strings.insert(id.clone(), s.clone());
                 let body = simplify(store, state, body);
@@ -184,10 +184,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
                 string_value(store, state, left),
                 string_value(store, state, right),
             ) {
-                (Some(left), Some(right)) => store.append(NodeSnapshot::Const(Constant::String {
-                    s: left + &right,
-                    delim: None,
-                })),
+                (Some(left), Some(right)) => store.append(NodeSnapshot::Const(Constant::String(left + &right))),
                 _ => append_rebuilt(
                     store,
                     NodeSnapshot::Prim(Primitive::Pstringadd, vec![left, right], loc),
@@ -195,7 +192,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
             }
         }
         NodeSnapshot::Const(_)
-        | NodeSnapshot::GlobalModule(_, _)
+        | NodeSnapshot::GlobalModule(_)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => node,
         NodeSnapshot::Function(arity, params, body, attr) => {
@@ -379,14 +376,7 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: "effect".into(),
                 arg_types: vec![],
-                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
-                    kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
-                    spec: None,
-                    obj_params: None,
-                    return_wrapper: crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
-                    inline_constant: None,
-                },
-                dynamic_import: false,
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                 transformed_jsx: false,
             },
             vec![],
@@ -444,14 +434,7 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: "must_not_run".into(),
                 arg_types: vec![],
-                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
-                    kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
-                    spec: None,
-                    obj_params: None,
-                    return_wrapper: crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
-                    inline_constant: None,
-                },
-                dynamic_import: false,
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                 transformed_jsx: false,
             },
             vec![],
@@ -578,15 +561,7 @@ mod tests {
                 Primitive::PjsCall {
                     prim_name: "unselected".into(),
                     arg_types: vec![],
-                    ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
-                        kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
-                        spec: None,
-                        obj_params: None,
-                        return_wrapper:
-                            crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
-                        inline_constant: None,
-                    },
-                    dynamic_import: false,
+                    ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                     transformed_jsx: false,
                 },
                 vec![],
@@ -695,10 +670,10 @@ mod tests {
         context.collect_info();
         context.simplify_exits(&generator);
         context.collect_info();
-        let mut inline = |_: &Ident, _: bool, _: &str| None;
+        let mut inline = |_: &Ident, _: &str| None;
         context.simplify_alias(&generator, false, &mut inline);
         context.deep_flatten(&generator);
-        let mut arity = |_: &Ident, _: bool, _: &str| None;
+        let mut arity = |_: &Ident, _: &str| None;
         context.alpha_conversion_with_external_arity(&generator, &mut arity);
         context.simplify_lets();
 
@@ -746,22 +721,22 @@ mod tests {
         assert_eq!(
             context.storage_measurements(),
             crate::lambda::indexed::IndexedStorageMeasurements {
-                node_allocations: 24,
+                node_allocations: 21,
                 current_root_edge_visits: 7,
                 current_root_unique_nodes: 8,
                 metadata_unique_nodes: 2,
                 backend_unique_nodes: 0,
                 live_unique_nodes: 9,
-                superseded_nodes: 15,
-                hot_node_occupied_bytes: 192,
+                superseded_nodes: 12,
+                hot_node_occupied_bytes: 168,
                 hot_node_capacity_bytes: 256,
-                side_payload_shallow_occupied_bytes: 1920,
-                side_payload_shallow_capacity_bytes: 2496,
+                side_payload_shallow_occupied_bytes: 1140,
+                side_payload_shallow_capacity_bytes: 1600,
                 nested_heap_bytes_included: false,
-                current_live_side_payload_shallow_bytes: 736,
+                current_live_side_payload_shallow_bytes: 384,
                 backend_retained_only_side_payload_shallow_bytes: 0,
-                metadata_retained_only_side_payload_shallow_bytes: 112,
-                superseded_unreachable_side_payload_shallow_bytes: 1072,
+                metadata_retained_only_side_payload_shallow_bytes: 80,
+                superseded_unreachable_side_payload_shallow_bytes: 676,
             }
         );
     }

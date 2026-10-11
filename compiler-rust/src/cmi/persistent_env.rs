@@ -18,18 +18,14 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::driver::{
-    CompilerOptions, experimental_let_unwrap_for_structure, jsx_version_for_structure,
-    load_pervasives, normalize_signature_types,
+    CompilerOptions, experimental_let_unwrap_for_structure, jsx_module_name, jsx_version_for_structure,
+    load_pervasives, normalize_signature,
 };
 use crate::ident::Ident;
 use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
-use crate::lambda::lam_constant::{Constant as LambdaConstant, PointerInfo, StringDelim};
-use crate::lambda::lam_primitive::{
-    ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
-    ExternalFfiKind, ExternalFfiSpec, ExternalModuleName, ExternalReturnWrapper, ExternalSpec,
-    Mutable, Primitive,
-};
+use crate::lambda::lam_constant::{Constant as LambdaConstant, PointerInfo};
+use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda, PrimInfo,
     TagInfo,
@@ -58,13 +54,17 @@ fn first_char_case_variant(name: &str) -> Option<String> {
     let mut chars = name.chars();
     let first = chars.next()?;
     let rest = chars.as_str();
-    if first.is_ascii_uppercase() {
-        Some(format!("{}{}", first.to_ascii_lowercase(), rest))
+    let swapped = if first.is_ascii_uppercase() {
+        first.to_ascii_lowercase()
     } else if first.is_ascii_lowercase() {
-        Some(format!("{}{}", first.to_ascii_uppercase(), rest))
+        first.to_ascii_uppercase()
     } else {
-        None
-    }
+        return None;
+    };
+    let mut variant = String::with_capacity(name.len());
+    variant.push(swapped);
+    variant.push_str(rest);
+    Some(variant)
 }
 
 fn resolve_first_char_case_key<'a, V>(map: &'a HashMap<String, V>, name: &str) -> Option<&'a str> {
@@ -177,16 +177,21 @@ pub struct PersStruct {
     pub ps_sig: Arc<Signature>,
     /// Source filename
     pub ps_filename: String,
+    /// The `Deprecated` persistence flag (`cmi_flags`, env.ml:663-668),
+    /// reported when the unit is looked up (env.ml:1044-1048).
+    pub ps_deprecated: Option<String>,
+    /// `ps_crcs` (env.ml:669-678): the unit's `.cmi` CRC list, itself first.
+    pub ps_crcs: Vec<(String, Option<[u8; 16]>)>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CmjExportConstant {
     Bool(bool),
     Null,
     Undefined { is_unit: bool },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum CmjExportArity {
     Single(Arity),
     Submodule(Vec<Arity>),
@@ -240,21 +245,37 @@ pub struct CmjModuleImportInfo {
     pub file_case: CmjFileCase,
 }
 
+/// Serialize a map in key order, so that equal maps encode identically.
+fn serialize_sorted<V: serde::Serialize, S: serde::Serializer>(
+    map: &Arc<HashMap<String, V>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let mut entries: Vec<(&String, &V)> = map.iter().collect();
+    entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    serializer.collect_map(entries)
+}
+
 /// In-memory module metadata for the `--in-process` build mode.
 ///
 /// When a module is registered in the in-memory registry, these fields
 /// replace the disk-based lookups that normally read `.ast` (source path),
 /// `.cmj` (purity), and `.cmi` (interface).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InMemoryModuleInfo {
     /// Source file path (replaces `.ast` source-path lookup)
     pub source_path: Arc<PathBuf>,
     /// Whether the module is side-effect free (replaces `.cmj` purity lookup)
     pub is_pure: bool,
     /// Closed constant exports (replaces `.cmj` constant lookup)
+    #[serde(serialize_with = "serialize_sorted")]
     pub cmj_export_constants: Arc<HashMap<String, CmjExportConstant>>,
     /// Arity metadata for exports (replaces `.cmj` arity lookup)
+    #[serde(serialize_with = "serialize_sorted")]
     pub cmj_export_arities: Arc<HashMap<String, CmjExportArity>>,
+    /// Non-constant `persistent_closed_lambda` exports (replaces the `.cmj`
+    /// lookup used for cross-module inlining, js_cmj_format.ml:112-121).
+    #[serde(serialize_with = "serialize_sorted")]
+    pub cmj_export_lambdas: Arc<HashMap<String, Lambda>>,
     /// Flat hoisted-export path metadata (replaces `.cmj` lookup).
     pub cmj_hoisted_exports: Arc<Vec<crate::lambda::HoistedExport>>,
     /// Whether this module belongs to `@rescript/runtime`
@@ -279,12 +300,18 @@ impl InMemoryModuleInfo {
             is_pure,
             cmj_export_constants: Arc::new(cmj_export_constants),
             cmj_export_arities: Arc::new(HashMap::new()),
+            cmj_export_lambdas: Arc::new(HashMap::new()),
             cmj_hoisted_exports: Arc::new(Vec::new()),
             is_runtime,
             package_name: None,
             package_root: None,
             js_output_suffix: None,
         }
+    }
+
+    pub fn with_cmj_export_lambdas(mut self, cmj_export_lambdas: HashMap<String, Lambda>) -> Self {
+        self.cmj_export_lambdas = Arc::new(cmj_export_lambdas);
+        self
     }
 
     pub fn with_cmj_export_arities(
@@ -392,6 +419,8 @@ pub struct ModuleRegistry {
     /// published signatures and type graphs.
     /// Keyed by module name.
     cached_modules: SharedRegistryMap<Arc<PortablePersStruct>>,
+    /// Clean one-shot modules with validated typed artifacts on disk.
+    disk_modules: SharedRegistryMap<bool>,
     /// Module metadata (source paths, purity, runtime status).
     module_info: SharedRegistryMap<InMemoryModuleInfo>,
     /// Alias prefix rewrites (flattened_name -> qualified_path).
@@ -401,11 +430,21 @@ pub struct ModuleRegistry {
     /// as an implicit dependency (e.g., via `-open Pervasives`) but hasn't
     /// been compiled yet in the current wave.
     source_fallback_paths: SharedRegistryMap<PathBuf>,
+    /// Package roots of registered modules that carry no `InMemoryModuleInfo`
+    /// (namespace units), for load-path visibility.
+    module_package_roots: SharedRegistryMap<PathBuf>,
     local_cached_modules: HashMap<String, Arc<PortablePersStruct>>,
     local_module_info: HashMap<String, InMemoryModuleInfo>,
     local_alias_rewrites: HashMap<String, Path>,
     local_source_fallback_paths: HashMap<String, PathBuf>,
     write_to_local: bool,
+    /// Item references of registered signatures (see `resolve_reads`),
+    /// shared by every snapshot. Keyed by the signature's identity, so a
+    /// module registered again gets fresh entries.
+    /// Keyed by unit, signature identity and fingerprint, and the identity
+    /// of the JS metadata whose inlinable bodies the references follow
+    /// (`usize::MAX` for references without them).
+    item_refs_cache: Arc<Mutex<HashMap<(String, usize, u64, usize), Arc<super::item_deps::UnitRefs>>>>,
 }
 
 impl ModuleRegistry {
@@ -440,8 +479,137 @@ impl ModuleRegistry {
         self.local_cached_modules.contains_key(name) || self.cached_modules.contains_key(name)
     }
 
+    /// A digest of everything another module's compile can read about
+    /// `name`: its published signature and its JS metadata (purity,
+    /// constants, arities, inlinable lambdas, hoisted exports, package).
+    /// Equal digests mean a dependent compiles to the same output. `None`
+    /// when the module is not registered.
+    /// The digest of the module's whole interface: of all its item digests
+    /// (see [`super::item_deps::item_digests`]), so it changes exactly when
+    /// what dependents compile against changes.
+    pub fn interface_digest(&self, name: &str) -> Option<u64> {
+        Some(self.item_digests(name)?[super::item_deps::WHOLE])
+    }
+
+    fn registered(&self, name: &str) -> (Option<Arc<PortablePersStruct>>, Option<InMemoryModuleInfo>) {
+        let pers = self
+            .local_cached_modules
+            .get(name)
+            .cloned()
+            .or_else(|| self.cached_modules.get_cloned(name));
+        let info = self
+            .local_module_info
+            .get(name)
+            .cloned()
+            .or_else(|| self.module_info.get_cloned(name));
+        (pers, info)
+    }
+
+    /// The per-item digests of a registered module
+    /// (see [`super::item_deps::item_digests`]), `None` when it is not
+    /// registered.
+    pub fn item_digests(&self, name: &str) -> Option<std::collections::BTreeMap<String, u64>> {
+        let (pers, info) = self.registered(name);
+        if pers.is_none() && info.is_none() {
+            return None;
+        }
+        Some(super::item_deps::item_digests(pers.as_deref(), info.as_ref()))
+    }
+
+    /// Resolve the reads of a compile against the registered modules' signatures
+    /// (see [`super::item_deps::resolve_reads`]), leaving out what inlinable
+    /// bodies refer to: a dependency publishes those with its JS metadata,
+    /// possibly after this compile, while the signatures every reached unit
+    /// is read through are final. [`Self::lambda_reads`] adds the rest once
+    /// all metadata is final. Runtime modules are not recorded.
+    pub fn resolve_signature_reads(
+        &self,
+        reads: Vec<super::item_deps::UnitRead>,
+    ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+        super::item_deps::resolve_reads(reads, &RegistryUnitSource { registry: self, lambdas: false })
+    }
+
+    /// What the inlinable bodies of the values and modules in `resolved`
+    /// (reads from [`Self::resolve_signature_reads`]) refer to, closed over
+    /// everything those units' items refer to.
+    pub fn lambda_reads(
+        &self,
+        resolved: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+        use super::item_deps::{Kind, UnitRead, item_key};
+        let source = RegistryUnitSource { registry: self, lambdas: true };
+        let value_prefix = item_key(Kind::Value, "");
+        let module_prefix = item_key(Kind::Module, "");
+        let mut seeds = Vec::new();
+        for (unit, keys) in resolved {
+            let Some(info) = self.registered(unit).1 else {
+                continue;
+            };
+            if info.cmj_export_lambdas.is_empty() {
+                continue;
+            }
+            let mut names: Vec<&str> = Vec::new();
+            if keys.contains(super::item_deps::WHOLE) {
+                names.extend(info.cmj_export_lambdas.keys().map(String::as_str));
+            } else {
+                for key in keys {
+                    if let Some(name) =
+                        key.strip_prefix(&value_prefix).or_else(|| key.strip_prefix(&module_prefix))
+                    {
+                        names.push(name);
+                    }
+                }
+            }
+            for name in names {
+                for lambda_unit in super::item_deps::UnitSource::lambda_units(&source, unit, name) {
+                    seeds.push(UnitRead {
+                        unit: lambda_unit,
+                        segs: Vec::new(),
+                        kind: Kind::Module,
+                    });
+                }
+            }
+        }
+        if seeds.is_empty() {
+            return std::collections::BTreeMap::new();
+        }
+        super::item_deps::resolve_reads(seeds, &source)
+    }
+
+    /// The module's published interface encoded for storage (see
+    /// [`super::stored_module`]), `None` when it is not registered.
+    pub fn encode_stored_module(&self, name: &str, alias_rewrites: &[(String, Path)]) -> Option<Vec<u8>> {
+        let (pers, info) = self.registered(name);
+        let info = info?;
+        let gentype_declarations = crate::gentype::main::type_declarations_of_module(name);
+        Some(super::stored_module::encode(&super::stored_module::StoredModuleRef {
+            pers_struct: pers.as_deref(),
+            info: &info,
+            alias_rewrites,
+            gentype_declarations: &gentype_declarations,
+        }))
+    }
+
+    /// Register a stored module's interface, as compiling it would.
+    pub fn register_stored_module(&mut self, name: &str, module: super::stored_module::StoredModule) {
+        let alias_rewrites = module.alias_rewrite_map();
+        crate::gentype::main::restore_type_declarations(name, module.gentype_declarations);
+        match module.pers_struct {
+            Some(pers) => self.register_module_arc(name, Arc::new(pers), module.info, alias_rewrites),
+            None => {
+                self.insert_module_info(name.to_string(), module.info);
+                self.extend_alias_rewrites(alias_rewrites);
+            }
+        }
+    }
+
+    pub fn register_disk_module(&mut self, name: &str, info: InMemoryModuleInfo) {
+        self.disk_modules.insert(name.to_string(), true);
+        self.insert_module_info(name.to_string(), info);
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.local_cached_modules.is_empty() && self.cached_modules.len() == 0
+        self.local_cached_modules.is_empty() && self.cached_modules.len() == 0 && self.disk_modules.len() == 0
     }
 
     pub fn module_info_is_runtime(&self, name: &str) -> bool {
@@ -463,13 +631,30 @@ impl ModuleRegistry {
         namespace_name: &str,
         module_aliases: &[(String, String)],
     ) {
+        self.register_namespace_for_package(namespace_name, module_aliases, None, Vec::new());
+    }
+
+    /// [`Self::register_namespace`] for a namespace owned by the package at
+    /// `package_root` (its `.mlmap` is only on that package's load path).
+    pub fn register_namespace_for_package(
+        &mut self,
+        namespace_name: &str,
+        module_aliases: &[(String, String)],
+        package_root: Option<PathBuf>,
+        ps_crcs: Vec<(String, Option<[u8; 16]>)>,
+    ) {
+        if let Some(root) = package_root {
+            self.module_package_roots.insert(namespace_name.to_string(), root);
+        }
         let mut sig_items: Signature = Vec::with_capacity(module_aliases.len());
         for (short_name, internal_name) in module_aliases {
             sig_items.push(SignatureItem::SigModule(
                 Ident::create_persistent(short_name.as_str()),
                 ModuleDeclaration {
+                    // As saved in the namespace `.cmi`: an alias typed by
+                    // `type_module_aux` is `Mty_alias (Mta_absent, path)`.
                     md_type: ModuleType::MtyAlias(
-                        AliasPresence::MtaPresent,
+                        AliasPresence::MtaAbsent,
                         Path::Pident(Ident::create_persistent(internal_name.as_str())),
                     ),
                     md_attributes: vec![],
@@ -488,16 +673,28 @@ impl ModuleRegistry {
 
         // Namespace signatures contain only MtyAlias entries (no TypeExprRefs),
         // so the portable type graph is empty.
-        let fingerprint = portable_types::compute_type_graph_fingerprint_pub(&[], &sig_items);
+        let fingerprint = portable_types::compute_type_graph_fingerprint_pub(
+            &portable_types::HashGraph {
+                entries: &[],
+                layouts: &[],
+                mutabilities: &[],
+            },
+            &sig_items,
+        );
         let portable = PortablePersStruct {
             ps_name: namespace_name.to_string(),
             ps_filename: format!("{}.mlmap", namespace_name),
+            ps_deprecated: None,
+            // The saved `.cmi`'s CRC list, recorded by importers like any
+            // loaded unit's (env.ml:627-638, 1924-1930).
+            ps_crcs,
             ps_sig: sig_items,
             raw_ps_sig: None,
             cmi_longident_names: Vec::new(),
             type_graph: portable_types::PortableTypeGraph {
                 entries: Vec::new(),
                 variant_layouts: Vec::new(),
+                mutabilities: Vec::new(),
             },
             raw_type_graph: None,
             fingerprint,
@@ -511,6 +708,7 @@ impl ModuleRegistry {
     pub fn purge_module(&mut self, name: &str) {
         self.cached_modules.remove(name);
         self.local_cached_modules.remove(name);
+        self.disk_modules.remove(name);
         self.module_info.remove(name);
         self.local_module_info.remove(name);
         self.source_fallback_paths.remove(name);
@@ -637,11 +835,12 @@ pub struct PersistentEnv {
     open_modules: Arc<Vec<String>>,
     /// Default JSX version from CLI flags, if any.
     jsx_version: Option<i32>,
+    jsx_module: Option<String>,
     /// Whether the current compilation uses `-nopervasives`.
     nopervasives: bool,
     /// Cache of renamed signatures (matching OCaml's lazy Subst.signature).
     /// Each module's signature is renamed once and cached here.
-    renamed_sig_cache: Arc<HashMap<String, Arc<Signature>>>,
+    renamed_sig_cache: Arc<HashMap<String, Arc<crate::types::context::DeferredRenamedSig>>>,
     /// In-memory module registry for `--in-process` builds.
     /// When a module is registered here, its metadata (source path, purity)
     /// is resolved from memory instead of from `.ast`/`.cmj` files on disk.
@@ -650,6 +849,7 @@ pub struct PersistentEnv {
     /// When true, all module resolution uses the in-memory registry only.
     /// Disk fallbacks (`.ast`, `.cmj`, `.cmi` probes) are skipped entirely.
     in_process_mode: bool,
+    disk_modules: SharedRegistryMap<bool>,
     /// Source file paths for on-demand lazy type checking in `--in-process` mode.
     /// When `find_pers_struct` can't find a module in the cache and this map
     /// has its source path, the module is type-checked from source on the fly.
@@ -662,11 +862,43 @@ pub struct PersistentEnv {
     /// type graphs that are internalized into the current TypeContext on first access
     /// via `find_pers_struct`. Populated by `from_registry()`.
     portable_cache: SharedRegistryMap<Arc<PortablePersStruct>>,
+    /// Package roots of registered units without module info (namespaces).
+    module_package_roots: SharedRegistryMap<PathBuf>,
+    /// Package roots whose units are on this compilation's load path. OCaml
+    /// only finds units through `-I` directories (the package itself, its
+    /// dependencies, dev dependencies for dev sources and the runtime);
+    /// `None` makes every registered unit visible.
+    visible_package_roots: Option<Arc<Vec<PathBuf>>>,
+    /// `outside_load_path` answers for `visible_package_roots`, by unit name.
+    outside_load_path_memo: OutsideLoadPathMemo,
     /// First persistent-loader error observed through any clone of this env.
     last_error: Arc<Mutex<Option<PersistentEnvError>>>,
     /// Consistency table for imported CMI digests, matching OCaml `Consistbl`.
     crc_units: Arc<Mutex<HashMap<String, (Vec<u8>, String)>>>,
+    /// `imported_units` with their recorded CRCs (env.ml:612-646): the
+    /// units this compilation found and the units their CRC lists name.
+    imported_units: Arc<Mutex<ImportedUnits>>,
     view: Arc<ResolutionView>,
+}
+
+/// Per-environment memo of `outside_load_path`. Each clone starts empty:
+/// clones are per compilation, and sharing one lock across workers made it
+/// contended.
+#[derive(Default)]
+struct OutsideLoadPathMemo(std::cell::RefCell<crate::fast_hash::AHashMap<String, bool>>);
+
+impl Clone for OutsideLoadPathMemo {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+/// `imported_units` plus the units whose CRC lists were already merged, so
+/// repeated lookups of a loaded unit skip re-recording its imports.
+#[derive(Debug, Default)]
+struct ImportedUnits {
+    units: std::collections::BTreeMap<String, Option<[u8; 16]>>,
+    recorded: crate::fast_hash::AHashSet<String>,
 }
 
 /// Errors reported by OCaml's `Env` persistent interface loader.
@@ -721,15 +953,21 @@ impl PersistentEnv {
             load_path_display: Arc::new(Vec::new()),
             open_modules: Arc::new(Vec::new()),
             jsx_version: None,
+            jsx_module: None,
             nopervasives: false,
             renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: SharedRegistryMap::default(),
             in_process_mode: false,
+            disk_modules: SharedRegistryMap::default(),
             source_fallback_paths: SharedRegistryMap::default(),
             source_fallback_depth: 0,
             portable_cache: SharedRegistryMap::default(),
+            module_package_roots: SharedRegistryMap::default(),
+            visible_package_roots: None,
+            outside_load_path_memo: OutsideLoadPathMemo::default(),
             last_error: Arc::new(Mutex::new(None)),
             crc_units: Arc::new(Mutex::new(HashMap::new())),
+            imported_units: Arc::default(),
             view: Arc::new(ResolutionView {
                 alias_prefix_rewrites: AliasPrefixRewrites::new(),
                 compiling_module: None,
@@ -751,15 +989,21 @@ impl PersistentEnv {
             load_path_display: Arc::new(Vec::new()),
             open_modules: Arc::new(Vec::new()),
             jsx_version: None,
+            jsx_module: None,
             nopervasives: false,
             renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: registry.module_info.clone(),
             in_process_mode: true,
+            disk_modules: registry.disk_modules.clone(),
             source_fallback_paths: registry.source_fallback_paths.clone(),
             source_fallback_depth: 0,
             portable_cache: registry.cached_modules.clone(),
+            module_package_roots: registry.module_package_roots.clone(),
+            visible_package_roots: None,
+            outside_load_path_memo: OutsideLoadPathMemo::default(),
             last_error: Arc::new(Mutex::new(None)),
             crc_units: Arc::new(Mutex::new(HashMap::new())),
+            imported_units: Arc::default(),
             view: Arc::new(ResolutionView {
                 alias_prefix_rewrites: AliasPrefixRewrites::from_base(
                     registry.alias_rewrites.clone(),
@@ -836,7 +1080,7 @@ impl PersistentEnv {
     }
 
     fn cache_lookup_entry(&self, name: &str) -> Option<(String, Option<Arc<PersStruct>>)> {
-        if self.view.hidden_modules.contains(name) {
+        if self.view.hidden_modules.contains(name) || self.outside_load_path(name) {
             return Some((name.to_string(), None));
         }
         let cache = self.cache.lock().unwrap();
@@ -845,6 +1089,11 @@ impl PersistentEnv {
             .get(cache_key)
             .cloned()
             .map(|value| (cache_key.to_string(), value))
+    }
+
+    /// The already-loaded persistent structure of `name`, without loading it.
+    pub(crate) fn loaded_pers_struct(&self, name: &str) -> Option<Arc<PersStruct>> {
+        self.cache_lookup_entry(name).and_then(|(_, loaded)| loaded)
     }
 
     fn cache_contains_key(&self, name: &str) -> bool {
@@ -861,6 +1110,9 @@ impl PersistentEnv {
     }
 
     fn in_memory_info(&self, name: &str) -> Option<InMemoryModuleInfo> {
+        if self.outside_load_path(name) {
+            return None;
+        }
         if let Some(key) = resolve_first_char_case_key(&self.view.in_memory_module_overrides, name) {
             if self.view.hidden_modules.contains(key) {
                 return None;
@@ -879,11 +1131,16 @@ impl PersistentEnv {
         name: &str,
         mut f: impl FnMut(&InMemoryModuleInfo) -> R,
     ) -> Option<R> {
-        if let Some(key) = resolve_first_char_case_key(&self.view.in_memory_module_overrides, name) {
+        if let Some(key) = resolve_first_char_case_key(&self.view.in_memory_module_overrides, name)
+        {
             if self.view.hidden_modules.contains(key) {
                 return None;
             }
-            return self.view.in_memory_module_overrides.get(key).map(|info| f(info));
+            return self
+                .view
+                .in_memory_module_overrides
+                .get(key)
+                .map(|info| f(info));
         }
         self.in_memory_modules
             .get_case_with(name, |key, info| {
@@ -897,8 +1154,13 @@ impl PersistentEnv {
     }
 
     fn portable_cache_entry(&self, name: &str) -> Option<(String, Arc<PortablePersStruct>)> {
+        if self.outside_load_path(name) {
+            return None;
+        }
         if let Some(key) = resolve_first_char_case_key(&self.view.portable_cache_overrides, name) {
-            return self.view.portable_cache_overrides
+            return self
+                .view
+                .portable_cache_overrides
                 .get(key)
                 .cloned()
                 .map(|portable| (key.to_string(), portable));
@@ -907,8 +1169,12 @@ impl PersistentEnv {
     }
 
     fn source_fallback_path_entry(&self, name: &str) -> Option<(String, PathBuf)> {
-        if let Some(key) = resolve_first_char_case_key(&self.view.source_fallback_path_overrides, name) {
-            return self.view.source_fallback_path_overrides
+        if let Some(key) =
+            resolve_first_char_case_key(&self.view.source_fallback_path_overrides, name)
+        {
+            return self
+                .view
+                .source_fallback_path_overrides
                 .get(key)
                 .cloned()
                 .map(|path| (key.to_string(), path));
@@ -968,14 +1234,66 @@ impl PersistentEnv {
         self.set_load_path_with_display(paths.clone(), paths);
     }
 
+    /// Set the load path from lists shared with other compilations.
+    pub fn set_load_path_shared(&mut self, paths: Arc<Vec<PathBuf>>, display_paths: Arc<Vec<PathBuf>>) {
+        debug_assert_eq!(paths.len(), display_paths.len());
+        self.load_path = paths;
+        self.load_path_display = display_paths;
+    }
+
     pub fn set_load_path_with_display(&mut self, paths: Vec<PathBuf>, display_paths: Vec<PathBuf>) {
         debug_assert_eq!(paths.len(), display_paths.len());
         self.load_path = Arc::new(paths);
         self.load_path_display = Arc::new(display_paths);
     }
 
+    /// Restrict registered units to those of the given packages (see
+    /// `visible_package_roots`).
+    pub fn set_visible_package_roots(&mut self, roots: Option<Vec<PathBuf>>) {
+        self.visible_package_roots = roots.map(Arc::new);
+        self.outside_load_path_memo = OutsideLoadPathMemo::default();
+    }
+
+    /// Whether `name` is a registered unit of a package outside the load path.
+    fn outside_load_path(&self, name: &str) -> bool {
+        let Some(visible) = self.visible_package_roots.as_deref() else {
+            return false;
+        };
+        if let Some(&outside) = self.outside_load_path_memo.0.borrow().get(name) {
+            return outside;
+        }
+        let visible_root = |root: &FsPath| visible.iter().any(|v| v == root);
+        let outside = self
+            .in_memory_info_with(name, |info| {
+                !info.is_runtime
+                    && info
+                        .package_root
+                        .as_deref()
+                        .is_some_and(|root| !visible_root(root))
+            })
+            .or_else(|| {
+                self.module_package_roots
+                    .get_case_cloned(name)
+                    .map(|(_, root)| !visible_root(&root))
+            });
+        // An unknown unit may still be registered later; only memoize answers
+        // from its registry entry.
+        let Some(outside) = outside else {
+            return false;
+        };
+        self.outside_load_path_memo
+            .0
+            .borrow_mut()
+            .insert(name.to_string(), outside);
+        outside
+    }
+
     pub fn set_open_modules(&mut self, open_modules: Vec<String>) {
         self.open_modules = Arc::new(open_modules);
+    }
+
+    pub fn set_jsx_module(&mut self, jsx_module: Option<String>) {
+        self.jsx_module = jsx_module;
     }
 
     pub fn set_jsx_version(&mut self, jsx_version: Option<i32>) {
@@ -986,12 +1304,17 @@ impl PersistentEnv {
         self.nopervasives = nopervasives;
     }
 
+    pub fn compiling_module_name(&self) -> Option<&str> {
+        self.view.compiling_module.as_deref()
+    }
+
     pub fn set_compiling_module(&mut self, module_name: Option<String>) {
         self.view_mut().compiling_module = module_name;
     }
 
     pub fn is_compiling_module(&self, module_name: &str) -> bool {
-        self.view.compiling_module
+        self.view
+            .compiling_module
             .as_deref()
             .is_some_and(|compiling| compiling == module_name)
     }
@@ -1014,7 +1337,8 @@ impl PersistentEnv {
     /// Example: if cache has `"Stdlib_JSON" -> Stdlib.JSON`, returns `["Stdlib_JSON"]`
     /// when queried with `Stdlib.JSON`.
     pub fn flattened_alias_heads_for_path(&self, qualified_path: &Path) -> Vec<String> {
-        self.view.alias_prefix_rewrites
+        self.view
+            .alias_prefix_rewrites
             .flattened_alias_heads_for_path(qualified_path)
     }
 
@@ -1028,21 +1352,93 @@ impl PersistentEnv {
         // know that the unit exists. Keep this as an availability probe so
         // namespace alias resolution can avoid consuming `Subst.signature`
         // stamps just to test a flattened compile-unit name.
+        if self.outside_load_path(name) {
+            return false;
+        }
         self.cache_contains_key(name)
             || self.portable_cache.contains_key(name)
             || self.in_memory_modules.contains_key(name)
             || self.source_fallback_paths.contains_key(name)
-            || (!self.in_process_mode && self.find_in_path_uncap(&format!("{name}.cmi")).is_some())
+            || ((!self.in_process_mode || self.disk_modules.contains_key(name))
+                && self.find_in_path_uncap(&format!("{name}.cmi")).is_some())
     }
 
     /// Find and load a module by name.
     /// Returns the cached signature, or None if the module cannot be found.
+    /// `Env.find_pers_struct` (env.ml:711-731): a found unit is an import
+    /// (`add_import`), and so is every unit its CRC list names, with that
+    /// CRC (`check_consistency`, env.ml:627-638).
     pub fn find_pers_struct<'a>(
         &mut self,
         name: &str,
         ctx: &'a TypeContext,
     ) -> Option<Arc<PersStruct>> {
-        let debug_pers = std::env::var_os("RUST_DEBUG_PERS_STRUCT").is_some();
+        if ctx.in_store_build() {
+            // Preparing a module is an effect on this compilation; later users
+            // of the shared data replay it (`StoreEffect::PreparePers`).
+            ctx.record_store_effect(crate::types::context::StoreEffect::PreparePers(name.into()));
+            return ctx.suspend_store_build(|| self.find_pers_struct(name, ctx));
+        }
+        let ps = self.find_pers_struct_unrecorded(name, ctx)?;
+        self.record_import(&ps);
+        Some(ps)
+    }
+
+    /// `Env.check_pers_struct` (env.ml:741-748): under `-no-alias-deps`, a
+    /// module looked up without loading is still recorded as a (weak) import,
+    /// with no CRC unless a loaded unit's CRC list supplies one.
+    pub fn check_pers_struct(&self, name: &str) {
+        self.imported_units
+            .lock()
+            .unwrap()
+            .units
+            .entry(name.to_string())
+            .or_insert(None);
+    }
+
+    /// The units whose interface this compilation read, sorted.
+    pub fn loaded_units(&self) -> Vec<String> {
+        let mut units: Vec<String> = self.imported_units.lock().unwrap().recorded.iter().cloned().collect();
+        units.sort();
+        units
+    }
+
+    fn record_import(&self, ps: &PersStruct) {
+        let mut imported = self.imported_units.lock().unwrap();
+        if imported.recorded.contains(ps.ps_name.as_str()) {
+            return;
+        }
+        imported.recorded.insert(ps.ps_name.clone());
+        imported.units.entry(ps.ps_name.clone()).or_insert(None);
+        for (unit, crc) in &ps.ps_crcs {
+            if let Some(crc) = crc {
+                let slot = imported.units.entry(unit.clone()).or_insert(None);
+                if slot.is_none() {
+                    *slot = Some(*crc);
+                }
+            }
+        }
+    }
+
+    /// `Env.imports ()` (env.ml:1873-1882, consistbl.ml:36-44): the imported
+    /// units in decreasing name order, without `dont_record_crc_unit`.
+    pub fn imports(&self, dont_record_crc_unit: Option<&str>) -> Vec<(String, Option<[u8; 16]>)> {
+        let imported = self.imported_units.lock().unwrap();
+        imported
+            .units
+            .iter()
+            .rev()
+            .filter(|(name, _)| Some(name.as_str()) != dont_record_crc_unit)
+            .map(|(name, crc)| (name.clone(), *crc))
+            .collect()
+    }
+
+    fn find_pers_struct_unrecorded<'a>(
+        &mut self,
+        name: &str,
+        ctx: &'a TypeContext,
+    ) -> Option<Arc<PersStruct>> {
+        let debug_pers = crate::debug_flags::debug_pers_struct();
         if debug_pers {
             eprintln!("[pers] find {name}");
         }
@@ -1089,9 +1485,12 @@ impl PersistentEnv {
             if self.view.hidden_modules.contains(&portable_key) {
                 return None;
             }
-            let ps = Arc::new(portable_types::internalize_pers_struct(portable, ctx));
+            ctx.poison_store_build_for("find_pers_struct:load");
+            let ps = portable_types::internalize_pers_struct(portable, ctx);
             let module_path = Path::Pident(Ident::create_persistent(&portable_key));
-            let effective_module_path = self.view.alias_prefix_rewrites
+            let effective_module_path = self
+                .view
+                .alias_prefix_rewrites
                 .get(&portable_key)
                 .unwrap_or_else(|| module_path.clone());
             collect_alias_rewrites(
@@ -1099,17 +1498,21 @@ impl PersistentEnv {
                 &effective_module_path,
                 &mut self.view_mut().alias_prefix_rewrites,
             );
-            register_sig_types_recursive(&ps.ps_sig, &effective_module_path, ctx, &self.load_path);
+            let shared = ctx.thread_store().owns_signature(&ps.ps_sig);
+            register_sig_types_recursive(&ps.ps_sig, &effective_module_path, ctx, shared);
             if !effective_module_path.same(&module_path) {
-                register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, &self.load_path);
+                register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, shared);
             }
-            register_types_by_stamp_in_signature_recursive(&ps.ps_sig, ctx);
+            // `register_sig_types_recursive` already registers every
+            // declaration with a non-zero stamp under that stamp, in this
+            // order, so no separate by-stamp pass is needed.
             if should_register_lazy_raw_sig(&portable_key, &self.view.alias_prefix_rewrites)
                 && !ctx.has_raw_module_sig(&portable_key)
             {
                 ctx.register_raw_module_sig(&portable_key, ps.ps_sig.clone());
             }
-            self.view_mut().prepared_cached_alias_rewrites
+            self.view_mut()
+                .prepared_cached_alias_rewrites
                 .insert(portable_key.clone());
             self.cache_insert(portable_key, Some(ps.clone()));
             return Some(ps);
@@ -1122,7 +1525,9 @@ impl PersistentEnv {
         // implementation as if a persistent `.cmi` already existed; if an
         // interface was published above, the portable-cache branch has already
         // returned it.
-        if self.view.compiling_module
+        if self
+            .view
+            .compiling_module
             .as_deref()
             .is_some_and(|compiling| compiling == name)
         {
@@ -1138,12 +1543,14 @@ impl PersistentEnv {
         if debug_pers {
             eprintln!("[pers] load {name} as {load_name}");
         }
+        ctx.poison_store_build_for("find_pers_struct:disk");
         self.cache_insert(load_name.clone(), None);
 
         // Try to load from disk
         let result = self.load_module(&load_name, ctx).map(Arc::new);
         if let Some(ps) = result.as_ref() {
-            self.view_mut().prepared_cached_alias_rewrites
+            self.view_mut()
+                .prepared_cached_alias_rewrites
                 .insert(load_name.clone());
             if should_register_lazy_raw_sig(&load_name, &self.view.alias_prefix_rewrites)
                 && !ctx.has_raw_module_sig(&load_name)
@@ -1157,9 +1564,14 @@ impl PersistentEnv {
 
     fn prepare_cached_pers_struct(&mut self, cache_key: &str, ps: &PersStruct, ctx: &TypeContext) {
         if !self.view.prepared_cached_alias_rewrites.contains(cache_key) {
-            self.view_mut().prepared_cached_alias_rewrites.insert(cache_key.to_string());
+            ctx.poison_store_build_for("find_pers_struct:prepare");
+            self.view_mut()
+                .prepared_cached_alias_rewrites
+                .insert(cache_key.to_string());
             let module_path = Path::Pident(Ident::create_persistent(cache_key));
-            let effective_module_path = self.view.alias_prefix_rewrites
+            let effective_module_path = self
+                .view
+                .alias_prefix_rewrites
                 .get(cache_key)
                 .unwrap_or_else(|| module_path.clone());
             collect_alias_rewrites(
@@ -1173,11 +1585,14 @@ impl PersistentEnv {
             // has to re-install this module's declarations for the current unit;
             // OCaml exposes the same ps_sig through the persistent table
             // (`compiler/ml/env.ml:711-746`) without re-reading the CMI.
-            register_sig_types_recursive(&ps.ps_sig, &effective_module_path, ctx, &self.load_path);
+            let shared = ctx.thread_store().owns_signature(&ps.ps_sig);
+            register_sig_types_recursive(&ps.ps_sig, &effective_module_path, ctx, shared);
             if !effective_module_path.same(&module_path) {
-                register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, &self.load_path);
+                register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, shared);
             }
-            register_types_by_stamp_in_signature_recursive(&ps.ps_sig, ctx);
+            // `register_sig_types_recursive` already registers every
+            // declaration with a non-zero stamp under that stamp, in this
+            // order, so no separate by-stamp pass is needed.
         }
 
         if should_register_lazy_raw_sig(cache_key, &self.view.alias_prefix_rewrites)
@@ -1193,6 +1608,8 @@ impl PersistentEnv {
         ps_name: String,
         mut signature: Signature,
         ps_filename: String,
+        ps_deprecated: Option<String>,
+        ps_crcs: Vec<(String, Option<[u8; 16]>)>,
         ctx: &'a TypeContext,
     ) -> PersStruct {
         let module_path = Path::Pident(Ident::create_persistent(name));
@@ -1210,7 +1627,9 @@ impl PersistentEnv {
         // lazily when env.ml:1513-1530 builds module components, not by rewriting
         // the cached persistent unit signature during load.
 
-        let effective_module_path = self.view.alias_prefix_rewrites
+        let effective_module_path = self
+            .view
+            .alias_prefix_rewrites
             .get(name)
             .unwrap_or_else(|| module_path.clone());
         collect_alias_rewrites(
@@ -1218,7 +1637,7 @@ impl PersistentEnv {
             &effective_module_path,
             &mut self.view_mut().alias_prefix_rewrites,
         );
-        register_sig_types_recursive(&signature, &effective_module_path, ctx, &self.load_path);
+        register_sig_types_recursive(&signature, &effective_module_path, ctx, false);
         let signature = Arc::new(signature);
         if should_register_lazy_raw_sig(name, &self.view.alias_prefix_rewrites) {
             ctx.register_raw_module_sig(name, signature.clone());
@@ -1228,6 +1647,8 @@ impl PersistentEnv {
             ps_name,
             ps_sig: signature,
             ps_filename,
+            ps_deprecated,
+            ps_crcs,
         }
     }
 
@@ -1339,6 +1760,12 @@ impl PersistentEnv {
         self.in_memory_info_with(name, |_| ()).is_some()
     }
 
+    /// `Config_util.find_opt`: the load-path file, trying the uncapitalized
+    /// name first.
+    pub fn find_in_load_path_uncap(&self, filename: &str) -> Option<String> {
+        self.find_in_path_uncap(filename)
+    }
+
     pub fn file_exists_in_load_path_uncap(&self, filename: &str) -> bool {
         self.find_in_path_uncap(filename).is_some()
     }
@@ -1442,6 +1869,10 @@ impl PersistentEnv {
     /// `js_cmj_format.ml:112-121`, where non-constant
     /// `persistent_closed_lambda` values are preserved for backend inlining.
     pub fn module_cmj_export_lambdas(&self, name: &str) -> Option<Arc<HashMap<String, Lambda>>> {
+        if let Some(lambdas) = self.in_memory_info_with(name, |info| info.cmj_export_lambdas.clone())
+        {
+            return Some(lambdas);
+        }
         // In in-process mode the registry is authoritative; do not fall back to
         // disk `.cmj` files behind the scheduler's back.
         if self.in_process_mode {
@@ -1474,7 +1905,7 @@ impl PersistentEnv {
         &self,
         source_path: &FsPath,
         ctx: &'a TypeContext,
-    ) -> Option<(Signature, PersistentEnv)> {
+    ) -> Option<(Signature, PersistentEnv, Option<String>)> {
         if self.source_fallback_depth >= Self::MAX_SOURCE_FALLBACK_DEPTH {
             return None;
         }
@@ -1498,15 +1929,22 @@ impl PersistentEnv {
             load_path_display: self.load_path_display.clone(),
             open_modules: self.open_modules.clone(),
             jsx_version: self.jsx_version,
+            jsx_module: self.jsx_module.clone(),
             nopervasives: self.nopervasives,
             renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: self.in_memory_modules.clone(),
             in_process_mode: self.in_process_mode,
+            disk_modules: self.disk_modules.clone(),
             source_fallback_paths: self.source_fallback_paths.clone(),
             source_fallback_depth: self.source_fallback_depth + 1,
             portable_cache: self.portable_cache.clone(),
+            module_package_roots: self.module_package_roots.clone(),
+            visible_package_roots: self.visible_package_roots.clone(),
+            outside_load_path_memo: self.outside_load_path_memo.clone(),
             last_error: self.last_error.clone(),
             crc_units: self.crc_units.clone(),
+            // A unit compiled from source has its own imports.
+            imported_units: Arc::default(),
             view: Arc::new(ResolutionView {
                 alias_prefix_rewrites: self.view.alias_prefix_rewrites.clone(),
                 compiling_module: self.view.compiling_module.clone(),
@@ -1542,6 +1980,7 @@ impl PersistentEnv {
             }
             let signature =
                 crate::binary_ast::ppx::rewrite_signature(&signature, parser.arena_mut()).ok()?;
+            let deprecated = crate::types::typemod::deprecated_of_sig(parser.arena(), &signature);
 
             crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
             let mut tctx = TypeCheckContext::new(ctx, parser.arena());
@@ -1555,16 +1994,18 @@ impl PersistentEnv {
             );
             let typed_module_type = TypedModuleType {
                 mty_desc: TypedModuleTypeDesc::Tmty_signature(typed_signature),
-                mty_type: crate::types::decl::ModuleType::MtySignature(decl_signature),
+                mty_type: crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(decl_signature)),
                 mty_env: crate::types::typedtree::EnvRef(0),
                 mty_loc: crate::parse_arena::LocIdx(0),
                 mty_attributes: crate::parser::ast::Attributes::new(),
             };
             let signature = match decl_module_type_from_typed(&typed_module_type)? {
-                crate::types::decl::ModuleType::MtySignature(signature) => signature,
+                crate::types::decl::ModuleType::MtySignature(signature) => {
+                    std::sync::Arc::unwrap_or_clone(signature)
+                }
                 _ => return None,
             };
-            return Some((signature, fallback_pers));
+            return Some((signature, fallback_pers, deprecated));
         }
 
         let mut parser = Parser::new(&filename, &source);
@@ -1576,18 +2017,26 @@ impl PersistentEnv {
         let options = CompilerOptions {
             open_modules: self.open_modules.as_ref().clone(),
             jsx_version: self.jsx_version,
+            jsx_module: self.jsx_module.clone(),
             ..CompilerOptions::default()
         };
         let experimental_let_unwrap =
             experimental_let_unwrap_for_structure(&structure, &options, parser.arena());
         let jsx_version = jsx_version_for_structure(&structure, &options, parser.arena());
         let structure = if let Some(jsx_version) = jsx_version {
-            jsx_ppx::transform_structure_result(structure, jsx_version, parser.arena_mut()).ok()?
+            jsx_ppx::transform_structure_result(
+                structure,
+                jsx_version,
+                jsx_module_name(&options, None),
+                parser.arena_mut(),
+            )
+            .ok()?
         } else {
             structure
         };
         let structure =
             crate::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut()).ok()?;
+        let deprecated = crate::types::typemod::deprecated_of_str(parser.arena(), &structure);
 
         crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
         let mut tctx = TypeCheckContext::new(ctx, parser.arena());
@@ -1603,11 +2052,15 @@ impl PersistentEnv {
             && !self.in_process_mode
             && FsPath::new(&format!("{}i", filename)).exists();
         if !has_resi {
-            normalize_signature_types(ctx, &typed_structure, &final_env);
+            normalize_signature(
+                ctx,
+                &final_env,
+                &crate::types::includemod::simplify_signature(&typed_structure.str_type),
+            );
         }
 
         let fallback_pers = tctx.persistent_env.take()?;
-        Some((typed_structure.str_type.clone(), fallback_pers))
+        Some((typed_structure.str_type.clone(), fallback_pers, deprecated))
     }
 
     fn load_module_from_source_fallback<'a>(
@@ -1632,7 +2085,7 @@ impl PersistentEnv {
         let preferred_path = interface_path.as_deref().unwrap_or(source_path.as_path());
 
         let debug_source_fallback =
-            std::env::var_os("RUST_DEBUG_PERSISTENT_SOURCE_FALLBACK").is_some();
+            crate::debug_flags::debug_persistent_source_fallback();
         if debug_source_fallback {
             eprintln!(
                 "[persistent-source] module={} ast={} source={}",
@@ -1642,7 +2095,7 @@ impl PersistentEnv {
             );
         }
 
-        let (signature, fallback_pers) = self.typecheck_source_signature(preferred_path, ctx)?;
+        let (signature, fallback_pers, deprecated) = self.typecheck_source_signature(preferred_path, ctx)?;
         self.view_mut().alias_prefix_rewrites
             .extend_missing(fallback_pers.view.alias_prefix_rewrites.local_clone());
         let fallback_entries = fallback_pers
@@ -1659,11 +2112,17 @@ impl PersistentEnv {
             }
         }
 
+        // OCaml reads this unit's `.cmi`; report the CRCs saved beside the
+        // source it was typed from.
+        let crcs = cmi_format::read_cmi_crcs(&preferred_path.with_extension("cmi").to_string_lossy())
+            .unwrap_or_default();
         Some(self.finalize_loaded_signature(
             name,
             name.to_string(),
             signature,
             preferred_path.to_string_lossy().into_owned(),
+            deprecated,
+            crcs,
             ctx,
         ))
     }
@@ -1674,7 +2133,7 @@ impl PersistentEnv {
         // In in-process mode, never fall through to .cmi loading. The registry
         // is authoritative for normal project modules. Runtime/bootstrap code
         // may register source fallback paths, which are also source-only.
-        if self.in_process_mode {
+        if self.in_process_mode && !self.disk_modules.contains_key(name) {
             if let Some((source_key, _)) = self.source_fallback_path_entry(name) {
                 return self.load_module_from_source_path_fallback(&source_key, ctx);
             }
@@ -1710,11 +2169,27 @@ impl PersistentEnv {
 
             let mut sig_ctx = SigReadContext::new(ctx);
             let signature = sig_ctx.read_signature(&cmi.cmi_sign);
+            // env.ml:663-668: the unit's `Deprecated` persistence flag.
+            let deprecated = cmi.cmi_flags.iter().fold(None, |_, flag| match flag {
+                crate::cmi::cmi_format::PersFlags::Deprecated(s) => Some(s.clone()),
+            });
+            let crcs = cmi
+                .cmi_crcs
+                .iter()
+                .map(|(unit, crc)| {
+                    (
+                        unit.clone(),
+                        crc.as_deref().and_then(|crc| <[u8; 16]>::try_from(crc).ok()),
+                    )
+                })
+                .collect();
             return Some(self.finalize_loaded_signature(
                 name,
                 name.to_string(),
                 signature,
                 display_path,
+                deprecated,
+                crcs,
                 ctx,
             ));
         }
@@ -1736,10 +2211,11 @@ impl PersistentEnv {
         // The source_fallback_paths already points to the preferred file
         // (.resi if it exists, .res otherwise), set by rewatch when
         // registering the paths.
-        let (signature, fallback_pers) = self.typecheck_source_signature(&source_path, ctx)?;
+        let (signature, fallback_pers, deprecated) = self.typecheck_source_signature(&source_path, ctx)?;
 
         // Merge any modules the fallback discovered
-        self.view_mut().alias_prefix_rewrites
+        self.view_mut()
+            .alias_prefix_rewrites
             .extend_missing(fallback_pers.view.alias_prefix_rewrites.local_clone());
         let fallback_entries = fallback_pers
             .cache
@@ -1755,11 +2231,17 @@ impl PersistentEnv {
             }
         }
 
+        // OCaml reads this unit's `.cmi`; report the CRCs saved beside the
+        // source it was typed from.
+        let crcs = cmi_format::read_cmi_crcs(&source_path.with_extension("cmi").to_string_lossy())
+            .unwrap_or_default();
         Some(self.finalize_loaded_signature(
             name,
             name.to_string(),
             signature,
             source_path.to_string_lossy().into_owned(),
+            deprecated,
+            crcs,
             ctx,
         ))
     }
@@ -1861,19 +2343,18 @@ impl PersistentEnv {
         ctx: &'a TypeContext,
     ) -> Option<Arc<Signature>> {
         // Check TypeContext cache first (populated by trigger_module_sig_rename)
-        if let Some(cached) = ctx.renamed_module_sigs.borrow().get(name) {
-            return Some(cached.clone());
+        if let Some(renamed) = ctx.renamed_module_sig(name) {
+            return Some(renamed);
         }
         // Check local cache
-        if let Some(cached) = self.renamed_sig_cache.get(name) {
-            return Some(cached.clone());
+        if let Some(cached) = self.renamed_sig_cache.get(name).cloned() {
+            return Some(ctx.materialize_renamed_sig(&cached));
         }
         self.force_lazy_signature_rename(name, ctx)?;
-        ctx.renamed_module_sigs
-            .borrow()
-            .get(name)
-            .cloned()
-            .or_else(|| self.renamed_sig_cache.get(name).cloned())
+        ctx.renamed_module_sig(name).or_else(|| {
+            let cached = self.renamed_sig_cache.get(name).cloned()?;
+            Some(ctx.materialize_renamed_sig(&cached))
+        })
     }
 
     pub fn get_renamed_sig<'a>(&mut self, name: &str, ctx: &'a TypeContext) -> Option<Signature> {
@@ -1902,11 +2383,7 @@ impl PersistentEnv {
         // signature here; the helper below owns that single OCaml-equivalent
         // copy.
         let ps = self.find_pers_struct(name, ctx)?;
-        let renamed = Arc::new(freshened_signature_bound_idents_from_kind(
-            "persistent_env_lazy_rename",
-            &ps.ps_sig,
-            ctx,
-        ));
+        let renamed = ctx.defer_renamed_sig("persistent_env_lazy_rename", ps.ps_sig.clone());
         Arc::make_mut(&mut self.renamed_sig_cache).insert(name.to_string(), renamed.clone());
         ctx.renamed_module_sigs
             .borrow_mut()
@@ -1931,36 +2408,65 @@ impl PersistentEnv {
         // table when opening the module. Reuse an already forced component view
         // here so `prefix_idents` and `Subst.modtype_declaration` side effects
         // are not repeated.
+        let alias_source = self.qualified_alias_path_for_flattened_head(name);
         let components = ctx
-            .with_qualified_module_components(&components_key, |components| components.clone())
+            .with_qualified_module_components(&components_key, |components| {
+                Arc::new(components.clone())
+            })
             .unwrap_or_else(|| {
-                let alias_source = self.qualified_alias_path_for_flattened_head(name);
+                // The view of a unit loaded into the worker store is the same
+                // for every compilation (OCaml builds `ps_comps` once per
+                // process), so it is built as a store build and shared.
+                let shareable = alias_source.is_none()
+                    && self.in_process_mode
+                    && ctx.thread_store().owns_signature(&ps.ps_sig)
+                    && crate::types::typecore::shared_components_enabled();
+                if shareable
+                    && let Some((components, piece)) =
+                        ctx.thread_store().shared_components(&components_key)
+                {
+                    ctx.touch_store_piece(&piece);
+                    ctx.register_qualified_module_components_arc(
+                        components_key.clone(),
+                        components.clone(),
+                    );
+                    return components;
+                }
                 // OCaml compiler/ml/env.ml:1513-1519 builds the component
                 // table after `scrape_alias`, and env.ml:1581-1585 stores the
                 // substituted modtypes in that table. When ReScript's
                 // persistent registry knows this opened unit is the flattened
                 // backing head for a selected alias path, share the same
                 // component modtype force with that alias path.
-                let components = crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
-                    module_path.clone(),
-                    ps.ps_sig.clone(),
-                    ahash::AHashMap::new(),
-                    alias_source,
-                    ctx,
-                );
-                ctx.register_qualified_module_components(components_key, components.clone());
+                let build = || {
+                    crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
+                        module_path.clone(),
+                        ps.ps_sig.clone(),
+                        crate::fast_hash::AHashMap::new(),
+                        alias_source.clone(),
+                        ctx,
+                    )
+                };
+                let (components, piece) = if shareable {
+                    ctx.build_in_store(build)
+                } else {
+                    (build(), None)
+                };
+                let components = Arc::new(components);
+                if shareable {
+                    match piece {
+                        Some(piece) => ctx.thread_store().publish_shared_components(
+                            components_key.clone(),
+                            components.clone(),
+                            piece,
+                        ),
+                        None => components.make_private(),
+                    }
+                }
+                ctx.register_qualified_module_components_arc(components_key, components.clone());
                 components
             });
-        add_signature_to_env_with_options(
-            &ps.ps_sig,
-            &module_path,
-            env,
-            ctx,
-            true,
-            false,
-            true,
-            Some(&components),
-        );
+        open_components_into_env(&components, env, ctx);
         true
     }
 
@@ -1973,7 +2479,7 @@ impl PersistentEnv {
     ) -> Option<ModuleDeclaration> {
         let ps = self.find_pers_struct(name, ctx)?;
         Some(ModuleDeclaration {
-            md_type: ModuleType::MtySignature(ps.ps_sig.as_ref().clone()),
+            md_type: ModuleType::MtySignature(std::sync::Arc::new(ps.ps_sig.as_ref().clone())),
             md_attributes: vec![],
             md_loc: crate::location::Location::none(),
             md_path: None,
@@ -1987,7 +2493,8 @@ impl PersistentEnv {
     /// detection can resolve from memory instead of probing disk.
     pub fn register_in_memory_module(&mut self, name: &str, info: InMemoryModuleInfo) {
         self.view_mut().hidden_modules.remove(name);
-        self.view_mut().in_memory_module_overrides
+        self.view_mut()
+            .in_memory_module_overrides
             .insert(name.to_string(), info);
     }
 
@@ -2001,6 +2508,8 @@ impl PersistentEnv {
         name: &str,
         signature: Signature,
         source_filename: &str,
+        deprecated: Option<String>,
+        crcs: Vec<(String, Option<[u8; 16]>)>,
         ctx: &'a TypeContext,
     ) {
         let ps = self.finalize_loaded_signature(
@@ -2008,6 +2517,8 @@ impl PersistentEnv {
             name.to_string(),
             signature,
             source_filename.to_string(),
+            deprecated,
+            crcs,
             ctx,
         );
         self.view_mut().hidden_modules.remove(name);
@@ -2055,8 +2566,10 @@ impl PersistentEnv {
             sig_items.push(SignatureItem::SigModule(
                 Ident::create_persistent(short_name.as_str()),
                 ModuleDeclaration {
+                    // As saved in the namespace `.cmi`: an alias typed by
+                    // `type_module_aux` is `Mty_alias (Mta_absent, path)`.
                     md_type: ModuleType::MtyAlias(
-                        AliasPresence::MtaPresent,
+                        AliasPresence::MtaAbsent,
                         Path::Pident(Ident::create_persistent(internal_name.as_str())),
                     ),
                     md_attributes: vec![],
@@ -2069,12 +2582,18 @@ impl PersistentEnv {
 
         // Record alias rewrites (e.g., "Foo-MyApp" → Pdot(Pident("MyApp"), "Foo"))
         let module_path = Path::Pident(Ident::create_persistent(namespace_name));
-        collect_alias_rewrites(&sig_items, &module_path, &mut self.view_mut().alias_prefix_rewrites);
+        collect_alias_rewrites(
+            &sig_items,
+            &module_path,
+            &mut self.view_mut().alias_prefix_rewrites,
+        );
 
         let ps = PersStruct {
             ps_name: namespace_name.to_string(),
             ps_sig: Arc::new(sig_items),
             ps_filename: format!("{}.mlmap", namespace_name),
+            ps_deprecated: None,
+            ps_crcs: Vec::new(),
         };
         self.view_mut().hidden_modules.remove(namespace_name);
         self.cache_insert(namespace_name.to_string(), Some(Arc::new(ps)));
@@ -2111,16 +2630,33 @@ impl PersistentEnv {
 /// `module_path` is the path to the module containing this signature
 /// (e.g., `Pident(Js)` or `Pdot(Pident(Js), "Promise")`).
 /// `load_path` is used to resolve module aliases by loading CMI files.
+/// Install the type declarations of a loaded signature in this unit's
+/// registries. `shared` says the signature is owned by the worker store, so
+/// the `Arc` handles can be shared across compilations instead of cloned.
 fn register_sig_types_recursive<'a>(
     sig: &Signature,
     module_path: &Path,
     ctx: &'a TypeContext,
-    _load_path: &[PathBuf],
+    shared: bool,
 ) {
+    if shared {
+        let store = ctx.thread_store();
+        let registrations = store.sig_type_registrations(sig, module_path, || {
+            let mut registrations = Vec::new();
+            collect_sig_type_registrations(sig, module_path, ctx, &mut registrations);
+            registrations
+        });
+        ctx.register_sig_type_registrations(&registrations);
+        return;
+    }
     for item in sig {
         match item {
             SignatureItem::SigType(id, decl, _) => {
-                let decl = Arc::new(decl.clone());
+                let decl = if shared {
+                    ctx.thread_store().shared_type_decl(decl)
+                } else {
+                    decl.clone()
+                };
                 ctx.register_shared_type_decl(id.name(), decl.clone());
                 // Also register by stamp for precise lookup when name is ambiguous (e.g., "t")
                 if id.stamp() != 0 {
@@ -2136,13 +2672,45 @@ fn register_sig_types_recursive<'a>(
                 match &md.md_type {
                     ModuleType::MtySignature(sub_sig) => {
                         // Recurse into sub-module signatures with extended path
-                        register_sig_types_recursive(sub_sig, &sub_path, ctx, _load_path);
+                        register_sig_types_recursive(sub_sig, &sub_path, ctx, shared);
                     }
                     // Match OCaml's lazy persistent-module behavior: don't eagerly
                     // load aliased CMIs here just to pre-register their nested types.
                     // Module-alias type lookup goes through module resolution later.
                     ModuleType::MtyAlias(_, _) => {}
                     _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The registrations `register_sig_types_recursive` installs for a
+/// store-owned signature, in installation order.
+fn collect_sig_type_registrations(
+    sig: &Signature,
+    module_path: &Path,
+    ctx: &TypeContext,
+    out: &mut Vec<crate::types::thread_store::SigTypeRegistration>,
+) {
+    for item in sig {
+        match item {
+            SignatureItem::SigType(id, decl, _) => {
+                let decl = ctx.thread_store().shared_type_decl(decl);
+                let qualified_path = Path::pdot(module_path.clone(), id.name());
+                out.push(crate::types::thread_store::SigTypeRegistration {
+                    name: smol_str::SmolStr::new_static(id.name()),
+                    stamp: id.stamp(),
+                    qualified_name: smol_str::SmolStr::new(qualified_path.name()),
+                    qualified_path,
+                    decl,
+                });
+            }
+            SignatureItem::SigModule(id, md, _) => {
+                if let ModuleType::MtySignature(sub_sig) = &md.md_type {
+                    let sub_path = Path::pdot(module_path.clone(), id.name());
+                    collect_sig_type_registrations(sub_sig, &sub_path, ctx, out);
                 }
             }
             _ => {}
@@ -2173,7 +2741,8 @@ mod cmj_export_tests {
         env.set_in_process_mode(true);
         env.set_nopervasives(true);
         env.add_load_path(load_path);
-        env.view_mut().source_fallback_path_overrides
+        env.view_mut()
+            .source_fallback_path_overrides
             .insert("Foo".to_string(), source_path);
 
         let loaded = env
@@ -2347,11 +2916,14 @@ fn decode_cmj_persistent_closed_constant(value: &OcamlValue) -> Option<CmjExport
 }
 
 fn decode_cmj_constant(value: &OcamlValue) -> Option<CmjExportConstant> {
+    // `Lambda.structured_constant` (compiler/ml/lambda.mli): constant
+    // constructors Const_assertfalse, Const_module_alias, Const_js_false,
+    // Const_js_true, Const_js_null; Const_js_undefined is block tag 9.
     match value {
-        OcamlValue::Int(0) => Some(CmjExportConstant::Null),
-        OcamlValue::Int(1) => Some(CmjExportConstant::Bool(true)),
+        OcamlValue::Int(4) => Some(CmjExportConstant::Null),
+        OcamlValue::Int(3) => Some(CmjExportConstant::Bool(true)),
         OcamlValue::Int(2) => Some(CmjExportConstant::Bool(false)),
-        OcamlValue::Block(tag, fields) if *tag == 0 && fields.len() == 1 => {
+        OcamlValue::Block(tag, fields) if *tag == 9 && fields.len() == 1 => {
             Some(CmjExportConstant::Undefined {
                 is_unit: fields[0].as_bool(),
             })
@@ -2453,27 +3025,26 @@ fn decode_cmj_file_case(value: &OcamlValue) -> Option<CmjFileCase> {
 
 fn decode_cmj_lambda(value: &OcamlValue) -> Option<Lambda> {
     match value {
-        // OCaml Lam.t constructor order is defined in compiler/core/lam.ml:91-113.
+        // `Lambda.t` constructor order is defined in compiler/ml/lambda.mli.
         OcamlValue::Block(0, fields) if fields.len() == 1 => {
             Some(Lambda::Lvar(decode_cmj_ident(&fields[0])?))
         }
-        OcamlValue::Block(1, fields) if fields.len() == 2 => Some(Lambda::LglobalModule(
-            decode_cmj_ident(&fields[0])?,
-            fields[1].as_bool(),
-        )),
+        OcamlValue::Block(1, fields) if fields.len() == 1 => {
+            Some(Lambda::LglobalModule(decode_cmj_ident(&fields[0])?))
+        }
         OcamlValue::Block(2, fields) if fields.len() == 1 => {
             Some(Lambda::Lconst(decode_cmj_lambda_constant(&fields[0])?))
         }
         OcamlValue::Block(3, fields) if fields.len() == 1 => {
             let apply = decode_cmj_apply(&fields[0])?;
-            Some(Lambda::Lapply(apply))
+            Some(Lambda::Lapply(Box::new(apply)))
         }
         OcamlValue::Block(4, fields) if fields.len() == 1 => {
-            Some(Lambda::Lfunction(decode_cmj_lfunction(&fields[0])?))
+            Some(Lambda::Lfunction(Box::new(decode_cmj_lfunction(&fields[0])?)))
         }
         OcamlValue::Block(7, fields) if fields.len() == 1 => {
             let prim = decode_cmj_prim_info(&fields[0])?;
-            Some(Lambda::Lprim(prim))
+            Some(Lambda::Lprim(Box::new(prim)))
         }
         OcamlValue::Block(13, fields) if fields.len() == 3 => Some(Lambda::if_(
             decode_cmj_lambda(&fields[0])?,
@@ -2518,15 +3089,18 @@ fn decode_cmj_ident(value: &OcamlValue) -> Option<Ident> {
 }
 
 fn decode_cmj_lfunction(value: &OcamlValue) -> Option<LFunction> {
+    // `Lambda.lfunction = {params; body; attr; loc}`; the arity is the
+    // parameter count.
     let (_, fields) = value.as_block_opt()?;
-    if fields.len() < 4 {
+    if fields.len() < 3 {
         return None;
     }
+    let params = decode_cmj_list(&fields[0], decode_cmj_ident)?;
     Some(LFunction {
-        arity: fields[0].as_int() as i32,
-        params: decode_cmj_list(&fields[1], decode_cmj_ident)?,
-        body: Box::new(decode_cmj_lambda(&fields[2])?),
-        attr: decode_cmj_function_attribute(&fields[3])?,
+        arity: params.len() as i32,
+        params,
+        body: Box::new(decode_cmj_lambda(&fields[1])?),
+        attr: decode_cmj_function_attribute(&fields[2])?,
     })
 }
 
@@ -2570,6 +3144,7 @@ fn decode_cmj_apply(value: &OcamlValue) -> Option<Apply> {
 }
 
 fn decode_cmj_ap_info(value: &OcamlValue) -> Option<ApInfo> {
+    // `Lambda.ap_info = {ap_loc; ap_inlined}`.
     let (_, fields) = value.as_block_opt()?;
     Some(ApInfo {
         loc: Location::none(),
@@ -2577,20 +3152,8 @@ fn decode_cmj_ap_info(value: &OcamlValue) -> Option<ApInfo> {
             .get(1)
             .and_then(decode_cmj_inline_attribute)
             .unwrap_or_default(),
-        status: fields
-            .get(2)
-            .and_then(decode_cmj_apply_status)
-            .unwrap_or(ApplyStatus::Na),
+        status: ApplyStatus::Na,
     })
-}
-
-fn decode_cmj_apply_status(value: &OcamlValue) -> Option<ApplyStatus> {
-    match value.as_int() {
-        0 => Some(ApplyStatus::Na),
-        1 => Some(ApplyStatus::InferFull),
-        2 => Some(ApplyStatus::Uncurry),
-        _ => None,
-    }
 }
 
 fn decode_cmj_prim_info(value: &OcamlValue) -> Option<PrimInfo> {
@@ -2606,57 +3169,50 @@ fn decode_cmj_prim_info(value: &OcamlValue) -> Option<PrimInfo> {
 }
 
 fn decode_cmj_lambda_constant(value: &OcamlValue) -> Option<LambdaConstant> {
-    // OCaml Lam_constant.t constructor order is in compiler/frontend/lam_constant.ml:33-50.
+    // `Lambda.structured_constant` constructor order is in compiler/ml/lambda.mli.
     match value {
-        OcamlValue::Int(0) => Some(LambdaConstant::JsNull),
-        OcamlValue::Int(1) => Some(LambdaConstant::JsTrue),
+        OcamlValue::Int(0) => Some(LambdaConstant::Int {
+            i: 0,
+            comment: Some(Box::new(PointerInfo::AssertFalse)),
+        }),
+        OcamlValue::Int(1) => Some(LambdaConstant::ModuleAlias),
         OcamlValue::Int(2) => Some(LambdaConstant::JsFalse),
-        OcamlValue::Int(3) => Some(LambdaConstant::ModuleAlias),
-        OcamlValue::Block(0, fields) if fields.len() == 1 => Some(LambdaConstant::JsUndefined {
-            is_unit: fields[0].as_bool(),
-        }),
-        OcamlValue::Block(1, fields) if fields.len() == 2 => Some(LambdaConstant::Int {
+        OcamlValue::Int(3) => Some(LambdaConstant::JsTrue),
+        OcamlValue::Int(4) => Some(LambdaConstant::JsNull),
+        OcamlValue::Block(0, fields) if fields.len() == 1 => Some(LambdaConstant::Int {
             i: fields[0].as_int() as i32,
-            comment: decode_cmj_pointer_info(&fields[1])?,
+            comment: None,
         }),
-        OcamlValue::Block(2, fields) if fields.len() == 1 => Some(LambdaConstant::Constructor(
-            decode_cmj_variant_tag(&fields[0])?,
-        )),
-        OcamlValue::Block(3, fields) if fields.len() == 1 => {
+        OcamlValue::Block(1, fields) if fields.len() == 1 => {
             Some(LambdaConstant::Char(fields[0].as_int() as i32))
         }
-        OcamlValue::Block(4, fields) if fields.len() == 2 => Some(LambdaConstant::String {
-            s: fields[0].as_string().to_string(),
-            delim: decode_cmj_external_delim_option(&fields[1])?,
-        }),
-        OcamlValue::Block(5, fields) if fields.len() == 1 => {
+        OcamlValue::Block(2, fields) if fields.len() == 1 => {
+            Some(LambdaConstant::String(fields[0].as_string().to_string()))
+        }
+        OcamlValue::Block(3, fields) if fields.len() == 1 => {
             Some(LambdaConstant::Float(fields[0].as_string().to_string()))
         }
-        OcamlValue::Block(6, fields) if fields.len() == 2 => Some(LambdaConstant::BigInt {
+        OcamlValue::Block(4, fields) if fields.len() == 2 => Some(LambdaConstant::BigInt {
             negative: fields[0].as_bool(),
             value: fields[1].as_string().to_string(),
         }),
+        OcamlValue::Block(5, fields) if fields.len() == 2 => Some(LambdaConstant::Block {
+            tag_info: Box::new(decode_cmj_tag_info(&fields[0])?),
+            elements: decode_cmj_list(&fields[1], decode_cmj_lambda_constant)?,
+        }),
+        OcamlValue::Block(6, fields) if fields.len() == 1 => Some(LambdaConstant::Constructor(
+            decode_cmj_variant_tag(&fields[0])?,
+        )),
+        // Tagless polymorphic variant; numeric-looking names are Const_int.
         OcamlValue::Block(7, fields) if fields.len() == 1 => {
             Some(LambdaConstant::Pointer(fields[0].as_string().to_string()))
         }
-        OcamlValue::Block(8, fields) if fields.len() == 2 => Some(LambdaConstant::Block {
-            tag_info: decode_cmj_tag_info(&fields[0])?,
-            elements: decode_cmj_list(&fields[1], decode_cmj_lambda_constant)?,
-        }),
-        OcamlValue::Block(9, fields) if fields.len() == 1 => Some(LambdaConstant::Some(Box::new(
+        OcamlValue::Block(8, fields) if fields.len() == 1 => Some(LambdaConstant::Some(Box::new(
             decode_cmj_lambda_constant(&fields[0])?,
         ))),
-        _ => None,
-    }
-}
-
-fn decode_cmj_pointer_info(value: &OcamlValue) -> Option<Option<PointerInfo>> {
-    match value {
-        OcamlValue::Int(0) => Some(None),
-        OcamlValue::Int(1) => Some(Some(PointerInfo::AssertFalse)),
-        OcamlValue::Block(0, fields) if fields.len() == 1 => {
-            Some(Some(PointerInfo::Some(fields[0].as_string().to_string())))
-        }
+        OcamlValue::Block(9, fields) if fields.len() == 1 => Some(LambdaConstant::JsUndefined {
+            is_unit: fields[0].as_bool(),
+        }),
         _ => None,
     }
 }
@@ -2670,24 +3226,25 @@ fn decode_cmj_variant_tag(value: &OcamlValue) -> Option<crate::types::VariantTag
     }
     Some(crate::types::VariantTag {
         name: fields[0].as_string().to_string(),
-        tag_type: decode_cmj_variant_tag_type_option(&fields[1])?,
+        literal: decode_cmj_variant_literal_tag_option(&fields[1])?,
     })
 }
 
-fn decode_cmj_variant_tag_type_option(
+fn decode_cmj_variant_literal_tag_option(
     value: &OcamlValue,
-) -> Option<Option<crate::types::VariantTagType>> {
+) -> Option<Option<crate::types::VariantLiteralTag>> {
     match value {
         OcamlValue::Int(0) => Some(None),
         OcamlValue::Block(0, fields) if fields.len() == 1 => {
-            Some(Some(decode_cmj_variant_tag_type(&fields[0])?))
+            Some(Some(decode_cmj_variant_literal_tag(&fields[0])?))
         }
         _ => None,
     }
 }
 
-fn decode_cmj_variant_tag_type(value: &OcamlValue) -> Option<crate::types::VariantTagType> {
-    use crate::types::VariantTagType as T;
+/// `Variant_runtime.literal_tag`.
+fn decode_cmj_variant_literal_tag(value: &OcamlValue) -> Option<crate::types::VariantLiteralTag> {
+    use crate::types::VariantLiteralTag as T;
     match value {
         OcamlValue::Int(0) => Some(T::Null),
         OcamlValue::Int(1) => Some(T::Undefined),
@@ -2695,7 +3252,7 @@ fn decode_cmj_variant_tag_type(value: &OcamlValue) -> Option<crate::types::Varia
             Some(T::String(fields[0].as_string().to_string()))
         }
         OcamlValue::Block(1, fields) if fields.len() == 1 => {
-            Some(T::Int(fields[0].as_int() as i32))
+            Some(T::Int(fields[0].as_int()))
         }
         OcamlValue::Block(2, fields) if fields.len() == 1 => {
             Some(T::Float(fields[0].as_string().to_string()))
@@ -2704,52 +3261,6 @@ fn decode_cmj_variant_tag_type(value: &OcamlValue) -> Option<crate::types::Varia
             Some(T::BigInt(fields[0].as_string().to_string()))
         }
         OcamlValue::Block(4, fields) if fields.len() == 1 => Some(T::Bool(fields[0].as_bool())),
-        OcamlValue::Block(5, fields) if fields.len() == 1 => {
-            Some(T::Untagged(decode_cmj_variant_block_type(&fields[0])?))
-        }
-        _ => None,
-    }
-}
-
-fn decode_cmj_variant_block_type(value: &OcamlValue) -> Option<crate::types::VariantBlockType> {
-    use crate::types::{VariantBlockType as T, VariantInstance as I};
-    match value {
-        OcamlValue::Int(0) => Some(T::Int),
-        OcamlValue::Int(1) => Some(T::String),
-        OcamlValue::Int(2) => Some(T::Float),
-        OcamlValue::Int(3) => Some(T::Bigint),
-        OcamlValue::Int(4) => Some(T::Boolean),
-        OcamlValue::Int(5) => Some(T::Function),
-        OcamlValue::Int(6) => Some(T::Object),
-        OcamlValue::Int(7) => Some(T::Unknown),
-        OcamlValue::Block(0, fields) if fields.len() == 1 => {
-            Some(T::Instance(match fields[0].as_int() {
-                0 => I::Array,
-                1 => I::ArrayBuffer,
-                2 => I::BigInt64Array,
-                3 => I::BigUint64Array,
-                4 => I::Blob,
-                5 => I::DataView,
-                6 => I::Date,
-                7 => I::File,
-                8 => I::Float32Array,
-                9 => I::Float64Array,
-                10 => I::Int16Array,
-                11 => I::Int32Array,
-                12 => I::Int8Array,
-                13 => I::Promise,
-                14 => I::RegExp,
-                15 => I::Uint16Array,
-                16 => I::Uint32Array,
-                17 => I::Uint8Array,
-                18 => I::Uint8ClampedArray,
-                19 => I::Set,
-                20 => I::Map,
-                21 => I::WeakSet,
-                22 => I::WeakMap,
-                _ => return None,
-            }))
-        }
         _ => None,
     }
 }
@@ -2763,16 +3274,29 @@ fn decode_cmj_tag_info(value: &OcamlValue) -> Option<TagInfo> {
         }
     }
 
-    fn block_runtime(value: &OcamlValue) -> Option<crate::types::BlockRuntime> {
+    /// `Variant_runtime.tagged_block`.
+    fn tagged_block(value: &OcamlValue) -> Option<crate::types::TaggedBlock> {
         let (_, fields) = value.as_block_opt()?;
-        Some(crate::types::BlockRuntime {
+        Some(crate::types::TaggedBlock {
             tag: decode_cmj_variant_tag(fields.first()?)?,
             tag_name: fields
                 .get(1)?
                 .as_option()
                 .map(|name| name.as_string().to_string()),
-            untagged: fields.get(2)?.as_bool(),
         })
+    }
+
+    /// `Variant_runtime.block`: `Tagged of tagged_block` or the inline
+    /// record `Untagged of {tag; block_type}`.
+    fn block(value: &OcamlValue) -> Option<crate::types::VariantBlock> {
+        match value.as_block_opt()? {
+            (0, fields) => Some(crate::types::VariantBlock::Tagged(tagged_block(fields.first()?)?)),
+            (1, fields) => Some(crate::types::VariantBlock::Untagged {
+                tag: decode_cmj_variant_tag(fields.first()?)?,
+                block_type: crate::cmi::sig_reader::decode_variant_block_type(fields.get(1)?),
+            }),
+            _ => None,
+        }
     }
 
     fn record_fields(value: &OcamlValue) -> Option<Vec<(String, bool)>> {
@@ -2805,15 +3329,15 @@ fn decode_cmj_tag_info(value: &OcamlValue) -> Option<TagInfo> {
         )
     }
 
+    // `Lambda.tag_info` constructor order is in compiler/ml/lambda.mli.
     match value {
         OcamlValue::Int(0) => Some(TagInfo::Tuple),
-        OcamlValue::Int(1) => Some(TagInfo::Extension),
-        OcamlValue::Int(2) => Some(TagInfo::Some),
-        OcamlValue::Int(3) => Some(TagInfo::SomeNotNested),
+        OcamlValue::Int(1) => Some(TagInfo::PolyVar(String::new())),
+        OcamlValue::Int(2) => Some(TagInfo::Extension),
         OcamlValue::Block(0, fields) if fields.len() == 3 => Some(TagInfo::Constructor {
             name: fields[0].as_string().to_string(),
             num_nonconst: fields[1].as_int() as i32,
-            runtime: block_runtime(&fields[2])?,
+            runtime: Box::new(tagged_block(&fields[2])?),
         }),
         OcamlValue::Block(1, fields) if fields.len() == 5 => Some(TagInfo::RecordInlined {
             name: fields[0].as_string().to_string(),
@@ -2821,23 +3345,20 @@ fn decode_cmj_tag_info(value: &OcamlValue) -> Option<TagInfo> {
             fields: record_fields(&fields[2])?,
             logical_field_count: None,
             mutable_flag: mutable_flag(&fields[3])?,
-            runtime: block_runtime(&fields[4])?,
+            runtime: Box::new(block(&fields[4])?),
         }),
-        OcamlValue::Block(2, fields) if fields.len() == 1 => {
-            Some(TagInfo::PolyVar(fields[0].as_string().to_string()))
-        }
-        OcamlValue::Block(3, fields) if fields.len() == 2 => Some(TagInfo::Record {
+        OcamlValue::Block(2, fields) if fields.len() == 2 => Some(TagInfo::Record {
             fields: record_fields(&fields[0])?,
             logical_field_count: None,
             mutable_flag: mutable_flag(&fields[1])?,
         }),
-        OcamlValue::Block(4, fields) if fields.len() == 1 => {
+        OcamlValue::Block(3, fields) if fields.len() == 1 => {
             Some(TagInfo::Module(decode_cmj_string_list(&fields[0])?))
         }
-        OcamlValue::Block(5, fields) if fields.len() == 1 => Some(TagInfo::ModuleExport(
+        OcamlValue::Block(4, fields) if fields.len() == 1 => Some(TagInfo::ModuleExport(
             decode_cmj_list(&fields[0], decode_cmj_ident)?,
         )),
-        OcamlValue::Block(6, fields) if fields.len() == 2 => Some(TagInfo::RecordExt {
+        OcamlValue::Block(5, fields) if fields.len() == 2 => Some(TagInfo::RecordExt {
             fields: string_array(&fields[0])?,
             mutable_flag: mutable_flag(&fields[1])?,
         }),
@@ -2846,62 +3367,133 @@ fn decode_cmj_tag_info(value: &OcamlValue) -> Option<TagInfo> {
 }
 
 fn decode_cmj_primitive(value: &OcamlValue) -> Option<Primitive> {
+    // `Lambda.primitive` constructor order is in compiler/ml/lambda.mli.
     match value {
-        // OCaml Lam_primitive.t nullary constructor indexes follow
-        // compiler/core/lam_primitive.ml:36-184, excluding payload variants.
-        OcamlValue::Int(1) => Some(Primitive::Praise),
-        OcamlValue::Int(6) => Some(Primitive::Pobjsize),
-        OcamlValue::Int(7) => Some(Primitive::Psequand),
-        OcamlValue::Int(8) => Some(Primitive::Psequor),
-        OcamlValue::Int(9) => Some(Primitive::Pnot),
-        OcamlValue::Int(13) => Some(Primitive::Pisint),
-        OcamlValue::Int(14) => Some(Primitive::Pnegint),
-        OcamlValue::Int(15) => Some(Primitive::Paddint),
-        OcamlValue::Int(16) => Some(Primitive::Psubint),
-        OcamlValue::Int(17) => Some(Primitive::Pmulint),
-        OcamlValue::Int(18) => Some(Primitive::Pdivint),
-        OcamlValue::Int(19) => Some(Primitive::Pmodint),
-        OcamlValue::Int(21) => Some(Primitive::Pandint),
-        OcamlValue::Int(22) => Some(Primitive::Porint),
-        OcamlValue::Int(23) => Some(Primitive::Pxorint),
-        OcamlValue::Int(25) => Some(Primitive::Plslint),
-        OcamlValue::Int(26) => Some(Primitive::Plsrint),
-        OcamlValue::Int(27) => Some(Primitive::Pasrint),
-        OcamlValue::Int(59) => Some(Primitive::Pstringlength),
-        OcamlValue::Int(66) => Some(Primitive::Pmakearray),
-        OcamlValue::Int(67) => Some(Primitive::Parraylength),
-        OcamlValue::Int(68) => Some(Primitive::Parrayrefu),
-        OcamlValue::Int(69) => Some(Primitive::Parraysetu),
-        OcamlValue::Int(77) => Some(Primitive::PjsApply),
-        OcamlValue::Int(91) => Some(Primitive::PfnArity),
-        OcamlValue::Int(93) => Some(Primitive::PisNotNone),
-        OcamlValue::Int(94) => Some(Primitive::PvalFromOption),
-        OcamlValue::Int(95) => Some(Primitive::PvalFromOptionNotNest),
-        OcamlValue::Int(96) => Some(Primitive::Psome),
-        OcamlValue::Int(97) => Some(Primitive::PsomeNotNest),
-        OcamlValue::Block(0, fields) if fields.len() == 2 => Some(Primitive::Pmakeblock(
-            decode_cmj_tag_info(&fields[0])?,
-            match fields[1].as_int() {
-                0 => Mutable::Immutable,
-                1 => Mutable::Mutable,
-                _ => return None,
-            },
-        )),
+        OcamlValue::Int(0) => Some(Primitive::Pdebugger),
+        OcamlValue::Int(1) => Some(Primitive::Ptypeof),
+        OcamlValue::Int(2) => Some(Primitive::Psome),
+        OcamlValue::Int(3) => Some(Primitive::PsomeNotNest),
+        OcamlValue::Int(4) => Some(Primitive::Pduprecord),
+        OcamlValue::Int(5) => Some(Primitive::Praise),
+        OcamlValue::Int(6) => Some(Primitive::Pobjorder),
+        OcamlValue::Int(7) => Some(Primitive::Pobjmin),
+        OcamlValue::Int(8) => Some(Primitive::Pobjmax),
+        OcamlValue::Int(9) => Some(Primitive::Pobjtag),
+        OcamlValue::Int(10) => Some(Primitive::Pobjsize),
+        OcamlValue::Int(11) => Some(Primitive::Psequand),
+        OcamlValue::Int(12) => Some(Primitive::Psequor),
+        OcamlValue::Int(13) => Some(Primitive::Pnot),
+        OcamlValue::Int(14) => Some(Primitive::Pboolorder),
+        OcamlValue::Int(15) => Some(Primitive::Pboolmin),
+        OcamlValue::Int(16) => Some(Primitive::Pboolmax),
+        OcamlValue::Int(17) => Some(Primitive::Pnegint),
+        OcamlValue::Int(18) => Some(Primitive::Paddint),
+        OcamlValue::Int(19) => Some(Primitive::Psubint),
+        OcamlValue::Int(20) => Some(Primitive::Pmulint),
+        OcamlValue::Int(21) => Some(Primitive::Pdivint),
+        OcamlValue::Int(22) => Some(Primitive::Pmodint),
+        OcamlValue::Int(23) => Some(Primitive::Ppowint),
+        OcamlValue::Int(24) => Some(Primitive::Pandint),
+        OcamlValue::Int(25) => Some(Primitive::Porint),
+        OcamlValue::Int(26) => Some(Primitive::Pxorint),
+        OcamlValue::Int(27) => Some(Primitive::Pnotint),
+        OcamlValue::Int(28) => Some(Primitive::Plslint),
+        OcamlValue::Int(29) => Some(Primitive::Plsrint),
+        OcamlValue::Int(30) => Some(Primitive::Pasrint),
+        OcamlValue::Int(31) => Some(Primitive::Pintorder),
+        OcamlValue::Int(32) => Some(Primitive::Pintmin),
+        OcamlValue::Int(33) => Some(Primitive::Pintmax),
+        OcamlValue::Int(34) => Some(Primitive::Pintoffloat),
+        OcamlValue::Int(35) => Some(Primitive::Pfloatofint),
+        OcamlValue::Int(36) => Some(Primitive::Pnegfloat),
+        OcamlValue::Int(37) => Some(Primitive::Pmodfloat),
+        OcamlValue::Int(38) => Some(Primitive::Paddfloat),
+        OcamlValue::Int(39) => Some(Primitive::Psubfloat),
+        OcamlValue::Int(40) => Some(Primitive::Pmulfloat),
+        OcamlValue::Int(41) => Some(Primitive::Pdivfloat),
+        OcamlValue::Int(42) => Some(Primitive::Ppowfloat),
+        OcamlValue::Int(43) => Some(Primitive::Pfloatorder),
+        OcamlValue::Int(44) => Some(Primitive::Pfloatmin),
+        OcamlValue::Int(45) => Some(Primitive::Pfloatmax),
+        OcamlValue::Int(46) => Some(Primitive::Pnegbigint),
+        OcamlValue::Int(47) => Some(Primitive::Paddbigint),
+        OcamlValue::Int(48) => Some(Primitive::Psubbigint),
+        OcamlValue::Int(49) => Some(Primitive::Ppowbigint),
+        OcamlValue::Int(50) => Some(Primitive::Pmulbigint),
+        OcamlValue::Int(51) => Some(Primitive::Pdivbigint),
+        OcamlValue::Int(52) => Some(Primitive::Pmodbigint),
+        OcamlValue::Int(53) => Some(Primitive::Pandbigint),
+        OcamlValue::Int(54) => Some(Primitive::Porbigint),
+        OcamlValue::Int(55) => Some(Primitive::Pxorbigint),
+        OcamlValue::Int(56) => Some(Primitive::Pnotbigint),
+        OcamlValue::Int(57) => Some(Primitive::Plslbigint),
+        OcamlValue::Int(58) => Some(Primitive::Pasrbigint),
+        OcamlValue::Int(59) => Some(Primitive::Pbigintorder),
+        OcamlValue::Int(60) => Some(Primitive::Pbigintmin),
+        OcamlValue::Int(61) => Some(Primitive::Pbigintmax),
+        OcamlValue::Int(62) => Some(Primitive::Pstringlength),
+        OcamlValue::Int(63) => Some(Primitive::Pstringrefu),
+        OcamlValue::Int(64) => Some(Primitive::Pstringrefs),
+        OcamlValue::Int(65) => Some(Primitive::Pstringorder),
+        OcamlValue::Int(66) => Some(Primitive::Pstringmin),
+        OcamlValue::Int(67) => Some(Primitive::Pstringmax),
+        OcamlValue::Int(68) => Some(Primitive::Pstringadd),
+        OcamlValue::Int(69) => Some(Primitive::Pmakearray),
+        OcamlValue::Int(70) => Some(Primitive::Parraylength),
+        OcamlValue::Int(71) => Some(Primitive::Parrayrefu),
+        OcamlValue::Int(72) => Some(Primitive::Parraysetu),
+        OcamlValue::Int(73) => Some(Primitive::Parrayrefs),
+        OcamlValue::Int(74) => Some(Primitive::Parraysets),
+        OcamlValue::Int(75) => Some(Primitive::Pmakelist),
+        OcamlValue::Int(76) => Some(Primitive::Pmakedict),
+        OcamlValue::Int(77) => Some(Primitive::PdictHas),
+        OcamlValue::Int(78) => Some(Primitive::Pawait),
+        OcamlValue::Int(79) => Some(Primitive::PinitMod),
+        OcamlValue::Int(80) => Some(Primitive::PupdateMod),
+        OcamlValue::Int(81) => Some(Primitive::Phash),
+        OcamlValue::Int(82) => Some(Primitive::PhashMixint),
+        OcamlValue::Int(83) => Some(Primitive::PhashMixstring),
+        OcamlValue::Int(84) => Some(Primitive::PhashFinalmix),
+        OcamlValue::Int(85) => Some(Primitive::Pisint),
+        OcamlValue::Int(86) => Some(Primitive::PisNullUndefined),
+        OcamlValue::Int(87) => Some(Primitive::PnullToOpt),
+        OcamlValue::Int(88) => Some(Primitive::PnullUndefinedToOpt),
+        OcamlValue::Int(89) => Some(Primitive::PisNull),
+        OcamlValue::Int(90) => Some(Primitive::PisUndefined),
+        OcamlValue::Int(91) => Some(Primitive::PisNotNone),
+        OcamlValue::Int(92) => Some(Primitive::PvalFromOption),
+        OcamlValue::Int(93) => Some(Primitive::PvalFromOptionNotNest),
+        OcamlValue::Int(94) => Some(Primitive::PisPolyVarBlock),
+        OcamlValue::Int(95) => Some(Primitive::PjsFnMethod),
+        OcamlValue::Block(0, fields) if fields.len() == 1 => {
+            let tag_info = decode_cmj_tag_info(&fields[0])?;
+            // `Lambda.mutable_flag_of_tag_info`: a block's mutability follows
+            // from its shape.
+            let mutable = match &tag_info {
+                TagInfo::Record { mutable_flag, .. }
+                | TagInfo::RecordInlined { mutable_flag, .. }
+                | TagInfo::RecordExt { mutable_flag, .. } => match mutable_flag {
+                    crate::parser::ast::MutableFlag::Mutable => Mutable::Mutable,
+                    crate::parser::ast::MutableFlag::Immutable => Mutable::Immutable,
+                },
+                _ => Mutable::Immutable,
+            };
+            Some(Primitive::Pmakeblock(tag_info, mutable))
+        }
         OcamlValue::Block(1, fields) if fields.len() == 2 => Some(Primitive::Pfield(
             fields[0].as_int() as i32,
             decode_cmj_field_dbg_info(&fields[1])?,
         )),
-        OcamlValue::Block(4, fields) if fields.len() == 5 => Some(Primitive::PjsCall {
+        OcamlValue::Block(4, fields) if fields.len() == 4 => Some(Primitive::PjsCall {
             prim_name: fields[0].as_string().to_string(),
-            arg_types: decode_cmj_list(&fields[1], decode_cmj_external_arg_spec)?,
-            ffi: decode_cmj_external_ffi_spec(&fields[2])?,
-            dynamic_import: fields[3].as_bool(),
-            transformed_jsx: fields[4].as_bool(),
+            arg_types: crate::cmi::ffi_decode::params(&fields[1])?,
+            ffi: Box::new(crate::cmi::ffi_decode::external_decl(&fields[2])?),
+            transformed_jsx: fields[3].as_bool(),
         }),
-        OcamlValue::Block(6, fields) if fields.len() == 1 => {
+        OcamlValue::Block(8, fields) if fields.len() == 1 => {
             Some(Primitive::Pobjcomp(decode_cmj_comparison(&fields[0])?))
         }
-        OcamlValue::Block(7, fields) if fields.len() == 1 => {
+        OcamlValue::Block(9, fields) if fields.len() == 1 => {
             Some(Primitive::Pboolcomp(decode_cmj_comparison(&fields[0])?))
         }
         OcamlValue::Block(10, fields) if fields.len() == 1 => {
@@ -2910,10 +3502,20 @@ fn decode_cmj_primitive(value: &OcamlValue) -> Option<Primitive> {
         OcamlValue::Block(11, fields) if fields.len() == 1 => {
             Some(Primitive::Pfloatcomp(decode_cmj_comparison(&fields[0])?))
         }
+        OcamlValue::Block(12, fields) if fields.len() == 1 => {
+            Some(Primitive::Pbigintcomp(decode_cmj_comparison(&fields[0])?))
+        }
         OcamlValue::Block(13, fields) if fields.len() == 1 => {
             Some(Primitive::Pstringcomp(decode_cmj_comparison(&fields[0])?))
         }
-        OcamlValue::Block(15, fields) if fields.len() == 1 => {
+        OcamlValue::Block(18, fields) if fields.len() == 1 => {
+            Some(Primitive::PtaggedTemplate(decode_cmj_string_list(&fields[0])?))
+        }
+        OcamlValue::Block(19, fields) if fields.len() == 1 => Some(Primitive::Ptemplate(decode_cmj_list(
+            &fields[0],
+            decode_cmj_template_segment,
+        )?)),
+        OcamlValue::Block(16, fields) if fields.len() == 1 => {
             Some(Primitive::Pjscomp(decode_cmj_comparison(&fields[0])?))
         }
         _ => None,
@@ -2947,125 +3549,19 @@ fn decode_cmj_field_dbg_info(value: &OcamlValue) -> Option<FieldDbgInfo> {
     }
 }
 
-fn decode_cmj_external_arg_spec(value: &OcamlValue) -> Option<ExternalArgSpec> {
-    let (_, fields) = value.as_block_opt()?;
-    if fields.len() < 2 {
-        return None;
-    }
-    Some(ExternalArgSpec {
-        arg_type: decode_cmj_external_arg_attr(&fields[0])?,
-        arg_label: decode_cmj_external_arg_label(&fields[1])?,
-    })
-}
-
-fn decode_cmj_external_arg_attr(value: &OcamlValue) -> Option<ExternalArgAttr> {
-    // compiler/frontend/external_arg_spec.ml:41-61.
+/// `String_literal.payload`: `Valid {source; semantic}` or `Invalid_source`.
+fn decode_cmj_template_segment(value: &OcamlValue) -> Option<crate::string_literal::TemplateSegment> {
+    use std::borrow::Cow;
     match value {
-        OcamlValue::Int(0) => Some(ExternalArgAttr::ExternUnit),
-        OcamlValue::Int(1) => Some(ExternalArgAttr::Nothing),
-        OcamlValue::Int(2) => Some(ExternalArgAttr::Ignore),
-        OcamlValue::Int(3) => Some(ExternalArgAttr::Unwrap),
-        OcamlValue::Block(3, fields) if fields.len() == 1 => Some(ExternalArgAttr::ArgCst(
-            decode_cmj_external_arg_const(&fields[0])?,
-        )),
-        _ => None,
-    }
-}
-
-fn decode_cmj_external_arg_label(value: &OcamlValue) -> Option<ExternalArgLabel> {
-    match value.as_int() {
-        0 => Some(ExternalArgLabel::Label),
-        1 => Some(ExternalArgLabel::Empty),
-        2 => Some(ExternalArgLabel::Optional),
-        _ => None,
-    }
-}
-
-fn decode_cmj_external_arg_const(value: &OcamlValue) -> Option<ExternalArgConst> {
-    match value {
-        OcamlValue::Block(0, fields) if fields.len() == 1 => {
-            Some(ExternalArgConst::IntLit(fields[0].as_int()))
-        }
-        OcamlValue::Block(1, fields) if fields.len() == 2 => Some(ExternalArgConst::StringLit(
-            fields[0].as_string().to_string(),
-            decode_cmj_external_arg_delim(&fields[1])?,
-        )),
-        _ => None,
-    }
-}
-
-fn decode_cmj_external_arg_delim(value: &OcamlValue) -> Option<ExternalArgDelim> {
-    match value.as_int() {
-        0 => Some(ExternalArgDelim::None),
-        1 => Some(ExternalArgDelim::StarJ),
-        2 => Some(ExternalArgDelim::NoQuotes),
-        3 => Some(ExternalArgDelim::BackQuotes),
-        _ => None,
-    }
-}
-
-fn decode_cmj_external_delim_option(value: &OcamlValue) -> Option<Option<StringDelim>> {
-    match value {
-        OcamlValue::Int(0) => Some(None),
-        OcamlValue::Block(0, fields) if fields.len() == 1 => Some(Some(match fields[0].as_int() {
-            0 => StringDelim::Plain,
-            1 => StringDelim::StarJ,
-            2 => StringDelim::NoQuotes,
-            3 => StringDelim::Backtick,
-            _ => return None,
-        })),
-        _ => None,
-    }
-}
-
-fn decode_cmj_external_ffi_spec(value: &OcamlValue) -> Option<ExternalFfiSpec> {
-    Some(ExternalFfiSpec {
-        kind: ExternalFfiKind::Default,
-        spec: Some(decode_cmj_external_spec(value)?),
-        obj_params: None,
-        return_wrapper: ExternalReturnWrapper::Identity,
-        inline_constant: None,
-    })
-}
-
-fn decode_cmj_external_spec(value: &OcamlValue) -> Option<ExternalSpec> {
-    // compiler/frontend/external_ffi_types.ml:45-75.
-    match value {
-        OcamlValue::Block(4, fields) if fields.len() >= 4 => Some(ExternalSpec::JsCall {
-            name: fields[0].as_string().to_string(),
-            external_module_name: decode_cmj_external_module_name_option(&fields[1])?,
-            splice: fields[2].as_bool(),
-            scopes: decode_cmj_string_list(&fields[3])?,
+        OcamlValue::Block(0, fields) if fields.len() == 2 => Some(crate::string_literal::StringLiteral::Valid {
+            source: Cow::Owned(fields[0].as_string().to_string()),
+            semantic: Cow::Owned(fields[1].as_string().to_string()),
         }),
-        OcamlValue::Block(6, fields) if fields.len() >= 4 => Some(ExternalSpec::JsNew {
-            name: fields[0].as_string().to_string(),
-            external_module_name: decode_cmj_external_module_name_option(&fields[1])?,
-            splice: fields[2].as_bool(),
-            scopes: decode_cmj_string_list(&fields[3])?,
-        }),
+        OcamlValue::Block(1, fields) if fields.len() == 1 => Some(
+            crate::string_literal::StringLiteral::InvalidSource(Cow::Owned(fields[0].as_string().to_string())),
+        ),
         _ => None,
     }
-}
-
-fn decode_cmj_external_module_name_option(
-    value: &OcamlValue,
-) -> Option<Option<ExternalModuleName>> {
-    match value {
-        OcamlValue::Int(0) => Some(None),
-        _ => Some(Some(decode_cmj_external_module_name(value.as_option()?)?)),
-    }
-}
-
-fn decode_cmj_external_module_name(value: &OcamlValue) -> Option<ExternalModuleName> {
-    let (_, fields) = value.as_block_opt()?;
-    if fields.len() < 2 {
-        return None;
-    }
-    Some(ExternalModuleName {
-        bundle: fields[0].as_string().to_string(),
-        module_bind_name: crate::lambda::lam_primitive::ExternalModuleBindName::Nothing,
-        import_attributes: None,
-    })
 }
 
 fn decode_cmj_string_list(value: &OcamlValue) -> Option<Vec<String>> {
@@ -3100,20 +3596,31 @@ fn decode_cmj_list<T>(
 /// during type unification, even when the type comes from a deeply nested module.
 pub(crate) fn register_types_by_stamp_recursive(md_type: &ModuleType, ctx: &TypeContext) {
     if let ModuleType::MtySignature(sig) = md_type {
-        register_types_by_stamp_in_signature_recursive(sig, ctx);
+        register_types_by_stamp_in_signature_recursive(sig, ctx, false);
     }
 }
 
-fn register_types_by_stamp_in_signature_recursive(sig: &Signature, ctx: &TypeContext) {
+fn register_types_by_stamp_in_signature_recursive(
+    sig: &Signature,
+    ctx: &TypeContext,
+    shared: bool,
+) {
     for item in sig {
         match item {
             SignatureItem::SigType(id, decl, _) => {
                 if id.stamp() != 0 {
-                    ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
+                    let decl = if shared {
+                        ctx.thread_store().shared_type_decl(decl)
+                    } else {
+                        decl.clone()
+                    };
+                    ctx.register_shared_type_decl_by_stamp(id.stamp(), decl);
                 }
             }
             SignatureItem::SigModule(_, md, _) => {
-                register_types_by_stamp_recursive(&md.md_type, ctx);
+                if let ModuleType::MtySignature(sub_sig) = &md.md_type {
+                    register_types_by_stamp_in_signature_recursive(sub_sig, ctx, shared);
+                }
             }
             _ => {}
         }
@@ -3147,13 +3654,38 @@ fn nonpersistent_path_head(path: &Path) -> Option<(i32, String)> {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone, Debug)]
 struct SubstMaps {
     type_stamp_map: HashMap<i32, Path>,
     type_name_map: HashMap<String, Path>,
     module_stamp_map: ModuleStampSubstMap,
     module_name_map: HashMap<String, Path>,
     protected_module_head: Option<(i32, String)>,
+}
+
+/// Fixed hasher keys: `AHashMap::default()` derives fresh random keys per
+/// map, and substitution maps are built for every qualified signature.
+static SUBST_MAP_STATE: ahash::RandomState = ahash::RandomState::with_seeds(
+    0x452821e6_38d01377,
+    0xbe5466cf_34e90c6c,
+    0xc0ac29b7_c97c50dd,
+    0x3f84d5b5_b5470917,
+);
+
+fn subst_map<K, V>() -> HashMap<K, V> {
+    std::collections::HashMap::with_hasher(SUBST_MAP_STATE.clone()).into()
+}
+
+impl Default for SubstMaps {
+    fn default() -> Self {
+        Self {
+            type_stamp_map: subst_map(),
+            type_name_map: subst_map(),
+            module_stamp_map: subst_map(),
+            module_name_map: subst_map(),
+            protected_module_head: None,
+        }
+    }
 }
 
 impl SubstMaps {
@@ -3266,6 +3798,22 @@ fn freshen_module_type_bound_idents_with_maps(
     maps: &SubstMaps,
     ctx: &TypeContext,
 ) {
+    let mut visited = HashSet::new();
+    freshen_module_type_bound_idents_rec(module_type, maps, ctx, &mut visited);
+}
+
+/// OCaml `Subst.modtype` (compiler/ml/subst.ml:345-376) with the composed
+/// substitution `maps`. Each path is substituted exactly once, through the
+/// substitution in scope where it occurs (as `Subst` rewrites the original
+/// identifiers), and each type node once (`visited`): renamed stamps can
+/// coincide with original ones, so substituting a rewritten path again would
+/// reach an unrelated identifier.
+fn freshen_module_type_bound_idents_rec(
+    module_type: &mut ModuleType,
+    maps: &SubstMaps,
+    ctx: &TypeContext,
+    visited: &mut HashSet<usize>,
+) {
     match module_type {
         ModuleType::MtyIdent(path) => {
             if !maps.is_empty() {
@@ -3298,7 +3846,7 @@ fn freshen_module_type_bound_idents_with_maps(
             }
         }
         ModuleType::MtySignature(sig) => {
-            freshen_signature_bound_idents_with_maps(sig, maps, ctx);
+            freshen_signature_bound_idents_rec(crate::types::decl::signature_mut(sig), maps, ctx, visited);
         }
         ModuleType::MtyFunctor {
             param,
@@ -3315,26 +3863,25 @@ fn freshen_module_type_bound_idents_with_maps(
             let mut param_maps = SubstMaps::default();
             insert_module_subst_path(&mut param_maps, &old_param, &new_param);
             let result_maps = merge_subst_maps(maps, &param_maps);
-            freshen_module_type_bound_idents_with_maps(result, &result_maps, ctx);
+            freshen_module_type_bound_idents_rec(result, &result_maps, ctx, visited);
             if let Some(param_type) = param_type.as_mut() {
-                freshen_module_type_bound_idents_with_maps(param_type, maps, ctx);
+                freshen_module_type_bound_idents_rec(param_type, maps, ctx, visited);
             }
         }
     }
 }
 
-fn freshen_signature_bound_idents_with_maps(
+/// OCaml `Subst.signature` (compiler/ml/subst.ml:322-364): rename this
+/// level's bound identifiers, then rewrite its components once through the
+/// outer substitution extended with those renamings; nested module types
+/// continue with that composed substitution.
+fn freshen_signature_bound_idents_rec(
     sig_items: &mut [SignatureItem],
     maps: &SubstMaps,
     ctx: &TypeContext,
+    visited: &mut HashSet<usize>,
 ) {
     let mut local_maps = SubstMaps::default();
-    let mut has_nested_module_types = false;
-
-    if !maps.is_empty() {
-        substitute_type_paths_in_sig_with_maps(sig_items, maps, ctx);
-        substitute_sig_decl_paths_in_place_with_maps(sig_items, maps);
-    }
 
     for item in sig_items.iter_mut() {
         match item {
@@ -3347,15 +3894,13 @@ fn freshen_signature_bound_idents_with_maps(
                 insert_type_subst_path(&mut local_maps, &old_id, &new_id);
                 *id = new_id;
             }
-            SignatureItem::SigModtype(id, mtd) => {
-                has_nested_module_types |= mtd.mtd_type.is_some();
+            SignatureItem::SigModtype(id, _) => {
                 let old_id = id.clone();
                 let new_id = ctx.rename_ident(&old_id);
                 insert_type_subst_path(&mut local_maps, &old_id, &new_id);
                 *id = new_id;
             }
             SignatureItem::SigModule(id, _, _) => {
-                has_nested_module_types = true;
                 let old_id = id.clone();
                 let new_id = ctx.rename_ident(&old_id);
                 insert_module_subst_path(&mut local_maps, &old_id, &new_id);
@@ -3365,36 +3910,25 @@ fn freshen_signature_bound_idents_with_maps(
         }
     }
 
-    if !local_maps.is_empty() {
-        substitute_type_paths_in_sig_with_maps(sig_items, &local_maps, ctx);
-        substitute_sig_decl_paths_in_place_with_maps(sig_items, &local_maps);
-    }
-
-    if !has_nested_module_types {
-        return;
-    }
-
-    let owned_combined_maps = if local_maps.is_empty() {
-        None
+    let combined_maps = if local_maps.is_empty() {
+        maps.clone()
     } else if maps.is_empty() && maps.protected_module_head.is_none() {
-        None
+        local_maps
     } else {
-        Some(merge_subst_maps(maps, &local_maps))
+        merge_subst_maps(maps, &local_maps)
     };
-    let combined_maps = match owned_combined_maps.as_ref() {
-        Some(combined_maps) => combined_maps,
-        None if local_maps.is_empty() => maps,
-        None => &local_maps,
-    };
+
+    substitute_type_paths_in_sig_items(sig_items, &combined_maps, ctx, visited, false);
+    substitute_sig_decl_paths_in_place_with_maps_rec(sig_items, &combined_maps, false);
 
     for item in sig_items.iter_mut() {
         match item {
             SignatureItem::SigModule(_, md, _) => {
-                freshen_module_type_bound_idents_with_maps(&mut md.md_type, combined_maps, ctx);
+                freshen_module_type_bound_idents_rec(&mut md.md_type, &combined_maps, ctx, visited);
             }
             SignatureItem::SigModtype(_, mtd) => {
                 if let Some(module_type) = mtd.mtd_type.as_mut() {
-                    freshen_module_type_bound_idents_with_maps(module_type, combined_maps, ctx);
+                    freshen_module_type_bound_idents_rec(module_type, &combined_maps, ctx, visited);
                 }
             }
             _ => {}
@@ -3441,23 +3975,47 @@ fn freshened_signature_ident_plan(
     (new_idents, local_maps, has_nested_module_types)
 }
 
+/// Number of binder stamps `freshened_signature_bound_idents_from_kind`
+/// allocates for `sig_items`: one per top-level binder
+/// (`freshened_signature_ident_plan`), then the nested module-type binders
+/// renamed by `freshen_nested_signature_module_types`.
+pub(crate) fn signature_freshen_stamp_count(sig_items: &[SignatureItem]) -> i32 {
+    fn module_type_count(module_type: &ModuleType) -> i32 {
+        match module_type {
+            ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => 0,
+            ModuleType::MtySignature(sig) => signature_freshen_stamp_count(sig),
+            ModuleType::MtyFunctor {
+                param_type, result, ..
+            } => {
+                1 + module_type_count(result)
+                    + param_type.as_ref().map_or(0, |param| module_type_count(param))
+            }
+        }
+    }
+    sig_items
+        .iter()
+        .map(|item| match item {
+            SignatureItem::SigValue(..) | SignatureItem::SigTypext(..) | SignatureItem::SigType(..) => 1,
+            SignatureItem::SigModtype(_, mtd) => {
+                1 + mtd.mtd_type.as_ref().map_or(0, module_type_count)
+            }
+            SignatureItem::SigModule(_, md, _) => 1 + module_type_count(&md.md_type),
+            SignatureItem::SigClass | SignatureItem::SigClassType => 0,
+        })
+        .sum()
+}
+
 fn freshen_nested_signature_module_types(sig_items: &mut [SignatureItem], ctx: &TypeContext) {
+    let mut visited = HashSet::new();
+    let no_maps = SubstMaps::default();
     for item in sig_items.iter_mut() {
         match item {
             SignatureItem::SigModule(_, md, _) => {
-                freshen_module_type_bound_idents_with_maps(
-                    &mut md.md_type,
-                    &SubstMaps::default(),
-                    ctx,
-                );
+                freshen_module_type_bound_idents_rec(&mut md.md_type, &no_maps, ctx, &mut visited);
             }
             SignatureItem::SigModtype(_, mtd) => {
                 if let Some(module_type) = mtd.mtd_type.as_mut() {
-                    freshen_module_type_bound_idents_with_maps(
-                        module_type,
-                        &SubstMaps::default(),
-                        ctx,
-                    );
+                    freshen_module_type_bound_idents_rec(module_type, &no_maps, ctx, &mut visited);
                 }
             }
             _ => {}
@@ -3666,7 +4224,7 @@ fn substitute_module_type_paths_with_maps(module_type: &mut ModuleType, maps: &S
             );
         }
         ModuleType::MtySignature(sig) => {
-            substitute_sig_decl_paths_in_place_with_maps(sig, maps);
+            substitute_sig_decl_paths_in_place_with_maps(crate::types::decl::signature_mut(sig), maps);
         }
         ModuleType::MtyFunctor {
             param_type, result, ..
@@ -3680,6 +4238,16 @@ fn substitute_module_type_paths_with_maps(module_type: &mut ModuleType, maps: &S
 }
 
 fn substitute_sig_decl_paths_in_place_with_maps(sig_items: &mut [SignatureItem], maps: &SubstMaps) {
+    substitute_sig_decl_paths_in_place_with_maps_rec(sig_items, maps, true);
+}
+
+/// Substitute the declaration paths of `sig_items`; without `recurse`, the
+/// module types of nested modules and module types are left alone.
+fn substitute_sig_decl_paths_in_place_with_maps_rec(
+    sig_items: &mut [SignatureItem],
+    maps: &SubstMaps,
+    recurse: bool,
+) {
     if maps.is_empty() {
         return;
     }
@@ -3699,7 +4267,7 @@ fn substitute_sig_decl_paths_in_place_with_maps(sig_items: &mut [SignatureItem],
                 }
             }
             SignatureItem::SigType(_, decl, _) => {
-                if let Some(path) = decl.type_path.as_mut() {
+                if let Some(path) = std::sync::Arc::make_mut(decl).type_path.as_mut() {
                     *path = substitute_type_path(
                         path,
                         &maps.type_stamp_map,
@@ -3731,10 +4299,12 @@ fn substitute_sig_decl_paths_in_place_with_maps(sig_items: &mut [SignatureItem],
                         maps.protected_module_head.as_ref(),
                     );
                 }
-                substitute_module_type_paths_with_maps(&mut md.md_type, maps);
+                if recurse {
+                    substitute_module_type_paths_with_maps(&mut md.md_type, maps);
+                }
             }
             SignatureItem::SigModtype(_, mtd) => {
-                if let Some(module_type) = mtd.mtd_type.as_mut() {
+                if recurse && let Some(module_type) = mtd.mtd_type.as_mut() {
                     substitute_module_type_paths_with_maps(module_type, maps);
                 }
             }
@@ -3753,11 +4323,23 @@ fn substitute_type_paths_in_sig_with_maps(
     maps: &SubstMaps,
     ctx: &TypeContext,
 ) {
+    let mut visited = HashSet::new();
+    substitute_type_paths_in_sig_items(sig_items, maps, ctx, &mut visited, true);
+}
+
+/// Substitute the type paths of `sig_items`' type expressions, visiting each
+/// type node once per `visited` set. With `recurse`, nested module
+/// signatures are included; without it only this level's items are.
+fn substitute_type_paths_in_sig_items(
+    sig_items: &[SignatureItem],
+    maps: &SubstMaps,
+    ctx: &TypeContext,
+    visited: &mut HashSet<usize>,
+    recurse: bool,
+) {
     if maps.is_empty() {
         return;
     }
-
-    let mut visited = HashSet::new();
 
     for item in sig_items {
         match item {
@@ -3770,7 +4352,7 @@ fn substitute_type_paths_in_sig_with_maps(
                     &maps.module_name_map,
                     maps.protected_module_head.as_ref(),
                     ctx,
-                    &mut visited,
+                    visited,
                 );
             }
             SignatureItem::SigType(_id, decl, _) => {
@@ -3783,7 +4365,7 @@ fn substitute_type_paths_in_sig_with_maps(
                         &maps.module_name_map,
                         maps.protected_module_head.as_ref(),
                         ctx,
-                        &mut visited,
+                        visited,
                     );
                 }
 
@@ -3796,7 +4378,7 @@ fn substitute_type_paths_in_sig_with_maps(
                         &maps.module_name_map,
                         maps.protected_module_head.as_ref(),
                         ctx,
-                        &mut visited,
+                        visited,
                     );
                 }
 
@@ -3814,7 +4396,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                             &maps.module_name_map,
                                             maps.protected_module_head.as_ref(),
                                             ctx,
-                                            &mut visited,
+                                            visited,
                                         );
                                     }
                                 }
@@ -3828,7 +4410,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                             &maps.module_name_map,
                                             maps.protected_module_head.as_ref(),
                                             ctx,
-                                            &mut visited,
+                                            visited,
                                         );
                                     }
                                 }
@@ -3842,7 +4424,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                     &maps.module_name_map,
                                     maps.protected_module_head.as_ref(),
                                     ctx,
-                                    &mut visited,
+                                    visited,
                                 );
                             }
                         }
@@ -3857,7 +4439,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                 &maps.module_name_map,
                                 maps.protected_module_head.as_ref(),
                                 ctx,
-                                &mut visited,
+                                visited,
                             );
                         }
                     }
@@ -3874,7 +4456,7 @@ fn substitute_type_paths_in_sig_with_maps(
                         &maps.module_name_map,
                         maps.protected_module_head.as_ref(),
                         ctx,
-                        &mut visited,
+                        visited,
                     );
                 }
                 match &ext.ext_args {
@@ -3888,7 +4470,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                 &maps.module_name_map,
                                 maps.protected_module_head.as_ref(),
                                 ctx,
-                                &mut visited,
+                                visited,
                             );
                         }
                     }
@@ -3902,7 +4484,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                 &maps.module_name_map,
                                 maps.protected_module_head.as_ref(),
                                 ctx,
-                                &mut visited,
+                                visited,
                             );
                         }
                     }
@@ -3916,13 +4498,13 @@ fn substitute_type_paths_in_sig_with_maps(
                         &maps.module_name_map,
                         maps.protected_module_head.as_ref(),
                         ctx,
-                        &mut visited,
+                        visited,
                     );
                 }
             }
             SignatureItem::SigModule(_id, md, _) => {
-                if let ModuleType::MtySignature(sub_sig) = &md.md_type {
-                    substitute_type_paths_in_sig_with_maps(sub_sig, maps, ctx);
+                if recurse && let ModuleType::MtySignature(sub_sig) = &md.md_type {
+                    substitute_type_paths_in_sig_items(sub_sig, maps, ctx, visited, true);
                 }
             }
             SignatureItem::SigModtype(..)
@@ -3955,6 +4537,35 @@ pub fn substitute_type_paths_in_child_sig(
     restore_child_self_manifests_from_parent_scope(child_sig, parent_sig, parent_module_path, ctx);
 }
 
+/// Rewrite module-alias targets of a scraped child signature through the
+/// parent component substitution.
+///
+/// OCaml compiler/ml/env.ml:1573-1578 builds child component tables with the
+/// parent `sub` from env.ml:1530 `prefix_idents`; `scrape_alias` at
+/// env.ml:1396-1408 strengthens the scraped signature with the unprefixed alias
+/// path (e.g. `X.B` for a sibling `X`), and forcing the child module thunk at
+/// env.ml:475-477 applies `Subst.modtype sub`, which rewrites that `X` to the
+/// selected parent path (compiler/ml/subst.ml:69-76).
+pub fn substitute_module_alias_paths_in_child_sig(
+    child_sig: &mut [SignatureItem],
+    parent_sig: &[SignatureItem],
+    parent_module_path: &Path,
+) {
+    let maps = build_subst_maps(parent_sig, parent_module_path);
+    for item in child_sig.iter_mut() {
+        if let SignatureItem::SigModule(_, md, _) = item
+            && let ModuleType::MtyAlias(_, path) = &mut md.md_type
+        {
+            *path = substitute_module_path(
+                path,
+                &maps.module_stamp_map,
+                &maps.module_name_map,
+                maps.protected_module_head.as_ref(),
+            );
+        }
+    }
+}
+
 fn restore_child_self_manifests_from_parent_scope(
     child_sig: &[SignatureItem],
     parent_sig: &[SignatureItem],
@@ -3969,7 +4580,7 @@ fn restore_child_self_manifests_from_parent_scope(
             continue;
         };
         let manifest = ctx.repr(manifest);
-        let desc = ctx.get_desc(manifest).clone();
+        let desc = ctx.get_desc(manifest).into_desc();
         let TypeDesc::Tconstr { path, args, abbrev } = desc else {
             continue;
         };
@@ -4073,7 +4684,7 @@ pub fn substitute_type_paths_in_sig(
             _ => {}
         }
     }
-    let type_name_map = &direct_type_name_map;
+    let type_name_map = direct_type_name_map;
     let module_stamp_map = &maps.module_stamp_map;
     let module_name_map = &maps.module_name_map;
     let protected_module_head = maps.protected_module_head.as_ref();
@@ -4373,11 +4984,12 @@ fn substitute_type_expr_path(
     let mut work_stack = vec![initial_ty_ref];
 
     while let Some(ty_ref) = work_stack.pop() {
-        if !visited.insert(ty_ref.index()) {
+        if !visited.insert(ty_ref.key()) {
             continue; // Already visited (cycle detection)
         }
 
-        let desc = ctx.get_desc(ty_ref);
+        let desc = ctx.borrow_desc(ty_ref);
+        let mut replacement = None;
 
         match &*desc {
             TypeDesc::Tconstr { path, args, .. } => {
@@ -4394,7 +5006,7 @@ fn substitute_type_expr_path(
                     if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                         *path = new_path;
                     }
-                    ctx.set_desc(ty_ref, new_desc);
+                    replacement = Some(new_desc);
                 }
 
                 // Push type arguments onto work stack
@@ -4446,7 +5058,7 @@ fn substitute_type_expr_path(
                         {
                             *path = new_path;
                         }
-                        ctx.set_desc(ty_ref, new_desc);
+                        replacement = Some(new_desc);
                     }
                 }
                 if let Some((_, args)) = &row.row_name {
@@ -4485,7 +5097,7 @@ fn substitute_type_expr_path(
                     if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                         *path = new_path;
                     }
-                    ctx.set_desc(ty_ref, new_desc);
+                    replacement = Some(new_desc);
                 }
                 for &arg in args {
                     work_stack.push(arg);
@@ -4493,17 +5105,134 @@ fn substitute_type_expr_path(
             }
             TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
         }
+        drop(desc);
+        if let Some(new_desc) = replacement {
+            ctx.set_desc(ty_ref, new_desc);
+        }
     }
 }
 
-pub fn substitute_type_paths_in_value_from_sig(
+/// Path prefixes that `prefix_idents` (env.ml:1454-1481) re-roots when a
+/// component is reached through a module alias. OCaml's raw unit signature
+/// names its own binders with local idents, which the component prefix
+/// replaces; Rust's persistent signatures name them through the unit path,
+/// so every `<alias source>.x` becomes `<component>.x`.
+pub fn alias_reroot_prefixes(module_path: &Path, ctx: &TypeContext) -> Vec<(Path, Path)> {
+    component_alias_sources(module_path, ctx)
+        .into_iter()
+        .filter(|source| !source.same(module_path))
+        .map(|source| (source, module_path.clone()))
+        .collect()
+}
+
+/// Copy `desc` with its alias-source paths re-rooted at the component when
+/// its type mentions any (`Subst.value_description` of env.ml:1537).
+pub fn reroot_value_description(
     desc: &mut crate::types::decl::ValueDescription,
-    sig_items: &[SignatureItem],
-    module_path: &Path,
+    prefixes: &[(Path, Path)],
     ctx: &TypeContext,
 ) {
+    if prefixes.is_empty() || !type_expr_mentions_path_prefixes(desc.val_type, prefixes, ctx) {
+        return;
+    }
+    let mut cache = crate::types::type_expr::TypeExprRefMap::new();
+    let map_path = |p: &Path| reroot_path(p, prefixes);
+    desc.val_type =
+        crate::types::typecore::copy_type_expr_mapping_paths(ctx, desc.val_type, &mut cache, &map_path);
+}
+
+/// Alias sources of a component path, including those inherited from its
+/// ancestors: when `A.B` is reached through the alias `A = U`, `A.B.C` is the
+/// component `U.B.C` re-rooted (env.ml:1567-1578 builds child components
+/// from the parent's prefixed signature).
+fn component_alias_sources(module_path: &Path, ctx: &TypeContext) -> Vec<Path> {
+    let mut sources = ctx.alias_sources_for_component_path(module_path);
+    if let Path::Pdot(parent, name, _) = module_path {
+        for parent_source in component_alias_sources(parent, ctx) {
+            let derived = Path::pdot(parent_source, name.as_str());
+            if !derived.same(module_path) && !sources.iter().any(|s| s.same(&derived)) {
+                sources.push(derived);
+            }
+        }
+    }
+    sources
+}
+
+/// Rewrite `path` through the first matching `(old, new)` prefix pair.
+pub fn reroot_path(path: &Path, prefixes: &[(Path, Path)]) -> Path {
+    rewrite_path_by_path_prefixes(path, &PathPrefixes::new(prefixes)).unwrap_or_else(|| path.clone())
+}
+
+/// Whether any type constructor or package path reachable from `ty` starts
+/// with one of the `old` prefixes.
+pub fn type_expr_mentions_path_prefixes(
+    ty: TypeExprRef,
+    prefixes: &[(Path, Path)],
+    ctx: &TypeContext,
+) -> bool {
+    fn walk(
+        ty: TypeExprRef,
+        prefixes: &PathPrefixes<'_>,
+        ctx: &TypeContext,
+        visited: &mut HashSet<TypeExprRef>,
+    ) -> bool {
+        if !visited.insert(ty) {
+            return false;
+        }
+        let desc = ctx.get_desc(ty);
+        let hit = |p: &Path| rewrite_path_by_path_prefixes(p, prefixes).is_some();
+        match &*desc {
+            TypeDesc::Tconstr { path, args, .. } => {
+                hit(path) || args.iter().any(|a| walk(*a, prefixes, ctx, visited))
+            }
+            TypeDesc::Tarrow { args, ret } => {
+                args.iter().any(|a| walk(a.typ, prefixes, ctx, visited))
+                    || walk(*ret, prefixes, ctx, visited)
+            }
+            TypeDesc::Ttuple(items) => items.iter().any(|a| walk(*a, prefixes, ctx, visited)),
+            TypeDesc::Tlink(t) | TypeDesc::Tsubst(t) => walk(*t, prefixes, ctx, visited),
+            TypeDesc::Tpoly { body, vars } => {
+                walk(*body, prefixes, ctx, visited)
+                    || vars.iter().any(|v| walk(*v, prefixes, ctx, visited))
+            }
+            TypeDesc::Tobject { fields } => walk(*fields, prefixes, ctx, visited),
+            TypeDesc::Tfield { typ, rest, .. } => {
+                walk(*typ, prefixes, ctx, visited) || walk(*rest, prefixes, ctx, visited)
+            }
+            TypeDesc::Tvariant(row) => {
+                row.row_name.as_ref().is_some_and(|(p, args)| {
+                    hit(p) || args.iter().any(|a| walk(*a, prefixes, ctx, visited))
+                }) || walk(row.row_more, prefixes, ctx, visited)
+                    || row.row_fields.iter().any(|(_, field)| match field {
+                        crate::types::type_expr::RowField::Rpresent(Some(t)) => {
+                            walk(*t, prefixes, ctx, visited)
+                        }
+                        crate::types::type_expr::RowField::Reither { types, .. } => {
+                            types.iter().any(|t| walk(*t, prefixes, ctx, visited))
+                        }
+                        _ => false,
+                    })
+            }
+            TypeDesc::Tpackage { path, args, .. } => {
+                hit(path) || args.iter().any(|a| walk(*a, prefixes, ctx, visited))
+            }
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => false,
+        }
+    }
+    walk(ty, &PathPrefixes::new(prefixes), ctx, &mut HashSet::new())
+}
+
+/// Component substitution used by `substitute_type_paths_in_value_from_sig`.
+/// It depends only on the component signature and access path, so component
+/// tables can build it once and reuse it for every value lookup.
+#[derive(Debug)]
+pub struct ValueSubstMaps {
+    maps: SubstMaps,
+    direct_type_name_map: HashMap<String, Path>,
+}
+
+pub fn build_value_subst_maps(sig_items: &[SignatureItem], module_path: &Path) -> ValueSubstMaps {
     let maps = build_subst_maps_for_module(sig_items, module_path);
-    let type_stamp_map = &maps.type_stamp_map;
     // OCaml compiler/ml/env.ml:1530-1538 builds component substitutions with
     // `prefix_idents`, then compiler/ml/subst.ml:303-309 applies
     // `Subst.value_description`. In-process persistent signatures can preserve
@@ -4520,7 +5249,33 @@ pub fn substitute_type_paths_in_value_from_sig(
             _ => {}
         }
     }
-    let type_name_map = &direct_type_name_map;
+    ValueSubstMaps {
+        maps,
+        direct_type_name_map,
+    }
+}
+
+pub fn substitute_type_paths_in_value_from_sig(
+    desc: &mut crate::types::decl::ValueDescription,
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext,
+) {
+    let value_maps = build_value_subst_maps(sig_items, module_path);
+    substitute_type_paths_in_value_with_maps(desc, &value_maps, sig_items, module_path, ctx);
+}
+
+pub fn substitute_type_paths_in_value_with_maps(
+    desc: &mut crate::types::decl::ValueDescription,
+    value_maps: &ValueSubstMaps,
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext,
+) {
+    let maps = &value_maps.maps;
+    let direct_type_name_map = &value_maps.direct_type_name_map;
+    let type_stamp_map = &maps.type_stamp_map;
+    let type_name_map = direct_type_name_map;
     let module_stamp_map = &maps.module_stamp_map;
     let module_name_map = &maps.module_name_map;
     let protected_module_head = maps.protected_module_head.as_ref();
@@ -4545,9 +5300,13 @@ pub fn substitute_type_paths_in_value_from_sig(
         &mut visited,
     );
 
-    for alias_source in ctx.alias_sources_for_component_path(module_path) {
+    for alias_source in component_alias_sources(module_path, ctx) {
         for item in sig_items {
-            let SignatureItem::SigType(id, _, _) = item else {
+            // `prefix_idents` (env.ml:1454-1481) re-roots type and module
+            // binders alike: `Result.t` inside the aliased unit becomes
+            // `<component>.Result.t`, so nested module prefixes move too.
+            let (SignatureItem::SigType(id, _, _) | SignatureItem::SigModule(id, _, _)) = item
+            else {
                 continue;
             };
             let old_path = Path::pdot(alias_source.clone(), id.name());
@@ -4712,7 +5471,7 @@ fn rewrite_type_expr_prefix(
     ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
-    if !visited.insert(ty_ref.index()) {
+    if !visited.insert(ty_ref.key()) {
         return; // Already visited (cycle detection)
     }
 
@@ -4848,7 +5607,7 @@ fn rewrite_module_type_prefix_paths(
             }
         }
         ModuleType::MtySignature(sig) => {
-            rewrite_module_prefix_paths_in_sig(sig, old_name, new_prefix);
+            rewrite_module_prefix_paths_in_sig(crate::types::decl::signature_mut(sig), old_name, new_prefix);
         }
         ModuleType::MtyFunctor {
             param_type, result, ..
@@ -4876,7 +5635,7 @@ pub fn rewrite_module_prefix_paths_in_sig(
                 }
             }
             SignatureItem::SigType(_, decl, _) => {
-                if let Some(path) = decl.type_path.as_mut() {
+                if let Some(path) = std::sync::Arc::make_mut(decl).type_path.as_mut() {
                     if let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix) {
                         *path = rewritten;
                     }
@@ -4926,7 +5685,7 @@ pub fn rewrite_module_prefix_paths_in_sig_shallow(
                 }
             }
             SignatureItem::SigType(_, decl, _) => {
-                if let Some(path) = decl.type_path.as_mut()
+                if let Some(path) = std::sync::Arc::make_mut(decl).type_path.as_mut()
                     && let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix)
                 {
                     *path = rewritten;
@@ -5236,13 +5995,56 @@ fn rewrite_path_by_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path
     }
 }
 
-fn rewrite_path_by_path_prefixes(path: &Path, prefixes: &[(Path, Path)]) -> Option<Path> {
-    for (old_prefix, new_prefix) in prefixes {
-        if let Some(rewritten) = rewrite_path_by_path_prefix(path, old_prefix, new_prefix) {
-            return Some(rewritten);
+/// Prefix rewrites `(old, new)` tried in order, with an index from each old
+/// prefix (compared with `Path::same`) to its first position.
+struct PathPrefixes<'a> {
+    pairs: &'a [(Path, Path)],
+    index: Option<ahash::AHashMap<crate::types::context::SamePathKey, usize>>,
+}
+
+impl<'a> PathPrefixes<'a> {
+    fn new(pairs: &'a [(Path, Path)]) -> Self {
+        // A short list is cheaper to scan than to hash every ancestor.
+        let index = (pairs.len() > 4).then(|| {
+            let mut index = ahash::AHashMap::with_capacity(pairs.len());
+            for (position, (old_prefix, _)) in pairs.iter().enumerate() {
+                index
+                    .entry(crate::types::context::SamePathKey::new(old_prefix.clone()))
+                    .or_insert(position);
+            }
+            index
+        });
+        PathPrefixes { pairs, index }
+    }
+}
+
+fn rewrite_path_by_path_prefixes(path: &Path, prefixes: &PathPrefixes<'_>) -> Option<Path> {
+    let Some(index) = &prefixes.index else {
+        for (old_prefix, new_prefix) in prefixes.pairs {
+            if let Some(rewritten) = rewrite_path_by_path_prefix(path, old_prefix, new_prefix) {
+                return Some(rewritten);
+            }
+        }
+        return None;
+    };
+    // The scan above returns the first prefix, in list order, equal to the
+    // path or one of its `Pdot` ancestors. Find that prefix through the index,
+    // then rewrite with it exactly as the scan would.
+    let mut first: Option<usize> = None;
+    let mut ancestor = path;
+    loop {
+        if let Some(&position) =
+            index.get(&crate::types::context::SamePathKey::new(ancestor.clone()))
+        {
+            first = Some(first.map_or(position, |found| found.min(position)));
+        }
+        match ancestor {
+            Path::Pdot(inner, _, _) => ancestor = inner,
+            _ => break,
         }
     }
-    None
+    let (old_prefix, new_prefix) = &prefixes.pairs[first?];
+    rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
 }
 
 fn rewrite_module_type_by_path_prefix(
@@ -5257,7 +6059,7 @@ fn rewrite_module_type_by_path_prefix(
             }
         }
         ModuleType::MtySignature(sig) => {
-            rewrite_sig_paths_by_path_prefix(sig, old_prefix, new_prefix);
+            rewrite_sig_paths_by_path_prefix(crate::types::decl::signature_mut(sig), old_prefix, new_prefix);
         }
         ModuleType::MtyFunctor {
             param_type, result, ..
@@ -5287,7 +6089,7 @@ pub fn rewrite_sig_paths_by_path_prefix(
                 }
             }
             SignatureItem::SigType(_, decl, _) => {
-                if let Some(path) = decl.type_path.as_mut() {
+                if let Some(path) = std::sync::Arc::make_mut(decl).type_path.as_mut() {
                     if let Some(rewritten) =
                         rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
                     {
@@ -5342,7 +6144,7 @@ pub fn rewrite_sig_paths_by_path_prefix_shallow(
                 }
             }
             SignatureItem::SigType(_, decl, _) => {
-                if let Some(path) = decl.type_path.as_mut()
+                if let Some(path) = std::sync::Arc::make_mut(decl).type_path.as_mut()
                     && let Some(rewritten) =
                         rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
                 {
@@ -5375,7 +6177,7 @@ fn rewrite_type_expr_by_path_prefix(
     ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
-    if !visited.insert(ty_ref.index()) {
+    if !visited.insert(ty_ref.key()) {
         return;
     }
 
@@ -5485,11 +6287,11 @@ pub fn rewrite_type_expr_by_path_prefix_pub(
 
 fn rewrite_type_expr_by_path_prefixes(
     ty_ref: TypeExprRef,
-    prefixes: &[(Path, Path)],
+    prefixes: &PathPrefixes<'_>,
     ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
-    if !visited.insert(ty_ref.index()) {
+    if !visited.insert(ty_ref.key()) {
         return;
     }
 
@@ -5696,6 +6498,14 @@ pub fn rewrite_sig_by_path_prefixes(
     if prefixes.is_empty() {
         return;
     }
+    rewrite_sig_by_path_prefix_index(sig_items, &PathPrefixes::new(prefixes), ctx);
+}
+
+fn rewrite_sig_by_path_prefix_index(
+    sig_items: &[SignatureItem],
+    prefixes: &PathPrefixes<'_>,
+    ctx: &TypeContext,
+) {
 
     let mut visited = HashSet::new();
 
@@ -5761,7 +6571,7 @@ pub fn rewrite_sig_by_path_prefixes(
             }
             SignatureItem::SigModule(_id, md, _) => {
                 if let ModuleType::MtySignature(sub_sig) = &md.md_type {
-                    rewrite_sig_by_path_prefixes(sub_sig, prefixes, ctx);
+                    rewrite_sig_by_path_prefix_index(sub_sig, prefixes, ctx);
                 }
             }
             _ => {}
@@ -5807,16 +6617,25 @@ fn substitute_submodule_paths(sig_items: &[SignatureItem], module_path: &Path, c
 }
 
 trait AliasRewriteSink {
+    fn has_alias_rewrite(&self, key: &str) -> bool;
     fn insert_alias_rewrite_if_absent(&mut self, key: String, value: Path);
 }
 
 impl AliasRewriteSink for HashMap<String, Path> {
+    fn has_alias_rewrite(&self, key: &str) -> bool {
+        self.contains_key(key)
+    }
+
     fn insert_alias_rewrite_if_absent(&mut self, key: String, value: Path) {
         self.entry(key).or_insert(value);
     }
 }
 
 impl AliasRewriteSink for AliasPrefixRewrites {
+    fn has_alias_rewrite(&self, key: &str) -> bool {
+        self.local.contains_key(key) || self.base.contains_key(key)
+    }
+
     fn insert_alias_rewrite_if_absent(&mut self, key: String, value: Path) {
         self.insert_if_absent(key, value);
     }
@@ -5841,14 +6660,18 @@ fn collect_alias_rewrites<S: AliasRewriteSink>(
                 // that alias-shaped module as either MtyAlias or MtyIdent after CMI
                 // loading, so record both forms for flattened namespace units such
                 // as `Webapi__Fetch`.
-                if let Path::Pident(alias_id) = alias_path {
-                    let qualified = Path::pdot(module_path.clone(), id.name());
+                // Only the first mapping for a name is kept; skip building
+                // the key and path for names already mapped.
+                if let Path::Pident(alias_id) = alias_path
+                    && !rewrites.has_alias_rewrite(alias_id.name())
+                {
+                    let qualified = Path::pdot(module_path.clone(), id.name_atom());
                     rewrites.insert_alias_rewrite_if_absent(alias_id.name().to_string(), qualified);
                 }
             }
             // Also recurse into MtySignature submodules to find nested aliases
             if let ModuleType::MtySignature(sub_sig) = &md.md_type {
-                let sub_path = Path::pdot(module_path.clone(), id.name());
+                let sub_path = Path::pdot(module_path.clone(), id.name_atom());
                 collect_alias_rewrites(sub_sig, &sub_path, rewrites);
             }
         }
@@ -5884,16 +6707,7 @@ pub(crate) fn open_module_components_into_env(
     // same component table into the opened environment. Reuse the component view
     // that module lookup already forced so opened `comp_modules` and
     // `comp_components` share the same lazy state.
-    add_signature_to_env_with_options(
-        components.signature(),
-        components.access_path(),
-        env,
-        ctx,
-        true,
-        false,
-        true,
-        Some(components),
-    );
+    open_components_into_env(components, env, ctx);
 }
 
 fn add_signature_to_env_with_options(
@@ -5905,6 +6719,87 @@ fn add_signature_to_env_with_options(
     apply_path_subst: bool,
     register_loaded_types: bool,
     precomputed_components: Option<&crate::types::env_lazy::QualifiedModuleComponents>,
+) {
+    if as_opened {
+        let layers = build_opened_layers(
+            sig_items,
+            module_path,
+            ctx,
+            apply_path_subst,
+            register_loaded_types,
+            precomputed_components,
+        );
+        env.add_prebuilt_open_layers(module_path.clone(), &layers);
+        return;
+    }
+    add_signature_to_env_with_options_inner(
+        sig_items,
+        module_path,
+        env,
+        ctx,
+        false,
+        apply_path_subst,
+        register_loaded_types,
+        precomputed_components,
+        None,
+    );
+}
+
+/// The layer tables that opening `sig_items` under `module_path` adds.
+fn build_opened_layers(
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext,
+    apply_path_subst: bool,
+    register_loaded_types: bool,
+    precomputed_components: Option<&crate::types::env_lazy::QualifiedModuleComponents>,
+) -> crate::types::env::OpenedLayers {
+    let mut out = None;
+    add_signature_to_env_with_options_inner(
+        sig_items,
+        module_path,
+        &mut Env::empty(),
+        ctx,
+        true,
+        apply_path_subst,
+        register_loaded_types,
+        precomputed_components,
+        Some(&mut out),
+    );
+    out.expect("opened layers built")
+}
+
+/// Open the component view `components` into `env`, reusing the view's
+/// layer tables when another Env already opened it.
+fn open_components_into_env(
+    components: &crate::types::env_lazy::QualifiedModuleComponents,
+    env: &mut Env,
+    ctx: &TypeContext,
+) {
+    let layers = components.opened_layers(ctx, || {
+        build_opened_layers(
+            components.signature(),
+            components.access_path(),
+            ctx,
+            false,
+            true,
+            Some(components),
+        )
+    });
+    env.add_prebuilt_open_layers(components.access_path().clone(), &layers);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_signature_to_env_with_options_inner(
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    env: &mut Env,
+    ctx: &TypeContext,
+    as_opened: bool,
+    apply_path_subst: bool,
+    register_loaded_types: bool,
+    precomputed_components: Option<&crate::types::env_lazy::QualifiedModuleComponents>,
+    opened_out: Option<&mut Option<crate::types::env::OpenedLayers>>,
 ) {
     // Apply path substitution: rewrite Tconstr paths from internal
     // (e.g., Pident "ref") to qualified (e.g., Pdot(Pident "Pervasives") "ref").
@@ -5952,13 +6847,8 @@ fn add_signature_to_env_with_options(
                         work_stack.push(*item);
                     }
                 }
-                TypeDesc::Tobject { fields, name } => {
+                TypeDesc::Tobject { fields } => {
                     work_stack.push(*fields);
-                    if let Some((_path, args)) = name {
-                        for arg in args {
-                            work_stack.push(*arg);
-                        }
-                    }
                 }
                 TypeDesc::Tfield { typ, rest, .. } => {
                     work_stack.push(*typ);
@@ -6024,6 +6914,15 @@ fn add_signature_to_env_with_options(
     // only value-bearing items (non-primitive values, modules, extension constructors)
     // get runtime field positions. Types and module types are skipped.
     let mut pos: i32 = 0;
+    let mut reroot_prefixes = alias_reroot_prefixes(module_path, ctx);
+    // Components of an in-process unit keep their value types naming the
+    // unit's items (`Unit.t`); re-root the opened values at the component
+    // path like `prefix_idents` does (env.ml:1454-1481, 1530-1538).
+    if let Some(source) = precomputed_components.and_then(|c| c.rerooted_value_source())
+        && !reroot_prefixes.iter().any(|(from, _)| from.same(source))
+    {
+        reroot_prefixes.push((source.clone(), module_path.clone()));
+    }
     let mut opened_values = Vec::new();
     let mut opened_types = Vec::new();
     let mut opened_constructors = Vec::new();
@@ -6031,6 +6930,22 @@ fn add_signature_to_env_with_options(
     let mut opened_modules = Vec::new();
     let mut opened_module_components = Vec::new();
     let mut opened_modtypes = Vec::new();
+    // `substitute_sig_path` rebuilds the component substitution for the whole
+    // signature on every call; build it once for this open instead of once per
+    // alias/extension item.
+    let mut sig_subst_maps: Option<SubstMaps> = None;
+    let mut substitute_path = |path: &Path| {
+        let maps = sig_subst_maps
+            .get_or_insert_with(|| build_subst_maps_for_module(sig_items, module_path));
+        substitute_type_path(
+            path,
+            &maps.type_stamp_map,
+            &maps.type_name_map,
+            &maps.module_stamp_map,
+            &maps.module_name_map,
+            maps.protected_module_head.as_ref(),
+        )
+    };
     for item in sig_items.iter() {
         let slot_path = |name: &str, p: i32| {
             Path::Pdot(
@@ -6043,6 +6958,9 @@ fn add_signature_to_env_with_options(
             SignatureItem::SigValue(id, desc) => {
                 // Add value binding with qualified path
                 let mut desc = desc.clone();
+                // env.ml:1874-1877 opens the component table, whose values
+                // were substituted for the component path (env.ml:1537).
+                reroot_value_description(&mut desc, &reroot_prefixes, ctx);
                 let value_pos = pos;
                 desc.val_path = Some(slot_path(id.name(), value_pos));
                 // OCaml: only increment pos for non-primitive values
@@ -6082,8 +7000,9 @@ fn add_signature_to_env_with_options(
             }
             SignatureItem::SigType(id, decl, _rec_status) => {
                 // Add type binding with qualified path
-                let mut decl = decl.clone();
+                let mut decl = (**decl).clone();
                 decl.type_path = Some(Path::pdot(module_path.clone(), id.name()));
+                let decl = Arc::new(decl);
                 if as_opened {
                     opened_types.push((id.clone(), decl.clone()));
                 } else {
@@ -6092,11 +7011,10 @@ fn add_signature_to_env_with_options(
 
                 // Also register in global type store for alias expansion
                 if register_loaded_types {
-                    let shared_decl = Arc::new(decl.clone());
-                    ctx.register_shared_type_decl(id.name(), shared_decl.clone());
+                    ctx.register_shared_type_decl(id.name(), decl.clone());
                     // Register by stamp for types from CMI modules (non-zero stamp)
                     if id.stamp() != 0 {
-                        ctx.register_shared_type_decl_by_stamp(id.stamp(), shared_decl);
+                        ctx.register_shared_type_decl_by_stamp(id.stamp(), decl.clone());
                     }
                 }
 
@@ -6115,7 +7033,7 @@ fn add_signature_to_env_with_options(
                                         type_params: inline_params.clone(),
                                         type_arity: inline_params.len() as i32,
                                         type_kind: crate::types::TypeKind::TypeRecord(
-                                            labels.clone(),
+                                            crate::types::decl::SharedVec::from(labels.clone()),
                                             crate::types::RecordRepresentation::RecordInlined {
                                                 name: cd.cd_id.name().to_string(),
                                                 representation:
@@ -6192,7 +7110,8 @@ fn add_signature_to_env_with_options(
                                 ),
                                 cstr_generalized: cd.cd_res.is_some(),
                                 cstr_private: decl.type_private,
-                                cstr_loc: crate::location::Location::none(),
+                                // datarepr.ml:111-172 `cstr_loc = cd_loc`.
+                                cstr_loc: cd.cd_loc.clone(),
                                 cstr_attributes:
                                     crate::types::decl::constructor_description_attrs_for_variant(
                                         constrs, cd,
@@ -6211,6 +7130,7 @@ fn add_signature_to_env_with_options(
                                     for (pos, ld) in labels.iter().enumerate() {
                                         let label_desc = LabelDescription {
                                             lbl_name: ld.ld_id.name().to_string(),
+                                            lbl_runtime_name: ld.declaration_name(),
                                             lbl_res: ty_res,
                                             lbl_arg:
                                                 crate::types::ctype::remap_label_type_to_params(
@@ -6250,6 +7170,7 @@ fn add_signature_to_env_with_options(
                         for (pos, ld) in labels.iter().enumerate() {
                             let label_desc = LabelDescription {
                                 lbl_name: ld.ld_id.name().to_string(),
+                                lbl_runtime_name: ld.declaration_name(),
                                 lbl_res: res_ty,
                                 lbl_arg: crate::types::ctype::remap_label_type_to_params(
                                     ctx,
@@ -6340,11 +7261,11 @@ fn add_signature_to_env_with_options(
                 };
                 md.md_type = match md.md_type {
                     ModuleType::MtyAlias(alias_presence, alias_path) => {
-                        let rewritten = substitute_sig_path(&alias_path, sig_items, module_path);
+                        let rewritten = substitute_path(&alias_path);
                         ModuleType::MtyAlias(alias_presence, normalize_hidden_alias_path(rewritten))
                     }
                     ModuleType::MtyIdent(path) => {
-                        let rewritten = substitute_sig_path(&path, sig_items, module_path);
+                        let rewritten = substitute_path(&path);
                         ModuleType::MtyIdent(normalize_hidden_alias_path(rewritten))
                     }
                     other => other,
@@ -6412,7 +7333,7 @@ fn add_signature_to_env_with_options(
             SignatureItem::SigTypext(id, ext, _status) => {
                 let ext_slot = pos;
                 pos += 1; // Extension constructors occupy runtime slots
-                let ext_type_path = substitute_sig_path(&ext.ext_type_path, sig_items, module_path);
+                let ext_type_path = substitute_path(&ext.ext_type_path);
                 // Add extension constructor
                 let cstr_desc = ConstructorDescription {
                     cstr_name: id.name().to_string(),
@@ -6435,8 +7356,10 @@ fn add_signature_to_env_with_options(
                     cstr_kind: ConstructorKind::Extension(slot_path(id.name(), ext_slot)),
                     cstr_generalized: ext.ext_ret_type.is_some(),
                     cstr_private: ext.ext_private,
-                    cstr_loc: crate::location::Location::none(),
-                    cstr_attributes: vec![],
+                    // `Datarepr.extension_descr`: `cstr_loc = ext.ext_loc`.
+                    cstr_loc: ext.ext_loc,
+                    // `Datarepr.extension_descr`: `cstr_attributes = ext.ext_attributes`.
+                    cstr_attributes: ext.ext_attributes.clone(),
                     cstr_inlined: None,
                 };
                 if as_opened {
@@ -6451,8 +7374,7 @@ fn add_signature_to_env_with_options(
         }
     }
     if as_opened {
-        env.add_opened_component_layers(
-            module_path.clone(),
+        let layers = crate::types::env::OpenedLayers::build(
             opened_values,
             opened_types,
             opened_constructors,
@@ -6461,6 +7383,10 @@ fn add_signature_to_env_with_options(
             opened_module_components,
             opened_modtypes,
         );
+        match opened_out {
+            Some(out) => *out = Some(layers),
+            None => env.add_prebuilt_open_layers(module_path.clone(), &layers),
+        }
     }
 }
 
@@ -6526,7 +7452,7 @@ mod resolution_view_tests {
     fn warm_preparation_keeps_view_shared_and_cold_preparation_stays_private() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let mut original = PersistentEnv::new();
-        original.register_in_memory_signature("M", vec![], "M.res", &ctx);
+        original.register_in_memory_signature("M", vec![], "M.res", None, vec![], &ctx);
         let ps = original
             .find_pers_struct("M", &ctx)
             .expect("registered module");
@@ -6575,12 +7501,15 @@ mod resolution_view_tests {
         let portable = Arc::new(PortablePersStruct {
             ps_name: "Portable".to_string(),
             ps_filename: "Portable.res".to_string(),
+            ps_deprecated: None,
+            ps_crcs: Vec::new(),
             ps_sig: vec![],
             raw_ps_sig: None,
             cmi_longident_names: vec![],
             type_graph: portable_types::PortableTypeGraph {
                 entries: vec![],
                 variant_layouts: vec![],
+                mutabilities: vec![],
             },
             raw_type_graph: None,
             fingerprint: 0,
@@ -6642,10 +7571,10 @@ mod resolution_view_tests {
         let second = original.clone();
         let ctx1 = TypeContext::new(Arc::new(IdGenerator::new()));
         let ctx2 = TypeContext::new(Arc::new(IdGenerator::new()));
-        let (sig1, fallback1) = first
+        let (sig1, fallback1, _) = first
             .typecheck_source_signature(&unit, &ctx1)
             .expect("first fallback");
-        let (sig2, fallback2) = second
+        let (sig2, fallback2, _) = second
             .typecheck_source_signature(&unit, &ctx2)
             .expect("second fallback");
         assert_eq!(sig1.len(), sig2.len());
@@ -6704,5 +7633,59 @@ mod resolution_view_tests {
         assert!(original.cache_contains_key("Leaf"));
         assert!(Arc::ptr_eq(&original.last_error, &merged.last_error));
         assert!(Arc::ptr_eq(&original.crc_units, &merged.crc_units));
+    }
+}
+
+/// The registered modules as a [`super::item_deps::UnitSource`].
+struct RegistryUnitSource<'a> {
+    registry: &'a ModuleRegistry,
+    /// Whether item references include what inlinable bodies refer to.
+    lambdas: bool,
+}
+
+impl super::item_deps::UnitSource for RegistryUnitSource<'_> {
+    fn portable(&self, unit: &str) -> Option<Arc<PortablePersStruct>> {
+        self.registry.registered(unit).0
+    }
+    fn lambda_units(&self, unit: &str, name: &str) -> Vec<String> {
+        if !self.lambdas {
+            return Vec::new();
+        }
+        let Some(info) = self.registry.registered(unit).1 else {
+            return Vec::new();
+        };
+        let Some(lambda) = info.cmj_export_lambdas.get(name) else {
+            return Vec::new();
+        };
+        crate::lambda::lam_compile::collect_possible_required_modules_for_lambda(lambda)
+            .into_iter()
+            .map(|module| module.id.name().to_string())
+            .collect()
+    }
+    fn ignored(&self, unit: &str) -> bool {
+        self.registry.module_info_is_runtime(unit)
+    }
+    fn refs(&self, unit: &str) -> Option<Arc<super::item_deps::UnitRefs>> {
+        let registry = self.registry;
+        let ps = registry
+            .local_cached_modules
+            .get(unit)
+            .cloned()
+            .or_else(|| registry.cached_modules.get_cloned(unit))?;
+        let lambdas = if self.lambdas {
+            registry
+                .registered(unit)
+                .1
+                .map_or(0, |info| Arc::as_ptr(&info.cmj_export_lambdas) as usize)
+        } else {
+            usize::MAX
+        };
+        let key = (unit.to_string(), Arc::as_ptr(&ps) as usize, ps.fingerprint, lambdas);
+        if let Some(refs) = registry.item_refs_cache.lock().unwrap().get(&key) {
+            return Some(refs.clone());
+        }
+        let refs = Arc::new(super::item_deps::unit_refs(unit, &ps, self));
+        registry.item_refs_cache.lock().unwrap().insert(key, refs.clone());
+        Some(refs)
     }
 }

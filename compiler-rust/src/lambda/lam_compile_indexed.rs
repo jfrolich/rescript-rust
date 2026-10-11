@@ -110,7 +110,7 @@ impl<'a> IndexedJsConsumer<'a> {
                             _ => Expression::call(function, args, CallInfo::default()),
                         },
                     };
-                    if expr.source_loc.is_none() { expr.source_loc = self.compiler.source_loc(&info.loc); }
+                    if expr.source_loc.is_none() { expr.source_loc = (self.compiler.source_loc(&info.loc)).map(Box::new); }
                     Output::of_block_and_expression(continuation, prelude, expr)
                 }
             };
@@ -178,7 +178,7 @@ impl<'a> IndexedJsConsumer<'a> {
             compiled_function.value.expect("call function"), args,
             call_info_of_apply_status(jsx, info.status),
         );
-        expr.source_loc = self.compiler.source_loc(&info.loc);
+        expr.source_loc = (self.compiler.source_loc(&info.loc)).map(Box::new);
         Output::of_block_and_expression(continuation, prelude, expr)
     }
 
@@ -211,9 +211,6 @@ impl<'a> IndexedJsConsumer<'a> {
             NodeView::Prim(primitive, args, loc) => (primitive.clone(), args.len(), *loc),
             _ => panic!("primitive lowering requires a primitive node"),
         };
-        if matches!(primitive, Primitive::Pimport) {
-            return self.import(node, count, loc, lower);
-        }
         if count == 2 && matches!(primitive, Primitive::Psequand | Primitive::Psequor) {
             return self.short_circuit_value(node, lower);
         }
@@ -275,76 +272,6 @@ impl<'a> IndexedJsConsumer<'a> {
                 self.compiler.try_statement(body, &exception, handler),
             ],
             expr: Expression::var(result),
-        }
-    }
-
-    fn import(
-        &mut self,
-        node: NodeId,
-        count: usize,
-        loc: Location,
-        lower: &mut impl FnMut(&mut Self, NodeId) -> Compiled,
-    ) -> Compiled {
-        if count != 1 {
-            self.compiler.report_diagnostic(&loc, "Missing argument: Dynamic import requires a module or module value that is a file as argument.");
-            return Compiled {
-                prelude: vec![],
-                expr: Expression::undefined(false),
-            };
-        }
-        let mut target = match self.context.store().view(node) {
-            NodeView::Prim(_, args, _) => args[0],
-            _ => unreachable!(),
-        };
-        let wrapped_call = match self.context.store().view(target) {
-            NodeView::Function(_, _, body, _) => match self.context.store().view(body) {
-                NodeView::Prim(Primitive::PjsCall { .. }, _, _) => Some(body),
-                NodeView::Sequence(first, second)
-                    if matches!(
-                        self.context.store().view(second),
-                        NodeView::Const(Constant::JsUndefined { .. })
-                    ) && matches!(
-                        self.context.store().view(first),
-                        NodeView::Prim(Primitive::PjsCall { .. }, _, _)
-                    ) =>
-                {
-                    Some(first)
-                }
-                _ => None,
-            },
-            _ => None,
-        };
-        if let Some(call) = wrapped_call {
-            let NodeSnapshot::Prim(mut primitive, args, loc) = self.context.store().snapshot(call)
-            else {
-                unreachable!()
-            };
-            let Primitive::PjsCall { dynamic_import, .. } = &mut primitive else {
-                unreachable!()
-            };
-            *dynamic_import = true;
-            target = self
-                .context
-                .store_mut()
-                .append(NodeSnapshot::Prim(primitive, args, loc));
-        }
-        if !matches!(
-            self.context.store().view(target),
-            NodeView::GlobalModule(..)
-                | NodeView::Var(_)
-                | NodeView::Prim(Primitive::Pfield(..) | Primitive::PjsCall { .. }, _, _)
-        ) {
-            self.compiler.report_diagnostic(&loc, "Invalid argument: unsupported argument to dynamic import. If you believe this should be supported, please open an issue.");
-            return Compiled {
-                prelude: vec![],
-                expr: Expression::undefined(false),
-            };
-        }
-        let compiled = lower(self, target);
-        let expr = self.compiler.compile_import(&loc, vec![compiled.expr]);
-        Compiled {
-            prelude: compiled.prelude,
-            expr,
         }
     }
 }

@@ -134,7 +134,13 @@ fn flatten(
         }
         NodeSnapshot::Sequence(left, right) => {
             let left = flatten(store, groups, left, id_gen);
-            groups.push(Group::Nop(left));
+            // `Lam_group.nop_cons` drops pure heads (lam_group.ml:36-39).
+            if !matches!(
+                store.view(left),
+                NodeView::Var(_) | NodeView::Const(_) | NodeView::Function(_, _, _, _)
+            ) {
+                groups.push(Group::Nop(left));
+            }
             flatten(store, groups, right, id_gen)
         }
         _ => aux(store, node, id_gen),
@@ -175,7 +181,7 @@ fn aux(store: &mut IndexedLambda, node: NodeId, id_gen: &IdGenerator) -> NodeId 
             append_rebuilt(store, NodeSnapshot::Sequence(left, right))
         }
         NodeSnapshot::Var(_)
-        | NodeSnapshot::GlobalModule(_, _)
+        | NodeSnapshot::GlobalModule(_)
         | NodeSnapshot::Const(_)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => node,

@@ -43,6 +43,9 @@ pub struct Comment {
     pub loc: Location,
     /// The end position of the previous token (for formatting).
     pub prev_tok_end_pos: Position,
+    /// Whether the token before the comment is `?`, e.g. the end of the
+    /// `=?` of an optional parameter (res_comment.ml `prev_tok_is_question`).
+    pub prev_tok_is_question: bool,
 }
 
 impl Comment {
@@ -64,6 +67,16 @@ impl Comment {
     /// Set the end position of the previous token.
     pub fn set_prev_tok_end_pos(&mut self, pos: Position) {
         self.prev_tok_end_pos = pos;
+    }
+
+    /// Whether the token before the comment is `?`.
+    pub fn prev_tok_is_question(&self) -> bool {
+        self.prev_tok_is_question
+    }
+
+    /// Set whether the token before the comment is `?`.
+    pub fn set_prev_tok_is_question(&mut self, b: bool) {
+        self.prev_tok_is_question = b;
     }
 
     /// Check if this is a single-line comment.
@@ -88,6 +101,7 @@ impl Comment {
             loc,
             style: CommentStyle::SingleLine,
             prev_tok_end_pos: Position::default(),
+            prev_tok_is_question: false,
         }
     }
 
@@ -117,6 +131,7 @@ impl Comment {
             loc,
             style,
             prev_tok_end_pos: Position::default(),
+            prev_tok_is_question: false,
         }
     }
 

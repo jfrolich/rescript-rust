@@ -8,16 +8,14 @@ pub(super) use crate::js_ir::{
 pub(super) use crate::lambda::js_exp_make::{
     int32_band, int32_bxor, int32_mul, ocaml_typeof_expr, raw_typeof_comparison,
 };
-pub(super) use crate::lambda::js_shake::later_toplevel_effect_allows_tail_move;
 pub(super) use crate::lambda::lam_coercion::resolve_export_aliases;
 pub(super) use crate::lambda::lam_compile_external::external_module_import_attributes;
 pub(super) use crate::lambda::lam_constant::{
-    Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo, StringDelim,
+    Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo,
 };
 pub(super) use crate::lambda::lam_primitive::{
-    ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
-    ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName, ExternalObjLabel,
-    ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, JsRawInfo, Mutable, Primitive,
+    Attr, Cst, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, JsRawInfo, Label,
+    LabelNoname, ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
 };
 pub(super) use crate::lambda::{
     ApInfo, Apply, ApplyStatus, Comparison, FieldDbgInfo, FunctionAttribute, InlineAttribute,
@@ -151,7 +149,7 @@ pub(super) fn find_variable_initializer<'a>(
 pub(super) fn external_module(bundle: &str) -> ExternalModuleName {
     ExternalModuleName {
         bundle: bundle.to_string(),
-        module_bind_name: ExternalModuleBindName::Nothing,
+        module_bind_name: ModuleBindName::PhintNothing,
         import_attributes: None,
     }
 }
@@ -163,7 +161,7 @@ fn external_module_with_attrs(
 ) -> ExternalModuleName {
     ExternalModuleName {
         bundle: bundle.to_string(),
-        module_bind_name: ExternalModuleBindName::HintName(hint.to_string()),
+        module_bind_name: ModuleBindName::PhintName(hint.to_string()),
         import_attributes: Some(
             attrs
                 .iter()
@@ -178,18 +176,15 @@ fn js_var_external(name: &str, external_module_name: Option<ExternalModuleName>)
         Primitive::PjsCall {
             prim_name: name.to_string(),
             arg_types: vec![],
-            ffi: ExternalFfiSpec {
-                kind: ExternalFfiKind::Default,
-                spec: Some(ExternalSpec::JsVar {
+            ffi: Box::new(ExternalDecl {
+                kind: DeclKind::DeclVal {
                     name: name.to_string(),
-                    external_module_name,
-                    scopes: vec![],
-                }),
-                obj_params: None,
-                return_wrapper: ExternalReturnWrapper::Identity,
-                inline_constant: None,
-            },
-            dynamic_import: false,
+                },
+                module_: external_module_name.map(ModuleSource::ModuleNamed),
+                scopes: vec![],
+                variadic: false,
+                effective_arity: 0,
+            }),
             transformed_jsx: false,
         },
         vec![],
@@ -212,24 +207,24 @@ fn test_function_calling(ident: Ident, target: &Ident) -> (Ident, Lambda) {
         Lambda::function_(
             1,
             vec![param],
-            Lambda::Lapply(Apply {
+            Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(Lambda::var(target.clone())),
                 ap_args: vec![],
                 ap_info: test_apply_info(),
                 ap_transformed_jsx: false,
-            }),
+            })),
             FunctionAttribute::default(),
         ),
     )
 }
 
 fn test_apply(target: &Ident) -> Lambda {
-    Lambda::Lapply(Apply {
+    Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::var(target.clone())),
         ap_args: vec![],
         ap_info: test_apply_info(),
         ap_transformed_jsx: false,
-    })
+    }))
 }
 
 fn test_function_calling_two(ident: Ident, first: &Ident, second: &Ident) -> (Ident, Lambda) {
@@ -341,14 +336,7 @@ fn console_log_effect(arg: Lambda) -> Lambda {
             Primitive::PjsCall {
                 prim_name: "console.log".to_string(),
                 arg_types: vec![],
-                ffi: ExternalFfiSpec {
-                    kind: ExternalFfiKind::Default,
-                    spec: None,
-                    obj_params: None,
-                    return_wrapper: ExternalReturnWrapper::Identity,
-                    inline_constant: None,
-                },
-                dynamic_import: false,
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                 transformed_jsx: false,
             },
             vec![arg],
@@ -547,30 +535,6 @@ fn lowers_upto_subint_one_finish_to_ocaml_exclusive_for_range() {
 
 #[test]
 #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn lowers_upto_predint_finish_to_ocaml_exclusive_for_range() {
-    let mut compiler = LambdaCompiler::new();
-    let i = Ident::create_local("i");
-    let xs = Ident::create_local("xs");
-    let lam = Lambda::for_(
-        i,
-        Lambda::const_(Constant::int(0)),
-        Lambda::prim(
-            Primitive::Poffsetint(-1),
-            vec![Lambda::var(xs)],
-            Location::none(),
-        ),
-        crate::lambda::DirectionFlag::Upto,
-        Lambda::unit(),
-    );
-
-    let compiled = compiler.compile_expr(&lam);
-    let rendered = print_block(&compiled.prelude);
-
-    assert_eq!(rendered.trim(), "for (let i = 0; i < xs; ++i) {}");
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
 fn lowers_for_bounds_preludes_in_ocaml_order_when_start_expr_is_pure() {
     let mut compiler = LambdaCompiler::new();
     let i = Ident::create_local("i");
@@ -664,18 +628,18 @@ fn compile_raw_js_trims_outer_whitespace_before_js_ir_printing() {
 fn compile_constant_named_constructor_uses_string_runtime_name() {
     let compiled = LambdaCompiler::compile_constant(&Constant::Int {
         i: 0,
-        comment: Some(PointerInfo::Constructor(ConstructorTag {
+        comment: Some(Box::new(PointerInfo::Constructor(ConstructorTag {
             name: "NoParam".to_string(),
             const_: 1,
             non_const: 2,
             runtime_tag: None,
-        })),
+        }))),
     });
 
     assert!(matches!(
         compiled,
         Expression {
-            desc: ExpressionDesc::Str { ref txt, .. },
+            desc: ExpressionDesc::Str(ref txt),
             ..
         } if txt == "NoParam"
     ));
@@ -685,18 +649,18 @@ fn compile_constant_named_constructor_uses_string_runtime_name() {
 fn compile_constant_constructor_runtime_tag_uses_runtime_literal() {
     let compiled = LambdaCompiler::compile_constant(&Constant::Int {
         i: 0,
-        comment: Some(PointerInfo::Constructor(ConstructorTag {
+        comment: Some(Box::new(PointerInfo::Constructor(ConstructorTag {
             name: "Three".to_string(),
             const_: 1,
             non_const: 0,
             runtime_tag: Some(ConstructorRuntimeTag::String("three".to_string())),
-        })),
+        }))),
     });
 
     assert!(matches!(
         compiled,
         Expression {
-            desc: ExpressionDesc::Str { ref txt, .. },
+            desc: ExpressionDesc::Str(ref txt),
             ..
         } if txt == "three"
     ));
@@ -706,12 +670,12 @@ fn compile_constant_constructor_runtime_tag_uses_runtime_literal() {
 fn compile_constant_empty_list_keeps_numeric_zero_with_pointer_comment() {
     let compiled = LambdaCompiler::compile_constant(&Constant::Int {
         i: 0,
-        comment: Some(PointerInfo::Constructor(ConstructorTag {
+        comment: Some(Box::new(PointerInfo::Constructor(ConstructorTag {
             name: "[]".to_string(),
             const_: 1,
             non_const: 1,
             runtime_tag: None,
-        })),
+        }))),
     });
 
     assert!(matches!(
@@ -721,7 +685,7 @@ fn compile_constant_empty_list_keeps_numeric_zero_with_pointer_comment() {
             comment: Some(ref comment),
             ..
         }
-        if comment == "[]"
+        if **comment == "[]"
     ));
     assert_eq!(print_expression(&compiled), "/* [] */0");
 }
@@ -753,60 +717,34 @@ fn compile_constant_some_unit_boxes_undefined_none_encoding() {
 }
 
 #[test]
-fn compile_constant_preserves_marshaled_starj_strings() {
-    let compiled = LambdaCompiler::compile_constant(&Constant::String {
-        s: "\\\"".to_string(),
-        delim: Some(StringDelim::StarJ),
-    });
+fn compile_constant_escapes_semantic_strings() {
+    // lam_compile_const.ml: `Const_string s -> E.str s`, printed by
+    // `Js_dump_string.pp_string`.
+    let compiled = LambdaCompiler::compile_constant(&Constant::String("\\\"".to_string()));
 
     assert!(matches!(
         compiled,
         Expression {
-            desc: ExpressionDesc::Str {
-                delim: Delim::StarJ,
-                ref txt,
-            },
+            desc: ExpressionDesc::Str(ref txt),
             ..
         } if txt == "\\\""
     ));
-    assert_eq!(print_expression(&compiled), "\"\\\"\"");
+    assert_eq!(print_expression(&compiled), "\"\\\\\\\"\"");
 }
 
 #[test]
-fn compile_constant_quotes_noquote_delim_strings_like_ocaml() {
-    let compiled = LambdaCompiler::compile_constant(&Constant::String {
-        s: "{foo:true}".to_string(),
-        delim: Some(StringDelim::NoQuotes),
-    });
-
-    assert!(matches!(
-        compiled,
-        Expression {
-            desc: ExpressionDesc::Str {
-                delim: Delim::None,
-                ref txt,
-            },
-            ..
-        } if txt == "{foo:true}"
-    ));
-    assert_eq!(print_expression(&compiled), "\"{foo:true}\"");
-}
-
-#[test]
-fn switch_case_expr_preserves_marshaled_string_tags() {
+fn switch_case_expr_escapes_string_tags() {
+    // js_exp_make.ml `tag_type`: `String s -> str s`.
     let compiled = LambdaCompiler::switch_case_expr(&SwitchCaseTag::String("\\\"".to_string()));
 
     assert!(matches!(
         compiled,
         Expression {
-            desc: ExpressionDesc::Str {
-                delim: Delim::StarJ,
-                ref txt,
-            },
+            desc: ExpressionDesc::Str(ref txt),
             ..
         } if txt == "\\\""
     ));
-    assert_eq!(print_expression(&compiled), "\"\\\"\"");
+    assert_eq!(print_expression(&compiled), "\"\\\\\\\"\"");
 }
 
 #[test]
@@ -919,11 +857,11 @@ fn compile_create_extension_uses_primitive_exceptions_create() {
     assert!(matches!(
         args.as_slice(),
         [Expression {
-            desc: ExpressionDesc::Str { txt, .. },
+            desc: ExpressionDesc::Str(txt),
             ..
         }] if txt == "Local_exception_test.A"
     ));
-    assert_eq!(compiled.expr.comment.as_deref(), Some("@__PURE__"));
+    assert_eq!(compiled.expr.comment.as_deref().map(String::as_str), Some("@__PURE__"));
     assert_eq!(
         print_expression(&compiled.expr),
         "/* @__PURE__ */Primitive_exceptions.create(\"Local_exception_test.A\")"
@@ -934,10 +872,9 @@ fn compile_create_extension_uses_primitive_exceptions_create() {
 fn compile_wrap_exn_uses_primitive_exceptions_internal_to_exception() {
     let mut compiler = LambdaCompiler::new();
     let exn = Ident::create_local("exn");
-    let compiled = compiler.compile_expr(&Lambda::prim(
-        Primitive::PwrapExn,
-        vec![Lambda::var(exn.clone())],
+    let compiled = compiler.compile_expr(&crate::raw_lambda::lower::wrap_exn(
         Location::none(),
+        Lambda::var(exn.clone()),
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -971,10 +908,7 @@ fn compile_integer_inequality_preserves_typeof_string_comparison_like_ocaml() {
                 vec![Lambda::const_(Constant::int(3))],
                 Location::none(),
             ),
-            Lambda::const_(Constant::String {
-                s: "number".to_string(),
-                delim: Some(StringDelim::StarJ),
-            }),
+            Lambda::const_(Constant::String("number".to_string())),
         ],
         Location::none(),
     ));
@@ -1457,7 +1391,7 @@ fn compile_expr_keeps_forwarded_module_call_params_like_ocaml() {
     let compiled = compiler.compile_expr(&Lambda::function_(
         1,
         vec![none.clone()],
-        Lambda::Lapply(Apply {
+        Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(Lambda::prim(
                 Primitive::Pfield(
                     23,
@@ -1465,7 +1399,7 @@ fn compile_expr_keeps_forwarded_module_call_params_like_ocaml() {
                         name: "fromArray".to_string(),
                     },
                 ),
-                vec![Lambda::LglobalModule(belt_map, false)],
+                vec![Lambda::LglobalModule(belt_map)],
                 Location::none(),
             )),
             ap_args: vec![Lambda::var(none.clone()), Lambda::var(icmp.clone())],
@@ -1475,7 +1409,7 @@ fn compile_expr_keeps_forwarded_module_call_params_like_ocaml() {
                 status: ApplyStatus::Uncurry,
             },
             ap_transformed_jsx: false,
-        }),
+        })),
         Default::default(),
     ));
 
@@ -1509,7 +1443,7 @@ fn compile_expr_keeps_forwarded_nested_wrapper_params_like_ocaml() {
         Lambda::function_(
             1,
             vec![extra.clone()],
-            Lambda::Lapply(Apply {
+            Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(Lambda::prim(
                     Primitive::Pfield(
                         9,
@@ -1517,7 +1451,7 @@ fn compile_expr_keeps_forwarded_nested_wrapper_params_like_ocaml() {
                             name: "eq".to_string(),
                         },
                     ),
-                    vec![Lambda::LglobalModule(belt_map, false)],
+                    vec![Lambda::LglobalModule(belt_map)],
                     Location::none(),
                 )),
                 ap_args: vec![
@@ -1531,7 +1465,7 @@ fn compile_expr_keeps_forwarded_nested_wrapper_params_like_ocaml() {
                     status: ApplyStatus::Uncurry,
                 },
                 ap_transformed_jsx: false,
-            }),
+            })),
             Default::default(),
         ),
         Default::default(),
@@ -1563,10 +1497,7 @@ fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_s
     let always_true = Ident::create_local("h");
     let also_true = Ident::create_local("j");
     let loc = Location::none();
-    let starj_empty = Lambda::const_(Constant::String {
-        s: "".to_string(),
-        delim: Some(StringDelim::StarJ),
-    });
+    let starj_empty = Lambda::const_(Constant::String("".to_string()));
 
     let outer_value = Lambda::let_(
         LetKind::Strict,
@@ -1594,8 +1525,8 @@ fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_s
             FunctionAttribute::default(),
         ),
     );
-    let nested_call = Lambda::Lapply(Apply {
-        ap_func: Box::new(Lambda::Lapply(Apply {
+    let nested_call = Lambda::Lapply(Box::new(Apply {
+        ap_func: Box::new(Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(outer_value),
             ap_args: vec![starj_empty.clone()],
             ap_info: ApInfo {
@@ -1604,7 +1535,7 @@ fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_s
                 status: ApplyStatus::Uncurry,
             },
             ap_transformed_jsx: false,
-        })),
+        }))),
         ap_args: vec![starj_empty],
         ap_info: ApInfo {
             loc: loc.clone(),
@@ -1612,7 +1543,7 @@ fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_s
             status: ApplyStatus::Uncurry,
         },
         ap_transformed_jsx: false,
-    });
+    }));
     let program = compiler.compile_program(&Lambda::let_(
         LetKind::Strict,
         unused,
@@ -2148,14 +2079,14 @@ fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block
             LetKind::Strict,
             v.clone(),
             Lambda::const_(Constant::Block {
-                tag_info: TagInfo::record(
+                tag_info: Box::new(TagInfo::record(
                     vec![
                         ("x".to_string(), false),
                         ("y".to_string(), false),
                         ("z".to_string(), false),
                     ],
                     crate::parser::ast::MutableFlag::Immutable,
-                ),
+                )),
                 elements: vec![
                     Constant::int(3),
                     Constant::int(4),
@@ -2165,7 +2096,7 @@ fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block
             Lambda::let_(
                 LetKind::Strict,
                 res.clone(),
-                Lambda::Lapply(Apply {
+                Lambda::Lapply(Box::new(Apply {
                     ap_func: Box::new(Lambda::var(f)),
                     ap_args: vec![Lambda::var(v.clone())],
                     ap_info: ApInfo {
@@ -2174,7 +2105,7 @@ fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block
                         status: ApplyStatus::Uncurry,
                     },
                     ap_transformed_jsx: false,
-                }),
+                })),
                 export_block,
             ),
         ),
@@ -2365,10 +2296,7 @@ fn compile_deps_program_rebinds_marshaled_string_exports_after_surviving_functio
         Lambda::let_(
             LetKind::Strict,
             s.clone(),
-            Lambda::const_(Constant::String {
-                s: "😀".to_string(),
-                delim: Some(StringDelim::StarJ),
-            }),
+            Lambda::const_(Constant::String("😀".to_string())),
             Lambda::let_(
                 LetKind::Strict,
                 bar.clone(),
@@ -2521,7 +2449,7 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_across_later_
             ident,
             value:
                 Some(Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 }),
             property,
@@ -2594,7 +2522,7 @@ fn compile_deps_program_keeps_exports_after_trailing_effect_sequence() {
 }
 
 #[test]
-fn compile_deps_program_skips_unreachable_throwing_export_binding_declaration() {
+fn compile_deps_program_declares_export_left_unbound_by_throwing_binding() {
     let mut compiler = LambdaCompiler::new();
     let exported = Ident::create_local("u");
     let export_block = Lambda::prim(
@@ -2619,17 +2547,26 @@ fn compile_deps_program_skips_unreachable_throwing_export_binding_declaration() 
     let deps = compiler.compile_deps_program(&lam);
 
     assert_eq!(deps.program.exports, vec![exported.clone()]);
-    let [stmt] = deps.program.block.as_slice() else {
+    // lam_compile_main.ml `declare_undeclared_exports`: the export the
+    // throw left unbound is declared after it.
+    let [stmt, declared] = deps.program.block.as_slice() else {
         panic!(
-            "expected the terminating throw to stay as the only statement, got {:?}",
+            "expected the terminating throw followed by the export declaration, got {:?}",
             deps.program.block
         );
     };
     assert!(matches!(
+        declared,
+        Statement {
+            desc: StatementDesc::Variable(VariableDeclaration { ident, value: None, .. }),
+            ..
+        } if ident.same(&exported)
+    ));
+    assert!(matches!(
         stmt,
         Statement {
             desc: StatementDesc::Throw(Expression {
-                desc: ExpressionDesc::Str { txt, .. },
+                desc: ExpressionDesc::Str(txt),
                 ..
             }),
             ..
@@ -2638,7 +2575,7 @@ fn compile_deps_program_skips_unreachable_throwing_export_binding_declaration() 
 }
 
 #[test]
-fn compile_deps_program_skips_unreachable_nested_throwing_export_binding_declaration() {
+fn compile_deps_program_declares_export_left_unbound_by_nested_throwing_binding() {
     let mut compiler = LambdaCompiler::new();
     let exported = Ident::create_local("A");
     let nested = Ident::create_local("u");
@@ -2679,18 +2616,27 @@ fn compile_deps_program_skips_unreachable_nested_throwing_export_binding_declara
     let deps = compiler.compile_deps_program(&lam);
 
     assert_eq!(deps.program.exports, vec![exported.clone()]);
-    let [stmt] = deps.program.block.as_slice() else {
+    // lam_compile_main.ml `declare_undeclared_exports`: the export the
+    // throw left unbound is declared after it.
+    let [stmt, declared] = deps.program.block.as_slice() else {
         panic!(
-            "expected the terminating throw to stay as the only statement, got {:?}",
+            "expected the terminating throw followed by the export declaration, got {:?}",
             deps.program.block
         );
     };
+    assert!(matches!(
+        declared,
+        Statement {
+            desc: StatementDesc::Variable(VariableDeclaration { ident, value: None, .. }),
+            ..
+        } if ident.same(&exported)
+    ));
     assert!(
         matches!(
             stmt,
             Statement {
                 desc: StatementDesc::Throw(Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 }),
                 ..
@@ -2720,7 +2666,7 @@ fn compile_return_block_skips_unreachable_sequence_after_throw() {
         stmt,
         Statement {
             desc: StatementDesc::Throw(Expression {
-                desc: ExpressionDesc::Str { txt, .. },
+                desc: ExpressionDesc::Str(txt),
                 ..
             }),
             ..
@@ -2734,7 +2680,7 @@ fn compile_return_block_lowers_trywith_in_return_position() {
     let callee = Ident::create_local("g");
     let exn = Ident::create_local("exn");
     let block = compiler.compile_return_block(&Lambda::LtryWith(
-        Box::new(Lambda::Lapply(Apply {
+        Box::new(Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(Lambda::var(callee)),
             ap_args: vec![],
             ap_info: ApInfo {
@@ -2743,7 +2689,7 @@ fn compile_return_block_lowers_trywith_in_return_position() {
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
-        })),
+        }))),
         exn.clone(),
         Box::new(Lambda::const_(Constant::int(0))),
     ));
@@ -2850,7 +2796,7 @@ fn direct_recursive_trywith_self_calls_do_not_lower_to_loops_like_ocaml() {
                 1,
                 vec![acc.clone()],
                 Lambda::LtryWith(
-                    Box::new(Lambda::Lapply(Apply {
+                    Box::new(Lambda::Lapply(Box::new(Apply {
                         ap_func: Box::new(Lambda::var(loop_.clone())),
                         ap_args: vec![Lambda::var(acc.clone())],
                         ap_info: ApInfo {
@@ -2859,7 +2805,7 @@ fn direct_recursive_trywith_self_calls_do_not_lower_to_loops_like_ocaml() {
                             status: ApplyStatus::Na,
                         },
                         ap_transformed_jsx: false,
-                    })),
+                    }))),
                     exn,
                     Box::new(Lambda::const_(Constant::int(0))),
                 ),
@@ -2895,7 +2841,7 @@ fn recursive_trywith_handler_self_calls_lower_to_loops_like_ocaml() {
     let read = Ident::create_local("read");
     let acc = Ident::create_local("acc");
     let exn = Ident::create_local("exn");
-    let tailcall = Lambda::Lapply(Apply {
+    let tailcall = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::var(loop_.clone())),
         ap_args: vec![Lambda::var(acc.clone())],
         ap_info: ApInfo {
@@ -2904,7 +2850,7 @@ fn recursive_trywith_handler_self_calls_lower_to_loops_like_ocaml() {
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
-    });
+    }));
     let lam = Lambda::letrec(
         vec![(
             loop_.clone(),
@@ -2912,7 +2858,7 @@ fn recursive_trywith_handler_self_calls_lower_to_loops_like_ocaml() {
                 1,
                 vec![acc.clone()],
                 Lambda::LtryWith(
-                    Box::new(Lambda::Lapply(Apply {
+                    Box::new(Lambda::Lapply(Box::new(Apply {
                         ap_func: Box::new(Lambda::var(read)),
                         ap_args: vec![Lambda::var(acc)],
                         ap_info: ApInfo {
@@ -2921,7 +2867,7 @@ fn recursive_trywith_handler_self_calls_lower_to_loops_like_ocaml() {
                             status: ApplyStatus::Na,
                         },
                         ap_transformed_jsx: false,
-                    })),
+                    }))),
                     exn,
                     Box::new(tailcall),
                 ),
@@ -2982,7 +2928,7 @@ fn lowers_expression_sequences_to_js_comma_expressions() {
     let mut compiler = LambdaCompiler::new();
     let callback = Ident::create_local("callback");
     let sequence = Lambda::Lsequence(
-        Box::new(Lambda::Lapply(Apply {
+        Box::new(Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(Lambda::var(callback.clone())),
             ap_args: vec![],
             ap_info: ApInfo {
@@ -2991,7 +2937,7 @@ fn lowers_expression_sequences_to_js_comma_expressions() {
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
-        })),
+        }))),
         Box::new(Lambda::const_(Constant::none())),
     );
     let program = compiler.compile_program(&Lambda::prim(
@@ -3046,7 +2992,7 @@ fn nested_effect_sequences_drop_intermediate_pignore_suffixes_when_appended_to_v
     let mut compiler = LambdaCompiler::new();
     let callback = Ident::create_local("callback");
     let value = Ident::create_local("value");
-    let call = Lambda::Lapply(Apply {
+    let call = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::var(callback.clone())),
         ap_args: vec![],
         ap_info: ApInfo {
@@ -3055,7 +3001,7 @@ fn nested_effect_sequences_drop_intermediate_pignore_suffixes_when_appended_to_v
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
-    });
+    }));
     let sequence = Lambda::Lsequence(
         Box::new(Lambda::Lsequence(
             Box::new(call),
@@ -3108,7 +3054,7 @@ fn int_switch_expressions_assign_branch_values_into_the_result_temp() {
     let scrutinee = Ident::create_local("scrutinee");
     let compiled = compiler.compile_expr(&Lambda::Lswitch(
         Box::new(Lambda::var(scrutinee.clone())),
-        LambdaSwitch {
+        Box::new(LambdaSwitch {
             sw_consts_full: true,
             sw_consts: vec![
                 (
@@ -3124,7 +3070,7 @@ fn int_switch_expressions_assign_branch_values_into_the_result_temp() {
             sw_blocks: vec![],
             sw_failaction: Some(Box::new(Lambda::const_(Constant::int(3)))),
             sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-        },
+        }),
     ));
 
     let [declare, switch_stmt] = compiled.prelude.as_slice() else {
@@ -3217,7 +3163,7 @@ fn int_switch_expressions_group_adjacent_equal_cases_and_drop_default_duplicates
     let scrutinee = Ident::create_local("scrutinee");
     let compiled = compiler.compile_expr(&Lambda::Lswitch(
         Box::new(Lambda::var(scrutinee.clone())),
-        LambdaSwitch {
+        Box::new(LambdaSwitch {
             sw_consts_full: false,
             sw_consts: vec![
                 (
@@ -3237,7 +3183,7 @@ fn int_switch_expressions_group_adjacent_equal_cases_and_drop_default_duplicates
             sw_blocks: vec![],
             sw_failaction: Some(Box::new(Lambda::const_(Constant::int(2)))),
             sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-        },
+        }),
     ));
 
     let [declare, switch_stmt] = compiled.prelude.as_slice() else {
@@ -3278,7 +3224,7 @@ fn int_switch_expressions_group_non_adjacent_equal_cases_like_ocaml_stable_group
     let scrutinee = Ident::create_local("scrutinee");
     let compiled = compiler.compile_expr(&Lambda::Lswitch(
         Box::new(Lambda::var(scrutinee.clone())),
-        LambdaSwitch {
+        Box::new(LambdaSwitch {
             sw_consts_full: true,
             sw_consts: vec![
                 (
@@ -3298,7 +3244,7 @@ fn int_switch_expressions_group_non_adjacent_equal_cases_like_ocaml_stable_group
             sw_blocks: vec![],
             sw_failaction: None,
             sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-        },
+        }),
     ));
 
     let [declare, switch_stmt] = compiled.prelude.as_slice() else {
@@ -3684,14 +3630,14 @@ fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
             Box::new(Lambda::LstaticCatch(
                 Box::new(Lambda::Lswitch(
                     Box::new(Lambda::var(key.clone())),
-                    LambdaSwitch {
+                    Box::new(LambdaSwitch {
                         sw_consts_full: false,
                         sw_consts: gpr_1438_switch_cases(&b, &c, &d, &e),
                         sw_blocks_full: true,
                         sw_blocks: vec![],
                         sw_failaction: Some(Box::new(Lambda::static_raise(2, Vec::new()))),
                         sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-                    },
+                    }),
                 )),
                 (2, vec![]),
                 Box::new(gpr_1438_fallthrough_handler()),
@@ -3858,12 +3804,12 @@ fn nested_let_values_preserve_declaration_context_for_wrapped_string_switches() 
 fn function_return_blocks_lower_switches_without_a_result_temp() {
     let mut compiler = LambdaCompiler::new();
     let scrutinee = Ident::create_local("scrutinee");
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
         arity: 1,
         params: vec![scrutinee.clone()],
         body: Box::new(Lambda::Lswitch(
             Box::new(Lambda::var(scrutinee.clone())),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: true,
                 sw_consts: vec![
                     (
@@ -3879,10 +3825,10 @@ fn function_return_blocks_lower_switches_without_a_result_temp() {
                 sw_blocks: vec![],
                 sw_failaction: Some(Box::new(Lambda::const_(Constant::int(3)))),
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            },
+            }),
         )),
         attr: crate::lambda::FunctionAttribute::default(),
-    }));
+    })));
 
     let Expression {
         desc: ExpressionDesc::Fun { body, .. },
@@ -3919,7 +3865,7 @@ fn function_return_blocks_lower_ifs_without_a_result_temp() {
     let mut compiler = LambdaCompiler::new();
     let cond = Ident::create_local("cond");
     let branch = Ident::create_local("branch");
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
         arity: 1,
         params: vec![cond.clone()],
         body: Box::new(Lambda::LifThenElse(
@@ -3933,7 +3879,7 @@ fn function_return_blocks_lower_ifs_without_a_result_temp() {
             Box::new(Lambda::const_(Constant::int(0))),
         )),
         attr: crate::lambda::FunctionAttribute::default(),
-    }));
+    })));
 
     let Expression {
         desc: ExpressionDesc::Fun { body, .. },
@@ -4124,7 +4070,7 @@ fn unit_return_function_body_keeps_positive_effect_guard_before_js_passes() {
         )),
         Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
     );
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
         arity: 2,
         params: vec![cond.clone(), seen.clone()],
         body: Box::new(body),
@@ -4132,7 +4078,7 @@ fn unit_return_function_body_keeps_positive_effect_guard_before_js_passes() {
             return_unit: true,
             ..Default::default()
         },
-    }));
+    })));
 
     let Expression {
         desc: ExpressionDesc::Fun { body, .. },
@@ -4188,7 +4134,7 @@ fn unit_return_function_with_trivial_if_branches_keeps_condition_effect_only() {
         Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
         Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
     );
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
         arity: 1,
         params: vec![effect.clone()],
         body: Box::new(body),
@@ -4196,7 +4142,7 @@ fn unit_return_function_with_trivial_if_branches_keeps_condition_effect_only() {
             return_unit: true,
             ..Default::default()
         },
-    }));
+    })));
 
     let Expression {
         desc: ExpressionDesc::Fun { body, .. },
@@ -4229,7 +4175,7 @@ fn unit_return_function_with_trivial_if_branches_keeps_condition_effect_only() {
 }
 
 #[test]
-fn unit_return_function_keeps_positive_effect_guard_through_js_pipeline() {
+fn unit_return_function_flips_effect_guard_into_early_return() {
     let mut compiler = LambdaCompiler::new();
     let run = Ident::create_local("run");
     let cond = Ident::create_local("cond");
@@ -4262,21 +4208,13 @@ fn unit_return_function_keeps_positive_effect_guard_through_js_pipeline() {
 
     let deps = compiler.compile_deps_program(&lam);
     let rendered = print_deps_program(&deps, None);
+    // OCaml compiles the assignment as a statement whatever the
+    // continuation (`compile_assign`), so the tail `else` is
+    // `[Return undefined]` and `Js_stmt_make.if_` flips the guard into an
+    // early return.
     assert!(
-        rendered.contains("if (cond) {"),
-        "expected the unit-return function to keep a positive guard, got:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("seen = 1;"),
-        "expected the effectful branch to stay inside the positive guard, got:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("return;"),
-        "expected the unit-return branch to keep its tail return, got:\n{rendered}"
-    );
-    assert!(
-        !rendered.contains("if (!cond) {"),
-        "unexpected negative guard in final JS pipeline output:\n{rendered}"
+        rendered.contains("  if (!cond) {\n    return;\n  }\n  seen = 1;\n}"),
+        "expected the guard to flip into an early return, got:\n{rendered}"
     );
 }
 
@@ -4437,7 +4375,7 @@ fn function_return_blocks_lower_effectful_sequands_without_a_result_temp() {
     let mut compiler = LambdaCompiler::new();
     let cond = Ident::create_local("cond");
     let branch = Ident::create_local("branch");
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
         arity: 1,
         params: vec![cond.clone()],
         body: Box::new(Lambda::prim(
@@ -4454,7 +4392,7 @@ fn function_return_blocks_lower_effectful_sequands_without_a_result_temp() {
             Location::none(),
         )),
         attr: crate::lambda::FunctionAttribute::default(),
-    }));
+    })));
 
     let Expression {
         desc: ExpressionDesc::Fun { body, .. },
@@ -4940,7 +4878,7 @@ fn effect_blocks_keep_allocating_branches_inside_conditional_expressions_like_oc
     let cond = Ident::create_local("cond");
     let effect = Ident::create_local("effect");
     let allocating_block = Lambda::const_(Constant::Block {
-        tag_info: TagInfo::tuple(),
+        tag_info: Box::new(TagInfo::tuple()),
         elements: vec![Constant::int(1), Constant::int(2)],
     });
 
@@ -5381,7 +5319,7 @@ pub(super) fn mixed_untagged_string_overlap_switch(
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                         name: "a".to_string(),
-                        tag_type: Some(crate::types::VariantTagType::String("a".to_string())),
+                        literal: Some(crate::types::VariantLiteralTag::String("a".to_string())),
                     }),
                 ),
                 default_body.clone(),
@@ -5390,7 +5328,7 @@ pub(super) fn mixed_untagged_string_overlap_switch(
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                         name: "b".to_string(),
-                        tag_type: Some(crate::types::VariantTagType::String("b".to_string())),
+                        literal: Some(crate::types::VariantLiteralTag::String("b".to_string())),
                     }),
                 ),
                 default_body.clone(),
@@ -5399,7 +5337,7 @@ pub(super) fn mixed_untagged_string_overlap_switch(
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                         name: "space".to_string(),
-                        tag_type: Some(crate::types::VariantTagType::String("space".to_string())),
+                        literal: Some(crate::types::VariantLiteralTag::String("space".to_string())),
                     }),
                 ),
                 space_body,
@@ -5412,9 +5350,9 @@ pub(super) fn mixed_untagged_string_overlap_switch(
             tag_name: None,
             block_types: vec![crate::types::VariantBlockType::String],
             literal_tags: vec![
-                crate::types::VariantTagType::String("space".to_string()),
-                crate::types::VariantTagType::String("b".to_string()),
-                crate::types::VariantTagType::String("a".to_string()),
+                crate::types::VariantLiteralTag::String("space".to_string()),
+                crate::types::VariantLiteralTag::String("b".to_string()),
+                crate::types::VariantLiteralTag::String("a".to_string()),
             ],
             has_null: false,
             has_undefined: false,
@@ -5433,7 +5371,7 @@ pub(super) fn single_complete_array_block_switch(
             crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(
                 crate::types::VariantTag {
                     name: "Empty".to_string(),
-                    tag_type: Some(crate::types::VariantTagType::Undefined),
+                    literal: Some(crate::types::VariantLiteralTag::Undefined),
                 },
             )),
             undefined_body,
@@ -5441,19 +5379,12 @@ pub(super) fn single_complete_array_block_switch(
         sw_blocks_full: true,
         sw_blocks: vec![(
             crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                crate::types::VariantBlock {
-                    runtime: crate::types::BlockRuntime {
-                        tag: crate::types::VariantTag {
+                crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                             name: "Cons".to_string(),
-                            tag_type: None,
-                        },
-                        tag_name: None,
-                        untagged: true,
-                    },
-                    block_type: Some(crate::types::VariantBlockType::Instance(
+                            literal: None,
+                        }, block_type: crate::types::VariantBlockType::Instance(
                         crate::types::VariantInstance::Array,
-                    )),
-                },
+                    ) },
             )),
             array_body,
         )],
@@ -5463,7 +5394,7 @@ pub(super) fn single_complete_array_block_switch(
             block_types: vec![crate::types::VariantBlockType::Instance(
                 crate::types::VariantInstance::Array,
             )],
-            literal_tags: vec![crate::types::VariantTagType::Undefined],
+            literal_tags: vec![crate::types::VariantLiteralTag::Undefined],
             has_null: false,
             has_undefined: true,
             has_other_literal: false,
@@ -5481,17 +5412,10 @@ pub(super) fn default_only_untagged_boolean_switch(
         sw_blocks_full: false,
         sw_blocks: vec![(
             crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                crate::types::VariantBlock {
-                    runtime: crate::types::BlockRuntime {
-                        tag: crate::types::VariantTag {
+                crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
                             name: "B".to_string(),
-                            tag_type: None,
-                        },
-                        tag_name: None,
-                        untagged: true,
-                    },
-                    block_type: Some(crate::types::VariantBlockType::Boolean),
-                },
+                            literal: None,
+                        }, block_type: crate::types::VariantBlockType::Boolean },
             )),
             boolean_body,
         )],
@@ -5504,8 +5428,8 @@ pub(super) fn default_only_untagged_boolean_switch(
                 crate::types::VariantBlockType::Boolean,
             ],
             literal_tags: vec![
-                crate::types::VariantTagType::Undefined,
-                crate::types::VariantTagType::Null,
+                crate::types::VariantLiteralTag::Undefined,
+                crate::types::VariantLiteralTag::Null,
             ],
             has_null: true,
             has_undefined: true,
@@ -5760,7 +5684,7 @@ pub(super) fn assert_typeof_check(
             assert!(matches!(
                 right.as_ref(),
                 Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 } if txt == expected_type
             ));
@@ -5831,7 +5755,7 @@ pub(super) fn assert_string_equality_check(
             assert!(matches!(
                 right.as_ref(),
                 Expression {
-                    desc: ExpressionDesc::Str { txt, .. },
+                    desc: ExpressionDesc::Str(txt),
                     ..
                 } if txt == expected_tag
             ));
@@ -5883,7 +5807,7 @@ fn flattens_value_sequences_back_to_effect_statements_at_toplevel() {
     let mut compiler = LambdaCompiler::new();
     let callback = Ident::create_local("callback");
     let lam = Lambda::Lsequence(
-        Box::new(Lambda::Lapply(Apply {
+        Box::new(Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(Lambda::var(callback.clone())),
             ap_args: vec![],
             ap_info: ApInfo {
@@ -5892,7 +5816,7 @@ fn flattens_value_sequences_back_to_effect_statements_at_toplevel() {
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
-        })),
+        }))),
         Box::new(Lambda::const_(Constant::none())),
     );
     let program = compiler.compile_program(&lam);
@@ -5927,11 +5851,11 @@ fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
     let after = Ident::create_local("after");
     let then_fn = Ident::create_local("thenFn");
     let else_fn = Ident::create_local("elseFn");
-    let lam = Lambda::Lapply(Apply {
+    let lam = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::LifThenElse(
             Box::new(Lambda::const_(Constant::JsTrue)),
             Box::new(Lambda::Lsequence(
-                Box::new(Lambda::Lapply(Apply {
+                Box::new(Lambda::Lapply(Box::new(Apply {
                     ap_func: Box::new(Lambda::var(before.clone())),
                     ap_args: vec![],
                     ap_info: ApInfo {
@@ -5940,11 +5864,11 @@ fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
-                })),
+                }))),
                 Box::new(Lambda::var(then_fn.clone())),
             )),
             Box::new(Lambda::Lsequence(
-                Box::new(Lambda::Lapply(Apply {
+                Box::new(Lambda::Lapply(Box::new(Apply {
                     ap_func: Box::new(Lambda::var(after.clone())),
                     ap_args: vec![],
                     ap_info: ApInfo {
@@ -5953,7 +5877,7 @@ fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
-                })),
+                }))),
                 Box::new(Lambda::var(else_fn.clone())),
             )),
         )),
@@ -5964,7 +5888,7 @@ fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
-    });
+    }));
 
     let program = compiler.compile_program(&lam);
     let rendered = print_block(&program.block);
@@ -5982,7 +5906,7 @@ fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
 fn value_context_direct_calls_stay_as_call_expressions() {
     let mut compiler = LambdaCompiler::new();
     let callback = Ident::create_local("callback");
-    let compiled = compiler.compile_expr(&Lambda::Lapply(Apply {
+    let compiled = compiler.compile_expr(&Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::var(callback.clone())),
         ap_args: vec![Lambda::const_(Constant::int(1))],
         ap_info: ApInfo {
@@ -5991,7 +5915,7 @@ fn value_context_direct_calls_stay_as_call_expressions() {
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
-    }));
+    })));
 
     assert!(
         compiled.prelude.is_empty(),
@@ -6060,8 +5984,8 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
         Lambda::let_(
             LetKind::Strict,
             result.clone(),
-            Lambda::Lapply(Apply {
-                ap_func: Box::new(Lambda::Lapply(Apply {
+            Lambda::Lapply(Box::new(Apply {
+                ap_func: Box::new(Lambda::Lapply(Box::new(Apply {
                     ap_func: Box::new(Lambda::var(gg)),
                     ap_args: vec![
                         Lambda::const_(Constant::int(3)),
@@ -6073,7 +5997,7 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
-                })),
+                }))),
                 ap_args: vec![Lambda::const_(Constant::int(6))],
                 ap_info: ApInfo {
                     loc: loc.clone(),
@@ -6081,7 +6005,7 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
                     status: ApplyStatus::Na,
                 },
                 ap_transformed_jsx: false,
-            }),
+            })),
             Lambda::var(result.clone()),
         ),
     );
@@ -6157,8 +6081,8 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
             Lambda::function_(
                 1,
                 vec![extra.clone()],
-                Lambda::Lapply(Apply {
-                    ap_func: Box::new(Lambda::Lapply(Apply {
+                Lambda::Lapply(Box::new(Apply {
+                    ap_func: Box::new(Lambda::Lapply(Box::new(Apply {
                         ap_func: Box::new(Lambda::var(g1)),
                         ap_args: vec![
                             Lambda::const_(Constant::int(3)),
@@ -6170,7 +6094,7 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
                             status: ApplyStatus::Na,
                         },
                         ap_transformed_jsx: false,
-                    })),
+                    }))),
                     ap_args: vec![Lambda::const_(Constant::int(6)), Lambda::var(extra.clone())],
                     ap_info: ApInfo {
                         loc: loc.clone(),
@@ -6178,7 +6102,7 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
-                }),
+                })),
                 crate::lambda::FunctionAttribute::default(),
             ),
             Lambda::var(result),
@@ -6207,7 +6131,7 @@ fn let_bound_direct_calls_skip_intermediate_call_aliases() {
     let compiled = compiler.compile_expr(&Lambda::Llet(
         LetKind::Strict,
         x.clone(),
-        Box::new(Lambda::Lapply(Apply {
+        Box::new(Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(Lambda::var(callback)),
             ap_args: vec![Lambda::const_(Constant::int(1))],
             ap_info: ApInfo {
@@ -6216,7 +6140,7 @@ fn let_bound_direct_calls_skip_intermediate_call_aliases() {
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
-        })),
+        }))),
         Box::new(Lambda::var(x.clone())),
     ));
 
@@ -6268,11 +6192,11 @@ fn return_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
     let after = Ident::create_local("after");
     let then_fn = Ident::create_local("thenFn");
     let else_fn = Ident::create_local("elseFn");
-    let lam = Lambda::Lapply(Apply {
+    let lam = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::LifThenElse(
             Box::new(Lambda::const_(Constant::JsTrue)),
             Box::new(Lambda::Lsequence(
-                Box::new(Lambda::Lapply(Apply {
+                Box::new(Lambda::Lapply(Box::new(Apply {
                     ap_func: Box::new(Lambda::var(before.clone())),
                     ap_args: vec![],
                     ap_info: ApInfo {
@@ -6281,11 +6205,11 @@ fn return_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
-                })),
+                }))),
                 Box::new(Lambda::var(then_fn.clone())),
             )),
             Box::new(Lambda::Lsequence(
-                Box::new(Lambda::Lapply(Apply {
+                Box::new(Lambda::Lapply(Box::new(Apply {
                     ap_func: Box::new(Lambda::var(after.clone())),
                     ap_args: vec![],
                     ap_info: ApInfo {
@@ -6294,7 +6218,7 @@ fn return_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
-                })),
+                }))),
                 Box::new(Lambda::var(else_fn.clone())),
             )),
         )),
@@ -6305,7 +6229,7 @@ fn return_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
-    });
+    }));
 
     let block = compiler.compile_return_block(&lam);
     let rendered = print_block(&block);
@@ -6331,11 +6255,11 @@ fn assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
     let then_fn = Ident::create_local("thenFn");
     let else_fn = Ident::create_local("elseFn");
     let result = Ident::create_local("result");
-    let lam = Lambda::Lapply(Apply {
+    let lam = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::LifThenElse(
             Box::new(Lambda::const_(Constant::JsTrue)),
             Box::new(Lambda::Lsequence(
-                Box::new(Lambda::Lapply(Apply {
+                Box::new(Lambda::Lapply(Box::new(Apply {
                     ap_func: Box::new(Lambda::var(before.clone())),
                     ap_args: vec![],
                     ap_info: ApInfo {
@@ -6344,11 +6268,11 @@ fn assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
-                })),
+                }))),
                 Box::new(Lambda::var(then_fn.clone())),
             )),
             Box::new(Lambda::Lsequence(
-                Box::new(Lambda::Lapply(Apply {
+                Box::new(Lambda::Lapply(Box::new(Apply {
                     ap_func: Box::new(Lambda::var(after.clone())),
                     ap_args: vec![],
                     ap_info: ApInfo {
@@ -6357,7 +6281,7 @@ fn assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
-                })),
+                }))),
                 Box::new(Lambda::var(else_fn.clone())),
             )),
         )),
@@ -6368,7 +6292,7 @@ fn assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
-    });
+    }));
 
     let block = compiler.compile_assign_to_target_block(&result, &lam);
     let rendered = print_block(&block);
@@ -6392,7 +6316,7 @@ fn function_bodies_drop_pure_undefined_sequence_suffixes() {
     let callback = Ident::create_local("callback");
     let value = Ident::create_local("value");
     let call = || {
-        Lambda::Lapply(Apply {
+        Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(Lambda::var(callback.clone())),
             ap_args: vec![],
             ap_info: ApInfo {
@@ -6401,7 +6325,7 @@ fn function_bodies_drop_pure_undefined_sequence_suffixes() {
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
-        })
+        }))
     };
     let body = Lambda::Lsequence(
         Box::new(Lambda::Lsequence(
@@ -6416,12 +6340,12 @@ fn function_bodies_drop_pure_undefined_sequence_suffixes() {
             Box::new(Lambda::var(value.clone())),
         )),
     );
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
         arity: 1,
         params: vec![value.clone()],
         body: Box::new(body),
         attr: crate::lambda::FunctionAttribute::default(),
-    }));
+    })));
 
     let Expression {
         desc: ExpressionDesc::Fun { body, .. },
@@ -6470,7 +6394,7 @@ fn top_level_if_effects_drop_trailing_pure_undefined_branch_suffixes() {
     let then_callback = Ident::create_local("thenCallback");
     let else_callback = Ident::create_local("elseCallback");
     let call = |id: &Ident| {
-        Lambda::Lapply(Apply {
+        Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(Lambda::var(id.clone())),
             ap_args: vec![],
             ap_info: ApInfo {
@@ -6479,7 +6403,7 @@ fn top_level_if_effects_drop_trailing_pure_undefined_branch_suffixes() {
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
-        })
+        }))
     };
     let lam = Lambda::LifThenElse(
         Box::new(Lambda::var(cond)),
@@ -7040,7 +6964,7 @@ fn function_return_blocks_collapse_identity_module_wrapper_to_parameter() {
     let field_alias = Ident::create_local("x");
     let loc = crate::location::Location::none();
 
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
         arity: 1,
         params: vec![module_param.clone()],
         body: Box::new(Lambda::let_(
@@ -7063,7 +6987,7 @@ fn function_return_blocks_collapse_identity_module_wrapper_to_parameter() {
             ),
         )),
         attr: crate::lambda::FunctionAttribute::default(),
-    }));
+    })));
 
     let Expression {
         desc: ExpressionDesc::Fun { body, .. },
@@ -7091,7 +7015,7 @@ fn function_return_blocks_collapse_inlined_identity_module_wrapper_to_parameter(
     let module_param = Ident::create_local("U");
     let loc = crate::location::Location::none();
 
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
         arity: 1,
         params: vec![module_param.clone()],
         body: Box::new(Lambda::prim(
@@ -7109,7 +7033,7 @@ fn function_return_blocks_collapse_inlined_identity_module_wrapper_to_parameter(
             crate::location::Location::none(),
         )),
         attr: crate::lambda::FunctionAttribute::default(),
-    }));
+    })));
 
     let Expression {
         desc: ExpressionDesc::Fun { body, .. },
@@ -7140,7 +7064,7 @@ fn function_return_blocks_keep_non_identity_module_wrapper() {
     let right_alias = Ident::create_local("y");
     let loc = crate::location::Location::none();
 
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
         arity: 2,
         params: vec![left.clone(), right.clone()],
         body: Box::new(Lambda::let_(
@@ -7180,7 +7104,7 @@ fn function_return_blocks_keep_non_identity_module_wrapper() {
             ),
         )),
         attr: crate::lambda::FunctionAttribute::default(),
-    }));
+    })));
 
     let Expression {
         desc: ExpressionDesc::Fun { body, .. },
@@ -7286,7 +7210,7 @@ fn js_flatten_and_mark_dead_substitutes_immutable_caml_block_index_reads() {
                                 Expression::number(Number::int(3)),
                             ],
                             MutableFlag::Immutable,
-                            TagInfo::tuple(),
+                            Box::new(TagInfo::tuple()),
                         ))),
                         property: LetKind::Strict,
                         ident_info: IdentInfo::default(),
@@ -7469,33 +7393,25 @@ fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
                                     Expression::number(Number::int(0)),
                                 ],
                                 MutableFlag::Immutable,
-                                TagInfo::Constructor {
+                                Box::new(TagInfo::Constructor {
                                     name: "::".to_string(),
                                     num_nonconst: 1,
-                                    runtime: crate::types::BlockRuntime {
-                                        tag: crate::types::VariantTag {
+                                    runtime: Box::new(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                             name: "::".to_string(),
-                                            tag_type: None,
-                                        },
-                                        tag_name: None,
-                                        untagged: false,
-                                    },
-                                },
+                                            literal: None,
+                                        }, tag_name: None }),
+                                }),
                             )),
                         ],
                         MutableFlag::Immutable,
-                        TagInfo::Constructor {
+                        Box::new(TagInfo::Constructor {
                             name: "::".to_string(),
                             num_nonconst: 1,
-                            runtime: crate::types::BlockRuntime {
-                                tag: crate::types::VariantTag {
+                            runtime: Box::new(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                     name: "::".to_string(),
-                                    tag_type: None,
-                                },
-                                tag_name: None,
-                                untagged: false,
-                            },
-                        },
+                                    literal: None,
+                                }, tag_name: None }),
+                        }),
                     ))),
                     property: LetKind::Strict,
                     ident_info: IdentInfo::default(),
@@ -7566,7 +7482,7 @@ fn js_flatten_and_mark_dead_keeps_single_field_module_reads_materialized_like_oc
                         value: Some(Expression::new(ExpressionDesc::CamlBlock(
                             vec![Expression::var(eq.clone())],
                             MutableFlag::Immutable,
-                            TagInfo::Module(vec!["Eq".to_string()]),
+                            Box::new(TagInfo::Module(vec!["Eq".to_string()])),
                         ))),
                         property: LetKind::Strict,
                         ident_info: IdentInfo::default(),
@@ -7649,7 +7565,7 @@ fn js_flatten_and_mark_dead_preserves_transformed_jsx_component_make_reads() {
                             value: Some(Expression::new(ExpressionDesc::CamlBlock(
                                 vec![Expression::var(component.clone())],
                                 MutableFlag::Immutable,
-                                TagInfo::Module(vec!["make".to_string()]),
+                                Box::new(TagInfo::Module(vec!["make".to_string()])),
                             ))),
                             property: LetKind::Strict,
                             ident_info: IdentInfo::default(),
@@ -7676,10 +7592,10 @@ fn js_flatten_and_mark_dead_preserves_transformed_jsx_component_make_reads() {
                                 Expression::new(ExpressionDesc::CamlBlock(
                                     vec![],
                                     MutableFlag::Immutable,
-                                    TagInfo::record(
+                                    Box::new(TagInfo::record(
                                         vec![],
                                         crate::parser::ast::MutableFlag::Immutable,
-                                    ),
+                                    )),
                                 )),
                             ],
                             CallInfo {
@@ -7726,7 +7642,7 @@ fn js_flatten_and_mark_dead_keeps_single_field_component_make_reads_without_jsx_
                             value: Some(Expression::new(ExpressionDesc::CamlBlock(
                                 vec![Expression::var(component.clone())],
                                 MutableFlag::Immutable,
-                                TagInfo::Module(vec!["make".to_string()]),
+                                Box::new(TagInfo::Module(vec!["make".to_string()])),
                             ))),
                             property: LetKind::Strict,
                             ident_info: IdentInfo::default(),
@@ -7753,10 +7669,10 @@ fn js_flatten_and_mark_dead_keeps_single_field_component_make_reads_without_jsx_
                                 Expression::new(ExpressionDesc::CamlBlock(
                                     vec![],
                                     MutableFlag::Immutable,
-                                    TagInfo::record(
+                                    Box::new(TagInfo::record(
                                         vec![],
                                         crate::parser::ast::MutableFlag::Immutable,
-                                    ),
+                                    )),
                                 )),
                             ],
                             CallInfo {
@@ -7821,7 +7737,7 @@ fn js_flatten_and_mark_dead_keeps_async_component_make_aliases_materialized() {
                             value: Some(Expression::new(ExpressionDesc::CamlBlock(
                                 vec![Expression::var(component.clone())],
                                 MutableFlag::Immutable,
-                                TagInfo::Module(vec!["make".to_string()]),
+                                Box::new(TagInfo::Module(vec!["make".to_string()])),
                             ))),
                             property: LetKind::Strict,
                             ident_info: IdentInfo::default(),
@@ -7875,7 +7791,7 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
                             Expression::undefined(false),
                         ],
                         MutableFlag::Immutable,
-                        TagInfo::Record {
+                        Box::new(TagInfo::Record {
                             fields: vec![
                                 ("id".to_string(), true),
                                 ("name".to_string(), true),
@@ -7886,7 +7802,7 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
                             ],
                             logical_field_count: None,
                             mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                        },
+                        }),
                     ))),
                     property: LetKind::StrictOpt,
                     ident_info: IdentInfo::default(),
@@ -8002,7 +7918,7 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
                             )),
                         ],
                         MutableFlag::Immutable,
-                        TagInfo::Record {
+                        Box::new(TagInfo::Record {
                             fields: vec![
                                 ("pk".to_string(), false),
                                 ("exportStatus".to_string(), true),
@@ -8010,7 +7926,7 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
                             ],
                             logical_field_count: None,
                             mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                        },
+                        }),
                     ))),
                     property: LetKind::Strict,
                     ident_info: IdentInfo::default(),
@@ -8070,7 +7986,7 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
                         items.as_slice(),
                         [
                             Expression {
-                                desc: ExpressionDesc::Str { .. },
+                                desc: ExpressionDesc::Str(_),
                                 ..
                             },
                             Expression {
@@ -8114,22 +8030,22 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
                                     Expression::number(Number::int(3)),
                                 ],
                                 MutableFlag::Immutable,
-                                TagInfo::Record {
+                                Box::new(TagInfo::Record {
                                     fields: vec![
                                         ("xx".to_string(), false),
                                         ("yy".to_string(), false),
                                     ],
                                     logical_field_count: None,
                                     mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                                },
+                                }),
                             )),
                         ],
                         MutableFlag::Immutable,
-                        TagInfo::Record {
+                        Box::new(TagInfo::Record {
                             fields: vec![("a".to_string(), false), ("b".to_string(), false)],
                             logical_field_count: None,
                             mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                        },
+                        }),
                     ))),
                     property: LetKind::Alias,
                     ident_info: IdentInfo::default(),
@@ -8366,16 +8282,18 @@ x: {
 }
 
 #[test]
-fn source_json_template_falls_back_to_regular_string_interpolation_like_ocaml() {
+fn source_json_template_with_interpolation_is_a_syntax_error_like_ocaml() {
     let source = r#"
 let x = json`some random ${"string"}`
 "#;
 
-    let output = compile_test_source_to_js(source, "json_template_test.res").unwrap();
+    let error = compile_test_source_to_js(source, "json_template_test.res")
+        .unwrap_err()
+        .to_string();
 
     assert!(
-        output.contains("let x = \"some random \" + \"string\";"),
-        "expected ordinary string interpolation fallback, got:\n{output}"
+        error.contains("`json` literals do not support interpolation"),
+        "expected json interpolation syntax error, got:\n{error}"
     );
 }
 
@@ -8463,93 +8381,14 @@ fn lowers_paddint_with_int32_coercion() {
 }
 
 #[test]
-fn lowers_poffsetref_to_ref_contents_update() {
-    let mut compiler = LambdaCompiler::new();
-    let cell = Ident::create_local("cell");
-    let program = compiler.compile_program(&Lambda::prim(
-        Primitive::Poffsetref(1),
-        vec![Lambda::var(cell.clone())],
-        Location::none(),
-    ));
-
-    let [stmt] = program.block.as_slice() else {
-        panic!("expected a single effect statement");
-    };
-    match &stmt.desc {
-        StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::Bin(BinOp::Eq, left, right),
-            ..
-        }) => {
-            assert!(matches!(
-                left.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::StaticIndex(target, field, Some(index)),
-                    ..
-                } if field == "contents"
-                    && *index == 0
-                    && matches!(
-                        target.as_ref(),
-                        Expression {
-                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                            ..
-                        } if id.same(&cell)
-                    )
-            ));
-            assert!(matches!(
-                right.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Bin(BinOp::Bor, offset_inner, truncation),
-                    ..
-                }
-                if matches!(
-                    truncation.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Number(Number::Int { i: 0, .. }),
-                        ..
-                    }
-                ) && matches!(
-                    offset_inner.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Bin(BinOp::Plus, read_back, delta),
-                        ..
-                    }
-                    if matches!(
-                        read_back.as_ref(),
-                        Expression {
-                            desc: ExpressionDesc::StaticIndex(target, field, Some(index)),
-                            ..
-                        } if field == "contents"
-                            && *index == 0
-                            && matches!(
-                                target.as_ref(),
-                                Expression {
-                                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                                    ..
-                                } if id.same(&cell)
-                            )
-                    ) && matches!(
-                        delta.as_ref(),
-                        Expression {
-                            desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
-                            ..
-                        }
-                    )
-                )
-            ));
-        }
-        other => panic!("expected `cell.contents = cell.contents + 1 | 0`, got {other:?}"),
-    }
-}
-
-#[test]
 fn lassign_expression_lowers_to_statement_prelude_and_unit_value() {
     let mut compiler = LambdaCompiler::new();
     let cell = Ident::create_local("cell");
     let compiled = compiler.compile_expr(&Lambda::Lassign(
         cell.clone(),
         Box::new(Lambda::prim(
-            Primitive::Poffsetint(1),
-            vec![Lambda::var(cell.clone())],
+            Primitive::Paddint,
+            vec![Lambda::var(cell.clone()), Lambda::const_(Constant::int(1))],
             Location::none(),
         )),
     ));
@@ -8575,8 +8414,8 @@ fn let_bindings_of_unit_lassigns_emit_effects_before_undefined_declarations() {
         &Lambda::Lassign(
             u.clone(),
             Box::new(Lambda::prim(
-                Primitive::Poffsetint(1),
-                vec![Lambda::var(u.clone())],
+                Primitive::Paddint,
+                vec![Lambda::var(u.clone()), Lambda::const_(Constant::int(1))],
                 Location::none(),
             )),
         ),
@@ -8669,43 +8508,6 @@ fn typeof_literal_comparisons_fold_like_ocaml_string_equal() {
             "object",
         )),
         "false"
-    );
-}
-
-#[test]
-fn lowers_pisout_to_ocaml_range_check_shapes() {
-    let mut compiler = LambdaCompiler::new();
-    let value = Ident::create_local("value");
-    let zero_offset = compiler.compile_expr(&Lambda::prim(
-        Primitive::Pisout(0),
-        vec![Lambda::const_(Constant::int(1)), Lambda::var(value.clone())],
-        Location::none(),
-    ));
-    let one_offset = compiler.compile_expr(&Lambda::prim(
-        Primitive::Pisout(1),
-        vec![Lambda::const_(Constant::int(1)), Lambda::var(value)],
-        Location::none(),
-    ));
-
-    assert!(
-        zero_offset.prelude.is_empty(),
-        "unexpected prelude:\n{}",
-        print_block(&zero_offset.prelude)
-    );
-    assert!(
-        one_offset.prelude.is_empty(),
-        "unexpected prelude:\n{}",
-        print_block(&one_offset.prelude)
-    );
-    assert!(
-        print_expression(&zero_offset.expr) == "value !== 0 && value !== 1",
-        "rendered expression was:\n{}",
-        print_expression(&zero_offset.expr)
-    );
-    assert!(
-        print_expression(&one_offset.expr) == "value !== -1 && value !== 0",
-        "rendered expression was:\n{}",
-        print_expression(&one_offset.expr)
     );
 }
 
@@ -8998,7 +8800,7 @@ fn lowers_pnull_to_opt_non_inline_operand_to_primitive_option_from_null() {
     assert!(matches!(
         args.as_slice(),
         [Expression {
-            desc: ExpressionDesc::Str { txt, .. },
+            desc: ExpressionDesc::Str(txt),
             ..
         }] if txt == "value"
     ));
@@ -9031,7 +8833,7 @@ fn lowers_pnull_undefined_to_opt_non_inline_operand_to_primitive_option_from_nul
     assert!(matches!(
         args.as_slice(),
         [Expression {
-            desc: ExpressionDesc::Str { txt, .. },
+            desc: ExpressionDesc::Str(txt),
             ..
         }] if txt == "value"
     ));
@@ -9247,7 +9049,7 @@ fn lowers_module_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(eq.clone())],
             MutableFlag::Immutable,
-            TagInfo::Module(vec!["Eq".to_string()]),
+            Box::new(TagInfo::Module(vec!["Eq".to_string()])),
         )),
     );
 
@@ -9273,11 +9075,11 @@ fn lowers_record_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(value.clone())],
             MutableFlag::Immutable,
-            TagInfo::Record {
+            Box::new(TagInfo::Record {
                 fields: vec![("d".to_string(), false)],
                 logical_field_count: None,
                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-            },
+            }),
         )),
     );
 
@@ -9302,18 +9104,14 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(head.clone()), Expression::var(tail.clone())],
             MutableFlag::Immutable,
-            TagInfo::Constructor {
+            Box::new(TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
-                runtime: crate::types::BlockRuntime {
-                    tag: crate::types::VariantTag {
+                runtime: Box::new(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                         name: "::".to_string(),
-                        tag_type: None,
-                    },
-                    tag_name: None,
-                    untagged: false,
-                },
-            },
+                        literal: None,
+                    }, tag_name: None }),
+            }),
         )),
     );
     let tail_expr = compiler.compile_field_access(
@@ -9322,18 +9120,14 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(head.clone()), Expression::var(tail.clone())],
             MutableFlag::Immutable,
-            TagInfo::Constructor {
+            Box::new(TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
-                runtime: crate::types::BlockRuntime {
-                    tag: crate::types::VariantTag {
+                runtime: Box::new(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                         name: "::".to_string(),
-                        tag_type: None,
-                    },
-                    tag_name: None,
-                    untagged: false,
-                },
-            },
+                        literal: None,
+                    }, tag_name: None }),
+            }),
         )),
     );
 
@@ -9366,7 +9160,7 @@ fn lowers_extension_pfield_from_pure_caml_block_directly_like_ocaml() {
                 Expression::var(payload.clone()),
             ],
             MutableFlag::Immutable,
-            TagInfo::Extension,
+            Box::new(TagInfo::Extension),
         )),
     );
 
@@ -9438,7 +9232,7 @@ fn lowers_polyvar_pfield_from_pure_caml_block_directly_like_ocaml() {
     let block = Expression::new(ExpressionDesc::CamlBlock(
         vec![Expression::string("Tag"), Expression::var(payload.clone())],
         MutableFlag::Immutable,
-        TagInfo::PolyVar("Tag".to_string()),
+        Box::new(TagInfo::PolyVar("Tag".to_string())),
     ));
     let tag = compiler.compile_field_access(0, &FieldDbgInfo::PolyVarTag, &block);
     let value = compiler.compile_field_access(1, &FieldDbgInfo::PolyVarContent, &block);
@@ -10112,7 +9906,7 @@ fn recursive_self_tailcalls_lower_to_looping_while_bodies() {
     let flag = Ident::create_local("flag");
     let acc = Ident::create_local("acc");
     let next = Ident::create_local("next");
-    let tailcall = Lambda::Lapply(Apply {
+    let tailcall = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::var(loop_.clone())),
         ap_args: vec![
             Lambda::const_(Constant::JsFalse),
@@ -10125,7 +9919,7 @@ fn recursive_self_tailcalls_lower_to_looping_while_bodies() {
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
-    });
+    }));
     let lam = Lambda::letrec(
         vec![(
             loop_.clone(),
@@ -10162,7 +9956,7 @@ fn recursive_int_switch_fallthrough_handler_breaks_before_tail_loop_continue() {
     let loop_ = Ident::create_local("loop");
     let tag = Ident::create_local("tag");
     let next = Ident::create_local("next");
-    let tailcall = Lambda::Lapply(Apply {
+    let tailcall = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::var(loop_.clone())),
         ap_args: vec![Lambda::var(next.clone()), Lambda::var(next.clone())],
         ap_info: ApInfo {
@@ -10171,11 +9965,11 @@ fn recursive_int_switch_fallthrough_handler_breaks_before_tail_loop_continue() {
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
-    });
+    }));
     let body = Lambda::LstaticCatch(
         Box::new(Lambda::Lswitch(
             Box::new(Lambda::var(tag.clone())),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: false,
                 sw_consts: vec![
                     (
@@ -10191,7 +9985,7 @@ fn recursive_int_switch_fallthrough_handler_breaks_before_tail_loop_continue() {
                 sw_blocks: vec![],
                 sw_failaction: Some(Box::new(Lambda::var(tag.clone()))),
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            },
+            }),
         )),
         (1, vec![]),
         Box::new(tailcall),
@@ -10218,7 +10012,7 @@ fn recursive_string_switch_fallthrough_handler_breaks_before_tail_loop_continue(
     let strip = Ident::create_local("strip");
     let ch = Ident::create_local("ch");
     let next = Ident::create_local("next");
-    let tailcall = Lambda::Lapply(Apply {
+    let tailcall = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::var(strip.clone())),
         ap_args: vec![Lambda::var(next.clone()), Lambda::var(next.clone())],
         ap_info: ApInfo {
@@ -10227,7 +10021,7 @@ fn recursive_string_switch_fallthrough_handler_breaks_before_tail_loop_continue(
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
-    });
+    }));
     let body = Lambda::LstaticCatch(
         Box::new(Lambda::LstringSwitch(
             Box::new(Lambda::var(ch.clone())),
@@ -10261,7 +10055,7 @@ fn recursive_self_tailcalls_lower_sequands_to_looping_while_bodies() {
     let mut compiler = LambdaCompiler::new();
     let loop_ = Ident::create_local("loop");
     let flag = Ident::create_local("flag");
-    let tailcall = Lambda::Lapply(Apply {
+    let tailcall = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::var(loop_.clone())),
         ap_args: vec![Lambda::const_(Constant::JsFalse)],
         ap_info: ApInfo {
@@ -10270,7 +10064,7 @@ fn recursive_self_tailcalls_lower_sequands_to_looping_while_bodies() {
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
-    });
+    }));
     let lam = Lambda::letrec(
         vec![(
             loop_.clone(),
@@ -10310,7 +10104,7 @@ fn recursive_self_tailcalls_lower_sequors_to_looping_while_bodies() {
     let mut compiler = LambdaCompiler::new();
     let loop_ = Ident::create_local("loop");
     let flag = Ident::create_local("flag");
-    let tailcall = Lambda::Lapply(Apply {
+    let tailcall = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::var(loop_.clone())),
         ap_args: vec![Lambda::const_(Constant::JsFalse)],
         ap_info: ApInfo {
@@ -10319,7 +10113,7 @@ fn recursive_self_tailcalls_lower_sequors_to_looping_while_bodies() {
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
-    });
+    }));
     let lam = Lambda::letrec(
         vec![(
             loop_.clone(),
@@ -10357,11 +10151,13 @@ fn recursive_self_tailcalls_lower_sequors_to_looping_while_bodies() {
 #[test]
 fn recursive_self_tailcalls_rename_params_before_loop_assignments() {
     let mut compiler = LambdaCompiler::new();
-    let loop_ = Ident::create_local("loop");
-    let a = Ident::create_local("a");
-    let b = Ident::create_local("b");
-    let flag = Ident::create_local("flag");
-    let tailcall = Lambda::Lapply(Apply {
+    // Allocate from the compiler's generator so the stamps cannot collide
+    // with the loop parameters it creates, whatever ran before on this thread.
+    let loop_ = compiler.id_gen.create("loop");
+    let a = compiler.id_gen.create("a");
+    let b = compiler.id_gen.create("b");
+    let flag = compiler.id_gen.create("flag");
+    let tailcall = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::var(loop_.clone())),
         ap_args: vec![
             Lambda::var(b.clone()),
@@ -10374,7 +10170,7 @@ fn recursive_self_tailcalls_rename_params_before_loop_assignments() {
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
-    });
+    }));
     let lam = Lambda::letrec(
         vec![(
             loop_.clone(),
@@ -10417,7 +10213,7 @@ fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
     let acc = compiler.id_gen.create("acc");
     let body = Lambda::if_(
         Lambda::var(n.clone()),
-        Lambda::Lapply(Apply {
+        Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(Lambda::var(f.clone())),
             ap_args: vec![
                 Lambda::prim(
@@ -10438,7 +10234,7 @@ fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
-        }),
+        })),
         Lambda::var(acc.clone()),
     );
     let lam = Lambda::letrec(
@@ -10493,7 +10289,7 @@ fn recursive_function_bindings_lower_to_looping_while_bodies() {
     let flag = Ident::create_local("flag");
     let acc = Ident::create_local("acc");
     let next = Ident::create_local("next");
-    let tailcall = Lambda::Lapply(Apply {
+    let tailcall = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::var(loop_.clone())),
         ap_args: vec![
             Lambda::const_(Constant::JsFalse),
@@ -10506,7 +10302,7 @@ fn recursive_function_bindings_lower_to_looping_while_bodies() {
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
-    });
+    }));
     let lam = Lambda::letrec(
         vec![(
             loop_.clone(),
@@ -10547,7 +10343,7 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
     let mut compiler = LambdaCompiler::new();
     let loop_ = Ident::create_local("loop");
     let value = Ident::create_local("value");
-    let tailcall = Lambda::Lapply(Apply {
+    let tailcall = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::var(loop_.clone())),
         ap_args: vec![Lambda::var(value.clone())],
         ap_info: ApInfo {
@@ -10556,16 +10352,16 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
-    });
+    }));
     let body = Lambda::Lswitch(
         Box::new(Lambda::var(value.clone())),
-        LambdaSwitch {
+        Box::new(LambdaSwitch {
             sw_consts_full: true,
             sw_consts: vec![(
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                         name: "Empty".to_string(),
-                        tag_type: None,
+                        literal: None,
                     }),
                 ),
                 Lambda::const_(Constant::int(0)),
@@ -10573,17 +10369,10 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
             sw_blocks_full: true,
             sw_blocks: vec![(
                 crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                    crate::types::VariantBlock {
-                        runtime: crate::types::BlockRuntime {
-                            tag: crate::types::VariantTag {
+                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                                 name: "Node".to_string(),
-                                tag_type: None,
-                            },
-                            tag_name: None,
-                            untagged: false,
-                        },
-                        block_type: None,
-                    },
+                                literal: None,
+                            }, tag_name: None }),
                 )),
                 tailcall,
             )],
@@ -10592,7 +10381,7 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
                 crate::types::VariantMatchingFacts {
                     tag_name: None,
                     block_types: vec![],
-                    literal_tags: vec![crate::types::VariantTagType::String(
+                    literal_tags: vec![crate::types::VariantLiteralTag::String(
                         "Empty".to_string().clone(),
                     )],
                     has_null: false,
@@ -10600,7 +10389,7 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
                     has_other_literal: true,
                 },
             ),
-        },
+        }),
     );
     let lam = Lambda::letrec(
         vec![(
@@ -10642,7 +10431,7 @@ fn recursive_function_aliases_reenter_the_same_tail_loop_like_a_scope_bug() {
                 Lambda::function_(
                     1,
                     vec![z],
-                    Lambda::Lapply(Apply {
+                    Lambda::Lapply(Box::new(Apply {
                         ap_func: Box::new(Lambda::var(even.clone())),
                         ap_args: vec![Lambda::const_(Constant::int(32))],
                         ap_info: ApInfo {
@@ -10651,7 +10440,7 @@ fn recursive_function_aliases_reenter_the_same_tail_loop_like_a_scope_bug() {
                             status: ApplyStatus::Na,
                         },
                         ap_transformed_jsx: false,
-                    }),
+                    })),
                     FunctionAttribute::default(),
                 ),
             ),
@@ -10660,7 +10449,7 @@ fn recursive_function_aliases_reenter_the_same_tail_loop_like_a_scope_bug() {
                 Lambda::function_(
                     1,
                     vec![y.clone()],
-                    Lambda::Lapply(Apply {
+                    Lambda::Lapply(Box::new(Apply {
                         ap_func: Box::new(Lambda::var(odd.clone())),
                         ap_args: vec![Lambda::var(y)],
                         ap_info: ApInfo {
@@ -10669,7 +10458,7 @@ fn recursive_function_aliases_reenter_the_same_tail_loop_like_a_scope_bug() {
                             status: ApplyStatus::Na,
                         },
                         ap_transformed_jsx: false,
-                    }),
+                    })),
                     FunctionAttribute::default(),
                 ),
             ),

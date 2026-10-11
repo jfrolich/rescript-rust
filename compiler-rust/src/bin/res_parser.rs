@@ -16,13 +16,12 @@
 //!   -jsx-version <n>        JSX version (3 or 4)
 //!   -jsx-module <mod>       JSX module (default: react)
 //!   -test-ast-conversion    Test AST conversion roundtrip (parsetree -> parsetree0 -> parsetree)
-//!   -typechecker            Parse for typechecker (not printer)
 
 use clap::Parser as ClapParser;
 use rescript_compiler::binary_ast::{Marshal, MarshalWriter, mapper_from0, mapper_to0, ppx};
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::{
-    Comment, Parser, ParserMode, ParserWarning, Scanner, SignatureItem, Structure, code_frame,
+    Comment, Parser, ParserWarning, Scanner, SignatureItem, Structure, code_frame,
     jsx_ppx, ml_printer, module, printer, sexp, sexp_locs, sexp_locs0,
 };
 use rescript_compiler::source_text::latin1_bytes_to_string;
@@ -102,9 +101,6 @@ struct Args {
     #[arg(long = "jsx-module", default_value = "react")]
     jsx_module: String,
 
-    /// Parse for typechecker (not printer)
-    #[arg(long = "typechecker")]
-    typechecker: bool,
 
     /// Test AST conversion
     #[arg(long = "test-ast-conversion")]
@@ -125,7 +121,6 @@ fn normalize_args() -> Vec<String> {
                 "-width" => "--width".to_string(),
                 "-jsx-version" => "--jsx-version".to_string(),
                 "-jsx-module" => "--jsx-module".to_string(),
-                "-typechecker" => "--typechecker".to_string(),
                 "-test-ast-conversion" => "--test-ast-conversion".to_string(),
                 _ => arg,
             }
@@ -134,6 +129,19 @@ fn normalize_args() -> Vec<String> {
 }
 
 fn main() {
+    // Parse on a thread with a large stack, like `bsc`, so deeply nested input
+    // does not overflow the default main-thread stack.
+    let handle = std::thread::Builder::new()
+        .name("res_parser".into())
+        .stack_size(512 * 1024 * 1024)
+        .spawn(run)
+        .expect("failed to spawn parser thread");
+    if handle.join().is_err() {
+        process::exit(2);
+    }
+}
+
+fn run() {
     let args = Args::parse_from(normalize_args());
 
     // Read file as raw bytes, converting each byte to a char (Latin-1 encoding).
@@ -156,17 +164,7 @@ fn main() {
     // Determine if we're parsing an interface
     let is_interface = args.interface || filename.ends_with(".resi") || filename.ends_with(".mli");
 
-    // Determine parser mode based on output format
-    // For sexp/res output (printer), use Default mode where strings get None delimiter
-    // For ML output and type checking, use ParseForTypeChecker mode where strings get Some("js") delimiter
-    // This matches OCaml's for_printer flag behavior
-    let mode = match args.print.as_str() {
-        "sexp" | "sexp-locs" | "sexp0-locs" | "res" | "ast" => ParserMode::Default,
-        _ => ParserMode::ParseForTypeChecker,
-    };
-
-    // Parse the file
-    let mut parser = Parser::with_mode(&filename, &source, mode);
+    let mut parser = Parser::new(&filename, &source);
 
     // Parse structure or signature
     if is_interface {
@@ -189,10 +187,22 @@ fn main() {
         let signature = if has_parse_errors {
             signature
         } else {
+            // res_cli.ml:305-317: the parsetree0 round trip runs before the
+            // JSX transform.
+            let signature = if args.test_ast_conversion {
+                let tree0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
+                mapper_from0::map_signature(parser.arena_mut(), &tree0).unwrap_or_else(|error| {
+                    eprintln!("{error}");
+                    std::process::exit(2)
+                })
+            } else {
+                signature
+            };
             // Apply JSX PPX transformation and emit JSX preprocessor warnings.
             let (signature, jsx_warnings) = match jsx_ppx::transform_signature_with_warnings_result(
                 signature,
                 args.jsx_version,
+                &args.jsx_module,
                 parser.arena_mut(),
             ) {
                 Ok(result) => result,
@@ -202,14 +212,7 @@ fn main() {
                 }
             };
             print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
-
-            // Apply AST conversion round-trip if requested (for testing)
-            if args.test_ast_conversion {
-                let sig0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
-                mapper_from0::map_signature(parser.arena_mut(), &sig0)
-            } else {
-                signature
-            }
+            signature
         };
 
         // Print in requested format
@@ -259,7 +262,7 @@ fn main() {
                 // 3. Marshaled signature (using output_value)
 
                 // Write magic
-                let _ = io::stdout().write_all(b"Caml1999N022");
+                let _ = io::stdout().write_all(b"ResIntf01311");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -280,7 +283,7 @@ fn main() {
                 let sig0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
 
                 // Write magic
-                let _ = io::stdout().write_all(b"Caml1999N022");
+                let _ = io::stdout().write_all(b"ResIntf01311");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -320,10 +323,22 @@ fn main() {
         let structure = if has_parse_errors {
             structure
         } else {
+            // res_cli.ml:305-317: the parsetree0 round trip runs before the
+            // JSX transform.
+            let structure = if args.test_ast_conversion {
+                let tree0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
+                mapper_from0::map_structure(parser.arena_mut(), &tree0).unwrap_or_else(|error| {
+                    eprintln!("{error}");
+                    std::process::exit(2)
+                })
+            } else {
+                structure
+            };
             // Apply JSX PPX transformation and emit JSX preprocessor warnings.
             let (structure, jsx_warnings) = match jsx_ppx::transform_structure_with_warnings_result(
                 structure,
                 args.jsx_version,
+                &args.jsx_module,
                 parser.arena_mut(),
             ) {
                 Ok(result) => result,
@@ -333,14 +348,7 @@ fn main() {
                 }
             };
             print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
-
-            // Apply AST conversion round-trip if requested (for testing)
-            if args.test_ast_conversion {
-                let str0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
-                mapper_from0::map_structure(parser.arena_mut(), &str0)
-            } else {
-                structure
-            }
+            structure
         };
 
         // Print in requested format
@@ -399,7 +407,7 @@ fn main() {
                 // 3. Marshaled structure (using output_value)
 
                 // Write magic
-                let _ = io::stdout().write_all(b"Caml1999M022");
+                let _ = io::stdout().write_all(b"ResImpl01311");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -420,7 +428,7 @@ fn main() {
                 let str0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
 
                 // Write magic
-                let _ = io::stdout().write_all(b"Caml1999M022");
+                let _ = io::stdout().write_all(b"ResImpl01311");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();

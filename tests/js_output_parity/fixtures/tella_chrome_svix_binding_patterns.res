@@ -46,8 +46,10 @@ module ChromeRuntime = {
   @val @scope(("chrome", "runtime", "onInstalled"))
   external addInstalledListener: (installedEvent => unit) => unit = "addListener"
 
+  type runtimeError = {message: string}
+
   @val @scope(("chrome", "runtime"))
-  external lastError: option<{message: string}> = "lastError"
+  external lastError: option<runtimeError> = "lastError"
 
   let connectAndListen = () => {
     let port = connect("recorder", {"name": "capture"})

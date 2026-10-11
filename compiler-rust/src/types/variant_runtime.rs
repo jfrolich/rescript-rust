@@ -7,7 +7,7 @@
 
 use super::context::TypeContext;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Instance {
     Array,
     ArrayBuffer,
@@ -64,7 +64,7 @@ impl Instance {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum BlockType {
     Int,
     String,
@@ -77,38 +77,92 @@ pub enum BlockType {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum TagType {
+/// OCaml `Variant_runtime.literal_tag`: the literal value a constructor is
+/// represented by, what `@as` states (or the constructor's own name when it
+/// states nothing). It never describes an inferred untagged payload shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum LiteralTag {
     String(String),
-    Int(i32),
+    Int(i64),
     Float(String),
     BigInt(String),
     Bool(bool),
     Null,
     Undefined,
-    Untagged(BlockType),
 }
 
+/// OCaml `Variant_runtime.tag_type`: information used to recognize a
+/// constructor during matching. A literal identifies a constant or an
+/// object's tag; a payload shape identifies a value represented directly by
+/// its payload.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TagType {
+    Literal(LiteralTag),
+    PayloadShape(BlockType),
+}
+
+/// OCaml `Variant_runtime.tag`: a constructor's name and its optional
+/// explicitly declared runtime literal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Tag {
+    pub name: String,
+    pub literal: Option<LiteralTag>,
+}
+
+/// OCaml `Variant_runtime.matchable_tag`: a tag widened for matching, where
+/// an untagged payload shape can take part alongside declared literals.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MatchableTag {
     pub name: String,
     pub tag_type: Option<TagType>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct BlockRuntime {
+/// OCaml `Variant_runtime.to_matchable_tag`.
+pub fn to_matchable_tag(tag: &Tag) -> MatchableTag {
+    MatchableTag {
+        name: tag.name.clone(),
+        tag_type: tag.literal.clone().map(TagType::Literal),
+    }
+}
+
+/// OCaml `Variant_runtime.tagged_block`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct TaggedBlock {
     pub tag: Tag,
     pub tag_name: Option<String>,
-    pub untagged: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Block {
-    pub runtime: BlockRuntime,
-    pub block_type: Option<BlockType>,
+/// OCaml `Variant_runtime.block`: an untagged payload always carries the
+/// runtime shape used for dispatch. Only tagged blocks have an emitted tag
+/// field.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Block {
+    Tagged(TaggedBlock),
+    Untagged { tag: Tag, block_type: BlockType },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+impl Block {
+    /// `Tagged {tag} | Untagged {tag}`.
+    pub fn tag(&self) -> &Tag {
+        match self {
+            Block::Tagged(TaggedBlock { tag, .. }) | Block::Untagged { tag, .. } => tag,
+        }
+    }
+
+    pub fn is_untagged(&self) -> bool {
+        matches!(self, Block::Untagged { .. })
+    }
+
+    /// The payload shape an untagged block is dispatched on.
+    pub fn block_type(&self) -> Option<&BlockType> {
+        match self {
+            Block::Untagged { block_type, .. } => Some(block_type),
+            Block::Tagged(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ConstructorCase {
     Constant(Tag),
     Block(Block),
@@ -120,17 +174,17 @@ pub struct Configuration {
     pub tag_name: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MatchingFacts {
     pub tag_name: Option<String>,
     pub block_types: Vec<BlockType>,
-    pub literal_tags: Vec<TagType>,
+    pub literal_tags: Vec<LiteralTag>,
     pub has_null: bool,
     pub has_undefined: bool,
     pub has_other_literal: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Layout {
     pub unboxed: bool,
     pub constructors: Vec<ConstructorCase>,
@@ -143,10 +197,77 @@ pub(crate) enum LayoutState {
     Complete(Layout),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LayoutRef(pub(crate) u32);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+impl LayoutRef {
+    #[inline]
+    pub(crate) fn from_usize(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("variant layout index exceeds u32::MAX");
+        assert!(
+            raw & super::type_expr::STORE_REF_TAG == 0,
+            "local variant layout index collides with the store tag"
+        );
+        Self(raw)
+    }
+
+    /// Reference to the `idx`-th complete layout of the per-thread store.
+    #[inline]
+    pub(crate) fn from_store_index(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("variant layout store index exceeds u32::MAX");
+        assert!(
+            raw & super::type_expr::STORE_REF_TAG == 0,
+            "variant layout store index exceeds the tag range"
+        );
+        Self(raw | super::type_expr::STORE_REF_TAG)
+    }
+
+    /// Layout `idx` of the process-wide shared pool.
+    #[inline]
+    pub(crate) fn from_shared_index(idx: u32) -> Self {
+        let bits = super::type_expr::STORE_REF_TAG | super::type_expr::SHARED_REF_TAG;
+        assert!(idx & bits == 0, "shared variant layout index exceeds the tag range");
+        Self(idx | bits)
+    }
+
+    #[inline]
+    pub(crate) fn is_shared(self) -> bool {
+        let bits = super::type_expr::STORE_REF_TAG | super::type_expr::SHARED_REF_TAG;
+        self.0 & bits == bits
+    }
+
+    #[inline]
+    pub(crate) fn shared_index(self) -> u32 {
+        debug_assert!(self.is_shared());
+        self.0 & !(super::type_expr::STORE_REF_TAG | super::type_expr::SHARED_REF_TAG)
+    }
+
+    /// Whether this layout lives in the per-thread store.
+    #[inline]
+    pub(crate) fn is_store(self) -> bool {
+        self.0 & super::type_expr::STORE_REF_TAG != 0
+    }
+
+    #[inline]
+    pub(crate) fn index(self) -> usize {
+        debug_assert!(
+            !self.is_store(),
+            "store variant layout used as a local index"
+        );
+        self.0 as usize
+    }
+
+    #[inline]
+    pub(crate) fn store_index(self) -> usize {
+        debug_assert!(
+            self.is_store(),
+            "local variant layout used as a store index"
+        );
+        (self.0 & !super::type_expr::STORE_REF_TAG) as usize
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ConstructorReference {
     pub variant: LayoutRef,
     pub position: usize,
@@ -162,19 +283,20 @@ impl Layout {
         for case in &constructors {
             match case {
                 ConstructorCase::Constant(tag) => {
-                    let tag = tag
-                        .tag_type
+                    // Without an `@as`, a nullary constructor is its own name.
+                    let literal = tag
+                        .literal
                         .clone()
-                        .unwrap_or_else(|| TagType::String(tag.name.clone()));
-                    match tag {
-                        TagType::Null => has_null = true,
-                        TagType::Undefined => has_undefined = true,
+                        .unwrap_or_else(|| LiteralTag::String(tag.name.clone()));
+                    match literal {
+                        LiteralTag::Null => has_null = true,
+                        LiteralTag::Undefined => has_undefined = true,
                         _ => has_other_literal = true,
                     }
-                    literal_tags.insert(0, tag);
+                    literal_tags.insert(0, literal);
                 }
                 ConstructorCase::Block(block) => {
-                    if let Some(block_type) = &block.block_type {
+                    if let Block::Untagged { block_type, .. } = block {
                         block_types.insert(0, block_type.clone());
                     }
                 }
@@ -239,19 +361,9 @@ pub fn plain_layout(
     let constructors = cases
         .into_iter()
         .map(|(name, has_payload)| {
-            let tag = Tag {
-                name,
-                tag_type: None,
-            };
+            let tag = Tag { name, literal: None };
             if has_payload {
-                ConstructorCase::Block(Block {
-                    runtime: BlockRuntime {
-                        tag,
-                        tag_name: None,
-                        untagged: false,
-                    },
-                    block_type: None,
-                })
+                ConstructorCase::Block(Block::Tagged(TaggedBlock { tag, tag_name: None }))
             } else {
                 ConstructorCase::Constant(tag)
             }

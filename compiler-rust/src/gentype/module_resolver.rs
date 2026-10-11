@@ -112,7 +112,7 @@ pub fn sourcedirs_to_map(
     (file_map, bs_dependencies_file_map)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Case {
     Lowercase,
     Uppercase,
@@ -184,6 +184,31 @@ pub fn apply(
     lazy_find(use_bs_dependencies, module_name)
 }
 
+/// Whether a source file exists. Sources do not change during a build, so
+/// in-process builds remember the answer per worker until the next build.
+fn source_file_exists(path: &str) -> bool {
+    let generation = crate::types::thread_store::build_generation();
+    if generation == 0 {
+        return Path::new(path).exists();
+    }
+    thread_local! {
+        static CACHE: std::cell::RefCell<(u64, crate::fast_hash::AHashMap<String, bool>)> =
+            std::cell::RefCell::new((0, crate::fast_hash::AHashMap::new()));
+    }
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.0 != generation {
+            *cache = (generation, crate::fast_hash::AHashMap::new());
+        }
+        if let Some(&exists) = cache.1.get(path) {
+            return exists;
+        }
+        let exists = Path::new(path).exists();
+        cache.1.insert(path.to_string(), exists);
+        exists
+    })
+}
+
 pub fn resolve_module(
     config: &crate::gentype::config::T,
     import_extension: &str,
@@ -204,7 +229,7 @@ pub fn resolve_module(
     );
     let candidate = crate::gentype::import_path::from_module(".", import_extension, module_name);
 
-    if Path::new(&module_name_res_file).exists() {
+    if source_file_exists(&module_name_res_file) {
         candidate
     } else {
         match apply(resolver, use_bs_dependencies, module_name) {

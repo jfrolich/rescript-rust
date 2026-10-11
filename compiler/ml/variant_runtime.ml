@@ -67,29 +67,42 @@ type block_type =
   | ObjectType
   | UnknownType
 
-(*
-  Type of the runtime representation of a tag.
-  Can be a literal (case with no payload), or a block (case with payload).
-  In the case of block it can be tagged or untagged.
-*)
-type tag_type =
+(* The literal value a constructor is represented by: what [@as] states, or
+   the constructor's own name when it states nothing. Unlike [tag_type], this
+   can never describe an inferred untagged payload shape. *)
+type literal_tag =
   | String of string
   | Int of int
   | Float of string
   | BigInt of string
   | Bool of bool
   | Null
-  | Undefined (* literal or tagged block *)
-  | Untagged of block_type (* untagged block *)
-type tag = {name: string; tag_type: tag_type option}
+  | Undefined
 
-type block_runtime = {tag: tag; tag_name: string option; untagged: bool}
-(** Runtime information shared by construction and pattern matching for a
-    constructor carrying a payload. [block_type] is deliberately not part of
-    this value: it describes how a matcher recognizes an unboxed payload, not
-    how the value itself is constructed. *)
+(** Information used to recognize a constructor during matching. A literal
+    identifies a constant or an object's tag; a payload shape identifies a
+    value represented directly by its payload. *)
+type tag_type = Literal of literal_tag | Payload_shape of block_type
 
-type block = {runtime: block_runtime; block_type: block_type option}
+type tag = {name: string; literal: literal_tag option}
+(** A constructor's name and optional explicitly declared runtime literal. *)
+
+type matchable_tag = {name: string; tag_type: tag_type option}
+(** A constructor tag widened for matching, where an untagged payload shape
+    can participate alongside declared literals. *)
+
+type tagged_block = {tag: tag; tag_name: string option}
+
+(** An untagged payload always carries the runtime shape used for dispatch.
+    Only tagged blocks have an emitted tag field. *)
+type block =
+  | Tagged of tagged_block
+  | Untagged of {tag: tag; block_type: block_type}
+
+(* Matching compares against a wider notion of tag than a declaration can
+   state, so a stored tag widens on its way into a check. *)
+let to_matchable_tag ({name; literal} : tag) : matchable_tag =
+  {name; tag_type = Option.map (fun literal -> Literal literal) literal}
 
 type constructor_case = Constant of tag | Block of block
 
@@ -102,7 +115,7 @@ type matching_facts = {
   block_types: block_type list;
       (** Runtime shapes of constructors represented directly by their
           payload. Tagged object constructors do not appear here. *)
-  literal_tags: tag_type list;
+  literal_tags: literal_tag list;
       (** Runtime values of all nullary constructors. *)
   has_null: bool;
   has_undefined: bool;
@@ -144,13 +157,8 @@ let constructor_at (layout : layout) position = layout.constructors.(position)
 
 let constructor_tag layout position =
   match constructor_at layout position with
-  | Constant tag -> tag.tag_type
-  | Block {runtime = {tag}} -> tag.tag_type
-
-let constructor_is_untagged layout position =
-  match constructor_at layout position with
-  | Constant _ -> false
-  | Block {runtime = {untagged}} -> untagged
+  | Constant tag -> tag.literal
+  | Block (Tagged {tag} | Untagged {tag}) -> tag.literal
 
 let representation ({variant; position} : constructor_reference) =
   constructor_at (get_layout variant) position
@@ -182,22 +190,22 @@ let compute_matching_facts ~tag_name (constructors : constructor_case array) :
   let has_other_literal = ref false in
   Array.iter
     (function
-      | Constant {name; tag_type} -> (
-        let tag =
-          match tag_type with
-          | Some tag -> tag
+      | Constant {name; literal} -> (
+        (* Without an [@as], a nullary constructor is its own name. *)
+        let literal =
+          match literal with
+          | Some literal -> literal
           | None -> String name
         in
-        literal_tags := tag :: !literal_tags;
-        match tag with
+        literal_tags := literal :: !literal_tags;
+        match literal with
         | Null -> has_null := true
         | Undefined -> has_undefined := true
-        | String _ | Int _ | Float _ | BigInt _ | Bool _ | Untagged _ ->
+        | String _ | Int _ | Float _ | BigInt _ | Bool _ ->
           has_other_literal := true)
-      | Block {block_type} -> (
-        match block_type with
-        | Some block_type -> block_types := block_type :: !block_types
-        | None -> ()))
+      | Block (Untagged {block_type}) ->
+        block_types := block_type :: !block_types
+      | Block (Tagged _) -> ())
     constructors;
   {
     tag_name;
@@ -235,13 +243,8 @@ let complete_layout layout_ref layout =
 let plain_layout (cases : (string * bool (* has payload *)) list) : layout_ref =
   let case (name, has_payload) =
     if has_payload then
-      Block
-        {
-          runtime =
-            {tag = {name; tag_type = None}; tag_name = None; untagged = false};
-          block_type = None;
-        }
-    else Constant {name; tag_type = None}
+      Block (Tagged {tag = {name; literal = None}; tag_name = None})
+    else Constant {name; literal = None}
   in
   ref
     (Complete

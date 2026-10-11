@@ -3,7 +3,7 @@
 //! This follows the same split as OCaml's `typeopt.ml`, which `translcore.ml`
 //! consults when deciding raw-lambda shapes such as `Blk_some_not_nested`.
 
-use std::collections::HashSet;
+use crate::fast_hash::AHashSet as HashSet;
 
 use crate::types::context::TypeContext;
 use crate::types::decl::{
@@ -42,7 +42,7 @@ pub(crate) fn constructor_payload_is_unboxed(
 ) -> bool {
     matches!(
         constructor_case(ctx, cstr),
-        Some(crate::types::VariantConstructorCase::Block(block)) if block.runtime.untagged
+        Some(crate::types::VariantConstructorCase::Block(block)) if block.is_untagged()
     )
 }
 
@@ -53,9 +53,16 @@ pub(crate) fn constructor_has_optional_shape(cstr: &ConstructorDescription) -> b
 }
 
 pub(crate) fn type_cannot_contain_undefined(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
-    let mut seen = HashSet::new();
-    type_cannot_contain_undefined_rec(ctx, env, ty, &mut seen)
+    ctx.typeopt_answer(env.id(), ty, TYPEOPT_CANNOT_CONTAIN_UNDEFINED, || {
+        let mut seen = HashSet::new();
+        type_cannot_contain_undefined_rec(ctx, env, ty, &mut seen)
+    })
 }
+
+const TYPEOPT_CANNOT_CONTAIN_UNDEFINED: u8 = 0;
+const TYPEOPT_BUILTIN_OBJECT: u8 = 1;
+const TYPEOPT_BASE_UNIT: u8 = 2;
+const TYPEOPT_BASE_BOOL: u8 = 3;
 
 fn type_cannot_contain_undefined_rec(
     ctx: &TypeContext,
@@ -96,19 +103,16 @@ fn type_cannot_contain_undefined_rec(
                                 case,
                                 Some(crate::types::VariantConstructorCase::Constant(
                                     crate::types::VariantTag {
-                                        tag_type: Some(crate::types::VariantTagType::Undefined),
+                                        literal: Some(crate::types::VariantLiteralTag::Undefined),
                                         ..
                                     }
                                 ))
                             ) || case.is_none()
-                                && has_undefined_literal(&cd.cd_attributes);
+                                && cd.cd_runtime_tag == Some(crate::types::VariantLiteralTag::Undefined);
                             let untagged = matches!(
                                 case,
                                 Some(crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock {
-                                        runtime: crate::types::BlockRuntime { untagged: true, .. },
-                                        ..
-                                    }
+                                    crate::types::VariantBlock::Untagged { .. }
                                 ))
                             ) || case.is_none()
                                 && has_untagged(&decl.type_attributes);
@@ -274,10 +278,17 @@ fn get_unboxed_repr_rec(
 pub(crate) fn scrape_ty(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
     // OCaml `Typeopt.scrape_ty` uses `Ctype.expand_head_opt`, then checks
     // unboxed representations (compiler/ml/typeopt.ml:19-31).
+    // `Ctype.correct_levels ty` is `duplicate_type ty` (ctype.ml:650), so
+    // the expansion's unifications mutate a copy, not the typed tree.
+    let ty = crate::types::ctype::subst_identity_copy(ctx, ty);
     let ty = crate::types::ctype::expand_head_opt(ctx, env, ty);
-    match &*ctx.get_desc(ty) {
-        TypeDesc::Tconstr { path, .. } => {
-            if let Some(decl) = find_type_decl(ctx, env, path) {
+    let path = match &*ctx.borrow_desc(ty) {
+        TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+        _ => None,
+    };
+    match path {
+        Some(path) => {
+            if let Some(decl) = find_type_decl(ctx, env, &path) {
                 if decl.type_representation == crate::types::TypeRepresentation::Unboxed {
                     // For unboxed types, try to get the representation type.
                     // If the type is recursive (representation returns None),
@@ -304,7 +315,7 @@ pub(crate) fn is_base_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef, name: 
         env: &Env,
         ty: TypeExprRef,
         name: &str,
-        seen: &mut HashSet<TypeExprRef>,
+        seen: &mut crate::types::type_expr::TypeExprRefSet,
     ) -> bool {
         let ty = scrape_ty(ctx, env, ty);
         if !seen.insert(ty) {
@@ -342,7 +353,29 @@ pub(crate) fn is_base_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef, name: 
 
     // Match OCaml `Typeopt.is_base_type`: inspect `scrape env ty`
     // (compiler/ml/typeopt.ml:99-101).
-    visit(ctx, env, ty, name, &mut HashSet::new())
+    let query = match name {
+        "unit" => Some(TYPEOPT_BASE_UNIT),
+        "bool" => Some(TYPEOPT_BASE_BOOL),
+        _ => None,
+    };
+    if let Some(query) = query {
+        return ctx.typeopt_answer(env.id(), ty, query, || {
+            visit(
+                ctx,
+                env,
+                ty,
+                name,
+                &mut crate::types::type_expr::TypeExprRefSet::new(),
+            )
+        });
+    }
+    visit(
+        ctx,
+        env,
+        ty,
+        name,
+        &mut crate::types::type_expr::TypeExprRefSet::new(),
+    )
 }
 
 fn type_is_builtin_path_but_option(path: &Path) -> BuiltinPathTest {
@@ -396,7 +429,7 @@ fn find_type_decl<'a>(
                         .map(|decl| crate::types::decl::TypeDeclarationRef::owned(decl.clone()))
                 })
                 .or_else(|| {
-                    ctx.find_resolved_pdot_type(&path.name())
+                    ctx.find_resolved_pdot_type_by_name(path)
                         .map(crate::types::decl::TypeDeclarationRef::Shared)
                 })
                 .or_else(|| {
@@ -411,7 +444,7 @@ fn find_type_decl<'a>(
         }
         _ => crate::types::ctype::lookup_type_decl_for_path(ctx, env, path)
             .or_else(|| {
-                ctx.find_resolved_pdot_type(&path.name())
+                ctx.find_resolved_pdot_type_by_name(path)
                     .map(crate::types::decl::TypeDeclarationRef::Shared)
             })
             .or_else(|| {
@@ -434,18 +467,13 @@ pub(crate) fn has_untagged(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| attr.attr_name.txt == UNTAGGED_ATTR)
 }
 
-fn has_undefined_literal(attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|attr| {
-        attr.attr_name.txt == "as"
-            && matches!(
-                attr.attr_payload,
-                crate::types::decl::AttributePayload::Ident(ref ident)
-                    if ident == "undefined"
-            )
+pub(crate) fn type_is_builtin_object(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
+    ctx.typeopt_answer(env.id(), ty, TYPEOPT_BUILTIN_OBJECT, || {
+        type_is_builtin_object_uncached(ctx, env, ty)
     })
 }
 
-pub(crate) fn type_is_builtin_object(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
+fn type_is_builtin_object_uncached(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
     let ty = scrape_ty(ctx, env, ty);
     match &*ctx.get_desc(ty) {
         TypeDesc::Tobject { .. } => true,
@@ -475,7 +503,7 @@ mod tests {
         let id_gen = IdGenerator::new();
         let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let fields = ctx.new_type(TypeDesc::Tnil);
-        let object = ctx.new_type(TypeDesc::Tobject { fields, name: None });
+        let object = ctx.new_type(TypeDesc::Tobject { fields });
 
         assert!(type_is_builtin_object(&ctx, &Env::empty(), object));
     }

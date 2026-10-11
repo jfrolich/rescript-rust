@@ -103,7 +103,7 @@ fn element_of_node(arena: &IndexedLambda, node: NodeId) -> IndexedElement {
         NodeView::Prim(Primitive::Pfield(_, FieldDbgInfo::Module { .. }), [base], _)
             if matches!(
                 arena.view(*base),
-                NodeView::GlobalModule(_, _) | NodeView::Var(_)
+                NodeView::GlobalModule(_) | NodeView::Var(_)
             ) =>
         {
             IndexedElement::SimpleForm(node)
@@ -145,37 +145,20 @@ fn arity_of_var(table: &AHashMap<Ident, IndexedIdKind>, id: &Ident) -> Arity {
     }
 }
 
-fn external_modules_mut(
-    table: &mut ExternalArityTable,
-    dynamic: bool,
-) -> &mut AHashMap<String, ExternalArityFieldTable> {
-    if dynamic {
-        &mut table.dynamic_imports
-    } else {
-        &mut table.static_imports
-    }
-}
-
 fn lookup_external(
     table: &mut ExternalArityTable,
     module: &Ident,
-    dynamic: bool,
     field: &str,
     resolver: &mut ExternalArityResolver<'_>,
 ) -> Option<ExternalArityInfo> {
-    let modules = if dynamic {
-        &table.dynamic_imports
-    } else {
-        &table.static_imports
-    };
-    if let Some(cached) = modules
+    if let Some(cached) = table
         .get(module.name())
         .and_then(|fields| fields.get(field))
     {
         return cached.clone();
     }
-    let resolved = resolver(module, dynamic, field);
-    external_modules_mut(table, dynamic)
+    let resolved = resolver(module, field);
+    table
         .entry(module.name().to_string())
         .or_default()
         .insert(field.to_string(), resolved.clone());
@@ -185,15 +168,9 @@ fn lookup_external(
 fn cached_external(
     table: &ExternalArityTable,
     module: &Ident,
-    dynamic: bool,
     field: &str,
 ) -> Option<ExternalArityInfo> {
-    let modules = if dynamic {
-        &table.dynamic_imports
-    } else {
-        &table.static_imports
-    };
-    modules
+    table
         .get(module.name())
         .and_then(|fields| fields.get(field))
         .and_then(Clone::clone)
@@ -206,7 +183,7 @@ fn all_arities<F>(
     lookup: &mut F,
 ) -> Arity
 where
-    F: FnMut(&Ident, bool, &str) -> Option<ExternalArityInfo>,
+    F: FnMut(&Ident, &str) -> Option<ExternalArityInfo>,
 {
     let mut nodes = nodes.into_iter();
     let Some(first) = nodes.next() else {
@@ -236,7 +213,7 @@ fn get_arity_impl<F>(
     lookup: &mut F,
 ) -> Arity
 where
-    F: FnMut(&Ident, bool, &str) -> Option<ExternalArityInfo>,
+    F: FnMut(&Ident, &str) -> Option<ExternalArityInfo>,
 {
     match arena.view(node) {
         NodeView::Var(id) => arity_of_var(table, id),
@@ -245,12 +222,12 @@ where
             get_arity_impl(arena, table, body, lookup)
         }
         NodeView::Prim(Primitive::Pfield(_, FieldDbgInfo::Module { name }), [base], _)
-            if matches!(arena.view(*base), NodeView::GlobalModule(_, _)) =>
+            if matches!(arena.view(*base), NodeView::GlobalModule(_)) =>
         {
-            let NodeView::GlobalModule(module, dynamic) = arena.view(*base) else {
+            let NodeView::GlobalModule(module) = arena.view(*base) else {
                 unreachable!("guarded by GlobalModule match")
             };
-            match lookup(module, dynamic, name) {
+            match lookup(module, name) {
                 Some(ExternalArityInfo::Single(arity)) => arity,
                 _ => Arity::na(),
             }
@@ -258,9 +235,9 @@ where
         NodeView::Prim(Primitive::Pfield(index, _), [inner], _) => {
             if let NodeView::Prim(Primitive::Pfield(_, FieldDbgInfo::Module { name }), [base], _) =
                 arena.view(*inner)
-                && let NodeView::GlobalModule(module, dynamic) = arena.view(*base)
+                && let NodeView::GlobalModule(module) = arena.view(*base)
             {
-                return match lookup(module, dynamic, name) {
+                return match lookup(module, name) {
                     Some(ExternalArityInfo::Submodule(arities)) => arities
                         .get(*index as usize)
                         .cloned()
@@ -271,7 +248,7 @@ where
             Arity::na()
         }
         NodeView::Prim(Primitive::Praise, _, _) => Arity::raise(),
-        NodeView::GlobalModule(_, _) | NodeView::Prim(_, _, _) => Arity::na(),
+        NodeView::GlobalModule(_) | NodeView::Prim(_, _, _) => Arity::na(),
         NodeView::Apply(function, args, _, _) => {
             match get_arity_impl(arena, table, function, lookup) {
                 Arity::Na => Arity::na(),
@@ -345,8 +322,8 @@ where
 }
 
 pub(crate) fn get_arity(arena: &IndexedLambda, meta: &IndexedLamStats, node: NodeId) -> Arity {
-    let mut lookup = |module: &Ident, dynamic: bool, field: &str| {
-        cached_external(&meta.external_arities, module, dynamic, field)
+    let mut lookup = |module: &Ident, field: &str| {
+        cached_external(&meta.external_arities, module, field)
     };
     get_arity_impl(arena, &meta.ident_tbl, node, &mut lookup)
 }
@@ -359,8 +336,8 @@ pub(crate) fn get_arity_external(
 ) -> Arity {
     let table = &meta.ident_tbl;
     let external = &mut meta.external_arities;
-    let mut lookup = |module: &Ident, dynamic: bool, field: &str| {
-        lookup_external(external, module, dynamic, field, resolver)
+    let mut lookup = |module: &Ident, field: &str| {
+        lookup_external(external, module, field, resolver)
     };
     get_arity_impl(arena, table, node, &mut lookup)
 }
@@ -373,7 +350,7 @@ pub(crate) fn indexed_size(arena: &IndexedLambda, node: NodeId) -> i32 {
             Constant::Block {
                 tag_info, elements, ..
             } => {
-                let missing = match tag_info {
+                let missing = match &**tag_info {
                     crate::lambda::TagInfo::Record { .. }
                     | crate::lambda::TagInfo::RecordInlined { .. } => tag_info
                         .logical_field_count()
@@ -395,7 +372,7 @@ pub(crate) fn indexed_size(arena: &IndexedLambda, node: NodeId) -> i32 {
     fn inner(arena: &IndexedLambda, node: NodeId) -> Option<i32> {
         match arena.view(node) {
             NodeView::Var(_)
-            | NodeView::GlobalModule(_, _)
+            | NodeView::GlobalModule(_)
             | NodeView::Break
             | NodeView::Continue => Some(1),
             NodeView::Const(constant) => Some(constant_size(constant)),
@@ -405,7 +382,7 @@ pub(crate) fn indexed_size(arena: &IndexedLambda, node: NodeId) -> i32 {
             NodeView::LetRec(_, _) => None,
             NodeView::Prim(primitive, args, _) => {
                 match primitive {
-                    Primitive::Pfield(_, FieldDbgInfo::Module { .. }) if matches!(args, [base] if matches!(arena.view(*base), NodeView::GlobalModule(_, _) | NodeView::Var(_))) =>
+                    Primitive::Pfield(_, FieldDbgInfo::Module { .. }) if matches!(args, [base] if matches!(arena.view(*base), NodeView::GlobalModule(_) | NodeView::Var(_))) =>
                     {
                         return Some(1);
                     }
@@ -429,7 +406,7 @@ pub(crate) fn indexed_size(arena: &IndexedLambda, node: NodeId) -> i32 {
                             .filter(|param| {
                                 !matches!(
                                     param.obj_arg_type,
-                                    crate::lambda::lam_primitive::ExternalArgAttr::ArgCst(_)
+                                    crate::types::external_ffi_types::Attr::ArgCst(_)
                                 )
                             })
                             .count();
@@ -524,7 +501,7 @@ fn collect_bind(
                 IndexedIdKind::OptionalBlock(*arg, BoxedNullable::NullUndefined),
             );
         }
-        NodeView::GlobalModule(source, _) => {
+        NodeView::GlobalModule(source) => {
             alias_ident_or_global(
                 meta,
                 id.clone(),
@@ -553,7 +530,9 @@ fn collect_bind(
                     Some(resolver) => get_arity_external(arena, meta, node, resolver),
                     None => get_arity(arena, meta, node),
                 };
-                annotate(meta, rec_flag, id.clone(), arity, Some(node));
+                // Like the tree collect: the payload is only read for
+                // function nodes (remove-alias inlining), and this is not one.
+                annotate(meta, rec_flag, id.clone(), arity, None);
             }
         }
     }
@@ -570,7 +549,7 @@ fn collect(
     match arena.view(node) {
         NodeView::Const(_)
         | NodeView::Var(_)
-        | NodeView::GlobalModule(_, _)
+        | NodeView::GlobalModule(_)
         | NodeView::Break
         | NodeView::Continue => {}
         NodeView::Apply(function, args, _, _) => {
@@ -754,26 +733,63 @@ mod tests {
     fn tree_collect_order(lambda: &Lambda, out: &mut Vec<String>) {
         fn bind(lambda: &Lambda, out: &mut Vec<String>) {
             match lambda {
-                Lambda::Lconst(_) | Lambda::LglobalModule(_, _) | Lambda::Lvar(_) => {}
-                Lambda::Lprim(crate::lambda::PrimInfo {
-                    primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
-                    args,
-                    ..
-                }) => {
+                Lambda::Lconst(_) | Lambda::LglobalModule(_) | Lambda::Lvar(_) => {}
+                Lambda::Lprim(__prim2)
+                    if matches!(
+                        __prim2.as_ref(),
+                        crate::lambda::PrimInfo {
+                            primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
+                            args: _,
+                            ..
+                        }
+                    ) =>
+                {
+                    let crate::lambda::PrimInfo {
+                        primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
+                        args,
+                        ..
+                    } = __prim2.as_ref()
+                    else {
+                        unreachable!()
+                    };
+
                     for arg in args {
                         tree_collect_order(arg, out);
                     }
                 }
-                Lambda::Lprim(crate::lambda::PrimInfo {
+                Lambda::Lprim(__prim1)
+                    if matches!(__prim1.as_ref(), crate::lambda::PrimInfo {
                     primitive: Primitive::Psome | Primitive::PsomeNotNest,
                     args,
                     ..
-                }) if args.len() == 1 => tree_collect_order(&args[0], out),
-                Lambda::Lprim(crate::lambda::PrimInfo {
+                } if args.len() == 1) =>
+                {
+                    let crate::lambda::PrimInfo {
+                        primitive: Primitive::Psome | Primitive::PsomeNotNest,
+                        args,
+                        ..
+                    } = __prim1.as_ref()
+                    else {
+                        unreachable!()
+                    };
+                    tree_collect_order(&args[0], out)
+                }
+                Lambda::Lprim(__prim0)
+                    if matches!(__prim0.as_ref(), crate::lambda::PrimInfo {
                     primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
                     args,
                     ..
-                }) if matches!(args.as_slice(), [Lambda::Lvar(_)]) => {}
+                } if matches!(args.as_slice(), [Lambda::Lvar(_)])) =>
+                {
+                    let crate::lambda::PrimInfo {
+                        primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
+                        args,
+                        ..
+                    } = __prim0.as_ref()
+                    else {
+                        unreachable!()
+                    };
+                }
                 Lambda::Lfunction(function) => tree_collect_order(&function.body, out),
                 other => tree_collect_order(other, out),
             }
@@ -782,7 +798,7 @@ mod tests {
         match lambda {
             Lambda::Lconst(_)
             | Lambda::Lvar(_)
-            | Lambda::LglobalModule(_, _)
+            | Lambda::LglobalModule(_)
             | Lambda::Lbreak
             | Lambda::Lcontinue => {}
             Lambda::Lapply(apply) => {
@@ -877,7 +893,7 @@ mod tests {
         );
         let tail = Lambda::Lswitch(
             Box::new(Lambda::Lvar(optional.clone())),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: false,
                 sw_consts: vec![
                     (SwitchKey::Int(2), Lambda::Lvar(f.clone())),
@@ -887,7 +903,7 @@ mod tests {
                 sw_blocks: vec![],
                 sw_failaction: Some(Box::new(Lambda::Lvar(block.clone()))),
                 sw_dispatch: SwitchDispatch::Direct,
-            },
+            }),
         );
         let lambda = Lambda::let_(
             crate::lambda::LetKind::Strict,
@@ -968,14 +984,14 @@ mod tests {
             ),
             Lambda::Lswitch(
                 Box::new(Lambda::Lconst(Constant::int(0))),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: false,
                     sw_consts: vec![(SwitchKey::Int(1), function(1))],
                     sw_blocks_full: true,
                     sw_blocks: vec![(SwitchKey::Int(2), function(1))],
                     sw_failaction: Some(Box::new(function(1))),
                     sw_dispatch: SwitchDispatch::Direct,
-                },
+                }),
             ),
             Lambda::LstringSwitch(
                 Box::new(Lambda::Lconst(Constant::int(0))),
@@ -1132,12 +1148,12 @@ mod tests {
     #[test]
     fn bound_functions_always_retain_node_ids_like_ocaml_collect() {
         fn raw_function(params: Vec<Ident>, body: Lambda, attr: FunctionAttribute) -> Lambda {
-            Lambda::Lfunction(crate::lambda::LFunction {
+            Lambda::Lfunction(Box::new(crate::lambda::LFunction {
                 arity: params.len() as i32,
                 params,
                 body: Box::new(body),
                 attr,
-            })
+            }))
         }
         fn sequences(count: i32) -> Lambda {
             (1..count).fold(Lambda::Lconst(Constant::int(0)), |body, n| {
@@ -1147,14 +1163,14 @@ mod tests {
         let param = id("param", 60);
         let parameter_switch = Lambda::Lswitch(
             Box::new(Lambda::Lvar(param.clone())),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: true,
                 sw_consts: vec![(SwitchKey::Int(0), Lambda::Lconst(Constant::int(0)))],
                 sw_blocks_full: true,
                 sw_blocks: vec![],
                 sw_failaction: None,
                 sw_dispatch: SwitchDispatch::Direct,
-            },
+            }),
         );
         let impure_medium = Lambda::Lsequence(
             Box::new(Lambda::Lassign(
@@ -1261,8 +1277,30 @@ mod tests {
         );
         let mut tree_meta = LamStats::new(vec![]);
         tree::collect_info(&mut tree_meta, &lambda);
-        let mut context =
-            crate::lambda::indexed::IndexedLambdaContext::from_lambda(lambda.clone(), []);
+        // `simplify_exits` only rebuilds changed nodes
+        // (lambda_traverse.ml `shallow_map_sharing`), so give every function
+        // body a dead catch for the pass to remove.
+        let rewritable = cases.iter().rev().enumerate().fold(
+            Lambda::Lconst(Constant::int(0)),
+            |body, (index, (ident, function, _))| {
+                let Lambda::Lfunction(function) = function.clone() else {
+                    panic!("expected function");
+                };
+                let mut function = *function;
+                function.body = Box::new(Lambda::LstaticCatch(
+                    function.body,
+                    (2000 + index as i32, vec![]),
+                    Box::new(Lambda::unit()),
+                ));
+                Lambda::Llet(
+                    crate::lambda::LetKind::Strict,
+                    ident.clone(),
+                    Box::new(Lambda::Lfunction(Box::new(function))),
+                    Box::new(body),
+                )
+            },
+        );
+        let mut context = crate::lambda::indexed::IndexedLambdaContext::from_lambda(rewritable, []);
         context.collect_info();
         context.simplify_exits(&crate::context::IdGenerator::with_start_stamp(100));
         let retained = context.storage_measurements();
@@ -1363,7 +1401,7 @@ mod tests {
         let exported = id("exported", 2);
         let value = Lambda::prim(
             Primitive::Pfield(0, FieldDbgInfo::Module { name: "run".into() }),
-            vec![Lambda::LglobalModule(module, false)],
+            vec![Lambda::LglobalModule(module)],
             Location::none(),
         );
         let lambda = Lambda::let_(
@@ -1373,14 +1411,14 @@ mod tests {
             Lambda::Lvar(exported.clone()),
         );
         let mut tree_meta = LamStats::new(vec![exported.clone()]);
-        let mut tree_resolver = |_: &Ident, _: bool, _: &str| {
+        let mut tree_resolver = |_: &Ident, _: &str| {
             Some(ExternalArityInfo::Single(Arity::info(vec![2], false)))
         };
         tree::collect_info_with_external_arity(&mut tree_meta, &lambda, &mut tree_resolver);
 
         let indexed = IndexedLambda::from_lambda(lambda);
         let mut indexed_meta = IndexedLamStats::new([exported.clone()]);
-        let mut indexed_resolver = |_: &Ident, _: bool, _: &str| {
+        let mut indexed_resolver = |_: &Ident, _: &str| {
             Some(ExternalArityInfo::Single(Arity::info(vec![2], false)))
         };
         collect_info_with_external_arity(
@@ -1396,51 +1434,51 @@ mod tests {
     }
 
     #[test]
-    fn cached_external_misses_do_not_reresolve_and_keep_import_modes_separate() {
-        fn field(module: Ident, dynamic: bool) -> Lambda {
-            Lambda::Lprim(crate::lambda::PrimInfo {
+    fn cached_external_misses_do_not_reresolve() {
+        fn field(module: Ident) -> Lambda {
+            Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                 primitive: Primitive::Pfield(
                     0,
                     FieldDbgInfo::Module {
                         name: "missing".into(),
                     },
                 ),
-                args: vec![Lambda::LglobalModule(module, dynamic)],
+                args: vec![Lambda::LglobalModule(module)],
                 loc: Location::none(),
-            })
+            }))
         }
         let static_one = id("staticOne", 50);
         let static_two = id("staticTwo", 51);
-        let dynamic = id("dynamic", 52);
+        let third = id("third", 52);
         let module = id("Dependency", 53);
         let lambda = Lambda::Llet(
             crate::lambda::LetKind::Strict,
             static_one.clone(),
-            Box::new(field(module.clone(), false)),
+            Box::new(field(module.clone())),
             Box::new(Lambda::Llet(
                 crate::lambda::LetKind::Strict,
                 static_two.clone(),
-                Box::new(field(module.clone(), false)),
+                Box::new(field(module.clone())),
                 Box::new(Lambda::Llet(
                     crate::lambda::LetKind::Strict,
-                    dynamic.clone(),
-                    Box::new(field(module, true)),
-                    Box::new(Lambda::Lvar(dynamic.clone())),
+                    third.clone(),
+                    Box::new(field(module)),
+                    Box::new(Lambda::Lvar(third.clone())),
                 )),
             )),
         );
-        let exports = vec![static_one, static_two, dynamic];
+        let exports = vec![static_one, static_two, third];
         let mut tree_calls = vec![];
-        let mut tree_resolver = |module: &Ident, dynamic: bool, field: &str| {
-            tree_calls.push((module.name().to_string(), dynamic, field.to_string()));
+        let mut tree_resolver = |module: &Ident, field: &str| {
+            tree_calls.push((module.name().to_string(), field.to_string()));
             None
         };
         let mut tree_meta = LamStats::new(exports.clone());
         tree::collect_info_with_external_arity(&mut tree_meta, &lambda, &mut tree_resolver);
         let indexed = IndexedLambda::from_lambda(lambda);
         let mut indexed_calls = vec![];
-        let mut indexed_resolver = |module: &Ident, dynamic: bool, field: &str| {
-            indexed_calls.push((module.name().to_string(), dynamic, field.to_string()));
+        let mut indexed_resolver = |module: &Ident, field: &str| {
+            indexed_calls.push((module.name().to_string(), field.to_string()));
             None
         };
         let mut indexed_meta = IndexedLamStats::new(exports);
@@ -1451,33 +1489,24 @@ mod tests {
             &mut indexed_resolver,
         );
         assert_eq!(tree_calls, indexed_calls);
-        assert_eq!(
-            indexed_calls,
-            vec![
-                ("Dependency".into(), false, "missing".into()),
-                ("Dependency".into(), true, "missing".into()),
-            ]
-        );
+        assert_eq!(indexed_calls, vec![("Dependency".into(), "missing".into())]);
     }
 
     #[test]
     fn nested_submodule_arity_preserves_fallthrough_and_cache_order() {
-        fn nested(module: Ident, dynamic: bool, outer: FieldDbgInfo, field: &str) -> Lambda {
+        fn nested(module: Ident, outer: FieldDbgInfo, field: &str) -> Lambda {
             Lambda::prim(
                 Primitive::Pfield(0, outer),
                 vec![Lambda::prim(
                     Primitive::Pfield(0, FieldDbgInfo::Module { name: field.into() }),
-                    vec![Lambda::LglobalModule(module, dynamic)],
+                    vec![Lambda::LglobalModule(module)],
                     Location::none(),
                 )],
                 Location::none(),
             )
         }
-        fn resolved(dynamic: bool) -> ExternalArityInfo {
-            ExternalArityInfo::Submodule(vec![Arity::info(
-                vec![if dynamic { 3 } else { 2 }],
-                false,
-            )])
+        fn resolved() -> ExternalArityInfo {
+            ExternalArityInfo::Submodule(vec![Arity::info(vec![2], false)])
         }
 
         let static_export = id("staticExport", 10);
@@ -1486,7 +1515,6 @@ mod tests {
         let static_value = || {
             nested(
                 id("StaticDependency", 1),
-                false,
                 FieldDbgInfo::Module {
                     name: "outer".into(),
                 },
@@ -1506,7 +1534,6 @@ mod tests {
                     dynamic_export.clone(),
                     nested(
                         id("DynamicDependency", 2),
-                        true,
                         FieldDbgInfo::Tuple,
                         "DynamicSubmodule",
                     ),
@@ -1521,18 +1548,18 @@ mod tests {
         ];
 
         let mut tree_calls = vec![];
-        let mut tree_resolver = |module: &Ident, dynamic: bool, field: &str| {
-            tree_calls.push((module.name().to_string(), dynamic, field.to_string()));
-            Some(resolved(dynamic))
+        let mut tree_resolver = |module: &Ident, field: &str| {
+            tree_calls.push((module.name().to_string(), field.to_string()));
+            Some(resolved())
         };
         let mut tree_meta = LamStats::new(exports.clone());
         tree::collect_info_with_external_arity(&mut tree_meta, &lambda, &mut tree_resolver);
 
         let indexed = IndexedLambda::from_lambda(lambda);
         let mut indexed_calls = vec![];
-        let mut indexed_resolver = |module: &Ident, dynamic: bool, field: &str| {
-            indexed_calls.push((module.name().to_string(), dynamic, field.to_string()));
-            Some(resolved(dynamic))
+        let mut indexed_resolver = |module: &Ident, field: &str| {
+            indexed_calls.push((module.name().to_string(), field.to_string()));
+            Some(resolved())
         };
         let mut indexed_meta = IndexedLamStats::new(exports.clone());
         collect_info_with_external_arity(
@@ -1546,8 +1573,8 @@ mod tests {
         assert_eq!(
             tree_calls,
             vec![
-                ("StaticDependency".into(), false, "StaticSubmodule".into()),
-                ("DynamicDependency".into(), true, "DynamicSubmodule".into()),
+                ("StaticDependency".into(), "StaticSubmodule".into()),
+                ("DynamicDependency".into(), "DynamicSubmodule".into()),
             ]
         );
         for export in exports {
@@ -1582,7 +1609,7 @@ mod tests {
 #[cfg(test)]
 mod indexed_size_sparse_tests {
     use super::*;
-    use crate::lambda::lam_primitive::{ExternalArgAttr, ExternalObjLabel, ExternalObjSpec};
+    use crate::lambda::lam_primitive::{Attr, Label, ObjParam};
     use crate::lambda::{Constant, Lambda, TagInfo};
     use crate::location::Location;
     use crate::parser::ast::MutableFlag;
@@ -1598,7 +1625,7 @@ mod indexed_size_sparse_tests {
     #[test]
     fn weighted_size_counts_omitted_record_and_object_fields() {
         let constant = Lambda::const_(Constant::Block {
-            tag_info: sparse_tag(),
+            tag_info: Box::new(sparse_tag()),
             elements: vec![Constant::int(1)],
         });
         let store = IndexedLambda::from_lambda(constant);
@@ -1613,9 +1640,9 @@ mod indexed_size_sparse_tests {
         assert_eq!(indexed_size(&store, store.root()), 7);
 
         let params = (0..6)
-            .map(|i| ExternalObjSpec {
-                obj_arg_type: ExternalArgAttr::Nothing,
-                obj_arg_label: ExternalObjLabel::Label {
+            .map(|i| ObjParam {
+                obj_arg_type: Attr::Nothing,
+                obj_arg_label: Label::ObjLabel {
                     name: format!("f{i}"),
                 },
             })

@@ -26,7 +26,7 @@
 //! assert_eq!(located.txt, "hello");
 //! ```
 
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -38,27 +38,6 @@ use crate::parser::ast::{
     ModuleExprDesc, ModuleType, ModuleTypeDesc, Pattern, PatternDesc, StringLoc, ValueConstraint,
 };
 use crate::parser::longident::Longident;
-
-/// Key for position deduplication.
-/// Two positions with the same (file_name, line, bol, cnum) are the same position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct PosKey {
-    file_name: StrIdx,
-    line: i32,
-    bol: i32,
-    cnum: i32,
-}
-
-impl PosKey {
-    fn from_position(pos: &Position) -> Self {
-        Self {
-            file_name: pos.file_name,
-            line: pos.line,
-            bol: pos.bol,
-            cnum: pos.cnum,
-        }
-    }
-}
 
 // Re-export StrIdx for convenience
 pub use crate::intern::StrIdx;
@@ -100,6 +79,16 @@ impl ArenaIdx for LocIdx {
         self.0
     }
 }
+
+/// First index of typechecker-generated synthetic locations.
+const SYNTHETIC_LOCATION_BASE: u32 = 0x8000_0000;
+/// First index of the positions of typechecker-interned locations.
+const SYNTHETIC_POSITION_BASE: u32 = 0x8000_0000;
+/// First index of expressions appended while the arena is shared
+/// ([`ParseArena::push_shared_expr`]).
+const SHARED_EXPRESSION_BASE: u32 = 0x8000_0000;
+/// First index of core types appended while the arena is shared.
+const SHARED_CORE_TYPE_BASE: u32 = 0x8000_0000;
 
 impl LocIdx {
     /// Check if this is the "none" location (index 0).
@@ -437,6 +426,16 @@ impl SpiceCache {
 // ParseArena
 // ============================================================================
 
+/// Sparse expression payloads set explicitly (see `ParseArena::expr_overrides`).
+#[derive(Debug, Clone, Default)]
+struct ExprOverrides {
+    fun_default: Option<ExprIdx>,
+    case_guards: Option<Box<[Option<ExprIdx>]>>,
+    record_spread: Option<ExprIdx>,
+    if_else_branch: Option<ExprIdx>,
+    coerce_from_type: Option<CoreTypeIdx>,
+}
+
 /// Arena for positions and locations during parsing.
 ///
 /// This provides:
@@ -452,6 +451,8 @@ pub struct ParseArena {
     /// Arena of positions (returns PosIdx).
     positions: Arena<Position, PosIdx>,
     position_file_names: HashMap<StrIdx, String>,
+    /// Most recent file name recorded in `position_file_names`.
+    last_position_file_name: Option<StrIdx>,
     /// Arena of locations (returns LocIdx).
     locations: Arena<InternedLocation, LocIdx>,
     /// Arena of longidents (returns LidentIdx).
@@ -464,6 +465,10 @@ pub struct ParseArena {
     /// Use `push_arity()` for computed paths (fresh indices).
     /// Use `static_arities` for literal paths (shared indices).
     arities: Vec<Option<i32>>,
+    /// Payloads set through `set_fun_default` and the other sparse setters,
+    /// overriding the fields stored in the expression itself. Getters read
+    /// the expression otherwise, so building an expression costs nothing here.
+    expr_overrides: crate::fast_hash::AHashMap<u32, Box<ExprOverrides>>,
     /// Arena of expressions (returns ExprIdx).
     /// Replaces `Box<Expression>` for recursive AST references.
     expressions: Arena<Expression, ExprIdx>,
@@ -477,7 +482,6 @@ pub struct ParseArena {
     /// not move these back inline during parity cleanup unless the replacement
     /// keeps the same AST behavior and comparable parser memory profile.
     /// Sparse side table for function default expressions, keyed by function ExprIdx.
-    expr_fun_defaults: Vec<Option<ExprIdx>>,
     /// N-ary source parameter lists keyed by the function body's arena index.
     ///
     /// `PexpFun` keeps only a compact first-parameter fallback for frozen-v0 PPX
@@ -493,6 +497,10 @@ pub struct ParseArena {
     /// while the arena is still exclusively borrowed.
     nary_fun_default_bindings_by_first_pattern:
         HashMap<PatIdx, Box<[(FunParam, Option<crate::parser::ast::ValueBinding>)]>>,
+    /// Ghost copies of character-interval pattern locations
+    /// (typecore.ml:1337 `{loc with loc_ghost = true}`), allocated before
+    /// type checking for the same aliasing reason.
+    interval_ghost_locs: HashMap<LocIdx, LocIdx>,
     /// N-ary locally-abstract-type (`newtypes`) lists keyed by the function's
     /// first parameter pattern, mirroring `Pexp_fun.newtypes` in the current
     /// upstream parsetree. Each entry is `(name, attributes)`; the parser puts
@@ -501,33 +509,53 @@ pub struct ParseArena {
     nary_arrow_args_by_first_type: HashMap<CoreTypeIdx, Box<[crate::parser::ast::TypeArg]>>,
     /// Sparse current-Parsetree value constraints keyed by the binding pattern.
     value_constraints_by_pattern: HashMap<PatIdx, ValueConstraint>,
+    /// Bindings whose `Ast_helper.Typ.varify_constructors` raises
+    /// `Syntaxerr.Error`; OCaml only raises it when `type_let` reaches them.
+    value_constraint_varify_errors: HashMap<PatIdx, LocIdx>,
+    /// The first error raised by a nested builtin-ppx rewrite whose caller
+    /// cannot return a `Result`; OCaml's mapper raises it immediately, so the
+    /// public rewrite entry points report it before any later error.
+    ppx_deferred_error: Option<crate::binary_ast::ppx::PpxError>,
+    /// Whether the builtin spice mapper stands in for a configured external
+    /// spice PPX (see `driver::is_builtin_external_ppx`).
+    builtin_spice_disabled: bool,
     /// Sparse side table for case guards, keyed by owning match/try ExprIdx.
     /// Value is a case-indexed list of optional guard expressions.
-    expr_case_guards: Vec<Option<Box<[Option<ExprIdx>]>>>,
-    /// Sparse side table for constructor payload argument, keyed by construct ExprIdx.
-    expr_construct_args: Vec<Option<ExprIdx>>,
-    /// Sparse side table for polymorphic variant payload argument, keyed by variant ExprIdx.
-    expr_variant_args: Vec<Option<ExprIdx>>,
     /// Sparse side table for record spread/base expression, keyed by record ExprIdx.
-    expr_record_spreads: Vec<Option<ExprIdx>>,
     /// Sparse side table for record-rest pattern bindings (`...T as r`),
     /// keyed by the record pattern's own location index.
     ///
-    /// OCaml compiler/ml/parsetree.ml:164-168 stores `record_pat_rest` inline
-    /// in `Ppat_record`. The arena parser keeps it in a sparse side table keyed
-    /// by the record pattern's `ppat_loc` (a stable arena index available both
-    /// at parse time and during type checking).
-    pat_record_rests: HashMap<LocIdx, crate::parser::ast::RecordPatRest>,
+    /// OCaml `Used_attributes` (compiler/ml/used_attributes.ml): attribute name
+    /// locations marked as consumed by the builtin PPX, consulted by the
+    /// unused-attribute sweep (`Bs_ast_invariant.warn_unused_attribute`).
+    used_attributes: std::sync::Mutex<HashSet<LocIdx>>,
     /// Sparse side table for if-then-else else branch expression, keyed by if ExprIdx.
-    expr_if_else_branches: Vec<Option<ExprIdx>>,
     /// Sparse side table for `Pexp_coerce` source type annotation, keyed by coerce ExprIdx.
-    expr_coerce_from_types: Vec<Option<CoreTypeIdx>>,
     /// Arena of patterns (returns PatIdx).
     /// Replaces `Box<Pattern>` for recursive AST references.
     patterns: Arena<Pattern, PatIdx>,
     /// Append-only stable storage for OCaml-shaped synthetic pattern rewrites.
     synthetic_patterns: elsa::sync::FrozenVec<Box<Pattern>>,
     synthetic_pattern_base: u32,
+    /// Typechecker-generated locations (e.g. OCaml's `{loc with loc_ghost =
+    /// true}` copies), appended while the arena is shared. Addressed from
+    /// `SYNTHETIC_LOCATION_BASE` so they never collide with primary indices.
+    synthetic_locations: elsa::sync::FrozenVec<Box<InternedLocation>>,
+    /// Expressions built while the arena is shared, addressed from
+    /// `SHARED_EXPRESSION_BASE`: the `@as` payloads printers put back with
+    /// `Ast_helper.Type.field_attributes` / `constructor_attributes`.
+    shared_expressions: elsa::sync::FrozenVec<Box<Expression>>,
+    /// Core types built while the arena is shared, addressed from
+    /// `SHARED_CORE_TYPE_BASE`: the tuples the type checker rebuilds from
+    /// polymorphic variant payload groups (`Ast_helper.Typ.tuple`).
+    shared_core_types: elsa::sync::FrozenVec<Box<CoreType>>,
+    /// `Lident` of `true`, `false`, `null` and `undefined`, for those payloads.
+    runtime_tag_lidents: [LidentIdx; 4],
+    /// The attribute name `as`.
+    as_attribute_name: StrIdx,
+    /// Positions of typechecker-interned locations, addressed from
+    /// `SYNTHETIC_POSITION_BASE`.
+    synthetic_positions: elsa::sync::FrozenVec<Box<Position>>,
     /// Slots reserved before type checking for strings discovered only after
     /// environment lookup (notably omitted record labels).
     synthetic_strings: elsa::sync::FrozenVec<Box<String>>,
@@ -572,6 +600,7 @@ pub struct ParseArena {
     /// Pre-allocated `Lident "None"` for optional field desugaring.
     /// Allocated in `new()`, not `default()`.
     static_none_lid: LidentIdx,
+    static_option_lid: LidentIdx,
     /// Pre-allocated `Ldot(Lident "*predef*", "None")` for optional-default rewrites.
     static_predef_none_lid: LidentIdx,
     /// Pre-allocated `Lident "Some"` for unqualified option wrapping paths.
@@ -601,8 +630,6 @@ pub struct ParseArena {
     static_pat_from_variant_spread_attr_str: StrIdx,
     /// Pre-allocated static longidents used by `%external` rewrite helpers.
     static_ppx_lidents: StaticPpxLidents,
-    /// Position deduplication table - maps position content to its index.
-    position_dedup: HashMap<PosKey, PosIdx>,
     /// Simple Lident deduplication table - maps StrIdx to its LidentIdx.
     /// This enables sharing of common identifiers like "()", "::", etc.
     lident_dedup: HashMap<StrIdx, LidentIdx>,
@@ -714,7 +741,9 @@ impl Default for ParseArena {
         // during typedtree reconstruction. Pre-intern the common decl-attr names
         // that can arrive from external CMIs so that round-tripping imported
         // attrs does not depend on local source text having mentioned them.
-        let _ = strings.intern("as");
+        let as_attribute_name = strings.intern("as");
+        let runtime_tag_lidents = ["true", "false", "null", "undefined"]
+            .map(|name| longidents.push(Longident::Lident(strings.intern(name))));
         let _ = strings.intern("deprecated");
         let _ = strings.intern("tag");
         let _ = strings.intern("unboxed");
@@ -914,29 +943,34 @@ impl Default for ParseArena {
         Self {
             positions: Arena::default(),
             position_file_names: HashMap::new(),
+            last_position_file_name: None,
             locations: Arena::default(),
             longidents,
             synthetic_longidents: elsa::sync::FrozenVec::new(),
             synthetic_longident_base: u32::MAX,
             arities,
+            expr_overrides: crate::fast_hash::AHashMap::default(),
             expressions: Arena::default(),
-            expr_fun_defaults: Vec::new(),
             nary_fun_params_by_first_pattern: HashMap::new(),
             nary_fun_unknown_arity_by_first_pattern: HashMap::new(),
             nary_fun_default_bindings_by_first_pattern: HashMap::new(),
+            interval_ghost_locs: HashMap::new(),
             nary_fun_newtypes_by_first_pattern: HashMap::new(),
             nary_arrow_args_by_first_type: HashMap::new(),
             value_constraints_by_pattern: HashMap::new(),
-            expr_case_guards: Vec::new(),
-            expr_construct_args: Vec::new(),
-            expr_variant_args: Vec::new(),
-            expr_record_spreads: Vec::new(),
-            pat_record_rests: HashMap::new(),
-            expr_if_else_branches: Vec::new(),
-            expr_coerce_from_types: Vec::new(),
+            value_constraint_varify_errors: HashMap::new(),
+            ppx_deferred_error: None,
+            builtin_spice_disabled: false,
+            used_attributes: std::sync::Mutex::new(HashSet::new()),
             patterns: Arena::default(),
             synthetic_patterns: elsa::sync::FrozenVec::new(),
             synthetic_pattern_base: u32::MAX,
+            synthetic_locations: elsa::sync::FrozenVec::new(),
+            shared_expressions: elsa::sync::FrozenVec::new(),
+            shared_core_types: elsa::sync::FrozenVec::new(),
+            runtime_tag_lidents,
+            as_attribute_name,
+            synthetic_positions: elsa::sync::FrozenVec::new(),
             synthetic_strings: elsa::sync::FrozenVec::new(),
             synthetic_string_base: u32::MAX,
             core_types,
@@ -954,6 +988,7 @@ impl Default for ParseArena {
             static_ast_literal_type_float_lident,
             static_placeholder_lid: LidentIdx::default(),
             static_none_lid: LidentIdx::default(),
+            static_option_lid: LidentIdx::default(),
             static_predef_none_lid,
             static_some_lid,
             static_predef_some_lid,
@@ -967,7 +1002,6 @@ impl Default for ParseArena {
             static_constructor_from_spread_attr_str,
             static_pat_from_variant_spread_attr_str,
             static_ppx_lidents,
-            position_dedup: HashMap::new(),
             lident_dedup,
             longident_shareable_strs: HashSet::new(),
             ldot_prefix_idx_table,
@@ -993,10 +1027,43 @@ impl Default for ParseArena {
 }
 
 impl ParseArena {
+    /// Reserve arena capacity for parsing `source_len` bytes.
+    ///
+    /// Growing the arenas by doubling copied every node table several times
+    /// per file. The ratios are the 90th percentile of nodes per source byte
+    /// over a large project, so most files never reallocate.
+    pub fn reserve_for_source(&mut self, source_len: usize) {
+        self.positions.reserve(source_len * 45 / 100);
+        self.locations.reserve(source_len * 16 / 100);
+        self.expressions.reserve(source_len * 9 / 100);
+        self.longidents.reserve(source_len * 65 / 1000);
+        self.patterns.reserve(source_len * 2 / 100);
+        self.core_types.reserve(source_len * 15 / 1000);
+        self.strings.reserve(source_len / 10);
+    }
+
     /// Create a new arena with the "none" position and location pre-allocated at index 0.
     ///
     /// This ensures that `LocIdx::default()` (which is `LocIdx(0)`) always refers to
     /// a valid "none" location, even without calling `none_loc()` first.
+    /// OCaml `Used_attributes.mark_used_attribute`: only non-ghost attributes.
+    pub fn mark_used_attribute(&self, attr: &crate::parser::ast::Attribute) {
+        if !self.loc_ghost(attr.0.loc) {
+            self.used_attributes
+                .lock()
+                .expect("used attributes lock")
+                .insert(attr.0.loc);
+        }
+    }
+
+    /// OCaml `Used_attributes.is_used_attribute`.
+    pub fn is_used_attribute(&self, loc: LocIdx) -> bool {
+        self.used_attributes
+            .lock()
+            .expect("used attributes lock")
+            .contains(&loc)
+    }
+
     pub fn new() -> Self {
         let mut arena = Self::default();
         // Pre-allocate none file name and position at index 0
@@ -1027,6 +1094,9 @@ impl ParseArena {
         // Pre-allocate "*predef*" longident
         let predef_str = arena.strings.intern("*predef*");
         arena.longidents.push(Longident::Lident(predef_str));
+        // Pre-allocate "option" longident (for optional record label types)
+        let option_str = arena.strings.intern("option");
+        arena.static_option_lid = arena.longidents.push(Longident::Lident(option_str));
         arena
     }
 
@@ -1040,6 +1110,13 @@ impl ParseArena {
     /// Used for optional field desugaring (synthesizing None for missing optional fields).
     pub fn none_lid(&self) -> LidentIdx {
         self.static_none_lid
+    }
+
+    /// Get the pre-allocated `Lident "option"` index. Optional record labels
+    /// are typed as `Ptyp_constr (Lident "option", [typ])`
+    /// (compiler/ml/typedecl.ml:314-329, 600-618).
+    pub fn option_lid(&self) -> LidentIdx {
+        self.static_option_lid
     }
 
     /// Get the pre-allocated Ldot(*predef*, "None") longident index.
@@ -1114,10 +1191,16 @@ impl ParseArena {
     // ========== Position methods ==========
 
     fn record_position_file_name(&mut self, file_name: StrIdx) {
+        // Almost every position in a parse shares one file name, so check the
+        // most recent one before hashing.
+        if self.last_position_file_name == Some(file_name) {
+            return;
+        }
         if !self.position_file_names.contains_key(&file_name) {
             self.position_file_names
                 .insert(file_name, self.get_string(file_name).to_string());
         }
+        self.last_position_file_name = Some(file_name);
     }
 
     /// Push a position into the arena and return its index.
@@ -1125,32 +1208,7 @@ impl ParseArena {
     /// PosIdx through code paths (reference sharing), not by value deduplication.
     pub fn push_position(&mut self, pos: Position) -> PosIdx {
         self.record_position_file_name(pos.file_name);
-        let key = PosKey::from_position(&pos);
-        let idx = self.positions.push(pos);
-        // Register in dedup table only if not already there (for lookup purposes)
-        self.position_dedup.entry(key).or_insert(idx);
-        idx
-    }
-
-    /// Get the index of a position if it exists in the dedup table.
-    /// Returns None if this position content hasn't been seen before.
-    #[allow(dead_code)]
-    pub fn get_position_idx(&self, pos: &Position) -> Option<PosIdx> {
-        let key = PosKey::from_position(pos);
-        self.position_dedup.get(&key).copied()
-    }
-
-    /// Push a position with deduplication - reuses an existing index if the position
-    /// content matches.
-    pub fn push_position_dedup(&mut self, pos: Position) -> PosIdx {
-        self.record_position_file_name(pos.file_name);
-        let key = PosKey::from_position(&pos);
-        if let Some(&idx) = self.position_dedup.get(&key) {
-            return idx;
-        }
-        let idx = self.positions.push(pos);
-        self.position_dedup.insert(key, idx);
-        idx
+        self.positions.push(pos)
     }
 
     /// Push a position from components.
@@ -1171,7 +1229,14 @@ impl ParseArena {
 
     /// Look up a position by index.
     pub fn get_position(&self, idx: PosIdx) -> &Position {
-        self.positions.get(idx)
+        let raw = idx.to_u32();
+        if raw < SYNTHETIC_POSITION_BASE {
+            self.positions.get(idx)
+        } else {
+            self.synthetic_positions
+                .get((raw - SYNTHETIC_POSITION_BASE) as usize)
+                .expect("typechecker synthetic position read before initialization")
+        }
     }
 
     /// Get all positions (for marshalling).
@@ -1405,7 +1470,58 @@ impl ParseArena {
 
     /// Look up a location by index.
     pub fn get_location(&self, idx: LocIdx) -> &InternedLocation {
-        self.locations.get(idx)
+        let raw = idx.to_u32();
+        if raw < SYNTHETIC_LOCATION_BASE {
+            self.locations.get(idx)
+        } else {
+            self.synthetic_locations
+                .get((raw - SYNTHETIC_LOCATION_BASE) as usize)
+                .expect("typechecker synthetic location read before initialization")
+        }
+    }
+
+    /// Intern a `Location` that comes from outside this arena (e.g. a label
+    /// declaration read from a `.cmi`) while the arena is shared.
+    /// `foreign_file_name` resolves file names that are not strings of this
+    /// arena (the type context's `.cmi` name table); they are copied into the
+    /// arena's typechecker string storage.
+    pub fn push_typecheck_location(
+        &self,
+        loc: &crate::location::Location,
+        foreign_file_name: &dyn Fn(StrIdx) -> Option<String>,
+    ) -> LocIdx {
+        let push_pos = |pos: &Position| {
+            // `Location::none()` is Rust's spelling of OCaml `Location.none`
+            // (`in_file "_none_"`: line 1, bol 0, cnum -1).
+            if pos.file_name == StrIdx::default() && pos.line == 0 {
+                return self.none_pos();
+            }
+            let mut pos = pos.clone();
+            if let Some(name) = foreign_file_name(pos.file_name) {
+                pos.file_name = self.push_typecheck_string(name);
+            }
+            let slot = self.synthetic_positions.len();
+            self.synthetic_positions.push(Box::new(pos));
+            PosIdx::from_u32(SYNTHETIC_POSITION_BASE + slot as u32)
+        };
+        let start = push_pos(&loc.loc_start);
+        let end = push_pos(&loc.loc_end);
+        let slot = self.synthetic_locations.len();
+        self.synthetic_locations
+            .push(Box::new(InternedLocation::new(start, end, loc.loc_ghost)));
+        LocIdx::from_u32(SYNTHETIC_LOCATION_BASE + slot as u32)
+    }
+
+    /// Append a typechecker-generated ghost copy of `idx` (OCaml
+    /// `{loc with Location.loc_ghost = true}`) to storage reserved before the
+    /// arena became shared. These indices live in a separate range, so scans
+    /// over `locations()` do not see them.
+    pub fn push_typecheck_ghost_loc(&self, idx: LocIdx) -> LocIdx {
+        let loc = self.get_location(idx);
+        let ghost = InternedLocation::new(loc.loc_start, loc.loc_end, true);
+        let slot = self.synthetic_locations.len();
+        self.synthetic_locations.push(Box::new(ghost));
+        LocIdx::from_u32(SYNTHETIC_LOCATION_BASE + slot as u32)
     }
 
     /// Get all locations (for marshalling).
@@ -1511,7 +1627,7 @@ impl ParseArena {
 
     /// Get an interned string by index.
     pub fn get_interned(&self, idx: StrIdx) -> &str {
-        self.strings.get(idx)
+        self.get_string(idx)
     }
 
     // ========================================================================
@@ -1950,6 +2066,7 @@ impl ParseArena {
     }
 
     /// Get the string content for a StrIdx.
+    #[inline]
     pub fn get_string(&self, idx: StrIdx) -> &str {
         let raw = idx.raw();
         if raw < self.synthetic_string_base {
@@ -1962,13 +2079,21 @@ impl ParseArena {
     }
 
     /// File names referenced by source positions in this arena.
-    pub fn source_file_names(&self) -> HashMap<StrIdx, String> {
-        self.position_file_names.clone()
+    pub fn source_file_names(&self) -> std::collections::HashMap<StrIdx, String> {
+        self.position_file_names
+            .iter()
+            .map(|(idx, name)| (*idx, name.clone()))
+            .collect()
     }
 
     /// Number of strings currently stored in the arena string table.
     pub fn string_count(&self) -> usize {
         self.strings.len()
+    }
+
+    /// Copy of the interned (non-synthetic) strings, by index.
+    pub fn snapshot_strings(&self) -> crate::intern::InternedStrings {
+        self.strings.snapshot()
     }
 
     /// Prepare append-only AST storage used by typecore synthetic rewrites.
@@ -2098,7 +2223,7 @@ impl ParseArena {
     /// Check if a longident is a simple Lident with the given name.
     pub fn is_lident(&self, idx: LidentIdx, name: &str) -> bool {
         match self.get_longident(idx) {
-            Longident::Lident(str_idx) => self.strings.get(*str_idx) == name,
+            Longident::Lident(str_idx) => self.get_string(*str_idx) == name,
             _ => false,
         }
     }
@@ -2116,7 +2241,7 @@ impl ParseArena {
     /// Get the last component of a longident as a string.
     pub fn lident_last(&self, idx: LidentIdx) -> &str {
         let str_idx = self.get_longident(idx).last_idx();
-        self.strings.get(str_idx)
+        self.get_string(str_idx)
     }
 
     /// Convert a Located<LidentIdx> to Located<Longident>.
@@ -2182,100 +2307,11 @@ impl ParseArena {
         }
     }
 
-    fn extract_fun_default(expr: &Expression) -> Option<ExprIdx> {
-        match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_fun(inner) => inner.default,
-            _ => None,
-        }
-    }
-
-    fn extract_case_guards(expr: &Expression) -> Option<Box<[Option<ExprIdx>]>> {
-        match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                let (_, cases) = &**inner;
-                if cases.iter().all(|case| case.pc_guard.is_none()) {
-                    None
-                } else {
-                    Some(
-                        cases
-                            .iter()
-                            .map(|case| case.pc_guard)
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    )
-                }
-            }
-            _ => None,
-        }
-    }
-
-    fn extract_construct_arg(expr: &Expression) -> Option<ExprIdx> {
-        match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_construct(_, arg) => *arg,
-            _ => None,
-        }
-    }
-
-    fn extract_variant_arg(expr: &Expression) -> Option<ExprIdx> {
-        match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_variant(inner) => {
-                let (_, arg) = &**inner;
-                *arg
-            }
-            _ => None,
-        }
-    }
-
-    fn extract_record_spread(expr: &Expression) -> Option<ExprIdx> {
-        match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_record(inner) => {
-                let (_, spread) = &**inner;
-                *spread
-            }
-            _ => None,
-        }
-    }
-
-    fn extract_if_else_branch(expr: &Expression) -> Option<ExprIdx> {
-        match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_ifthenelse(inner) => {
-                let (_, _, else_branch) = &**inner;
-                *else_branch
-            }
-            _ => None,
-        }
-    }
-
-    fn extract_coerce_from_type(expr: &Expression) -> Option<CoreTypeIdx> {
-        match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_coerce(inner) => {
-                let (_, from_type, _) = &**inner;
-                *from_type
-            }
-            _ => None,
-        }
-    }
-
     /// Push an expression into the arena and return its index.
     /// Use this instead of `Box::new(expr)` for recursive AST references.
     #[inline]
     pub fn push_expr(&mut self, expr: Expression) -> ExprIdx {
-        let default = Self::extract_fun_default(&expr);
-        let case_guards = Self::extract_case_guards(&expr);
-        let construct_arg = Self::extract_construct_arg(&expr);
-        let variant_arg = Self::extract_variant_arg(&expr);
-        let record_spread = Self::extract_record_spread(&expr);
-        let if_else = Self::extract_if_else_branch(&expr);
-        let coerce_from = Self::extract_coerce_from_type(&expr);
-        let idx = self.expressions.push(expr);
-        self.expr_fun_defaults.push(default);
-        self.expr_case_guards.push(case_guards);
-        self.expr_construct_args.push(construct_arg);
-        self.expr_variant_args.push(variant_arg);
-        self.expr_record_spreads.push(record_spread);
-        self.expr_if_else_branches.push(if_else);
-        self.expr_coerce_from_types.push(coerce_from);
-        idx
+        self.expressions.push(expr)
     }
 
     /// Reserve an expression index using a placeholder node.
@@ -2284,75 +2320,63 @@ impl ParseArena {
     /// used when sparse side data must be keyed by stable `ExprIdx`.
     #[inline]
     pub fn reserve_expr(&mut self) -> ExprIdx {
-        let idx = self.expressions.reserve_with(Self::placeholder_expr());
-        self.expr_fun_defaults.push(None);
-        self.expr_case_guards.push(None);
-        self.expr_construct_args.push(None);
-        self.expr_variant_args.push(None);
-        self.expr_record_spreads.push(None);
-        self.expr_if_else_branches.push(None);
-        self.expr_coerce_from_types.push(None);
-        idx
+        self.expressions.reserve_with(Self::placeholder_expr())
     }
 
     /// Initialize a previously reserved expression slot.
     #[inline]
     pub fn initialize_expr(&mut self, idx: ExprIdx, expr: Expression) {
-        let slot = idx.0 as usize;
-        debug_assert!(slot < self.expr_fun_defaults.len());
-        debug_assert!(slot < self.expr_case_guards.len());
-        debug_assert!(slot < self.expr_construct_args.len());
-        debug_assert!(slot < self.expr_variant_args.len());
-        debug_assert!(slot < self.expr_record_spreads.len());
-        debug_assert!(slot < self.expr_if_else_branches.len());
-        debug_assert!(slot < self.expr_coerce_from_types.len());
-        let default = Self::extract_fun_default(&expr);
-        let case_guards = Self::extract_case_guards(&expr);
-        let construct_arg = Self::extract_construct_arg(&expr);
-        let variant_arg = Self::extract_variant_arg(&expr);
-        let record_spread = Self::extract_record_spread(&expr);
-        let if_else = Self::extract_if_else_branch(&expr);
-        let coerce_from = Self::extract_coerce_from_type(&expr);
+        if !self.expr_overrides.is_empty() {
+            self.expr_overrides.remove(&idx.0);
+        }
         self.expressions.initialize(idx, expr);
-        self.expr_fun_defaults[slot] = default;
-        self.expr_case_guards[slot] = case_guards;
-        self.expr_construct_args[slot] = construct_arg;
-        self.expr_variant_args[slot] = variant_arg;
-        self.expr_record_spreads[slot] = record_spread;
-        self.expr_if_else_branches[slot] = if_else;
-        self.expr_coerce_from_types[slot] = coerce_from;
     }
 
     /// Get an expression by index.
     #[inline]
     pub fn get_expr(&self, idx: ExprIdx) -> &Expression {
-        self.expressions.get(idx)
+        let raw = idx.0;
+        if raw < SHARED_EXPRESSION_BASE {
+            self.expressions.get(idx)
+        } else {
+            self.shared_expressions
+                .get((raw - SHARED_EXPRESSION_BASE) as usize)
+                .expect("shared expression read before it was pushed")
+        }
+    }
+
+    /// Append an expression while the arena is shared. Such expressions have
+    /// no sparse side-table entries, so they must not carry function
+    /// defaults, case guards or other side-table payloads.
+    pub fn push_shared_expr(&self, expr: Expression) -> ExprIdx {
+        let slot = self.shared_expressions.len();
+        self.shared_expressions.push(Box::new(expr));
+        ExprIdx(SHARED_EXPRESSION_BASE + slot as u32)
+    }
+
+    /// `Lident` of `true`, `false`, `null` or `undefined`.
+    pub fn runtime_tag_lident(&self, name: &str) -> LidentIdx {
+        let index = match name {
+            "true" => 0,
+            "false" => 1,
+            "null" => 2,
+            "undefined" => 3,
+            _ => unreachable!("runtime_tag_lident: {name}"),
+        };
+        self.runtime_tag_lidents[index]
+    }
+
+    /// The interned attribute name `as`.
+    pub fn as_attribute_name(&self) -> StrIdx {
+        self.as_attribute_name
     }
 
     /// Get a mutable expression by index.
     #[inline]
     pub fn get_expr_mut(&mut self, idx: ExprIdx) -> &mut Expression {
-        let slot = idx.0 as usize;
-        if slot < self.expr_fun_defaults.len() {
-            self.expr_fun_defaults[slot] = None;
-        }
-        if slot < self.expr_case_guards.len() {
-            self.expr_case_guards[slot] = None;
-        }
-        if slot < self.expr_construct_args.len() {
-            self.expr_construct_args[slot] = None;
-        }
-        if slot < self.expr_variant_args.len() {
-            self.expr_variant_args[slot] = None;
-        }
-        if slot < self.expr_record_spreads.len() {
-            self.expr_record_spreads[slot] = None;
-        }
-        if slot < self.expr_if_else_branches.len() {
-            self.expr_if_else_branches[slot] = None;
-        }
-        if slot < self.expr_coerce_from_types.len() {
-            self.expr_coerce_from_types[slot] = None;
+        // The caller may rewrite the payload fields; overrides no longer apply.
+        if !self.expr_overrides.is_empty() {
+            self.expr_overrides.remove(&idx.0);
         }
         self.expressions.get_mut(idx)
     }
@@ -2371,6 +2395,15 @@ impl ParseArena {
         let first_type = args.first().expect("Ptyp_arrow has arguments").typ;
         self.nary_arrow_args_by_first_type
             .insert(first_type, args.into_boxed_slice());
+    }
+
+    /// The n-ary parameters recorded for an arrow whose first parameter is
+    /// `arg`, when the parser grouped more than one.
+    pub fn nary_arrow_args_slice(
+        &self,
+        arg: &crate::parser::ast::TypeArg,
+    ) -> Option<&[crate::parser::ast::TypeArg]> {
+        self.nary_arrow_args_by_first_type.get(&arg.typ).map(|args| &args[..])
     }
 
     pub fn nary_arrow_args<'a>(
@@ -2407,6 +2440,28 @@ impl ParseArena {
     ) {
         self.nary_fun_default_bindings_by_first_pattern
             .insert(first_pattern, bindings.into_boxed_slice());
+    }
+
+    /// Allocate the ghost locations used by character-interval expansion.
+    pub fn prepare_interval_ghost_locs(&mut self) {
+        // Read the parser-owned pattern storage directly: patterns pushed by
+        // earlier preparation can sit above a previous synthetic base.
+        for i in 0..self.patterns.len() {
+            let pat = self.patterns.get(PatIdx(i as u32));
+            if !matches!(&*pat.ppat_desc, crate::parser::ast::PatternDesc::Ppat_interval(_)) {
+                continue;
+            }
+            let loc = pat.ppat_loc;
+            if !self.interval_ghost_locs.contains_key(&loc) {
+                let ghost = self.mk_ghost_loc(loc);
+                self.interval_ghost_locs.insert(loc, ghost);
+            }
+        }
+    }
+
+    /// The ghost copy of an interval pattern's location.
+    pub fn interval_ghost_loc(&self, loc: LocIdx) -> Option<LocIdx> {
+        self.interval_ghost_locs.get(&loc).copied()
     }
 
     /// Return optional-default lowering prepared before type checking.
@@ -2459,14 +2514,23 @@ impl ParseArena {
         mut constraint: ValueConstraint,
         expression: ExprIdx,
         loc: LocIdx,
-    ) -> Result<(), LocIdx> {
+    ) {
         let names = constraint
             .pvc_newtypes
             .iter()
             .map(|name| self.get_string(name.txt).to_string())
             .collect::<std::collections::HashSet<_>>();
         let source = self.get_core_type(constraint.pvc_type).clone();
-        let body = crate::parser::typ::substitute_type_vars(self, source, &names)?;
+        let body = match crate::parser::typ::substitute_type_vars(self, source, &names) {
+            Ok(body) => body,
+            Err(error_loc) => {
+                // Keep the wire constraint; typing raises the error later.
+                self.value_constraint_varify_errors.insert(pattern, error_loc);
+                self.value_constraints_by_pattern.insert(pattern, constraint);
+                return;
+            }
+        };
+        self.value_constraint_varify_errors.remove(&pattern);
         let body = self.push_core_type(body);
         let poly = self.push_core_type(CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((
@@ -2502,7 +2566,33 @@ impl ParseArena {
         constraint.pvc_expression = Some(wrapped);
         self.value_constraints_by_pattern
             .insert(pattern, constraint);
-        Ok(())
+    }
+
+    /// Enable or disable the builtin spice mapper for this compilation.
+    pub fn set_builtin_spice(&mut self, enabled: bool) {
+        self.builtin_spice_disabled = !enabled;
+    }
+
+    pub fn builtin_spice_enabled(&self) -> bool {
+        !self.builtin_spice_disabled
+    }
+
+    /// Record a nested builtin-ppx error unless an earlier one is pending.
+    pub fn defer_ppx_error(&mut self, error: crate::binary_ast::ppx::PpxError) {
+        if self.ppx_deferred_error.is_none() {
+            self.ppx_deferred_error = Some(error);
+        }
+    }
+
+    /// Take the first deferred builtin-ppx error.
+    pub fn take_ppx_deferred_error(&mut self) -> Option<crate::binary_ast::ppx::PpxError> {
+        self.ppx_deferred_error.take()
+    }
+
+    /// Whether `Ast_helper.Typ.varify_constructors` fails for this binding's
+    /// constraint (compiler/ml/ast_helper.ml:74-78).
+    pub fn value_constraint_varify_error(&self, pattern: PatIdx) -> Option<LocIdx> {
+        self.value_constraint_varify_errors.get(&pattern).copied()
     }
 
     /// Return a value binding's locally abstract constraint, when present.
@@ -2595,21 +2685,15 @@ impl ParseArena {
     /// Attach sparse function default data to an expression node.
     ///
     /// The key must be the `ExprIdx` of the owning `Pexp_fun` expression.
-    pub fn set_fun_default(&mut self, owner: ExprIdx, default: Option<ExprIdx>) {
-        let slot = owner.0 as usize;
-        if slot >= self.expr_fun_defaults.len() {
-            self.expr_fun_defaults.resize(slot + 1, None);
-        }
-        self.expr_fun_defaults[slot] = default;
+    pub fn set_fun_default(&mut self, owner: ExprIdx, value: Option<ExprIdx>) {
+        self.expr_overrides.entry(owner.0).or_default().fun_default = value;
     }
 
     /// Get sparse function default data for a `Pexp_fun` expression node.
     pub fn fun_default(&self, owner: ExprIdx) -> Option<ExprIdx> {
-        let slot = owner.0 as usize;
-        self.expr_fun_defaults
-            .get(slot)
-            .copied()
-            .flatten()
+        self.expr_overrides
+            .get(&owner.0)
+            .and_then(|o| o.fun_default)
             .or_else(|| match &*self.get_expr(owner).pexp_desc {
                 ExpressionDesc::Pexp_fun(inner) => inner.default,
                 _ => None,
@@ -2620,27 +2704,19 @@ impl ParseArena {
     ///
     /// Guards are indexed by case position within the node's `Vec<Case>`.
     pub fn set_case_guards(&mut self, owner: ExprIdx, guards: Vec<Option<ExprIdx>>) {
-        let slot = owner.0 as usize;
-        if slot >= self.expr_case_guards.len() {
-            self.expr_case_guards.resize(slot + 1, None);
-        }
-        self.expr_case_guards[slot] = if guards.is_empty() || guards.iter().all(|g| g.is_none()) {
-            None
-        } else {
-            Some(guards.into_boxed_slice())
-        };
-    }
-
-    /// Get the sparse case guard list for a match/try expression.
-    pub fn case_guards(&self, owner: ExprIdx) -> Option<&[Option<ExprIdx>]> {
-        self.expr_case_guards
-            .get(owner.0 as usize)
-            .and_then(|v| v.as_deref())
+        self.expr_overrides.entry(owner.0).or_default().case_guards =
+            if guards.is_empty() || guards.iter().all(|g| g.is_none()) {
+                None
+            } else {
+                Some(guards.into_boxed_slice())
+            };
     }
 
     /// Get a sparse case guard by owner expression and case position.
     pub fn case_guard(&self, owner: ExprIdx, case_index: usize) -> Option<ExprIdx> {
-        self.case_guards(owner)
+        self.expr_overrides
+            .get(&owner.0)
+            .and_then(|o| o.case_guards.as_deref())
             .and_then(|guards| guards.get(case_index))
             .copied()
             .flatten()
@@ -2653,86 +2729,16 @@ impl ParseArena {
             })
     }
 
-    /// Attach sparse constructor payload argument data to a construct expression node.
-    pub fn set_construct_arg(&mut self, owner: ExprIdx, arg: Option<ExprIdx>) {
-        let slot = owner.0 as usize;
-        if slot >= self.expr_construct_args.len() {
-            self.expr_construct_args.resize(slot + 1, None);
-        }
-        self.expr_construct_args[slot] = arg;
-    }
-
-    /// Get sparse constructor payload argument data for a `Pexp_construct` expression node.
-    pub fn construct_arg(&self, owner: ExprIdx) -> Option<ExprIdx> {
-        let slot = owner.0 as usize;
-        self.expr_construct_args
-            .get(slot)
-            .copied()
-            .flatten()
-            .or_else(|| match &*self.get_expr(owner).pexp_desc {
-                ExpressionDesc::Pexp_construct(_, arg) => *arg,
-                _ => None,
-            })
-    }
-
-    /// Attach sparse polymorphic variant payload argument data to a variant expression node.
-    pub fn set_variant_arg(&mut self, owner: ExprIdx, arg: Option<ExprIdx>) {
-        let slot = owner.0 as usize;
-        if slot >= self.expr_variant_args.len() {
-            self.expr_variant_args.resize(slot + 1, None);
-        }
-        self.expr_variant_args[slot] = arg;
-    }
-
-    /// Get sparse polymorphic variant payload argument data for a `Pexp_variant` expression node.
-    pub fn variant_arg(&self, owner: ExprIdx) -> Option<ExprIdx> {
-        let slot = owner.0 as usize;
-        self.expr_variant_args
-            .get(slot)
-            .copied()
-            .flatten()
-            .or_else(|| match &*self.get_expr(owner).pexp_desc {
-                ExpressionDesc::Pexp_variant(inner) => {
-                    let (_, arg) = &**inner;
-                    *arg
-                }
-                _ => None,
-            })
-    }
-
     /// Attach sparse record spread/base expression data to a record expression node.
-    /// Attach record-rest binding data to a record pattern, keyed by its location index.
-    pub fn set_record_pat_rest(&mut self, loc: LocIdx, rest: crate::parser::ast::RecordPatRest) {
-        self.pat_record_rests.insert(loc, rest);
-    }
-
-    /// Get sparse record-rest binding data for a record pattern node.
-    pub fn record_pat_rest(&self, loc: LocIdx) -> Option<&crate::parser::ast::RecordPatRest> {
-        self.pat_record_rests.get(&loc)
-    }
-
-    pub fn take_record_pat_rest(
-        &mut self,
-        loc: LocIdx,
-    ) -> Option<crate::parser::ast::RecordPatRest> {
-        self.pat_record_rests.remove(&loc)
-    }
-
-    pub fn set_record_spread(&mut self, owner: ExprIdx, spread: Option<ExprIdx>) {
-        let slot = owner.0 as usize;
-        if slot >= self.expr_record_spreads.len() {
-            self.expr_record_spreads.resize(slot + 1, None);
-        }
-        self.expr_record_spreads[slot] = spread;
+    pub fn set_record_spread(&mut self, owner: ExprIdx, value: Option<ExprIdx>) {
+        self.expr_overrides.entry(owner.0).or_default().record_spread = value;
     }
 
     /// Get sparse record spread/base expression data for a `Pexp_record` expression node.
     pub fn record_spread(&self, owner: ExprIdx) -> Option<ExprIdx> {
-        let slot = owner.0 as usize;
-        self.expr_record_spreads
-            .get(slot)
-            .copied()
-            .flatten()
+        self.expr_overrides
+            .get(&owner.0)
+            .and_then(|o| o.record_spread)
             .or_else(|| match &*self.get_expr(owner).pexp_desc {
                 ExpressionDesc::Pexp_record(inner) => {
                     let (_, spread) = &**inner;
@@ -2743,21 +2749,15 @@ impl ParseArena {
     }
 
     /// Attach sparse else-branch expression data to an if-then-else expression node.
-    pub fn set_if_else_branch(&mut self, owner: ExprIdx, else_branch: Option<ExprIdx>) {
-        let slot = owner.0 as usize;
-        if slot >= self.expr_if_else_branches.len() {
-            self.expr_if_else_branches.resize(slot + 1, None);
-        }
-        self.expr_if_else_branches[slot] = else_branch;
+    pub fn set_if_else_branch(&mut self, owner: ExprIdx, value: Option<ExprIdx>) {
+        self.expr_overrides.entry(owner.0).or_default().if_else_branch = value;
     }
 
     /// Get sparse else-branch expression data for a `Pexp_ifthenelse` expression node.
     pub fn if_else_branch(&self, owner: ExprIdx) -> Option<ExprIdx> {
-        let slot = owner.0 as usize;
-        self.expr_if_else_branches
-            .get(slot)
-            .copied()
-            .flatten()
+        self.expr_overrides
+            .get(&owner.0)
+            .and_then(|o| o.if_else_branch)
             .or_else(|| match &*self.get_expr(owner).pexp_desc {
                 ExpressionDesc::Pexp_ifthenelse(inner) => {
                     let (_, _, else_branch) = &**inner;
@@ -2768,21 +2768,15 @@ impl ParseArena {
     }
 
     /// Attach sparse source type data to a coerce expression node.
-    pub fn set_coerce_from_type(&mut self, owner: ExprIdx, from_type: Option<CoreTypeIdx>) {
-        let slot = owner.0 as usize;
-        if slot >= self.expr_coerce_from_types.len() {
-            self.expr_coerce_from_types.resize(slot + 1, None);
-        }
-        self.expr_coerce_from_types[slot] = from_type;
+    pub fn set_coerce_from_type(&mut self, owner: ExprIdx, value: Option<CoreTypeIdx>) {
+        self.expr_overrides.entry(owner.0).or_default().coerce_from_type = value;
     }
 
     /// Get sparse source type data for a `Pexp_coerce` expression node.
     pub fn coerce_from_type(&self, owner: ExprIdx) -> Option<CoreTypeIdx> {
-        let slot = owner.0 as usize;
-        self.expr_coerce_from_types
-            .get(slot)
-            .copied()
-            .flatten()
+        self.expr_overrides
+            .get(&owner.0)
+            .and_then(|o| o.coerce_from_type)
             .or_else(|| match &*self.get_expr(owner).pexp_desc {
                 ExpressionDesc::Pexp_coerce(inner) => {
                     let (_, from_type, _) = &**inner;
@@ -2855,7 +2849,21 @@ impl ParseArena {
     /// Get a core type by index.
     #[inline]
     pub fn get_core_type(&self, idx: CoreTypeIdx) -> &CoreType {
-        self.core_types.get(idx)
+        let raw = idx.0;
+        if raw < SHARED_CORE_TYPE_BASE {
+            self.core_types.get(idx)
+        } else {
+            self.shared_core_types
+                .get((raw - SHARED_CORE_TYPE_BASE) as usize)
+                .expect("shared core type read before it was pushed")
+        }
+    }
+
+    /// Append a core type while the arena is shared.
+    pub fn push_shared_core_type(&self, typ: CoreType) -> CoreTypeIdx {
+        let slot = self.shared_core_types.len();
+        self.shared_core_types.push(Box::new(typ));
+        CoreTypeIdx(SHARED_CORE_TYPE_BASE + slot as u32)
     }
 
     /// Get a mutable core type by index.
@@ -3215,16 +3223,12 @@ mod tests {
 
         assert_eq!(arena.fun_default(owner), None);
         assert_eq!(arena.case_guard(owner, 0), None);
-        assert_eq!(arena.construct_arg(owner), None);
-        assert_eq!(arena.variant_arg(owner), None);
         assert_eq!(arena.record_spread(owner), None);
         assert_eq!(arena.if_else_branch(owner), None);
         assert_eq!(arena.coerce_from_type(owner), None);
 
         arena.set_fun_default(owner, Some(default_expr));
         arena.set_case_guards(owner, vec![None, Some(guard_expr)]);
-        arena.set_construct_arg(owner, Some(default_expr));
-        arena.set_variant_arg(owner, Some(guard_expr));
         arena.set_record_spread(owner, Some(default_expr));
         arena.set_if_else_branch(owner, Some(guard_expr));
         arena.set_coerce_from_type(owner, Some(from_type));
@@ -3233,8 +3237,6 @@ mod tests {
         assert_eq!(arena.case_guard(owner, 0), None);
         assert_eq!(arena.case_guard(owner, 1), Some(guard_expr));
         assert_eq!(arena.case_guard(owner, 2), None);
-        assert_eq!(arena.construct_arg(owner), Some(default_expr));
-        assert_eq!(arena.variant_arg(owner), Some(guard_expr));
         assert_eq!(arena.record_spread(owner), Some(default_expr));
         assert_eq!(arena.if_else_branch(owner), Some(guard_expr));
         assert_eq!(arena.coerce_from_type(owner), Some(from_type));
@@ -3289,25 +3291,6 @@ mod tests {
             pexp_attributes: Attributes::new(),
         });
 
-        let ctor_lid = Located {
-            txt: arena.push_lident("Ctor"),
-            loc: LocIdx::default(),
-        };
-        let construct_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_construct(ctor_lid, Some(default_expr))),
-            pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
-        });
-
-        let variant_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_variant(Box::new((
-                "Tag".into(),
-                Some(guard_expr),
-            )))),
-            pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
-        });
-
         let record_owner = arena.push_expr(Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((
                 vec![],
@@ -3341,8 +3324,6 @@ mod tests {
 
         assert_eq!(arena.fun_default(fun_owner), Some(default_expr));
         assert_eq!(arena.case_guard(match_owner, 0), Some(guard_expr));
-        assert_eq!(arena.construct_arg(construct_owner), Some(default_expr));
-        assert_eq!(arena.variant_arg(variant_owner), Some(guard_expr));
         assert_eq!(arena.record_spread(record_owner), Some(default_expr));
         assert_eq!(arena.if_else_branch(if_owner), Some(guard_expr));
         assert_eq!(arena.coerce_from_type(coerce_owner), Some(from_type));
@@ -3350,16 +3331,12 @@ mod tests {
         // get_expr_mut clears sparse cache entries; fallback to inline fields must preserve behavior.
         let _ = arena.get_expr_mut(fun_owner);
         let _ = arena.get_expr_mut(match_owner);
-        let _ = arena.get_expr_mut(construct_owner);
-        let _ = arena.get_expr_mut(variant_owner);
         let _ = arena.get_expr_mut(record_owner);
         let _ = arena.get_expr_mut(if_owner);
         let _ = arena.get_expr_mut(coerce_owner);
 
         assert_eq!(arena.fun_default(fun_owner), Some(default_expr));
         assert_eq!(arena.case_guard(match_owner, 0), Some(guard_expr));
-        assert_eq!(arena.construct_arg(construct_owner), Some(default_expr));
-        assert_eq!(arena.variant_arg(variant_owner), Some(guard_expr));
         assert_eq!(arena.record_spread(record_owner), Some(default_expr));
         assert_eq!(arena.if_else_branch(if_owner), Some(guard_expr));
         assert_eq!(arena.coerce_from_type(coerce_owner), Some(from_type));

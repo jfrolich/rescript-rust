@@ -10,6 +10,24 @@ We tried to keep the installation process as simple as possible. In case you are
 
 Happy hacking!
 
+## Repository guides
+
+This document covers repository-wide setup and workflow. Start with the guide
+for the compiler area you are changing:
+
+- [parser, printer, and JSX transformation](compiler/syntax/README.md)
+- [type checker and typed tree](compiler/ml/README.md)
+- [Lambda, Lam, and JavaScript generation](compiler/core/README.md)
+- [editor analysis](analysis/README.md)
+- [build system](rewatch/README.md)
+- [`rescript-tools`](tools/README.md)
+
+Public language and library documentation belongs on the
+[ReScript website](https://github.com/rescript-association/rescript-lang.org).
+The guides in this repository document its current implementation and
+contributor workflows. Detailed caller contracts belong in module interfaces;
+algorithm and representation invariants belong beside their implementation.
+
 ## Setup
 
 > Most of our contributors are working on Apple machines, so all our instructions are currently macOS / Linux centric. Contributions for Windows development welcome!
@@ -48,9 +66,9 @@ opam init
 
 # Any recent OCaml version works as a development compiler
 # Can also create local switch with opam switch create
-# If you get "No compiler matching `5.3.0' found" error,
+# If you get "No compiler matching `5.5.1' found" error,
 # then you need to run `opam update && opam upgrade` first
-opam switch create 5.3.0
+opam switch create 5.5.1
 
 # Install dev dependencies from OPAM
 opam install . --deps-only --with-test --with-dev-setup -y
@@ -99,6 +117,21 @@ As an alternative to the manual installation, the repository provides a [develop
 Run the `Dev Containers: Rebuild and Reopen in Container` action to get started.
 
 You can also open this dev container with [GitHub Codespaces](https://github.com/features/codespaces/).
+
+Alternatively, install the [Dev Container CLI](https://github.com/devcontainers/cli) through npm:
+
+```sh
+npm install -g @devcontainers/cli
+```
+
+Then create the development container and open a shell in it:
+
+```sh
+devcontainer up --workspace-folder .
+devcontainer exec --workspace-folder . zsh
+```
+
+Use the Dev Container tooling rather than building `.devcontainer/Dockerfile` directly. The tooling installs the features declared in `devcontainer.json`, including Node.js, and runs the post-create command. A plain `docker build` does not apply these features or lifecycle commands.
 
 ## Building the Compiler
 
@@ -150,6 +183,59 @@ make checkformat
 To make sure that no files are added to or removed from the `rescript`, `@rescript/runtime`, or `@rescript/belt` npm package inadvertently, an artifact list is kept at `packages/artifacts.json`. During CI build, it is verified that only the files that are listed there are actually included in the npm packages.
 
 After adding a new file to the repository that should go into one of the npm packages - e.g., a new stdlib module -, run `make artifacts`.
+
+## Adding a New npm Package
+
+npm trusted publishing can only be configured after a package exists in the
+registry. Before the package's first real release, create it with a minimal
+`0.0.0` version under a temporary `bootstrap` tag. This keeps `latest` and the
+normal release tags unchanged. The npm account used for these commands needs
+write access to the package scope and two-factor authentication enabled. Run
+`npm login` first if the account is not already authenticated locally.
+
+Run the following outside the repository, replacing `@rescript/example` with
+the new package name:
+
+```sh
+bootstrap_dir="$(mktemp -d)"
+cd "$bootstrap_dir"
+
+npm init --yes
+npm pkg set \
+  name="@rescript/example" \
+  version="0.0.0" \
+  license="MIT" \
+  repository.type="git" \
+  repository.url="git+https://github.com/rescript-lang/rescript.git"
+
+npm publish \
+  --access public \
+  --tag bootstrap \
+  --provenance=false
+```
+
+Then use npm 11.15 or newer to authorize this repository's protected publish
+job as the package's trusted publisher:
+
+```sh
+npm trust github @rescript/example \
+  --file publish.yml \
+  --repository rescript-lang/rescript \
+  --environment npm-release \
+  --allow-publish \
+  --yes
+```
+
+The normal `Publish` workflow can now publish the package with provenance. Once
+the first real version has been published successfully, remove the temporary
+tag:
+
+```sh
+npm dist-tag rm @rescript/example bootstrap
+```
+
+The `0.0.0` version remains in npm's immutable package history but is not
+selected by `latest` or any of the repository's release tags.
 
 ## Test the compiler
 

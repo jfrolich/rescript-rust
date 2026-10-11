@@ -29,7 +29,7 @@ type arity = Single of Lam_arity.t | Submodule of Lam_arity.t array
 (* TODO: add a magic number *)
 type cmj_value = {
   arity: arity;
-  persistent_closed_lambda: Lam.t option;
+  persistent_closed_lambda: Lambda.t option;
       (** Either constant or closed functor *)
 }
 
@@ -40,7 +40,7 @@ let single_na = Single Lam_arity.na
 type keyed_cmj_value = {
   name: string;
   arity: arity;
-  persistent_closed_lambda: Lam.t option;
+  persistent_closed_lambda: Lambda.t option;
 }
 
 type keyed_cmj_values = keyed_cmj_value array
@@ -48,7 +48,11 @@ type keyed_cmj_values = keyed_cmj_value array
 type hoisted_export = {
   path: string list;  (** Exact source-level module path segments. *)
   export_name: string;
-      (** Flat compiler identifier used for the public JS export. *)
+      (** Flattened compiler name for the export, before JS identifier
+          conversion: the emitted export applies [Ext_ident.convert] to it
+          (a hoisted [Operator.\"+"] is stored as [Operator$+] and exported
+          as [Operator$$plus]), and so must any consumer that reconstructs
+          the JS export name. *)
 }
 
 type t = {
@@ -82,8 +86,6 @@ let from_file name : t =
   let v : t = input_value ic in
   close_in ic;
   v
-
-let from_string s : t = Marshal.from_string s Ext_digest.length
 
 let for_sure_not_changed (name : string) (header : string) =
   if Sys.file_exists name then (

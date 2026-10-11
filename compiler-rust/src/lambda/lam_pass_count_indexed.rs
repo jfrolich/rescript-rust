@@ -218,7 +218,7 @@ pub(crate) fn collect_occurs(
                 count(store, occ, local, a, hash_capacity);
                 count(store, occ, local, b, hash_capacity);
             }
-            NodeSnapshot::GlobalModule(_, _)
+            NodeSnapshot::GlobalModule(_)
             | NodeSnapshot::Const(_)
             | NodeSnapshot::Break
             | NodeSnapshot::Continue => {}
@@ -298,14 +298,14 @@ mod tests {
             Lambda::const_(Constant::int(0)),
             Lambda::Lswitch(
                 Box::new(Lambda::const_(Constant::int(0))),
-                crate::lambda::LambdaSwitch {
+                Box::new(crate::lambda::LambdaSwitch {
                     sw_consts_full: consts_full,
                     sw_consts: vec![],
                     sw_blocks_full: blocks_full,
                     sw_blocks: vec![],
                     sw_failaction: Some(Box::new(Lambda::var(value.clone()))),
                     sw_dispatch: SwitchDispatch::Direct,
-                },
+                }),
             ),
         );
         (value, IndexedLambda::from_lambda(input))
@@ -349,14 +349,14 @@ mod tests {
                     vec![parameter],
                     Lambda::Lswitch(
                         Box::new(Lambda::const_(Constant::int(0))),
-                        crate::lambda::LambdaSwitch {
+                        Box::new(crate::lambda::LambdaSwitch {
                             sw_consts_full: false,
                             sw_consts: vec![],
                             sw_blocks_full: false,
                             sw_blocks: vec![],
                             sw_failaction: Some(Box::new(Lambda::var(alias.clone()))),
                             sw_dispatch: SwitchDispatch::Direct,
-                        },
+                        }),
                     ),
                     FunctionAttribute::default(),
                 ),

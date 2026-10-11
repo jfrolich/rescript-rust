@@ -3,7 +3,7 @@
 
 use crate::gentype::gen_type_common::{
     Case as VariantCase, ClosedFlag as GenClosedFlag, Dep, Function, Label, LabelJs, Payload, Type,
-    create_variant, dep_to_string, ident, is_number, unknown,
+    create_variant, dep_to_string, is_number, unknown,
 };
 use crate::parse_arena::ParseArena;
 use crate::parser::ast::ClosedFlag as AstClosedFlag;
@@ -325,21 +325,28 @@ fn get_field_type(
     object_field: &ObjectField,
 ) -> (
     String,
+    crate::gentype::gen_type_common::Mutable,
     crate::gentype::translate_type_expr_from_types::Translation,
 ) {
     match &object_field.of_desc {
-        ObjectFieldDesc::OTtag(name, t) => (
-            name.txt.clone(),
-            match crate::gentype::runtime::is_mutable_object_field(&name.txt) {
-                true => crate::gentype::translate_type_expr_from_types::Translation {
-                    dependencies: vec![],
-                    type_: ident(""),
-                },
-                false => translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, t),
-            },
-        ),
+        ObjectFieldDesc::OTtag(name, t) => {
+            let mutable_ = if object_field.of_attributes.iter().any(|(attr_name, payload)| {
+                arena.get_string(attr_name.txt) == "set"
+                    && matches!(payload, crate::parser::ast::Payload::PStr(items) if items.is_empty())
+            }) {
+                crate::gentype::gen_type_common::Mutable::Mutable
+            } else {
+                crate::gentype::gen_type_common::Mutable::Immutable
+            };
+            (
+                name.txt.clone(),
+                mutable_,
+                translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, t),
+            )
+        }
         ObjectFieldDesc::OTinherit(t) => (
             "Inherit".to_string(),
+            crate::gentype::gen_type_common::Mutable::Immutable,
             translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, t),
         ),
     }

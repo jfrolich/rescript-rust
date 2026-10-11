@@ -60,9 +60,6 @@ let module_id : module_id fn =
   let _x0 = _self.ident _self _x0 in
   {id = _x0; kind = _x1; dynamic_import = _x2}
 
-let required_modules : required_modules fn =
- fun _self arg -> list _self.module_id _self arg
-
 let vident : vident fn =
  fun _self -> function
   | Id _x0 ->
@@ -126,19 +123,17 @@ let expression_desc : expression_desc fn =
     let _x1 = _self.expression _self _x1 in
     let _x2 = _self.expression _self _x2 in
     Bin (_x0, _x1, _x2)
-  | FlatCall (_x0, _x1) ->
-    let _x0 = _self.expression _self _x0 in
-    let _x1 = _self.expression _self _x1 in
-    FlatCall (_x0, _x1)
   | Call (_x0, _x1, _x2) ->
     let _x0 = _self.expression _self _x0 in
     let _x1 = list _self.expression _self _x1 in
     Call (_x0, _x1, _x2)
   | Tagged_template (_x0, _x1, _x2) ->
     let _x0 = _self.expression _self _x0 in
-    let _x1 = list _self.expression _self _x1 in
     let _x2 = list _self.expression _self _x2 in
     Tagged_template (_x0, _x1, _x2)
+  | Interpolated_template ({values} as template) ->
+    let values = list _self.expression _self values in
+    Interpolated_template {template with values}
   | String_index (_x0, _x1) ->
     let _x0 = _self.expression _self _x0 in
     let _x1 = _self.expression _self _x1 in
@@ -162,6 +157,8 @@ let expression_desc : expression_desc fn =
     let body = _self.block _self body in
     Fun {fun_ with params; body}
   | Str _ as v -> v
+  | Template_literal _ as v -> v
+  | Json_literal _ as v -> v
   | Raw_js_code _ as v -> v
   | Array _x0 ->
     let _x0 = list _self.expression _self _x0 in
@@ -305,12 +302,6 @@ let program : program fn =
  fun _self {block = _x0; exports = _x1; export_set = _x2} ->
   let _x0 = _self.block _self _x0 in
   {block = _x0; exports = _x1; export_set = _x2}
-
-let deps_program : deps_program fn =
- fun _self {program = _x0; modules = _x1; side_effect = _x2} ->
-  let _x0 = _self.program _self _x0 in
-  let _x1 = required_modules _self _x1 in
-  {program = _x0; modules = _x1; side_effect = _x2}
 
 let super : iter =
   {

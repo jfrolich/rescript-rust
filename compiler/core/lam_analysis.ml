@@ -23,13 +23,14 @@
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA. *)
 
 (**used in effect analysis, it is sound but not-complete *)
-let not_zero_constant (x : Lam_constant.t) =
+let not_zero_constant (x : Lambda.structured_constant) =
   match x with
-  | Const_int {i} -> i <> 0l
+  | Const_int i -> i <> 0l
+  | Const_assertfalse -> false
   | Const_bigint (_, i) -> i <> "0"
   | _ -> false
 
-let rec no_side_effects (lam : Lam.t) : bool =
+let rec no_side_effects (lam : Lambda.t) : bool =
   match lam with
   | Lvar _ | Lconst _ | Lfunction _ -> true
   | Lglobal_module _ -> true
@@ -44,9 +45,15 @@ let rec no_side_effects (lam : Lam.t) : bool =
       match args with
       | [_; Lconst cst] -> not_zero_constant cst
       | _ -> false)
+    | Ppowbigint -> (
+      (* Raises on a negative exponent, so pure only when the exponent is a
+         nonnegative constant. *)
+      match args with
+      | [_; Lconst (Const_bigint (true, _))] -> true
+      | _ -> false)
     | Pcreate_extension _ | Ptypeof | Pis_null | Pis_not_none | Psome
     | Psome_not_nest | Pis_undefined | Pis_null_undefined | Pnull_to_opt
-    | Pnull_undefined_to_opt | Pjs_object_create _ | Pimport
+    | Pnull_undefined_to_opt | Pjs_object_create _ | Pimport _
     (* TODO: check *)
     | Pmakeblock _
     (* whether it's mutable or not *)
@@ -66,14 +73,13 @@ let rec no_side_effects (lam : Lam.t) : bool =
     | Ppowfloat | Pdivfloat | Pmodfloat | Pfloatcomp _ | Pjscomp _ | Pfloatorder
     | Pfloatmin | Pfloatmax
     (* bigint primitives *)
-    | Pnegbigint | Paddbigint | Psubbigint | Pmulbigint | Ppowbigint
-    | Pnotbigint | Pandbigint | Porbigint | Pxorbigint | Plslbigint | Pasrbigint
+    | Pnegbigint | Paddbigint | Psubbigint | Pmulbigint | Pnotbigint
+    | Pandbigint | Porbigint | Pxorbigint | Plslbigint | Pasrbigint
     | Pbigintcomp _ | Pbigintorder | Pbigintmin | Pbigintmax
     (* string primitives *)
-    | Pstringlength | Pstringrefu | Pstringrefs | Pstringcomp _ | Pstringorder
-    | Pstringmin | Pstringmax
+    | Pstringlength | Pstringcomp _ | Pstringorder | Pstringmin | Pstringmax
     (* array primitives *)
-    | Pmakearray | Parraylength | Parrayrefu | Parrayrefs
+    | Pmakearray | Parraylength | Parrayrefu
     (* list primitives *)
     | Pmakelist
     (* dict primitives *)
@@ -81,25 +87,26 @@ let rec no_side_effects (lam : Lam.t) : bool =
     (* Test if the argument is a block or an immediate integer *)
     | Pisint | Pis_poly_var_block
     (* Test if the (integer) argument is outside an interval *)
-    | Pisout _
     (* Operations on big arrays: (unsafe, #dimensions, kind, layout) *)
     (* Compile time constants *)
-    | Poffsetint _ | Pstringadd | Pfn_arity | Pwrap_exn | Phash
-    | Phash_mixstring | Phash_mixint | Phash_finalmix
+    | Pstringadd | Ptemplate _ | Phash | Phash_mixstring | Phash_mixint
+    | Phash_finalmix
     | Praw_js_code
         {code_info = Exp (Js_function _ | Js_literal _) | Stmt Js_stmt_comment}
       ->
       true
     (* A tagged template invokes its tag at runtime, so it always has side
        effects. *)
-    | Ptagged_template | Pjs_apply | Pjs_runtime_apply | Pjs_call _ | Pinit_mod
-    | Pupdate_mod | Pjs_unsafe_downgrade _ | Pdebugger | Pjs_fn_method
+    | Ptagged_template _ | Pjs_call _ | Pinit_mod | Pupdate_mod
+    | Pjs_object_get _ | Pjs_object_set _ | Pdebugger | Pjs_fn_method
     (* Await promise *)
     | Pawait
     (* TODO *)
     | Praw_js_code _
     (* byte swap *)
-    | Parraysets | Parraysetu | Poffsetref _ | Praise | Psetfield _ ->
+    | Parraysets | Parraysetu | Praise | Psetfield _
+    (* bounds-checked reads throw when the index is out of range *)
+    | Parrayrefs | Pstringrefs | Pstringrefu ->
       false)
   | Llet (_, _, arg, body) -> no_side_effects arg && no_side_effects body
   | Lswitch (_, _) -> false
@@ -107,8 +114,7 @@ let rec no_side_effects (lam : Lam.t) : bool =
   | Lstaticraise _ -> false
   | Lstaticcatch _ -> false
   (* It would be nice that we can also analysis some small functions
-      for example [String.contains],
-      [Format.make_queue_elem]
+      for example [String.contains]
   *)
   | Ltrywith (body, _exn, handler) ->
     no_side_effects body && no_side_effects handler
@@ -123,7 +129,6 @@ let rec no_side_effects (lam : Lam.t) : bool =
   | Lfor _ -> false
   | Lfor_of _ | Lfor_await_of _ -> false
   | Lassign _ -> false (* actually it depends ... *)
-  (* | Lsend _ -> false  *)
   | Lapply
       {
         ap_func = Lprim {primitive = Pfield (_, Fld_module {name = "from_fun"})};
@@ -143,7 +148,7 @@ let really_big () = raise_notrace Too_big_to_inline
 
 (* let big_lambda = 1000 *)
 
-let rec size (lam : Lam.t) =
+let rec size (lam : Lambda.t) =
   try
     match lam with
     | Lvar _ -> 1
@@ -186,24 +191,24 @@ let rec size (lam : Lam.t) =
     | Lfor_of _ | Lfor_await_of _ -> really_big ()
     | Lassign (_, v) -> 1 + size v
     (* This is side effectful,  be careful *)
-    (* | Lsend _  ->  really_big () *)
   with Too_big_to_inline -> 1000
 
 and size_constant x =
   match x with
-  | Const_int _ | Const_constructor _ | Const_char _ | Const_float _
-  | Const_bigint _ | Const_pointer _ | Const_js_null | Const_js_undefined _
-  | Const_module_alias | Const_js_true | Const_js_false ->
+  | Const_int _ | Const_assertfalse | Const_constructor _ | Const_char _
+  | Const_float _ | Const_bigint _ | Const_polyvar _ | Const_js_null
+  | Const_js_undefined _ | Const_module_alias | Const_js_true | Const_js_false
+    ->
     1
   | Const_string _ -> 1
   | Const_some s -> size_constant s
   | Const_block (_, str) ->
     Ext_list.fold_left str 0 (fun acc x -> acc + size_constant x)
 
-and size_lams acc (lams : Lam.t list) =
+and size_lams acc (lams : Lambda.t list) =
   Ext_list.fold_left lams acc (fun acc l -> acc + size l)
 
-let args_all_const (args : Lam.t list) =
+let args_all_const (args : Lambda.t list) =
   Ext_list.for_all args (fun x ->
       match x with
       | Lconst _ -> true
@@ -222,7 +227,7 @@ let small_inline_size = 5
     ideally we should also evaluate its size after inlining, 
     since after partial evaluation, it might still be *very big*
 *)
-let destruct_pattern (body : Lam.t) params args =
+let destruct_pattern (body : Lambda.t) params args =
   let rec aux v params args =
     match (params, args) with
     | x :: xs, b :: bs -> if Ident.same x v then Some b else aux v xs bs
@@ -232,23 +237,23 @@ let destruct_pattern (body : Lam.t) params args =
   match body with
   | Lswitch (Lvar v, switch) -> (
     match aux v params args with
-    | Some (Lam.Lconst _ as lam) ->
-      size (Lam.switch lam switch) < small_inline_size
+    | Some (Lambda.Lconst _ as lam) ->
+      size (Lambda.switch lam switch) < small_inline_size
     | Some _ | None -> false)
   | Lifthenelse (Lvar v, then_, else_) -> (
     (* -FIXME *)
     match aux v params args with
     | Some (Lconst _ as lam) ->
-      size (Lam.if_ lam then_ else_) < small_inline_size
+      size (Lambda.if_ lam then_ else_) < small_inline_size
     | Some _ | None -> false)
   | _ -> false
 
 (* Async functions cannot be beta reduced *)
-let lfunction_can_be_inlined (lfunction : Lam.lfunction) =
+let lfunction_can_be_inlined (lfunction : Lambda.lfunction) =
   (not lfunction.attr.async) && lfunction.attr.directive = None
 
 (** Hints to inlining *)
-let ok_to_inline_fun_when_app (m : Lam.lfunction) (args : Lam.t list) =
+let ok_to_inline_fun_when_app (m : Lambda.lfunction) (args : Lambda.t list) =
   match m.attr.inline with
   | Always_inline -> true
   | Never_inline -> false
@@ -263,11 +268,11 @@ let ok_to_inline_fun_when_app (m : Lam.lfunction) (args : Lam.t list) =
 (* TODO:  We can relax this a bit later,
     but decide whether to inline it later in the call site
 *)
-let safe_to_inline (lam : Lam.t) =
+let safe_to_inline (lam : Lambda.t) =
   match lam with
   | Lfunction _ -> true
   | Lconst
-      ( Const_pointer _ | Const_constructor _ | Const_js_true | Const_js_false
+      ( Const_polyvar _ | Const_constructor _ | Const_js_true | Const_js_false
       | Const_js_undefined _ ) ->
     true
   | _ -> false

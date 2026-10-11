@@ -66,7 +66,7 @@ impl IndexedJsConsumer<'_> {
                 env: Default::default(),
                 return_unit: attr.return_unit,
                 async_: attr.async_,
-                directive: attr.directive,
+                directive: (attr.directive).map(Box::new),
             }),
         }
     }
@@ -104,13 +104,12 @@ impl IndexedJsConsumer<'_> {
             }
             _ => panic!("for lowering requires a for node"),
         };
-        // compiler/core/lam_compile.ml:2096-2108: remove the inclusive -1
-        // wrapper only in the two reference shapes, retaining its child's ID.
+        // compiler/core/lam_compile.ml:1935-1941: remove the inclusive -1
+        // wrapper, retaining its child's ID.
         let direction = match direction {
             DirectionFlag::Downto => ForDirection::Downto,
             DirectionFlag::Upto => {
                 let exclusive = match self.context.store().view(finish) {
-                    NodeView::Prim(Primitive::Poffsetint(-1), [inner], _) => Some(*inner),
                     NodeView::Prim(Primitive::Psubint, [inner, one], _)
                         if matches!(
                             self.context.store().view(*one),
@@ -152,14 +151,14 @@ impl IndexedJsConsumer<'_> {
             prelude.extend(finish.prelude);
             None
         };
-        prelude.push(Statement::new(StatementDesc::ForRange(
+        prelude.push(Statement::for_range(
             frame.label(),
             init,
             finish.expr,
             id,
             direction,
             body,
-        )));
+        ));
         Compiled {
             prelude,
             expr: Expression::undefined(true),
@@ -237,22 +236,7 @@ impl IndexedJsConsumer<'_> {
             NodeView::Assign(id, child) => (id.clone(), child),
             _ => panic!("assignment lowering requires an assign node"),
         };
-        // compiler/core/lam_compile.ml:1356-1362: the increment case builds
-        // int32_add directly, rather than entering child primitive lowering.
-        let offset = match self.context.store().view(child) {
-            NodeView::Prim(Primitive::Poffsetint(offset), [arg], _) if matches!(self.context.store().view(*arg), NodeView::Var(other) if id.same(other)) => {
-                Some(*offset)
-            }
-            _ => None,
-        };
-        let compiled = if let Some(offset) = offset {
-            Compiled {
-                prelude: vec![],
-                expr: int32_add(Expression::var(id.clone()), int_expr(offset)),
-            }
-        } else {
-            value(self, child)
-        };
+        let compiled = value(self, child);
         let mut prelude = compiled.prelude;
         prelude.push(Statement::exp(Expression::bin(
             BinOp::Eq,

@@ -342,7 +342,7 @@ impl Doc {
             match (mode, doc) {
                 (_, Doc::Nil) | (_, Doc::LineSuffix(_)) | (_, Doc::BreakParent) => {}
                 (_, Doc::Text(txt)) => {
-                    width -= txt.len() as i32;
+                    width -= text_width(txt);
                 }
                 (_, Doc::Indent(doc)) => {
                     stack.push((indent + 2, mode, doc));
@@ -404,7 +404,7 @@ impl Doc {
                 Doc::Nil | Doc::BreakParent => {}
                 Doc::Text(txt) => {
                     buffer.push_str(txt);
-                    pos += txt.len() as i32;
+                    pos += text_width(txt);
                 }
                 Doc::LineSuffix(doc) => {
                     line_suffices.push((indent, mode, doc));
@@ -511,7 +511,7 @@ impl Doc {
                 Doc::Nil | Doc::BreakParent | Doc::LineSuffix(_) => {}
                 Doc::Text(txt) => {
                     buffer.push_str(txt);
-                    pos += txt.len() as i32;
+                    pos += text_width(txt);
                 }
                 Doc::Concat(docs) => {
                     for doc in docs.iter().rev() {
@@ -681,4 +681,16 @@ mod tests {
         );
         assert_eq!(doc.to_string(80), "a\n\nb");
     }
+}
+
+/// The width res_doc.ml:152,198 gives a text: OCaml's `String.length`, a
+/// byte count of the source. Printer text carries source bytes as Latin-1
+/// chars (one char per byte); other chars count as their UTF-8 bytes.
+fn text_width(txt: &str) -> i32 {
+    if txt.is_ascii() {
+        return txt.len() as i32;
+    }
+    txt.chars()
+        .map(|c| if (c as u32) <= 0xFF { 1 } else { c.len_utf8() as i32 })
+        .sum()
 }

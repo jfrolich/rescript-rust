@@ -84,18 +84,6 @@ impl Marshal for ArgLabel {
     }
 }
 
-// ========== RecordElement<T> (for record patterns and expressions) ==========
-
-impl<T: Marshal> Marshal for RecordElement<T> {
-    /// RecordElement encoding: block with 3 fields (lid, x, opt)
-    fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        w.write_block_header(0, 3);
-        self.lid.marshal(w);
-        self.x.marshal(w);
-        w.write_int(if self.opt { 1 } else { 0 });
-    }
-}
-
 // ========== Constant (all non-constant constructors) ==========
 
 impl Marshal for Constant {
@@ -435,94 +423,81 @@ impl Marshal for ExpressionDesc {
                 bindings.marshal(w);
                 body.marshal(w);
             }
-            // Pexp_fun is now tag 3 with 6 fields in current parsetree
-            // (Pexp_function was removed)
-            ExpressionDesc::Fun {
-                arg_label,
-                default,
-                lhs,
-                rhs,
-                arity,
-                is_async,
-            } => {
-                w.write_block_header(3, 6);
-                arg_label.marshal(w);
+            // parsetree0.ml expression_desc: Pexp_function (3), Pexp_fun (4),
+            // Pexp_apply (5).
+            ExpressionDesc::Function(cases) => {
+                w.write_block_header(3, 1);
+                cases.marshal(w);
+            }
+            ExpressionDesc::Fun(label, default, lhs, rhs) => {
+                w.write_block_header(4, 4);
+                label.marshal(w);
                 default.marshal(w);
                 lhs.marshal(w);
                 rhs.marshal(w);
-                arity.marshal(w);
-                w.write_int(if *is_async { 1 } else { 0 });
             }
-            // Pexp_apply has 4 fields in current parsetree
-            ExpressionDesc::Apply {
-                funct,
-                args,
-                partial,
-                transformed_jsx,
-            } => {
-                w.write_block_header(4, 4);
+            ExpressionDesc::Apply(funct, args) => {
+                w.write_block_header(5, 2);
                 funct.marshal(w);
                 args.marshal(w);
-                w.write_int(if *partial { 1 } else { 0 });
-                w.write_int(if *transformed_jsx { 1 } else { 0 });
             }
             ExpressionDesc::Match(e, cases) => {
-                w.write_block_header(5, 2);
-                e.marshal(w);
-                cases.marshal(w);
-            }
-            ExpressionDesc::Try(e, cases) => {
                 w.write_block_header(6, 2);
                 e.marshal(w);
                 cases.marshal(w);
             }
+            ExpressionDesc::Try(e, cases) => {
+                w.write_block_header(7, 2);
+                e.marshal(w);
+                cases.marshal(w);
+            }
             ExpressionDesc::Tuple(exprs) => {
-                w.write_block_header(7, 1);
+                w.write_block_header(8, 1);
                 exprs.marshal(w);
             }
             ExpressionDesc::Construct(lid, opt) => {
-                w.write_block_header(8, 2);
+                w.write_block_header(9, 2);
                 lid.marshal(w);
                 opt.marshal(w);
             }
             ExpressionDesc::Variant(label, opt) => {
-                w.write_block_header(9, 2);
+                w.write_block_header(10, 2);
                 w.write_str(label);
                 opt.marshal(w);
             }
             ExpressionDesc::Record(fields, opt) => {
-                w.write_block_header(10, 2);
+                w.write_block_header(11, 2);
                 fields.marshal(w);
                 opt.marshal(w);
             }
             ExpressionDesc::Field(e, lid) => {
-                w.write_block_header(11, 2);
+                w.write_block_header(12, 2);
                 e.marshal(w);
                 lid.marshal(w);
             }
             ExpressionDesc::Setfield(e1, lid, e2) => {
-                w.write_block_header(12, 3);
+                w.write_block_header(13, 3);
                 e1.marshal(w);
                 lid.marshal(w);
                 e2.marshal(w);
             }
             ExpressionDesc::Array(exprs) => {
-                w.write_block_header(13, 1);
+                w.write_block_header(14, 1);
                 exprs.marshal(w);
             }
             ExpressionDesc::Ifthenelse(e1, e2, e3) => {
-                w.write_block_header(14, 3);
+                w.write_block_header(15, 3);
                 e1.marshal(w);
                 e2.marshal(w);
                 e3.marshal(w);
             }
             ExpressionDesc::Sequence(e1, e2) => {
-                w.write_block_header(15, 2);
+                w.write_block_header(16, 2);
                 e1.marshal(w);
                 e2.marshal(w);
             }
             ExpressionDesc::While(e1, e2) => {
-                w.write_block_header(16, 2);
+                w.write_block_header(17, 2);
                 e1.marshal(w);
                 e2.marshal(w);
             }

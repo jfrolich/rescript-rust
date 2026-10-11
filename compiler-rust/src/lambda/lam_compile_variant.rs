@@ -11,13 +11,13 @@ use super::js_stmt_make::{block_terminates, strict_single_return_expr};
 use super::lam_coercion::push_s_exp;
 use super::lam_compile::{
     Compiled, GroupedSwitchDefault, LambdaCompiler, TailLoopState, compiled_from_effect_block,
-    pointer_info_comment_text, return_switch_case_needs_break_like_ocaml,
+    pointer_info_comment_text,
     trailing_return_expression,
 };
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, Number, UsedStats};
 use crate::js_ir::{
-    BinOp, Block, CallInfo, CaseClause, Delim, Expression, ExpressionDesc, Statement,
+    BinOp, Block, CallInfo, CaseClause, Expression, ExpressionDesc, Statement,
     StatementDesc, StringClause, VIdent, VariableDeclaration, expression_has_no_side_effects,
     ocaml_eq_expression,
 };
@@ -347,23 +347,22 @@ impl LambdaCompiler {
             && !self.uses_untagged_variant_switch(switch)
     }
 
-    fn tag_type_value(tag: &crate::types::VariantTagType) -> SwitchCaseTag {
+    fn literal_tag_value(tag: &crate::types::VariantLiteralTag) -> SwitchCaseTag {
         match tag {
-            crate::types::VariantTagType::String(value) => SwitchCaseTag::String(value.clone()),
-            crate::types::VariantTagType::Int(value) => SwitchCaseTag::Int(*value as i64),
-            crate::types::VariantTagType::Float(value) => SwitchCaseTag::Float(value.clone()),
-            crate::types::VariantTagType::BigInt(value) => SwitchCaseTag::BigInt(value.clone()),
-            crate::types::VariantTagType::Bool(value) => SwitchCaseTag::Bool(*value),
-            crate::types::VariantTagType::Null => SwitchCaseTag::Null,
-            crate::types::VariantTagType::Undefined => SwitchCaseTag::Undefined,
-            crate::types::VariantTagType::Untagged(_) => unreachable!("literal tag is untagged"),
+            crate::types::VariantLiteralTag::String(value) => SwitchCaseTag::String(value.clone()),
+            crate::types::VariantLiteralTag::Int(value) => SwitchCaseTag::Int(i64::from(*value as i32)),
+            crate::types::VariantLiteralTag::Float(value) => SwitchCaseTag::Float(value.clone()),
+            crate::types::VariantLiteralTag::BigInt(value) => SwitchCaseTag::BigInt(value.clone()),
+            crate::types::VariantLiteralTag::Bool(value) => SwitchCaseTag::Bool(*value),
+            crate::types::VariantLiteralTag::Null => SwitchCaseTag::Null,
+            crate::types::VariantLiteralTag::Undefined => SwitchCaseTag::Undefined,
         }
     }
 
     fn switch_tag_value(tag: &crate::types::VariantTag) -> SwitchCaseTag {
-        tag.tag_type
+        tag.literal
             .as_ref()
-            .map(Self::tag_type_value)
+            .map(Self::literal_tag_value)
             .unwrap_or_else(|| SwitchCaseTag::String(tag.name.clone()))
     }
 
@@ -379,7 +378,7 @@ impl LambdaCompiler {
             facts
                 .literal_tags
                 .iter()
-                .map(Self::tag_type_value)
+                .map(Self::literal_tag_value)
                 .collect(),
         )
     }
@@ -575,7 +574,7 @@ impl LambdaCompiler {
             .iter()
             .map(|(key, body)| match key {
                 SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(block)) => {
-                    Some((Self::switch_tag_value(&block.runtime.tag), body))
+                    Some((Self::switch_tag_value(&block.tag()), body))
                 }
                 SwitchKey::Int(_) | SwitchKey::Constructor(_) => None,
             })
@@ -683,7 +682,7 @@ impl LambdaCompiler {
         all_block_types: &[VariantBlockType],
         has_null_case: bool,
     ) -> Option<Expression> {
-        let test = match case.block_type.as_ref()? {
+        let test = match case.block_type()? {
             VariantBlockType::String => self.builtin_untagged_typeof_test(expr, "string"),
             VariantBlockType::Int | VariantBlockType::Float => {
                 self.builtin_untagged_typeof_test(expr, "number")
@@ -744,7 +743,7 @@ impl LambdaCompiler {
             return None;
         }
         let clauses_have_array_case = runtime_test_cases.iter().any(|(case, _)| {
-            matches!(&case.block_type, Some(VariantBlockType::Instance(name)) if name.as_str() == "Array")
+            matches!(case.block_type(), Some(VariantBlockType::Instance(name)) if name.as_str() == "Array")
         });
         let type_has_array_case = all_block_types
             .iter()
@@ -787,7 +786,7 @@ impl LambdaCompiler {
             && self.block_switch_complete(switch)
             && block_cases.len() == 1
             && default_block.is_empty()
-            && matches!(block_cases[0].0.block_type, Some(VariantBlockType::Unknown))
+            && matches!(block_cases[0].0.block_type(), Some(VariantBlockType::Unknown))
         {
             return Some(build_body(self, block_cases[0].1));
         }
@@ -798,7 +797,7 @@ impl LambdaCompiler {
         let mut current_else = default_block;
         for (case, body) in block_cases.iter().rev() {
             let body_block = build_body(self, body);
-            if matches!(case.block_type, Some(VariantBlockType::Unknown)) {
+            if matches!(case.block_type(), Some(VariantBlockType::Unknown)) {
                 current_else = body_block;
                 continue;
             }
@@ -924,7 +923,7 @@ impl LambdaCompiler {
         let all_block_types = self.untagged_block_types(switch).unwrap_or_default();
         if let Some((_, body)) = block_cases
             .iter()
-            .find(|(case, _)| matches!(case.block_type, Some(VariantBlockType::Unknown)))
+            .find(|(case, _)| matches!(case.block_type(), Some(VariantBlockType::Unknown)))
         {
             return self.compile_assign_to_target_block(result, body);
         }
@@ -934,13 +933,13 @@ impl LambdaCompiler {
 
         let has_unfiltered_runtime_test_cases = block_cases
             .iter()
-            .any(|(case, _)| matches!(case.block_type, Some(VariantBlockType::Instance(_))));
+            .any(|(case, _)| matches!(case.block_type(), Some(VariantBlockType::Instance(_))));
         let filtered_block_cases =
             self.filtered_switch_case_refs(&block_cases, self.block_switch_default(switch));
         let mut runtime_test_cases = Vec::new();
         let mut typeof_cases = Vec::new();
         for (case, body) in filtered_block_cases {
-            match case.block_type.as_ref() {
+            match case.block_type() {
                 Some(VariantBlockType::Instance(_)) => runtime_test_cases.push((case, body)),
                 Some(block_type) => {
                     if let Some(tag) = Self::block_type_switch_tag(block_type) {
@@ -1081,7 +1080,7 @@ impl LambdaCompiler {
         let all_block_types = self.untagged_block_types(switch).unwrap_or_default();
         if let Some((_, body)) = block_cases
             .iter()
-            .find(|(case, _)| matches!(case.block_type, Some(VariantBlockType::Unknown)))
+            .find(|(case, _)| matches!(case.block_type(), Some(VariantBlockType::Unknown)))
         {
             return self.compile_return_block(body);
         }
@@ -1091,13 +1090,13 @@ impl LambdaCompiler {
 
         let has_unfiltered_runtime_test_cases = block_cases
             .iter()
-            .any(|(case, _)| matches!(case.block_type, Some(VariantBlockType::Instance(_))));
+            .any(|(case, _)| matches!(case.block_type(), Some(VariantBlockType::Instance(_))));
         let filtered_block_cases =
             self.filtered_switch_case_refs(&block_cases, self.block_switch_default(switch));
         let mut runtime_test_cases = Vec::new();
         let mut typeof_cases = Vec::new();
         for (case, body) in filtered_block_cases {
-            match case.block_type.as_ref() {
+            match case.block_type() {
                 Some(VariantBlockType::Instance(_)) => runtime_test_cases.push((case, body)),
                 Some(block_type) => {
                     if let Some(tag) = Self::block_type_switch_tag(block_type) {
@@ -1256,7 +1255,7 @@ impl LambdaCompiler {
         let all_block_types = self.untagged_block_types(switch).unwrap_or_default();
         if let Some((_, body)) = block_cases
             .iter()
-            .find(|(case, _)| matches!(case.block_type, Some(VariantBlockType::Unknown)))
+            .find(|(case, _)| matches!(case.block_type(), Some(VariantBlockType::Unknown)))
         {
             return self.compile_effect_block(body);
         }
@@ -1274,13 +1273,13 @@ impl LambdaCompiler {
 
         let has_unfiltered_runtime_test_cases = block_cases
             .iter()
-            .any(|(case, _)| matches!(case.block_type, Some(VariantBlockType::Instance(_))));
+            .any(|(case, _)| matches!(case.block_type(), Some(VariantBlockType::Instance(_))));
         let filtered_block_cases =
             self.filtered_switch_case_refs(&block_cases, self.block_switch_default(switch));
         let mut runtime_test_cases = Vec::new();
         let mut typeof_cases = Vec::new();
         for (case, body) in filtered_block_cases {
-            match case.block_type.as_ref() {
+            match case.block_type() {
                 Some(VariantBlockType::Instance(_)) => runtime_test_cases.push((case, body)),
                 Some(block_type) => {
                     if let Some(tag) = Self::block_type_switch_tag(block_type) {
@@ -1631,10 +1630,11 @@ impl LambdaCompiler {
             return block_branch;
         };
 
-        if const_branch.is_empty() {
-            block_branch
-        } else if block_branch.is_empty() {
-            const_branch
+        // An empty branch still needs the dispatch test around the other one:
+        // `S.if_ test const_branch block_branch` (js_stmt_make.ml:248-262)
+        // turns `if (test) {} else {b}` into `if (!test) {b}`.
+        if const_branch.is_empty() && block_branch.is_empty() {
+            Vec::new()
         } else {
             self.compile_effect_if(dispatch_test, const_branch, block_branch)
         }
@@ -1726,19 +1726,16 @@ impl LambdaCompiler {
 
     pub(crate) fn switch_case_expr(tag: &SwitchCaseTag) -> Expression {
         match tag {
-            SwitchCaseTag::String(value) => Expression::new(ExpressionDesc::Str {
-                delim: Delim::StarJ,
-                txt: value.clone(),
-            }),
+            SwitchCaseTag::String(value) => Expression::new(ExpressionDesc::Str(value.clone())),
             SwitchCaseTag::Int(value) => match i32::try_from(*value) {
                 Ok(value) => Expression::number(Number::int(value)),
                 Err(_) => Expression::number(Number::float(value.to_string())),
             },
             SwitchCaseTag::Float(value) => Expression::number(Number::float(value.clone())),
+            // js_exp_make.ml `literal_tag`: `Bigint_utils.parse_bigint`.
             SwitchCaseTag::BigInt(value) => {
-                let positive = !value.starts_with('-');
-                let digits = value.strip_prefix('-').unwrap_or(value);
-                Expression::number(Number::bigint(positive, digits.to_string()))
+                let (positive, digits) = crate::types::typecore::parse_bigint_literal(value);
+                Expression::number(Number::bigint(positive, digits))
             }
             SwitchCaseTag::Bool(value) => Expression::bool(*value),
             SwitchCaseTag::Null => Expression::null(),
@@ -2132,7 +2129,7 @@ impl LambdaCompiler {
                         // `Js_output.to_break_block`
                         // (compiler/core/js_output.ml:88-100).
                         let should_break =
-                            return_switch_case_needs_break_like_ocaml(body, &compiled_body);
+                            self.return_case_needs_break_like_ocaml(body, &compiled_body);
                         CaseClause {
                             source_loc: None,
                             body: compiled_body,
@@ -2233,7 +2230,7 @@ impl LambdaCompiler {
             // Mirror `compile_general_cases` + `Js_output.to_break_block`
             // (compiler/core/lam_compile.ml:610-624;
             // compiler/core/js_output.ml:88-100).
-            let should_break = return_switch_case_needs_break_like_ocaml(body, &compiled_body);
+            let should_break = self.return_case_needs_break_like_ocaml(body, &compiled_body);
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 clauses.push((

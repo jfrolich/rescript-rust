@@ -17,6 +17,7 @@ pub mod op;
 pub mod printer;
 pub mod program_printer;
 pub mod source_map;
+pub(crate) mod walk;
 
 use ahash::AHashMap;
 use std::cell::RefCell;
@@ -42,7 +43,7 @@ pub use program_printer::{
 };
 
 /// Module identifier for imports/requires
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ModuleId {
     /// The module identifier
     pub id: Ident,
@@ -67,6 +68,9 @@ pub struct ModulePathResolver {
     format: ModuleFormat,
     output_suffix: String,
     current_source_path: Option<PathBuf>,
+    /// `Filename.dirname` of the output prefix, which script-mode imports are
+    /// relative to (js_name_of_module_id.ml `~output_dir`).
+    output_dir: Option<PathBuf>,
     current_package_name: Option<String>,
     current_package_has_output: bool,
     runtime_path: Option<PathBuf>,
@@ -116,6 +120,9 @@ impl ModulePathResolver {
             output_suffix: output_suffix_from_path(output_path),
             current_source_path: source_filename
                 .map(|path| normalize_absolute_path(FsPath::new(path))),
+            output_dir: output_path
+                .or(source_filename.map(FsPath::new))
+                .and_then(|path| normalize_absolute_path(path).parent().map(FsPath::to_path_buf)),
             current_package_name: package_name.map(ToOwned::to_owned),
             current_package_has_output: package_name.is_some() && output_module_format.is_some(),
             runtime_path: runtime_path.map(normalize_absolute_path),
@@ -175,7 +182,9 @@ impl ModulePathResolver {
                 if let Some(cached) = self.module_path_cache.borrow().get(module_name).cloned() {
                     return cached;
                 }
-                let resolved = if self.is_runtime_module(module_name) {
+                let resolved = if let Some(path) = self.script_module_path(module_name) {
+                    Some(path)
+                } else if self.is_runtime_module(module_name) {
                     Some(self.runtime_module_path(module.id.name()))
                 } else {
                     let target_source = self
@@ -415,6 +424,41 @@ impl ModulePathResolver {
         resolved
     }
 
+    /// js_name_of_module_id.ml `Package_script, Package_script`: a script
+    /// dependency of a script unit is imported from the `.js` file found on
+    /// the load path, relative to the output directory.
+    fn script_module_path(&self, module_name: &str) -> Option<String> {
+        if self.is_in_process_mode() || !matches!(self.current_package_query(), PackageInfoQuery::Script) {
+            return None;
+        }
+        let env = self.persistent_env.as_ref()?;
+        let import_info = env.module_cmj_import_info(module_name)?;
+        // `Package_found dep, Package_script`: `pkg.pkg_rel_path // js_file`
+        // (js_packages_info.ml `query_package_infos`).
+        let package_name = match &import_info.package_spec.name {
+            crate::cmi::persistent_env::CmjPackageName::Empty => None,
+            crate::cmi::persistent_env::CmjPackageName::Runtime => Some("@rescript/runtime"),
+            crate::cmi::persistent_env::CmjPackageName::Normal(name) => Some(name.as_str()),
+        };
+        if let Some(package_name) = package_name {
+            let info = import_info
+                .package_spec
+                .module_systems
+                .iter()
+                .find(|info| module_system_compatible(info.module_system, self.format))?;
+            let js_file = js_name_of_module_name(module_name, import_info.file_case, &info.suffix);
+            return Some(filename_concat(&filename_concat(package_name, &info.path), &js_file));
+        }
+        let js_file = js_name_of_module_name(module_name, import_info.file_case, ".js");
+        let found = normalize_absolute_path(FsPath::new(&env.find_in_load_path_uncap(&js_file)?));
+        let relative = relative_path_between(self.output_dir.as_ref()?, &found)?;
+        let mut rendered = relative.to_string_lossy().replace('\\', "/");
+        if !rendered.starts_with("./") && !rendered.starts_with("../") {
+            rendered = format!("./{rendered}");
+        }
+        Some(rendered)
+    }
+
     fn relative_output_path(&self, target_source: &FsPath) -> Option<String> {
         let current_source = self.current_source_path.as_ref()?;
         let from_dir = current_source.parent()?;
@@ -531,6 +575,15 @@ fn module_format_from_output_path(output_path: Option<&FsPath>) -> ModuleFormat 
     }
 }
 
+/// OCaml `Filename.concat`.
+fn filename_concat(dir: &str, file: &str) -> String {
+    if dir.is_empty() || dir.ends_with('/') {
+        format!("{dir}{file}")
+    } else {
+        format!("{dir}/{file}")
+    }
+}
+
 fn module_system_compatible(dep: CmjPackageModuleSystem, query: ModuleFormat) -> bool {
     matches!(
         (dep, query),
@@ -582,7 +635,7 @@ fn normalize_absolute_path(path: &FsPath) -> PathBuf {
     let base = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir()
+        crate::process_cwd::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
     };
@@ -590,6 +643,20 @@ fn normalize_absolute_path(path: &FsPath) -> PathBuf {
 }
 
 fn normalize_lexical_path(path: PathBuf) -> PathBuf {
+    // An absolute Unix path without `.`/`..` components, doubled or trailing
+    // separators is already normal; skip rebuilding it component by component.
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = path.as_os_str().as_bytes();
+        if bytes.first() == Some(&b'/')
+            && bytes.len() > 1
+            && !bytes.ends_with(b"/")
+            && !bytes.windows(2).any(|pair| pair == b"//" || pair == b"/.")
+        {
+            return path;
+        }
+    }
     let mut prefix: Option<OsString> = None;
     let mut has_root = false;
     let mut parts: Vec<OsString> = Vec::new();
@@ -668,29 +735,16 @@ fn relative_path_between(base_dir: &FsPath, target: &FsPath) -> Option<PathBuf> 
 }
 
 /// Variable identifier (local or qualified)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum VIdent {
     /// Local identifier
     Id(Ident),
     /// Qualified identifier (module.member)
-    Qualified(ModuleId, Option<String>),
-}
-
-/// String delimiter type
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Delim {
-    /// No special delimiter
-    None,
-    /// StarJ format
-    StarJ,
-    /// No quotes (raw)
-    NoQuotes,
-    /// Backtick template literal
-    BackQuotes,
+    Qualified(Box<ModuleId>, Option<String>),
 }
 
 /// For loop direction
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ForDirection {
     /// i++
     Upto,
@@ -702,7 +756,7 @@ pub enum ForDirection {
 
 /// Kind of call, matching OCaml's `Js_call_info.call_info`
 /// (js_call_info.ml:27-34).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CallKind {
     /// Plain ML expression call. Mirrors OCaml's `Call_ml`.
     MlCall,
@@ -720,7 +774,7 @@ pub enum CallKind {
 /// `pp_function` rewrite wraps such calls with `Curry.__N(...)`. Rust does
 /// not currently emit the Curry wrapper, so the printer's rewrite is gated
 /// on `Full` only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CallArity {
     /// Full application (arity matches).
     Full,
@@ -730,7 +784,7 @@ pub enum CallArity {
 }
 
 /// Call information for function calls
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CallInfo {
     /// Is this a method call?
     pub is_method: bool,
@@ -746,14 +800,14 @@ pub struct CallInfo {
 }
 
 /// Function environment (for closures)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FunEnv {
     /// Captured variables
     pub captured: Vec<Ident>,
 }
 
 /// Raw JavaScript code info
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct JsRawInfo {
     /// The JavaScript code
     pub code: String,
@@ -762,7 +816,7 @@ pub struct JsRawInfo {
 }
 
 /// JavaScript expression description
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ExpressionDesc {
     /// Length property access (arr.length, str.length)
     Length(Box<Expression>, LengthObject),
@@ -810,7 +864,14 @@ pub enum ExpressionDesc {
     ArrayIndex(Box<Expression>, Box<Expression>),
 
     /// Tagged template literal
-    TaggedTemplate(Box<Expression>, Vec<Expression>, Vec<Expression>),
+    TaggedTemplate(Box<Expression>, Vec<String>, Vec<Expression>),
+
+    /// An ordinary interpolated template ready for emission: segments keep
+    /// source and semantic forms; every segment has a valid decoded value.
+    InterpolatedTemplate {
+        segments: Vec<crate::string_literal::TemplateSegment>,
+        values: Vec<Expression>,
+    },
 
     /// Static property access (obj.prop or obj["prop"])
     StaticIndex(Box<Expression>, String, Option<i32>),
@@ -826,14 +887,21 @@ pub enum ExpressionDesc {
         is_method: bool,
         params: Vec<Ident>,
         body: Block,
-        env: FunEnv,
+        env: Box<FunEnv>,
         return_unit: bool,
         async_: bool,
-        directive: Option<String>,
+        directive: Option<Box<String>>,
     },
 
-    /// String literal
-    Str { delim: Delim, txt: String },
+    /// A decoded runtime string value, emitted with the compiler's quoting.
+    Str(String),
+
+    /// A non-interpolated ordinary backquoted literal: `source` is emitted,
+    /// `semantic` is used for comparisons and optimizations.
+    TemplateLiteral(crate::string_literal::TemplateSegment),
+
+    /// Validated JavaScript literal source from an external `json` payload.
+    JsonLiteral(String),
 
     /// Raw JavaScript code
     RawJsCode(JsRawInfo),
@@ -845,7 +913,7 @@ pub enum ExpressionDesc {
     OptionalBlock(Box<Expression>, bool),
 
     /// Caml block (variant, record, tuple)
-    CamlBlock(Vec<Expression>, MutableFlag, TagInfo),
+    CamlBlock(Vec<Expression>, MutableFlag, Box<TagInfo>),
 
     /// Block tag access
     CamlBlockTag(Box<Expression>, String),
@@ -873,7 +941,7 @@ pub enum ExpressionDesc {
 }
 
 /// A field excluded by object-rest destructuring.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RecordRestField {
     pub label: String,
     pub ident: Option<Ident>,
@@ -883,14 +951,14 @@ pub struct RecordRestField {
 pub type PropertyMap = Vec<(PropertyName, Expression)>;
 
 /// JavaScript expression
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Expression {
     /// Expression description
     pub desc: ExpressionDesc,
     /// Optional comment
-    pub comment: Option<String>,
+    pub comment: Option<Box<String>>,
     /// Original ReScript source location used by source map generation.
-    pub source_loc: Option<crate::location::Location>,
+    pub source_loc: Option<Box<crate::location::Location>>,
 }
 
 impl Expression {
@@ -907,7 +975,7 @@ impl Expression {
     pub fn with_comment(desc: ExpressionDesc, comment: impl Into<String>) -> Self {
         Self {
             desc,
-            comment: Some(comment.into()),
+            comment: Some(Box::new(comment.into())),
             source_loc: None,
         }
     }
@@ -923,123 +991,75 @@ impl Expression {
     }
 
     /// Create a qualified variable expression
-    pub fn qualified(module: ModuleId, member: Option<String>) -> Self {
-        Self::new(ExpressionDesc::Var(VIdent::Qualified(module, member)))
+    pub fn qualified(module: impl Into<Box<ModuleId>>, member: Option<String>) -> Self {
+        Self::new(ExpressionDesc::Var(VIdent::Qualified(module.into(), member)))
     }
 
-    /// Create a string expression
+    /// Create a string expression (`Js_exp_make.str`).
     pub fn string(txt: impl Into<String>) -> Self {
-        Self::new(ExpressionDesc::Str {
-            delim: Delim::None,
-            txt: txt.into(),
-        })
+        Self::new(ExpressionDesc::Str(txt.into()))
+    }
+
+    /// `Js_exp_make.string_literal_semantic`: the runtime value of a string
+    /// or non-interpolated template literal.
+    pub fn string_literal_semantic(&self) -> Option<&str> {
+        match &self.desc {
+            ExpressionDesc::Str(semantic) => Some(semantic),
+            ExpressionDesc::TemplateLiteral(segment) => Some(segment.semantic()),
+            _ => None,
+        }
     }
 
     /// Create a string append expression, mirroring OCaml's
     /// `Js_exp_make.string_append` folding behavior.
     pub fn string_append(left: Expression, right: Expression) -> Self {
-        fn concat(expr: &Expression, left: &str, right: &str, delim: Delim) -> Expression {
-            let mut merged = expr.clone();
-            merged.desc = ExpressionDesc::Str {
-                txt: format!("{left}{right}"),
-                delim,
-            };
+        fn concat(base: &Expression, a: &str, b: &str) -> Expression {
+            let mut merged = base.clone();
+            merged.desc = ExpressionDesc::Str(format!("{a}{b}"));
             merged
         }
+        fn append(left: Expression, right: Expression) -> Expression {
+            Expression {
+                desc: ExpressionDesc::StringAppend(Box::new(left), Box::new(right)),
+                comment: None,
+                source_loc: None,
+            }
+        }
 
-        match (&left.desc, &right.desc) {
-            (ExpressionDesc::Str { txt, .. }, _) if txt.is_empty() => return right,
-            (_, ExpressionDesc::Str { txt, .. }) if txt.is_empty() => return left,
-            (
-                ExpressionDesc::Str {
-                    txt: left_txt,
-                    delim: left_delim,
-                },
-                ExpressionDesc::StringAppend(prefix, tail),
-            ) => {
-                if let ExpressionDesc::Str {
-                    txt: prefix_txt,
-                    delim: prefix_delim,
-                } = &prefix.desc
-                {
-                    if left_delim == prefix_delim {
-                        return Self::string_append(
-                            concat(&left, left_txt, prefix_txt, *left_delim),
-                            tail.as_ref().clone(),
-                        );
-                    }
-                }
-            }
-            (
-                ExpressionDesc::StringAppend(head, suffix),
-                ExpressionDesc::Str {
-                    txt: right_txt,
-                    delim: right_delim,
-                },
-            ) => {
-                if let ExpressionDesc::Str {
-                    txt: suffix_txt,
-                    delim: suffix_delim,
-                } = &suffix.desc
-                {
-                    if suffix_delim == right_delim {
-                        return Self::string_append(
-                            head.as_ref().clone(),
-                            concat(&left, suffix_txt, right_txt, *suffix_delim),
-                        );
-                    }
-                }
-            }
-            (
-                ExpressionDesc::StringAppend(head, left_suffix),
-                ExpressionDesc::StringAppend(right_prefix, tail),
-            ) => {
-                if let (
-                    ExpressionDesc::Str {
-                        txt: left_suffix_txt,
-                        delim: left_suffix_delim,
-                    },
-                    ExpressionDesc::Str {
-                        txt: right_prefix_txt,
-                        delim: right_prefix_delim,
-                    },
-                ) = (&left_suffix.desc, &right_prefix.desc)
-                {
-                    if left_suffix_delim == right_prefix_delim {
-                        return Self::string_append(
-                            Self::string_append(
-                                head.as_ref().clone(),
-                                concat(
-                                    &left,
-                                    left_suffix_txt,
-                                    right_prefix_txt,
-                                    *left_suffix_delim,
-                                ),
-                            ),
-                            tail.as_ref().clone(),
-                        );
-                    }
-                }
-            }
-            (
-                ExpressionDesc::Str {
-                    txt: left_txt,
-                    delim: left_delim,
-                },
-                ExpressionDesc::Str {
-                    txt: right_txt,
-                    delim: right_delim,
-                },
-            ) if left_delim == right_delim => {
-                return concat(&left, left_txt, right_txt, *left_delim);
+        match (left.string_literal_semantic(), right.string_literal_semantic()) {
+            (Some(""), _) => return right,
+            (_, Some("")) => return left,
+            (Some(a), Some(b)) => {
+                let mut merged = concat(&left, a, b);
+                merged.comment = None;
+                merged.source_loc = None;
+                return merged;
             }
             _ => {}
         }
-
-        Self {
-            desc: ExpressionDesc::StringAppend(Box::new(left), Box::new(right)),
-            comment: None,
-            source_loc: None,
+        match (&left.desc, &right.desc) {
+            (ExpressionDesc::StringAppend(a, b_expr), ExpressionDesc::StringAppend(c_expr, d)) => {
+                match (b_expr.string_literal_semantic(), c_expr.string_literal_semantic()) {
+                    (Some(b), Some(c)) => Self::string_append(
+                        Self::string_append(a.as_ref().clone(), concat(b_expr, b, c)),
+                        d.as_ref().clone(),
+                    ),
+                    _ => append(left, right),
+                }
+            }
+            (_, ExpressionDesc::StringAppend(b, c)) => {
+                match (left.string_literal_semantic(), b.string_literal_semantic()) {
+                    (Some(a), Some(b)) => Self::string_append(concat(&left, a, b), c.as_ref().clone()),
+                    _ => append(left, right),
+                }
+            }
+            (ExpressionDesc::StringAppend(c, b_expr), _) => {
+                match (b_expr.string_literal_semantic(), right.string_literal_semantic()) {
+                    (Some(b), Some(a)) => Self::string_append(c.as_ref().clone(), concat(b_expr, b, a)),
+                    _ => append(left, right),
+                }
+            }
+            _ => append(left, right),
         }
     }
 
@@ -1072,13 +1092,15 @@ impl Expression {
             ) if expression_has_no_side_effects(&target) => {
                 Expression::number(Number::int(items.len() as i32))
             }
-            (
-                ExpressionDesc::Str {
-                    txt,
-                    delim: Delim::None,
-                },
-                LengthObject::String,
-            ) => Expression::number(Number::int(txt.len() as i32)),
+            // js_exp_make.ml `string_length`: `String_literal.utf16_length`
+            // of a literal's semantic value.
+            (ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_), LengthObject::String) => {
+                let semantic = target.string_literal_semantic().expect("a string literal");
+                Expression::number(Number::int(
+                    crate::string_literal::utf16_length(semantic).expect("String_literal.utf16_length: Invalid_utf8")
+                        as i32,
+                ))
+            }
             (
                 ExpressionDesc::Fun {
                     is_method, params, ..
@@ -1395,19 +1417,12 @@ fn fold_strict_equality(left: &Expression, right: &Expression) -> Option<bool> {
         ) => {
             return Some(left_int == right_int);
         }
-        (
-            ExpressionDesc::Str {
-                txt: left_txt,
-                delim: left_delim,
-            },
-            ExpressionDesc::Str {
-                txt: right_txt,
-                delim: right_delim,
-            },
-        ) => {
-            return fold_strict_string_equality(left_txt, left_delim, right_txt, right_delim);
-        }
         _ => {}
+    }
+
+    // js_exp_make.ml `string_comp`: literal strings compare by semantic value.
+    if let (Some(left), Some(right)) = (left.string_literal_semantic(), right.string_literal_semantic()) {
+        return Some(left == right);
     }
 
     let same_nullish = matches!(
@@ -1459,38 +1474,6 @@ fn fold_strict_equality(left: &Expression, right: &Expression) -> Option<bool> {
     None
 }
 
-pub(crate) fn fold_strict_string_equality_pub(
-    left_txt: &str,
-    left_delim: &Delim,
-    right_txt: &str,
-    right_delim: &Delim,
-) -> Option<bool> {
-    fold_strict_string_equality(left_txt, left_delim, right_txt, right_delim)
-}
-
-fn fold_strict_string_equality(
-    left_txt: &str,
-    left_delim: &Delim,
-    right_txt: &str,
-    right_delim: &Delim,
-) -> Option<bool> {
-    if left_delim != right_delim {
-        return None;
-    }
-
-    if left_txt == right_txt {
-        Some(true)
-    } else if is_simple_string_comparison(left_txt) && is_simple_string_comparison(right_txt) {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-fn is_simple_string_comparison(text: &str) -> bool {
-    text.is_ascii() && !text.as_bytes().contains(&b'\\')
-}
-
 fn is_nullish_literal(expr: &Expression) -> bool {
     matches!(
         expr.desc,
@@ -1518,7 +1501,10 @@ pub(crate) fn expression_has_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::Var(_)
         | ExpressionDesc::Fun { .. }
         | ExpressionDesc::Number(_)
-        | ExpressionDesc::Str { .. } => true,
+        | ExpressionDesc::JsonLiteral(_)
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_) => true,
+        ExpressionDesc::InterpolatedTemplate { values, .. } => values.iter().all(expression_has_no_side_effects),
         ExpressionDesc::StaticIndex(target, _, _) => expression_has_no_side_effects(target),
         ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right)
@@ -1552,10 +1538,11 @@ pub(crate) fn expression_has_no_side_effects(expr: &Expression) -> bool {
                 && expression_has_no_side_effects(left)
                 && expression_has_no_side_effects(right)
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
-            expression_has_no_side_effects(tag)
-                && strings.iter().all(expression_has_no_side_effects)
-                && values.iter().all(expression_has_no_side_effects)
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
+            expression_has_no_side_effects(tag) && values.iter().all(expression_has_no_side_effects)
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
+            values.iter().all(expression_has_no_side_effects)
         }
         ExpressionDesc::Call(func, args, _)
             if is_array_is_array_callee(func) && args.len() == 1 =>
@@ -1646,7 +1633,7 @@ fn push_negation(expr: Expression) -> Option<Expression> {
 }
 
 /// Switch case clause
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CaseClause {
     /// Case body
     pub body: Block,
@@ -1662,7 +1649,7 @@ pub struct CaseClause {
 pub type IntClause = (i32, CaseClause);
 
 /// String switch clause (tag type, case clause)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StringClause {
     /// Tag type (from Ast_untagged_variants)
     pub tag_type: SwitchCaseTag,
@@ -1671,7 +1658,7 @@ pub struct StringClause {
 }
 
 /// Variable declaration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VariableDeclaration {
     /// Variable identifier
     pub ident: Ident,
@@ -1684,7 +1671,7 @@ pub struct VariableDeclaration {
 }
 
 /// JavaScript statement description
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum StatementDesc {
     /// Block of statements
     Block(Block),
@@ -1706,8 +1693,8 @@ pub enum StatementDesc {
     /// For loop (label, init, end, ident, direction, body).
     ForRange(
         Option<String>,
-        Option<Expression>,
-        Expression,
+        Option<Box<Expression>>,
+        Box<Expression>,
         Ident,
         ForDirection,
         Block,
@@ -1716,11 +1703,11 @@ pub enum StatementDesc {
     /// `for (let ident of iterable) { body }` (upstream #7887).
     /// The optional label is lazily attached when a nested switch needs to
     /// emit a labeled `break`/`continue` targeting this loop.
-    ForOf(Option<String>, Ident, Expression, Block),
+    ForOf(Option<String>, Ident, Box<Expression>, Block),
 
     /// `for await (let ident of iterable) { body }` (upstream #7887).
     /// Only emitted inside async functions.
-    ForAwaitOf(Option<String>, Ident, Expression, Block),
+    ForAwaitOf(Option<String>, Ident, Box<Expression>, Block),
 
     /// Continue statement (optional target label)
     Continue(Option<String>),
@@ -1748,14 +1735,14 @@ pub enum StatementDesc {
 }
 
 /// JavaScript statement
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Statement {
     /// Statement description
     pub desc: StatementDesc,
     /// Optional comment
-    pub comment: Option<String>,
+    pub comment: Option<Box<String>>,
     /// Original ReScript source location used by source map generation.
-    pub source_loc: Option<crate::location::Location>,
+    pub source_loc: Option<Box<crate::location::Location>>,
 }
 
 impl Statement {
@@ -1818,11 +1805,30 @@ impl Statement {
         Self::new(StatementDesc::While(label, cond, body))
     }
 
+    /// Create a counted `for` loop statement.
+    pub fn for_range(
+        label: Option<String>,
+        init: Option<Expression>,
+        finish: Expression,
+        ident: Ident,
+        direction: ForDirection,
+        body: Block,
+    ) -> Self {
+        Self::new(StatementDesc::ForRange(
+            label,
+            init.map(Box::new),
+            Box::new(finish),
+            ident,
+            direction,
+            body,
+        ))
+    }
+
     /// Create a `for (let id of iterable) { body }` statement.
     /// Port of OCaml `S.for_of`. The optional label is lazily attached when
     /// a nested switch requires a labeled break/continue target.
     pub fn for_of(label: Option<String>, ident: Ident, iterable: Expression, body: Block) -> Self {
-        Self::new(StatementDesc::ForOf(label, ident, iterable, body))
+        Self::new(StatementDesc::ForOf(label, ident, Box::new(iterable), body))
     }
 
     /// Create a `for await (let id of iterable) { body }` statement.
@@ -1833,12 +1839,12 @@ impl Statement {
         iterable: Expression,
         body: Block,
     ) -> Self {
-        Self::new(StatementDesc::ForAwaitOf(label, ident, iterable, body))
+        Self::new(StatementDesc::ForAwaitOf(label, ident, Box::new(iterable), body))
     }
 
     /// Create a return statement
     pub fn return_(expr: Expression) -> Self {
-        let source_loc = expr.source_loc;
+        let source_loc = expr.source_loc.clone();
         let mut statement = Self::new(StatementDesc::Return(expr));
         statement.source_loc = source_loc;
         statement
@@ -1885,7 +1891,7 @@ fn block_with_comment(block: Block, comment: Option<String>) -> Statement {
         [] => Statement {
             source_loc: None,
             desc: StatementDesc::Block(vec![]),
-            comment,
+            comment: comment.map(Box::new),
         },
         [stmt] => match &stmt.desc {
             StatementDesc::Block(inner) => block_with_comment(inner.clone(), comment),
@@ -1894,7 +1900,7 @@ fn block_with_comment(block: Block, comment: Option<String>) -> Statement {
         _ => Statement {
             source_loc: None,
             desc: StatementDesc::Block(block),
-            comment,
+            comment: comment.map(Box::new),
         },
     }
 }
@@ -1918,7 +1924,7 @@ fn normalize_statement(desc: StatementDesc, comment: Option<String>) -> Statemen
         }
         StatementDesc::StringSwitch(
             Expression {
-                desc: ExpressionDesc::Str { txt, .. },
+                desc: ExpressionDesc::Str(txt),
                 ..
             },
             clauses,
@@ -1937,7 +1943,7 @@ fn normalize_statement(desc: StatementDesc, comment: Option<String>) -> Statemen
         _ => Statement {
             source_loc: None,
             desc,
-            comment,
+            comment: comment.map(Box::new),
         },
     }
 }
@@ -1966,19 +1972,8 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
         return Statement::return_(Expression::cond(cond, then_ret.clone(), else_ret.clone()));
     }
 
+    // js_stmt_make.ml:255-261: `_, [Return _]` flips to an early return.
     if let Some(else_ret) = single_return_expr(&else_) {
-        // Keep explicit positive success guards when the consequent already
-        // carries a real multi-statement return tail and the alternate is only
-        // `return undefined`. OCaml's backend preserves that final shape for
-        // cases like async option switches, while the early-return rewrite here
-        // flips them into `if (!cond) return; ...` too soon.
-        if preserves_positive_return_undefined_tail(&then_, else_ret)
-            || preserves_positive_literal_dispatch_return_tail(&cond, &then_, else_ret)
-            || (preserves_nullish_success_guard(&cond, &then_, &else_)
-                && !nullish_guard_fallback_returns_guard_target(&cond, else_ret))
-        {
-            return Statement::new(StatementDesc::If(cond, then_, else_));
-        }
         let mut block = Vec::with_capacity(1 + then_.len());
         block.push(Statement::new(StatementDesc::If(
             negate_condition(cond),
@@ -1989,10 +1984,8 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
         return Statement::block(block);
     }
 
+    // js_stmt_make.ml:262-265.
     if block_last_is_terminal(&then_) {
-        if preserves_nullish_success_guard(&cond, &then_, &else_) {
-            return Statement::new(StatementDesc::If(cond, then_, else_));
-        }
         let mut block = Vec::with_capacity(1 + else_.len());
         block.push(Statement::new(StatementDesc::If(cond, then_, vec![])));
         block.extend(else_);
@@ -2017,14 +2010,12 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
     }
 
     if let Some((nested_cond, nested_then, nested_else)) = single_if_block(&then_) {
-        let preserve_literal_membership_guard =
-            preserves_literal_membership_guard(&cond, nested_cond);
         // OCaml's `S.if_` rule 10 (compiler/core/js_stmt_make.ml:290-292)
         // merges `if c1 { if c2 then2 else2 } else2` into
         // `if (c1 && c2) then2 else2`. `E.and_` then folds
         // `typeof x === "string" && x === "lit"` to `x === "lit"`
         // (compiler/core/js_exp_make.ml:800-813).
-        if !preserve_literal_membership_guard && ocaml_eq_block(nested_else, &else_) {
+        if ocaml_eq_block(nested_else, &else_) {
             return simplify_if_statement(
                 js_and_expression(cond, nested_cond.clone()),
                 nested_then.clone(),
@@ -2032,8 +2023,7 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
             );
         }
 
-        if !preserve_literal_membership_guard
-            && !nested_then.is_empty()
+        if !nested_then.is_empty()
             && ocaml_eq_block(nested_then, &else_)
         {
             return simplify_if_statement(
@@ -2072,13 +2062,6 @@ pub(crate) fn block_last_is_terminal(block: &Block) -> bool {
             | Some(StatementDesc::Throw(_))
             | Some(StatementDesc::Continue(_))
             | Some(StatementDesc::Break(_))
-    )
-}
-
-fn block_last_is_return(block: &Block) -> bool {
-    matches!(
-        last_statement(block).map(|stmt| &stmt.desc),
-        Some(StatementDesc::Return(_))
     )
 }
 
@@ -2156,359 +2139,6 @@ fn single_statement(block: &Block) -> Option<&Statement> {
     Some(stmt)
 }
 
-fn unwrap_single_block_statement_for_preserved_tail(stmt: &Statement) -> &Statement {
-    match &stmt.desc {
-        StatementDesc::Block(inner) if inner.len() == 1 => {
-            unwrap_single_block_statement_for_preserved_tail(&inner[0])
-        }
-        _ => stmt,
-    }
-}
-
-fn single_wrapped_return_expr(block: &Block) -> Option<&Expression> {
-    let stmt = single_statement(block)?;
-    match &unwrap_single_block_statement_for_preserved_tail(stmt).desc {
-        StatementDesc::Return(expr) => Some(expr),
-        _ => None,
-    }
-}
-
-fn single_wrapped_if_block(block: &Block) -> Option<(&Expression, &Block, &Block)> {
-    let stmt = single_statement(block)?;
-    match &unwrap_single_block_statement_for_preserved_tail(stmt).desc {
-        StatementDesc::If(cond, then_block, else_block) => Some((cond, then_block, else_block)),
-        _ => None,
-    }
-}
-
-fn preserves_positive_return_undefined_tail(then_: &Block, else_ret: &Expression) -> bool {
-    if !matches!(else_ret.desc, ExpressionDesc::Undefined { .. }) {
-        return false;
-    }
-    let Some((last, prefix)) = then_.split_last() else {
-        return false;
-    };
-    if !matches!(last.desc, StatementDesc::Return(_)) {
-        return false;
-    }
-
-    prefix.iter().any(statement_contains_await)
-}
-
-fn preserves_positive_literal_dispatch_return_tail(
-    cond: &Expression,
-    then_: &Block,
-    else_ret: &Expression,
-) -> bool {
-    if !matches!(else_ret.desc, ExpressionDesc::Undefined { .. }) {
-        return false;
-    }
-
-    let Some((nested_cond, _, nested_else)) = single_wrapped_if_block(then_) else {
-        return false;
-    };
-    if !nested_else.is_empty()
-        && !matches!(
-            single_wrapped_return_expr(nested_else),
-            Some(Expression {
-                desc: ExpressionDesc::Undefined { .. },
-                ..
-            })
-        )
-    {
-        return false;
-    }
-
-    let Some((inner_op, inner_vident, inner_literal)) = strict_var_literal_comparison(nested_cond)
-    else {
-        return false;
-    };
-    if inner_op != BinOp::EqEqEq || !matches!(inner_literal.desc, ExpressionDesc::Str { .. }) {
-        return false;
-    }
-
-    let mut saw_inner_literal = false;
-    let mut saw_other_literal = false;
-    if !collect_same_var_literal_membership_terms(
-        cond,
-        inner_vident,
-        inner_literal,
-        &mut saw_inner_literal,
-        &mut saw_other_literal,
-    ) {
-        return false;
-    }
-
-    saw_inner_literal && saw_other_literal
-}
-
-fn preserves_nullish_success_guard(cond: &Expression, then_: &Block, else_: &Block) -> bool {
-    if !is_nullish_refinement_guard(cond) || is_nullish_unit_success_tail(then_, else_) {
-        return false;
-    }
-
-    // OCaml only preserves the explicit success-arm shape for the loose
-    // `x == null`/`x != null` family. For strict `null`/`undefined`
-    // refinements, js_stmt_make.if_ still applies the generic guard/fallthrough
-    // rewrite, which is the shape used by files like pattern_match_json and
-    // test_zero_nullable.
-    if !is_loose_nullish_refinement_guard(cond) {
-        return false;
-    }
-
-    let then_nontrivial_terminal = then_.len() > 1 && block_last_is_return(then_);
-    let else_nontrivial_terminal = else_.len() > 1 && block_last_is_return(else_);
-    let then_simple_fallback = then_.is_empty() || single_return_expr(then_).is_some();
-    let else_simple_fallback = else_.is_empty() || single_return_expr(else_).is_some();
-
-    (then_nontrivial_terminal && else_simple_fallback)
-        || (else_nontrivial_terminal && then_simple_fallback)
-}
-
-fn is_unit_return_expr(expr: &Expression) -> bool {
-    match &expr.desc {
-        ExpressionDesc::Undefined { .. } => true,
-        ExpressionDesc::Seq(_, suffix) => is_unit_return_expr(suffix),
-        ExpressionDesc::Cond(_, consequent, alternate) => {
-            is_unit_return_expr(consequent) && is_unit_return_expr(alternate)
-        }
-        _ => false,
-    }
-}
-
-fn is_nullish_unit_success_tail(then_: &Block, else_: &Block) -> bool {
-    // OCaml reference: compiler/core/js_stmt_make.ml:237-250 applies the
-    // generic `S.if_` rule-5/rule-7 rewrites when both branch return values
-    // are unit, including `Cond`/`Seq` expressions whose suffix is unit.
-    let Some(else_ret) = single_return_expr(else_) else {
-        return false;
-    };
-    if !is_unit_return_expr(else_ret) {
-        return false;
-    }
-
-    let Some(Statement {
-        desc: StatementDesc::Return(then_ret),
-        ..
-    }) = last_statement(then_)
-    else {
-        return false;
-    };
-
-    is_unit_return_expr(then_ret)
-}
-
-fn nullish_guard_fallback_returns_guard_target(cond: &Expression, expr: &Expression) -> bool {
-    let ExpressionDesc::Var(fallback_vident) = &expr.desc else {
-        return false;
-    };
-
-    let Some(target_vident) = nullish_guard_target(cond) else {
-        return false;
-    };
-
-    same_vident(target_vident, fallback_vident)
-}
-
-fn nullish_guard_target(expr: &Expression) -> Option<&VIdent> {
-    match &expr.desc {
-        ExpressionDesc::IsNullOrUndefined(inner) => match &inner.as_ref().desc {
-            ExpressionDesc::Var(vident) => Some(vident),
-            _ => None,
-        },
-        ExpressionDesc::JsNot(inner) => nullish_guard_target(inner),
-        _ => match strict_var_literal_comparison(expr) {
-            Some((
-                BinOp::EqEqEq | BinOp::NotEqEq,
-                vident,
-                Expression {
-                    desc: ExpressionDesc::Null | ExpressionDesc::Undefined { .. },
-                    ..
-                },
-            )) => Some(vident),
-            _ => None,
-        },
-    }
-}
-
-fn is_nullish_refinement_guard(expr: &Expression) -> bool {
-    match &expr.desc {
-        ExpressionDesc::IsNullOrUndefined(inner) => matches!(
-            inner.as_ref(),
-            Expression {
-                desc: ExpressionDesc::Var(_),
-                ..
-            }
-        ),
-        ExpressionDesc::JsNot(inner) => matches!(
-            inner.as_ref(),
-            Expression {
-                desc: ExpressionDesc::IsNullOrUndefined(target),
-                ..
-            } if matches!(
-                target.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Var(_),
-                    ..
-                }
-            )
-        ),
-        _ => matches!(
-            strict_var_literal_comparison(expr),
-            Some((
-                BinOp::EqEqEq | BinOp::NotEqEq,
-                _,
-                Expression {
-                    desc: ExpressionDesc::Null | ExpressionDesc::Undefined { .. },
-                    ..
-                }
-            ))
-        ),
-    }
-}
-
-fn is_loose_nullish_refinement_guard(expr: &Expression) -> bool {
-    match &expr.desc {
-        ExpressionDesc::IsNullOrUndefined(inner) => matches!(
-            inner.as_ref(),
-            Expression {
-                desc: ExpressionDesc::Var(_),
-                ..
-            }
-        ),
-        ExpressionDesc::JsNot(inner) => matches!(
-            inner.as_ref(),
-            Expression {
-                desc: ExpressionDesc::IsNullOrUndefined(target),
-                ..
-            } if matches!(
-                target.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Var(_),
-                    ..
-                }
-            )
-        ),
-        _ => false,
-    }
-}
-
-fn statement_contains_await(stmt: &Statement) -> bool {
-    match &stmt.desc {
-        StatementDesc::Block(inner) => inner.iter().any(statement_contains_await),
-        StatementDesc::Variable(decl) => decl.value.as_ref().is_some_and(expression_contains_await),
-        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
-            expression_contains_await(expr)
-        }
-        StatementDesc::If(cond, then_block, else_block) => {
-            expression_contains_await(cond)
-                || then_block.iter().any(statement_contains_await)
-                || else_block.iter().any(statement_contains_await)
-        }
-        StatementDesc::While(_, cond, body) => {
-            expression_contains_await(cond) || body.iter().any(statement_contains_await)
-        }
-        StatementDesc::ForRange(_, start, finish, _, _, body) => {
-            start.as_ref().is_some_and(expression_contains_await)
-                || expression_contains_await(finish)
-                || body.iter().any(statement_contains_await)
-        }
-        // `for await ... of` is itself an `await` site, so always returns true.
-        StatementDesc::ForAwaitOf(_, _, _, _) => true,
-        StatementDesc::ForOf(_, _, iterable, body) => {
-            expression_contains_await(iterable) || body.iter().any(statement_contains_await)
-        }
-        StatementDesc::IntSwitch(expr, clauses, default) => {
-            expression_contains_await(expr)
-                || clauses
-                    .iter()
-                    .any(|(_, clause)| clause.body.iter().any(statement_contains_await))
-                || default
-                    .as_ref()
-                    .is_some_and(|block| block.iter().any(statement_contains_await))
-        }
-        StatementDesc::StringSwitch(expr, clauses, default) => {
-            expression_contains_await(expr)
-                || clauses
-                    .iter()
-                    .any(|clause| clause.clause.body.iter().any(statement_contains_await))
-                || default
-                    .as_ref()
-                    .is_some_and(|block| block.iter().any(statement_contains_await))
-        }
-        StatementDesc::Try(body, catch, finally) => {
-            body.iter().any(statement_contains_await)
-                || catch
-                    .as_ref()
-                    .is_some_and(|(_, block)| block.iter().any(statement_contains_await))
-                || finally
-                    .as_ref()
-                    .is_some_and(|block| block.iter().any(statement_contains_await))
-        }
-        StatementDesc::Continue(_) | StatementDesc::Break(_) | StatementDesc::Debugger => false,
-    }
-}
-
-fn expression_contains_await(expr: &Expression) -> bool {
-    match &expr.desc {
-        ExpressionDesc::Await(_) => true,
-        ExpressionDesc::Length(inner, _)
-        | ExpressionDesc::IsNullOrUndefined(inner)
-        | ExpressionDesc::Typeof(inner)
-        | ExpressionDesc::JsNot(inner)
-        | ExpressionDesc::JsBnot(inner)
-        | ExpressionDesc::CamlBlockTag(inner, _)
-        | ExpressionDesc::OptionalBlock(inner, _)
-        | ExpressionDesc::Spread(inner) => expression_contains_await(inner),
-        ExpressionDesc::StringAppend(left, right)
-        | ExpressionDesc::In(left, right)
-        | ExpressionDesc::Seq(left, right)
-        | ExpressionDesc::Bin(_, left, right)
-        | ExpressionDesc::StringIndex(left, right)
-        | ExpressionDesc::ArrayIndex(left, right)
-        | ExpressionDesc::FlatCall(left, right) => {
-            expression_contains_await(left) || expression_contains_await(right)
-        }
-        ExpressionDesc::Cond(test, consequent, alternate) => {
-            expression_contains_await(test)
-                || expression_contains_await(consequent)
-                || expression_contains_await(alternate)
-        }
-        ExpressionDesc::Call(func, args, _) => {
-            expression_contains_await(func) || args.iter().any(expression_contains_await)
-        }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
-            expression_contains_await(tag)
-                || strings.iter().any(expression_contains_await)
-                || values.iter().any(expression_contains_await)
-        }
-        ExpressionDesc::StaticIndex(target, _, _) => expression_contains_await(target),
-        ExpressionDesc::RecordRest(_, source) => expression_contains_await(source),
-        ExpressionDesc::New(target, args) => {
-            expression_contains_await(target)
-                || args
-                    .as_ref()
-                    .is_some_and(|args| args.iter().any(expression_contains_await))
-        }
-        ExpressionDesc::Array(items, _) => items.iter().any(expression_contains_await),
-        ExpressionDesc::Object(dup, props) => {
-            dup.as_deref().is_some_and(expression_contains_await)
-                || props
-                    .iter()
-                    .any(|(_, value)| expression_contains_await(value))
-        }
-        ExpressionDesc::CamlBlock(items, _, _) => items.iter().any(expression_contains_await),
-        ExpressionDesc::Fun { .. }
-        | ExpressionDesc::Var(_)
-        | ExpressionDesc::Str { .. }
-        | ExpressionDesc::RawJsCode(_)
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Number(_)
-        | ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null => false,
-    }
-}
-
 fn expression_stmt_is_trivial(expr: &Expression) -> bool {
     matches!(
         expr.desc,
@@ -2546,73 +2176,6 @@ pub fn unnest_block(block: Block) -> Block {
             }
         }
         _ => block,
-    }
-}
-
-fn preserves_literal_membership_guard(outer_cond: &Expression, inner_cond: &Expression) -> bool {
-    let Some((inner_op, inner_vident, inner_literal)) = strict_var_literal_comparison(inner_cond)
-    else {
-        return false;
-    };
-    if inner_op != BinOp::EqEqEq {
-        return false;
-    }
-    if !matches!(inner_literal.desc, ExpressionDesc::Bool(false)) {
-        return false;
-    }
-
-    let mut saw_inner_literal = false;
-    let mut saw_other_literal = false;
-    if !collect_same_var_literal_membership_terms(
-        outer_cond,
-        inner_vident,
-        inner_literal,
-        &mut saw_inner_literal,
-        &mut saw_other_literal,
-    ) {
-        return false;
-    }
-
-    saw_inner_literal && saw_other_literal
-}
-
-fn collect_same_var_literal_membership_terms(
-    expr: &Expression,
-    expected_vident: &VIdent,
-    inner_literal: &Expression,
-    saw_inner_literal: &mut bool,
-    saw_other_literal: &mut bool,
-) -> bool {
-    match &expr.desc {
-        ExpressionDesc::Bin(BinOp::Or, left, right) => {
-            collect_same_var_literal_membership_terms(
-                left,
-                expected_vident,
-                inner_literal,
-                saw_inner_literal,
-                saw_other_literal,
-            ) && collect_same_var_literal_membership_terms(
-                right,
-                expected_vident,
-                inner_literal,
-                saw_inner_literal,
-                saw_other_literal,
-            )
-        }
-        _ => {
-            let Some((op, vident, literal)) = strict_var_literal_comparison(expr) else {
-                return false;
-            };
-            if op != BinOp::EqEqEq || !same_vident(vident, expected_vident) {
-                return false;
-            }
-            if ocaml_eq_expression(literal, inner_literal) {
-                *saw_inner_literal = true;
-            } else {
-                *saw_other_literal = true;
-            }
-            true
-        }
     }
 }
 
@@ -2662,7 +2225,7 @@ fn js_and_expression(left: Expression, right: Expression) -> Expression {
                 ExpressionDesc::Var(left_vident),
                 ExpressionDesc::Undefined { .. },
                 ExpressionDesc::Var(right_vident),
-                ExpressionDesc::Str { .. } | ExpressionDesc::Number(_),
+                ExpressionDesc::Str(_) | ExpressionDesc::Number(_),
             ) if same_vident(left_vident, right_vident)
         ) =>
         {
@@ -2706,7 +2269,7 @@ fn js_or_expression(left: Expression, right: Expression) -> Expression {
 
 fn simplify_and_if_no_side_effects(left: &Expression, right: &Expression) -> Option<Expression> {
     if expression_has_no_side_effects(left) && expression_has_no_side_effects(right) {
-        simplify_and_expression(left, right)
+        simplify_and_expression_with_depth(left, right, 0, true)
     } else {
         None
     }
@@ -2714,20 +2277,22 @@ fn simplify_and_if_no_side_effects(left: &Expression, right: &Expression) -> Opt
 
 fn simplify_or_if_no_side_effects(left: &Expression, right: &Expression) -> Option<Expression> {
     if expression_has_no_side_effects(left) && expression_has_no_side_effects(right) {
-        simplify_or_expression(left, right)
+        simplify_or_expression_with_depth(left, right, 0, true)
     } else {
         None
     }
 }
 
-fn simplify_and_expression(left: &Expression, right: &Expression) -> Option<Expression> {
-    simplify_and_expression_with_depth(left, right, 0)
-}
-
+/// `pure` is true when both operands are already known to have no side
+/// effects. Sub-expressions of pure `&&`/`||` operands, their negations and
+/// conjunctions of them are pure as well, so recursive calls on those pass it
+/// on instead of walking the operands again (for long `||` chains that walk
+/// made each step linear and whole-chain construction quadratic).
 fn simplify_and_expression_with_depth(
     left: &Expression,
     right: &Expression,
     depth: usize,
+    pure: bool,
 ) -> Option<Expression> {
     if depth > JS_SIMPLIFY_MAX_DEPTH {
         return None;
@@ -2742,15 +2307,15 @@ fn simplify_and_expression_with_depth(
         _ => {}
     }
 
-    if expression_has_no_side_effects(left) && expression_has_no_side_effects(right) {
+    if pure || (expression_has_no_side_effects(left) && expression_has_no_side_effects(right)) {
         match (&left.desc, &right.desc) {
             (ExpressionDesc::Bin(BinOp::And, left_a, left_b), _) => {
                 let simplified_left_a =
-                    simplify_and_expression_with_depth(left_a, right, depth + 1);
+                    simplify_and_expression_with_depth(left_a, right, depth + 1, true);
                 let simplified_left_b =
-                    simplify_and_expression_with_depth(left_b, right, depth + 1);
+                    simplify_and_expression_with_depth(left_b, right, depth + 1, true);
                 return match (simplified_left_a, simplified_left_b) {
-                    (None, None) => simplify_and_expression_with_depth(left_a, left_b, depth + 1)
+                    (None, None) => simplify_and_expression_with_depth(left_a, left_b, depth + 1, true)
                         .and_then(|expr| simplify_and_force(&expr, right, depth + 1)),
                     (Some(left_a), None) => simplify_and_force(&left_a, left_b, depth + 1),
                     (None, Some(left_b)) => simplify_and_force(left_a, &left_b, depth + 1),
@@ -2760,13 +2325,13 @@ fn simplify_and_expression_with_depth(
             (_, ExpressionDesc::Bin(BinOp::And, right_a, right_b)) => {
                 let combined =
                     raw_bin_expression(BinOp::And, left.clone(), right_a.as_ref().clone());
-                return simplify_and_expression_with_depth(&combined, right_b, depth + 1);
+                return simplify_and_expression_with_depth(&combined, right_b, depth + 1, true);
             }
             (ExpressionDesc::Bin(BinOp::Or, left_a, left_b), _) => {
                 let simplified_left_a =
-                    simplify_and_expression_with_depth(left_a, right, depth + 1);
+                    simplify_and_expression_with_depth(left_a, right, depth + 1, true);
                 let simplified_left_b =
-                    simplify_and_expression_with_depth(left_b, right, depth + 1);
+                    simplify_and_expression_with_depth(left_b, right, depth + 1, true);
                 return match (simplified_left_a, simplified_left_b) {
                     (Some(expr), None) if matches!(expr.desc, ExpressionDesc::Bool(false)) => Some(
                         raw_bin_expression(BinOp::And, left_b.as_ref().clone(), right.clone()),
@@ -2775,7 +2340,7 @@ fn simplify_and_expression_with_depth(
                         raw_bin_expression(BinOp::And, left_a.as_ref().clone(), right.clone()),
                     ),
                     (None, _) | (_, None) => {
-                        simplify_or_expression_with_depth(left_a, left_b, depth + 1)
+                        simplify_or_expression_with_depth(left_a, left_b, depth + 1, true)
                             .and_then(|expr| simplify_and_force(&expr, right, depth + 1))
                     }
                     (Some(left_a), Some(left_b)) => simplify_or_force(&left_a, &left_b, depth + 1),
@@ -2789,10 +2354,14 @@ fn simplify_and_expression_with_depth(
         return Some(left.clone());
     }
 
-    if expression_has_no_side_effects(left) && disjunction_contains_expression(left, right) {
+    if (pure || expression_has_no_side_effects(left))
+        && disjunction_contains_expression(left, right)
+    {
         return Some(right.clone());
     }
-    if expression_has_no_side_effects(right) && disjunction_contains_expression(right, left) {
+    if (pure || expression_has_no_side_effects(right))
+        && disjunction_contains_expression(right, left)
+    {
         return Some(left.clone());
     }
 
@@ -2817,14 +2386,12 @@ fn simplify_and_expression_with_depth(
     None
 }
 
-fn simplify_or_expression(left: &Expression, right: &Expression) -> Option<Expression> {
-    simplify_or_expression_with_depth(left, right, 0)
-}
-
+/// See `simplify_and_expression_with_depth` for `pure`.
 fn simplify_or_expression_with_depth(
     left: &Expression,
     right: &Expression,
     depth: usize,
+    pure: bool,
 ) -> Option<Expression> {
     if depth > JS_SIMPLIFY_MAX_DEPTH {
         return None;
@@ -2839,26 +2406,31 @@ fn simplify_or_expression_with_depth(
         _ => {}
     }
 
-    if expression_has_no_side_effects(left) && conjunction_contains_expression(left, right) {
+    if (pure || expression_has_no_side_effects(left))
+        && conjunction_contains_expression(left, right)
+    {
         return Some(right.clone());
     }
-    if expression_has_no_side_effects(right) && conjunction_contains_expression(right, left) {
+    if (pure || expression_has_no_side_effects(right))
+        && conjunction_contains_expression(right, left)
+    {
         return Some(left.clone());
     }
 
     let left_not = push_negation(left.clone())?;
     let right_not = push_negation(right.clone())?;
-    let simplified = simplify_and_expression_with_depth(&left_not, &right_not, depth + 1)?;
+    // Negation keeps operands pure.
+    let simplified = simplify_and_expression_with_depth(&left_not, &right_not, depth + 1, pure)?;
     push_negation(simplified)
 }
 
 fn simplify_and_force(left: &Expression, right: &Expression, depth: usize) -> Option<Expression> {
-    simplify_and_expression_with_depth(left, right, depth)
+    simplify_and_expression_with_depth(left, right, depth, false)
         .or_else(|| Some(raw_bin_expression(BinOp::And, left.clone(), right.clone())))
 }
 
 fn simplify_or_force(left: &Expression, right: &Expression, depth: usize) -> Option<Expression> {
-    simplify_or_expression_with_depth(left, right, depth)
+    simplify_or_expression_with_depth(left, right, depth, false)
         .or_else(|| Some(raw_bin_expression(BinOp::Or, left.clone(), right.clone())))
 }
 
@@ -2989,7 +2561,7 @@ fn typeof_var_type_test(expr: &Expression) -> Option<(&VIdent, &str)> {
     let ExpressionDesc::Var(vident) = &value.desc else {
         return None;
     };
-    let ExpressionDesc::Str { txt, .. } = &right.desc else {
+    let ExpressionDesc::Str(txt) = &right.desc else {
         return None;
     };
     Some((vident, txt.as_str()))
@@ -3010,7 +2582,6 @@ fn strict_var_literal_comparison(expr: &Expression) -> Option<(BinOp, &VIdent, &
 
 fn is_array_is_array_callee(expr: &Expression) -> bool {
     match &expr.desc {
-        ExpressionDesc::Str { txt, .. } => txt == "Array.isArray",
         ExpressionDesc::StaticIndex(target, field, _)
             if field == "isArray"
                 && matches!(
@@ -3047,7 +2618,7 @@ fn literal_matches_type_name(literal: &Expression, type_name: &str) -> bool {
     matches!(
         (&literal.desc, type_name),
         (ExpressionDesc::Bool(_), "boolean")
-            | (ExpressionDesc::Str { .. }, "string")
+            | (ExpressionDesc::Str(_), "string")
             | (ExpressionDesc::Number(_), "number")
     )
 }
@@ -3059,7 +2630,7 @@ fn is_scalar_nullish_literal(expr: &Expression) -> bool {
             | ExpressionDesc::Null
             | ExpressionDesc::Undefined { .. }
             | ExpressionDesc::Number(_)
-            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Str(_)
     )
 }
 
@@ -3170,16 +2741,8 @@ pub(crate) fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool
                 && ocaml_eq_expression(left_lhs, right_lhs)
                 && ocaml_eq_expression(left_rhs, right_rhs)
         }
-        (
-            ExpressionDesc::Str {
-                delim: left_delim,
-                txt: left_txt,
-            },
-            ExpressionDesc::Str {
-                delim: right_delim,
-                txt: right_txt,
-            },
-        ) => left_delim == right_delim && left_txt == right_txt,
+        (ExpressionDesc::Str(left_txt), ExpressionDesc::Str(right_txt)) => left_txt == right_txt,
+        (ExpressionDesc::TemplateLiteral(left), ExpressionDesc::TemplateLiteral(right)) => left == right,
         (
             ExpressionDesc::StaticIndex(left_obj, left_field, left_pos),
             ExpressionDesc::StaticIndex(right_obj, right_field, right_pos),
@@ -3195,13 +2758,7 @@ pub(crate) fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool
             ocaml_eq_expression(left_first, right_first)
                 && ocaml_eq_expression(left_second, right_second)
         }
-        (
-            ExpressionDesc::StringAppend(left_first, left_second),
-            ExpressionDesc::StringAppend(right_first, right_second),
-        ) => {
-            ocaml_eq_expression(left_first, right_first)
-                && ocaml_eq_expression(left_second, right_second)
-        }
+        // js_analyzer.ml `eq_expression`: `String_append _` is never equal.
         (ExpressionDesc::Bool(left_bool), ExpressionDesc::Bool(right_bool)) => {
             left_bool == right_bool
         }
@@ -3272,7 +2829,7 @@ pub struct Program {
     /// Exported identifiers
     pub exports: Exports,
     /// Set of exported identifiers
-    pub export_set: std::collections::HashSet<Ident>,
+    pub export_set: ahash::AHashSet<Ident>,
     /// Idents that occupy printed names without emitting statements.
     pub name_reservations: Vec<Ident>,
 }
@@ -3309,7 +2866,7 @@ impl Program {
         Self {
             block: vec![],
             exports: vec![],
-            export_set: std::collections::HashSet::new(),
+            export_set: ahash::AHashSet::new(),
             name_reservations: Vec::new(),
         }
     }
@@ -3431,13 +2988,13 @@ fn dispose_statement_nonrecursive(statement: Statement, stack: &mut Vec<DisposeI
             stack.push(DisposeItem::Block(body));
         }
         StatementDesc::ForRange(_, start, finish, _, _, body) => {
-            push_optional_expression(start, stack);
-            stack.push(DisposeItem::Expression(finish));
+            push_optional_expression(start.map(|expr| *expr), stack);
+            stack.push(DisposeItem::Expression(*finish));
             stack.push(DisposeItem::Block(body));
         }
         StatementDesc::ForOf(_, _, iterable, body)
         | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
-            stack.push(DisposeItem::Expression(iterable));
+            stack.push(DisposeItem::Expression(*iterable));
             stack.push(DisposeItem::Block(body));
         }
         StatementDesc::IntSwitch(expr, clauses, default) => {
@@ -3510,10 +3067,10 @@ fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<Dispo
             stack.push(DisposeItem::Expression(*func));
             push_expression_vec(args, stack);
         }
-        ExpressionDesc::TaggedTemplate(tag, quasi, expressions) => {
-            push_expression_vec(quasi, stack);
+        ExpressionDesc::TaggedTemplate(_tag, _quasi, expressions) => {
             push_expression_vec(expressions, stack);
         }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => push_expression_vec(values, stack),
         ExpressionDesc::Fun {
             is_method: _,
             params: _,
@@ -3543,7 +3100,9 @@ fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<Dispo
         }
         ExpressionDesc::Var(_)
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Undefined { .. }
@@ -3581,10 +3140,7 @@ mod tests {
     fn test_string_expression() {
         let expr = Expression::string("hello");
         match &expr.desc {
-            ExpressionDesc::Str {
-                delim: Delim::None,
-                txt,
-            } => {
+            ExpressionDesc::Str(txt) => {
                 assert_eq!(txt, "hello");
             }
             _ => panic!("Expected Str"),
@@ -3605,21 +3161,12 @@ mod tests {
 
     #[test]
     fn test_string_append_folds_adjacent_same_delim_literals() {
-        let left = Expression::new(ExpressionDesc::Str {
-            txt: "hello ".to_string(),
-            delim: Delim::StarJ,
-        });
-        let right = Expression::new(ExpressionDesc::Str {
-            txt: "world".to_string(),
-            delim: Delim::StarJ,
-        });
+        let left = Expression::new(ExpressionDesc::Str("hello ".to_string()));
+        let right = Expression::new(ExpressionDesc::Str("world".to_string()));
         let expr = Expression::string_append(left, right);
 
         match &expr.desc {
-            ExpressionDesc::Str { txt, delim } => {
-                assert_eq!(txt, "hello world");
-                assert_eq!(*delim, Delim::StarJ);
-            }
+            ExpressionDesc::Str(txt) => assert_eq!(txt, "hello world"),
             other => panic!("Expected folded string literal, got {other:?}"),
         }
     }
@@ -3627,27 +3174,18 @@ mod tests {
     #[test]
     fn test_string_append_merges_literal_prefix_into_nested_append() {
         let nested = Expression::string_append(
-            Expression::new(ExpressionDesc::Str {
-                txt: "beta".to_string(),
-                delim: Delim::StarJ,
-            }),
+            Expression::new(ExpressionDesc::Str("beta".to_string())),
             Expression::var(Ident::create_local("tail")),
         );
         let expr = Expression::string_append(
-            Expression::new(ExpressionDesc::Str {
-                txt: "alpha".to_string(),
-                delim: Delim::StarJ,
-            }),
+            Expression::new(ExpressionDesc::Str("alpha".to_string())),
             nested,
         );
 
         match &expr.desc {
             ExpressionDesc::StringAppend(left, right) => {
                 match &left.desc {
-                    ExpressionDesc::Str { txt, delim } => {
-                        assert_eq!(txt, "alphabeta");
-                        assert_eq!(*delim, Delim::StarJ);
-                    }
+                    ExpressionDesc::Str(txt) => assert_eq!(txt, "alphabeta"),
                     other => panic!("Expected merged left string literal, got {other:?}"),
                 }
                 assert!(matches!(right.as_ref().desc, ExpressionDesc::Var(_)));
@@ -4351,89 +3889,7 @@ mod tests {
     }
 
     #[test]
-    fn test_if_statement_keeps_explicit_literal_membership_guards() {
-        let value = Ident::create_local("value");
-        let outer_cond = raw_bin_expression(
-            BinOp::Or,
-            raw_bin_expression(
-                BinOp::Or,
-                Expression::bin(
-                    BinOp::EqEqEq,
-                    Expression::var(value.clone()),
-                    Expression::undefined(true),
-                ),
-                Expression::bin(
-                    BinOp::EqEqEq,
-                    Expression::var(value.clone()),
-                    Expression::null(),
-                ),
-            ),
-            raw_bin_expression(
-                BinOp::Or,
-                Expression::bin(
-                    BinOp::EqEqEq,
-                    Expression::var(value.clone()),
-                    Expression::bool(false),
-                ),
-                Expression::bin(
-                    BinOp::EqEqEq,
-                    Expression::var(value.clone()),
-                    Expression::bool(true),
-                ),
-            ),
-        );
-        let inner_cond = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(value.clone()),
-            Expression::bool(false),
-        );
-        let success = Expression::call(
-            Expression::var(Ident::create_local("success")),
-            vec![],
-            CallInfo::default(),
-        );
-        let failure_expr = Expression::call(
-            Expression::var(Ident::create_local("failure")),
-            vec![],
-            CallInfo::default(),
-        );
-        let success_block = vec![
-            Statement::exp(success),
-            Statement::return_(Expression::undefined(true)),
-        ];
-        let failure_block = vec![
-            Statement::exp(failure_expr.clone()),
-            Statement::return_(Expression::undefined(true)),
-        ];
-
-        assert!(
-            preserves_literal_membership_guard(&outer_cond, &inner_cond),
-            "expected literal membership detection to trigger for {outer_cond:#?} / {inner_cond:#?}"
-        );
-
-        let stmt = Statement::if_(
-            outer_cond.clone(),
-            vec![Statement::new(StatementDesc::If(
-                inner_cond.clone(),
-                success_block,
-                failure_block.clone(),
-            ))],
-            failure_block,
-        );
-
-        let StatementDesc::If(test, then_block, else_block) = &stmt.desc else {
-            panic!("expected the explicit outer literal membership guard to stay materialized");
-        };
-        assert!(ocaml_eq_expression(test, &outer_cond));
-        let Some((nested_test, _, nested_else)) = single_if_block(then_block) else {
-            panic!("expected the literal membership branch to keep the nested refinement");
-        };
-        assert!(ocaml_eq_expression(nested_test, &inner_cond));
-        assert!(ocaml_eq_block(nested_else, else_block));
-    }
-
-    #[test]
-    fn test_if_statement_keeps_positive_await_return_tail() {
+    fn test_if_statement_rewrites_await_return_tail() {
         let cond = Expression::var(Ident::create_local("value"));
         let effect = Statement::exp(Expression::new(ExpressionDesc::Await(Box::new(
             Expression::call(
@@ -4446,31 +3902,15 @@ mod tests {
         let else_block = vec![Statement::return_(Expression::undefined(true))];
 
         let stmt = Statement::if_(cond.clone(), then_block.clone(), else_block.clone());
-
-        let StatementDesc::If(test, kept_then, kept_else) = &stmt.desc else {
-            panic!("expected the positive return tail to stay as an if statement: {stmt:#?}");
-        };
-        assert!(ocaml_eq_expression(test, &cond));
-        assert!(matches!(
-            kept_then.as_slice(),
-            [
-                Statement {
-                    desc: StatementDesc::Exp(Expression {
-                        desc: ExpressionDesc::Await(_),
-                        ..
-                    }),
-                    ..
-                },
-                Statement {
-                    desc: StatementDesc::Return(Expression {
-                        desc: ExpressionDesc::Undefined { .. },
-                        ..
-                    }),
-                    ..
-                }
-            ]
-        ));
-        assert!(ocaml_eq_block(kept_else, &else_block));
+        // js_stmt_make.ml:262-269: a single Return else becomes an early guard.
+        let mut expected = vec![Statement::new(StatementDesc::If(
+            Expression::not(cond), else_block, vec![],
+        ))];
+        expected.extend(then_block);
+        assert_eq!(
+            print_block(&vec![stmt]),
+            print_block(&vec![Statement::block(expected)]),
+        );
     }
 
     #[test]
@@ -4521,7 +3961,7 @@ mod tests {
     }
 
     #[test]
-    fn test_if_statement_keeps_positive_literal_dispatch_return_tail() {
+    fn test_if_statement_rewrites_literal_dispatch_return_tail() {
         let key = Ident::create_local("key");
         let active = Ident::create_local("active");
         let dispatch = raw_bin_expression(
@@ -4560,22 +4000,20 @@ mod tests {
         ))];
         let else_block = vec![Statement::return_(Expression::undefined(true))];
 
-        let stmt = Statement::if_(dispatch.clone(), then_block, else_block.clone());
-
-        let StatementDesc::If(test, kept_then, kept_else) = &stmt.desc else {
-            panic!("expected the literal dispatch tail to stay positive: {stmt:#?}");
-        };
-        assert!(ocaml_eq_expression(test, &dispatch));
-        let Some((nested_test, _, nested_else)) = single_if_block(kept_then) else {
-            panic!("expected the literal dispatch branch to keep the nested exact-literal check");
-        };
-        assert!(ocaml_eq_expression(nested_test, &inner_cond));
-        assert!(nested_else.is_empty());
-        assert!(ocaml_eq_block(kept_else, &else_block));
+        let stmt = Statement::if_(dispatch.clone(), then_block.clone(), else_block.clone());
+        // js_stmt_make.ml:262-269: a single Return else becomes an early guard.
+        let mut expected = vec![Statement::new(StatementDesc::If(
+            Expression::not(dispatch), else_block, vec![],
+        ))];
+        expected.extend(then_block);
+        assert_eq!(
+            print_block(&vec![stmt]),
+            print_block(&vec![Statement::block(expected)]),
+        );
     }
 
     #[test]
-    fn test_if_statement_keeps_positive_block_wrapped_literal_dispatch_return_tail() {
+    fn test_if_statement_rewrites_block_wrapped_literal_dispatch_return_tail() {
         let key = Ident::create_local("key");
         let active = Ident::create_local("active");
         let dispatch = raw_bin_expression(
@@ -4619,28 +4057,16 @@ mod tests {
         )]))];
         let else_block = vec![Statement::return_(Expression::undefined(true))];
 
-        let stmt = Statement::if_(dispatch.clone(), then_block, else_block.clone());
-
-        let StatementDesc::If(test, kept_then, kept_else) = &stmt.desc else {
-            panic!("expected the wrapped literal dispatch tail to stay positive: {stmt:#?}");
-        };
-        assert!(ocaml_eq_expression(test, &dispatch));
-        let [wrapped_nested] = kept_then.as_slice() else {
-            panic!("expected the wrapped then branch to keep a single nested statement");
-        };
-        let nested_stmt = match &wrapped_nested.desc {
-            StatementDesc::Block(inner) => match inner.as_slice() {
-                [stmt] => stmt,
-                other => panic!("expected a single wrapped nested if, got {other:#?}"),
-            },
-            other => panic!("expected a wrapped nested if, got {other:#?}"),
-        };
-        let StatementDesc::If(nested_test, _, nested_else) = &nested_stmt.desc else {
-            panic!("expected the wrapped branch to keep the exact-literal check");
-        };
-        assert!(ocaml_eq_expression(nested_test, &inner_cond));
-        assert!(nested_else.is_empty());
-        assert!(ocaml_eq_block(kept_else, &else_block));
+        let stmt = Statement::if_(dispatch.clone(), then_block.clone(), else_block.clone());
+        // js_stmt_make.ml:262-269: a single Return else becomes an early guard.
+        let mut expected = vec![Statement::new(StatementDesc::If(
+            Expression::not(dispatch), else_block, vec![],
+        ))];
+        expected.extend(then_block);
+        assert_eq!(
+            print_block(&vec![stmt]),
+            print_block(&vec![Statement::block(expected)]),
+        );
     }
 
     #[test]
@@ -4707,7 +4133,7 @@ mod tests {
     }
 
     #[test]
-    fn test_if_statement_keeps_loose_nullish_else_branch_materialized() {
+    fn test_if_statement_rewrites_loose_nullish_else_to_fallthrough() {
         let elem = Ident::create_local("elem");
         let cond = Expression::is_null_or_undefined(Expression::var(elem.clone()));
         let then_block = vec![Statement::return_(Expression::number(Number::int(1)))];
@@ -4721,26 +4147,13 @@ mod tests {
         ];
 
         let stmt = Statement::if_(cond.clone(), then_block.clone(), else_block.clone());
-
-        let StatementDesc::If(test, kept_then, kept_else) = &stmt.desc else {
-            panic!("expected loose nullish guard to keep its explicit else: {stmt:#?}");
-        };
-        assert!(
-            matches!(
-                &test.desc,
-                ExpressionDesc::IsNullOrUndefined(inner)
-                    if matches!(
-                        inner.as_ref(),
-                        Expression {
-                            desc: ExpressionDesc::Var(VIdent::Id(id)),
-                            ..
-                        } if id.same(&elem)
-                    )
-            ),
-            "unexpected loose nullish test shape: {stmt:#?}"
+        // js_stmt_make.ml:270-274: terminal then arm precedes the else body.
+        let mut expected = vec![Statement::new(StatementDesc::If(cond, then_block, vec![]))];
+        expected.extend(else_block);
+        assert_eq!(
+            print_block(&vec![stmt]),
+            print_block(&vec![Statement::block(expected)]),
         );
-        assert!(ocaml_eq_block(kept_then, &then_block));
-        assert!(ocaml_eq_block(kept_else, &else_block));
     }
 
     #[test]
@@ -5060,7 +4473,7 @@ mod tests {
                     then_block.as_slice(),
                     [Statement {
                         desc: StatementDesc::Return(Expression {
-                            desc: ExpressionDesc::Str { txt, .. },
+                            desc: ExpressionDesc::Str(txt),
                             ..
                         }),
                         ..
@@ -5075,7 +4488,7 @@ mod tests {
         assert!(matches!(
             &final_return.desc,
             StatementDesc::Return(Expression {
-                desc: ExpressionDesc::Str { txt, .. },
+                desc: ExpressionDesc::Str(txt),
                 ..
             }) if txt == "no"
         ));
@@ -5186,7 +4599,7 @@ mod tests {
         assert!(matches!(
             throw_stmt.desc,
             StatementDesc::Throw(Expression {
-                desc: ExpressionDesc::Str { .. },
+                desc: ExpressionDesc::Str(_),
                 ..
             })
         ));
@@ -5302,7 +4715,7 @@ mod tests {
                         (&lhs.desc, &rhs.desc),
                         (
                             ExpressionDesc::Var(VIdent::Id(id)),
-                            ExpressionDesc::Str { txt, .. }
+                            ExpressionDesc::Str(txt)
                         ) if id.same(&key) && txt == "space"
                     )
                 ) && matches!(
@@ -5314,7 +4727,7 @@ mod tests {
                         (&lhs.desc, &rhs.desc),
                         (
                             ExpressionDesc::Var(VIdent::Id(id)),
-                            ExpressionDesc::Str { txt, .. }
+                            ExpressionDesc::Str(txt)
                         ) if id.same(&key) && txt == "a"
                     )
                 )
@@ -5336,7 +4749,7 @@ mod tests {
                 ) && matches!(
                     right.as_ref(),
                     Expression {
-                        desc: ExpressionDesc::Str { txt, .. },
+                        desc: ExpressionDesc::Str(txt),
                         ..
                     } if txt == "space"
                 )
@@ -5652,7 +5065,7 @@ mod tests {
                 ) && matches!(
                     right.as_ref(),
                     Expression {
-                        desc: ExpressionDesc::Str { txt, .. },
+                        desc: ExpressionDesc::Str(txt),
                         ..
                     } if txt == "space"
                 )
@@ -5696,7 +5109,7 @@ mod tests {
                 ) && matches!(
                     right.as_ref(),
                     Expression {
-                        desc: ExpressionDesc::Str { txt, .. },
+                        desc: ExpressionDesc::Str(txt),
                         ..
                     } if txt == "space"
                 )
@@ -5808,7 +5221,7 @@ mod tests {
         );
 
         match expr.desc {
-            ExpressionDesc::Str { txt, .. } => assert_eq!(txt, "then branch"),
+            ExpressionDesc::Str(txt) => assert_eq!(txt, "then branch"),
             other => panic!("expected folded string branch, got {other:?}"),
         }
     }

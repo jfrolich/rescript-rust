@@ -9,8 +9,9 @@
 use crate::lambda::lam_compile_context::LamStats;
 use crate::lambda::lam_eta_conversion::transform_under_supply;
 use crate::lambda::lam_pass_collect::ExternalArityResolver;
-use crate::lambda::lam_primitive::Primitive;
+use crate::lambda::map_box;
 use crate::lambda::{ApInfo, Apply, ApplyStatus, Lambda, LambdaSwitch, PrimInfo};
+use crate::lambda::{map_function_body, map_prim_args};
 
 /// Direct port of `Lam_pass_alpha_conversion.alpha_conversion`
 /// (lam_pass_alpha_conversion.ml:25-129).
@@ -187,12 +188,14 @@ impl<'a, 'r> Alpha<'a, 'r> {
             Lambda::Lconst(_) | Lambda::Lvar(_) => lam.clone(),
 
             // lam_pass_alpha_conversion.ml:54-61
-            Lambda::Lapply(Apply {
-                ap_func,
-                ap_args,
-                ap_info,
-                ap_transformed_jsx,
-            }) => {
+            Lambda::Lapply(__apply3) => {
+                let Apply {
+                    ap_func,
+                    ap_args,
+                    ap_info,
+                    ap_transformed_jsx,
+                } = __apply3.as_ref();
+
                 let args_arity = self.get_arity(ap_func).extract_arity();
                 let len = ap_args.len() as i32;
                 self.populate_apply_info(
@@ -220,18 +223,21 @@ impl<'a, 'r> Alpha<'a, 'r> {
             }
 
             // lam_pass_alpha_conversion.ml:66
-            Lambda::LglobalModule(_, _) => lam.clone(),
+            Lambda::LglobalModule(_) => lam.clone(),
 
             // lam_pass_alpha_conversion.ml:67-68 — recurse through primitives.
-            Lambda::Lprim(PrimInfo {
-                primitive,
-                args,
-                loc,
-            }) => Lambda::prim(
-                primitive.clone(),
-                args.iter().map(|a| self.simpl(a)).collect(),
-                loc.clone(),
-            ),
+            Lambda::Lprim(__prim2) => {
+                let PrimInfo {
+                    primitive,
+                    args,
+                    loc,
+                } = __prim2.as_ref();
+                Lambda::prim(
+                    primitive.clone(),
+                    args.iter().map(|a| self.simpl(a)).collect(),
+                    loc.clone(),
+                )
+            }
 
             // lam_pass_alpha_conversion.ml:88-90
             Lambda::Lfunction(f) => Lambda::function_(
@@ -291,7 +297,11 @@ impl<'a, 'r> Alpha<'a, 'r> {
             }
 
             // lam_pass_alpha_conversion.ml:118
-            Lambda::Lsequence(l1, l2) => Lambda::seq(self.simpl(l1), self.simpl(l2)),
+            // Upstream deleted this pass (eadc533b7: arity is queried where
+            // it is used), so nothing re-folds a sequence here.
+            Lambda::Lsequence(l1, l2) => {
+                Lambda::Lsequence(Box::new(self.simpl(l1)), Box::new(self.simpl(l2)))
+            }
 
             // lam_pass_alpha_conversion.ml:119
             Lambda::Lwhile(l1, l2) => Lambda::while_(self.simpl(l1), self.simpl(l2)),
@@ -326,13 +336,15 @@ impl<'a, 'r> Alpha<'a, 'r> {
     /// Owned form of `simpl` (`compiler/core/lam_pass_alpha_conversion.ml:50-126`).
     fn simpl_owned(&mut self, lam: Lambda) -> Lambda {
         match lam {
-            Lambda::Lconst(_) | Lambda::Lvar(_) | Lambda::LglobalModule(_, _) => lam,
-            Lambda::Lapply(Apply {
-                ap_func,
-                ap_args,
-                ap_info,
-                ap_transformed_jsx,
-            }) => {
+            Lambda::Lconst(_) | Lambda::Lvar(_) | Lambda::LglobalModule(_) => lam,
+            Lambda::Lapply(__apply1) => {
+                let Apply {
+                    ap_func,
+                    ap_args,
+                    ap_info,
+                    ap_transformed_jsx,
+                } = *__apply1;
+
                 let args_arity = self.get_arity(&ap_func).extract_arity();
                 let len = ap_args.len() as i32;
                 self.populate_apply_info_owned(
@@ -344,28 +356,21 @@ impl<'a, 'r> Alpha<'a, 'r> {
                     ap_info,
                 )
             }
-            Lambda::Llet(str, v, l1, l2) => {
-                Lambda::let_(str, v, self.simpl_owned(*l1), self.simpl_owned(*l2))
-            }
+            Lambda::Llet(str, v, l1, l2) => Lambda::Llet(
+                str,
+                v,
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
             Lambda::Lletrec(bindings, body) => {
                 let bindings = bindings
                     .into_iter()
                     .map(|(id, e)| (id, self.simpl_owned(e)))
                     .collect();
-                Lambda::letrec(bindings, self.simpl_owned(*body))
+                Lambda::Lletrec(bindings, map_box(body, |inner| self.simpl_owned(inner)))
             }
-            Lambda::Lprim(PrimInfo {
-                primitive,
-                args,
-                loc,
-            }) => Lambda::prim(
-                primitive,
-                args.into_iter().map(|a| self.simpl_owned(a)).collect(),
-                loc,
-            ),
-            Lambda::Lfunction(f) => {
-                Lambda::function_(f.arity, f.params, self.simpl_owned(*f.body), f.attr)
-            }
+            Lambda::Lprim(info) => map_prim_args(info, |a| self.simpl_owned(a)),
+            Lambda::Lfunction(f) => map_function_body(f, |inner| self.simpl_owned(inner)),
             Lambda::Lswitch(scrut, switch) => Lambda::switch(
                 self.simpl_owned(*scrut),
                 LambdaSwitch {
@@ -381,7 +386,9 @@ impl<'a, 'r> Alpha<'a, 'r> {
                         .into_iter()
                         .map(|(k, l)| (k, self.simpl_owned(l)))
                         .collect(),
-                    sw_failaction: switch.sw_failaction.map(|f| Box::new(self.simpl_owned(*f))),
+                    sw_failaction: switch
+                        .sw_failaction
+                        .map(|f| map_box(f, |inner| self.simpl_owned(inner))),
                     sw_dispatch: switch.sw_dispatch,
                 },
             ),
@@ -390,40 +397,58 @@ impl<'a, 'r> Alpha<'a, 'r> {
                 sw.into_iter()
                     .map(|(k, v)| (k, self.simpl_owned(v)))
                     .collect(),
-                d.map(|d| Box::new(self.simpl_owned(*d))),
+                d.map(|d| map_box(d, |inner| self.simpl_owned(inner))),
             ),
             Lambda::LstaticRaise(i, ls) => {
                 Lambda::static_raise(i, ls.into_iter().map(|l| self.simpl_owned(l)).collect())
             }
-            Lambda::LstaticCatch(l1, ids, l2) => {
-                Lambda::static_catch(self.simpl_owned(*l1), ids.0, ids.1, self.simpl_owned(*l2))
-            }
-            Lambda::LtryWith(l1, v, l2) => {
-                Lambda::try_(self.simpl_owned(*l1), v, self.simpl_owned(*l2))
-            }
+            Lambda::LstaticCatch(l1, ids, l2) => Lambda::LstaticCatch(
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                (ids.0, ids.1),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
+            Lambda::LtryWith(l1, v, l2) => Lambda::LtryWith(
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                v,
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
             Lambda::LifThenElse(l1, l2, l3) => Lambda::if_(
                 self.simpl_owned(*l1),
                 self.simpl_owned(*l2),
                 self.simpl_owned(*l3),
             ),
-            Lambda::Lsequence(l1, l2) => Lambda::seq(self.simpl_owned(*l1), self.simpl_owned(*l2)),
-            Lambda::Lwhile(l1, l2) => Lambda::while_(self.simpl_owned(*l1), self.simpl_owned(*l2)),
-            Lambda::Lfor(var, l1, l2, dir, l3) => Lambda::for_(
-                var,
-                self.simpl_owned(*l1),
-                self.simpl_owned(*l2),
-                dir,
-                self.simpl_owned(*l3),
+            // Upstream deleted this pass (eadc533b7: arity is queried where
+            // it is used), so nothing re-folds a sequence here.
+            Lambda::Lsequence(l1, l2) => Lambda::Lsequence(
+                Box::new(self.simpl_owned(*l1)),
+                Box::new(self.simpl_owned(*l2)),
             ),
-            Lambda::Lfor_of(var, l1, l2) => {
-                Lambda::for_of(var, self.simpl_owned(*l1), self.simpl_owned(*l2))
-            }
-            Lambda::Lfor_await_of(var, l1, l2) => {
-                Lambda::for_await_of(var, self.simpl_owned(*l1), self.simpl_owned(*l2))
-            }
+            Lambda::Lwhile(l1, l2) => Lambda::Lwhile(
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
+            Lambda::Lfor(var, l1, l2, dir, l3) => Lambda::Lfor(
+                var,
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+                dir,
+                map_box(l3, |inner| self.simpl_owned(inner)),
+            ),
+            Lambda::Lfor_of(var, l1, l2) => Lambda::Lfor_of(
+                var,
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
+            Lambda::Lfor_await_of(var, l1, l2) => Lambda::Lfor_await_of(
+                var,
+                map_box(l1, |inner| self.simpl_owned(inner)),
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
             Lambda::Lbreak => Lambda::break_(),
             Lambda::Lcontinue => Lambda::continue_(),
-            Lambda::Lassign(v, l) => Lambda::assign(v, self.simpl_owned(*l)),
+            Lambda::Lassign(v, l) => {
+                Lambda::Lassign(v, map_box(l, |inner| self.simpl_owned(inner)))
+            }
         }
     }
 }

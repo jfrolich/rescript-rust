@@ -51,7 +51,6 @@ let rec exp ?comment (e : E.t) : t =
     exp ?comment b
   | Number _ | Undefined _ -> block []
   (* TODO: we can do more *)
-  (* | _ when is_pure e ->  block [] *)
   | _ -> {statement_desc = Exp e; comment; source_loc = None}
 
 let declare_variable ?comment ?ident_info ~kind (ident : Ident.t) : t =
@@ -144,15 +143,13 @@ let string_switch ?(comment : string option)
     (e : J.expression)
     (clauses : (Variant_runtime.tag_type * J.case_clause) list) : t =
   match e.expression_desc with
-  | Str {txt} -> (
+  | Str txt -> (
     let continuation =
       match
         Ext_list.find_opt clauses (fun (switch_case, x) ->
             match switch_case with
-            | String s -> if s = txt then Some x.switch_body else None
-            | Int _ | Float _ | BigInt _ | Bool _ | Null | Undefined
-            | Untagged _ ->
-              None)
+            | Literal (String s) -> if s = txt then Some x.switch_body else None
+            | Literal _ | Payload_shape _ -> None)
       with
       | Some case -> case
       | None -> (

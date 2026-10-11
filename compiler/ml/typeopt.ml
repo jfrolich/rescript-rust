@@ -76,10 +76,10 @@ let rec type_cannot_contain_undefined (typ : Types.type_expr) (env : Env.t) =
             let tag, payload_is_unboxed =
               match case with
               | Variant_runtime.Constant tag -> (tag, false)
-              | Variant_runtime.Block {runtime = {tag; untagged}} ->
-                (tag, untagged)
+              | Variant_runtime.Block (Tagged {tag}) -> (tag, false)
+              | Variant_runtime.Block (Untagged {tag}) -> (tag, true)
             in
-            tag.tag_type <> Some Variant_runtime.Undefined
+            tag.literal <> Some Variant_runtime.Undefined
             && ((not payload_is_unboxed)
                ||
                match cd.cd_args with

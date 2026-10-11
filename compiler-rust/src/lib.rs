@@ -37,12 +37,15 @@
 #![warn(rust_2018_idioms)]
 #![allow(clippy::uninlined_format_args)] // Style preference, not a correctness issue
 
+pub mod analysis;
 pub mod arena;
 pub mod binary_ast;
+pub mod binser;
 pub mod cache;
 /// CMI file loading infrastructure.
 pub mod cmi;
 pub mod config;
+pub mod fast_hash;
 pub mod context;
 /// Cached debug environment flags.
 pub mod debug_flags;
@@ -50,18 +53,25 @@ pub mod diagnostics;
 pub mod driver;
 /// GenType TypeScript emitter port.
 pub mod gentype;
+pub mod hash_seed;
 pub mod ident;
+pub mod name;
 pub mod intern;
 pub mod js_ir;
 pub mod lambda;
 pub mod location;
+pub mod misc;
 pub mod parse_arena;
 pub mod parser;
 /// Optional aggregate compiler performance counters.
 pub mod perf_counters;
+pub mod process_cwd;
 pub mod raw_lambda;
 /// Source text decoding helpers.
 pub mod source_text;
+pub mod string_literal;
+pub mod ast_payload;
+pub mod ast_helper_type;
 /// Optional aggregate compiler phase timings.
 pub mod timing;
 pub mod types;

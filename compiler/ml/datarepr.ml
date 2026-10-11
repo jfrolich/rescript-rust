@@ -121,7 +121,7 @@ let constructor_payload_is_unboxed (cstr : constructor_description) =
   match cstr.cstr_kind with
   | Ordinary_constructor representation -> (
     match Variant_runtime.representation representation with
-    | Block {runtime = {untagged = true}} -> true
+    | Block (Untagged _) -> true
     | Constant _ | Block _ -> false)
   | Extension_constructor _ -> false
 
@@ -239,6 +239,7 @@ let none = {desc = Ttuple []; level = -1; id = -1}
 let dummy_label =
   {
     lbl_name = "";
+    lbl_runtime_name = "";
     lbl_res = none;
     lbl_arg = none;
     lbl_mut = Immutable;
@@ -259,6 +260,7 @@ let label_descrs ty_res lbls repres priv =
       let lbl =
         {
           lbl_name = Ident.name l.ld_id;
+          lbl_runtime_name = Record_runtime.declaration_name l;
           lbl_res = ty_res;
           lbl_arg = l.ld_type;
           lbl_mut = l.ld_mutable;

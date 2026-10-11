@@ -12,28 +12,28 @@ use crate::parser::longident::Longident;
 // ========== Asttypes (flags and labels) ==========
 
 /// Recursion flag: whether a let binding is recursive
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RecFlag {
     Nonrecursive = 0,
     Recursive = 1,
 }
 
 /// Direction flag for for-loops
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DirectionFlag {
     Upto = 0,
     Downto = 1,
 }
 
 /// Private flag for type declarations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PrivateFlag {
     Private = 0,
     Public = 1,
 }
 
 /// Mutability flag for record fields
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MutableFlag {
     Immutable = 0,
     Mutable = 1,
@@ -47,21 +47,21 @@ pub enum VirtualFlag {
 }
 
 /// Override flag for open statements
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OverrideFlag {
     Override = 0,
     Fresh = 1,
 }
 
 /// Closed flag for record patterns and polymorphic variants
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ClosedFlag {
     Closed = 0,
     Open = 1,
 }
 
 /// Variance for type parameters
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Variance {
     Covariant = 0,
     Contravariant = 1,
@@ -74,7 +74,7 @@ pub type Label = String;
 /// Argument label for function parameters (parsetree0 uses Noloc version)
 /// Uses StrIdx to allow sharing with Longident::Lident when the same
 /// identifier is used for both label and value (punning).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ArgLabel {
     /// Unlabeled argument
     Nolabel,
@@ -84,25 +84,11 @@ pub enum ArgLabel {
     Optional(StrIdx),
 }
 
-/// Arity annotation for functions (None = inferred, Some(n) = explicit arity)
-pub type Arity = Option<i32>;
-
-/// Record element for both patterns and expressions (current parsetree format)
-/// Used in Ppat_record and Pexp_record
-#[derive(Debug, Clone, PartialEq)]
-pub struct RecordElement<T> {
-    /// Field name
-    pub lid: Located<Longident>,
-    /// Field value (pattern or expression)
-    pub x: T,
-    /// Whether this field is optional
-    pub opt: bool,
-}
 
 // ========== Constants ==========
 
 /// Constant values in the AST
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Constant {
     /// Integer constant: 3, 3l, 3L, 3n
     Integer(String, Option<char>),
@@ -126,7 +112,7 @@ pub type Extension = (Located<String>, Payload);
 pub type Attributes = Vec<Attribute>;
 
 /// Payload of an attribute or extension
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Payload {
     /// Structure payload
     PStr(Structure),
@@ -141,7 +127,7 @@ pub enum Payload {
 // ========== Core Types ==========
 
 /// A type expression
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CoreType {
     pub ptyp_desc: CoreTypeDesc,
     pub ptyp_loc: Location,
@@ -149,7 +135,7 @@ pub struct CoreType {
 }
 
 /// Core type description
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CoreTypeDesc {
     /// Wildcard: _
     Any,
@@ -181,7 +167,7 @@ pub enum CoreTypeDesc {
 pub type PackageType = (Located<Longident>, Vec<(Located<Longident>, CoreType)>);
 
 /// Row field in a polymorphic variant
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum RowField {
     /// Tag: `A, `A of T, etc.
     Rtag(Located<Label>, Attributes, bool, Vec<CoreType>),
@@ -190,7 +176,7 @@ pub enum RowField {
 }
 
 /// Object field
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ObjectField {
     /// Named field: l: T
     Otag(Located<Label>, Attributes, CoreType),
@@ -201,7 +187,7 @@ pub enum ObjectField {
 // ========== Patterns ==========
 
 /// A pattern
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Pattern {
     pub ppat_desc: PatternDesc,
     pub ppat_loc: Location,
@@ -209,7 +195,7 @@ pub struct Pattern {
 }
 
 /// Pattern description
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PatternDesc {
     /// Wildcard: _
     Any,
@@ -228,8 +214,8 @@ pub enum PatternDesc {
     /// Polymorphic variant: `A or `A P
     Variant(Label, Option<Box<Pattern>>),
     /// Record: { l1=P1; ...; ln=Pn } or { l1=P1; ...; ln=Pn; _ }
-    /// Uses RecordElement with 3 fields (lid, x, opt) in current parsetree
-    Record(Vec<RecordElement<Pattern>>, ClosedFlag),
+    /// Optional fields carry the `res.optional` attribute.
+    Record(Vec<(Located<Longident>, Pattern)>, ClosedFlag),
     /// Array: [| P1; ...; Pn |]
     Array(Vec<Pattern>),
     /// Or pattern: P1 | P2
@@ -253,7 +239,7 @@ pub enum PatternDesc {
 // ========== Expressions ==========
 
 /// An expression
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Expression {
     pub pexp_desc: ExpressionDesc,
     pub pexp_loc: Location,
@@ -261,7 +247,7 @@ pub struct Expression {
 }
 
 /// Expression description
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ExpressionDesc {
     /// Identifier: x, M.x
     Ident(Located<Longident>),
@@ -269,22 +255,13 @@ pub enum ExpressionDesc {
     Constant(Constant),
     /// Let binding: let P = E in E
     Let(RecFlag, Vec<ValueBinding>, Box<Expression>),
-    /// Fun: fun P -> E (current parsetree format with arity and async)
-    Fun {
-        arg_label: ArgLabel,
-        default: Option<Box<Expression>>,
-        lhs: Box<Pattern>,
-        rhs: Box<Expression>,
-        arity: Arity,
-        is_async: bool,
-    },
-    /// Application: E0 ~l1:E1 ... ~ln:En (current parsetree format)
-    Apply {
-        funct: Box<Expression>,
-        args: Vec<(ArgLabel, Expression)>,
-        partial: bool,
-        transformed_jsx: bool,
-    },
+    /// function P1 -> E1 | ... | Pn -> En
+    Function(Vec<Case>),
+    /// fun ~l:(P = E0) -> E1: one parameter; `(P1, P2) => E` is a chain
+    /// wrapped in `Function$` with a `res.arity` attribute.
+    Fun(ArgLabel, Option<Box<Expression>>, Box<Pattern>, Box<Expression>),
+    /// E0 ~l1:E1 ... ~ln:En
+    Apply(Box<Expression>, Vec<(ArgLabel, Expression)>),
     /// Match: match E with P1 -> E1 | ... | Pn -> En
     Match(Box<Expression>, Vec<Case>),
     /// Try: try E with P1 -> E1 | ... | Pn -> En
@@ -296,8 +273,8 @@ pub enum ExpressionDesc {
     /// Polymorphic variant: `A or `A E
     Variant(Label, Option<Box<Expression>>),
     /// Record: { l1=E1; ...; ln=En } or { E with l1=E1; ...; ln=En }
-    /// Uses RecordElement with 3 fields (lid, x, opt) in current parsetree
-    Record(Vec<RecordElement<Expression>>, Option<Box<Expression>>),
+    /// Optional fields carry the `res.optional` attribute.
+    Record(Vec<(Located<Longident>, Expression)>, Option<Box<Expression>>),
     /// Field access: E.l
     Field(Box<Expression>, Located<Longident>),
     /// Field update: E1.l <- E2
@@ -355,7 +332,7 @@ pub enum ExpressionDesc {
 }
 
 /// A case in a match or function expression
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Case {
     pub pc_lhs: Pattern,
     pub pc_guard: Option<Expression>,
@@ -365,7 +342,7 @@ pub struct Case {
 // ========== Value bindings ==========
 
 /// A value binding: let P = E
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ValueBinding {
     pub pvb_pat: Pattern,
     pub pvb_expr: Expression,
@@ -374,7 +351,7 @@ pub struct ValueBinding {
 }
 
 /// A value description: val x: T or external x: T = "s1" ... "sn"
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ValueDescription {
     pub pval_name: Located<String>,
     pub pval_type: CoreType,
@@ -386,7 +363,7 @@ pub struct ValueDescription {
 // ========== Type declarations ==========
 
 /// A type declaration
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TypeDeclaration {
     pub ptype_name: Located<String>,
     pub ptype_params: Vec<(CoreType, Variance)>,
@@ -399,7 +376,7 @@ pub struct TypeDeclaration {
 }
 
 /// Type kind
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TypeKind {
     /// Abstract type
     Abstract,
@@ -412,7 +389,7 @@ pub enum TypeKind {
 }
 
 /// A label declaration (record field)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LabelDeclaration {
     pub pld_name: Located<String>,
     pub pld_mutable: MutableFlag,
@@ -422,7 +399,7 @@ pub struct LabelDeclaration {
 }
 
 /// A constructor declaration
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ConstructorDeclaration {
     pub pcd_name: Located<String>,
     pub pcd_args: ConstructorArguments,
@@ -432,7 +409,7 @@ pub struct ConstructorDeclaration {
 }
 
 /// Constructor arguments
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ConstructorArguments {
     /// Tuple arguments: C of T1 * T2
     Tuple(Vec<CoreType>),
@@ -443,7 +420,7 @@ pub enum ConstructorArguments {
 // ========== Type extensions ==========
 
 /// A type extension: type t += ...
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TypeExtension {
     pub ptyext_path: Located<Longident>,
     pub ptyext_params: Vec<(CoreType, Variance)>,
@@ -453,7 +430,7 @@ pub struct TypeExtension {
 }
 
 /// An extension constructor
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExtensionConstructor {
     pub pext_name: Located<String>,
     pub pext_kind: ExtensionConstructorKind,
@@ -462,7 +439,7 @@ pub struct ExtensionConstructor {
 }
 
 /// Extension constructor kind
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ExtensionConstructorKind {
     /// Declaration: | C of T1 * ... * Tn
     Decl(ConstructorArguments, Option<CoreType>),
@@ -473,7 +450,7 @@ pub enum ExtensionConstructorKind {
 // ========== Module types ==========
 
 /// A module type
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModuleType {
     pub pmty_desc: ModuleTypeDesc,
     pub pmty_loc: Location,
@@ -481,7 +458,7 @@ pub struct ModuleType {
 }
 
 /// Module type description
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ModuleTypeDesc {
     /// Identifier: S
     Ident(Located<Longident>),
@@ -500,7 +477,7 @@ pub enum ModuleTypeDesc {
 }
 
 /// With constraint
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum WithConstraint {
     /// Type constraint: with type X.t = T
     Type(Located<Longident>, TypeDeclaration),
@@ -518,14 +495,14 @@ pub enum WithConstraint {
 pub type Signature = Vec<SignatureItem>;
 
 /// A signature item
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SignatureItem {
     pub psig_desc: SignatureItemDesc,
     pub psig_loc: Location,
 }
 
 /// Signature item description
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SignatureItemDesc {
     /// Value: val x: T
     Value(ValueDescription),
@@ -556,7 +533,7 @@ pub enum SignatureItemDesc {
 }
 
 /// Module declaration
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModuleDeclaration {
     pub pmd_name: Located<String>,
     pub pmd_type: ModuleType,
@@ -565,7 +542,7 @@ pub struct ModuleDeclaration {
 }
 
 /// Module type declaration
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModuleTypeDeclaration {
     pub pmtd_name: Located<String>,
     pub pmtd_type: Option<ModuleType>,
@@ -574,7 +551,7 @@ pub struct ModuleTypeDeclaration {
 }
 
 /// Open description
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OpenDescription {
     pub popen_lid: Located<Longident>,
     pub popen_override: OverrideFlag,
@@ -583,7 +560,7 @@ pub struct OpenDescription {
 }
 
 /// Include infos (generic)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IncludeInfos<A> {
     pub pincl_mod: A,
     pub pincl_loc: Location,
@@ -599,7 +576,7 @@ pub type IncludeDeclaration = IncludeInfos<ModuleExpr>;
 // ========== Module expressions ==========
 
 /// A module expression
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModuleExpr {
     pub pmod_desc: ModuleExprDesc,
     pub pmod_loc: Location,
@@ -607,7 +584,7 @@ pub struct ModuleExpr {
 }
 
 /// Module expression description
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ModuleExprDesc {
     /// Identifier: X
     Ident(Located<Longident>),
@@ -631,14 +608,14 @@ pub enum ModuleExprDesc {
 pub type Structure = Vec<StructureItem>;
 
 /// A structure item
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StructureItem {
     pub pstr_desc: StructureItemDesc,
     pub pstr_loc: Location,
 }
 
 /// Structure item description
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum StructureItemDesc {
     /// Evaluation: E
     Eval(Expression, Attributes),
@@ -673,7 +650,7 @@ pub enum StructureItemDesc {
 }
 
 /// A module binding: X = ME
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModuleBinding {
     pub pmb_name: Located<String>,
     pub pmb_expr: ModuleExpr,

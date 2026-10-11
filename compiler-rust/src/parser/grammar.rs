@@ -368,7 +368,6 @@ pub fn is_block_expr_start(token: &Token<'_>) -> bool {
             | Token::Switch
             | Token::True
             | Token::Try
-            | Token::Typ
             | Token::Uident(_)
             | Token::Underscore
             | Token::While
@@ -575,7 +574,7 @@ pub fn is_list_element(grammar: &Grammar, token: &Token<'_>) -> bool {
         Grammar::StringFieldDeclarations => is_string_field_decl_start(token),
         Grammar::FieldDeclarations => is_field_decl_start(token),
         Grammar::RecordDecl => is_record_decl_start(token),
-        Grammar::TypExprList => is_typ_expr_start(token) || *token == Token::LessThan,
+        Grammar::TypExprList => is_typ_expr_start(token),
         Grammar::TypeParams => is_type_param_start(token),
         Grammar::FunctorArgs => is_functor_arg_start(token),
         Grammar::ModExprList => is_mod_expr_start(token),

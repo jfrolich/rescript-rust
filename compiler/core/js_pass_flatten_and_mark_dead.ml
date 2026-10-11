@@ -93,10 +93,10 @@ let mark_dead_code (js : J.program) : J.program =
             | Some {expression_desc = Record_rest (fields, _)} ->
               fields
               |> List.iter (fun (field : J.record_rest_field) ->
-                     match field.record_rest_ident with
-                     | None -> ()
-                     | Some ident ->
-                       add_binding_info ident_use_stats ident_info ident)
+                  match field.record_rest_ident with
+                  | None -> ()
+                  | Some ident ->
+                    add_binding_info ident_use_stats ident_info ident)
             | _ -> ()));
     }
   in
@@ -205,7 +205,8 @@ let subst_map (substitution : J.expression Hash_ident.t) =
           let _, e, bindings =
             Ext_list.fold_left ls (0, [], []) (fun (i, e, acc) x ->
                 match x.expression_desc with
-                | Var _ | Number _ | Str _ | J.Bool _ | Undefined _ ->
+                | Var _ | Number _ | Str _ | Template_literal _ | J.Bool _
+                | Undefined _ ->
                   (* TODO: check the optimization *)
                   (i + 1, x :: e, acc)
                 | _ ->
@@ -268,8 +269,11 @@ let subst_map (substitution : J.expression Hash_ident.t) =
               when !Js_config.jsx_preserve ->
               super.expression self x
             | Some
-                ({expression_desc = J.Var _ | Number _ | Str _ | Undefined _} as
-                 x) ->
+                ({
+                   expression_desc =
+                     ( J.Var _ | Number _ | Str _ | Template_literal _
+                     | Undefined _ );
+                 } as x) ->
               x
             | None | Some _ -> super.expression self x)
           | Some _ | None -> super.expression self x)

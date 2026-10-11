@@ -363,7 +363,9 @@ function classify$9(v) {
   }
 }
 
-let ff = x => x + 1 | 0;
+function ff(x) {
+  return x + 1 | 0;
+}
 
 let TestFunctionCase = {
   classify: classify$9,
@@ -620,18 +622,11 @@ let OnlyOne = {
   onlyOne: "OnlyOne"
 };
 
-function should_not_merge(x) {
-  if (Array.isArray(x)) {
+function shareEquivalentStringActions(x) {
+  if (typeof x === "boolean") {
+    return "boolean";
+  } else {
     return "do not merge";
-  }
-  if (x instanceof Date) {
-    return "do not merge";
-  }
-  switch (typeof x) {
-    case "boolean" :
-      return "boolean";
-    case "object" :
-      return "do not merge";
   }
 }
 
@@ -649,9 +644,55 @@ function can_merge(x) {
   }
 }
 
+function shareAlphaEquivalentStringActions(value) {
+  if (value > 2 || value < 0) {
+    return [
+      sideEffect(),
+      "fallback"
+    ];
+  }
+  if (value === 1) {
+    return [
+      sideEffect(),
+      "different"
+    ];
+  }
+  let result = sideEffect();
+  return [
+    result,
+    "shared"
+  ];
+}
+
+function preserveDiscriminatorGroups(x) {
+  if (Array.isArray(x)) {
+    while (keepGoing()) {
+      sideEffect();
+    };
+    return;
+  }
+  if (x instanceof Date) {
+    while (keepGoing()) {
+      sideEffect();
+    };
+    return;
+  }
+  switch (typeof x) {
+    case "boolean" :
+      return;
+    case "object" :
+      while (keepGoing()) {
+        sideEffect();
+      };
+      return;
+  }
+}
+
 let MergeCases = {
-  should_not_merge: should_not_merge,
-  can_merge: can_merge
+  shareEquivalentStringActions: shareEquivalentStringActions,
+  can_merge: can_merge,
+  shareAlphaEquivalentStringActions: shareAlphaEquivalentStringActions,
+  preserveDiscriminatorGroups: preserveDiscriminatorGroups
 };
 
 function printLength(json) {

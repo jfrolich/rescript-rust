@@ -705,7 +705,7 @@ pub fn type_info_to_typed_expr<'a>(
     };
 
     Some(typedtree::Expression::new(
-        typedtree::ExpressionDesc::Texp_construct(lid_loc, cstr_desc, args),
+        typedtree::ExpressionDesc::Texp_construct(lid_loc, std::sync::Arc::new(cstr_desc), args),
         loc,
         type_info_ty,
         env_ref,
@@ -750,7 +750,7 @@ pub fn make_string_expr<'a>(
     loc: crate::parse_arena::LocIdx,
 ) -> typedtree::Expression {
     typedtree::Expression::new(
-        typedtree::ExpressionDesc::Texp_constant(typedtree::Constant::String(s.to_string(), None)),
+        typedtree::ExpressionDesc::Texp_constant(typedtree::Constant::String(s.to_string())),
         loc,
         ctx.new_constr(predef::path_string(), vec![]),
         ctx.store_typed_env(env),
@@ -789,7 +789,7 @@ pub fn make_bool_expr<'a>(
         loc: crate::parse_arena::LocIdx::none(),
     };
     typedtree::Expression::new(
-        typedtree::ExpressionDesc::Texp_construct(lid_loc, cstr_desc, vec![]),
+        typedtree::ExpressionDesc::Texp_construct(lid_loc, std::sync::Arc::new(cstr_desc), vec![]),
         loc,
         bool_ty,
         env_ref,
@@ -1120,6 +1120,7 @@ pub fn specialize_expression(
         // Record — specialize field values
         typedtree::ExpressionDesc::Texp_record {
             fields,
+            empty_representation,
             extended_expression,
         } => {
             // Clone and specialize each field expression
@@ -1147,6 +1148,7 @@ pub fn specialize_expression(
                 .transpose()?;
             typedtree::ExpressionDesc::Texp_record {
                 fields: spec_fields,
+                empty_representation: empty_representation.clone(),
                 extended_expression: spec_ext.map(Box::new),
             }
         }
@@ -1227,7 +1229,7 @@ fn try_eval_to_comptime(expr: &typedtree::Expression, env: &SpecEnv) -> Option<C
     match &expr.exp_desc {
         typedtree::ExpressionDesc::Texp_constant(c) => match c {
             typedtree::Constant::Int(n) => Some(ComptimeValue::Int(*n)),
-            typedtree::Constant::String(s, _) => Some(ComptimeValue::String(s.clone())),
+            typedtree::Constant::String(s) => Some(ComptimeValue::String(s.clone())),
             typedtree::Constant::Float(s) => s.parse::<f64>().ok().map(ComptimeValue::Float),
             typedtree::Constant::Char(c) => Some(ComptimeValue::Int(*c as i64)),
             _ => None,
@@ -1352,7 +1354,7 @@ fn comptime_value_to_constant(value: &ComptimeValue) -> Option<typedtree::Consta
     match value {
         ComptimeValue::Int(n) => Some(typedtree::Constant::Int(*n)),
         ComptimeValue::Float(f) => Some(typedtree::Constant::Float(f.to_string())),
-        ComptimeValue::String(s) => Some(typedtree::Constant::String(s.clone(), None)),
+        ComptimeValue::String(s) => Some(typedtree::Constant::String(s.clone())),
         ComptimeValue::Bool(_) => None, // Booleans are constructors, not constants
         ComptimeValue::Unit => None,
         _ => None,

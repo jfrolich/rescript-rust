@@ -4,7 +4,7 @@
 //! parts of the compiler, maintaining compatibility with the OCaml types.
 
 /// Comparison operators
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Comparison {
     /// Equal
     Eq,
@@ -52,7 +52,7 @@ impl Comparison {
 }
 
 /// Let binding kind
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LetKind {
     /// Strict evaluation (evaluated immediately)
     Strict,
@@ -65,7 +65,7 @@ pub enum LetKind {
 }
 
 /// Field debug info for record/tuple field access
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FieldDbgInfo {
     /// Record field
     Record { name: String },
@@ -111,7 +111,7 @@ impl FieldDbgInfo {
 }
 
 /// Set field debug info for record field mutation
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SetFieldDbgInfo {
     /// Record set
     RecordSet(String),

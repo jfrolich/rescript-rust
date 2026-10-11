@@ -144,7 +144,9 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
             // Lfunction: clear local scope. Closure variables can not be
             // carried over because parameters are never rebound
             // (lam_pass_count.ml:112-117).
-            Lambda::Lfunction(LFunction { body, .. }) => {
+            Lambda::Lfunction(__func0) => {
+                let LFunction { body, .. } = __func0.as_ref();
+
                 let mut empty = LocalTbl::new();
                 count(occ, &mut empty, body);
             }
@@ -209,7 +211,7 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
             Lambda::Lassign(_, l) => count(occ, bv, l),
 
             // Lglobal_module: nothing to count (lam_pass_count.ml:140).
-            Lambda::LglobalModule(_, _) => {}
+            Lambda::LglobalModule(_) => {}
 
             // Lprim: count each arg (lam_pass_count.ml:141).
             Lambda::Lprim(prim) => {

@@ -35,3 +35,7 @@ tests/error_output_parity/compiler/cases/cmj_not_found.res	-w -A -bs-jsx 4 -colo
 tests/error_output_parity/compiler/cases/js_not_found.res	-w -A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases
 tests/error_output_parity/compiler/cases/package_script_dependency.res	-w -A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases -bs-project-root . -bs-package-name pkg -bs-package-output esmodule:src:.mjs
 tests/error_output_parity/compiler/cases/package_missing_ml_dependency.res	-w -A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases -bs-project-root . -bs-package-name pkg -bs-package-output esmodule:src:.mjs
+tests/error_output_parity/compiler/cases/bs_ast_error_extension.res	-w +A -bs-jsx 4 -color never -bs-ast
+tests/error_output_parity/compiler/cases/bs_ast_error_extension_empty.res	-w +A -bs-jsx 4 -color never -bs-ast
+tests/error_output_parity/compiler/cases/bs_ast_error_extension.resi	-w +A -bs-jsx 4 -color never -bs-ast
+tests/error_output_parity/compiler/cases/deprecated_module_persistent_submodule.res	-w +A -bs-jsx 4 -color never -I packages/@rescript/belt/lib/ocaml

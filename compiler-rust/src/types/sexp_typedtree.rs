@@ -17,7 +17,7 @@ use crate::types::decl::{
     TypeDeclaration, TypeKind,
 };
 use crate::types::path::Path;
-use crate::types::type_expr::{FieldKind, RowDesc, RowField, TypeDesc, TypeExprRef};
+use crate::types::type_expr::{RowDesc, RowField, TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
     Case, Constant, Expression, ExpressionDesc, ExtensionConstructor, ExtensionConstructorKind,
     FunctionParam, Loc, ModuleBinding, ModuleExpr, ModuleExprDesc, ModuleTypeConstraint,
@@ -221,11 +221,7 @@ fn sexp_constant(c: &Constant) -> Sexp {
     match c {
         Constant::Int(i) => Sexp::list(vec![Sexp::atom("Const_int"), Sexp::atom(&i.to_string())]),
         Constant::Char(c) => Sexp::list(vec![Sexp::atom("Const_char"), Sexp::atom(&c.to_string())]),
-        Constant::String(s, delim) => Sexp::list(vec![
-            Sexp::atom("Const_string"),
-            string(s),
-            opt(|d: &String| string(d), delim),
-        ]),
+        Constant::String(s) => Sexp::list(vec![Sexp::atom("Const_string"), string(s)]),
         Constant::Float(s) => Sexp::list(vec![Sexp::atom("Const_float"), string(s)]),
         Constant::BigInt(positive, s) => {
             let sign_str = if *positive { "+" } else { "-" };
@@ -561,14 +557,13 @@ fn sexp_type_expr_body_inline(
         }
         TypeDesc::Tfield {
             name,
-            kind,
+            mutability,
             typ,
             rest,
         } => {
-            let kind_str = match kind {
-                FieldKind::Fpresent => "Fpresent",
-                FieldKind::Fabsent => "Fabsent",
-                FieldKind::Fvar(_) => "Fvar",
+            let kind_str = match ctx.mutability_repr(*mutability) {
+                crate::types::asttypes::MutableFlag::Immutable => "Immutable",
+                crate::types::asttypes::MutableFlag::Mutable => "Mutable",
             };
             let typ_sexp = sexp_type_expr_inline(arena, ctx, state, *typ);
             let rest_sexp = sexp_type_expr_inline(arena, ctx, state, *rest);
@@ -800,12 +795,6 @@ fn sexp_pat_extra(
             items.push(attrs_sexp);
             Sexp::list(items)
         }
-        PatExtra::Tpat_open(p, _, _) => {
-            let mut items = vec![Sexp::atom("Tpat_open"), sexp_path(p)];
-            items.extend(loc_sexp);
-            items.push(attrs_sexp);
-            Sexp::list(items)
-        }
         PatExtra::Tpat_unpack => {
             let mut items = vec![Sexp::atom("Tpat_unpack")];
             items.extend(loc_sexp);
@@ -1032,9 +1021,21 @@ fn sexp_exp_extra(
             items.push(attrs_sexp);
             Sexp::list(items)
         }
-        ExpExtra::Texp_coerce(ct2) => {
-            let ct2_sexp = sexp_core_type(arena, ctx, with_locs, dedup, ct2);
-            let mut items = vec![Sexp::atom("Texp_coerce"), ct2_sexp];
+        ExpExtra::Texp_coerce {
+            source_type,
+            target,
+            target_type,
+        } => {
+            let source_sexp = Sexp::list(vec![
+                Sexp::atom("source"),
+                sexp_type_expr(arena, ctx, dedup, *source_type),
+            ]);
+            let ct_sexp = sexp_core_type(arena, ctx, with_locs, dedup, target);
+            let target_sexp = Sexp::list(vec![
+                Sexp::atom("target"),
+                sexp_type_expr(arena, ctx, dedup, *target_type),
+            ]);
+            let mut items = vec![Sexp::atom("Texp_coerce"), source_sexp, ct_sexp, target_sexp];
             items.extend(loc_sexp);
             items.push(attrs_sexp);
             Sexp::list(items)
@@ -1241,6 +1242,7 @@ fn sexp_expression_desc(
         ExpressionDesc::Texp_record {
             fields,
             extended_expression,
+            ..
         } => {
             let mut field_items = Vec::new();
             for (_li, ld, def, opt_flag) in fields.iter() {
@@ -1397,21 +1399,54 @@ fn sexp_expression_desc(
         ExpressionDesc::Texp_for_await_of(_, _, _, _) => {
             Sexp::list(vec![Sexp::atom("Texp_for_await_of")])
         }
-        ExpressionDesc::Texp_send(e, meth, opt_arg) => {
-            use crate::types::typedtree::MethKind;
+        ExpressionDesc::Texp_tagged_template { tag, raw_sources, values } => {
+            let tag_sexp = sexp_expression(arena, ctx, with_locs, dedup, tag);
+            let values_sexp: Vec<Sexp> =
+                values.iter().map(|value| sexp_expression(arena, ctx, with_locs, dedup, value)).collect();
+            Sexp::list(vec![
+                Sexp::atom("Texp_tagged_template"),
+                tag_sexp,
+                Sexp::list(raw_sources.iter().map(|source| string(source)).collect()),
+                Sexp::list(values_sexp),
+            ])
+        }
+        ExpressionDesc::Texp_template { segments, values } => {
+            let values_sexp: Vec<Sexp> =
+                values.iter().map(|value| sexp_expression(arena, ctx, with_locs, dedup, value)).collect();
+            Sexp::list(vec![
+                Sexp::atom("Texp_template"),
+                Sexp::list(
+                    segments
+                        .iter()
+                        .map(|segment| Sexp::list(vec![string(segment.source()), string(segment.semantic())]))
+                        .collect(),
+                ),
+                Sexp::list(values_sexp),
+            ])
+        }
+        ExpressionDesc::Texp_object_get(e, name) => {
             let e_sexp = sexp_expression(arena, ctx, with_locs, dedup, e);
-            let meth_sexp = match meth {
-                MethKind::Tmeth_name(name) => string(name),
-                MethKind::Tmeth_val(id) => sexp_ident(id),
-            };
-            let arg_sexp = match opt_arg {
-                None => Sexp::atom("None"),
-                Some(a) => Sexp::list(vec![
-                    Sexp::atom("Some"),
-                    sexp_expression(arena, ctx, with_locs, dedup, a),
-                ]),
-            };
-            Sexp::list(vec![Sexp::atom("Texp_send"), e_sexp, meth_sexp, arg_sexp])
+            Sexp::list(vec![Sexp::atom("Texp_object_get"), e_sexp, string(&name.txt)])
+        }
+        ExpressionDesc::Texp_object_set(e1, name, e2) => {
+            let e1_sexp = sexp_expression(arena, ctx, with_locs, dedup, e1);
+            let e2_sexp = sexp_expression(arena, ctx, with_locs, dedup, e2);
+            Sexp::list(vec![
+                Sexp::atom("Texp_object_set"),
+                e1_sexp,
+                string(&name.txt),
+                e2_sexp,
+            ])
+        }
+        ExpressionDesc::Texp_object_literal(fields) => {
+            let mut items = vec![Sexp::atom("Texp_object_literal")];
+            for (s, e) in fields {
+                items.push(Sexp::list(vec![
+                    string(&s.txt),
+                    sexp_expression(arena, ctx, with_locs, dedup, e),
+                ]));
+            }
+            Sexp::list(items)
         }
         ExpressionDesc::Texp_letmodule(id, _, me, e) => Sexp::list(vec![
             Sexp::atom("Texp_letmodule"),
@@ -2720,7 +2755,14 @@ fn sexp_value_description(
     items.push(sexp_core_type(arena, ctx, with_locs, dedup, &vd.val_desc));
     items.push(Sexp::list(
         std::iter::once(Sexp::atom("prim"))
-            .chain(vd.val_prim.iter().map(|s| string(s)))
+            .chain(
+                vd.val_prim
+                    .as_ref()
+                    .map(|prim| prim.debug_strings(arena))
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|s| string(s)),
+            )
             .collect(),
     ));
     items.push(sexp_attributes(arena, with_locs, &vd.val_attributes));

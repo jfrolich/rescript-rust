@@ -178,9 +178,9 @@ echo ""
 echo -e "${BOLD}Step 1: Building project with rescript...${RESET}"
 cd "$BUILD_DIR"
 if [[ "$STDLIB_MODE" != "true" ]]; then
-    RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
+    RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
 fi
-if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
+if ! RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
     echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
 fi
 cd "$PROJECT_ROOT"

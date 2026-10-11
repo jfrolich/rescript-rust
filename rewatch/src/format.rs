@@ -1,11 +1,9 @@
-use crate::{helpers, project_context};
+use crate::project_context;
 use anyhow::{Result, bail};
 use num_cpus;
 use rayon::prelude::*;
 use std::fs;
-use std::io::{self, Write};
-use std::path::Path;
-use std::process::Command;
+use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::{info_span, instrument};
 
@@ -15,11 +13,9 @@ use clap::ValueEnum;
 
 #[instrument(name = "format.format", skip_all)]
 pub fn format(stdin_extension: Option<FileExtension>, check: bool, files: Vec<String>) -> Result<()> {
-    let bsc_path = helpers::get_bsc();
-
     match stdin_extension {
         Some(extension) => {
-            format_stdin(&bsc_path, extension)?;
+            format_stdin(extension)?;
         }
         None => {
             let files = if files.is_empty() {
@@ -27,11 +23,23 @@ pub fn format(stdin_extension: Option<FileExtension>, check: bool, files: Vec<St
             } else {
                 files
             };
-            format_files(&bsc_path, files, check)?;
+            format_files(files, check)?;
         }
     }
 
     Ok(())
+}
+
+/// Format with the in-process ReScript printer (`bsc -format`). Parsing and
+/// printing recurse over the syntax tree, so give them a large stack like the
+/// compiler threads.
+fn format_source(source: Vec<u8>, filename: String) -> Result<Vec<u8>> {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || rescript_compiler::driver::format_source(&source, &filename))?
+        .join()
+        .map_err(|_| anyhow::anyhow!("the formatter panicked"))?
+        .map_err(|report| anyhow::anyhow!(report))
 }
 
 fn get_files_in_scope() -> Result<Vec<String>> {
@@ -59,60 +67,43 @@ fn get_files_in_scope() -> Result<Vec<String>> {
     Ok(files)
 }
 
-fn format_stdin(bsc_exe: &Path, extension: FileExtension) -> Result<()> {
+fn format_stdin(extension: FileExtension) -> Result<()> {
     let extension_value = extension
         .to_possible_value()
         .ok_or(anyhow::anyhow!("Could not get extension arg value"))?;
 
-    let mut temp_file = tempfile::Builder::new()
-        .suffix(extension_value.get_name())
-        .tempfile()?;
-    io::copy(&mut io::stdin(), &mut temp_file)?;
-    let temp_path = temp_file.path();
-
-    let mut cmd = Command::new(bsc_exe);
-    cmd.arg("-format").arg(temp_path);
-
-    let output = cmd.output()?;
-
-    if output.status.success() {
-        io::stdout().write_all(&output.stdout)?;
-    } else {
-        let stderr_str = String::from_utf8_lossy(&output.stderr);
-        bail!("Error formatting stdin: {}", stderr_str);
+    let mut source = Vec::new();
+    io::stdin().read_to_end(&mut source)?;
+    let filename = format!("stdin{}", extension_value.get_name());
+    match format_source(source, filename) {
+        Ok(formatted) => {
+            io::stdout().write_all(&formatted)?;
+            Ok(())
+        }
+        Err(err) => bail!("Error formatting stdin: {err}"),
     }
-
-    Ok(())
 }
 
-fn format_files(bsc_exe: &Path, files: Vec<String>, check: bool) -> Result<()> {
+fn format_files(files: Vec<String>, check: bool) -> Result<()> {
     let batch_size = 4 * num_cpus::get();
     let incorrectly_formatted_files = AtomicUsize::new(0);
 
     files.par_chunks(batch_size).try_for_each(|batch| {
         batch.iter().try_for_each(|file| {
-            let mut cmd = Command::new(bsc_exe);
-            // Always get formatted output to stdout for comparison
-            cmd.arg("-format").arg(file);
-
-            let output = cmd.output()?;
-
-            if output.status.success() {
-                let original_content = fs::read_to_string(file)?;
-                let formatted_content = String::from_utf8_lossy(&output.stdout);
-                if original_content != formatted_content {
-                    if check {
-                        eprintln!("[format check] {file}");
-                        incorrectly_formatted_files.fetch_add(1, Ordering::SeqCst);
-                    } else {
-                        let _file_span = info_span!("format.write_file", file = %file).entered();
-                        // Only write if content actually changed
-                        fs::write(file, &*formatted_content)?;
-                    }
+            let original_content = fs::read(file)?;
+            let formatted_content = match format_source(original_content.clone(), file.clone()) {
+                Ok(formatted) => formatted,
+                Err(err) => bail!("Error formatting {}: {}", file, err),
+            };
+            if original_content != formatted_content {
+                if check {
+                    eprintln!("[format check] {file}");
+                    incorrectly_formatted_files.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    let _file_span = info_span!("format.write_file", file = %file).entered();
+                    // Only write if content actually changed
+                    fs::write(file, &formatted_content)?;
                 }
-            } else {
-                let stderr_str = String::from_utf8_lossy(&output.stderr);
-                bail!("Error formatting {}: {}", file, stderr_str);
             }
             Ok(())
         })

@@ -106,35 +106,72 @@ let process_optional_args ~config ~cross_file ~exp_type ~(loc_from : Location.t)
     let supplied_maybe = ref [] in
     args
     |> List.iter (fun (lbl, arg) ->
-           let arg_is_supplied =
-             match arg with
-             | Some
-                 {
-                   Typedtree.exp_desc =
-                     Texp_construct (_, {cstr_name = "Some"}, _);
-                 } ->
-               Some true
-             | Some
-                 {
-                   Typedtree.exp_desc =
-                     Texp_construct (_, {cstr_name = "None"}, _);
-                 } ->
-               Some false
-             | Some _ -> None
-             | None -> Some false
-           in
-           match lbl with
-           | Asttypes.Optional {txt = s} when not loc_from.loc_ghost ->
-             if arg_is_supplied <> Some false then supplied := s :: !supplied;
-             if arg_is_supplied = None then
-               supplied_maybe := s :: !supplied_maybe
-           | _ -> ());
+        let arg_is_supplied =
+          match arg with
+          | Some
+              {Typedtree.exp_desc = Texp_construct (_, {cstr_name = "Some"}, _)}
+            ->
+            Some true
+          | Some
+              {Typedtree.exp_desc = Texp_construct (_, {cstr_name = "None"}, _)}
+            ->
+            Some false
+          | Some _ -> None
+          | None -> Some false
+        in
+        match lbl with
+        | Asttypes.Optional {txt = s} when not loc_from.loc_ghost ->
+          if arg_is_supplied <> Some false then supplied := s :: !supplied;
+          if arg_is_supplied = None then supplied_maybe := s :: !supplied_maybe
+        | _ -> ());
     (!supplied, !supplied_maybe)
     |> Dead_optional_args.add_references ~config ~cross_file ~loc_from ~loc_to
          ~binding ~path)
 
-let rec collect_expr ~config ~refs ~file_deps ~cross_file ~direct_callees
-    ~(last_binding : Location.t) super self (e : Typedtree.expression) =
+let type_path_candidates ~file ~(module_path : Module_path.t) path =
+  let path = Dce_path.from_path_t path in
+  let module_context =
+    module_path.path @ [File_context.module_name_tagged file]
+  in
+  let add_unique paths path =
+    if List.exists (fun existing -> existing = path) paths then paths
+    else path :: paths
+  in
+  [path; path @ module_context]
+  |> List.fold_left
+       (fun paths path ->
+         [
+           path;
+           Dce_path.module_to_implementation path;
+           Dce_path.module_to_interface path;
+         ]
+         |> List.fold_left add_unique paths)
+       []
+
+(* A record coercion [(e :> Target.t)] views the source record through the
+   target's labels, so reading a target label reads the source label of the same
+   name; without that link the source labels look unread. The two types can live
+   in different files, so record the candidate paths and let the global pass
+   pair the labels up. Both types come from [Texp_coerce] already head-expanded,
+   so an alias names the type that owns the labels; the source type is there at
+   all only because the typed tree keeps it - the syntax never spells it out. *)
+let add_coercion ~cross_file ~file ~module_path ~source ~target =
+  if !Config.analyze_types then
+    let type_paths typ =
+      match (Ctype.repr typ).Types.desc with
+      | Types.Tconstr (path, _, _) ->
+        type_path_candidates ~file ~module_path path
+      | _ -> []
+    in
+    match (type_paths source, type_paths target) with
+    | [], _ | _, [] -> ()
+    | source_type_paths, target_type_paths ->
+      Cross_file_items.add_coercion cross_file ~source_type_paths
+        ~target_type_paths
+
+let rec collect_expr ~config ~decls ~refs ~file_deps ~cross_file ~direct_callees
+    ~file ~module_path ~(last_binding : Location.t) super self
+    (e : Typedtree.expression) =
   let loc_from = e.exp_loc in
   let binding = last_binding in
   let add_optional_arg_value_escape ~val_type pos_from pos_to =
@@ -142,6 +179,13 @@ let rec collect_expr ~config ~refs ~file_deps ~cross_file ~direct_callees
       Cross_file_items.add_optional_arg_value_escape cross_file ~pos_from
         ~pos_to
   in
+  e.exp_extra
+  |> List.iter (fun (extra, _, _) ->
+      match extra with
+      | Typedtree.Texp_coerce {source_type; target_type} ->
+        add_coercion ~cross_file ~file ~module_path ~source:source_type
+          ~target:target_type
+      | _ -> ());
   (match e.exp_desc with
   | Texp_ident
       (_path, _, {Types.val_loc = {loc_ghost = false; _} as loc_to; val_type})
@@ -151,7 +195,7 @@ let rec collect_expr ~config ~refs ~file_deps ~cross_file ~direct_callees
       (* Work around lowercase jsx with no children producing an artifact `emptyArray`
          which is called from its own location as many things are generated on the same location. *)
       if config.Dce_config.cli.debug then
-        Log_.item "addDummyReference %s --> %s@."
+        Log_.item "add_value_ref (dummy) %s --> %s@."
           (Location.none.loc_start |> Pos.to_string)
           (loc_to.loc_start |> Pos.to_string);
       References.add_value_ref refs ~pos_to:loc_to.loc_start
@@ -164,7 +208,7 @@ let rec collect_expr ~config ~refs ~file_deps ~cross_file ~direct_callees
           (* [Location.none] identifies a top-level [Tstr_eval], which executes
              unconditionally, so use the expression's own position. Both
              liveness implementations deliberately treat non-declaration
-             positions as live; that behavior is load-bearing here. *)
+             positions as live; this analysis depends on that behavior. *)
           if binding = Location.none then loc_from.loc_start
           else binding.loc_start
         in
@@ -183,7 +227,7 @@ let rec collect_expr ~config ~refs ~file_deps ~cross_file ~direct_callees
     Expression_table.replace direct_callees direct_callee ();
     args
     |> process_optional_args ~config ~cross_file ~exp_type
-         ~loc_from:(loc_from : Location.t)
+         ~(loc_from : Location.t)
          ~binding:last_binding ~loc_to ~path
   | Texp_let
       ( (* generated for functions with optional args *)
@@ -219,7 +263,7 @@ let rec collect_expr ~config ~refs ~file_deps ~cross_file ~direct_callees
     Expression_table.replace direct_callees direct_callee ();
     args
     |> process_optional_args ~config ~cross_file ~exp_type
-         ~loc_from:(loc_from : Location.t)
+         ~(loc_from : Location.t)
          ~binding:last_binding ~loc_to ~path
   | Texp_field
       (_, _, {lbl_loc = {Location.loc_start = pos_to; loc_ghost = false}; _}) ->
@@ -245,15 +289,14 @@ let rec collect_expr ~config ~refs ~file_deps ~cross_file ~direct_callees
   | Texp_record {fields} ->
     fields
     |> Array.iter (fun (_, record_label_definition, _) ->
-           match record_label_definition with
-           | Typedtree.Overridden (_, ({exp_loc} as e)) when exp_loc.loc_ghost
-             ->
-             (* Punned field in OCaml projects has ghost location in expression *)
-             let e = {e with exp_loc = {exp_loc with loc_ghost = false}} in
-             collect_expr ~config ~refs ~file_deps ~cross_file ~direct_callees
-               ~last_binding super self e
-             |> ignore
-           | _ -> ())
+        match record_label_definition with
+        | Typedtree.Overridden (_, ({exp_loc} as e)) when exp_loc.loc_ghost ->
+          (* Punned field in OCaml projects has ghost location in expression *)
+          let e = {e with exp_loc = {exp_loc with loc_ghost = false}} in
+          collect_expr ~config ~decls ~refs ~file_deps ~cross_file
+            ~direct_callees ~file ~module_path ~last_binding super self e
+          |> ignore
+        | _ -> ())
   | _ -> ());
   super.Tast_mapper.expr self e
 
@@ -267,31 +310,11 @@ let rec collect_expr ~config ~refs ~file_deps ~cross_file ~direct_callees
   With this annotation we declare a new type for each branch to allow the
   function to be typed.
   *)
-let type_path_candidates ~file ~(module_path : Module_path.t) path =
-  let path = Dce_path.from_path_t path in
-  let module_context =
-    module_path.path @ [File_context.module_name_tagged file]
-  in
-  let add_unique paths path =
-    if List.exists (fun existing -> existing = path) paths then paths
-    else path :: paths
-  in
-  [path; path @ module_context]
-  |> List.fold_left
-       (fun paths path ->
-         [
-           path;
-           Dce_path.module_to_implementation path;
-           Dce_path.module_to_interface path;
-         ]
-         |> List.fold_left add_unique paths)
-       []
-
 let add_record_label_type_references ~config ~refs ~pos_from labels =
   labels
   |> List.iter (fun {Types.ld_loc = {loc_start = pos_to; loc_ghost}; _} ->
-         if not loc_ghost then
-           Dead_type.add_type_reference ~config ~refs ~pos_from ~pos_to)
+      if not loc_ghost then
+        Dead_type.add_type_reference ~config ~refs ~pos_from ~pos_to)
 
 let add_record_rest_type_references_from_path ~config ~decls ~refs ~file
     ~module_path ~pos_from rest =
@@ -301,14 +324,13 @@ let add_record_rest_type_references_from_path ~config ~decls ~refs ~file
       let type_paths = type_path_candidates ~file ~module_path path in
       decls |> Declarations.builder_to_list
       |> List.iter (fun (_, decl) ->
-             match (decl.Decl.decl_kind, decl.path) with
-             | RecordLabel, _label :: type_path
-               when List.exists
-                      (fun candidate -> candidate = type_path)
-                      type_paths ->
-               Dead_type.add_type_reference ~config ~refs ~pos_from
-                 ~pos_to:decl.pos
-             | _ -> ())
+          match (decl.Decl.decl_kind, decl.path) with
+          | RecordLabel, _label :: type_path
+            when List.exists (fun candidate -> candidate = type_path) type_paths
+            ->
+            Dead_type.add_type_reference ~config ~refs ~pos_from
+              ~pos_to:decl.pos
+          | _ -> ())
     | _ -> ()
 
 let add_record_rest_type_references ~config ~decls ~refs ~file ~module_path
@@ -332,8 +354,8 @@ let collect_pattern ~config ~decls ~refs ~file ~module_path :
   | Typedtree.Tpat_record (cases, _clodsedFlag, rest) -> (
     cases
     |> List.iter (fun (_loc, {Types.lbl_loc = {loc_start = pos_to}}, _pat, _) ->
-           if !Config.analyze_types then
-             Dead_type.add_type_reference ~config ~refs ~pos_from ~pos_to);
+        if !Config.analyze_types then
+          Dead_type.add_type_reference ~config ~refs ~pos_from ~pos_to);
     match rest with
     | None -> ()
     | Some rest ->
@@ -432,8 +454,8 @@ let traverse_structure ~config ~decls ~refs ~file_deps ~cross_file ~file
         expr =
           (fun _self e ->
             e
-            |> collect_expr ~config ~refs ~file_deps ~cross_file ~direct_callees
-                 ~last_binding super mapper);
+            |> collect_expr ~config ~decls ~refs ~file_deps ~cross_file
+                 ~direct_callees ~file ~module_path ~last_binding super mapper);
         pat =
           (fun _self p ->
             p

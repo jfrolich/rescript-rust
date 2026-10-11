@@ -5,7 +5,7 @@
 
 use super::op::{BinOp, Kind, Number, PropertyName, UsedStats};
 use super::{
-    Block, CallArity, CallInfo, CallKind, CaseClause, Delim, Expression, ExpressionDesc,
+    Block, CallArity, CallInfo, CallKind, CaseClause, Expression, ExpressionDesc,
     ForDirection, JsRawInfo, ModulePathResolver, Statement, StatementDesc, StringClause, VIdent,
     VariableDeclaration, ocaml_eq_block, ocaml_eq_expression,
 };
@@ -16,7 +16,7 @@ use crate::ident::Ident;
 use crate::js_ir::source_map::SourceMapBuilder;
 use crate::lambda::SwitchCaseTag;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::fmt::Write;
 
 #[derive(Clone, Default)]
@@ -437,8 +437,8 @@ impl JsPrinter {
             self.newline();
         }
 
-        self.mark_source_loc(stmt.source_loc.as_ref());
-        self.fallback_expression_source_loc = stmt.source_loc;
+        self.mark_source_loc(stmt.source_loc.as_ref().map(|v| &**v));
+        self.fallback_expression_source_loc = stmt.source_loc.as_deref().copied();
         self.print_statement_desc(&stmt.desc, top_level);
         self.fallback_expression_source_loc = None;
     }
@@ -509,7 +509,7 @@ impl JsPrinter {
                             body,
                             *return_unit,
                             *async_,
-                            directive.as_deref(),
+                            directive.as_deref().map(|x| x.as_str()),
                         );
                         return;
                     }
@@ -919,7 +919,7 @@ impl JsPrinter {
                     ..
                 } = &value.desc
                 {
-                    self.mark_source_loc(value.source_loc.as_ref());
+                    self.mark_source_loc(value.source_loc.as_ref().map(|v| &**v));
                     // OCaml reference: compiler/core/js_dump.ml:337-360 builds
                     // `set_env` including `Name_non_top id`, then
                     // compiler/core/js_dump.ml:411-414 prints the function in
@@ -933,7 +933,7 @@ impl JsPrinter {
                         body,
                         return_unit: *return_unit,
                         async_: *async_,
-                        directive: directive.as_deref(),
+                        directive: directive.as_deref().map(|x| x.as_str()),
                         function_ident: Some(&decl.ident),
                     });
                 } else {
@@ -1195,7 +1195,8 @@ impl JsPrinter {
                 self.print_function_body(body, return_unit);
             }
             self.dedent();
-            self.newline();
+            // Ext_pp.brace_vgroup closes with `force_newline`.
+            self.force_newline();
         }
         self.write_char('}');
     }
@@ -1240,11 +1241,18 @@ impl JsPrinter {
 
     fn print_switch_case_tag(&mut self, tag: &SwitchCaseTag) {
         match tag {
-            SwitchCaseTag::String(value) => self.print_string_with_delim(value, Delim::StarJ),
+            // js_exp_make.ml `tag_type`: `String s -> str s`.
+            SwitchCaseTag::String(value) => self.print_string(value),
             SwitchCaseTag::Int(value) => self.write(&value.to_string()),
             SwitchCaseTag::Float(value) => self.write(value),
+            // js_exp_make.ml `literal_tag`: `Bigint_utils.parse_bigint`,
+            // printed as `Bigint_utils.to_string`.
             SwitchCaseTag::BigInt(value) => {
-                self.write(value);
+                let (positive, digits) = crate::types::typecore::parse_bigint_literal(value);
+                if !positive {
+                    self.write("-");
+                }
+                self.write(&digits);
                 self.write("n");
             }
             SwitchCaseTag::Bool(value) => self.write(if *value { "true" } else { "false" }),
@@ -1283,17 +1291,17 @@ impl JsPrinter {
         match &expr.desc {
             ExpressionDesc::Call(func, _, _) => matches!(func.desc, ExpressionDesc::RawJsCode(_)),
             ExpressionDesc::RawJsCode(info) => !info.is_stmt,
-            ExpressionDesc::Fun { .. } | ExpressionDesc::Object(_, _) => true,
+            ExpressionDesc::Fun { .. } | ExpressionDesc::Object(_, _) | ExpressionDesc::JsonLiteral(_) => true,
             _ => false,
         }
     }
 
     fn arrow_expr_needs_paren(&self, expr: &Expression) -> bool {
         match &expr.desc {
-            ExpressionDesc::Fun { .. } | ExpressionDesc::Object(_, _) => true,
+            ExpressionDesc::Fun { .. } | ExpressionDesc::Object(_, _) | ExpressionDesc::JsonLiteral(_) => true,
             ExpressionDesc::RawJsCode(info) => !info.is_stmt,
             ExpressionDesc::CamlBlock(_, _, tag_info) => matches!(
-                tag_info,
+                &**tag_info,
                 crate::lambda::TagInfo::Record { .. }
                     | crate::lambda::TagInfo::Module(_)
                     | crate::lambda::TagInfo::PolyVar(_)
@@ -1407,14 +1415,17 @@ impl JsPrinter {
                 self.collect_jsx_fields_from_object(props)?,
                 dup.as_ref().map(|dup| dup.as_ref()),
             )),
-            ExpressionDesc::CamlBlock(
-                elements,
-                _,
-                crate::lambda::TagInfo::Record { fields, .. },
-            ) => Some((
-                self.collect_jsx_fields_from_record_block(elements, fields)?,
-                None,
-            )),
+            ExpressionDesc::CamlBlock(elements, _, tag)
+                if matches!(**tag, crate::lambda::TagInfo::Record { .. }) =>
+            {
+                let crate::lambda::TagInfo::Record { fields, .. } = &**tag else {
+                    unreachable!()
+                };
+                Some((
+                    self.collect_jsx_fields_from_record_block(elements, fields)?,
+                    None,
+                ))
+            }
             ExpressionDesc::Seq(_, _) => {
                 let (fields, spread_props) = self.collect_jsx_spread_assignments(props)?;
                 Some((fields, Some(spread_props)))
@@ -1458,7 +1469,7 @@ impl JsPrinter {
 
     fn print_transformed_jsx_tag(&mut self, tag: &Expression, level: u8, is_fragment: bool) {
         match &tag.desc {
-            ExpressionDesc::Str { txt, .. } => self.write(txt),
+            ExpressionDesc::Str(txt) => self.write(txt),
             _ if is_fragment => {}
             _ => self.print_expression(tag, level),
         }
@@ -1483,7 +1494,9 @@ impl JsPrinter {
         self.write("}");
     }
 
-    fn print_transformed_jsx_child(&mut self, child: &Expression) {
+    /// js_dump.ml `print_one_child`: a child prints at the level of the
+    /// enclosing JSX expression (`print_indented_list f level ...`).
+    fn print_transformed_jsx_child(&mut self, child: &Expression, level: u8) {
         let child_is_jsx = matches!(
             &child.desc,
             ExpressionDesc::Call(
@@ -1498,7 +1511,7 @@ impl JsPrinter {
         if !child_is_jsx {
             self.write("{");
         }
-        self.print_expression(child, 0);
+        self.print_expression(child, level);
         if !child_is_jsx {
             self.write("}");
         }
@@ -1586,7 +1599,7 @@ impl JsPrinter {
                 self.indent();
                 for child in children {
                     self.newline();
-                    self.print_transformed_jsx_child(child);
+                    self.print_transformed_jsx_child(child, level);
                 }
                 self.dedent();
                 self.newline();
@@ -1601,7 +1614,7 @@ impl JsPrinter {
                 self.write(">");
                 self.indent();
                 self.newline();
-                self.print_transformed_jsx_child(child);
+                self.print_transformed_jsx_child(child, level);
                 self.dedent();
                 self.newline();
                 self.write("</");
@@ -1652,7 +1665,7 @@ impl JsPrinter {
             self.write(" */");
         }
 
-        self.mark_source_loc(expr.source_loc.as_ref());
+        self.mark_source_loc(expr.source_loc.as_ref().map(|v| &**v));
         self.print_expression_desc(&expr.desc, level);
     }
 
@@ -1679,8 +1692,31 @@ impl JsPrinter {
                 self.print_number(n, level);
             }
 
-            ExpressionDesc::Str { delim, txt } => {
-                self.print_string_with_delim(txt, *delim);
+            ExpressionDesc::Str(txt) => {
+                self.print_string(txt);
+            }
+
+            ExpressionDesc::TemplateLiteral(segment) => {
+                self.write_char('`');
+                self.write_decoded_internal_string(segment.source());
+                self.write_char('`');
+            }
+
+            ExpressionDesc::JsonLiteral(source) => {
+                self.write_decoded_internal_string(source);
+            }
+
+            ExpressionDesc::InterpolatedTemplate { segments, values } => {
+                self.write_char('`');
+                for (i, segment) in segments.iter().enumerate() {
+                    self.write_decoded_internal_string(segment.source());
+                    if let Some(value) = values.get(i) {
+                        self.write("${");
+                        self.print_expression(value, 0);
+                        self.write_char('}');
+                    }
+                }
+                self.write_char('`');
             }
 
             ExpressionDesc::Array(elements, _) => {
@@ -1936,8 +1972,12 @@ impl JsPrinter {
                     self.write_char('(');
                 }
                 self.print_member_target_expression(arr, true);
+                // `P.group f 1` around the whole access plus
+                // `P.bracket_group f 1` around the index (js_dump.ml:1039-1043).
                 self.write_char('[');
-                self.print_expression(idx, 0);
+                // The index sits inside both the outer `P.group f 1` and
+                // `P.bracket_group f 1` (js_dump.ml `Array_index`).
+                self.with_indent(2, |p| p.print_expression(idx, 0));
                 self.write_char(']');
                 if needs_paren {
                     self.write_char(')');
@@ -2017,7 +2057,7 @@ impl JsPrinter {
                     body,
                     return_unit: *return_unit,
                     async_: *async_,
-                    directive: directive.as_deref(),
+                    directive: directive.as_deref().map(|x| x.as_str()),
                     function_ident: None,
                 });
             }
@@ -2078,10 +2118,8 @@ impl JsPrinter {
             ExpressionDesc::TaggedTemplate(tag, strings, values) => {
                 self.print_expression(tag, level);
                 self.write_char('`');
-                for (i, s) in strings.iter().enumerate() {
-                    if let ExpressionDesc::Str { txt, .. } = &s.desc {
-                        self.write_decoded_internal_string(txt);
-                    }
+                for (i, source) in strings.iter().enumerate() {
+                    self.write_decoded_internal_string(source);
                     if i < values.len() {
                         self.write("${");
                         self.print_expression(&values[i], 0);
@@ -2108,13 +2146,13 @@ impl JsPrinter {
             ExpressionDesc::CamlBlock(elements, _mutable, tag_info) => {
                 use crate::lambda::TagInfo;
 
-                if matches!(tag_info, TagInfo::Extension | TagInfo::RecordExt { .. }) {
+                if matches!(&**tag_info, TagInfo::Extension | TagInfo::RecordExt { .. }) {
                     self.print_exception_block_literal(level, elements, tag_info, false);
                     return;
                 }
 
                 // Check if this is a record with field names
-                match tag_info {
+                match &**tag_info {
                     TagInfo::Record { fields, .. } if fields.len() == elements.len() => {
                         if record_uses_array_syntax(fields) {
                             self.print_array_literal(elements);
@@ -2145,14 +2183,20 @@ impl JsPrinter {
                         runtime,
                         ..
                     } if fields.len() == elements.len() => {
-                        let untagged = runtime.untagged;
-                        let tag_name = runtime.tag_name.as_deref().unwrap_or("TAG");
-                        let tag_value = variant_tag_to_switch(&runtime.tag)
-                            .unwrap_or_else(|| SwitchCaseTag::String(name.clone()));
+                        // js_dump.ml Blk_record_inlined: only a tagged block
+                        // emits its tag field.
+                        let tag_field = match &**runtime {
+                            crate::types::VariantBlock::Untagged { .. } => None,
+                            crate::types::VariantBlock::Tagged(tagged) => Some((
+                                tagged.tag_name.as_deref().unwrap_or("TAG"),
+                                variant_tag_to_switch(&tagged.tag)
+                                    .unwrap_or_else(|| SwitchCaseTag::String(name.clone())),
+                            )),
+                        };
                         self.print_object_literal(
                             level,
                             None,
-                            (if untagged {
+                            (if tag_field.is_none() {
                                 Vec::new()
                             } else {
                                 vec![(None, None)]
@@ -2171,9 +2215,11 @@ impl JsPrinter {
                             ),
                             |this, prop| match prop {
                                 (None, None) => {
+                                    let (tag_name, tag_value) =
+                                        tag_field.as_ref().expect("tag property of a tagged block");
                                     this.print_literal_property_name(tag_name);
                                     this.write(": ");
-                                    this.print_switch_case_tag(&tag_value);
+                                    this.print_switch_case_tag(tag_value);
                                 }
                                 (Some(field_name), Some(elem)) => {
                                     this.print_literal_property_name(field_name);
@@ -2221,16 +2267,12 @@ impl JsPrinter {
                                 },
                             );
                         } else {
-                            let untagged = runtime.untagged;
-                            if untagged && elements.len() == 1 {
-                                self.print_expression(&elements[0], level);
-                            } else {
+                            {
                                 let tag_name = runtime.tag_name.as_deref().unwrap_or("TAG");
                                 let tag_value = variant_tag_to_switch(&runtime.tag)
                                     .unwrap_or_else(|| SwitchCaseTag::String(name.clone()));
-                                let include_tag = !untagged;
-                                let include_debug_name =
-                                    self.debug && !untagged && name.as_str() != "::";
+                                let include_tag = true;
+                                let include_debug_name = self.debug && name.as_str() != "::";
                                 self.print_object_literal(
                                     level,
                                     None,
@@ -2325,7 +2367,7 @@ impl JsPrinter {
         match &expr.desc {
             ExpressionDesc::CamlBlock(elements, _, tag_info)
                 if matches!(
-                    tag_info,
+                    &**tag_info,
                     crate::lambda::TagInfo::Extension | crate::lambda::TagInfo::RecordExt { .. }
                 ) =>
             {
@@ -2406,11 +2448,7 @@ impl JsPrinter {
                 self.write(&mod_name);
                 match &module.kind {
                     Kind::Ml | Kind::Runtime => {
-                        let printed_member = if member == "default" {
-                            "default".to_string()
-                        } else {
-                            convert_ident_name(member)
-                        };
+                        let printed_member = js_export_name(member);
                         self.write_char('.');
                         self.write(&printed_member);
                     }
@@ -2439,16 +2477,18 @@ impl JsPrinter {
 
         self.write_char('{');
         let mut props = props.into_iter().peekable();
+        // OCaml `js_dump.ml` prints the spread through `J.Spread` at level 1,
+        // whose operand is printed at level 13 (so object literals get parens).
         if let (Some(spread), None) = (dup, props.peek()) {
             self.write("...");
-            self.print_expression(spread, 1);
+            self.print_expression(spread, 13);
         } else if dup.is_some() || props.peek().is_some() {
             self.indent();
 
             if let Some(spread) = dup {
                 self.newline();
                 self.write("...");
-                self.print_expression(spread, 1);
+                self.print_expression(spread, 13);
                 if props.peek().is_some() {
                     self.write_char(',');
                 }
@@ -2593,80 +2633,47 @@ impl JsPrinter {
         }
     }
 
-    /// Print a string literal
+    /// Print a string literal: `Js_dump_string.pp_string`
+    /// (js_dump_string.ml `escape_to_buffer`). Valid UTF-8 sequences are
+    /// emitted as-is; other non-ASCII bytes are `\x` escaped.
     pub(super) fn print_string(&mut self, s: &str) {
-        if s.is_ascii() {
-            self.write_char('"');
-            let bytes = s.as_bytes();
-            let mut chunk_start = 0;
-            for (index, byte) in bytes.iter().copied().enumerate() {
-                let escaped = match byte {
-                    b'"' => Some("\\\""),
-                    b'\\' => Some("\\\\"),
-                    b'\n' => Some("\\n"),
-                    b'\r' => Some("\\r"),
-                    b'\t' => Some("\\t"),
-                    0..=31 => {
-                        if chunk_start < index {
-                            self.write(&s[chunk_start..index]);
-                        }
-                        write!(self.output, "\\x{byte:02x}").unwrap();
-                        self.last_new_line = false;
-                        chunk_start = index + 1;
+        let bytes = crate::string_literal::bytes_of(s);
+        let len = bytes.len();
+        let mut out = String::with_capacity(len + 2);
+        out.push('"');
+        let mut i = 0;
+        let hex = |out: &mut String, byte: u8| {
+            out.push_str("\\x");
+            out.push(char::from_digit((byte >> 4) as u32, 16).expect("hex digit"));
+            out.push(char::from_digit((byte & 0xf) as u32, 16).expect("hex digit"));
+        };
+        while i < len {
+            let c = bytes[i];
+            match c {
+                8 => out.push_str("\\b"),
+                12 => out.push_str("\\f"),
+                b'\n' => out.push_str("\\n"),
+                b'\r' => out.push_str("\\r"),
+                b'\t' => out.push_str("\\t"),
+                0 if i == len - 1 || !bytes[i + 1].is_ascii_digit() => out.push_str("\\0"),
+                b'\\' => out.push_str("\\\\"),
+                0..=31 | 127 => hex(&mut out, c),
+                128..=255 => {
+                    let (valid, _, length) = crate::string_literal::get_utf_8_uchar(&bytes, i);
+                    if valid {
+                        out.push_str(std::str::from_utf8(&bytes[i..i + length]).expect("valid UTF-8"));
+                        i += length;
                         continue;
                     }
-                    _ => None,
-                };
-                if let Some(escaped) = escaped {
-                    if chunk_start < index {
-                        self.write(&s[chunk_start..index]);
-                    }
-                    self.write(escaped);
-                    chunk_start = index + 1;
+                    hex(&mut out, c);
                 }
+                b'"' => out.push_str("\\\""),
+                _ => out.push(c as char),
             }
-            if chunk_start < s.len() {
-                self.write(&s[chunk_start..]);
-            }
-            self.write_char('"');
-            return;
+            i += 1;
         }
-
-        let decoded = decode_internal_utf8_string(s);
-        self.write_char('"');
-        for c in decoded.chars() {
-            match c {
-                '"' => self.write("\\\""),
-                '\\' => self.write("\\\\"),
-                '\n' => self.write("\\n"),
-                '\r' => self.write("\\r"),
-                '\t' => self.write("\\t"),
-                c if c < ' ' => {
-                    write!(self.output, "\\x{:02x}", c as u32).unwrap();
-                    self.last_new_line = false;
-                }
-                c => self.write_char(c),
-            }
-        }
-        self.write_char('"');
-    }
-
-    /// Print a string with specific delimiter
-    fn print_string_with_delim(&mut self, s: &str, delim: Delim) {
-        match delim {
-            Delim::None => self.print_string(s),
-            Delim::NoQuotes => self.write_decoded_internal_string(s),
-            Delim::BackQuotes => {
-                self.write_char('`');
-                self.write_decoded_internal_string(s);
-                self.write_char('`');
-            }
-            Delim::StarJ => {
-                self.write_char('"');
-                self.write_decoded_internal_string(s);
-                self.write_char('"');
-            }
-        }
+        out.push('"');
+        self.write(&out);
     }
 
     pub(super) fn write_decoded_internal_string(&mut self, s: &str) {
@@ -2694,231 +2701,35 @@ impl JsPrinter {
         }
     }
 
-    /// Print a function body using the same return-unit elision rules as OCaml.
-    fn print_function_body(&mut self, stmts: &Block, return_unit: bool) {
-        if stmts.is_empty() {
-            return;
-        }
-
-        if let Some(rewritten) =
-            try_function_body_shared_success_disjunction_fallthrough_rewrite(stmts)
-        {
-            self.print_function_body(&rewritten, return_unit);
-            return;
-        }
-
-        if let Some(rewritten) =
-            try_function_body_shared_success_else_if_chain_suffix_rewrite(stmts)
-        {
-            self.print_function_body(&rewritten, return_unit);
-            return;
-        }
-
-        if let Some(rewritten) = try_function_body_shared_return_guard_chain_suffix_rewrite(stmts) {
-            self.print_function_body(&rewritten, return_unit);
-            return;
-        }
-
-        if let Some(rewritten) =
-            try_function_body_positive_strict_undefined_tail_suffix_rewrite(stmts)
-        {
-            self.print_function_body(&rewritten, return_unit);
-            return;
-        }
-
-        // Leave guard-return fallthroughs as sibling statements, matching
-        // compiler/core/js_stmt_make.ml:249-250.
-        if let Some(rewritten) = try_function_body_drop_dead_undefined_binding_guard_prefix(stmts) {
-            self.print_function_body(&rewritten, return_unit);
-            return;
-        }
-
-        if return_unit {
-            if let Some(merged) = try_unit_function_body_single_clean_negative_guard_merge(stmts) {
-                self.print_function_tail_statement(&merged, return_unit);
-                return;
-            }
-        }
-
-        if let Some(merged) = try_function_body_shared_return_guard_chain_merge(stmts) {
-            self.print_function_tail_statement(&merged, return_unit);
-            return;
-        }
-
-        // OCaml's `function_body` only drops/elides unit tails while walking
-        // statements; it does not rewrite early-return guard chains into a
-        // positive success guard (compiler/core/js_dump.ml:1675-1703).
-
-        if return_unit {
-            let implicit_return = Statement::return_(Expression::undefined(true));
-
-            if let [stmt, trailing_stmt] = stmts.as_slice() {
-                if let Some(merged) = try_function_body_shared_tail_nested_if_merge(
-                    stmt,
-                    trailing_stmt,
-                    &implicit_return,
-                ) {
-                    self.print_function_tail_statement(&merged, return_unit);
+    /// Port of compiler/core/js_dump.ml:1743-1771. Only the final
+    /// statement is eligible for unit-return elision; do not optimize guards
+    /// here after the JS passes have established their control-flow shape.
+    fn print_function_body(&mut self, mut stmts: &[Statement], return_unit: bool) {
+        while let Some((stmt, rest)) = stmts.split_first() {
+            match rest {
+                [] => {
+                    self.print_function_tail_statement(stmt, return_unit);
                     return;
                 }
-
-                if let Some(merged) = try_function_body_shared_tail_outer_else_merge(
-                    stmt,
-                    trailing_stmt,
-                    &implicit_return,
-                ) {
-                    self.print_function_tail_statement(&merged, return_unit);
+                [tail] if return_is_undefined(tail) => {
+                    self.print_statement(stmt, false);
                     return;
                 }
-            }
-        }
-
-        if let [stmt, trailing_stmt, trailing_return] = stmts.as_slice() {
-            if return_is_undefined(trailing_return) {
-                if let Some(merged) = try_function_body_shared_tail_nested_if_merge(
-                    stmt,
-                    trailing_stmt,
-                    trailing_return,
-                ) {
-                    self.print_function_tail_statement(&merged, return_unit);
-                    return;
-                }
-
-                if let Some(merged) = try_function_body_shared_tail_outer_else_merge(
-                    stmt,
-                    trailing_stmt,
-                    trailing_return,
-                ) {
-                    self.print_function_tail_statement(&merged, return_unit);
-                    return;
+                _ => {
+                    self.print_statement(stmt, false);
+                    self.newline();
+                    stmts = rest;
                 }
             }
-        }
-
-        if let [stmt, trailing_return] = stmts.as_slice() {
-            if return_is_undefined(trailing_return) {
-                if let Some(merged) =
-                    try_function_body_trailing_return_nested_if_merge(stmt, trailing_return)
-                {
-                    self.print_function_tail_statement(&merged, return_unit);
-                    return;
-                }
-            }
-        }
-
-        let mut printed_any = false;
-        for (index, stmt) in stmts.iter().enumerate() {
-            let printed = if index + 1 == stmts.len() {
-                function_tail_statement_prints(stmt)
-            } else {
-                true
-            };
-            if !printed {
-                continue;
-            }
-            if printed_any {
-                self.newline();
-            }
-            if index + 1 == stmts.len() {
-                self.print_function_tail_statement(stmt, return_unit);
-            } else {
-                self.print_statement(stmt, false);
-            }
-            printed_any = true;
         }
     }
 
     fn print_function_tail_statement(&mut self, stmt: &Statement, return_unit: bool) {
-        // OCaml's `function_body` keeps guard chains as emitted by `S.if_`;
-        // see compiler/core/js_dump.ml:1675-1703.
-
-        if return_unit {
-            if let Some(merged) = try_unit_function_tail_shared_else_guard_chain_merge(stmt) {
-                self.print_function_tail_statement(&merged, return_unit);
-                return;
-            }
-
-            if let Some(merged) = try_unit_function_tail_shared_else_positive_guard_merge(stmt) {
-                self.print_function_tail_statement(&merged, return_unit);
-                return;
-            }
-
-            if let Some(merged) = try_unit_function_tail_shared_else_guard_merge(stmt) {
-                self.print_function_tail_statement(&merged, return_unit);
-                return;
-            }
-        }
-
         match &stmt.desc {
-            StatementDesc::Block(inner) if inner.len() == 1 => {
-                self.print_function_tail_statement(&inner[0], return_unit);
-            }
-            StatementDesc::If(cond, then_, else_)
-                if else_.is_empty()
-                    && return_unit
-                    && try_tail_nested_negative_guard_merge(then_).is_some() =>
-            {
-                let (inner_cond, inner_body) =
-                    try_tail_nested_negative_guard_merge(then_).expect("checked above");
-                self.print_function_tail_statement(
-                    &Statement {
-                        source_loc: None,
-                        desc: StatementDesc::If(
-                            Expression::bin(
-                                BinOp::And,
-                                cond.clone(),
-                                negate_tail_merge_condition(&inner_cond),
-                            ),
-                            inner_body,
-                            vec![],
-                        ),
-                        comment: stmt.comment.clone(),
-                    },
-                    return_unit,
-                );
-            }
-            StatementDesc::If(cond, then_, else_)
-                if else_.is_empty() && try_tail_nested_if_merge(then_, return_unit).is_some() =>
-            {
-                let (inner_cond, inner_then, inner_else) =
-                    try_tail_nested_if_merge(then_, return_unit).expect("checked above");
-                self.print_function_tail_statement(
-                    &Statement {
-                        source_loc: None,
-                        desc: StatementDesc::If(
-                            Expression::bin(BinOp::And, cond.clone(), inner_cond),
-                            inner_then,
-                            inner_else,
-                        ),
-                        comment: stmt.comment.clone(),
-                    },
-                    return_unit,
-                );
-            }
-            StatementDesc::If(cond, then_, else_)
-                if else_is_single_return_undefined(else_)
-                    && try_tail_nested_if_merge_with_outer_undefined_else(then_).is_some() =>
-            {
-                let (inner_cond, inner_then, inner_else) =
-                    try_tail_nested_if_merge_with_outer_undefined_else(then_)
-                        .expect("checked above");
-                self.print_function_tail_statement(
-                    &Statement {
-                        source_loc: None,
-                        desc: StatementDesc::If(
-                            Expression::bin(BinOp::And, cond.clone(), inner_cond),
-                            inner_then,
-                            inner_else,
-                        ),
-                        comment: stmt.comment.clone(),
-                    },
-                    return_unit,
-                );
-            }
             StatementDesc::If(cond, then_, else_) if else_is_single_return_undefined(else_) => {
                 self.print_statement(
                     &Statement {
-                        source_loc: None,
+                        source_loc: stmt.source_loc.clone(),
                         desc: StatementDesc::If(cond.clone(), then_.clone(), vec![]),
                         comment: stmt.comment.clone(),
                     },
@@ -2930,25 +2741,12 @@ impl JsPrinter {
                 ..
             }) => {}
             StatementDesc::Return(expr) if return_unit => {
-                self.print_statement(
-                    &Statement {
-                        source_loc: None,
-                        desc: StatementDesc::Exp(expr.clone()),
-                        comment: stmt.comment.clone(),
-                    },
-                    false,
-                );
+                self.print_statement(&Statement::exp(expr.clone()), false);
             }
             _ => self.print_statement(stmt, false),
         }
     }
-}
 
-fn unwrap_single_block_stmt(stmt: &Statement) -> &Statement {
-    match &stmt.desc {
-        StatementDesc::Block(inner) if inner.len() == 1 => unwrap_single_block_stmt(&inner[0]),
-        _ => stmt,
-    }
 }
 
 /// Direct port of the eta-reduction check in OCaml's `pp_function`
@@ -3007,1012 +2805,6 @@ fn eta_reduce_function_body<'a>(
     Some(v)
 }
 
-fn try_tail_nested_if_merge(
-    block: &Block,
-    allow_empty_else: bool,
-) -> Option<(Expression, Block, Block)> {
-    let [stmt] = block.as_slice() else {
-        return None;
-    };
-    match &stmt.desc {
-        StatementDesc::Block(inner) => try_tail_nested_if_merge(inner, allow_empty_else),
-        StatementDesc::If(cond, then_, else_)
-            if else_is_single_return_undefined(else_) || (allow_empty_else && else_.is_empty()) =>
-        {
-            Some((cond.clone(), then_.clone(), else_.clone()))
-        }
-        _ => None,
-    }
-}
-
-fn try_tail_nested_if_merge_with_outer_undefined_else(
-    then_block: &Block,
-) -> Option<(Expression, Block, Block)> {
-    let (inner_cond, inner_then, inner_else) = try_tail_nested_if_merge(then_block, true)?;
-    if !inner_else.is_empty() && !return_is_undefined_block(&inner_else) {
-        return None;
-    }
-
-    Some((
-        inner_cond,
-        inner_then,
-        if inner_else.is_empty() {
-            vec![Statement::return_(Expression::undefined(true))]
-        } else {
-            inner_else
-        },
-    ))
-}
-
-fn try_tail_nested_negative_guard_merge(block: &Block) -> Option<(Expression, Block)> {
-    let [stmt] = block.as_slice() else {
-        return None;
-    };
-    let StatementDesc::If(cond, then_, else_) = &unwrap_single_block_stmt(stmt).desc else {
-        return None;
-    };
-    if !return_is_undefined_block(then_) || else_.is_empty() {
-        return None;
-    }
-
-    Some((cond.clone(), else_.clone()))
-}
-
-fn try_function_body_trailing_return_nested_if_merge(
-    stmt: &Statement,
-    trailing_return: &Statement,
-) -> Option<Statement> {
-    if !return_is_undefined(trailing_return) {
-        return None;
-    }
-
-    match &stmt.desc {
-        StatementDesc::Block(inner) if inner.len() == 1 => {
-            try_function_body_trailing_return_nested_if_merge(&inner[0], trailing_return)
-        }
-        StatementDesc::If(cond, then_, else_) if else_.is_empty() => {
-            let (inner_cond, inner_then, inner_else) = try_tail_nested_if_merge(then_, true)?;
-            if !inner_else.is_empty() && !return_is_undefined_block(&inner_else) {
-                return None;
-            }
-            Some(Statement {
-                source_loc: None,
-                desc: StatementDesc::If(
-                    Expression::bin(BinOp::And, cond.clone(), inner_cond),
-                    inner_then,
-                    vec![],
-                ),
-                comment: stmt.comment.clone(),
-            })
-        }
-        _ => None,
-    }
-}
-
-fn try_function_body_shared_tail_nested_if_merge(
-    stmt: &Statement,
-    trailing_stmt: &Statement,
-    trailing_return: &Statement,
-) -> Option<Statement> {
-    let stmt = unwrap_single_block_stmt(stmt);
-    let StatementDesc::If(cond, then_, else_) = &stmt.desc else {
-        return None;
-    };
-    if !else_.is_empty() {
-        return None;
-    }
-
-    let [nested_stmt] = then_.as_slice() else {
-        return None;
-    };
-    let nested_stmt = unwrap_single_block_stmt(nested_stmt);
-    let StatementDesc::If(inner_cond, inner_then, inner_else) = &nested_stmt.desc else {
-        return None;
-    };
-    if !inner_else.is_empty() {
-        return None;
-    }
-
-    Some(Statement {
-        source_loc: None,
-        desc: StatementDesc::If(
-            cond.clone(),
-            vec![
-                Statement::new(StatementDesc::If(
-                    inner_cond.clone(),
-                    inner_then.clone(),
-                    vec![],
-                )),
-                trailing_stmt.clone(),
-                trailing_return.clone(),
-            ],
-            vec![trailing_stmt.clone(), trailing_return.clone()],
-        ),
-        comment: stmt.comment.clone(),
-    })
-}
-
-fn try_function_body_shared_tail_outer_else_merge(
-    stmt: &Statement,
-    trailing_stmt: &Statement,
-    trailing_return: &Statement,
-) -> Option<Statement> {
-    let stmt = unwrap_single_block_stmt(stmt);
-    let StatementDesc::If(cond, then_, else_) = &stmt.desc else {
-        return None;
-    };
-    if !else_.is_empty() {
-        return None;
-    }
-
-    let shared_tail = vec![trailing_stmt.clone(), trailing_return.clone()];
-    let stripped_then = strip_trailing_return_undefined_block(then_)?;
-    if stripped_then.is_empty() {
-        return None;
-    }
-
-    match unwrap_single_block_stmt(&then_[0]).desc {
-        StatementDesc::If(_, _, _) => Some(Statement {
-            source_loc: None,
-            desc: StatementDesc::If(cond.clone(), then_.clone(), shared_tail),
-            comment: stmt.comment.clone(),
-        }),
-        _ => None,
-    }
-}
-
-fn try_unit_function_tail_shared_else_guard_chain_merge(stmt: &Statement) -> Option<Statement> {
-    let stmt = unwrap_single_block_stmt(stmt);
-    let StatementDesc::If(outer_cond, then_block, else_block) = &stmt.desc else {
-        return None;
-    };
-    let stripped_else = strip_trailing_return_undefined_block(else_block)?;
-    if stripped_else.is_empty() {
-        return None;
-    }
-
-    let (first_then, remaining_then) = then_block.split_first()?;
-    if !ocaml_eq_block(&remaining_then.to_vec(), else_block) {
-        return None;
-    }
-
-    let StatementDesc::If(inner_cond, inner_then, inner_else) =
-        &unwrap_single_block_stmt(first_then).desc
-    else {
-        return None;
-    };
-    if !inner_else.is_empty() {
-        return None;
-    }
-
-    let (guard_cond, stripped_then) =
-        strip_leading_negative_guard_shared_else(inner_then, else_block)?;
-
-    Some(Statement::new(StatementDesc::If(
-        Expression::bin(
-            BinOp::And,
-            Expression::bin(BinOp::And, outer_cond.clone(), inner_cond.clone()),
-            negate_tail_merge_condition(&guard_cond),
-        ),
-        stripped_then,
-        stripped_else,
-    )))
-}
-
-fn try_unit_function_tail_shared_else_guard_merge(stmt: &Statement) -> Option<Statement> {
-    let stmt = unwrap_single_block_stmt(stmt);
-    let StatementDesc::If(outer_cond, then_block, else_block) = &stmt.desc else {
-        return None;
-    };
-    let stripped_else = strip_trailing_return_undefined_block(else_block)?;
-    if stripped_else.is_empty() {
-        return None;
-    }
-
-    let (first_then, remaining_then) = then_block.split_first()?;
-    let StatementDesc::If(inner_cond, inner_then, inner_else) =
-        &unwrap_single_block_stmt(first_then).desc
-    else {
-        return None;
-    };
-    if !inner_else.is_empty() || !ocaml_eq_block(inner_then, else_block) {
-        return None;
-    }
-
-    let stripped_then = strip_trailing_return_undefined_block(&remaining_then.to_vec())?;
-    if stripped_then.is_empty() {
-        return None;
-    }
-
-    Some(Statement::new(StatementDesc::If(
-        Expression::bin(
-            BinOp::And,
-            outer_cond.clone(),
-            negate_tail_merge_condition(inner_cond),
-        ),
-        stripped_then,
-        stripped_else,
-    )))
-}
-
-fn try_unit_function_tail_shared_else_positive_guard_merge(stmt: &Statement) -> Option<Statement> {
-    let stmt = unwrap_single_block_stmt(stmt);
-    let StatementDesc::If(outer_cond, then_block, else_block) = &stmt.desc else {
-        return None;
-    };
-    let stripped_else = strip_trailing_return_undefined_block(else_block)?;
-    if stripped_else.is_empty() {
-        return None;
-    }
-
-    let (first_then, remaining_then) = then_block.split_first()?;
-    let StatementDesc::If(inner_cond, inner_then, inner_else) =
-        &unwrap_single_block_stmt(first_then).desc
-    else {
-        return None;
-    };
-    if !inner_else.is_empty() || !ocaml_eq_block(&remaining_then.to_vec(), else_block) {
-        return None;
-    }
-
-    let stripped_then = strip_trailing_return_undefined_block(inner_then)?;
-    if stripped_then.is_empty() {
-        return None;
-    }
-
-    if !positive_guard_merge_outer_cond_is_redundant(outer_cond, inner_cond) {
-        return None;
-    }
-    let combined_cond = Expression::bin(BinOp::And, outer_cond.clone(), inner_cond.clone());
-
-    Some(Statement::new(StatementDesc::If(
-        combined_cond,
-        stripped_then,
-        stripped_else,
-    )))
-}
-
-fn positive_guard_merge_outer_cond_is_redundant(
-    outer_cond: &Expression,
-    inner_cond: &Expression,
-) -> bool {
-    matches!(
-        (&outer_cond.desc, &inner_cond.desc),
-        (
-            ExpressionDesc::Bin(BinOp::NotEqEq, outer_lhs, outer_rhs),
-            ExpressionDesc::Bin(BinOp::EqEqEq, inner_lhs, inner_rhs),
-        ) if matches!(
-            (
-                &outer_lhs.as_ref().desc,
-                &outer_rhs.as_ref().desc,
-                &inner_lhs.as_ref().desc,
-                &inner_rhs.as_ref().desc,
-            ),
-            (
-                ExpressionDesc::Var(VIdent::Id(outer_id)),
-                ExpressionDesc::Undefined { .. },
-                ExpressionDesc::Var(VIdent::Id(inner_id)),
-                ExpressionDesc::Str { .. } | ExpressionDesc::Number(_),
-            ) if outer_id.same(inner_id)
-        )
-    )
-}
-
-fn strip_trailing_return_undefined_block(block: &Block) -> Option<Block> {
-    let (tail, body) = block.split_last()?;
-    if !return_is_undefined(unwrap_single_block_stmt(tail)) {
-        return None;
-    }
-    Some(body.to_vec())
-}
-
-fn strip_leading_negative_guard_shared_else(
-    block: &Block,
-    else_block: &Block,
-) -> Option<(Expression, Block)> {
-    let (first, remaining) = block.split_first()?;
-    let StatementDesc::If(cond, then_block, else_block_inner) =
-        &unwrap_single_block_stmt(first).desc
-    else {
-        return None;
-    };
-    if !else_block_inner.is_empty() || !ocaml_eq_block(then_block, else_block) {
-        return None;
-    }
-
-    let stripped_block = strip_trailing_return_undefined_block(&remaining.to_vec())?;
-    if stripped_block.is_empty() {
-        return None;
-    }
-
-    Some((cond.clone(), stripped_block))
-}
-
-fn try_unit_function_body_single_clean_negative_guard_merge(stmts: &Block) -> Option<Statement> {
-    let mut guards = Vec::new();
-    let mut body = collect_function_tail_negative_guard_chain_stmt(
-        &Statement::new(StatementDesc::Block(stmts.clone())),
-        &mut guards,
-    )?;
-    if body.is_empty() {
-        return None;
-    }
-
-    let [guard] = guards.as_slice() else {
-        return None;
-    };
-    let positive_guard = supported_single_negative_guard_condition(guard)?;
-    if !supported_single_negative_guard_body(&body) {
-        return None;
-    }
-
-    if !body
-        .last()
-        .is_some_and(|stmt| return_is_undefined(unwrap_single_block_stmt(stmt)))
-    {
-        body.push(Statement::return_(Expression::undefined(true)));
-    }
-
-    Some(Statement::new(StatementDesc::If(
-        positive_guard,
-        body,
-        vec![],
-    )))
-}
-
-fn try_function_body_shared_return_guard_chain_merge(stmts: &[Statement]) -> Option<Statement> {
-    let (last, prefix) = stmts.split_last()?;
-    if prefix.is_empty() {
-        return None;
-    }
-
-    let mut fallback: Option<Expression> = None;
-    let mut positive_guards = Vec::new();
-
-    for stmt in prefix {
-        let guard = shared_return_guard_test(stmt, &mut fallback)?;
-        positive_guards.push(negate_tail_merge_condition(&guard));
-    }
-
-    let (final_guard, success_block) =
-        shared_return_guard_chain_terminal_success(last, &mut fallback)?;
-    if success_block.is_empty() {
-        return None;
-    }
-    positive_guards.push(final_guard);
-
-    let fallback = fallback?;
-    let mut guards = positive_guards.into_iter();
-    let cond = guards.next()?;
-    let cond = guards.fold(cond, |acc, guard| Expression::bin(BinOp::And, acc, guard));
-
-    Some(Statement {
-        source_loc: None,
-        desc: StatementDesc::If(cond, success_block, vec![Statement::return_(fallback)]),
-        comment: None,
-    })
-}
-
-fn try_function_body_shared_return_guard_chain_suffix_rewrite(stmts: &Block) -> Option<Block> {
-    if stmts.len() < 2 {
-        return None;
-    }
-
-    for start in 0..stmts.len() - 1 {
-        let suffix = &stmts[start..];
-        if let Some(merged) = try_function_body_shared_return_guard_chain_merge(suffix) {
-            let mut rewritten = stmts[..start].to_vec();
-            rewritten.push(merged);
-            return Some(rewritten);
-        }
-    }
-
-    None
-}
-
-fn try_function_body_positive_strict_undefined_tail_if_rewrite(
-    stmts: &[Statement],
-) -> Option<Statement> {
-    let [guard_stmt, success_stmt] = stmts else {
-        return None;
-    };
-
-    let StatementDesc::If(test, then_, else_) = &unwrap_single_block_stmt(guard_stmt).desc else {
-        return None;
-    };
-    if !else_.is_empty() {
-        return None;
-    }
-
-    let positive_test = negate_positive_strict_undefined_guard(test)?;
-    let fallback = single_wrapped_return_expr(then_)?;
-    if matches!(fallback.desc, ExpressionDesc::Undefined { .. }) {
-        return None;
-    }
-
-    let success_stmt = unwrap_single_block_stmt(success_stmt);
-    let success_supported = matches!(success_stmt.desc, StatementDesc::Return(_))
-        || stmt_is_simple_total_return_if(success_stmt);
-    if !success_supported {
-        return None;
-    }
-
-    Some(Statement {
-        source_loc: None,
-        desc: StatementDesc::If(
-            positive_test,
-            vec![success_stmt.clone()],
-            vec![Statement::return_(fallback.clone())],
-        ),
-        comment: guard_stmt.comment.clone(),
-    })
-}
-
-fn try_function_body_positive_strict_undefined_tail_suffix_rewrite(stmts: &Block) -> Option<Block> {
-    if stmts.len() < 2 {
-        return None;
-    }
-
-    for start in 0..stmts.len() - 1 {
-        let suffix = &stmts[start..];
-        if let Some(rewritten_stmt) =
-            try_function_body_positive_strict_undefined_tail_if_rewrite(suffix)
-        {
-            let mut rewritten = stmts[..start].to_vec();
-            rewritten.push(rewritten_stmt);
-            return Some(rewritten);
-        }
-    }
-
-    None
-}
-
-fn negate_positive_strict_undefined_guard(cond: &Expression) -> Option<Expression> {
-    match &cond.desc {
-        ExpressionDesc::Bin(BinOp::EqEqEq, left, right)
-            if matches!(right.as_ref().desc, ExpressionDesc::Undefined { .. }) =>
-        {
-            Some(Expression::bin(
-                BinOp::NotEqEq,
-                left.as_ref().clone(),
-                right.as_ref().clone(),
-            ))
-        }
-        ExpressionDesc::Bin(BinOp::EqEqEq, left, right)
-            if matches!(left.as_ref().desc, ExpressionDesc::Undefined { .. }) =>
-        {
-            Some(Expression::bin(
-                BinOp::NotEqEq,
-                right.as_ref().clone(),
-                left.as_ref().clone(),
-            ))
-        }
-        _ => None,
-    }
-}
-
-fn stmt_is_simple_total_return_if(stmt: &Statement) -> bool {
-    let StatementDesc::If(_, then_, else_) = &unwrap_single_block_stmt(stmt).desc else {
-        return false;
-    };
-
-    single_wrapped_return_expr(then_).is_some() && single_wrapped_return_expr(else_).is_some()
-}
-
-fn try_function_body_shared_success_else_if_chain_suffix_rewrite(stmts: &Block) -> Option<Block> {
-    let (last, prefix) = stmts.split_last()?;
-    let (cond, fallback, success) = shared_success_else_if_chain(last)?;
-
-    let mut rewritten = prefix.to_vec();
-    rewritten.push(Statement {
-        source_loc: None,
-        desc: StatementDesc::If(cond, vec![Statement::return_(fallback)], vec![]),
-        comment: last.comment.clone(),
-    });
-    rewritten.push(Statement::return_(success));
-    Some(rewritten)
-}
-
-fn try_function_body_shared_success_disjunction_fallthrough_rewrite(
-    stmts: &Block,
-) -> Option<Block> {
-    let (last, prefix) = stmts.split_last()?;
-    let stmt = unwrap_single_block_stmt(last);
-    let StatementDesc::If(cond, then_, else_) = &stmt.desc else {
-        return None;
-    };
-
-    let success = single_wrapped_return_expr(then_)?;
-    let fallback = single_wrapped_return_expr(else_)?;
-    if ocaml_eq_expression(success, fallback) {
-        return None;
-    }
-
-    let cond = positive_conjunction_from_disjunction_chain(cond)?;
-
-    let mut rewritten = prefix.to_vec();
-    rewritten.push(Statement {
-        source_loc: None,
-        desc: StatementDesc::If(cond, vec![Statement::return_(fallback.clone())], vec![]),
-        comment: last.comment.clone(),
-    });
-    rewritten.push(Statement::return_(success.clone()));
-    Some(rewritten)
-}
-
-fn shared_success_else_if_chain(stmt: &Statement) -> Option<(Expression, Expression, Expression)> {
-    let mut guards = Vec::new();
-    let mut success: Option<Expression> = None;
-    let fallback = collect_shared_success_else_if_chain(stmt, &mut guards, &mut success)?;
-    if guards.len() < 2 {
-        return None;
-    }
-
-    let mut positive_guards = guards
-        .into_iter()
-        .map(|guard| negate_tail_merge_condition(&guard));
-    let cond = positive_guards.next()?;
-    let cond = positive_guards.fold(cond, |acc, guard| Expression::bin(BinOp::And, acc, guard));
-
-    Some((cond, fallback, success?))
-}
-
-fn positive_conjunction_from_disjunction_chain(cond: &Expression) -> Option<Expression> {
-    let mut guards = Vec::new();
-    collect_disjunction_chain(cond, &mut guards);
-    if guards.len() < 2 || !guards.iter().all(disjunction_guard_is_nonzero_zero_test) {
-        return None;
-    }
-
-    let mut positive_guards = guards
-        .into_iter()
-        .map(|guard| negate_tail_merge_condition(&guard));
-    let cond = positive_guards.next()?;
-    Some(positive_guards.fold(cond, |acc, guard| Expression::bin(BinOp::And, acc, guard)))
-}
-
-fn disjunction_guard_is_nonzero_zero_test(cond: &Expression) -> bool {
-    matches!(
-        &cond.desc,
-        ExpressionDesc::Bin(BinOp::NotEqEq, left, right)
-            if is_zero_int_literal(left) || is_zero_int_literal(right)
-    )
-}
-
-fn is_zero_int_literal(expr: &Expression) -> bool {
-    matches!(expr.desc, ExpressionDesc::Number(Number::Int { i: 0, .. }))
-}
-
-fn collect_disjunction_chain(cond: &Expression, guards: &mut Vec<Expression>) {
-    match &cond.desc {
-        ExpressionDesc::Bin(BinOp::Or, left, right) => {
-            collect_disjunction_chain(left, guards);
-            collect_disjunction_chain(right, guards);
-        }
-        _ => guards.push(cond.clone()),
-    }
-}
-
-fn collect_shared_success_else_if_chain(
-    stmt: &Statement,
-    guards: &mut Vec<Expression>,
-    success: &mut Option<Expression>,
-) -> Option<Expression> {
-    let stmt = unwrap_single_block_stmt(stmt);
-    let StatementDesc::If(cond, then_, else_) = &stmt.desc else {
-        return None;
-    };
-
-    let then_return = single_wrapped_return_expr(then_)?;
-    match success {
-        Some(existing) if !ocaml_eq_expression(existing, then_return) => return None,
-        Some(_) => {}
-        None => {
-            *success = Some(then_return.clone());
-        }
-    }
-
-    guards.push(cond.clone());
-
-    if let Some(fallback) = single_wrapped_return_expr(else_) {
-        if success
-            .as_ref()
-            .is_some_and(|existing| ocaml_eq_expression(existing, fallback))
-        {
-            return None;
-        }
-        return Some(fallback.clone());
-    }
-
-    let nested = single_else_if_stmt_like_ocaml(else_)?;
-    collect_shared_success_else_if_chain(nested, guards, success)
-}
-
-fn collect_function_tail_negative_guard_chain_stmt(
-    stmt: &Statement,
-    guards: &mut Vec<Expression>,
-) -> Option<Block> {
-    match &stmt.desc {
-        StatementDesc::Block(inner) => {
-            collect_function_tail_negative_guard_chain_block(inner, guards)
-        }
-        _ if guards.is_empty() => None,
-        _ => Some(vec![stmt.clone()]),
-    }
-}
-
-fn collect_function_tail_negative_guard_chain_block(
-    block: &Block,
-    guards: &mut Vec<Expression>,
-) -> Option<Block> {
-    match block.as_slice() {
-        [] => None,
-        [stmt] => collect_function_tail_negative_guard_chain_stmt(stmt, guards),
-        [first, rest @ ..] => {
-            if let Some(test) = negative_guard_return_undefined_test(first) {
-                guards.push(Expression::not(test.clone()));
-                collect_function_tail_negative_guard_chain_stmt(
-                    &Statement::new(StatementDesc::Block(rest.to_vec())),
-                    guards,
-                )
-            } else if guards.is_empty() {
-                None
-            } else {
-                Some(block.clone())
-            }
-        }
-    }
-}
-
-fn try_function_body_drop_dead_undefined_binding_guard_prefix(stmts: &Block) -> Option<Block> {
-    match stmts.as_slice() {
-        [
-            Statement {
-                desc: StatementDesc::Block(inner),
-                ..
-            },
-        ] => {
-            return try_function_body_drop_dead_undefined_binding_guard_prefix(inner);
-        }
-        [
-            Statement {
-                desc: StatementDesc::Block(inner),
-                ..
-            },
-            rest @ ..,
-        ] => {
-            let mut flattened = inner.clone();
-            flattened.extend(rest.iter().cloned());
-            if let Some(rewritten) =
-                try_function_body_drop_dead_undefined_binding_guard_prefix(&flattened)
-            {
-                return Some(rewritten);
-            }
-        }
-        _ => {}
-    }
-
-    let [decl_stmt, if_stmt, rest @ ..] = stmts.as_slice() else {
-        return None;
-    };
-
-    let StatementDesc::Variable(decl) = &decl_stmt.desc else {
-        return None;
-    };
-    if decl.value.is_some() || block_mentions_ident(rest, &decl.ident) {
-        return None;
-    }
-
-    let StatementDesc::If(cond, then_block, else_block) = &unwrap_single_block_stmt(if_stmt).desc
-    else {
-        return None;
-    };
-
-    if block_is_single_wrapped_assign_undefined_to_ident(then_block, &decl.ident)
-        && block_terminates_without_ident(else_block, &decl.ident)
-    {
-        let mut rewritten = Vec::with_capacity(stmts.len().saturating_sub(1));
-        rewritten.push(Statement {
-            source_loc: None,
-            desc: StatementDesc::If(
-                negate_tail_merge_condition(cond),
-                else_block.clone(),
-                vec![],
-            ),
-            comment: decl_stmt
-                .comment
-                .clone()
-                .or_else(|| if_stmt.comment.clone()),
-        });
-        rewritten.extend(rest.iter().cloned());
-        return Some(rewritten);
-    }
-
-    if block_is_single_wrapped_assign_undefined_to_ident(else_block, &decl.ident)
-        && block_terminates_without_ident(then_block, &decl.ident)
-    {
-        let mut rewritten = Vec::with_capacity(stmts.len().saturating_sub(1));
-        rewritten.push(Statement {
-            source_loc: None,
-            desc: StatementDesc::If(cond.clone(), then_block.clone(), vec![]),
-            comment: decl_stmt
-                .comment
-                .clone()
-                .or_else(|| if_stmt.comment.clone()),
-        });
-        rewritten.extend(rest.iter().cloned());
-        return Some(rewritten);
-    }
-
-    None
-}
-
-fn block_is_single_wrapped_assign_undefined_to_ident(block: &Block, ident: &Ident) -> bool {
-    matches!(
-        block.as_slice(),
-        [stmt] if assigns_undefined_to_ident(unwrap_single_block_stmt(stmt), ident)
-    )
-}
-
-fn assigns_undefined_to_ident(stmt: &Statement, ident: &Ident) -> bool {
-    matches!(
-        &stmt.desc,
-        StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::Bin(
-                BinOp::Eq,
-                lhs,
-                rhs,
-            ),
-            ..
-        }) if matches!(
-            (&lhs.as_ref().desc, &rhs.as_ref().desc),
-            (
-                ExpressionDesc::Var(VIdent::Id(target)),
-                ExpressionDesc::Undefined { .. },
-            ) if target.same(ident)
-        )
-    )
-}
-
-fn block_terminates_without_ident(block: &Block, ident: &Ident) -> bool {
-    !block.is_empty() && block_terminates(block) && !block_mentions_ident(block, ident)
-}
-
-fn block_terminates(block: &Block) -> bool {
-    block.last().is_some_and(statement_terminates)
-}
-
-fn statement_terminates(stmt: &Statement) -> bool {
-    match &stmt.desc {
-        StatementDesc::Block(inner) => block_terminates(inner),
-        StatementDesc::Return(_)
-        | StatementDesc::Throw(_)
-        | StatementDesc::Break(_)
-        | StatementDesc::Continue(_) => true,
-        _ => false,
-    }
-}
-
-fn block_mentions_ident(block: &[Statement], ident: &Ident) -> bool {
-    block
-        .iter()
-        .any(|stmt| statement_mentions_ident(stmt, ident))
-}
-
-fn statement_mentions_ident(stmt: &Statement, ident: &Ident) -> bool {
-    match &stmt.desc {
-        StatementDesc::Block(inner) => block_mentions_ident(inner, ident),
-        StatementDesc::Variable(VariableDeclaration {
-            ident: binding,
-            value,
-            ..
-        }) => {
-            binding.same(ident)
-                || value
-                    .as_ref()
-                    .is_some_and(|value| expression_mentions_ident(value, ident))
-        }
-        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
-            expression_mentions_ident(expr, ident)
-        }
-        StatementDesc::If(cond, then_block, else_block) => {
-            expression_mentions_ident(cond, ident)
-                || block_mentions_ident(then_block, ident)
-                || block_mentions_ident(else_block, ident)
-        }
-        StatementDesc::While(_, cond, body) => {
-            expression_mentions_ident(cond, ident) || block_mentions_ident(body, ident)
-        }
-        StatementDesc::ForRange(_, start, finish, loop_ident, _, body) => {
-            loop_ident.same(ident)
-                || start
-                    .as_ref()
-                    .is_some_and(|start| expression_mentions_ident(start, ident))
-                || expression_mentions_ident(finish, ident)
-                || block_mentions_ident(body, ident)
-        }
-        StatementDesc::ForOf(_, loop_ident, iterable, body)
-        | StatementDesc::ForAwaitOf(_, loop_ident, iterable, body) => {
-            loop_ident.same(ident)
-                || expression_mentions_ident(iterable, ident)
-                || block_mentions_ident(body, ident)
-        }
-        StatementDesc::IntSwitch(test, clauses, default) => {
-            expression_mentions_ident(test, ident)
-                || clauses
-                    .iter()
-                    .any(|(_, clause)| block_mentions_ident(&clause.body, ident))
-                || default
-                    .as_ref()
-                    .is_some_and(|block| block_mentions_ident(block, ident))
-        }
-        StatementDesc::StringSwitch(test, clauses, default) => {
-            expression_mentions_ident(test, ident)
-                || clauses
-                    .iter()
-                    .any(|clause| block_mentions_ident(&clause.clause.body, ident))
-                || default
-                    .as_ref()
-                    .is_some_and(|block| block_mentions_ident(block, ident))
-        }
-        StatementDesc::Try(body, catch, finally) => {
-            block_mentions_ident(body, ident)
-                || catch.as_ref().is_some_and(|(catch_ident, catch_block)| {
-                    catch_ident.same(ident) || block_mentions_ident(catch_block, ident)
-                })
-                || finally
-                    .as_ref()
-                    .is_some_and(|block| block_mentions_ident(block, ident))
-        }
-        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => false,
-    }
-}
-
-fn expression_mentions_ident(expr: &Expression, ident: &Ident) -> bool {
-    match &expr.desc {
-        ExpressionDesc::Var(VIdent::Id(binding)) => binding.same(ident),
-        ExpressionDesc::Var(VIdent::Qualified(_, _))
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
-        | ExpressionDesc::Number(_)
-        | ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null
-        | ExpressionDesc::RawJsCode(_) => false,
-        ExpressionDesc::Length(inner, _)
-        | ExpressionDesc::IsNullOrUndefined(inner)
-        | ExpressionDesc::Typeof(inner)
-        | ExpressionDesc::JsNot(inner)
-        | ExpressionDesc::JsBnot(inner)
-        | ExpressionDesc::Spread(inner)
-        | ExpressionDesc::RecordRest(_, inner)
-        | ExpressionDesc::Await(inner)
-        | ExpressionDesc::OptionalBlock(inner, _)
-        | ExpressionDesc::StaticIndex(inner, _, _)
-        | ExpressionDesc::CamlBlockTag(inner, _)
-        | ExpressionDesc::New(inner, None) => expression_mentions_ident(inner, ident),
-        ExpressionDesc::In(left, right)
-        | ExpressionDesc::StringAppend(left, right)
-        | ExpressionDesc::Seq(left, right)
-        | ExpressionDesc::Bin(_, left, right)
-        | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
-        | ExpressionDesc::ArrayIndex(left, right) => {
-            expression_mentions_ident(left, ident) || expression_mentions_ident(right, ident)
-        }
-        ExpressionDesc::Cond(test, consequent, alternate) => {
-            expression_mentions_ident(test, ident)
-                || expression_mentions_ident(consequent, ident)
-                || expression_mentions_ident(alternate, ident)
-        }
-        ExpressionDesc::Call(func, args, _)
-        | ExpressionDesc::New(func, Some(args))
-        | ExpressionDesc::TaggedTemplate(func, _, args) => {
-            expression_mentions_ident(func, ident)
-                || args.iter().any(|arg| expression_mentions_ident(arg, ident))
-        }
-        ExpressionDesc::Fun { params, body, .. } => {
-            params.iter().any(|param| param.same(ident)) || block_mentions_ident(body, ident)
-        }
-        ExpressionDesc::Array(items, _) => items
-            .iter()
-            .any(|item| expression_mentions_ident(item, ident)),
-        ExpressionDesc::CamlBlock(items, _, _) => items
-            .iter()
-            .any(|item| expression_mentions_ident(item, ident)),
-        ExpressionDesc::Object(dup, props) => {
-            dup.as_deref()
-                .is_some_and(|dup| expression_mentions_ident(dup, ident))
-                || props
-                    .iter()
-                    .any(|(_, value)| expression_mentions_ident(value, ident))
-        }
-    }
-}
-
-fn negative_guard_return_undefined_test(stmt: &Statement) -> Option<&Expression> {
-    match &unwrap_single_block_stmt(stmt).desc {
-        StatementDesc::If(test, then_, else_)
-            if block_is_single_wrapped_return_undefined(then_) && else_.is_empty() =>
-        {
-            Some(test)
-        }
-        _ => None,
-    }
-}
-
-fn block_is_single_wrapped_return_undefined(block: &Block) -> bool {
-    matches!(block.as_slice(), [stmt] if return_is_undefined(unwrap_single_block_stmt(stmt)))
-}
-
-fn single_wrapped_return_expr(block: &Block) -> Option<&Expression> {
-    let [stmt] = block.as_slice() else {
-        return None;
-    };
-    match &unwrap_single_block_stmt(stmt).desc {
-        StatementDesc::Return(expr) => Some(expr),
-        _ => None,
-    }
-}
-
-fn shared_return_guard_test(
-    stmt: &Statement,
-    fallback: &mut Option<Expression>,
-) -> Option<Expression> {
-    let StatementDesc::If(test, then_, else_) = &unwrap_single_block_stmt(stmt).desc else {
-        return None;
-    };
-    if !else_.is_empty() {
-        return None;
-    }
-
-    let then_return = single_wrapped_return_expr(then_)?;
-    match fallback {
-        Some(existing) if !ocaml_eq_expression(existing, then_return) => None,
-        Some(_) => Some(test.clone()),
-        None => {
-            *fallback = Some(then_return.clone());
-            Some(test.clone())
-        }
-    }
-}
-
-fn shared_return_guard_chain_terminal_success(
-    stmt: &Statement,
-    fallback: &mut Option<Expression>,
-) -> Option<(Expression, Block)> {
-    let StatementDesc::If(test, then_, else_) = &unwrap_single_block_stmt(stmt).desc else {
-        return None;
-    };
-
-    let then_return = single_wrapped_return_expr(then_);
-    let else_return = single_wrapped_return_expr(else_);
-
-    let matches_fallback = |expr: &Expression, fallback: &Option<Expression>| match fallback {
-        Some(existing) => ocaml_eq_expression(existing, expr),
-        None => true,
-    };
-
-    if let Some(then_return) = then_return {
-        if !else_.is_empty() && matches_fallback(then_return, fallback) {
-            if fallback.is_none() {
-                *fallback = Some(then_return.clone());
-            }
-            return Some((negate_tail_merge_condition(test), else_.clone()));
-        }
-    }
-
-    if let Some(else_return) = else_return {
-        if !then_.is_empty() && matches_fallback(else_return, fallback) {
-            if fallback.is_none() {
-                *fallback = Some(else_return.clone());
-            }
-            return Some((test.clone(), then_.clone()));
-        }
-    }
-
-    None
-}
-
 fn decode_internal_utf8_string(s: &str) -> Cow<'_, str> {
     if s.is_ascii() {
         return Cow::Borrowed(s);
@@ -4055,7 +2847,10 @@ enum RawJsExpressionStatement {
 
 fn classify_raw_js_expression_statement(expr: &Expression) -> RawJsExpressionStatement {
     match &expr.desc {
-        ExpressionDesc::Var(_) | ExpressionDesc::Str { .. } => RawJsExpressionStatement::Omit,
+        ExpressionDesc::Var(_)
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_) => RawJsExpressionStatement::Omit,
         ExpressionDesc::RawJsCode(info) if info.is_stmt => {
             if matches!(
                 classify_js_stmt(&info.code),
@@ -4119,15 +2914,14 @@ fn call_argument_needs_extra_group_indent(
 }
 
 fn variant_tag_to_switch(tag: &crate::types::VariantTag) -> Option<SwitchCaseTag> {
-    match tag.tag_type.as_ref()? {
-        crate::types::VariantTagType::String(value) => Some(SwitchCaseTag::String(value.clone())),
-        crate::types::VariantTagType::Int(value) => Some(SwitchCaseTag::Int(*value as i64)),
-        crate::types::VariantTagType::Float(value) => Some(SwitchCaseTag::Float(value.clone())),
-        crate::types::VariantTagType::BigInt(value) => Some(SwitchCaseTag::BigInt(value.clone())),
-        crate::types::VariantTagType::Bool(value) => Some(SwitchCaseTag::Bool(*value)),
-        crate::types::VariantTagType::Null => Some(SwitchCaseTag::Null),
-        crate::types::VariantTagType::Undefined => Some(SwitchCaseTag::Undefined),
-        crate::types::VariantTagType::Untagged(_) => None,
+    match tag.literal.as_ref()? {
+        crate::types::VariantLiteralTag::String(value) => Some(SwitchCaseTag::String(value.clone())),
+        crate::types::VariantLiteralTag::Int(value) => Some(SwitchCaseTag::Int(i64::from(*value as i32))),
+        crate::types::VariantLiteralTag::Float(value) => Some(SwitchCaseTag::Float(value.clone())),
+        crate::types::VariantLiteralTag::BigInt(value) => Some(SwitchCaseTag::BigInt(value.clone())),
+        crate::types::VariantLiteralTag::Bool(value) => Some(SwitchCaseTag::Bool(*value)),
+        crate::types::VariantLiteralTag::Null => Some(SwitchCaseTag::Null),
+        crate::types::VariantLiteralTag::Undefined => Some(SwitchCaseTag::Undefined),
     }
 }
 
@@ -4136,7 +2930,7 @@ fn is_undefined_literal(expr: &Expression) -> bool {
 }
 
 fn else_is_single_return_undefined(block: &Block) -> bool {
-    return_is_undefined_block(block)
+    matches!(block.as_slice(), [stmt] if return_is_undefined(stmt))
 }
 
 fn else_block_is_omitted_like_ocaml(block: &Block) -> bool {
@@ -4186,10 +2980,6 @@ fn single_else_if_stmt_like_ocaml(block: &Block) -> Option<&Statement> {
     }
 }
 
-fn return_is_undefined_block(block: &Block) -> bool {
-    matches!(block.as_slice(), [stmt] if return_is_undefined(stmt))
-}
-
 fn return_is_undefined(stmt: &Statement) -> bool {
     matches!(
         stmt,
@@ -4201,88 +2991,6 @@ fn return_is_undefined(stmt: &Statement) -> bool {
             ..
         }
     )
-}
-
-fn negate_tail_merge_condition(cond: &Expression) -> Expression {
-    match &cond.desc {
-        ExpressionDesc::Bool(value) => Expression::bool(!value),
-        ExpressionDesc::JsNot(inner) => inner.as_ref().clone(),
-        ExpressionDesc::Bin(BinOp::EqEqEq, left, right) => Expression::bin(
-            BinOp::NotEqEq,
-            left.as_ref().clone(),
-            right.as_ref().clone(),
-        ),
-        ExpressionDesc::Bin(BinOp::NotEqEq, left, right) => {
-            Expression::bin(BinOp::EqEqEq, left.as_ref().clone(), right.as_ref().clone())
-        }
-        _ => Expression::not(cond.clone()),
-    }
-}
-
-fn supported_single_negative_guard_condition(cond: &Expression) -> Option<Expression> {
-    match &cond.desc {
-        ExpressionDesc::Bin(BinOp::EqEqEq | BinOp::NotEqEq, left, right)
-            if single_negative_guard_subject_expr_supported(left)
-                && single_negative_guard_tag_expr_supported(right) =>
-        {
-            Some(cond.clone())
-        }
-        ExpressionDesc::Bin(BinOp::EqEqEq | BinOp::NotEqEq, left, right)
-            if single_negative_guard_subject_expr_supported(right)
-                && single_negative_guard_tag_expr_supported(left) =>
-        {
-            Some(cond.clone())
-        }
-        _ => None,
-    }
-}
-
-fn single_negative_guard_subject_expr_supported(expr: &Expression) -> bool {
-    match &expr.desc {
-        ExpressionDesc::Var(_) => true,
-        ExpressionDesc::StaticIndex(target, _, _) => {
-            single_negative_guard_subject_expr_supported(target)
-        }
-        _ => false,
-    }
-}
-
-fn single_negative_guard_tag_expr_supported(expr: &Expression) -> bool {
-    matches!(
-        expr.desc,
-        ExpressionDesc::Str { .. } | ExpressionDesc::Var(_)
-    )
-}
-
-fn supported_single_negative_guard_body(body: &Block) -> bool {
-    body.iter()
-        .all(|stmt| match &unwrap_single_block_stmt(stmt).desc {
-            StatementDesc::Return(Expression {
-                desc: ExpressionDesc::Undefined { .. },
-                ..
-            }) => true,
-            StatementDesc::Exp(expr) => supported_single_negative_guard_effect(expr),
-            _ => false,
-        })
-}
-
-fn supported_single_negative_guard_effect(expr: &Expression) -> bool {
-    match &expr.desc {
-        ExpressionDesc::Bin(BinOp::Eq, left, _) => {
-            supported_single_negative_guard_assign_target(left)
-        }
-        _ => false,
-    }
-}
-
-fn supported_single_negative_guard_assign_target(expr: &Expression) -> bool {
-    match &expr.desc {
-        ExpressionDesc::Var(_) => true,
-        ExpressionDesc::StaticIndex(target, _, _) | ExpressionDesc::ArrayIndex(target, _) => {
-            single_negative_guard_subject_expr_supported(target)
-        }
-        _ => false,
-    }
 }
 
 fn function_tail_statement_prints(stmt: &Statement) -> bool {
@@ -4359,7 +3067,7 @@ fn normalize_hex_float_literal(float_str: &str) -> Option<String> {
     Some(js_number_to_string(value))
 }
 
-fn parse_hex_float_literal(float_str: &str) -> Option<f64> {
+pub(crate) fn parse_hex_float_literal(float_str: &str) -> Option<f64> {
     let (negative, digits) = if let Some(rest) = float_str.strip_prefix('-') {
         (true, rest)
     } else if let Some(rest) = float_str.strip_prefix('+') {
@@ -4461,6 +3169,16 @@ fn unwrap_uppercase_exotic(name: &str) -> &str {
         &name[2..name.len() - 1]
     } else {
         name
+    }
+}
+
+/// `Js_dump_import_export.js_export_name`: the emitted export name of an ML
+/// binding, JS identifier conversion with the ES default export kept literal.
+pub(crate) fn js_export_name(name: &str) -> String {
+    if name == "default" {
+        name.to_string()
+    } else {
+        convert_ident_name(name)
     }
 }
 
@@ -4690,7 +3408,9 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
         ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Number(_) => {}
         ExpressionDesc::Length(inner, _)
@@ -4724,10 +3444,12 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
                 collect_expression_idents(arg, stats);
             }
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
-            for string in strings {
-                collect_expression_idents(string, stats);
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
+            for value in values {
+                collect_expression_idents(value, stats);
             }
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
             for value in values {
                 collect_expression_idents(value, stats);
             }
@@ -5009,6 +3731,46 @@ mod tests {
     use crate::lambda::TagInfo;
     use std::path::Path;
 
+    #[test]
+    fn function_body_preserves_nested_guards_and_inner_returns() {
+        // js_dump.ml:1752-1766 only elides the outermost unit-return tail.
+        let outer = Expression::var(Ident::create_local("outer"));
+        let inner = Expression::var(Ident::create_local("inner"));
+        let body = vec![Statement::new(StatementDesc::If(
+            outer,
+            vec![Statement::new(StatementDesc::If(
+                inner,
+                vec![Statement::exp(Expression::call(
+                    Expression::var(Ident::create_local("act")),
+                    vec![],
+                    CallInfo::default(),
+                ))],
+                vec![Statement::return_(Expression::undefined(true))],
+            ))],
+            vec![Statement::return_(Expression::undefined(true))],
+        ))];
+        let mut printer = JsPrinter::new();
+        printer.print_function_body(&body, true);
+        assert_eq!(printer.into_output(), "if (outer) {\n  if (inner) {\n    act();\n  } else {\n    return;\n  }\n}");
+    }
+
+    #[test]
+    fn function_body_trailing_return_does_not_rewrite_preceding_if() {
+        // The two-element clause prints s as a statement, not function_body [s].
+        let cond = Expression::var(Ident::create_local("cond"));
+        let body = vec![
+            Statement::new(StatementDesc::If(
+                cond,
+                vec![Statement::return_(Expression::number(Number::int(1)))],
+                vec![Statement::return_(Expression::undefined(true))],
+            )),
+            Statement::return_(Expression::undefined(true)),
+        ];
+        let mut printer = JsPrinter::new();
+        printer.print_function_body(&body, true);
+        assert_eq!(printer.into_output(), "if (cond) {\n  return 1;\n} else {\n  return;\n}");
+    }
+
     fn jsx_runtime_module() -> ModuleId {
         ModuleId {
             id: Ident::create_persistent("JsxRuntime"),
@@ -5083,7 +3845,7 @@ mod tests {
     #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_for_range_finish_binding_suffix_persists_across_sibling_loops_like_ocaml() {
-        let first = Statement::new(StatementDesc::ForRange(
+        let first = Statement::for_range(
             None,
             Some(Expression::number(Number::int(0))),
             Expression::call(
@@ -5094,9 +3856,9 @@ mod tests {
             Ident::create_local("i"),
             ForDirection::Up,
             vec![],
-        ));
+        );
 
-        let second = Statement::new(StatementDesc::ForRange(
+        let second = Statement::for_range(
             None,
             Some(Expression::number(Number::int(0))),
             Expression::call(
@@ -5107,7 +3869,7 @@ mod tests {
             Ident::create_local("i"),
             ForDirection::Up,
             vec![],
-        ));
+        );
 
         let rendered = print_block(&vec![first, second]);
 
@@ -5135,15 +3897,12 @@ mod tests {
     }
 
     #[test]
-    fn test_print_noquote_string_decodes_internal_utf8_bytes() {
+    fn test_print_json_literal_decodes_internal_utf8_bytes() {
         let regex = format!(
             "/Bucklescript{}/",
             "\u{662f}\u{4e00}\u{4e2a}\u{7a0b}\u{5e8f}\u{8bed}\u{8a00}"
         );
-        let expr = Expression::new(ExpressionDesc::Str {
-            txt: latin1_encoded_utf8(&regex),
-            delim: Delim::NoQuotes,
-        });
+        let expr = Expression::new(ExpressionDesc::JsonLiteral(latin1_encoded_utf8(&regex)));
         assert_eq!(print_expression(&expr), regex);
     }
 
@@ -5151,10 +3910,7 @@ mod tests {
     fn test_print_tagged_template_decodes_internal_utf8_bytes() {
         let expr = Expression::new(ExpressionDesc::TaggedTemplate(
             Box::new(Expression::var(Ident::create_local("tag"))),
-            vec![Expression::new(ExpressionDesc::Str {
-                txt: latin1_encoded_utf8("\u{4f60}\u{597d}\u{ff0c}\n\u{4e16}\u{754c}"),
-                delim: Delim::NoQuotes,
-            })],
+            vec![latin1_encoded_utf8("\u{4f60}\u{597d}\u{ff0c}\n\u{4e16}\u{754c}")],
             vec![],
         ));
 
@@ -5623,7 +4379,7 @@ mod tests {
                 Expression::new(ExpressionDesc::CamlBlock(
                     vec![],
                     MutableFlag::Immutable,
-                    TagInfo::record(vec![], crate::parser::ast::MutableFlag::Immutable),
+                    Box::new(TagInfo::record(vec![], crate::parser::ast::MutableFlag::Immutable)),
                 )),
             ],
             CallInfo {
@@ -5644,13 +4400,13 @@ mod tests {
                         ),
                     ],
                     MutableFlag::Immutable,
-                    TagInfo::record(
+                    Box::new(TagInfo::record(
                         vec![
                             ("className".to_string(), true),
                             ("children".to_string(), false),
                         ],
                         crate::parser::ast::MutableFlag::Immutable,
-                    ),
+                    )),
                 )),
             ],
             CallInfo {
@@ -5859,50 +4615,6 @@ mod tests {
     }
 
     #[test]
-    fn test_print_function_body_rewrites_strict_undefined_guard_return_suffix_into_positive_nested_guards()
-     {
-        let x = Ident::create_local("x");
-        let y = Ident::create_local("y");
-        let block = vec![
-            Statement::new(StatementDesc::If(
-                Expression::bin(
-                    BinOp::EqEqEq,
-                    Expression::var(x.clone()),
-                    Expression::undefined(false),
-                ),
-                vec![Statement::return_(Expression::bin(
-                    BinOp::EqEqEq,
-                    Expression::var(y.clone()),
-                    Expression::undefined(false),
-                ))],
-                vec![],
-            )),
-            Statement::new(StatementDesc::If(
-                Expression::bin(
-                    BinOp::EqEqEq,
-                    Expression::var(y.clone()),
-                    Expression::undefined(false),
-                ),
-                vec![Statement::return_(Expression::bool(false))],
-                vec![],
-            )),
-            Statement::return_(Expression::bin(
-                BinOp::EqEqEq,
-                Expression::var(x),
-                Expression::var(y),
-            )),
-        ];
-
-        let mut printer = JsPrinter::new();
-        printer.print_function_body(&block, false);
-
-        assert_eq!(
-            printer.into_output(),
-            "if (x !== undefined) {\n  if (y !== undefined) {\n    return x === y;\n  } else {\n    return false;\n  }\n} else {\n  return y === undefined;\n}"
-        );
-    }
-
-    #[test]
     fn test_print_function_body_keeps_bound_success_tail_on_strict_undefined_guard() {
         let match_id = Ident::create_local("match");
         let tmp = Ident::create_local("tmp");
@@ -6017,14 +4729,14 @@ mod tests {
             Box::new(Expression::var(xs)),
             LengthObject::Array,
         ));
-        let stmt = Statement::new(StatementDesc::ForRange(
+        let stmt = Statement::for_range(
             None,
             Some(Expression::number(Number::int(0))),
             finish,
             i,
             ForDirection::Up,
             vec![],
-        ));
+        );
         assert_eq!(
             print_block(&vec![stmt]),
             "for (let i = 0, i_finish = xs.length; i < i_finish; ++i) {}"
@@ -6040,14 +4752,14 @@ mod tests {
             Box::new(Expression::var(xs)),
             LengthObject::Array,
         ));
-        let stmt = Statement::new(StatementDesc::ForRange(
+        let stmt = Statement::for_range(
             None,
             None,
             finish,
             i,
             ForDirection::Upto,
             vec![],
-        ));
+        );
         assert_eq!(
             print_block(&vec![stmt]),
             "for (let i_finish = xs.length; i <= i_finish; ++i) {}"
@@ -6072,14 +4784,14 @@ mod tests {
             Box::new(Expression::var(xs)),
             LengthObject::Array,
         ));
-        let stmt = Statement::new(StatementDesc::ForRange(
+        let stmt = Statement::for_range(
             None,
             Some(init),
             finish,
             i,
             ForDirection::Upto,
             vec![],
-        ));
+        );
         assert_eq!(
             print_block(&vec![stmt]),
             "for (let i = (sideEffect(), 0), i_finish = xs.length; i <= i_finish; ++i) {}"
@@ -6419,7 +5131,7 @@ mod tests {
                 ExpressionDesc::CamlBlock(
                     vec![Expression::number(Number::int(1))],
                     MutableFlag::Immutable,
-                    TagInfo::constructor("Some", 1),
+                    Box::new(TagInfo::constructor("Some", 1)),
                 ),
             ))],
             env: Default::default(),
@@ -6491,677 +5203,6 @@ mod tests {
     }
 
     #[test]
-    fn test_print_unit_function_tail_nested_if_merges_conditions_like_ocaml() {
-        let handle_key = Ident::create_local("handleKey");
-        let state = Ident::create_local("state");
-        let key = Ident::create_local("key");
-        let do_action = Ident::create_local("doAction");
-        let key_is_space = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(key.clone()),
-            Expression::string("space"),
-        );
-        let state_active = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::var(state.clone())),
-            "active".to_string(),
-            None,
-        ));
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle_key,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![state.clone(), key.clone()],
-                body: vec![Statement::new(StatementDesc::If(
-                    key_is_space,
-                    vec![Statement::new(StatementDesc::If(
-                        state_active,
-                        vec![
-                            Statement::exp(Expression::call(
-                                Expression::var(do_action),
-                                vec![Expression::var(state)],
-                                CallInfo::default(),
-                            )),
-                            Statement::return_(Expression::undefined(true)),
-                        ],
-                        vec![Statement::return_(Expression::undefined(true))],
-                    ))],
-                    vec![],
-                ))],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(rendered.contains("if (key === \"space\" && state.active) {"));
-        assert!(rendered.contains("doAction(state);"));
-        assert!(rendered.contains("return;"));
-        assert!(!rendered.contains("if (state.active)"));
-        assert!(!rendered.contains("else"));
-    }
-
-    #[test]
-    fn test_print_unit_function_tail_block_wrapped_nested_if_merges_conditions_like_ocaml() {
-        let handle_key = Ident::create_local("handleKey");
-        let state = Ident::create_local("state");
-        let key = Ident::create_local("key");
-        let do_action = Ident::create_local("doAction");
-        let key_is_space = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(key.clone()),
-            Expression::string("space"),
-        );
-        let state_active = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::var(state.clone())),
-            "active".to_string(),
-            None,
-        ));
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle_key,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![state.clone(), key.clone()],
-                body: vec![Statement::new(StatementDesc::Block(vec![Statement::new(
-                    StatementDesc::If(
-                        key_is_space,
-                        vec![Statement::new(StatementDesc::If(
-                            state_active,
-                            vec![
-                                Statement::exp(Expression::call(
-                                    Expression::var(do_action),
-                                    vec![Expression::var(state)],
-                                    CallInfo::default(),
-                                )),
-                                Statement::return_(Expression::undefined(true)),
-                            ],
-                            vec![Statement::return_(Expression::undefined(true))],
-                        ))],
-                        vec![],
-                    ),
-                )]))],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(rendered.contains("if (key === \"space\" && state.active) {"));
-        assert!(rendered.contains("doAction(state);"));
-        assert!(rendered.contains("return;"));
-        assert!(!rendered.contains("if (state.active)"));
-        assert!(!rendered.contains("else"));
-    }
-
-    #[test]
-    fn test_print_unit_function_body_with_trailing_return_merges_nested_if_like_ocaml() {
-        let handle_key = Ident::create_local("handleKey");
-        let state = Ident::create_local("state");
-        let key = Ident::create_local("key");
-        let do_action = Ident::create_local("doAction");
-        let key_is_space = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(key.clone()),
-            Expression::string("space"),
-        );
-        let state_active = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::var(state.clone())),
-            "active".to_string(),
-            None,
-        ));
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle_key,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![state.clone(), key.clone()],
-                body: vec![
-                    Statement::new(StatementDesc::If(
-                        key_is_space,
-                        vec![Statement::new(StatementDesc::If(
-                            state_active,
-                            vec![
-                                Statement::exp(Expression::call(
-                                    Expression::var(do_action),
-                                    vec![Expression::var(state)],
-                                    CallInfo::default(),
-                                )),
-                                Statement::return_(Expression::undefined(true)),
-                            ],
-                            vec![Statement::return_(Expression::undefined(true))],
-                        ))],
-                        vec![],
-                    )),
-                    Statement::return_(Expression::undefined(true)),
-                ],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(rendered.contains("if (key === \"space\" && state.active) {"));
-        assert!(rendered.contains("doAction(state);"));
-        assert!(rendered.contains("return;"));
-        assert!(!rendered.contains("if (state.active)"));
-        assert!(!rendered.contains("else"));
-    }
-
-    #[test]
-    #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-    fn test_print_unit_function_body_with_large_literal_dispatch_merges_to_exact_literal_like_ocaml()
-     {
-        let handle_key = Ident::create_local("handleKey");
-        let state = Ident::create_local("state");
-        let key = Ident::create_local("key");
-        let do_action = Ident::create_local("doAction");
-        let key_is_space = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(key.clone()),
-            Expression::string("space"),
-        );
-        let rest = [
-            "q", "p", "o", "n", "m", "l", "k", "j", "i", "h", "g", "f", "e", "d", "c", "b", "a",
-        ]
-        .into_iter()
-        .map(|txt| {
-            Expression::bin(
-                BinOp::EqEqEq,
-                Expression::var(key.clone()),
-                Expression::string(txt),
-            )
-        })
-        .reduce(|acc, expr| Expression::bin(BinOp::Or, acc, expr))
-        .expect("expected a non-empty literal chain");
-        let dispatch = Expression::bin(BinOp::Or, key_is_space.clone(), rest);
-        let state_active = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::var(state.clone())),
-            "active".to_string(),
-            None,
-        ));
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle_key,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![state.clone(), key.clone()],
-                body: vec![
-                    Statement::new(StatementDesc::If(
-                        dispatch,
-                        vec![Statement::new(StatementDesc::If(
-                            key_is_space,
-                            vec![Statement::new(StatementDesc::If(
-                                state_active,
-                                vec![
-                                    Statement::exp(Expression::call(
-                                        Expression::var(do_action),
-                                        vec![Expression::var(state)],
-                                        CallInfo::default(),
-                                    )),
-                                    Statement::return_(Expression::undefined(true)),
-                                ],
-                                vec![Statement::return_(Expression::undefined(true))],
-                            ))],
-                            vec![],
-                        ))],
-                        vec![],
-                    )),
-                    Statement::return_(Expression::undefined(true)),
-                ],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(rendered.contains("if (key === \"space\" && state.active) {"));
-        assert!(rendered.contains("doAction(state);"));
-        assert!(rendered.contains("return;"));
-        assert!(!rendered.contains("key === \"q\""));
-        assert!(!rendered.contains("if (key === \"space\" ||"));
-        assert!(!rendered.contains("if (key === \"space\")"));
-        assert!(!rendered.contains("if (state.active)"));
-        assert!(!rendered.contains("else"));
-    }
-
-    #[test]
-    #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-    fn test_print_unit_function_body_collapses_nested_negative_guard_chain_like_ocaml() {
-        let handle_key = Ident::create_local("handleKey");
-        let state = Ident::create_local("state");
-        let key = Ident::create_local("key");
-        let do_action = Ident::create_local("doAction");
-        let key_not_space = Expression::bin(
-            BinOp::NotEqEq,
-            Expression::var(key.clone()),
-            Expression::string("space"),
-        );
-        let rest = [
-            "q", "p", "o", "n", "m", "l", "k", "j", "i", "h", "g", "f", "e", "d", "c", "b", "a",
-        ]
-        .into_iter()
-        .map(|txt| {
-            Expression::bin(
-                BinOp::NotEqEq,
-                Expression::var(key.clone()),
-                Expression::string(txt),
-            )
-        })
-        .reduce(|acc, expr| Expression::bin(BinOp::And, acc, expr))
-        .expect("expected a non-empty literal chain");
-        let dispatch = Expression::bin(BinOp::And, key_not_space.clone(), rest);
-        let state_active = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::var(state.clone())),
-            "active".to_string(),
-            None,
-        ));
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle_key,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![state.clone(), key.clone()],
-                body: vec![Statement::new(StatementDesc::Block(vec![
-                    Statement::new(StatementDesc::If(
-                        dispatch,
-                        vec![Statement::return_(Expression::undefined(true))],
-                        vec![],
-                    )),
-                    Statement::new(StatementDesc::Block(vec![
-                        Statement::new(StatementDesc::If(
-                            key_not_space,
-                            vec![Statement::return_(Expression::undefined(true))],
-                            vec![],
-                        )),
-                        Statement::new(StatementDesc::Block(vec![
-                            Statement::new(StatementDesc::If(
-                                Expression::not(state_active.clone()),
-                                vec![Statement::return_(Expression::undefined(true))],
-                                vec![],
-                            )),
-                            Statement::exp(Expression::call(
-                                Expression::var(do_action),
-                                vec![Expression::var(state)],
-                                CallInfo::default(),
-                            )),
-                            Statement::return_(Expression::undefined(true)),
-                        ])),
-                    ])),
-                ]))],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(rendered.contains("if (key === \"space\" && state.active) {"));
-        assert!(rendered.contains("doAction(state);"));
-        assert!(rendered.contains("return;"));
-        assert!(!rendered.contains("key !== \"q\""));
-        assert!(!rendered.contains("if (key !== \"space\")"));
-        assert!(!rendered.contains("if (!state.active)"));
-        assert!(!rendered.contains("else"));
-    }
-
-    #[test]
-    #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-    fn test_print_unit_function_body_collapses_flat_negative_guard_chain_like_ocaml() {
-        let handle_key = Ident::create_local("handleKey");
-        let state = Ident::create_local("state");
-        let key = Ident::create_local("key");
-        let do_action = Ident::create_local("doAction");
-        let key_not_space = Expression::bin(
-            BinOp::NotEqEq,
-            Expression::var(key.clone()),
-            Expression::string("space"),
-        );
-        let rest = [
-            "q", "p", "o", "n", "m", "l", "k", "j", "i", "h", "g", "f", "e", "d", "c", "b", "a",
-        ]
-        .into_iter()
-        .map(|txt| {
-            Expression::bin(
-                BinOp::NotEqEq,
-                Expression::var(key.clone()),
-                Expression::string(txt),
-            )
-        })
-        .reduce(|acc, expr| Expression::bin(BinOp::And, acc, expr))
-        .expect("expected a non-empty literal chain");
-        let dispatch = Expression::bin(BinOp::And, key_not_space.clone(), rest);
-        let state_active = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::var(state.clone())),
-            "active".to_string(),
-            None,
-        ));
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle_key,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![state.clone(), key.clone()],
-                body: vec![
-                    Statement::new(StatementDesc::If(
-                        dispatch,
-                        vec![Statement::return_(Expression::undefined(true))],
-                        vec![],
-                    )),
-                    Statement::new(StatementDesc::If(
-                        key_not_space,
-                        vec![Statement::return_(Expression::undefined(true))],
-                        vec![],
-                    )),
-                    Statement::new(StatementDesc::If(
-                        Expression::not(state_active.clone()),
-                        vec![Statement::return_(Expression::undefined(true))],
-                        vec![],
-                    )),
-                    Statement::exp(Expression::call(
-                        Expression::var(do_action),
-                        vec![Expression::var(state)],
-                        CallInfo::default(),
-                    )),
-                    Statement::return_(Expression::undefined(true)),
-                ],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(rendered.contains("if (key === \"space\" && state.active) {"));
-        assert!(rendered.contains("doAction(state);"));
-        assert!(rendered.contains("return;"));
-        assert!(!rendered.contains("key !== \"q\""));
-        assert!(!rendered.contains("if (key !== \"space\")"));
-        assert!(!rendered.contains("if (!state.active)"));
-        assert!(!rendered.contains("else"));
-    }
-
-    #[test]
-    fn test_print_non_unit_function_body_collapses_shared_return_guard_chain_like_ocaml() {
-        let check = Ident::create_local("check");
-        let match_ = Ident::create_local("match");
-        let value = Ident::create_local("value");
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: check,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![match_.clone(), value.clone()],
-                body: vec![
-                    Statement::new(StatementDesc::If(
-                        Expression::bin(
-                            BinOp::EqEqEq,
-                            Expression::var(match_.clone()),
-                            Expression::undefined(true),
-                        ),
-                        vec![Statement::return_(Expression::string("fallback"))],
-                        vec![],
-                    )),
-                    Statement::new(StatementDesc::If(
-                        Expression::bin(
-                            BinOp::NotEqEq,
-                            Expression::var(value.clone()),
-                            Expression::undefined(true),
-                        ),
-                        vec![Statement::return_(Expression::string("fallback"))],
-                        vec![Statement::return_(Expression::string("success"))],
-                    )),
-                ],
-                env: Default::default(),
-                return_unit: false,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(
-            rendered.contains("if (match !== undefined && value === undefined) {"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("return \"success\";"), "{rendered}");
-        assert!(rendered.contains("return \"fallback\";"), "{rendered}");
-        assert!(
-            !rendered.contains("if (match === undefined) {"),
-            "{rendered}"
-        );
-        assert!(
-            !rendered.contains("if (value !== undefined) {"),
-            "{rendered}"
-        );
-    }
-
-    #[test]
-    fn test_print_non_unit_function_body_collapses_shared_success_else_if_chain_like_ocaml() {
-        let show = Ident::create_local("show");
-        let a = Ident::create_local("a");
-        let b = Ident::create_local("b");
-        let c = Ident::create_local("c");
-        let result = Ident::create_local("result");
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: show,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![a.clone(), b.clone(), c.clone(), result.clone()],
-                body: vec![Statement::new(StatementDesc::If(
-                    Expression::bin(
-                        BinOp::NotEqEq,
-                        Expression::var(a.clone()),
-                        Expression::number(Number::int(0)),
-                    ),
-                    vec![Statement::return_(Expression::var(result.clone()))],
-                    vec![Statement::new(StatementDesc::If(
-                        Expression::bin(
-                            BinOp::NotEqEq,
-                            Expression::var(b.clone()),
-                            Expression::number(Number::int(0)),
-                        ),
-                        vec![Statement::return_(Expression::var(result.clone()))],
-                        vec![Statement::new(StatementDesc::If(
-                            Expression::bin(
-                                BinOp::NotEqEq,
-                                Expression::var(c.clone()),
-                                Expression::number(Number::int(0)),
-                            ),
-                            vec![Statement::return_(Expression::var(result.clone()))],
-                            vec![Statement::return_(Expression::string("zeroes"))],
-                        ))],
-                    ))],
-                ))],
-                env: Default::default(),
-                return_unit: false,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(
-            rendered.contains("if (a === 0 && b === 0 && c === 0) {"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("return \"zeroes\";"), "{rendered}");
-        assert!(rendered.contains("return result;"), "{rendered}");
-        assert!(!rendered.contains("if (a !== 0) {"), "{rendered}");
-        assert!(!rendered.contains("else if (b !== 0) {"), "{rendered}");
-        assert!(!rendered.contains("else if (c !== 0) {"), "{rendered}");
-    }
-
-    #[test]
-    fn test_print_non_unit_function_body_inverts_shared_success_or_guard_into_fallthrough() {
-        let show = Ident::create_local("show");
-        let a = Ident::create_local("a");
-        let b = Ident::create_local("b");
-        let c = Ident::create_local("c");
-        let result = Ident::create_local("result");
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: show,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![a.clone(), b.clone(), c.clone(), result.clone()],
-                body: vec![Statement::new(StatementDesc::If(
-                    Expression::bin(
-                        BinOp::Or,
-                        Expression::bin(
-                            BinOp::Or,
-                            Expression::bin(
-                                BinOp::NotEqEq,
-                                Expression::var(a.clone()),
-                                Expression::number(Number::int(0)),
-                            ),
-                            Expression::bin(
-                                BinOp::NotEqEq,
-                                Expression::var(b.clone()),
-                                Expression::number(Number::int(0)),
-                            ),
-                        ),
-                        Expression::bin(
-                            BinOp::NotEqEq,
-                            Expression::var(c.clone()),
-                            Expression::number(Number::int(0)),
-                        ),
-                    ),
-                    vec![Statement::return_(Expression::var(result.clone()))],
-                    vec![Statement::return_(Expression::string("zeroes"))],
-                ))],
-                env: Default::default(),
-                return_unit: false,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(
-            rendered.contains("if (a === 0 && b === 0 && c === 0) {"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("return \"zeroes\";"), "{rendered}");
-        assert!(rendered.contains("return result;"), "{rendered}");
-        assert!(
-            !rendered.contains("if (a !== 0 || b !== 0 || c !== 0) {"),
-            "{rendered}"
-        );
-        assert!(!rendered.contains("} else {"), "{rendered}");
-    }
-
-    #[test]
-    fn test_print_non_unit_function_body_drops_dead_undefined_binding_before_throw_guard() {
-        let assert_f = Ident::create_local("assert_f");
-        let x = Ident::create_local("x");
-        let match_ = Ident::create_local("match");
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: assert_f,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![x.clone()],
-                body: vec![
-                    Statement::variable(VariableDeclaration {
-                        ident: match_.clone(),
-                        value: None,
-                        property: crate::lambda::lam_compat::LetKind::Strict,
-                        ident_info: Default::default(),
-                    }),
-                    Statement::new(StatementDesc::If(
-                        Expression::bin(
-                            BinOp::Gt,
-                            Expression::var(x.clone()),
-                            Expression::number(Number::int(3)),
-                        ),
-                        vec![Statement::exp(Expression::bin(
-                            BinOp::Eq,
-                            Expression::var(match_),
-                            Expression::undefined(true),
-                        ))],
-                        vec![Statement::throw(Expression::string("boom"))],
-                    )),
-                    Statement::return_(Expression::number(Number::int(3))),
-                ],
-                env: Default::default(),
-                return_unit: false,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(rendered.contains("if (x <= 3) {"), "{rendered}");
-        assert!(rendered.contains("throw \"boom\";"), "{rendered}");
-        assert!(rendered.contains("return 3;"), "{rendered}");
-        assert!(!rendered.contains("let match;"), "{rendered}");
-        assert!(!rendered.contains("match = undefined;"), "{rendered}");
-        assert!(!rendered.contains("if (x > 3) {"), "{rendered}");
-        assert!(!rendered.contains("} else {"), "{rendered}");
-    }
-
-    #[test]
-    fn test_print_non_unit_function_body_drops_dead_undefined_binding_before_throw_guard_when_wrapped()
-     {
-        let assert_f = Ident::create_local("assert_f");
-        let x = Ident::create_local("x");
-        let match_ = Ident::create_local("match");
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: assert_f,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![x.clone()],
-                body: vec![Statement::new(StatementDesc::Block(vec![
-                    Statement::variable(VariableDeclaration {
-                        ident: match_.clone(),
-                        value: None,
-                        property: crate::lambda::lam_compat::LetKind::Strict,
-                        ident_info: Default::default(),
-                    }),
-                    Statement::new(StatementDesc::If(
-                        Expression::bin(
-                            BinOp::Gt,
-                            Expression::var(x.clone()),
-                            Expression::number(Number::int(3)),
-                        ),
-                        vec![Statement::exp(Expression::bin(
-                            BinOp::Eq,
-                            Expression::var(match_),
-                            Expression::undefined(true),
-                        ))],
-                        vec![Statement::throw(Expression::string("boom"))],
-                    )),
-                    Statement::return_(Expression::number(Number::int(3))),
-                ]))],
-                env: Default::default(),
-                return_unit: false,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(rendered.contains("if (x <= 3) {"), "{rendered}");
-        assert!(rendered.contains("throw \"boom\";"), "{rendered}");
-        assert!(rendered.contains("return 3;"), "{rendered}");
-        assert!(!rendered.contains("let match;"), "{rendered}");
-        assert!(!rendered.contains("match = undefined;"), "{rendered}");
-    }
-
-    #[test]
     fn test_print_unit_function_body_keeps_single_negative_guard_like_ocaml() {
         let handle = Ident::create_local("handle");
         let q = Ident::create_local("q");
@@ -7203,51 +5244,6 @@ mod tests {
     }
 
     #[test]
-    fn test_print_unit_function_body_flips_single_clean_negative_guard_like_ocaml() {
-        let handle = Ident::create_local("handle");
-        let value = Ident::create_local("value");
-        let state = Ident::create_local("state");
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![value.clone(), state.clone()],
-                body: vec![
-                    Statement::new(StatementDesc::If(
-                        Expression::bin(
-                            BinOp::NotEqEq,
-                            Expression::var(value.clone()),
-                            Expression::string("b"),
-                        ),
-                        vec![Statement::return_(Expression::undefined(true))],
-                        vec![],
-                    )),
-                    Statement::exp(Expression::bin(
-                        BinOp::Eq,
-                        Expression::new(ExpressionDesc::StaticIndex(
-                            Box::new(Expression::var(state)),
-                            "contents".to_string(),
-                            None,
-                        )),
-                        Expression::string("b"),
-                    )),
-                ],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(rendered.contains("if (value === \"b\") {"), "{rendered}");
-        assert!(rendered.contains("state.contents = \"b\";"), "{rendered}");
-        assert!(rendered.contains("return;"), "{rendered}");
-        assert!(!rendered.contains("if (value !== \"b\") {"), "{rendered}");
-    }
-
-    #[test]
     fn test_print_unit_function_body_keeps_single_negative_guard_before_loop_like_ocaml() {
         let handle = Ident::create_local("handle");
         let len = Ident::create_local("len");
@@ -7267,14 +5263,14 @@ mod tests {
                         vec![Statement::return_(Expression::undefined(true))],
                         vec![],
                     )),
-                    Statement::new(StatementDesc::ForRange(
+                    Statement::for_range(
                         None,
                         Some(Expression::number(Number::int(0))),
                         Expression::number(Number::int(1)),
                         k,
                         ForDirection::Up,
                         vec![],
-                    )),
+                    ),
                 ],
                 env: Default::default(),
                 return_unit: true,
@@ -7351,668 +5347,6 @@ mod tests {
             !rendered.contains("if (typeof obj !== \"function\") {"),
             "{rendered}"
         );
-    }
-
-    #[test]
-    #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-    fn test_print_unit_function_body_with_trailing_return_merges_nested_if_without_inner_else() {
-        let handle_key = Ident::create_local("handleKey");
-        let state = Ident::create_local("state");
-        let key = Ident::create_local("key");
-        let do_action = Ident::create_local("doAction");
-        let key_is_space = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(key.clone()),
-            Expression::string("space"),
-        );
-        let state_active = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::var(state.clone())),
-            "active".to_string(),
-            None,
-        ));
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle_key,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![state.clone(), key.clone()],
-                body: vec![
-                    Statement::new(StatementDesc::If(
-                        key_is_space,
-                        vec![Statement::new(StatementDesc::If(
-                            state_active,
-                            vec![
-                                Statement::exp(Expression::call(
-                                    Expression::var(do_action),
-                                    vec![Expression::var(state)],
-                                    CallInfo::default(),
-                                )),
-                                Statement::return_(Expression::undefined(true)),
-                            ],
-                            vec![],
-                        ))],
-                        vec![],
-                    )),
-                    Statement::return_(Expression::undefined(true)),
-                ],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(rendered.contains("if (key === \"space\" && state.active) {"));
-        assert!(rendered.contains("doAction(state);"));
-        assert!(rendered.contains("return;"));
-        assert!(!rendered.contains("if (state.active)"));
-        assert!(!rendered.contains("else"));
-    }
-
-    #[test]
-    fn test_print_unit_function_tail_merges_nested_if_when_outer_else_is_return_undefined() {
-        let handle_key = Ident::create_local("handleKey");
-        let state = Ident::create_local("state");
-        let key = Ident::create_local("key");
-        let do_action = Ident::create_local("doAction");
-        let key_is_space = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(key.clone()),
-            Expression::string("space"),
-        );
-        let state_active = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::var(state.clone())),
-            "active".to_string(),
-            None,
-        ));
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle_key,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![state.clone(), key.clone()],
-                body: vec![Statement::new(StatementDesc::If(
-                    key_is_space,
-                    vec![Statement::new(StatementDesc::If(
-                        state_active,
-                        vec![
-                            Statement::exp(Expression::call(
-                                Expression::var(do_action),
-                                vec![Expression::var(state)],
-                                CallInfo::default(),
-                            )),
-                            Statement::return_(Expression::undefined(true)),
-                        ],
-                        vec![Statement::return_(Expression::undefined(true))],
-                    ))],
-                    vec![Statement::return_(Expression::undefined(true))],
-                ))],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(rendered.contains("if (key === \"space\" && state.active) {"));
-        assert!(rendered.contains("doAction(state);"));
-        assert!(rendered.contains("return;"));
-        assert!(!rendered.contains("if (state.active)"));
-        assert!(!rendered.contains("else"));
-    }
-
-    #[test]
-    fn test_print_unit_function_tail_merges_nested_negative_guard_with_implicit_outer_return() {
-        let foo4 = Ident::create_local("foo4");
-        let x = Ident::create_local("x");
-        let h = Ident::create_local("h");
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: foo4,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![x.clone(), h.clone()],
-                body: vec![Statement::new(StatementDesc::If(
-                    Expression::bin(
-                        BinOp::And,
-                        Expression::bin(
-                            BinOp::EqEqEq,
-                            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                                x.clone(),
-                            )))),
-                            Expression::string("object"),
-                        ),
-                        Expression::bin(
-                            BinOp::EqEqEq,
-                            Expression::new(ExpressionDesc::StaticIndex(
-                                Box::new(Expression::var(x.clone())),
-                                "NAME".to_string(),
-                                None,
-                            )),
-                            Expression::string("Foo"),
-                        ),
-                    ),
-                    vec![Statement::new(StatementDesc::If(
-                        Expression::bin(
-                            BinOp::NotEqEq,
-                            Expression::new(ExpressionDesc::StaticIndex(
-                                Box::new(Expression::var(x.clone())),
-                                "VAL".to_string(),
-                                None,
-                            )),
-                            Expression::number(Number::int(3)),
-                        ),
-                        vec![Statement::return_(Expression::undefined(true))],
-                        vec![Statement::return_(Expression::call(
-                            Expression::var(h),
-                            vec![],
-                            CallInfo::default(),
-                        ))],
-                    ))],
-                    vec![],
-                ))],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(
-            rendered
-                .contains("if (typeof x === \"object\" && x.NAME === \"Foo\" && x.VAL === 3) {"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("return h();"), "{rendered}");
-        assert!(!rendered.contains("if (x.VAL !== 3)"), "{rendered}");
-        assert!(!rendered.contains("} else {"), "{rendered}");
-    }
-
-    #[test]
-    fn test_print_unit_function_body_merges_shared_tail_into_nested_if_else() {
-        let do_with_b = Ident::create_local("doWithB");
-        let console_log = Expression::qualified(
-            ModuleId {
-                id: Ident::create_local("console"),
-                kind: Kind::External {
-                    name: "console".to_string(),
-                    default: false,
-                    import_attributes: None,
-                },
-                dynamic_import: false,
-            },
-            Some("log".to_string()),
-        );
-        let b = Ident::create_local("b");
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: do_with_b,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![b.clone()],
-                body: vec![
-                    Statement::new(StatementDesc::If(
-                        Expression::bin(
-                            BinOp::NotEqEq,
-                            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                                b.clone(),
-                            )))),
-                            Expression::string("object"),
-                        ),
-                        vec![Statement::new(StatementDesc::If(
-                            Expression::bin(
-                                BinOp::EqEqEq,
-                                Expression::var(b),
-                                Expression::string("One"),
-                            ),
-                            vec![
-                                Statement::exp(Expression::call(
-                                    console_log.clone(),
-                                    vec![Expression::string("aaa")],
-                                    CallInfo::default(),
-                                )),
-                                Statement::return_(Expression::undefined(true)),
-                            ],
-                            vec![],
-                        ))],
-                        vec![],
-                    )),
-                    Statement::exp(Expression::call(
-                        console_log,
-                        vec![Expression::string("twwwoooo")],
-                        CallInfo::default(),
-                    )),
-                    Statement::return_(Expression::undefined(true)),
-                ],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(
-            rendered.contains("if (typeof b !== \"object\") {"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("if (b === \"One\") {"), "{rendered}");
-        assert!(rendered.contains("console.log(\"aaa\");"), "{rendered}");
-        assert!(rendered.contains("} else {"), "{rendered}");
-        assert!(
-            rendered.contains("console.log(\"twwwoooo\");"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("return;"), "{rendered}");
-        assert!(!rendered.contains("&&"), "{rendered}");
-    }
-
-    #[test]
-    fn test_print_unit_function_tail_merges_shared_else_guard_like_ocaml() {
-        let handle = Ident::create_local("handle");
-        let outer = Ident::create_local("outer");
-        let value = Ident::create_local("value");
-        let yes = Ident::create_local("yes");
-        let no = Ident::create_local("no");
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![outer.clone(), value.clone()],
-                body: vec![Statement::new(StatementDesc::If(
-                    Expression::var(outer.clone()),
-                    vec![
-                        Statement::new(StatementDesc::If(
-                            Expression::bin(
-                                BinOp::NotEqEq,
-                                Expression::var(value.clone()),
-                                Expression::number(Number::int(3)),
-                            ),
-                            vec![
-                                Statement::exp(Expression::call(
-                                    Expression::var(no.clone()),
-                                    vec![],
-                                    CallInfo::default(),
-                                )),
-                                Statement::return_(Expression::undefined(true)),
-                            ],
-                            vec![],
-                        )),
-                        Statement::exp(Expression::call(
-                            Expression::var(yes),
-                            vec![],
-                            CallInfo::default(),
-                        )),
-                        Statement::return_(Expression::undefined(true)),
-                    ],
-                    vec![
-                        Statement::exp(Expression::call(
-                            Expression::var(no),
-                            vec![],
-                            CallInfo::default(),
-                        )),
-                        Statement::return_(Expression::undefined(true)),
-                    ],
-                ))],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(rendered.contains("if (outer && value === 3) {"));
-        assert!(rendered.contains("yes();"));
-        assert!(rendered.contains("} else {"));
-        assert!(rendered.contains("no();"));
-        assert!(!rendered.contains("if (value !== 3)"));
-        assert!(!rendered.contains("return;"));
-    }
-
-    #[test]
-    fn test_print_unit_function_tail_merges_shared_else_positive_guard_like_iterator_tests() {
-        let handle = Ident::create_local("handle");
-        let value = Ident::create_local("value");
-        let done = Ident::create_local("done");
-        let next = Ident::create_local("next");
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![value.clone()],
-                body: vec![Statement::new(StatementDesc::If(
-                    Expression::bin(
-                        BinOp::NotEqEq,
-                        Expression::var(value.clone()),
-                        Expression::undefined(false),
-                    ),
-                    vec![
-                        Statement::new(StatementDesc::If(
-                            Expression::bin(
-                                BinOp::EqEqEq,
-                                Expression::var(value.clone()),
-                                Expression::number(Number::int(3)),
-                            ),
-                            vec![
-                                Statement::exp(Expression::call(
-                                    Expression::var(done),
-                                    vec![],
-                                    CallInfo::default(),
-                                )),
-                                Statement::return_(Expression::undefined(true)),
-                            ],
-                            vec![],
-                        )),
-                        Statement::exp(Expression::call(
-                            Expression::var(next.clone()),
-                            vec![],
-                            CallInfo::default(),
-                        )),
-                        Statement::return_(Expression::undefined(true)),
-                    ],
-                    vec![
-                        Statement::exp(Expression::call(
-                            Expression::var(next),
-                            vec![],
-                            CallInfo::default(),
-                        )),
-                        Statement::return_(Expression::undefined(true)),
-                    ],
-                ))],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(rendered.contains("if (value === 3) {"), "{rendered}");
-        assert!(rendered.contains("done();"), "{rendered}");
-        assert!(rendered.contains("} else {"), "{rendered}");
-        assert!(rendered.contains("next();"), "{rendered}");
-        assert!(!rendered.contains("if (value !== undefined)"), "{rendered}");
-        assert!(!rendered.contains("return;"), "{rendered}");
-    }
-
-    #[test]
-    fn test_print_unit_function_body_merges_implicit_shared_tail_into_nested_if_else_like_ocaml() {
-        let do_with_b = Ident::create_local("doWithB");
-        let console_log = Expression::qualified(
-            ModuleId {
-                id: Ident::create_local("console"),
-                kind: Kind::External {
-                    name: "console".to_string(),
-                    default: false,
-                    import_attributes: None,
-                },
-                dynamic_import: false,
-            },
-            Some("log".to_string()),
-        );
-        let b = Ident::create_local("b");
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: do_with_b,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![b.clone()],
-                body: vec![
-                    Statement::new(StatementDesc::If(
-                        Expression::bin(
-                            BinOp::NotEqEq,
-                            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                                b.clone(),
-                            )))),
-                            Expression::string("object"),
-                        ),
-                        vec![Statement::new(StatementDesc::If(
-                            Expression::bin(
-                                BinOp::EqEqEq,
-                                Expression::var(b),
-                                Expression::string("One"),
-                            ),
-                            vec![
-                                Statement::exp(Expression::call(
-                                    console_log.clone(),
-                                    vec![Expression::string("aaa")],
-                                    CallInfo::default(),
-                                )),
-                                Statement::return_(Expression::undefined(true)),
-                            ],
-                            vec![],
-                        ))],
-                        vec![],
-                    )),
-                    Statement::exp(Expression::call(
-                        console_log,
-                        vec![Expression::string("twwwoooo")],
-                        CallInfo::default(),
-                    )),
-                ],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(
-            rendered.contains("if (typeof b !== \"object\") {"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("if (b === \"One\") {"), "{rendered}");
-        assert!(rendered.contains("console.log(\"aaa\");"), "{rendered}");
-        assert!(
-            rendered.contains("console.log(\"twwwoooo\");"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("return;"), "{rendered}");
-        assert!(!rendered.contains("&&"), "{rendered}");
-        assert!(rendered.contains("} else {"), "{rendered}");
-    }
-
-    #[test]
-    fn test_print_unit_function_body_merges_implicit_terminal_outer_else_like_do_with_a() {
-        let do_with_a = Ident::create_local("doWithA");
-        let console_log = Expression::qualified(
-            ModuleId {
-                id: Ident::create_local("console"),
-                kind: Kind::External {
-                    name: "console".to_string(),
-                    default: false,
-                    import_attributes: None,
-                },
-                dynamic_import: false,
-            },
-            Some("log".to_string()),
-        );
-        let a = Ident::create_local("a");
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: do_with_a,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![a.clone()],
-                body: vec![
-                    Statement::new(StatementDesc::If(
-                        Expression::bin(
-                            BinOp::NotEqEq,
-                            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                                a.clone(),
-                            )))),
-                            Expression::string("object"),
-                        ),
-                        vec![
-                            Statement::new(StatementDesc::If(
-                                Expression::bin(
-                                    BinOp::EqEqEq,
-                                    Expression::var(a),
-                                    Expression::string("One"),
-                                ),
-                                vec![
-                                    Statement::exp(Expression::call(
-                                        console_log.clone(),
-                                        vec![Expression::string("aaa")],
-                                        CallInfo::default(),
-                                    )),
-                                    Statement::return_(Expression::undefined(true)),
-                                ],
-                                vec![],
-                            )),
-                            Statement::exp(Expression::call(
-                                console_log.clone(),
-                                vec![Expression::string("threeeee")],
-                                CallInfo::default(),
-                            )),
-                            Statement::return_(Expression::undefined(true)),
-                        ],
-                        vec![],
-                    )),
-                    Statement::exp(Expression::call(
-                        console_log,
-                        vec![Expression::string("twwwoooo")],
-                        CallInfo::default(),
-                    )),
-                ],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(
-            rendered.contains("if (typeof a !== \"object\") {"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("if (a === \"One\") {"), "{rendered}");
-        assert!(
-            rendered.contains("console.log(\"threeeee\");"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("} else {"), "{rendered}");
-        assert!(
-            rendered.contains("console.log(\"twwwoooo\");"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("return;"), "{rendered}");
-    }
-
-    #[test]
-    fn test_print_unit_function_body_merges_implicit_shared_else_guard_chain_like_gpr_1891() {
-        let foo = Ident::create_local("foo");
-        let x = Ident::create_local("x");
-        let console_log = Expression::qualified(
-            ModuleId {
-                id: Ident::create_local("console"),
-                kind: Kind::External {
-                    name: "console".to_string(),
-                    default: false,
-                    import_attributes: None,
-                },
-                dynamic_import: false,
-            },
-            Some("log".to_string()),
-        );
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: foo,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![x.clone()],
-                body: vec![
-                    Statement::new(StatementDesc::If(
-                        Expression::bin(
-                            BinOp::EqEqEq,
-                            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                                x.clone(),
-                            )))),
-                            Expression::string("object"),
-                        ),
-                        vec![
-                            Statement::new(StatementDesc::If(
-                                Expression::bin(
-                                    BinOp::EqEqEq,
-                                    Expression::new(ExpressionDesc::StaticIndex(
-                                        Box::new(Expression::var(x.clone())),
-                                        "NAME".to_string(),
-                                        None,
-                                    )),
-                                    Expression::string("Foo"),
-                                ),
-                                vec![
-                                    Statement::new(StatementDesc::If(
-                                        Expression::bin(
-                                            BinOp::NotEqEq,
-                                            Expression::new(ExpressionDesc::StaticIndex(
-                                                Box::new(Expression::var(x.clone())),
-                                                "VAL".to_string(),
-                                                None,
-                                            )),
-                                            Expression::number(Number::int(3)),
-                                        ),
-                                        vec![
-                                            Statement::exp(Expression::call(
-                                                console_log.clone(),
-                                                vec![Expression::string("2")],
-                                                CallInfo::default(),
-                                            )),
-                                            Statement::return_(Expression::undefined(true)),
-                                        ],
-                                        vec![],
-                                    )),
-                                    Statement::exp(Expression::call(
-                                        console_log.clone(),
-                                        vec![Expression::string("1")],
-                                        CallInfo::default(),
-                                    )),
-                                    Statement::return_(Expression::undefined(true)),
-                                ],
-                                vec![],
-                            )),
-                            Statement::exp(Expression::call(
-                                console_log.clone(),
-                                vec![Expression::string("2")],
-                                CallInfo::default(),
-                            )),
-                            Statement::return_(Expression::undefined(true)),
-                        ],
-                        vec![],
-                    )),
-                    Statement::exp(Expression::call(
-                        console_log,
-                        vec![Expression::string("2")],
-                        CallInfo::default(),
-                    )),
-                ],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
-
-        assert!(
-            rendered
-                .contains("if (typeof x === \"object\" && x.NAME === \"Foo\" && x.VAL === 3) {"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("console.log(\"1\");"), "{rendered}");
-        assert!(rendered.contains("} else {"), "{rendered}");
-        assert!(rendered.contains("console.log(\"2\");"), "{rendered}");
-        assert!(!rendered.contains("if (x.NAME === \"Foo\")"), "{rendered}");
-        assert!(!rendered.contains("x.VAL !== 3"), "{rendered}");
-        assert!(!rendered.contains("return;"), "{rendered}");
     }
 
     #[test]
@@ -8523,7 +5857,7 @@ mod tests {
                 env: Default::default(),
                 return_unit: false,
                 async_: false,
-                directive: Some("'use memo'".to_string()),
+                directive: Some(Box::new("'use memo'".to_string())),
             })),
             property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
@@ -8543,7 +5877,7 @@ mod tests {
             env: Default::default(),
             return_unit: false,
             async_: false,
-            directive: Some("'use cache'".to_string()),
+            directive: Some(Box::new("'use cache'".to_string())),
         }));
 
         assert_eq!(
@@ -8607,7 +5941,7 @@ mod tests {
                 Expression::number(Number::int(0)),
             ],
             MutableFlag::Immutable,
-            TagInfo::constructor("::", 1),
+            Box::new(TagInfo::constructor("::", 1)),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  hd: 1,\n  tl: 0\n}");
@@ -8618,7 +5952,7 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::number(Number::int(1))],
             MutableFlag::Immutable,
-            TagInfo::constructor("Some", 1),
+            Box::new(TagInfo::constructor("Some", 1)),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  TAG: \"Some\",\n  _0: 1\n}");
@@ -8632,7 +5966,7 @@ mod tests {
                 Expression::number(Number::int(2)),
             ],
             MutableFlag::Immutable,
-            TagInfo::constructor("A", 2),
+            Box::new(TagInfo::constructor("A", 2)),
         ));
 
         assert_eq!(
@@ -8653,10 +5987,10 @@ mod tests {
                 Expression::undefined(false),
             ],
             MutableFlag::Immutable,
-            TagInfo::record(
+            Box::new(TagInfo::record(
                 vec![("x".to_string(), false), ("i".to_string(), true)],
                 crate::parser::ast::MutableFlag::Immutable,
-            ),
+            )),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  x: 10\n}");
@@ -8667,21 +6001,17 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::string("hello")],
             MutableFlag::Immutable,
-            TagInfo::RecordInlined {
+            Box::new(TagInfo::RecordInlined {
                 name: "One".to_string(),
                 num_nonconst: 1,
-                runtime: crate::types::BlockRuntime {
-                    tag: crate::types::VariantTag {
+                runtime: Box::new(crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
                         name: "One".to_string(),
-                        tag_type: None,
-                    },
-                    tag_name: None,
-                    untagged: false,
-                },
+                        literal: None,
+                    }, tag_name: None })),
                 fields: vec![("name".to_string(), false)],
                 logical_field_count: None,
                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-            },
+            }),
         ));
 
         assert_eq!(
@@ -8698,10 +6028,10 @@ mod tests {
                 Expression::number(Number::int(2)),
             ],
             MutableFlag::Immutable,
-            TagInfo::record(
+            Box::new(TagInfo::record(
                 vec![("0".to_string(), false), ("1".to_string(), false)],
                 crate::parser::ast::MutableFlag::Immutable,
-            ),
+            )),
         ));
 
         assert_eq!(print_expression(&expr), "[\n  1,\n  2\n]");
@@ -8712,7 +6042,7 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::number(Number::int(1))],
             MutableFlag::Immutable,
-            TagInfo::Module(vec!["value".to_string()]),
+            Box::new(TagInfo::Module(vec!["value".to_string()])),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  value: 1\n}");
@@ -8723,7 +6053,7 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::string("Not_found")],
             MutableFlag::Immutable,
-            TagInfo::Extension,
+            Box::new(TagInfo::Extension),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  RE_EXN_ID: \"Not_found\"\n}");
@@ -8737,10 +6067,10 @@ mod tests {
                 Expression::number(Number::int(3)),
             ],
             MutableFlag::Immutable,
-            TagInfo::RecordExt {
+            Box::new(TagInfo::RecordExt {
                 fields: vec!["value".to_string()],
                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-            },
+            }),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  RE_EXN_ID: A,\n  value: 3\n}");
@@ -8752,7 +6082,7 @@ mod tests {
             ExpressionDesc::CamlBlock(
                 vec![Expression::string("Not_found")],
                 MutableFlag::Immutable,
-                TagInfo::Extension,
+                Box::new(TagInfo::Extension),
             ),
         ))]);
 
@@ -8928,7 +6258,7 @@ mod tests {
     }
 
     #[test]
-    fn test_print_string_switch_cases_preserve_marshaled_string_tags() {
+    fn test_print_string_switch_cases_escape_string_tags() {
         let rendered = print_block(&vec![Statement::new(StatementDesc::StringSwitch(
             Expression::var(Ident::create_local("tag")),
             vec![
@@ -8956,7 +6286,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "switch (tag) {\n  case \"\\\"\" :\n    return 1;\n  case \"\\\\\" :\n    return 2;\n  default:\n    return 3;\n}"
+            "switch (tag) {\n  case \"\\\\\\\"\" :\n    return 1;\n  case \"\\\\\\\\\" :\n    return 2;\n  default:\n    return 3;\n}"
         );
     }
 

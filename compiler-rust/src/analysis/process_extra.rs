@@ -1,0 +1,584 @@
+//! References and located items of a module: a port of
+//! analysis/src/process_extra.ml.
+
+use super::process_attributes::{self as attrs, Attrs};
+use super::process_cmt::{dig, Annots, Ctx};
+use super::resolve_path::{self, Resolution};
+use super::shared_types::*;
+use crate::ident::{Ident, IdentFlags};
+use crate::parse_arena::{LidentIdx, LocIdx};
+use crate::parser::longident::Longident;
+use crate::types::decl::ConstructorDescription;
+use crate::types::tast_iterator::{self as ti, TastIterator};
+use crate::types::typedtree as tt;
+use crate::types::{Path, TypeDesc, TypeExprRef};
+
+/// `add_loc_item`.
+fn add_loc_item(extra: &mut Extra, loc: Loc, loc_type: LocType) {
+    if !loc.ghost {
+        extra.loc_items.push(LocItem { loc, loc_type });
+    }
+}
+
+/// `add_reference`.
+fn add_reference(extra: &mut Extra, stamp: i32, loc: Loc) {
+    let mut locs = vec![loc];
+    if let Some(old) = extra.internal_references.find(&stamp) {
+        locs.extend(old.iter().copied());
+    }
+    extra.internal_references.replace(stamp, locs);
+}
+
+/// `extra_for_file`.
+fn extra_for_file(file: &File, types: &crate::types::TypeContext) -> Extra {
+    let mut extra = Extra::default();
+    for (stamp, kind) in file.stamps.iter() {
+        if let StampKind::Module(d) = kind {
+            add_loc_item(&mut extra, d.name.loc, LocType::LModule(LocKind::Definition(*stamp, Tip::Module)));
+            add_reference(&mut extra, *stamp, d.name.loc);
+        }
+    }
+    for (stamp, kind) in file.stamps.iter() {
+        if let StampKind::Value(d) = kind {
+            add_loc_item(
+                &mut extra,
+                d.name.loc,
+                LocType::Typed(d.name.txt.clone(), d.item, LocKind::Definition(*stamp, Tip::Value)),
+            );
+            add_reference(&mut extra, *stamp, d.name.loc);
+        }
+    }
+    for (stamp, kind) in file.stamps.iter() {
+        let StampKind::Type(d) = kind else {
+            continue;
+        };
+        add_loc_item(
+            &mut extra,
+            d.name.loc,
+            LocType::TypeDefinition(d.name.txt.clone(), d.item.decl.clone(), *stamp),
+        );
+        add_reference(&mut extra, *stamp, d.name.loc);
+        match &d.item.kind {
+            TypeKind::Record(labels) => {
+                for label in labels {
+                    add_reference(&mut extra, label.stamp, label.fname.loc);
+                    add_loc_item(
+                        &mut extra,
+                        label.fname.loc,
+                        LocType::Typed(
+                            d.name.txt.clone(),
+                            label.typ,
+                            LocKind::Definition(d.stamp, Tip::Field(label.fname.txt.clone())),
+                        ),
+                    );
+                }
+            }
+            TypeKind::Variant(constructors) => {
+                for c in constructors {
+                    add_reference(&mut extra, c.stamp, c.cname.loc);
+                    let path = Path::Pident(Ident::new(
+                        d.name.txt.as_str(),
+                        c.stamp,
+                        IdentFlags::from_bits_truncate(0),
+                    ));
+                    let t = types.new_type(TypeDesc::Tconstr {
+                        path,
+                        args: Default::default(),
+                        abbrev: types.alloc_abbrev_nil(),
+                    });
+                    add_loc_item(
+                        &mut extra,
+                        c.cname.loc,
+                        LocType::Typed(
+                            d.name.txt.clone(),
+                            t,
+                            LocKind::Definition(d.stamp, Tip::Constructor(c.cname.txt.clone())),
+                        ),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    extra
+}
+
+/// `add_external_reference`.
+fn add_external_reference(extra: &mut Extra, module_name: &str, path: ModulePathList, tip: Tip, loc: Loc) {
+    let key = module_name.to_string();
+    let mut refs = vec![(path, tip, loc)];
+    if let Some(old) = extra.external_references.find(&key) {
+        refs.extend(old.iter().cloned());
+    }
+    extra.external_references.replace(key, refs);
+}
+
+/// `add_file_reference`.
+fn add_file_reference(extra: &mut Extra, module_name: &str, loc: Loc) {
+    let key = module_name.to_string();
+    let mut locs = extra.file_references.find(&key).cloned().unwrap_or_default();
+    locs.insert(std::cmp::Reverse(loc));
+    extra.file_references.replace(key, locs);
+}
+
+/// `Longident.flatten`; `None` for a functor application, where OCaml
+/// raises.
+fn flatten(ctx: &Ctx<'_>, lid: &Longident) -> Option<Vec<String>> {
+    match lid {
+        Longident::Lident(s) => Some(vec![ctx.arena.get_string(*s).to_string()]),
+        Longident::Ldot(lid, s) => {
+            let mut path = flatten(ctx, lid)?;
+            path.push(ctx.arena.get_string(*s).to_string());
+            Some(path)
+        }
+        Longident::Lapply(..) => None,
+    }
+}
+
+fn last(ctx: &Ctx<'_>, lid: &Longident) -> String {
+    ctx.arena.get_string(lid.last_idx()).to_string()
+}
+
+/// `get_type_at_path`.
+enum TypeAtPath {
+    NotFound,
+    Global(String, ModulePathList),
+    Local(Declared<Type>),
+}
+
+/// The fields of a `Texp_record` that `add_for_record` reads.
+struct RecordItem {
+    lid: LidentIdx,
+    loc: LocIdx,
+}
+
+/// The `Tast_iterator` of `get_extra`.
+struct ExtraIterator<'a, 'f> {
+    ctx: Ctx<'a>,
+    file: &'f mut File,
+    env: QueryEnv,
+    extra: Extra,
+}
+
+impl ExtraIterator<'_, '_> {
+    fn loc(&self, idx: LocIdx) -> Loc {
+        Loc::of_idx(self.ctx.arena, idx)
+    }
+
+    fn resolve(&self, path: &Path) -> Resolution {
+        resolve_path::from_compiler_path(self.file, &self.env, path)
+    }
+
+    /// `add_for_path`.
+    fn add_for_path(&mut self, path: &Path, lident: &Longident, loc: Loc, typ: TypeExprRef, tip: Tip) {
+        let ident_name = last(&self.ctx, lident);
+        let ident_loc = loc.end_of_location(ident_name.len() as i32);
+        let loc_type = match self.resolve(path) {
+            Resolution::Stamp(stamp) => {
+                add_reference(&mut self.extra, stamp, ident_loc);
+                LocKind::LocalReference(stamp, tip)
+            }
+            Resolution::NotFound | Resolution::GlobalMod(_) => LocKind::NotFound,
+            Resolution::Global(module_name, path) => {
+                add_external_reference(&mut self.extra, &module_name, path.clone(), tip.clone(), ident_loc);
+                LocKind::GlobalReference(module_name, path, tip)
+            }
+            Resolution::Exported(env, name) => {
+                let kind = match tip {
+                    Tip::Type => ExportedKind::Type,
+                    _ => ExportedKind::Value,
+                };
+                match env.exported.find(kind, &name) {
+                    Some(stamp) => {
+                        add_reference(&mut self.extra, stamp, ident_loc);
+                        LocKind::LocalReference(stamp, tip)
+                    }
+                    None => LocKind::NotFound,
+                }
+            }
+        };
+        add_loc_item(&mut self.extra, loc, LocType::Typed(ident_name, typ, loc_type));
+    }
+
+    /// `add_for_path_parent`.
+    fn add_for_path_parent(&mut self, path: &Path, loc: Loc) {
+        let loc_type = match self.resolve(path) {
+            Resolution::GlobalMod(module_name) => {
+                add_file_reference(&mut self.extra, &module_name, loc);
+                LocType::TopLevelModule(module_name)
+            }
+            Resolution::Stamp(stamp) => {
+                add_reference(&mut self.extra, stamp, loc);
+                LocType::LModule(LocKind::LocalReference(stamp, Tip::Module))
+            }
+            Resolution::NotFound => LocType::LModule(LocKind::NotFound),
+            Resolution::Global(module_name, path) => {
+                add_external_reference(&mut self.extra, &module_name, path.clone(), Tip::Module, loc);
+                LocType::LModule(LocKind::GlobalReference(module_name, path, Tip::Module))
+            }
+            Resolution::Exported(env, name) => match env.exported.find(ExportedKind::Module, &name) {
+                Some(stamp) => {
+                    add_reference(&mut self.extra, stamp, loc);
+                    LocType::LModule(LocKind::LocalReference(stamp, Tip::Module))
+                }
+                None => LocType::LModule(LocKind::NotFound),
+            },
+        };
+        add_loc_item(&mut self.extra, loc, loc_type);
+    }
+
+    /// `get_type_at_path`.
+    fn get_type_at_path(&self, path: &Path) -> TypeAtPath {
+        let find = |stamp: i32| match self.file.stamps.find_type(stamp) {
+            Some(declared) => TypeAtPath::Local(declared.clone()),
+            None => TypeAtPath::NotFound,
+        };
+        match self.resolve(path) {
+            Resolution::GlobalMod(_) | Resolution::NotFound => TypeAtPath::NotFound,
+            Resolution::Global(module_name, path) => TypeAtPath::Global(module_name, path),
+            Resolution::Exported(env, name) => match env.exported.find(ExportedKind::Type, &name) {
+                None => TypeAtPath::NotFound,
+                Some(stamp) => find(stamp),
+            },
+            Resolution::Stamp(stamp) => find(stamp),
+        }
+    }
+
+    fn constr_path(&self, t: TypeExprRef) -> Option<Path> {
+        match &*self.ctx.types.get_desc(dig(self.ctx.types, t)) {
+            TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+            _ => None,
+        }
+    }
+
+    /// The field named `name` of a record type, as a reference.
+    fn field_reference(&mut self, t: &TypeAtPath, name: &str, name_loc: Loc) -> LocKind {
+        match t {
+            TypeAtPath::Local(Declared {
+                stamp,
+                item: Type {
+                    kind: TypeKind::Record(fields),
+                    ..
+                },
+                ..
+            }) => match fields.iter().find(|f| f.fname.txt == name) {
+                Some(field) => {
+                    add_reference(&mut self.extra, field.stamp, name_loc);
+                    LocKind::LocalReference(*stamp, Tip::Field(name.to_string()))
+                }
+                None => LocKind::NotFound,
+            },
+            TypeAtPath::Global(module_name, path) => {
+                let tip = Tip::Field(name.to_string());
+                add_external_reference(&mut self.extra, module_name, path.clone(), tip.clone(), name_loc);
+                LocKind::GlobalReference(module_name.clone(), path.clone(), tip)
+            }
+            _ => LocKind::NotFound,
+        }
+    }
+
+    /// `add_for_field`.
+    fn add_for_field(&mut self, record_type: TypeExprRef, field_type: TypeExprRef, lid: &tt::Loc<LidentIdx>) {
+        let Some(path) = self.constr_path(record_type) else {
+            return;
+        };
+        let t = self.get_type_at_path(&path);
+        let name = last(&self.ctx, self.ctx.arena.get_longident(lid.txt));
+        let name_loc = self.loc(lid.loc).end_of_location(name.len() as i32);
+        let loc_type = self.field_reference(&t, &name, name_loc);
+        add_loc_item(&mut self.extra, name_loc, LocType::Typed(name, field_type, loc_type));
+    }
+
+    /// `add_for_record`.
+    fn add_for_record(&mut self, record_type: TypeExprRef, items: &[RecordItem]) {
+        let Some(path) = self.constr_path(record_type) else {
+            return;
+        };
+        let t = self.get_type_at_path(&path);
+        for item in items {
+            let name = last(&self.ctx, self.ctx.arena.get_longident(item.lid));
+            let name_loc = self.loc(item.loc).end_of_location(name.len() as i32);
+            let loc_type = self.field_reference(&t, &name, name_loc);
+            add_loc_item(&mut self.extra, name_loc, LocType::Typed(name, record_type, loc_type));
+        }
+    }
+
+    /// `add_for_constructor`.
+    fn add_for_constructor(&mut self, constructor_type: TypeExprRef, lid: &tt::Loc<LidentIdx>, constructor: &ConstructorDescription) {
+        let Some(path) = self.constr_path(constructor_type) else {
+            return;
+        };
+        let name = last(&self.ctx, self.ctx.arena.get_longident(lid.txt));
+        let name_loc = self.loc(lid.loc).end_of_location(name.len() as i32);
+        let t = self.get_type_at_path(&path);
+        let loc_type = match &t {
+            TypeAtPath::Local(Declared {
+                stamp,
+                item: Type {
+                    kind: TypeKind::Variant(constructors),
+                    ..
+                },
+                ..
+            }) => match constructors.iter().find(|c| c.cname.txt == constructor.cstr_name) {
+                Some(c) => {
+                    add_reference(&mut self.extra, c.stamp, name_loc);
+                    LocKind::LocalReference(*stamp, Tip::Constructor(name.clone()))
+                }
+                None => LocKind::NotFound,
+            },
+            TypeAtPath::Global(module_name, path) => {
+                let tip = Tip::Constructor(name.clone());
+                add_external_reference(&mut self.extra, module_name, path.clone(), tip.clone(), name_loc);
+                LocKind::GlobalReference(module_name.clone(), path.clone(), tip)
+            }
+            _ => LocKind::NotFound,
+        };
+        add_loc_item(&mut self.extra, name_loc, LocType::Typed(name, constructor_type, loc_type));
+    }
+
+    /// `add_for_longident`.
+    fn add_for_longident(&mut self, top: Option<(TypeExprRef, Tip)>, path: &Path, txt: &Longident, loc: Loc) {
+        // `lid_is_complex` is false for every longident.
+        if loc.ghost {
+            return;
+        }
+        let Some(flat) = flatten(&self.ctx, txt) else {
+            return;
+        };
+        let id_length = flat.join(".").len() as i32;
+        let reported_length = loc.end.cnum - loc.start.cnum;
+        let is_ppx = id_length != reported_length;
+        if is_ppx {
+            match top {
+                Some((t, tip)) => self.add_for_path(path, txt, loc, t, tip),
+                None => self.add_for_path_parent(path, loc),
+            }
+        } else {
+            let l = loc.end_of_location(last(&self.ctx, txt).len() as i32);
+            match top {
+                Some((t, tip)) => self.add_for_path(path, txt, l, t, tip),
+                None => self.add_for_path_parent(path, l),
+            }
+            if let (Path::Pdot(pinner, _, _), Longident::Ldot(inner, name)) = (path, txt) {
+                let name_len = self.ctx.arena.get_string(*name).len() as i32;
+                self.add_for_longident(None, pinner, inner, loc.chop_location_end(name_len + 1));
+            }
+        }
+    }
+
+    fn add_for_lident(&mut self, top: Option<(TypeExprRef, Tip)>, path: &Path, lid: &tt::Loc<LidentIdx>) {
+        let txt = self.ctx.arena.get_longident(lid.txt).clone();
+        let loc = self.loc(lid.loc);
+        self.add_for_longident(top, path, &txt, loc);
+    }
+
+    /// `handle_module_expr`.
+    fn handle_module_expr(&mut self, expr: &tt::ModuleExprDesc) {
+        match expr {
+            tt::ModuleExprDesc::Tmod_constraint(expr, _, _, _) => self.handle_module_expr(&expr.mod_desc),
+            tt::ModuleExprDesc::Tmod_ident(path, lid) => self.add_for_lident(None, path, lid),
+            tt::ModuleExprDesc::Tmod_functor(_, _, _, result) => self.handle_module_expr(&result.mod_desc),
+            tt::ModuleExprDesc::Tmod_apply(obj, arg, _) => {
+                self.handle_module_expr(&obj.mod_desc);
+                self.handle_module_expr(&arg.mod_desc);
+            }
+            _ => {}
+        }
+    }
+
+    /// `add_for_declared_pattern` of `pat`.
+    fn add_for_declared_pattern(&mut self, stamp: i32, name: Located<String>, extent: Loc, item: TypeExprRef, attributes: Attrs<'_>) {
+        if self.file.stamps.find_value(stamp).is_none() {
+            let declared = attrs::new_declared(item, extent, name.clone(), stamp, ModulePath::NotVisible, false, attributes);
+            self.file.stamps.add_value(stamp, declared);
+            add_reference(&mut self.extra, stamp, name.loc);
+            add_loc_item(
+                &mut self.extra,
+                name.loc,
+                LocType::Typed(name.txt, item, LocKind::Definition(stamp, Tip::Value)),
+            );
+        }
+    }
+
+    /// A `Tpat_var`/`Tpat_alias` binding.
+    fn add_for_pattern_binding(&mut self, pattern: &tt::Pattern, ident: &Ident, name: &tt::Loc<String>) {
+        let stamp = ident.binding_time();
+        let name = Located {
+            txt: name.txt.clone(),
+            loc: self.loc(name.loc),
+        };
+        let has_unpack = pattern
+            .pat_extra
+            .iter()
+            .any(|(extra, _, _)| matches!(extra, tt::PatExtra::Tpat_unpack));
+        let unpacked = if has_unpack {
+            match &*self.ctx.types.get_desc(dig(self.ctx.types, pattern.pat_type)) {
+                TypeDesc::Tpackage { path, .. } => Some(path.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let attributes = Attrs::Parsed(pattern.pat_attributes.as_slice(), self.ctx.arena);
+        match unpacked {
+            Some(path) => {
+                let extent = name.loc;
+                let declared = attrs::new_declared(Module::Ident(path), extent, name, stamp, ModulePath::NotVisible, false, attributes);
+                self.file.stamps.add_module(stamp, declared);
+            }
+            None => {
+                let extent = self.loc(pattern.pat_loc);
+                self.add_for_declared_pattern(stamp, name, extent, pattern.pat_type, attributes);
+            }
+        }
+    }
+}
+
+impl TastIterator for ExtraIterator<'_, '_> {
+    fn structure_item(&mut self, item: &tt::StructureItem) {
+        match &item.str_desc {
+            tt::StructureItemDesc::Tstr_include(incl) => self.handle_module_expr(&incl.incl_mod.mod_desc),
+            tt::StructureItemDesc::Tstr_module(mb) => self.handle_module_expr(&mb.mb_expr.mod_desc),
+            tt::StructureItemDesc::Tstr_open(open) => {
+                let lid = tt::Loc {
+                    txt: open.open_txt.txt,
+                    loc: open.open_txt.loc,
+                };
+                self.add_for_lident(None, &open.open_path, &lid);
+            }
+            _ => {}
+        }
+        ti::walk_structure_item(self, item)
+    }
+
+    fn signature_item(&mut self, item: &tt::TypedSignatureItem) {
+        if let tt::TypedSignatureItemDesc::Tsig_value(vd) = &item.sig_desc {
+            let stamp = vd.val_id.binding_time();
+            if self.file.stamps.find_value(stamp).is_none() {
+                let name = Located {
+                    txt: vd.val_name.txt.clone(),
+                    loc: self.loc(vd.val_name.loc),
+                };
+                let declared = attrs::new_declared(
+                    vd.val_desc.ctyp_type,
+                    self.loc(vd.val_loc),
+                    name.clone(),
+                    stamp,
+                    ModulePath::NotVisible,
+                    false,
+                    Attrs::Parsed(vd.val_attributes.as_slice(), self.ctx.arena),
+                );
+                self.file.stamps.add_value(stamp, declared);
+                add_reference(&mut self.extra, stamp, name.loc);
+                add_loc_item(
+                    &mut self.extra,
+                    name.loc,
+                    LocType::Typed(name.txt, vd.val_desc.ctyp_type, LocKind::Definition(stamp, Tip::Value)),
+                );
+            }
+        }
+        ti::walk_signature_item(self, item)
+    }
+
+    fn typ(&mut self, item: &tt::TypedCoreType) {
+        if let tt::TypedCoreTypeDesc::Ttyp_constr(path, lid, _) = &item.ctyp_desc {
+            self.add_for_lident(Some((item.ctyp_type, Tip::Type)), path, lid);
+        }
+        ti::walk_typ(self, item)
+    }
+
+    fn pat(&mut self, pattern: &tt::Pattern) {
+        match &pattern.pat_desc {
+            tt::PatternDesc::Tpat_record(items, _, rest) => {
+                let record_items: Vec<RecordItem> = items
+                    .iter()
+                    .map(|(lid, _, _, _)| RecordItem {
+                        lid: lid.txt,
+                        loc: lid.loc,
+                    })
+                    .collect();
+                self.add_for_record(pattern.pat_type, &record_items);
+                if let Some(rest) = rest {
+                    let name = Located {
+                        txt: rest.rest_name.txt.clone(),
+                        loc: self.loc(rest.rest_name.loc),
+                    };
+                    let extent = name.loc;
+                    let attributes = Attrs::Parsed(pattern.pat_attributes.as_slice(), self.ctx.arena);
+                    self.add_for_declared_pattern(rest.rest_ident.binding_time(), name, extent, rest.rest_type, attributes);
+                }
+            }
+            tt::PatternDesc::Tpat_construct(lid, constructor, _) => {
+                self.add_for_constructor(pattern.pat_type, lid, constructor)
+            }
+            tt::PatternDesc::Tpat_alias(_, ident, name) | tt::PatternDesc::Tpat_var(ident, name) => {
+                self.add_for_pattern_binding(pattern, ident, name)
+            }
+            _ => {}
+        }
+        ti::walk_pat(self, pattern)
+    }
+
+    fn expr(&mut self, expression: &tt::Expression) {
+        match &expression.exp_desc {
+            // `Jsx_hacks.path_is_fragment`
+            tt::ExpressionDesc::Texp_ident(path, lid, _) if path.name() != "ReasonReact.fragment" => {
+                self.add_for_lident(Some((expression.exp_type, Tip::Value)), path, lid)
+            }
+            tt::ExpressionDesc::Texp_record { fields, .. } | tt::ExpressionDesc::Texp_record_sparse { fields, .. } => {
+                let items: Vec<RecordItem> = fields
+                    .iter()
+                    .filter_map(|(_, _, def, _)| match def {
+                        tt::RecordLabelDefinition::Overridden(lid, _) => Some(RecordItem {
+                            lid: lid.txt,
+                            loc: lid.loc,
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                self.add_for_record(expression.exp_type, &items);
+            }
+            tt::ExpressionDesc::Texp_constant(constant) => {
+                let loc = self.loc(expression.exp_loc);
+                add_loc_item(&mut self.extra, loc, LocType::Constant(constant.clone()));
+            }
+            tt::ExpressionDesc::Texp_construct(lid, constructor, _) => {
+                // Skip unit and list literals.
+                let skip = match self.ctx.arena.get_longident(lid.txt) {
+                    Longident::Lident(name) => {
+                        let loc = self.loc(lid.loc);
+                        matches!(self.ctx.arena.get_string(*name), "()" | "::") && loc.end.cnum - loc.start.cnum != 2
+                    }
+                    _ => false,
+                };
+                if !skip {
+                    self.add_for_constructor(expression.exp_type, lid, constructor);
+                }
+            }
+            tt::ExpressionDesc::Texp_field(inner, lid, _) => self.add_for_field(inner.exp_type, expression.exp_type, lid),
+            _ => {}
+        }
+        ti::walk_expr(self, expression)
+    }
+}
+
+/// `get_extra`. Values and modules the walk finds (local bindings) are
+/// added to the file's stamps, as OCaml's shared stamp table is updated.
+pub fn get_extra(ctx: Ctx<'_>, file: &mut File, annots: Annots<'_>) -> Extra {
+    let extra = extra_for_file(file, ctx.types);
+    let env = QueryEnv::from_file(file);
+    let mut iterator = ExtraIterator { ctx, file, env, extra };
+    match annots {
+        Annots::Implementation(items) => {
+            for item in items {
+                iterator.structure_item(item);
+            }
+        }
+        Annots::Interface(items) => {
+            for item in items {
+                iterator.signature_item(item);
+            }
+        }
+    }
+    iterator.extra
+}

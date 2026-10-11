@@ -35,19 +35,19 @@ pub fn log_not_implemented(x: &str) {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Optional {
     Mandatory,
     Optional,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Mutable {
     Immutable,
     Mutable,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LabelJs {
     NullLabel,
     UndefinedLabel,
@@ -57,7 +57,7 @@ pub enum LabelJs {
     StringLabel(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Case {
     pub label_js: LabelJs,
 }
@@ -89,14 +89,14 @@ pub fn label_js_to_string(case: &Case) -> String {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ClosedFlag {
     Open,
     Closed,
     Inline,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Type {
     Array(Box<Type>, Mutable),
     Dict(Box<Type>),
@@ -114,13 +114,13 @@ pub enum Type {
 
 pub type Fields = Vec<Field>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArgType {
     pub a_name: String,
     pub a_type: Type,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Field {
     pub mutable_: Mutable,
     pub name_js: String,
@@ -129,21 +129,21 @@ pub struct Field {
     pub doc_string: doc_string::T,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Function {
     pub arg_types: Vec<ArgType>,
     pub ret_type: Box<Type>,
     pub type_vars: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Ident {
     pub builtin: bool,
     pub name: String,
     pub type_args: Vec<Type>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Variant {
     pub inherits: Vec<Type>,
     pub no_payloads: Vec<Case>,
@@ -153,7 +153,7 @@ pub struct Variant {
     pub unboxed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Payload {
     pub case: Case,
     pub t: Type,

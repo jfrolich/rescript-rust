@@ -65,7 +65,7 @@ pub fn format_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
                 write!(f, "'\\x{c:02x}'")
             }
         }
-        Constant::String { s, .. } => write!(f, "{s:?}"),
+        Constant::String(s) => write!(f, "{s:?}"),
         Constant::ImmString(s) => write!(f, "#{s:?}"),
         Constant::Float(s) => write!(f, "{s}"),
         Constant::BigInt { negative, value } => {
@@ -128,19 +128,14 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::Pignore => write!(f, "ignore"),
         Primitive::PcreateExtension(s) => write!(f, "extension[{s}]"),
         Primitive::PextensionSlotEq => write!(f, "#extension_slot_eq"),
-        Primitive::PwrapExn => write!(f, "#exn"),
         Primitive::PinitMod => write!(f, "init_mod!"),
         Primitive::PupdateMod => write!(f, "update_mod!"),
         Primitive::PjsApply => write!(f, "#apply"),
         Primitive::PjsRuntimeApply => write!(f, "#runtime_apply"),
-        Primitive::PtaggedTemplate => write!(f, "#tagged_template"),
-        Primitive::PjsUnsafeDowngrade { name, setter } => {
-            if *setter {
-                write!(f, "##{name}#=")
-            } else {
-                write!(f, "##{name}")
-            }
-        }
+        Primitive::PtaggedTemplate(_) => write!(f, "#tagged_template"),
+        Primitive::Ptemplate(_) => write!(f, "#template"),
+        Primitive::PjsObjectGet(name) => write!(f, "js_object_get[{name}]"),
+        Primitive::PjsObjectSet(name) => write!(f, "js_object_set[{name}]"),
         Primitive::PfnArity => write!(f, "fn.length"),
         Primitive::PjsFnMethod => write!(f, "js_fn_method"),
         Primitive::Pdebugger => write!(f, "debugger"),
@@ -156,9 +151,7 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::PvalFromOptionNotNest => write!(f, "[?unbox-not-nest]"),
         Primitive::PisUndefined => write!(f, "[?undefined]"),
         Primitive::PisNullUndefined => write!(f, "[?null?undefined]"),
-        Primitive::Pnull => write!(f, "null"),
-        Primitive::Pundefined => write!(f, "undefined"),
-        Primitive::Pimport => write!(f, "import"),
+        Primitive::Pimport(_) => write!(f, "import"),
         Primitive::Pmakeblock(tag_info, Mutable::Immutable) => {
             write!(f, "makeblock {}", tag_info.tag_label())
         }
@@ -212,8 +205,6 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::Pintorder => write!(f, "compare"),
         Primitive::Pintmin => write!(f, "min"),
         Primitive::Pintmax => write!(f, "max"),
-        Primitive::Poffsetint(n) => write!(f, "{n}+"),
-        Primitive::Poffsetref(n) => write!(f, "+:={n}"),
         Primitive::Pintoffloat => write!(f, "int_of_float"),
         Primitive::Pfloatofint => write!(f, "float_of_int"),
         Primitive::Pnegfloat => write!(f, "~-."),
@@ -263,7 +254,6 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::Parraysets => write!(f, "array.set"),
         Primitive::Pisint => write!(f, "isint"),
         Primitive::PisPolyVarBlock => write!(f, "#is_poly_var_block"),
-        Primitive::Pisout(i) => write!(f, "isout {i}"),
         Primitive::Pawait => write!(f, "await"),
         Primitive::Phash => write!(f, "hash"),
         Primitive::PhashMixint => write!(f, "hash_mix_int"),
@@ -311,13 +301,7 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt
     match lam {
         Lambda::Lvar(id) => write!(f, "{}", id.name()),
 
-        Lambda::LglobalModule(id, dynamic_import) => {
-            if *dynamic_import {
-                write!(f, "dynamic global {}", id.name())
-            } else {
-                write!(f, "global {}", id.name())
-            }
-        }
+        Lambda::LglobalModule(id) => write!(f, "global {}", id.name()),
 
         Lambda::Lconst(c) => format_constant(c, f),
 
@@ -385,12 +369,8 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt
         Lambda::Lprim(prim_info) => {
             // Special case for module field access
             if let Primitive::Pfield(n, FieldDbgInfo::Module { name }) = &prim_info.primitive {
-                if let [Lambda::LglobalModule(id, dynamic_import)] = prim_info.args.as_slice() {
-                    if *dynamic_import {
-                        return write!(f, "dynamic {}.{name}/{n}", id.name());
-                    } else {
-                        return write!(f, "{}.{name}/{n}", id.name());
-                    }
+                if let [Lambda::LglobalModule(id)] = prim_info.args.as_slice() {
+                    return write!(f, "{}.{name}/{n}", id.name());
                 }
             }
 
@@ -641,12 +621,9 @@ fn format_raw_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::PjsFnMethod => write!(f, "#fn_method"),
         Primitive::Pjscomp(cmp) => write!(f, "{}", format_comparison(*cmp)),
         Primitive::Pstringadd => write!(f, "string.concat"),
-        Primitive::PwrapExn => write!(f, "wrap_exn"),
         Primitive::PextensionSlotEq => write!(f, "#extension_slot_eq"),
         Primitive::PinitMod => write!(f, "#init_mod"),
         Primitive::PupdateMod => write!(f, "#update_mod"),
-        Primitive::Pnull => write!(f, "null"),
-        Primitive::Pundefined => write!(f, "undefined"),
         Primitive::PnullToOpt => write!(f, "null_to_opt"),
         Primitive::PnullUndefinedToOpt => write!(f, "nullable_to_opt"),
         Primitive::PisNotNone => write!(f, "#is_not_none"),
@@ -694,7 +671,7 @@ fn format_raw_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
                 write!(f, "'\\x{c:02x}'")
             }
         }
-        Constant::String { s, .. } => write!(f, "{s:?}"),
+        Constant::String(s) => write!(f, "{s:?}"),
         Constant::ImmString(s) => write!(f, "#{s:?}"),
         Constant::Float(s) => write!(f, "{s}"),
         Constant::BigInt { negative, value } => {
@@ -737,12 +714,8 @@ fn raw_innermost_let_body<'a>(mut lam: &'a Lambda) -> &'a Lambda {
 fn format_raw_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt::Result {
     match lam {
         Lambda::Lvar(id) => format_raw_ident(id, f),
-        Lambda::LglobalModule(id, dynamic_import) => {
-            if *dynamic_import {
-                write!(f, "dynamic global ")?;
-            } else {
-                write!(f, "global ")?;
-            }
+        Lambda::LglobalModule(id) => {
+            write!(f, "global ")?;
             format_raw_ident(id, f)
         }
         Lambda::Lconst(c) => format_raw_constant(c, f),
@@ -807,10 +780,7 @@ fn format_raw_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) ->
         }
         Lambda::Lprim(prim_info) => {
             if let Primitive::Pfield(n, FieldDbgInfo::Module { name }) = &prim_info.primitive {
-                if let [Lambda::LglobalModule(id, dynamic_import)] = prim_info.args.as_slice() {
-                    if *dynamic_import {
-                        write!(f, "dynamic ")?;
-                    }
+                if let [Lambda::LglobalModule(id)] = prim_info.args.as_slice() {
                     format_raw_ident(id, f)?;
                     return write!(f, ".{name}/{n}");
                 }
@@ -1130,13 +1100,9 @@ mod tests {
     #[test]
     fn test_print_global_module() {
         let m = Ident::create_local("Module");
-        let global = Lambda::global_module(m, false);
+        let global = Lambda::global_module(m);
         let s = lambda_to_string(&global);
         assert!(s.contains("global Module"));
-
-        let dynamic = Lambda::global_module(Ident::create_local("DynModule"), true);
-        let s = lambda_to_string(&dynamic);
-        assert!(s.contains("dynamic global DynModule"));
     }
 
     #[test]

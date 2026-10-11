@@ -38,6 +38,15 @@ let extract_internal_loc_attr attr_name attrs =
   in
   loop [] attrs
 
+let extract_ternary_attr (attrs : Pt.attributes) =
+  let rec loop rev_acc = function
+    | [] -> (false, List.rev rev_acc)
+    | ({txt = "res.ternary"}, Pt.PStr []) :: rest ->
+      (true, List.rev_append rev_acc rest)
+    | attr :: rest -> loop (attr :: rev_acc) rest
+  in
+  loop [] attrs
+
 type mapper = {
   attribute: mapper -> attribute -> Pt.attribute;
   attributes: mapper -> attribute list -> Pt.attribute list;
@@ -82,11 +91,80 @@ let map_tuple3 f1 f2 f3 (x, y, z) = (f1 x, f2 y, f3 z)
 let map_opt f = function
   | None -> None
   | Some x -> Some (f x)
-let map_constant = function
+let has_template_attr attrs =
+  Ext_list.exists attrs (fun ({txt}, _) -> txt = "res.template")
+
+let remove_template_attr attrs =
+  List.filter (fun ({Location.txt}, _) -> txt <> "res.template") attrs
+
+let semantic_string semantic =
+  Pt.Pconst_string (String_literal.string_from_semantic semantic)
+
+let source_string ~loc source =
+  match String_literal.string_from_source source with
+  | Some payload -> Pt.Pconst_string payload
+  | None -> Location.raise_errorf ~loc "Invalid string escape sequence"
+
+let template_source_from0 = function
+  | source, Some ("js" | "*j") -> source
+  | semantic, _ ->
+    String_literal.template_source
+      (String_literal.template_from_semantic semantic)
+
+let map_constant ~loc = function
   | Pconst_integer (s, suffix) -> Pt.Pconst_integer (s, suffix)
-  | Pconst_char c -> Pconst_char c
-  | Pconst_string (s, q) -> Pconst_string (s, q)
+  | Pconst_char semantic ->
+    (* Ast0 stores only the code point, so source spelling cannot survive the
+       PPX bridge. Reconstruct a valid canonical spelling on the way back. *)
+    Pconst_char {source = String_literal.encode_char_source semantic; semantic}
+  | Pconst_string (s, Some ("js" | "*j")) -> source_string ~loc s
+  | Pconst_string (s, None) -> semantic_string s
+  | Pconst_string (s, Some "json") -> Pconst_json s
+  (* Other v0 quotation delimiters are syntax, not part of the string value.
+     Tagged ReScript templates are represented as applications before PPX. *)
+  | Pconst_string (semantic, Some _) -> semantic_string semantic
   | Pconst_float (s, suffix) -> Pconst_float (s, suffix)
+
+let map_pattern_constant ~loc = function
+  | Pconst_string (_, Some tag) when tag <> "js" && tag <> "*j" ->
+    Location.raise_errorf ~loc
+      "Tagged template literals are not supported in patterns"
+  | constant -> map_constant ~loc constant
+
+let is_raw_source_extension = function
+  | "raw" | "ffi" -> true
+  | _ -> false
+
+let map_raw_source_payload sub = function
+  | PStr
+      [
+        {
+          pstr_desc =
+            Pstr_eval
+              ( {
+                  pexp_desc = Pexp_constant (Pconst_string (s, _));
+                  pexp_loc;
+                  pexp_attributes;
+                },
+                eval_attributes );
+          pstr_loc;
+        };
+      ] ->
+    let expression =
+      Ast_helper.Exp.constant
+        ~loc:(sub.location sub pexp_loc)
+        ~attrs:(sub.attributes sub pexp_attributes)
+        (Pt.Pconst_raw_source s)
+    in
+    Some
+      (Pt.PStr
+         [
+           Ast_helper.Str.eval
+             ~loc:(sub.location sub pstr_loc)
+             ~attrs:(sub.attributes sub eval_attributes)
+             expression;
+         ])
+  | _ -> None
 
 let for_of_attr_name = "_res.for_of"
 let for_await_of_attr_name = "_res.for_await_of"
@@ -95,6 +173,54 @@ let map_loc sub {loc; txt} = {loc = sub.location sub loc; txt}
 
 (* Internal Parsetree0 bridge metadata; public res.* attributes pass through. *)
 let record_rest_attr_name = "_res.record_rest"
+let constructor_args_attr_name = "_res.constructor_args"
+
+let has_explicit_arity_attr (attrs : Pt.attributes) =
+  List.exists
+    (function
+      | {txt = "ocaml.explicit_arity" | "explicit_arity"}, _ -> true
+      | _ -> false)
+    attrs
+
+let remove_constructor_args_attr (attrs : Pt.attributes) =
+  let rec loop rev_attrs = function
+    | ({Location.txt}, Pt.PStr []) :: attrs
+      when txt = constructor_args_attr_name ->
+      (true, List.rev_append rev_attrs attrs)
+    | attr :: attrs -> loop (attr :: rev_attrs) attrs
+    | [] -> (false, List.rev rev_attrs)
+  in
+  loop [] attrs
+
+(* Constructor argument bridge contract (shared with Ast_mapper_to0):
+
+   The current parsetree records source argument lists, not declaration arity.
+   Frozen v0 has only an optional payload, so encoding multiple arguments
+   packs them into a tuple and adds [_res.constructor_args] to the constructor.
+   A single tuple argument needs no marker. List cons nodes also need none:
+   their tuple payload always means head and tail, preserving the v0 wire shape.
+   Polymorphic variant type payload groups use the same encoding, with the
+   marker on the tuple type itself.
+
+   Decoding consumes the internal marker and restores the source list.
+   Ordinary constructors also accept PPX-produced [explicit_arity] and
+   [ocaml.explicit_arity] attributes, and split the list constructor [::] when
+   its tuple has no attributes. Attributed tuples remain one payload so
+   their attributes survive another v0 conversion. Other unmarked v0 tuples
+   also remain a single syntactic payload; Typecore resolves semantic grouping
+   once it knows the constructor declaration.
+
+   The tuple used to encode multiple arguments carries the argument-list
+   location, preserving its parentheses span. For a single argument, v0
+   cannot store both the payload and outer argument-list locations: decoding
+   falls back to the payload location. Nullary constructors use the enclosing
+   node location. No location-only attributes are needed. *)
+let decode_args ~map ~tuple_args ~split_tuple = function
+  | None -> []
+  | Some arg -> (
+    match tuple_args arg with
+    | Some (args, []) when split_tuple -> List.map map args
+    | _ -> [map arg])
 
 let record_rest_of_pattern (rest : Pt.pattern) =
   match rest.Pt.ppat_desc with
@@ -123,9 +249,23 @@ module T = struct
   (* Type expressions for the core language *)
 
   let row_field sub = function
-    | Rtag (l, attrs, b, tl) ->
+    | Rtag (l, attrs, b, types) ->
+      let map_group typ =
+        let typ = sub.typ sub typ in
+        let has_constructor_args, attrs =
+          remove_constructor_args_attr typ.ptyp_attributes
+        in
+        let txt =
+          match typ.ptyp_desc with
+          | Ptyp_tuple args when has_constructor_args && attrs = [] -> args
+          (* A PPX may annotate the synthesized tuple. Keep its wrapper when
+             consuming the marker so those attributes retain their owner. *)
+          | _ -> [{typ with ptyp_attributes = attrs}]
+        in
+        {loc = typ.ptyp_loc; txt}
+      in
       Pt.Rtag
-        (map_loc sub l, sub.attributes sub attrs, b, List.map (sub.typ sub) tl)
+        (map_loc sub l, sub.attributes sub attrs, b, List.map map_group types)
     | Rinherit t -> Rinherit (sub.typ sub t)
 
   let object_field sub = function
@@ -494,8 +634,36 @@ module E = struct
     let has_jsx_attribute () =
       attrs |> List.exists (fun ({txt}, _) -> txt = "JSX")
     in
+    let first_wrapper =
+      let rec find = function
+        | ({txt = "res.braces" | "ns.braces"; loc}, _) :: _ ->
+          Some (`Braces loc)
+        | ({txt = "res.await"}, _) :: _ -> Some `Await
+        | _ :: rest -> find rest
+        | [] -> None
+      in
+      find e.pexp_attributes
+    in
     match desc with
-    | _ when has_await_attribute attrs ->
+    | _
+      when match first_wrapper with
+           | Some (`Braces _) -> true
+           | _ -> false ->
+      let outer_attrs0, braces_loc, inner_attrs0 =
+        let rec split acc = function
+          | ({Location.txt = "res.braces" | "ns.braces"; loc}, _) :: rest ->
+            (List.rev acc, loc, rest)
+          | a :: rest -> split (a :: acc) rest
+          | [] -> assert false
+        in
+        split [] e.pexp_attributes
+      in
+      let inner = sub.expr sub {e with pexp_attributes = inner_attrs0} in
+      braces
+        ~braces_loc:(sub.location sub braces_loc)
+        ~attrs:(sub.attributes sub outer_attrs0)
+        inner
+    | _ when first_wrapper = Some `Await ->
       (* [Ast_mapper_to0] merges the await node's attributes and the inner
          expression's attributes into the one v0 slot, with [res.await] as
          the boundary: await-node attributes before it, inner attributes
@@ -511,7 +679,15 @@ module E = struct
       let inner = sub.expr sub {e with pexp_attributes = inner_attrs0} in
       await ~loc ~attrs:(sub.attributes sub await_attrs0) inner
     | Pexp_ident x -> ident ~loc ~attrs (map_loc sub x)
-    | Pexp_constant x -> constant ~loc ~attrs (map_constant x)
+    | Pexp_constant (Pconst_string (text, delimiter))
+      when has_template_attr attrs && delimiter <> Some "json" ->
+      let attrs = remove_template_attr attrs in
+      let source = template_source_from0 (text, delimiter) in
+      template ~loc ~attrs [{txt = source; loc}] []
+    | Pexp_constant x ->
+      let template = has_template_attr attrs in
+      let attrs = if template then remove_template_attr attrs else attrs in
+      constant ~loc ~attrs (map_constant ~loc x)
     | Pexp_let (r, vbs, e) ->
       let_ ~loc ~attrs r (List.map (sub.value_binding sub) vbs) (sub.expr sub e)
     | Pexp_fun (lab, def, p, e) ->
@@ -567,6 +743,14 @@ module E = struct
       fun_ ~loc ~attrs
         [{p_attrs = []; p_lbl = Nolabel; p_default = None; p_pat = pat}]
         body
+    | Pexp_apply
+        ( {pexp_desc = Pexp_ident {txt = Longident.Lident "#="}},
+          [
+            (Asttypes.Noloc.Nolabel, {pexp_desc = Pexp_send (e, s)});
+            (Asttypes.Noloc.Nolabel, v);
+          ] ) ->
+      (* Decode the v0 encoding of property assignment. *)
+      object_set ~loc ~attrs (sub.expr sub e) (map_loc sub s) (sub.expr sub v)
     | Pexp_apply ({pexp_desc = Pexp_ident tag_name}, args)
       when has_jsx_attribute () -> (
       let attrs = attrs |> List.filter (fun ({txt}, _) -> txt <> "JSX") in
@@ -599,6 +783,104 @@ module E = struct
         in
         jsx_container_element ~loc ~attrs jsx_tag_name props Lexing.dummy_pos
           children (Some closing_tag))
+    | Pexp_apply
+        ( tag,
+          [
+            (Nolabel, {pexp_desc = Pexp_array segments});
+            (Nolabel, {pexp_desc = Pexp_array values});
+          ] )
+      when List.exists
+             (fun ({Location.txt}, _) -> txt = "res.taggedTemplate")
+             attrs ->
+      let raw_sources =
+        List.map
+          (fun (segment : Parsetree0.expression) ->
+            match segment.pexp_desc with
+            | Pexp_constant (Pconst_string (txt, Some ("js" | "*j"))) ->
+              {Location.txt; loc = sub.location sub segment.pexp_loc}
+            | Pexp_constant (Pconst_string (semantic, _)) ->
+              {
+                Location.txt = template_source_from0 (semantic, None);
+                loc = sub.location sub segment.pexp_loc;
+              }
+            | _ -> assert false)
+          segments
+      in
+      let attrs =
+        List.filter
+          (fun ({Location.txt}, _) -> txt <> "res.taggedTemplate")
+          attrs
+      in
+      tagged_template ~loc ~attrs (sub.expr sub tag) raw_sources
+        (List.map (sub.expr sub) values)
+    | Pexp_apply _ as application when has_template_attr attrs ->
+      let rec flatten acc (expression : Parsetree0.expression) =
+        match expression.pexp_desc with
+        | Pexp_apply
+            ( {pexp_desc = Pexp_ident {txt = Longident.Lident "^"}},
+              [(Nolabel, lhs); (Nolabel, rhs)] )
+          when has_template_attr expression.pexp_attributes ->
+          flatten (rhs :: acc) lhs
+        | _ -> expression :: acc
+      in
+      let parts = flatten [] {e with pexp_desc = application} in
+      let reject_json_interpolation () =
+        Location.raise_errorf ~loc
+          "`json` literals do not support interpolation"
+      in
+      let rec collect sources values = function
+        | [{pexp_desc = Pexp_constant (Pconst_string (_, Some "json"))}] ->
+          reject_json_interpolation ()
+        | [
+            {
+              pexp_desc = Pexp_constant (Pconst_string (text, delimiter));
+              pexp_loc;
+            };
+          ] ->
+          let txt = template_source_from0 (text, delimiter) in
+          Some
+            ( List.rev
+                ({Location.txt; loc = sub.location sub pexp_loc} :: sources),
+              List.rev values )
+        | {pexp_desc = Pexp_constant (Pconst_string (_, Some "json"))}
+          :: _value :: _rest ->
+          reject_json_interpolation ()
+        | {
+            pexp_desc = Pexp_constant (Pconst_string (text, delimiter));
+            pexp_loc;
+          }
+          :: value :: rest ->
+          let txt = template_source_from0 (text, delimiter) in
+          collect
+            ({Location.txt; loc = sub.location sub pexp_loc} :: sources)
+            (value :: values) rest
+        | _ -> None
+      in
+      begin match collect [] [] parts with
+      | Some (sources, values) ->
+        let attrs = remove_template_attr attrs in
+        template ~loc ~attrs sources (List.map (sub.expr sub) values)
+      | None ->
+        let attrs = remove_template_attr attrs in
+        begin match application with
+        | Pexp_apply (e, l) ->
+          let e =
+            match (e.pexp_desc, l) with
+            | ( Pexp_ident ({txt = Longident.Lident "^"} as lid),
+                [(Nolabel, _); (Nolabel, _)] ) ->
+              {
+                e with
+                pexp_desc = Pexp_ident {lid with txt = Longident.Lident "++"};
+              }
+            | _ -> e
+          in
+          apply ~loc ~attrs (sub.expr sub e)
+            (List.map
+               (fun (lbl, e) -> (Asttypes.to_arg_label lbl, sub.expr sub e))
+               l)
+        | _ -> assert false
+        end
+      end
     | Pexp_apply (e, l) ->
       let e =
         match (e.pexp_desc, l) with
@@ -653,9 +935,26 @@ module E = struct
       jsx_fragment ~loc ~attrs loc.loc_start (map_jsx_children sub e)
         loc.loc_end
     | Pexp_construct (lid, arg) -> (
+      let args_loc =
+        match arg with
+        | Some arg -> sub.location sub arg.pexp_loc
+        | None -> loc
+      in
       let lid1 = map_loc sub lid in
-      let arg1 = map_opt (sub.expr sub) arg in
-      let exp1 = construct ~loc ~attrs lid1 arg1 in
+      let has_constructor_args, attrs = remove_constructor_args_attr attrs in
+      let args =
+        decode_args ~map:(sub.expr sub)
+          ~tuple_args:(fun arg ->
+            match arg.pexp_desc with
+            | Pexp_tuple args -> Some (args, arg.pexp_attributes)
+            | _ -> None)
+          ~split_tuple:
+            (has_constructor_args
+            || has_explicit_arity_attr attrs
+            || lid.txt = Longident.Lident "::")
+          arg
+      in
+      let exp1 = construct ~loc ~attrs lid1 {txt = args; loc = args_loc} in
       match lid.txt with
       | Lident "Function$" -> (
         let rec attributes_to_arity (attrs : Parsetree.attributes) =
@@ -675,8 +974,8 @@ module E = struct
           | _ :: rest -> attributes_to_arity rest
           | [] -> assert false
         in
-        match arg1 with
-        | Some ({pexp_desc = Pexp_fun f} as e1) -> (
+        match args with
+        | [({pexp_desc = Pexp_fun f} as e1)] -> (
           let arity = attributes_to_arity attrs in
           (* Gather [arity] parameters from the converted chain of unary
              functions into one n-ary node. Nested first-class functions are
@@ -712,8 +1011,22 @@ module E = struct
             })
         | _ -> exp1)
       | _ -> exp1)
-    | Pexp_variant (lab, eo) ->
-      variant ~loc ~attrs lab (map_opt (sub.expr sub) eo)
+    | Pexp_variant (lab, arg) ->
+      let has_constructor_args, attrs = remove_constructor_args_attr attrs in
+      let args_loc =
+        match arg with
+        | Some arg -> sub.location sub arg.pexp_loc
+        | None -> loc
+      in
+      let args =
+        decode_args ~map:(sub.expr sub)
+          ~tuple_args:(fun arg ->
+            match arg.pexp_desc with
+            | Pexp_tuple args -> Some (args, arg.pexp_attributes)
+            | _ -> None)
+          ~split_tuple:has_constructor_args arg
+      in
+      variant ~loc ~attrs lab {txt = args; loc = args_loc}
     | Pexp_record (l, eo) ->
       record ~loc ~attrs
         (Ext_list.map l (fun (lid, e) ->
@@ -733,9 +1046,15 @@ module E = struct
     | Pexp_setfield (e1, lid, e2) ->
       setfield ~loc ~attrs (sub.expr sub e1) (map_loc sub lid) (sub.expr sub e2)
     | Pexp_array el -> array ~loc ~attrs (List.map (sub.expr sub) el)
-    | Pexp_ifthenelse (e1, e2, e3) ->
-      ifthenelse ~loc ~attrs (sub.expr sub e1) (sub.expr sub e2)
-        (map_opt (sub.expr sub) e3)
+    | Pexp_ifthenelse (e1, e2, e3) -> (
+      let is_ternary, remaining_attrs = extract_ternary_attr attrs in
+      match (is_ternary, e3) with
+      | true, Some alternate ->
+        ternary ~loc ~attrs:remaining_attrs (sub.expr sub e1) (sub.expr sub e2)
+          (sub.expr sub alternate)
+      | _ ->
+        ifthenelse ~loc ~attrs (sub.expr sub e1) (sub.expr sub e2)
+          (map_opt (sub.expr sub) e3))
     | Pexp_sequence (e1, e2) ->
       sequence ~loc ~attrs (sub.expr sub e1) (sub.expr sub e2)
     | Pexp_extension ({txt = "res.break"; _}, PStr []) -> break ~loc ~attrs ()
@@ -763,7 +1082,34 @@ module E = struct
       coerce ~loc ~attrs (sub.expr sub e) (sub.typ sub t2)
     | Pexp_constraint (e, t) ->
       constraint_ ~loc ~attrs (sub.expr sub e) (sub.typ sub t)
-    | Pexp_send (e, s) -> send ~loc ~attrs (sub.expr sub e) (map_loc sub s)
+    | Pexp_send (e, s) ->
+      object_get ~loc ~attrs (sub.expr sub e) (map_loc sub s)
+    | Pexp_extension
+        ( {txt = "obj"},
+          PStr
+            [
+              {
+                pstr_desc =
+                  Pstr_eval ({pexp_desc = Pexp_record (rows, None)}, []);
+              };
+            ] )
+      when List.for_all
+             (fun ((lid : Longident.t Location.loc), _) ->
+               match lid.txt with
+               | Longident.Lident _ -> true
+               | _ -> false)
+             rows ->
+      (* Decode the reserved v0 %obj encoding of object literals. *)
+      object_literal ~loc ~attrs
+        (List.map
+           (fun ((lid : Longident.t Location.loc), e) ->
+             let name =
+               match lid.txt with
+               | Longident.Lident name -> name
+               | _ -> assert false
+             in
+             ({txt = name; loc = lid.loc}, sub.expr sub e))
+           rows)
     | Pexp_new _ -> failwith "Pexp_new is no longer present in ReScript"
     | Pexp_setinstvar _ ->
       failwith "Pexp_setinstvar is no longer present in ReScript"
@@ -829,6 +1175,49 @@ module E = struct
     | Pexp_pack me -> pack ~loc ~attrs (sub.module_expr sub me)
     | Pexp_open (ovf, lid, e) ->
       open_ ~loc ~attrs ovf (map_loc sub lid) (sub.expr sub e)
+    | Pexp_extension ({txt = "re"}, payload) -> (
+      let malformed ~loc =
+        Location.raise_errorf ~loc
+          "A PPX returned a malformed regexp payload. Expected a string \
+           containing one regexp literal."
+      in
+      match payload with
+      | PStr
+          [
+            {
+              pstr_desc =
+                Pstr_eval
+                  ( {
+                      pexp_desc = Pexp_constant (Pconst_string (source, _));
+                      pexp_loc = source_loc;
+                      pexp_attributes = source_attrs;
+                    },
+                    eval_attrs );
+            };
+          ] -> (
+        let env = Parser_env.init_env None source in
+        let (_, expression), errors =
+          Parser_flow.do_parse env Parser_flow.Parse.expression false
+        in
+        match expression with
+        | Flow_ast.Expression.RegExpLiteral {pattern; raw}
+          when errors = [] && Parser_env.Peek.token env = Token.T_EOF ->
+          (* Flow filters unknown flags in its [flags] field. Keep the raw
+             spelling so the bridge never silently changes a PPX's regexp. *)
+          let flags_start = String.length pattern + 2 in
+          let flags =
+            String.sub raw flags_start (String.length raw - flags_start)
+          in
+          (* Payload wrappers disappear at this boundary. Keep the expression's
+             location and transfer both levels of payload attributes to it. *)
+          regexp ~loc
+            ~attrs:
+              (attrs
+              @ sub.attributes sub eval_attrs
+              @ sub.attributes sub source_attrs)
+            pattern flags
+        | _ -> malformed ~loc:(sub.location sub source_loc))
+      | _ -> malformed ~loc)
     | Pexp_extension x -> extension ~loc ~attrs (sub.extension sub x)
     | Pexp_unreachable -> assert false
 end
@@ -844,13 +1233,51 @@ module P = struct
     | Ppat_any -> any ~loc ~attrs ()
     | Ppat_var s -> var ~loc ~attrs (map_loc sub s)
     | Ppat_alias (p, s) -> alias ~loc ~attrs (sub.pat sub p) (map_loc sub s)
-    | Ppat_constant c -> constant ~loc ~attrs (map_constant c)
+    | Ppat_constant c ->
+      let template = has_template_attr attrs in
+      let attrs = if template then remove_template_attr attrs else attrs in
+      constant ~loc ~attrs (map_pattern_constant ~loc c)
     | Ppat_interval (c1, c2) ->
-      interval ~loc ~attrs (map_constant c1) (map_constant c2)
+      interval ~loc ~attrs
+        (map_pattern_constant ~loc c1)
+        (map_pattern_constant ~loc c2)
     | Ppat_tuple pl -> tuple ~loc ~attrs (List.map (sub.pat sub) pl)
-    | Ppat_construct (l, p) ->
-      construct ~loc ~attrs (map_loc sub l) (map_opt (sub.pat sub) p)
-    | Ppat_variant (l, p) -> variant ~loc ~attrs l (map_opt (sub.pat sub) p)
+    | Ppat_construct (l, arg) ->
+      let args_loc =
+        match arg with
+        | Some arg -> sub.location sub arg.ppat_loc
+        | None -> loc
+      in
+      let has_constructor_args, attrs = remove_constructor_args_attr attrs in
+      let args =
+        decode_args ~map:(sub.pat sub)
+          ~tuple_args:(fun arg ->
+            match arg.ppat_desc with
+            | Ppat_tuple args -> Some (args, arg.ppat_attributes)
+            | _ -> None)
+          ~split_tuple:
+            (has_constructor_args
+            || has_explicit_arity_attr attrs
+            || l.txt = Longident.Lident "::")
+          arg
+      in
+      construct ~loc ~attrs (map_loc sub l) {txt = args; loc = args_loc}
+    | Ppat_variant (l, arg) ->
+      let has_constructor_args, attrs = remove_constructor_args_attr attrs in
+      let args_loc =
+        match arg with
+        | Some arg -> sub.location sub arg.ppat_loc
+        | None -> loc
+      in
+      let args =
+        decode_args ~map:(sub.pat sub)
+          ~tuple_args:(fun arg ->
+            match arg.ppat_desc with
+            | Ppat_tuple args -> Some (args, arg.ppat_attributes)
+            | _ -> None)
+          ~split_tuple:has_constructor_args arg
+      in
+      variant ~loc ~attrs l {txt = args; loc = args_loc}
     | Ppat_record (lpl, cf) ->
       let rest, attrs = get_record_rest_attr attrs in
       record ~loc ~attrs ?rest
@@ -873,7 +1300,7 @@ module P = struct
     | Ppat_type s -> type_ ~loc ~attrs (map_loc sub s)
     | Ppat_lazy _ -> failwith "Ppat_lazy is no longer present in ReScript"
     | Ppat_unpack s -> unpack ~loc ~attrs (map_loc sub s)
-    | Ppat_open (lid, p) -> open_ ~loc ~attrs (map_loc sub lid) (sub.pat sub p)
+    | Ppat_open _ -> failwith "Ppat_open is no longer present in ReScript"
     | Ppat_exception p -> exception_ ~loc ~attrs (sub.pat sub p)
     | Ppat_extension x -> extension ~loc ~attrs (sub.extension sub x)
 end
@@ -898,10 +1325,18 @@ let default_mapper =
     extension_constructor = T.map_extension_constructor;
     value_description =
       (fun this {pval_name; pval_type; pval_prim; pval_loc; pval_attributes} ->
+        let prim =
+          match pval_prim with
+          | [] -> None
+          | [s] -> Some (Parsetree.Prim_name s)
+          | _ :: _ :: _ ->
+            Location.raise_errorf ~loc:pval_loc
+              "An external declaration can carry only a single primitive string"
+        in
         Val.mk (map_loc this pval_name) (this.typ this pval_type)
           ~attrs:(this.attributes this pval_attributes)
           ~loc:(this.location this pval_loc)
-          ~prim:pval_prim);
+          ?prim);
     pat = P.map;
     expr = E.map;
     module_declaration =
@@ -969,10 +1404,10 @@ let default_mapper =
               when List.map (fun {txt} -> txt) newtypes
                    = List.map (fun {txt} -> txt) poly_newtypes
                    &&
-                   try
-                     Ast_helper0.Typ.varify_constructors newtypes typ
-                     = poly_type
-                   with Syntaxerr.Error _ -> false ->
+                     try
+                       Ast_helper0.Typ.varify_constructors newtypes typ
+                       = poly_type
+                     with Syntaxerr.Error _ -> false ->
               Some (pat, expr, newtypes, typ)
             | _ -> None)
           | _ -> None
@@ -1018,7 +1453,19 @@ let default_mapper =
           pc_rhs = this.expr this pc_rhs;
         });
     location = (fun _this l -> l);
-    extension = (fun this (s, e) -> (map_loc this s, this.payload this e));
+    extension =
+      (fun this (s, payload) ->
+        if s.txt = "re" then
+          Location.raise_errorf ~loc:(this.location this s.loc)
+            "A PPX returned a regexp extension outside an expression.";
+        let payload =
+          if is_raw_source_extension s.txt then
+            match map_raw_source_payload this payload with
+            | Some payload -> payload
+            | None -> this.payload this payload
+          else this.payload this payload
+        in
+        (map_loc this s, payload));
     attribute = (fun this (s, e) -> (map_loc this s, this.payload this e));
     attributes = (fun this l -> List.map (this.attribute this) l);
     payload =

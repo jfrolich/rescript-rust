@@ -50,11 +50,6 @@ let is_builtin_rank0_type txt =
   | "int" | "char" | "float" | "bool" | "unit" | "exn" | "string" -> true
   | _ -> false
 
-let is_unit (ty : t) =
-  match ty.ptyp_desc with
-  | Ptyp_constr ({txt = Lident "unit"}, []) -> true
-  | _ -> false
-
 (* let is_array (ty : t) =
    match ty.ptyp_desc with
    | Ptyp_constr({txt =Lident "array"}, [_]) -> true
@@ -84,22 +79,6 @@ let is_user_option (ty : t) =
    ]}
    will be recognized as a invalid program
 *)
-let from_labels ~loc arity labels : t =
-  let tyvars =
-    Ext_list.init arity (fun i -> Typ.var ~loc ("a" ^ string_of_int i))
-  in
-  let result_type =
-    Typ.object_ ~loc
-      (Ext_list.map2 labels tyvars (fun x y -> Parsetree.Otag (x, [], y)))
-      Closed
-  in
-  let args =
-    Ext_list.map2 labels tyvars (fun label tyvar ->
-        {Parsetree.attrs = []; lbl = Asttypes.Labelled label; typ = tyvar})
-  in
-  match args with
-  | [] -> result_type
-  | _ -> Typ.arrow ~loc args result_type
 
 let make_obj ~loc xs = Typ.object_ ~loc xs Closed
 

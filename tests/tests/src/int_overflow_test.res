@@ -3,17 +3,16 @@ open Test_utils
 
 @@warning("-107")
 
-let max_int = 2147483647 // 0x80000000
-let min_int = -2147483648 // 0x7FFFFFFF
+let max_int = 2147483647 // 0x7FFFFFFF
+let min_int = -2147483648 // 0x80000000
 
 let hash_variant = s => {
   let accu = ref(0)
   for i in 0 to String.length(s) - 1 {
-    accu :=
-      Int.bitwiseAnd(
-        223 * accu.contents + String.codePointAt(s, i)->Option.getUnsafe,
-        Int.shiftLeft(1, 31) - 1,
-      )
+    accu := Int.bitwiseAnd(
+      223 * accu.contents + String.codePointAt(s, i)->Option.getUnsafe,
+      Int.shiftLeft(1, 31) - 1,
+    )
     /* Here accu is 31 bits, times 223 will not be than 53 bits..
        TODO: we can use `Sys.backend_type` for patching
  */

@@ -6,21 +6,8 @@
 
 use super::lam_tag_info::TagInfo;
 
-/// String delimiter information for template literals
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StringDelim {
-    /// Standard quoted string (`DNone` in OCaml lambda)
-    Plain,
-    /// Escaped JS string delimiter (`*j` / `js`)
-    StarJ,
-    /// No quotes (standard string)
-    NoQuotes,
-    /// Template literal backtick
-    Backtick,
-}
-
 /// Pointer info for tracking constructor origins
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PointerInfo {
     /// No specific info
     None,
@@ -37,7 +24,7 @@ pub enum PointerInfo {
 }
 
 /// Constructor tag information
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ConstructorTag {
     /// Constructor name
     pub name: String,
@@ -50,7 +37,7 @@ pub struct ConstructorTag {
 }
 
 /// Runtime representation selected for an untagged variant constructor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConstructorRuntimeTag {
     Int(i64),
     String(String),
@@ -65,7 +52,7 @@ pub enum ConstructorRuntimeTag {
 ///
 /// These represent compile-time constant values that can be embedded
 /// directly in the generated JavaScript.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Constant {
     /// JavaScript null
     JsNull,
@@ -87,7 +74,7 @@ pub enum Constant {
         /// The integer value (32-bit)
         i: i32,
         /// Optional comment/info about the integer
-        comment: Option<PointerInfo>,
+        comment: Option<Box<PointerInfo>>,
     },
 
     /// Native integer constant kept at 64-bit width.
@@ -95,7 +82,7 @@ pub enum Constant {
         /// The integer value (64-bit)
         i: i64,
         /// Optional comment/info about the integer
-        comment: Option<PointerInfo>,
+        comment: Option<Box<PointerInfo>>,
     },
 
     /// Nullary nominal constructor with its canonical runtime tag.
@@ -104,13 +91,9 @@ pub enum Constant {
     /// Character constant (stored as Unicode code point)
     Char(i32),
 
-    /// String constant
-    String {
-        /// The string value
-        s: String,
-        /// Optional delimiter (for template literals)
-        delim: Option<StringDelim>,
-    },
+    /// A decoded runtime string value; literal source spelling is no longer
+    /// present at this layer.
+    String(String),
 
     /// Immutable string constant (`Const_immstring` in OCaml lambda)
     ImmString(String),
@@ -132,7 +115,7 @@ pub enum Constant {
     /// Block constant (for variants, records, tuples)
     Block {
         /// Tag info for debugging/codegen
-        tag_info: TagInfo,
+        tag_info: Box<TagInfo>,
         /// Block elements
         elements: Vec<Constant>,
     },
@@ -154,24 +137,19 @@ impl Constant {
     pub fn int_with_comment(i: i32, comment: PointerInfo) -> Self {
         Constant::Int {
             i,
-            comment: Some(comment),
+            comment: Some(Box::new(comment)),
         }
     }
 
-    /// Create a string constant
+    /// Create a string constant (`Lambda.Lift.string`).
     pub fn string(s: impl Into<String>) -> Self {
-        Constant::String {
-            s: s.into(),
-            delim: None,
-        }
+        Constant::String(s.into())
     }
 
-    /// Create a string constant with delimiter
-    pub fn string_with_delim(s: impl Into<String>, delim: StringDelim) -> Self {
-        Constant::String {
-            s: s.into(),
-            delim: Some(delim),
-        }
+    /// `Lambda.const_string`: a compiler-generated semantic string constant,
+    /// normalizing malformed filesystem or legacy bytes.
+    pub fn const_string(s: &str) -> Self {
+        Constant::String(crate::string_literal::normalize_semantic(s).into_owned())
     }
 
     /// Create an immutable string constant.
@@ -230,7 +208,7 @@ impl Constant {
             | Constant::Constructor(_)
             | Constant::NativeInt { .. }
             | Constant::Char(_)
-            | Constant::String { .. }
+            | Constant::String(_)
             | Constant::ImmString(_)
             | Constant::Float(_)
             | Constant::BigInt { .. }
@@ -250,9 +228,7 @@ impl Constant {
             (Constant::Constructor(a), Constant::Constructor(b)) => a == b,
             (Constant::NativeInt { i: a, .. }, Constant::NativeInt { i: b, .. }) => a == b,
             (Constant::Char(a), Constant::Char(b)) => a == b,
-            (Constant::String { s: a, delim: da }, Constant::String { s: b, delim: db }) => {
-                a == b && da == db
-            }
+            (Constant::String(a), Constant::String(b)) => a == b,
             (Constant::ImmString(a), Constant::ImmString(b)) => a == b,
             (Constant::Float(a), Constant::Float(b)) => a == b,
             (
@@ -291,18 +267,17 @@ impl Constant {
         match self {
             Constant::Int { i, .. } => *i != 0,
             Constant::NativeInt { i, .. } => *i != 0,
-            Constant::Constructor(tag) => match &tag.tag_type {
+            Constant::Constructor(tag) => match &tag.literal {
                 None => tag.name != "[]",
-                Some(crate::types::VariantTagType::String(value)) => !value.is_empty(),
-                Some(crate::types::VariantTagType::Int(value)) => *value != 0,
-                Some(crate::types::VariantTagType::Bool(value)) => *value,
+                Some(crate::types::VariantLiteralTag::String(value)) => !value.is_empty(),
+                Some(crate::types::VariantLiteralTag::Int(value)) => *value != 0,
+                Some(crate::types::VariantLiteralTag::Bool(value)) => *value,
                 Some(
-                    crate::types::VariantTagType::Null | crate::types::VariantTagType::Undefined,
+                    crate::types::VariantLiteralTag::Null | crate::types::VariantLiteralTag::Undefined,
                 ) => false,
                 Some(
-                    crate::types::VariantTagType::Float(_)
-                    | crate::types::VariantTagType::BigInt(_)
-                    | crate::types::VariantTagType::Untagged(_),
+                    crate::types::VariantLiteralTag::Float(_)
+                    | crate::types::VariantLiteralTag::BigInt(_),
                 ) => true,
             },
             Constant::Char(c) => *c != 0,
@@ -311,7 +286,7 @@ impl Constant {
             | Constant::ModuleAlias
             | Constant::JsUndefined { .. } => false,
             Constant::JsTrue
-            | Constant::String { .. }
+            | Constant::String(_)
             | Constant::ImmString(_)
             | Constant::Pointer(_)
             | Constant::Float(_)
@@ -342,7 +317,7 @@ mod tests {
     fn test_string_constant() {
         let c = Constant::string("hello");
         match c {
-            Constant::String { s, delim: None } => assert_eq!(s, "hello"),
+            Constant::String(s) => assert_eq!(s, "hello"),
             _ => panic!("Expected String"),
         }
     }
@@ -388,14 +363,14 @@ mod tests {
         assert!(!Constant::Some(Box::new(Constant::int(42))).is_allocating());
         assert!(
             Constant::Some(Box::new(Constant::Block {
-                tag_info: TagInfo::Tuple,
+                tag_info: Box::new(TagInfo::Tuple),
                 elements: vec![Constant::int(1)],
             }))
             .is_allocating()
         );
         assert!(
             Constant::Block {
-                tag_info: TagInfo::Tuple,
+                tag_info: Box::new(TagInfo::Tuple),
                 elements: vec![Constant::int(1), Constant::int(2)],
             }
             .is_allocating()

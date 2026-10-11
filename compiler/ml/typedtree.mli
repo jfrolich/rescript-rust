@@ -62,7 +62,6 @@ and pat_extra =
                            where [disjunction] is a [Tpat_or _] representing the
                            branches of [tconst].
          *)
-  | Tpat_open of Path.t * Longident.t loc * Env.t
   | Tpat_unpack
       (** (module P)     { pat_desc  = Tpat_var "P"
                            ; pat_extra = (Tpat_unpack, _, _) :: ... }
@@ -117,7 +116,18 @@ and expression = {
 
 and exp_extra =
   | Texp_constraint of core_type  (** E : T *)
-  | Texp_coerce of core_type  (** E :> T           [Texp_coerce T]
+  | Texp_coerce of {
+      source_type: type_expr;
+      target: core_type;
+      target_type: type_expr;
+    }
+      (** E :> T           [Texp_coerce {source_type; target; target_type}]
+
+            [target] is T as written. [source_type] is the inferred type of E,
+            which the surface syntax never spells out, and [target_type] is the
+            type of T; both are head-expanded, so a consumer without a typing
+            environment can still relate them - e.g. to pair up the record
+            labels a coercion projects.
          *)
   | Texp_open of override_flag * Path.t * Longident.t loc * Env.t
       (** let open[!] M in    [Texp_open (!, P, M, env)]
@@ -224,7 +234,9 @@ and expression_desc =
       * expression
       * direction_flag
       * expression
-  | Texp_send of expression * meth * expression option
+  | Texp_object_get of expression * string Asttypes.loc
+  | Texp_object_set of expression * string Asttypes.loc * expression
+  | Texp_object_literal of (string Asttypes.loc * expression) list
   | Texp_letmodule of Ident.t * string loc * module_expr * expression
   | Texp_letexception of extension_constructor * expression
   | Texp_assert of expression
@@ -235,8 +247,23 @@ and expression_desc =
      breaks analysis when it reads CMTs produced by older compiler versions. *)
   | Texp_for_of of Ident.t * Parsetree.pattern * expression * expression
   | Texp_for_await_of of Ident.t * Parsetree.pattern * expression * expression
-
-and meth = Tmeth_name of string
+  (* A typed JavaScript tagged template. For example, [sql`id = ${id}`] stores
+     the typed [sql] expression in [tag], [raw_sources = ["id = "; ""]], and
+     the typed [id] expression in [values]. Raw sources retain their exact
+     spelling and may contain invalid escapes, as JavaScript permits for tagged
+     templates. There is always one more raw source than value. *)
+  | Texp_tagged_template of {
+      tag: expression;
+      raw_sources: string list;
+      values: expression list;
+    }
+  (* A typed ordinary backquoted template. Each segment contains both its
+     validated source spelling and decoded semantic value; [values] contains
+     the typed interpolated expressions. For example, [`a ${value}\n`] has two
+     segments, with the final one represented as
+     [{source = "\\n"; semantic = "\n"}]. There is always one more segment
+     than value. *)
+  | Texp_template of {segments: template_segment list; values: expression list}
 
 and case = {c_lhs: pattern; c_guard: expression option; c_rhs: expression}
 
@@ -245,6 +272,11 @@ and function_param = {
   fp_param: Ident.t; (* the name the compiled parameter binds to *)
   fp_pat: pattern;
   fp_partial: partial; (* whether [fp_pat] is exhaustive *)
+  fp_has_default: bool;
+      (* optional parameter with a default value. [fp_pat] then binds the
+         option carrier directly to [fp_param] -- a fresh ident named after
+         the label -- and the user's pattern is bound by a let at the head
+         of the body. *)
 }
 
 and record_label_definition =
@@ -458,7 +490,7 @@ and value_description = {
   val_name: string loc;
   val_desc: core_type;
   val_val: Types.value_description;
-  val_prim: string list;
+  val_prim: Parsetree.primitive_repr option;
   val_loc: Location.t;
   val_attributes: attributes;
 }
@@ -485,6 +517,7 @@ and type_kind =
 and label_declaration = {
   ld_id: Ident.t;
   ld_name: string loc;
+  ld_runtime_name: string option;
   ld_mutable: mutable_flag;
   ld_optional: bool;
   ld_type: core_type;
@@ -495,6 +528,7 @@ and label_declaration = {
 and constructor_declaration = {
   cd_id: Ident.t;
   cd_name: string loc;
+  cd_runtime_tag: Variant_runtime.literal_tag option;
   cd_args: constructor_arguments;
   cd_res: core_type option;
   cd_loc: Location.t;

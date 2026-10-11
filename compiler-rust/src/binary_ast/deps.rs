@@ -13,12 +13,12 @@ use crate::parse_arena::{
     CoreTypeIdx, ExprIdx, LidentIdx, ModExprIdx, ModTypeIdx, ParseArena, PatIdx,
 };
 use crate::parser::ast::{
-    Attributes, Case, ConstructorArguments, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
+    Case, ConstructorArguments, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
     ExtensionConstructor, ExtensionConstructorKind, IncludeDeclaration, IncludeDescription,
     LabelDeclaration, ModuleBinding, ModuleDeclaration, ModuleExpr, ModuleExprDesc, ModuleType,
     ModuleTypeDeclaration, ModuleTypeDesc, ObjectField, OpenDescription, Pattern, PatternDesc,
     Payload, RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc,
-    TypeDeclaration, TypeExtension, TypeKind, ValueDescription, WithConstraint,
+    Extension, TypeDeclaration, TypeExtension, TypeKind, ValueDescription, WithConstraint,
 };
 use crate::parser::ast::{PexpApply, PexpFun};
 use crate::parser::longident::Longident;
@@ -31,6 +31,21 @@ pub fn extract_structure_deps(arena: &ParseArena, structure: &[StructureItem]) -
     let mut collector = DependencyCollector::new(arena);
     collector.add_structure(structure);
     collector.finish()
+}
+
+/// The `[%error]` extension OCaml `Depend` raises on while extracting the
+/// dependencies of a structure (depend.ml:92-96), if any.
+pub fn structure_error_extension(arena: &ParseArena, structure: &[StructureItem]) -> Option<Extension> {
+    let mut collector = DependencyCollector::new(arena);
+    collector.add_structure(structure);
+    collector.error_extension
+}
+
+/// The `[%error]` extension OCaml `Depend` raises on for a signature.
+pub fn signature_error_extension(arena: &ParseArena, signature: &[SignatureItem]) -> Option<Extension> {
+    let mut collector = DependencyCollector::new(arena);
+    collector.add_signature(signature);
+    collector.error_extension
 }
 
 /// Extract module dependencies from a signature (interface).
@@ -49,6 +64,9 @@ struct DependencyCollector<'a> {
     /// For locally-bound modules, track names introduced by their inner structure/signature.
     /// Used to model OCaml `open_module` behavior (`open M` brings submodules into scope).
     module_members: HashMap<String, HashSet<String>>,
+    /// The first `[%error]`/`[%ocaml.error]` extension reached; OCaml
+    /// `Depend.handle_extension` (depend.ml:92-96) raises there.
+    error_extension: Option<Extension>,
 }
 
 impl<'a> DependencyCollector<'a> {
@@ -58,6 +76,16 @@ impl<'a> DependencyCollector<'a> {
             deps: BTreeSet::new(),
             bound_modules: HashSet::new(),
             module_members: HashMap::new(),
+            error_extension: None,
+        }
+    }
+
+    /// OCaml `Depend.handle_extension` (depend.ml:92-96).
+    fn handle_extension(&mut self, ext: &Extension) {
+        if self.error_extension.is_none()
+            && matches!(self.arena.get_string(ext.0.txt), "error" | "ocaml.error")
+        {
+            self.error_extension = Some(ext.clone());
         }
     }
 
@@ -75,38 +103,45 @@ impl<'a> DependencyCollector<'a> {
     // ========== Arena index helper methods ==========
 
     fn add_expr_idx(&mut self, idx: ExprIdx) {
-        let expr = self.arena.get_expr(idx).clone();
-        self.add_expression(&expr);
+        let arena = self.arena;
+        let expr = arena.get_expr(idx);
+        self.add_expression(expr);
     }
 
     fn add_pat_idx(&mut self, idx: PatIdx) {
-        let pat = self.arena.get_pat(idx).clone();
-        self.add_pattern(&pat);
+        let arena = self.arena;
+        let pat = arena.get_pat(idx);
+        self.add_pattern(pat);
     }
 
     fn add_pat_idx_collecting_unpack(&mut self, idx: PatIdx) -> HashSet<String> {
-        let pat = self.arena.get_pat(idx).clone();
-        self.add_pattern_collecting_unpack(&pat)
+        let arena = self.arena;
+        let pat = arena.get_pat(idx);
+        self.add_pattern_collecting_unpack(pat)
     }
 
     fn add_pat_idx_inner(&mut self, idx: PatIdx, unpack_names: &mut HashSet<String>) {
-        let pat = self.arena.get_pat(idx).clone();
+        let arena = self.arena;
+        let pat = arena.get_pat(idx);
         self.add_pattern_inner(&pat, unpack_names);
     }
 
     fn add_core_type_idx(&mut self, idx: CoreTypeIdx) {
-        let ty = self.arena.get_core_type(idx).clone();
-        self.add_core_type(&ty);
+        let arena = self.arena;
+        let ty = arena.get_core_type(idx);
+        self.add_core_type(ty);
     }
 
     fn add_mod_expr_idx(&mut self, idx: ModExprIdx) {
-        let me = self.arena.get_mod_expr(idx).clone();
-        self.add_module_expr(&me);
+        let arena = self.arena;
+        let me = arena.get_mod_expr(idx);
+        self.add_module_expr(me);
     }
 
     fn add_mod_type_idx(&mut self, idx: ModTypeIdx) {
-        let mt = self.arena.get_mod_type(idx).clone();
-        self.add_module_type(&mt);
+        let arena = self.arena;
+        let mt = arena.get_mod_type(idx);
+        self.add_module_type(mt);
     }
 
     // ========== Longident methods ==========
@@ -307,8 +342,7 @@ impl<'a> DependencyCollector<'a> {
                 // Attributes don't contribute dependencies
             }
             StructureItemDesc::Pstr_extension(inner) => {
-                // Extension payload ignored for dependency extraction
-                // OCaml's handle_extension ignores extension payloads for dependency extraction
+                self.handle_extension(&inner.0);
             }
         }
     }
@@ -392,8 +426,7 @@ impl<'a> DependencyCollector<'a> {
                 // Attributes don't contribute dependencies
             }
             SignatureItemDesc::Psig_extension(inner) => {
-                // Extension payload ignored for dependency extraction
-                // OCaml's handle_extension ignores extension payloads for dependency extraction
+                self.handle_extension(&inner.0);
             }
         }
     }
@@ -405,7 +438,14 @@ impl<'a> DependencyCollector<'a> {
             ExpressionDesc::Pexp_ident(lid) => {
                 self.add_lident_idx(lid.txt);
             }
-            ExpressionDesc::Pexp_constant(_) => {}
+            ExpressionDesc::Pexp_braces(braces) => self.add_expr_idx(braces.expr),
+            ExpressionDesc::Pexp_constant(_) | ExpressionDesc::Pexp_regexp(_) => {}
+            ExpressionDesc::Pexp_ternary(inner) => {
+                let (cond, consequent, alternate) = **inner;
+                self.add_expr_idx(cond);
+                self.add_expr_idx(consequent);
+                self.add_expr_idx(alternate);
+            }
             ExpressionDesc::Pexp_break | ExpressionDesc::Pexp_continue => {}
             ExpressionDesc::Pexp_let(inner) => {
                 let (ref _rec_flag, ref bindings, ref body) = **inner;
@@ -504,6 +544,17 @@ impl<'a> DependencyCollector<'a> {
                     self.add_expr_idx(*arg);
                 }
             }
+            ExpressionDesc::Pexp_template(template) => {
+                for value in &template.values {
+                    self.add_expr_idx(*value);
+                }
+            }
+            ExpressionDesc::Pexp_tagged_template(template) => {
+                self.add_expr_idx(template.tag);
+                for value in &template.values {
+                    self.add_expr_idx(*value);
+                }
+            }
             ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
                 let (ref expr, ref cases) = **inner;
                 // expr is ExprIdx
@@ -518,20 +569,15 @@ impl<'a> DependencyCollector<'a> {
                     self.add_expr_idx(*expr);
                 }
             }
-            ExpressionDesc::Pexp_construct(lid, arg) => {
+            ExpressionDesc::Pexp_construct(lid, args) => {
                 self.add_lident_idx(lid.txt);
-                if let Some(arg) = arg {
-                    // arg is ExprIdx
-                    let arg = *arg;
-                    self.add_expr_idx(arg);
+                for arg in &args.txt {
+                    self.add_expr_idx(*arg);
                 }
             }
             ExpressionDesc::Pexp_variant(inner) => {
-                let (ref _label, ref arg) = **inner;
-                if let Some(arg) = arg {
-                    // arg is ExprIdx
-                    let arg = *arg;
-                    self.add_expr_idx(arg);
+                for arg in &inner.1.txt {
+                    self.add_expr_idx(*arg);
                 }
             }
             ExpressionDesc::Pexp_record(inner) => {
@@ -625,11 +671,21 @@ impl<'a> DependencyCollector<'a> {
                 }
                 self.add_core_type_idx(*ty2);
             }
-            ExpressionDesc::Pexp_send(inner) => {
+            ExpressionDesc::Pexp_object_get(inner) => {
                 let (ref expr, ref _label) = **inner;
                 // expr is ExprIdx
                 let expr = *expr;
                 self.add_expr_idx(expr);
+            }
+            ExpressionDesc::Pexp_object_set(inner) => {
+                let (ref expr, _, ref value) = **inner;
+                self.add_expr_idx(*expr);
+                self.add_expr_idx(*value);
+            }
+            ExpressionDesc::Pexp_object_literal(fields) => {
+                for (_, e) in fields.iter() {
+                    self.add_expr_idx(*e);
+                }
             }
             ExpressionDesc::Pexp_letmodule(inner) => {
                 let (ref name, ref me, ref body) = **inner;
@@ -682,8 +738,33 @@ impl<'a> DependencyCollector<'a> {
                     self.bound_modules.remove(name);
                 }
             }
-            ExpressionDesc::Pexp_extension(_ext_inner) => {
-                // OCaml's handle_extension ignores extension payloads for dependency extraction
+            ExpressionDesc::Pexp_extension(ext) => {
+                // depend.ml:292-298: `[%extension_constructor C]` depends on
+                // the constructor path.
+                let constructor = match &ext.1 {
+                    Payload::PStr(items)
+                        if items.len() == 1
+                            && matches!(
+                                self.arena.get_string(ext.0.txt),
+                                "ocaml.extension_constructor" | "extension_constructor"
+                            ) =>
+                    {
+                        match items[0].pstr_desc.as_ref() {
+                            StructureItemDesc::Pstr_eval(inner) => {
+                                match self.arena.get_expr(inner.0).pexp_desc.as_ref() {
+                                    ExpressionDesc::Pexp_construct(c, args) if args.txt.is_empty() => Some(c.txt),
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                match constructor {
+                    Some(c) => self.add_lident_idx(c),
+                    None => self.handle_extension(ext),
+                }
             }
             ExpressionDesc::Pexp_await(expr) => {
                 // expr is ExprIdx
@@ -832,24 +913,19 @@ impl<'a> DependencyCollector<'a> {
                     self.add_pat_idx_inner(*pat, unpack_names);
                 }
             }
-            PatternDesc::Ppat_construct(lid, arg) => {
+            PatternDesc::Ppat_construct(lid, args) => {
                 self.add_lident_idx(lid.txt);
-                if let Some(arg) = arg {
-                    // arg is PatIdx
-                    let arg = *arg;
-                    self.add_pat_idx_inner(arg, unpack_names);
+                for arg in &args.txt {
+                    self.add_pat_idx_inner(*arg, unpack_names);
                 }
             }
             PatternDesc::Ppat_variant(inner) => {
-                let (ref _label, ref arg) = **inner;
-                if let Some(arg) = arg {
-                    // arg is PatIdx
-                    let arg = *arg;
-                    self.add_pat_idx_inner(arg, unpack_names);
+                for arg in &inner.1.txt {
+                    self.add_pat_idx_inner(*arg, unpack_names);
                 }
             }
             PatternDesc::Ppat_record(inner) => {
-                let (ref fields, ref _closed) = **inner;
+                let (ref fields, ref _closed, ref record_rest) = **inner;
                 for field in fields {
                     self.add_lident_idx(field.lid.txt);
                     // field.pat is PatIdx
@@ -857,9 +933,8 @@ impl<'a> DependencyCollector<'a> {
                 }
                 // OCaml Depend visits the rest pattern's type annotation
                 // (compiler/ml/depend.ml:187): `...M.t as rest` records a
-                // dependency on M. The rest row lives in a sparse side table
-                // keyed by the pattern location.
-                if let Some(rest) = self.arena.record_pat_rest(pat.ppat_loc)
+                // dependency on M.
+                if let Some(rest) = record_rest
                     && let Some(rest_type) = rest.rest_type
                 {
                     self.add_core_type_idx(rest_type);
@@ -893,15 +968,8 @@ impl<'a> DependencyCollector<'a> {
                 let pat_idx = *pat_idx;
                 self.add_pat_idx_inner(pat_idx, unpack_names);
             }
-            PatternDesc::Ppat_extension(_ext_inner) => {
-                // OCaml's handle_extension ignores extension payloads for dependency extraction
-            }
-            PatternDesc::Ppat_open(lid, pat_idx) => {
-                // Pattern open uses full module path
-                self.add_lident_idx_full(lid.txt);
-                // pat is PatIdx
-                let pat_idx = *pat_idx;
-                self.add_pat_idx_inner(pat_idx, unpack_names);
+            PatternDesc::Ppat_extension(ext) => {
+                self.handle_extension(ext);
             }
         }
     }
@@ -961,9 +1029,8 @@ impl<'a> DependencyCollector<'a> {
                 let (ref rows, ref _closed, ref _labels) = **inner;
                 for row in rows {
                     match row {
-                        RowField::Rtag(_label, _attrs, _bool, tys) => {
-                            for ty in tys {
-                                // ty is CoreTypeIdx
+                        RowField::Rtag(_label, _attrs, _bool, groups) => {
+                            for ty in groups.iter().flat_map(|group| group.txt.iter()) {
                                 self.add_core_type_idx(*ty);
                             }
                         }
@@ -989,8 +1056,8 @@ impl<'a> DependencyCollector<'a> {
                     self.add_core_type_idx(*ty);
                 }
             }
-            CoreTypeDesc::Ptyp_extension(_ext_inner) => {
-                // OCaml's handle_extension ignores extension payloads for dependency extraction
+            CoreTypeDesc::Ptyp_extension(ext) => {
+                self.handle_extension(ext);
             }
         }
     }
@@ -1044,8 +1111,8 @@ impl<'a> DependencyCollector<'a> {
                 let expr = *expr;
                 self.add_expr_idx(expr);
             }
-            ModuleExprDesc::Pmod_extension(_ext_inner) => {
-                // OCaml's handle_extension ignores extension payloads for dependency extraction
+            ModuleExprDesc::Pmod_extension(ext) => {
+                self.handle_extension(ext);
             }
         }
     }
@@ -1097,8 +1164,8 @@ impl<'a> DependencyCollector<'a> {
                 let me = *me;
                 self.add_mod_expr_idx(me);
             }
-            ModuleTypeDesc::Pmty_extension(_ext_inner) => {
-                // OCaml's handle_extension ignores extension payloads for dependency extraction
+            ModuleTypeDesc::Pmty_extension(ext) => {
+                self.handle_extension(ext);
             }
         }
     }
@@ -1296,6 +1363,7 @@ impl<'a> DependencyCollector<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::ast::Attributes;
     use crate::parse_arena::{LocIdx, Located};
 
     /// Parse a dotted string like "Foo.Bar.baz" into a Longident using the arena.

@@ -295,7 +295,7 @@ pub(crate) struct SwitchInput<'a> {
 
 pub(crate) enum LambdaInputView<'a> {
     Var(&'a Ident),
-    GlobalModule(&'a Ident, bool),
+    GlobalModule(&'a Ident),
     Const(&'a Constant),
     Apply(ApplyInput<'a>),
     Function(FunctionInput<'a>),
@@ -332,7 +332,7 @@ impl<'a> LambdaInput<'a> {
         match self {
             Self::Recursive(lambda) => match lambda {
                 Lambda::Lvar(id) => LambdaInputView::Var(id),
-                Lambda::LglobalModule(id, d) => LambdaInputView::GlobalModule(id, *d),
+                Lambda::LglobalModule(id) => LambdaInputView::GlobalModule(id),
                 Lambda::Lconst(c) => LambdaInputView::Const(c),
                 Lambda::Lapply(a) => LambdaInputView::Apply(ApplyInput {
                     function: LambdaInput::Recursive(&a.ap_func),
@@ -424,7 +424,7 @@ impl<'a> LambdaInput<'a> {
             },
             Self::Indexed { store, node } => match store.view(node) {
                 NodeView::Var(id) => LambdaInputView::Var(id),
-                NodeView::GlobalModule(id, d) => LambdaInputView::GlobalModule(id, d),
+                NodeView::GlobalModule(id) => LambdaInputView::GlobalModule(id),
                 NodeView::Const(c) => LambdaInputView::Const(c),
                 NodeView::Apply(f, a, i, j) => LambdaInputView::Apply(ApplyInput {
                     function: Self::Indexed { store, node: f },

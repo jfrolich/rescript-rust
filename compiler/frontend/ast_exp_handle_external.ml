@@ -25,7 +25,7 @@
 let handle_debugger loc (payload : Ast_payload.t) =
   match payload with
   | PStr [] ->
-    Ast_external_mk.local_external_apply loc ~pval_prim:["%debugger"]
+    Ast_external_mk.local_external_apply loc ~pval_prim:(Prim_name "%debugger")
       ~pval_type:
         (Ast_helper.Typ.arrow
            [{attrs = []; lbl = Nolabel; typ = Ast_helper.Typ.any ()}]
@@ -34,25 +34,19 @@ let handle_debugger loc (payload : Ast_payload.t) =
   | _ ->
     Location.raise_errorf ~loc "%%debugger extension doesn't accept arguments"
 
-let handle_raw ~kind loc payload =
+let handle_raw loc payload =
   let is_function = ref None in
-  match Ast_payload.raw_as_string_exp_exn ~kind ~is_function payload with
-  | None -> (
-    match kind with
-    | Raw_re ->
-      Location.raise_errorf ~loc
-        "%%re extension can only be applied to a string"
-    | Raw_exp ->
-      Location.raise_errorf ~loc
-        "%%raw extension can only be applied to a string"
-    | Raw_program ->
-      Location.raise_errorf ~loc
-        "%%%%raw extension can only be applied to a string")
+  match
+    Ast_payload.raw_as_string_exp_exn ~kind:Raw_exp ~is_function payload
+  with
+  | None ->
+    Location.raise_errorf ~loc "%%raw extension can only be applied to a string"
   | Some exp ->
     {
       exp with
       pexp_desc =
-        Ast_external_mk.local_external_apply loc ~pval_prim:["#raw_expr"]
+        Ast_external_mk.local_external_apply loc
+          ~pval_prim:(Prim_name "#raw_expr")
           ~pval_type:
             (Ast_helper.Typ.arrow
                [{attrs = []; lbl = Nolabel; typ = Ast_helper.Typ.any ()}]
@@ -97,7 +91,8 @@ let handle_ffi ~loc ~payload =
       {
         exp with
         pexp_desc =
-          Ast_external_mk.local_external_apply loc ~pval_prim:["#raw_expr"]
+          Ast_external_mk.local_external_apply loc
+            ~pval_prim:(Prim_name "#raw_expr")
             ~pval_type:
               (Ast_helper.Typ.arrow
                  [{attrs = []; lbl = Nolabel; typ = Ast_helper.Typ.any ()}]
@@ -116,7 +111,8 @@ let handle_raw_structure loc payload =
       {
         exp with
         pexp_desc =
-          Ast_external_mk.local_external_apply loc ~pval_prim:["#raw_stmt"]
+          Ast_external_mk.local_external_apply loc
+            ~pval_prim:(Prim_name "#raw_stmt")
             ~pval_type:
               (Ast_helper.Typ.arrow
                  [{attrs = []; lbl = Nolabel; typ = Ast_helper.Typ.any ()}]

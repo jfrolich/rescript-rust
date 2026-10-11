@@ -43,8 +43,11 @@ module Const = struct
   let int64 ?(suffix = 'L') i = integer ~suffix (Int64.to_string i)
   let nativeint ?(suffix = 'n') i = integer ~suffix (Nativeint.to_string i)
   let float ?suffix f = Pconst_float (f, suffix)
-  let char c = Pconst_char (Char.code c)
-  let string ?quotation_delimiter s = Pconst_string (s, quotation_delimiter)
+  let char c =
+    let semantic = Char.code c in
+    Pconst_char {source = String_literal.encode_char_source semantic; semantic}
+  let string semantic =
+    Pconst_string (String_literal.string_from_semantic semantic)
 end
 
 module Typ = struct
@@ -116,8 +119,14 @@ module Typ = struct
       in
       {t with ptyp_desc = desc}
     and loop_row_field = function
-      | Rtag (label, attrs, flag, lst) ->
-        Rtag (label, attrs, flag, List.map loop lst)
+      | Rtag (label, attrs, flag, groups) ->
+        Rtag
+          ( label,
+            attrs,
+            flag,
+            List.map
+              (fun ({txt} as group) -> {group with txt = List.map loop txt})
+              groups )
       | Rinherit t -> Rinherit (loop t)
     and loop_object_field = function
       | Otag (label, attrs, t) -> Otag (label, attrs, loop t)
@@ -145,7 +154,6 @@ module Pat = struct
   let constraint_ ?loc ?attrs a b = mk ?loc ?attrs (Ppat_constraint (a, b))
   let type_ ?loc ?attrs a = mk ?loc ?attrs (Ppat_type a)
   let unpack ?loc ?attrs a = mk ?loc ?attrs (Ppat_unpack a)
-  let open_ ?loc ?attrs a b = mk ?loc ?attrs (Ppat_open (a, b))
   let exception_ ?loc ?attrs a = mk ?loc ?attrs (Ppat_exception a)
   let extension ?loc ?attrs a = mk ?loc ?attrs (Ppat_extension a)
 end
@@ -155,6 +163,8 @@ module Exp = struct
     {pexp_desc = d; pexp_loc = loc; pexp_attributes = attrs}
   let attr d a = {d with pexp_attributes = d.pexp_attributes @ [a]}
 
+  let braces ?(attrs = []) ~braces_loc e =
+    mk ~loc:e.pexp_loc ~attrs (Pexp_braces {expr = e; braces_loc})
   let ident ?loc ?attrs a = mk ?loc ?attrs (Pexp_ident a)
   let constant ?loc ?attrs a = mk ?loc ?attrs (Pexp_constant a)
   let let_ ?loc ?attrs a b c = mk ?loc ?attrs (Pexp_let (a, b, c))
@@ -177,6 +187,8 @@ module Exp = struct
   let setfield ?loc ?attrs a b c = mk ?loc ?attrs (Pexp_setfield (a, b, c))
   let array ?loc ?attrs a = mk ?loc ?attrs (Pexp_array a)
   let ifthenelse ?loc ?attrs a b c = mk ?loc ?attrs (Pexp_ifthenelse (a, b, c))
+  let ternary ?loc ?attrs condition consequent alternate =
+    mk ?loc ?attrs (Pexp_ternary (condition, consequent, alternate))
   let sequence ?loc ?attrs a b = mk ?loc ?attrs (Pexp_sequence (a, b))
   let break ?loc ?attrs () = mk ?loc ?attrs Pexp_break
   let continue ?loc ?attrs () = mk ?loc ?attrs Pexp_continue
@@ -187,13 +199,21 @@ module Exp = struct
     mk ?loc ?attrs (Pexp_for_await_of (a, b, c))
   let constraint_ ?loc ?attrs a b = mk ?loc ?attrs (Pexp_constraint (a, b))
   let coerce ?loc ?attrs a c = mk ?loc ?attrs (Pexp_coerce (a, (), c))
-  let send ?loc ?attrs a b = mk ?loc ?attrs (Pexp_send (a, b))
+  let object_get ?loc ?attrs a b = mk ?loc ?attrs (Pexp_object_get (a, b))
+  let object_set ?loc ?attrs a b c = mk ?loc ?attrs (Pexp_object_set (a, b, c))
+  let object_literal ?loc ?attrs a = mk ?loc ?attrs (Pexp_object_literal a)
   let letmodule ?loc ?attrs a b c = mk ?loc ?attrs (Pexp_letmodule (a, b, c))
   let letexception ?loc ?attrs a b = mk ?loc ?attrs (Pexp_letexception (a, b))
   let assert_ ?loc ?attrs a = mk ?loc ?attrs (Pexp_assert a)
   let pack ?loc ?attrs a = mk ?loc ?attrs (Pexp_pack a)
   let open_ ?loc ?attrs a b c = mk ?loc ?attrs (Pexp_open (a, b, c))
   let extension ?loc ?attrs a = mk ?loc ?attrs (Pexp_extension a)
+  let regexp ?loc ?attrs pattern flags =
+    mk ?loc ?attrs (Pexp_regexp {pattern; flags})
+  let template ?loc ?attrs source_segments values =
+    mk ?loc ?attrs (Pexp_template {source_segments; values})
+  let tagged_template ?loc ?attrs tag raw_sources values =
+    mk ?loc ?attrs (Pexp_tagged_template {tag; raw_sources; values})
   let await ?loc ?attrs a = mk ?loc ?attrs (Pexp_await a)
   let jsx_fragment ?loc ?attrs a b c =
     mk ?loc ?attrs
@@ -233,7 +253,7 @@ module Exp = struct
         | None ->
           let loc = {loc with Location.loc_ghost = true} in
           let nil = Location.mkloc (Longident.Lident "[]") loc in
-          construct ~loc nil None)
+          construct ~loc nil (Location.mkloc [] loc))
       | e1 :: el ->
         let exp_el = handle_seq el in
         let loc =
@@ -244,8 +264,9 @@ module Exp = struct
               loc_ghost = false;
             }
         in
-        let arg = tuple ~loc [e1; exp_el] in
-        construct ~loc (Location.mkloc (Longident.Lident "::") loc) (Some arg)
+        construct ~loc
+          (Location.mkloc (Longident.Lident "::") loc)
+          (Location.mkloc [e1; exp_el] loc)
     in
     let expr = handle_seq seq in
     {expr with pexp_loc = loc}
@@ -316,7 +337,7 @@ module Str = struct
 end
 
 module Val = struct
-  let mk ?(loc = !default_loc) ?(attrs = []) ?(prim = []) name typ =
+  let mk ?(loc = !default_loc) ?(attrs = []) ?prim name typ =
     {
       pval_name = name;
       pval_type = typ;
@@ -369,7 +390,17 @@ end
 
 module Type = struct
   let mk ?(loc = !default_loc) ?(attrs = []) ?(params = []) ?(cstrs = [])
-      ?(kind = Ptype_abstract) ?(priv = Public) ?manifest name =
+      ?(kind = Ptype_abstract) ?(priv = Public) ?manifest ?(origin = Declared)
+      name =
+    let origin, attrs =
+      let rec extract acc = function
+        | ({txt = "res.inlineRecordDefinition"}, _) :: rest ->
+          (Inline_record_definition, List.rev_append acc rest)
+        | attr :: rest -> extract (attr :: acc) rest
+        | [] -> (origin, List.rev acc)
+      in
+      extract [] attrs
+    in
     {
       ptype_name = name;
       ptype_params = params;
@@ -377,30 +408,147 @@ module Type = struct
       ptype_kind = kind;
       ptype_private = priv;
       ptype_manifest = manifest;
+      ptype_origin = origin;
       ptype_attributes = attrs;
       ptype_loc = loc;
     }
 
+  let declaration_attributes (decl : Parsetree.type_declaration) =
+    match decl.ptype_origin with
+    | Declared -> decl.ptype_attributes
+    | Inline_record_definition ->
+      (Location.mknoloc "res.inlineRecordDefinition", PStr [])
+      :: decl.ptype_attributes
+
   let constructor ?(loc = !default_loc) ?(attrs = []) ?(args = Pcstr_tuple [])
-      ?res name =
+      ?res ?runtime_tag name =
+    let runtime_tag, attrs =
+      match runtime_tag with
+      | Some tag -> (Some {Asttypes.txt = tag; loc = name.loc}, attrs)
+      | None -> (
+        (* Only the first [@as] can name the constructor. Leave an invalid
+           first annotation, and everything after it, for the type checker so
+           formatting an invalid file does not change its diagnostics. *)
+        let rec take seen (attrs : Parsetree.attributes) =
+          match attrs with
+          | [] -> (None, [])
+          | (({txt = "as"; loc}, payload) : Parsetree.attribute) :: rest -> (
+            match Ast_payload.constructor_tag_of_payload payload with
+            | Some txt -> (Some {Asttypes.txt; loc}, List.rev_append seen rest)
+            | None -> (None, attrs))
+          | attr :: rest -> take (attr :: seen) rest
+        in
+        match take [] attrs with
+        | None, _ -> (None, attrs)
+        | found -> found)
+    in
     {
       pcd_name = name;
+      pcd_runtime_tag = runtime_tag;
       pcd_args = args;
       pcd_res = res;
       pcd_loc = loc;
       pcd_attributes = attrs;
     }
 
+  let constructor_attributes (cd : Parsetree.constructor_declaration) =
+    match cd.pcd_runtime_tag with
+    | None -> cd.pcd_attributes
+    | Some {txt = tag; loc} ->
+      let expression =
+        match tag with
+        | Pct_string s -> Exp.constant ~loc (Pconst_string s)
+        | Pct_int i -> Exp.constant ~loc (Pconst_integer (i, None))
+        | Pct_float f -> Exp.constant ~loc (Pconst_float (f, None))
+        | Pct_bigint i -> Exp.constant ~loc (Pconst_integer (i, Some 'n'))
+        | Pct_bool b ->
+          Exp.construct ~loc
+            (Location.mkloc
+               (Longident.Lident (if b then "true" else "false"))
+               loc)
+            (Location.mkloc [] loc)
+        | Pct_null ->
+          Exp.ident ~loc (Location.mkloc (Longident.Lident "null") loc)
+        | Pct_undefined ->
+          Exp.ident ~loc (Location.mkloc (Longident.Lident "undefined") loc)
+      in
+      let payload = Parsetree.PStr [Str.eval ~loc expression] in
+      (* Back where it was written, so attributes print in source order. Ppx
+         output has no source position and ties, as for a field's rename
+         above; the tag goes last among the tied. *)
+      let written_earlier (({loc = other}, _) : Parsetree.attribute) =
+        other.loc_start.pos_cnum <= loc.loc_start.pos_cnum
+      in
+      let earlier, later = List.partition written_earlier cd.pcd_attributes in
+      earlier @ ((Location.mkloc "as" loc, payload) :: later)
+
+  (* [@as("x")] on a record field renames it at run time. It is taken out of
+     the attributes here, so every producer - the parser, a ppx, the frozen
+     AST bridge - agrees on what the field is called without re-reading the
+     payload. *)
   let field ?(loc = !default_loc) ?(attrs = []) ?(mut = Immutable)
-      ?(optional = false) name typ =
+      ?(optional = false) ?runtime_name name typ =
+    let runtime_name, attrs =
+      match runtime_name with
+      | Some txt ->
+        ( Some
+            {
+              txt = String_literal.string_from_semantic txt;
+              loc = name.Asttypes.loc;
+            },
+          attrs )
+      | None -> (
+        (* Take out the first [@as] that denotes a name. One whose payload is
+           not a name is left alone: it does not rename the field, and dropping
+           it here would make the printer delete it from the source. *)
+        let rec take seen (attrs : Parsetree.attributes) =
+          match attrs with
+          | [] -> (None, [])
+          | ((({txt = "as"; loc}, payload) : Parsetree.attribute) as attr)
+            :: rest -> (
+            match Ast_payload.string_literal_of_payload payload with
+            | Some txt ->
+              (* A second [@as] is left in the attributes for the type checker
+                 to reject, so that an invalid file can still be printed. *)
+              (Some {Asttypes.txt; loc}, List.rev_append seen rest)
+            | None -> take (attr :: seen) rest)
+          | attr :: rest -> take (attr :: seen) rest
+        in
+        match take [] attrs with
+        | None, _ -> (None, attrs)
+        | found -> found)
+    in
     {
       pld_name = name;
+      pld_runtime_name = runtime_name;
       pld_mutable = mut;
       pld_optional = optional;
       pld_type = typ;
       pld_loc = loc;
       pld_attributes = attrs;
     }
+
+  (* The attributes as they were written, with the runtime name put back.
+     Inverse of the extraction in [field], for printers. *)
+  let field_attributes (ld : Parsetree.label_declaration) =
+    match ld.pld_runtime_name with
+    | None -> ld.pld_attributes
+    | Some {txt; loc} ->
+      let payload =
+        Parsetree.PStr [Str.eval ~loc (Exp.constant ~loc (Pconst_string txt))]
+      in
+      (* Back where it was written: attributes print in source order, so a
+         field declared [@optional @as("x")] must not come out reordered.
+         Ppx output has no source position, so all of it ties on
+         [Location.none]; the rename then goes last among the tied, which is
+         the order a ppx writing [@dead @as("x")] gave. Where it sat exactly
+         is not recoverable without storing an index, which is not worth a
+         field in the AST. *)
+      let written_earlier (({loc = other}, _) : Parsetree.attribute) =
+        other.loc_start.pos_cnum <= loc.loc_start.pos_cnum
+      in
+      let earlier, later = List.partition written_earlier ld.pld_attributes in
+      earlier @ ((Location.mkloc "as" loc, payload) :: later)
 end
 
 (** Type extensions *)

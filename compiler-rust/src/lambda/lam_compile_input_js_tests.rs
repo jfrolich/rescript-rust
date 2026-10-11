@@ -22,14 +22,15 @@ fn indexed_identity_module_emits_original_identifier_with_all_flags() {
         )
     };
     for inline in [false, true] {
-        for dynamic in [None, Some(false), Some(true)] {
-            let base = match dynamic {
-                None => Lambda::var(target.clone()),
-                Some(dynamic) => Lambda::LglobalModule(target.clone(), dynamic),
+        for global in [false, true] {
+            let base = if global {
+                Lambda::LglobalModule(target.clone())
+            } else {
+                Lambda::var(target.clone())
             };
             // Exercise the consumer shape without the producer smart constructor
             // collapsing the inlined module wrapper first.
-            let body = Lambda::Lprim(PrimInfo {
+            let body = Lambda::Lprim(Box::new(PrimInfo {
                 primitive: Primitive::Pmakeblock(
                     crate::lambda::TagInfo::Module(vec!["value".into()]),
                     Mutable::Immutable,
@@ -40,7 +41,7 @@ fn indexed_identity_module_emits_original_identifier_with_all_flags() {
                     Lambda::var(alias.clone())
                 }],
                 loc: Location::none(),
-            });
+            }));
             let body = if inline {
                 body
             } else {
@@ -56,9 +57,9 @@ fn indexed_identity_module_emits_original_identifier_with_all_flags() {
                 ))
                 .expect("identity module");
             let actual = match &expr.desc {
-                ExpressionDesc::Var(VIdent::Id(id)) if dynamic.is_none() => id,
-                ExpressionDesc::Var(VIdent::Qualified(module, None)) => {
-                    assert_eq!(Some(module.dynamic_import), dynamic);
+                ExpressionDesc::Var(VIdent::Id(id)) if !global => id,
+                ExpressionDesc::Var(VIdent::Qualified(module, None)) if global => {
+                    assert!(!module.dynamic_import);
                     &module.id
                 }
                 other => panic!("unexpected expression: {other:?}"),
@@ -123,15 +124,6 @@ fn primitive_js_boundary_preserves_prelude_and_shared_dynamic_import_allocator()
         true,
         false,
     );
-    let module = ModuleId {
-        id: Ident::new("External", 411, crate::ident::IdentFlags::JS_OBJECT),
-        kind: Kind::External {
-            name: "external-package".into(),
-            default: false,
-            import_attributes: None,
-        },
-        dynamic_import: true,
-    };
     let before = Statement::exp(Expression::call(
         Expression::var(Ident::create_persistent("before")),
         vec![],
@@ -139,8 +131,15 @@ fn primitive_js_boundary_preserves_prelude_and_shared_dynamic_import_allocator()
     ));
     let prelude_text = print_block(&vec![before.clone()]);
     let compiled = compiler.compile_primitive_js(
-        &Primitive::Pimport,
-        vec![Expression::qualified(module, Some("value".into()))],
+        &Primitive::Pimport(Box::new(crate::lambda::lam_primitive::ImportSource::ImportExternal {
+            module_: crate::lambda::lam_primitive::ExternalModuleName {
+                bundle: "external-package".into(),
+                module_bind_name: crate::lambda::lam_primitive::ModuleBindName::PhintNothing,
+                import_attributes: None,
+            },
+            path: vec!["value".into()],
+        })),
+        vec![],
         vec![before],
         &Location::none(),
     );
@@ -148,7 +147,9 @@ fn primitive_js_boundary_preserves_prelude_and_shared_dynamic_import_allocator()
     let js = print_expression(&compiled.expr);
     assert!(js.contains("import(\"external-package\")"), "{js}");
     assert!(js.contains(".then("), "{js}");
-    assert_eq!(generator.current_stamp(), 901);
+    // `Lam_compile_env.add_js_module` allocates the module binding, then
+    // `wrap_then_path` the callback parameter.
+    assert_eq!(generator.current_stamp(), 902);
     match &compiler.id_gen {
         LambdaIdGenerator::Shared(actual) => assert!(Arc::ptr_eq(actual, &generator)),
         LambdaIdGenerator::Owned(_) => panic!("generator replaced"),

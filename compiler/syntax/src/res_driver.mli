@@ -9,34 +9,24 @@ type ('ast, 'diagnostics) parse_result = {
 
 type 'diagnostics parsing_engine = {
   parse_implementation:
-    for_printer:bool ->
-    filename:string ->
-    (Parsetree.structure, 'diagnostics) parse_result;
+    filename:string -> (Parsetree.structure, 'diagnostics) parse_result;
   parse_implementation_from_source:
-    for_printer:bool ->
-    source:string ->
-    (Parsetree.structure, 'diagnostics) parse_result;
+    source:string -> (Parsetree.structure, 'diagnostics) parse_result;
   parse_interface:
-    for_printer:bool ->
-    filename:string ->
-    (Parsetree.signature, 'diagnostics) parse_result;
+    filename:string -> (Parsetree.signature, 'diagnostics) parse_result;
   parse_interface_from_source:
-    for_printer:bool ->
-    source:string ->
-    (Parsetree.signature, 'diagnostics) parse_result;
+    source:string -> (Parsetree.signature, 'diagnostics) parse_result;
   string_of_diagnostics:
     source:string -> filename:string -> 'diagnostics -> unit;
 }
 
 val parse_implementation_from_source :
-  for_printer:bool ->
   display_filename:string ->
   source:string ->
   (Parsetree.structure, Res_diagnostics.t list) parse_result
 [@@live]
 
 val parse_interface_from_source :
-  for_printer:bool ->
   display_filename:string ->
   source:string ->
   (Parsetree.signature, Res_diagnostics.t list) parse_result
@@ -49,21 +39,9 @@ type print_engine = {
     comments:Res_comment.t list ->
     Parsetree.structure ->
     unit;
-  print_implementation_from_source:
-    width:int ->
-    source:string ->
-    comments:Res_comment.t list ->
-    Parsetree.structure ->
-    unit;
   print_interface:
     width:int ->
     filename:string ->
-    comments:Res_comment.t list ->
-    Parsetree.signature ->
-    unit;
-  print_interface_from_source:
-    width:int ->
-    source:string ->
     comments:Res_comment.t list ->
     Parsetree.signature ->
     unit;

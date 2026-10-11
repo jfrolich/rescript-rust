@@ -4,7 +4,7 @@
 //! projections, and marks dead code for elimination.
 
 use ahash::AHashMap as HashMap;
-use std::collections::HashSet;
+use ahash::AHashSet as HashSet;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
@@ -142,7 +142,7 @@ fn flatten_and_mark_dead_statement(
                         }
 
                         let rewritten_value = Expression {
-                            source_loc,
+                            source_loc: source_loc.clone(),
                             desc: ExpressionDesc::CamlBlock(
                                 rewritten_items,
                                 MutableFlag::Immutable,
@@ -153,7 +153,7 @@ fn flatten_and_mark_dead_statement(
                         substitution.insert(decl.ident.clone(), rewritten_value.clone());
 
                         let original = Statement {
-                            source_loc,
+                            source_loc: source_loc.clone(),
                             desc: StatementDesc::Variable(VariableDeclaration {
                                 ident: decl.ident,
                                 value: Some(rewritten_value),
@@ -182,7 +182,7 @@ fn flatten_and_mark_dead_statement(
                     // object shape is already materialized before this pass in
                     // the OCaml backend.
                     return Statement {
-                        source_loc,
+                        source_loc: source_loc.clone(),
                         desc: {
                             let rewritten_value = Expression {
                                 source_loc,
@@ -281,9 +281,9 @@ fn flatten_and_mark_dead_statement(
             desc: StatementDesc::ForRange(
                 label,
                 start.map(|expr| {
-                    flatten_and_mark_dead_expression(expr, id_gen, substitution, jsx_preserve)
+                    Box::new(flatten_and_mark_dead_expression(*expr, id_gen, substitution, jsx_preserve))
                 }),
-                flatten_and_mark_dead_expression(finish, id_gen, substitution, jsx_preserve),
+                Box::new(flatten_and_mark_dead_expression(*finish, id_gen, substitution, jsx_preserve)),
                 ident,
                 direction,
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
@@ -295,7 +295,7 @@ fn flatten_and_mark_dead_statement(
             desc: StatementDesc::ForOf(
                 label,
                 ident,
-                flatten_and_mark_dead_expression(iterable, id_gen, substitution, jsx_preserve),
+                Box::new(flatten_and_mark_dead_expression(*iterable, id_gen, substitution, jsx_preserve)),
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
             ),
             comment,
@@ -305,7 +305,7 @@ fn flatten_and_mark_dead_statement(
             desc: StatementDesc::ForAwaitOf(
                 label,
                 ident,
-                flatten_and_mark_dead_expression(iterable, id_gen, substitution, jsx_preserve),
+                Box::new(flatten_and_mark_dead_expression(*iterable, id_gen, substitution, jsx_preserve)),
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
             ),
             comment,
@@ -416,7 +416,7 @@ fn flatten_and_mark_dead_expression(
     substitution: &mut HashMap<Ident, Expression>,
     jsx_preserve: bool,
 ) -> Expression {
-    if let Some(rewritten) = try_substitute_caml_block_projection(&expr, substitution) {
+    if let Some(rewritten) = try_substitute_caml_block_projection(&expr, substitution, jsx_preserve) {
         return rewritten;
     }
 
@@ -547,19 +547,7 @@ fn flatten_and_mark_dead_expression(
                 jsx_preserve,
             )),
             args.into_iter()
-                .enumerate()
-                .map(|(index, arg)| {
-                    if jsx_preserve && info.call_transformed_jsx && index == 0 {
-                        flatten_and_mark_dead_transformed_jsx_tag_expression(
-                            arg,
-                            id_gen,
-                            substitution,
-                            jsx_preserve,
-                        )
-                    } else {
-                        flatten_and_mark_dead_expression(arg, id_gen, substitution, jsx_preserve)
-                    }
-                })
+                .map(|arg| flatten_and_mark_dead_expression(arg, id_gen, substitution, jsx_preserve))
                 .collect(),
             info,
         ),
@@ -595,12 +583,7 @@ fn flatten_and_mark_dead_expression(
                 substitution,
                 jsx_preserve,
             )),
-            strings
-                .into_iter()
-                .map(|value| {
-                    flatten_and_mark_dead_expression(value, id_gen, substitution, jsx_preserve)
-                })
-                .collect(),
+            strings,
             values
                 .into_iter()
                 .map(|value| {
@@ -608,6 +591,15 @@ fn flatten_and_mark_dead_expression(
                 })
                 .collect(),
         ),
+        ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
+            segments,
+            values: values
+                .into_iter()
+                .map(|value| {
+                    flatten_and_mark_dead_expression(value, id_gen, substitution, jsx_preserve)
+                })
+                .collect(),
+        },
         ExpressionDesc::StaticIndex(target, field, pos) => {
             let target =
                 flatten_and_mark_dead_expression(*target, id_gen, substitution, jsx_preserve);
@@ -651,7 +643,9 @@ fn flatten_and_mark_dead_expression(
             async_,
             directive,
         },
-        ExpressionDesc::Str { delim, txt } => ExpressionDesc::Str { delim, txt },
+        ExpressionDesc::Str(txt) => ExpressionDesc::Str(txt),
+        ExpressionDesc::TemplateLiteral(segment) => ExpressionDesc::TemplateLiteral(segment),
+        ExpressionDesc::JsonLiteral(source) => ExpressionDesc::JsonLiteral(source),
         ExpressionDesc::RawJsCode(info) => ExpressionDesc::RawJsCode(info),
         ExpressionDesc::Array(items, mutable_flag) => ExpressionDesc::Array(
             items
@@ -736,50 +730,10 @@ fn flatten_and_mark_dead_expression(
     }
 }
 
-fn flatten_and_mark_dead_transformed_jsx_tag_expression(
-    expr: Expression,
-    id_gen: &IdGenerator,
-    substitution: &mut HashMap<Ident, Expression>,
-    jsx_preserve: bool,
-) -> Expression {
-    let Expression {
-        source_loc,
-        desc,
-        comment,
-    } = expr;
-    match desc {
-        // OCaml's js_pass_flatten_and_mark_dead preserves component `.make`
-        // projections in JSX-preserve mode so the dumper can print `<Foo.make />`.
-        ExpressionDesc::StaticIndex(target, field, Some(index)) if field == "make" => Expression {
-            source_loc,
-            desc: ExpressionDesc::StaticIndex(
-                Box::new(flatten_and_mark_dead_expression(
-                    *target,
-                    id_gen,
-                    substitution,
-                    jsx_preserve,
-                )),
-                field,
-                Some(index),
-            ),
-            comment,
-        },
-        other => flatten_and_mark_dead_expression(
-            Expression {
-                source_loc,
-                desc: other,
-                comment,
-            },
-            id_gen,
-            substitution,
-            jsx_preserve,
-        ),
-    }
-}
-
 fn try_substitute_caml_block_projection(
     expr: &Expression,
     substitution: &HashMap<Ident, Expression>,
+    jsx_preserve: bool,
 ) -> Option<Expression> {
     match &expr.desc {
         ExpressionDesc::ArrayIndex(left, right) => {
@@ -789,13 +743,13 @@ fn try_substitute_caml_block_projection(
             let ExpressionDesc::Number(Number::Int { i, .. }) = right.desc else {
                 return None;
             };
-            substituted_caml_block_item(substitution, id, None, i)
+            substituted_caml_block_item(substitution, id, None, i, jsx_preserve)
         }
         ExpressionDesc::StaticIndex(target, field, Some(index)) => {
             let ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) = &target.desc else {
                 return None;
             };
-            substituted_caml_block_item(substitution, id, Some(field), *index)
+            substituted_caml_block_item(substitution, id, Some(field), *index, jsx_preserve)
         }
         _ => None,
     }
@@ -806,26 +760,35 @@ fn substituted_caml_block_item(
     id: &Ident,
     field: Option<&str>,
     index: i32,
+    jsx_preserve: bool,
 ) -> Option<Expression> {
     let expression = substitution.get(id)?;
+    // js_pass_flatten_and_mark_dead.ml:266-270 (7432): in JSX preserve mode a
+    // block item that is the variable `make` stays a projection, so the
+    // dumper prints `<Foo.make />`.
+    let substitutable = |item: &Expression| {
+        is_simple_substituted_index_value(item)
+            && !(jsx_preserve
+                && matches!(&item.desc, ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) if id.name() == "make"))
+    };
     let ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, tag_info) = &expression.desc
     else {
         return None;
     };
     if let Some(field) = field {
-        match tag_info {
+        match &**tag_info {
             TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. } => {
                 let item = items
                     .iter()
                     .zip(fields.iter())
                     .find_map(|(item, (field_name, _))| (field_name == field).then_some(item))?;
-                return is_simple_substituted_index_value(item).then(|| item.clone());
+                return substitutable(item).then(|| item.clone());
             }
             _ => {}
         }
     }
     let item = items.get(usize::try_from(index).ok()?)?;
-    is_simple_substituted_index_value(item).then(|| item.clone())
+    substitutable(item).then(|| item.clone())
 }
 
 fn should_materialize_block_binding_items(
@@ -854,7 +817,8 @@ fn should_materialize_block_binding_items(
 fn is_deep_constant_block_binding_item(expr: &Expression) -> bool {
     match &expr.desc {
         ExpressionDesc::Number(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
         | ExpressionDesc::Bool(_)
         | ExpressionDesc::Undefined { .. } => true,
         ExpressionDesc::OptionalBlock(inner, _) => is_deep_constant_block_binding_item(inner),
@@ -877,7 +841,8 @@ fn is_simple_block_binding_item(expr: &Expression) -> bool {
     match &expr.desc {
         ExpressionDesc::Var(_)
         | ExpressionDesc::Number(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
         | ExpressionDesc::Bool(_)
         | ExpressionDesc::Undefined { .. } => true,
         _ => false,
@@ -888,9 +853,12 @@ fn is_simple_substituted_index_value(expr: &Expression) -> bool {
     match &expr.desc {
         ExpressionDesc::Var(_)
         | ExpressionDesc::Number(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
         | ExpressionDesc::Undefined { .. } => true,
-        ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, TagInfo::Constructor { .. }) => {
+        ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, tag)
+            if matches!(**tag, TagInfo::Constructor { .. }) =>
+        {
             items.iter().all(is_simple_substituted_index_value)
         }
         _ => false,
@@ -1069,7 +1037,9 @@ fn collect_mark_dead_states_expression(
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Number(_) => {}
         ExpressionDesc::Length(inner, _)
@@ -1105,11 +1075,13 @@ fn collect_mark_dead_states_expression(
                 collect_mark_dead_states_expression(arg, states);
             }
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             collect_mark_dead_states_expression(tag, states);
-            for string in strings {
-                collect_mark_dead_states_expression(string, states);
+            for value in values {
+                collect_mark_dead_states_expression(value, states);
             }
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
             for value in values {
                 collect_mark_dead_states_expression(value, states);
             }
@@ -1277,11 +1249,13 @@ fn apply_mark_dead_states_expression(expr: &mut Expression, states: &HashMap<Ide
                 apply_mark_dead_states_expression(arg, states);
             }
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             apply_mark_dead_states_expression(tag, states);
-            for string in strings {
-                apply_mark_dead_states_expression(string, states);
+            for value in values {
+                apply_mark_dead_states_expression(value, states);
             }
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
             for value in values {
                 apply_mark_dead_states_expression(value, states);
             }
@@ -1320,7 +1294,9 @@ fn apply_mark_dead_states_expression(expr: &mut Expression, states: &HashMap<Ide
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Number(_) => {}
     }
@@ -1429,7 +1405,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
                         Statement::block(block)
                     } else {
                         Statement {
-                            source_loc,
+                            source_loc: source_loc.clone(),
                             desc: StatementDesc::Exp(flatten_expression(Expression {
                                 source_loc,
                                 desc: ExpressionDesc::Bin(BinOp::Eq, target, value),
@@ -1440,7 +1416,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
                     }
                 }
                 desc => Statement {
-                    source_loc,
+                    source_loc: source_loc.clone(),
                     desc: StatementDesc::Exp(flatten_expression(Expression {
                         source_loc,
                         desc,
@@ -1493,7 +1469,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
                     Statement::block(block)
                 }
                 desc => Statement {
-                    source_loc,
+                    source_loc: source_loc.clone(),
                     desc: StatementDesc::Return(flatten_expression(Expression {
                         source_loc,
                         desc,
@@ -1542,8 +1518,8 @@ fn flatten_statement(stmt: Statement) -> Statement {
             source_loc,
             desc: StatementDesc::ForRange(
                 label,
-                start.map(flatten_expression),
-                flatten_expression(finish),
+                start.map(|expr| Box::new(flatten_expression(*expr))),
+                Box::new(flatten_expression(*finish)),
                 ident,
                 direction,
                 flatten_block(body),
@@ -1555,7 +1531,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
             desc: StatementDesc::ForOf(
                 label,
                 ident,
-                flatten_expression(iterable),
+                Box::new(flatten_expression(*iterable)),
                 flatten_block(body),
             ),
             comment,
@@ -1565,7 +1541,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
             desc: StatementDesc::ForAwaitOf(
                 label,
                 ident,
-                flatten_expression(iterable),
+                Box::new(flatten_expression(*iterable)),
                 flatten_block(body),
             ),
             comment,
@@ -1697,9 +1673,13 @@ fn flatten_expression(expr: Expression) -> Expression {
         ),
         ExpressionDesc::TaggedTemplate(tag, strings, values) => ExpressionDesc::TaggedTemplate(
             Box::new(flatten_expression(*tag)),
-            strings.into_iter().map(flatten_expression).collect(),
+            strings,
             values.into_iter().map(flatten_expression).collect(),
         ),
+        ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
+            segments,
+            values: values.into_iter().map(flatten_expression).collect(),
+        },
         ExpressionDesc::StaticIndex(target, field, pos) => {
             ExpressionDesc::StaticIndex(Box::new(flatten_expression(*target)), field, pos)
         }
@@ -1725,7 +1705,9 @@ fn flatten_expression(expr: Expression) -> Expression {
             async_,
             directive,
         },
-        ExpressionDesc::Str { delim, txt } => ExpressionDesc::Str { delim, txt },
+        ExpressionDesc::Str(txt) => ExpressionDesc::Str(txt),
+        ExpressionDesc::TemplateLiteral(segment) => ExpressionDesc::TemplateLiteral(segment),
+        ExpressionDesc::JsonLiteral(source) => ExpressionDesc::JsonLiteral(source),
         ExpressionDesc::RawJsCode(info) => ExpressionDesc::RawJsCode(info),
         ExpressionDesc::Array(items, mutable_flag) => ExpressionDesc::Array(
             items.into_iter().map(flatten_expression).collect(),

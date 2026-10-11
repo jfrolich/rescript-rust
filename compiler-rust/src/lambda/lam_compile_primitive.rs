@@ -10,9 +10,9 @@ use super::js_exp_make::{
     compile_int_equality, compile_nullish_strict_comparison, compile_raw_comparison, int_bnot,
     int_expr, int_literal, int32_add, int32_band, int32_bor, int32_bxor, int32_lsl, int32_lsr,
     int32_minus, int32_mul, int32_offset, int32_pow, is_nullish_literal, is_optional_block,
-    is_out_expr, is_type_number_expr, is_type_object_expr, is_zero_int, js_expr_no_side_effects,
-    js_seq, ocaml_typeof_expr, poly_var_tag_access, poly_var_value_access, range_exclusion_or,
-    runtime_compare_call_args, runtime_member_for_eta_wrapped_primitive, strict_eq_int, to_int32,
+    is_type_number_expr, is_type_object_expr, is_zero_int, js_expr_no_side_effects,
+    js_seq, ocaml_typeof_expr, poly_var_tag_access, poly_var_value_access,
+    runtime_compare_call_args, runtime_member_for_eta_wrapped_primitive, to_int32,
 };
 use super::lam_compile::{Compiled, LambdaCompiler, call_info_of_apply_status};
 use super::lam_compile_input::{LambdaInputView, LambdaInputs};
@@ -24,7 +24,7 @@ use crate::js_ir::{
 };
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 use crate::lambda::lam_constant::Constant;
-use crate::lambda::lam_primitive::{ExternalSpec, Mutable, Primitive};
+use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::{Lambda, TagInfo};
 use crate::location::Location;
 
@@ -35,10 +35,6 @@ impl LambdaCompiler {
         args: &[Lambda],
         loc: &Location,
     ) -> Compiled {
-        if matches!(prim, Primitive::Pimport) {
-            return self.compile_import_primitive(loc, args);
-        }
-
         if let Some(compiled) =
             self.compile_hoisted_external_field(prim, LambdaInputs::Recursive(args))
         {
@@ -67,7 +63,7 @@ impl LambdaCompiler {
             prim: &'a Primitive,
             args: LambdaInputs<'a>,
             segments: &mut Vec<String>,
-        ) -> Option<(&'a Ident, bool)> {
+        ) -> Option<&'a Ident> {
             let Primitive::Pfield(_, FieldDbgInfo::Module { name }) = prim else {
                 return None;
             };
@@ -76,13 +72,13 @@ impl LambdaCompiler {
                 return None;
             }
             match args.first()?.view() {
-                LambdaInputView::GlobalModule(id, dynamic_import) => Some((id, dynamic_import)),
+                LambdaInputView::GlobalModule(id) => Some(id),
                 LambdaInputView::Prim(prim, args, _) => external_field_path(prim, args, segments),
                 _ => None,
             }
         }
         let mut reversed = Vec::new();
-        let (id, dynamic_import) = external_field_path(prim, args, &mut reversed)?;
+        let id = external_field_path(prim, args, &mut reversed)?;
         if reversed.len() < 2 {
             return None;
         }
@@ -97,7 +93,7 @@ impl LambdaCompiler {
                 crate::js_ir::ModuleId {
                     id: id.clone(),
                     kind: crate::js_ir::Kind::Ml,
-                    dynamic_import,
+                    dynamic_import: false,
                 },
                 Some(export_name),
             ),
@@ -111,33 +107,32 @@ impl LambdaCompiler {
     pub(crate) fn compile_primitive_js(
         &mut self,
         prim: &Primitive,
-        compiled_args: Vec<Expression>,
+        mut compiled_args: Vec<Expression>,
         mut prelude: Block,
         loc: &Location,
     ) -> Compiled {
         use Primitive::*;
         let expr = match prim {
-            Pstringlength => Expression::length(compiled_args[0].clone(), LengthObject::String),
-            Parraylength => Expression::length(compiled_args[0].clone(), LengthObject::Array),
-            // Upstream compiler/core/lam_compile_primitive.ml:91-101.
-            PtaggedTemplate => match compiled_args.as_slice() {
-                [
-                    tag,
-                    Expression {
-                        desc: ExpressionDesc::Array(strings, _),
-                        ..
-                    },
-                    Expression {
-                        desc: ExpressionDesc::Array(values, _),
-                        ..
-                    },
-                ] => Expression::new(ExpressionDesc::TaggedTemplate(
-                    Box::new(tag.clone()),
-                    strings.clone(),
-                    values.clone(),
-                )),
-                _ => unreachable!("tagged-template primitive operands are two arrays"),
-            },
+            Pstringlength => {
+                Expression::length(take_arg(&mut compiled_args, 0), LengthObject::String)
+            }
+            Parraylength => {
+                Expression::length(take_arg(&mut compiled_args, 0), LengthObject::Array)
+            }
+            // lam_compile_primitive.ml `Ptagged_template strings`:
+            // `[tag; value0; ...]` plus raw source segments -> tag`...`.
+            PtaggedTemplate(strings) => {
+                let mut args = std::mem::take(&mut compiled_args).into_iter();
+                let tag = args.next().expect("a tagged template has a tag");
+                Expression::new(ExpressionDesc::TaggedTemplate(Box::new(tag), strings.clone(), args.collect()))
+            }
+            // `Ptemplate [segment] when args = []` / `Ptemplate segments`.
+            Ptemplate(segments) if segments.len() == 1 && compiled_args.is_empty() => {
+                Expression::new(ExpressionDesc::TemplateLiteral(segments[0].clone()))
+            }
+            Ptemplate(segments) => {
+                crate::lambda::js_exp_make::interpolated_template(segments.clone(), std::mem::take(&mut compiled_args))
+            }
             // OCaml lam_compile_primitive.ml:87-90 lowers Pjs_apply to a
             // direct call of the first argument with the remaining arguments.
             PjsApply => match compiled_args.split_first() {
@@ -178,103 +173,129 @@ impl LambdaCompiler {
                 _ => Expression::undefined(false),
             },
             Parraysets => self.runtime_call_expr("Primitive_array", "set", compiled_args),
-            Paddint => int32_add(compiled_args[0].clone(), compiled_args[1].clone()),
+            Paddint => int32_add(
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
+            ),
             Paddfloat => Expression::bin(
                 BinOp::Plus,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
             Paddbigint => Expression::bin(
                 BinOp::Plus,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
-            Psubint => int32_minus(compiled_args[0].clone(), compiled_args[1].clone()),
+            Psubint => int32_minus(
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
+            ),
             Psubfloat => Expression::bin(
                 BinOp::Minus,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
             Psubbigint => Expression::bin(
                 BinOp::Minus,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
-            Pmulint => int32_mul(compiled_args[0].clone(), compiled_args[1].clone()),
+            Pmulint => int32_mul(
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
+            ),
             Pmulfloat => Expression::bin(
                 BinOp::Mul,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
             Pmulbigint => Expression::bin(
                 BinOp::Mul,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
-            Pdivint => self.int32_div_expr(compiled_args[0].clone(), compiled_args[1].clone()),
+            Pdivint => self.int32_div_expr(
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
+            ),
             Pdivfloat => Expression::bin(
                 BinOp::Div,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
-            Pdivbigint => self.bigint_div_expr(compiled_args[0].clone(), compiled_args[1].clone()),
-            Pmodint => self.int32_mod_expr(compiled_args[0].clone(), compiled_args[1].clone()),
+            Pdivbigint => self.bigint_div_expr(
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
+            ),
+            Pmodint => self.int32_mod_expr(
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
+            ),
             Pmodfloat => Expression::bin(
                 BinOp::Mod,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
-            Pmodbigint => self.bigint_mod_expr(compiled_args[0].clone(), compiled_args[1].clone()),
-            Ppowint => int32_pow(compiled_args[0].clone(), compiled_args[1].clone()),
+            Pmodbigint => self.bigint_mod_expr(
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
+            ),
+            Ppowint => int32_pow(
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
+            ),
             Ppowfloat => Expression::bin(
                 BinOp::Pow,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
             Ppowbigint => Expression::bin(
                 BinOp::Pow,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
             Pobjcomp(cmp) => self.compile_object_comparison(
                 *cmp,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
             Pboolcomp(cmp) => self.compile_bool_comparison(
                 *cmp,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
             Pintcomp(cmp) | Pfloatcomp(cmp) => self.compile_int_comparison(
                 *cmp,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
             Pbigintcomp(cmp) => self.compile_bigint_comparison(
                 *cmp,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
-            Pjscomp(cmp) => {
-                compile_raw_comparison(*cmp, compiled_args[0].clone(), compiled_args[1].clone())
-            }
+            Pjscomp(cmp) => compile_raw_comparison(
+                *cmp,
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
+            ),
             Pstringcomp(cmp) => self.compile_string_comparison(
                 *cmp,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
             Pobjorder => self.runtime_call_expr("Primitive_object", "compare", compiled_args),
             Pobjmin => self.runtime_call_expr("Primitive_object", "min", compiled_args),
             Pobjmax => self.runtime_call_expr("Primitive_object", "max", compiled_args),
             Pobjtag => Expression::new(ExpressionDesc::CamlBlockTag(
-                Box::new(compiled_args[0].clone()),
+                Box::new(take_arg(&mut compiled_args, 0)),
                 "TAG".to_string(),
             )),
             // OCaml js_exp_make.ml:1374-1375 wraps Caml_block length in
             // to_int32, unlike array/string/function length.
             Pobjsize => to_int32(Expression::length(
-                compiled_args[0].clone(),
+                take_arg(&mut compiled_args, 0),
                 LengthObject::CamlBlock,
             )),
             Pboolorder => match (
@@ -295,16 +316,16 @@ impl LambdaCompiler {
                 "Primitive_bool",
                 "min",
                 Comparison::Lt,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
                 both_bool_literals,
             ),
             Pboolmax => self.compile_typed_min_max(
                 "Primitive_bool",
                 "max",
                 Comparison::Gt,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
                 both_bool_literals,
             ),
             Pintorder => self.runtime_call_expr("Primitive_int", "compare", compiled_args),
@@ -312,16 +333,16 @@ impl LambdaCompiler {
                 "Primitive_int",
                 "min",
                 Comparison::Lt,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
                 both_int_literals,
             ),
             Pintmax => self.compile_typed_min_max(
                 "Primitive_int",
                 "max",
                 Comparison::Gt,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
                 both_int_literals,
             ),
             Pfloatorder => self.runtime_call_expr("Primitive_float", "compare", compiled_args),
@@ -329,16 +350,16 @@ impl LambdaCompiler {
                 "Primitive_float",
                 "min",
                 Comparison::Lt,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
                 both_float_literals,
             ),
             Pfloatmax => self.compile_typed_min_max(
                 "Primitive_float",
                 "max",
                 Comparison::Gt,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
                 both_float_literals,
             ),
             Pbigintorder => self.runtime_call_expr("Primitive_bigint", "compare", compiled_args),
@@ -346,16 +367,16 @@ impl LambdaCompiler {
                 "Primitive_bigint",
                 "min",
                 Comparison::Lt,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
                 both_bigint_literals,
             ),
             Pbigintmax => self.compile_typed_min_max(
                 "Primitive_bigint",
                 "max",
                 Comparison::Gt,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
                 both_bigint_literals,
             ),
             Pstringorder => self.runtime_call_expr("Primitive_string", "compare", compiled_args),
@@ -363,16 +384,16 @@ impl LambdaCompiler {
                 "Primitive_string",
                 "min",
                 Comparison::Lt,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
                 both_string_literals,
             ),
             Pstringmax => self.compile_typed_min_max(
                 "Primitive_string",
                 "max",
                 Comparison::Gt,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
                 both_string_literals,
             ),
             Phash => self.runtime_call_expr("Primitive_hash", "hash", compiled_args),
@@ -385,16 +406,16 @@ impl LambdaCompiler {
             }
             Psequand => Expression::bin(
                 BinOp::And,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
             Psequor => Expression::bin(
                 BinOp::Or,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
-            Pnot => Expression::not(compiled_args[0].clone()),
-            Pnegint => int32_minus(int_expr(0), compiled_args[0].clone()),
+            Pnot => Expression::not(take_arg(&mut compiled_args, 0)),
+            Pnegint => int32_minus(int_expr(0), take_arg(&mut compiled_args, 0)),
             // `Pnegfloat` must emit `0. - x` (not `0 - x`) so the printer
             // rule at `js_dump.ml` / `printer.rs:1520-1531` produces `- x`
             // with the OCaml-style space. Mirrors
@@ -402,38 +423,50 @@ impl LambdaCompiler {
             Pnegfloat => Expression::bin(
                 BinOp::Minus,
                 Expression::number(Number::float("0.")),
-                compiled_args[0].clone(),
+                take_arg(&mut compiled_args, 0),
             ),
             Pnegbigint => Expression::bin(
                 BinOp::Minus,
                 Expression::number(Number::bigint(true, "0")),
-                compiled_args[0].clone(),
+                take_arg(&mut compiled_args, 0),
             ),
-            Pnotint => int_bnot(compiled_args[0].clone()),
-            Pnotbigint => int_bnot(compiled_args[0].clone()),
-            Pandint => int32_band(compiled_args[0].clone(), compiled_args[1].clone()),
+            Pnotint => int_bnot(take_arg(&mut compiled_args, 0)),
+            Pnotbigint => int_bnot(take_arg(&mut compiled_args, 0)),
+            Pandint => int32_band(
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
+            ),
             Pandbigint => Expression::bin(
                 BinOp::Band,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
-            Porint => int32_bor(compiled_args[0].clone(), compiled_args[1].clone()),
+            Porint => int32_bor(
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
+            ),
             Porbigint => Expression::bin(
                 BinOp::Bor,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
-            Pxorint => int32_bxor(compiled_args[0].clone(), compiled_args[1].clone()),
+            Pxorint => int32_bxor(
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
+            ),
             Pxorbigint => Expression::bin(
                 BinOp::Bxor,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
-            Plslint => int32_lsl(compiled_args[0].clone(), compiled_args[1].clone()),
+            Plslint => int32_lsl(
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
+            ),
             Plslbigint => Expression::bin(
                 BinOp::Lsl,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
             Plsrint => {
                 // OCaml `Plsrint` returns the left operand directly for a
@@ -450,42 +483,16 @@ impl LambdaCompiler {
             }
             Pasrint => Expression::bin(
                 BinOp::Asr,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
             Pasrbigint => Expression::bin(
                 BinOp::Asr,
-                compiled_args[0].clone(),
-                compiled_args[1].clone(),
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
             ),
-            Poffsetint(offset) => int32_offset(compiled_args[0].clone(), *offset),
-            Poffsetref(offset) => {
-                // OCaml lowers through `Js_of_lam_block.field
-                // Lambda.ref_field_info`, so the `contents` access keeps
-                // record field position metadata
-                // (compiler/core/lam_compile_primitive.ml:342-348).
-                let field = self.compile_field_access(
-                    0,
-                    &FieldDbgInfo::Record {
-                        name: "contents".to_string(),
-                    },
-                    &compiled_args[0],
-                );
-                Expression::new(ExpressionDesc::Seq(
-                    Box::new(Expression::bin(
-                        BinOp::Eq,
-                        field.clone(),
-                        int32_offset(field, *offset),
-                    )),
-                    Box::new(Expression::undefined(false)),
-                ))
-            }
-            Pisint => is_type_number_expr(compiled_args[0].clone()),
-            PisPolyVarBlock => is_type_object_expr(compiled_args[0].clone()),
-            Pisout(offset) => match compiled_args.as_slice() {
-                [range, value] => is_out_expr(int32_offset(value.clone(), *offset), range.clone()),
-                _ => Expression::undefined(false),
-            },
+            Pisint => is_type_number_expr(take_arg(&mut compiled_args, 0)),
+            PisPolyVarBlock => is_type_object_expr(take_arg(&mut compiled_args, 0)),
             Pmakearray => Expression::array(compiled_args, MutableFlag::Mutable),
             Pmakedict => match compiled_args.as_slice() {
                 [
@@ -502,7 +509,7 @@ impl LambdaCompiler {
                                     fields.as_slice(),
                                     [
                                         Expression {
-                                            desc: ExpressionDesc::Str { .. },
+                                            desc: ExpressionDesc::Str(_),
                                             ..
                                         },
                                         _
@@ -511,7 +518,7 @@ impl LambdaCompiler {
                             {
                                 let [
                                     Expression {
-                                        desc: ExpressionDesc::Str { txt, .. },
+                                        desc: ExpressionDesc::Str(txt),
                                         ..
                                     },
                                     value,
@@ -561,21 +568,22 @@ impl LambdaCompiler {
                 )),
                 _ => Expression::undefined(false),
             },
-            Pstringadd => {
-                Expression::string_append(compiled_args[0].clone(), compiled_args[1].clone())
-            }
+            Pstringadd => Expression::string_append(
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
+            ),
             PinitMod => self.runtime_call_expr("Primitive_module", "init", compiled_args),
             PupdateMod => self.runtime_call_expr("Primitive_module", "update", compiled_args),
-            PnullToOpt => self.null_to_opt_expr(compiled_args[0].clone()),
-            PnullUndefinedToOpt => self.null_undefined_to_opt_expr(compiled_args[0].clone()),
-            PisNotNone => self.is_not_none_expr(compiled_args[0].clone()),
-            PisNull => self.is_null_expr(compiled_args[0].clone()),
-            PisUndefined => self.is_undefined_expr(compiled_args[0].clone()),
-            PisNullUndefined => self.is_null_or_undefined_expr(compiled_args[0].clone()),
-            PvalFromOption => self.val_from_option_expr(compiled_args[0].clone()),
-            PvalFromOptionNotNest => compiled_args[0].clone(),
-            Psome => self.some_expr(compiled_args[0].clone()),
-            PsomeNotNest => self.optional_block(compiled_args[0].clone(), true),
+            PnullToOpt => self.null_to_opt_expr(take_arg(&mut compiled_args, 0)),
+            PnullUndefinedToOpt => self.null_undefined_to_opt_expr(take_arg(&mut compiled_args, 0)),
+            PisNotNone => self.is_not_none_expr(take_arg(&mut compiled_args, 0)),
+            PisNull => self.is_null_expr(take_arg(&mut compiled_args, 0)),
+            PisUndefined => self.is_undefined_expr(take_arg(&mut compiled_args, 0)),
+            PisNullUndefined => self.is_null_or_undefined_expr(take_arg(&mut compiled_args, 0)),
+            PvalFromOption => self.val_from_option_expr(take_arg(&mut compiled_args, 0)),
+            PvalFromOptionNotNest => take_arg(&mut compiled_args, 0),
+            Psome => self.some_expr(take_arg(&mut compiled_args, 0)),
+            PsomeNotNest => self.optional_block(take_arg(&mut compiled_args, 0), true),
             Pfield(idx, info) => self.compile_field_access(*idx, info, &compiled_args[0]),
             Psetfield(idx, info) => {
                 let target =
@@ -593,7 +601,7 @@ impl LambdaCompiler {
                 Expression::new(ExpressionDesc::CamlBlock(
                     compiled_args,
                     js_mutable,
-                    tag_info.clone(),
+                    Box::new(tag_info.clone()),
                 ))
             }
             // OCaml lam_compile_primitive.ml:560-564 builds the mutable list
@@ -601,7 +609,7 @@ impl LambdaCompiler {
             Pmakelist => Expression::new(ExpressionDesc::CamlBlock(
                 compiled_args,
                 MutableFlag::Mutable,
-                TagInfo::constructor("::", 1),
+                Box::new(TagInfo::constructor("::", 1)),
             )),
             PrawJsCode(info) => {
                 Expression::new(ExpressionDesc::RawJsCode(crate::js_ir::JsRawInfo {
@@ -611,7 +619,7 @@ impl LambdaCompiler {
             }
             Pdebugger => {
                 let mut statement = Statement::debugger();
-                statement.source_loc = self.source_loc(loc);
+                statement.source_loc = (self.source_loc(loc)).map(Box::new);
                 prelude.push(statement);
                 Expression::undefined(false)
             }
@@ -621,7 +629,7 @@ impl LambdaCompiler {
                     .cloned()
                     .unwrap_or_else(|| Expression::undefined(false));
                 let mut statement = Statement::throw(expr);
-                statement.source_loc = self.source_loc(loc);
+                statement.source_loc = (self.source_loc(loc)).map(Box::new);
                 prelude.push(statement);
                 Expression::undefined(false)
             }
@@ -638,16 +646,16 @@ impl LambdaCompiler {
                 ),
                 Box::new(Expression::undefined(true)),
             )),
-            Ptypeof => ocaml_typeof_expr(compiled_args[0].clone()),
-            Pintoffloat => to_int32(compiled_args[0].clone()),
+            Ptypeof => ocaml_typeof_expr(take_arg(&mut compiled_args, 0)),
+            Pintoffloat => to_int32(take_arg(&mut compiled_args, 0)),
             Pfloatofint => compiled_args
                 .first()
                 .cloned()
                 .unwrap_or_else(|| Expression::undefined(false)),
-            Pawait => Expression::new(ExpressionDesc::Await(Box::new(compiled_args[0].clone()))),
-            PwrapExn => {
-                self.runtime_call_expr("Primitive_exceptions", "internalToException", compiled_args)
-            }
+            Pawait => Expression::new(ExpressionDesc::Await(Box::new(take_arg(
+                &mut compiled_args,
+                0,
+            )))),
             PcreateExtension(name) => self.pure_runtime_call_expr(
                 "Primitive_exceptions",
                 "create",
@@ -686,7 +694,10 @@ impl LambdaCompiler {
                 Some(expr) => expr,
                 None => Expression::undefined(false),
             },
-            PjsUnsafeDowngrade { name, setter } => match (*setter, compiled_args.as_slice()) {
+            PjsObjectGet(name) | PjsObjectSet(name) => match (
+                matches!(prim, PjsObjectSet(_)),
+                compiled_args.as_slice(),
+            ) {
                 (false, [receiver]) => self.static_index(receiver.clone(), name),
                 (true, [receiver, value]) => Expression::new(ExpressionDesc::Seq(
                     Box::new(Expression::bin(
@@ -698,25 +709,13 @@ impl LambdaCompiler {
                 )),
                 _ => Expression::undefined(false),
             },
-            Pimport => self.compile_import(loc, compiled_args),
+            Pimport(source) => self.compile_import(loc, source),
             PjsCall {
                 prim_name,
                 arg_types,
                 ffi,
-                dynamic_import,
                 transformed_jsx,
-            } => self.compile_js_call(
-                loc,
-                prim_name,
-                arg_types,
-                ffi,
-                *dynamic_import,
-                *transformed_jsx,
-                compiled_args,
-                &mut prelude,
-            ),
-            Pnull => Expression::null(),
-            Pundefined => Expression::undefined(false),
+            } => self.compile_js_call(prim_name, arg_types, ffi, *transformed_jsx, compiled_args),
             _ => Expression::undefined(false),
         };
 
@@ -917,4 +916,9 @@ impl LambdaCompiler {
             self.runtime_call_expr(module_name, member, vec![left, right])
         }
     }
+}
+
+/// Move argument `index` out of `args`, which the calling arm uses once.
+fn take_arg(args: &mut [Expression], index: usize) -> Expression {
+    std::mem::replace(&mut args[index], Expression::undefined(false))
 }

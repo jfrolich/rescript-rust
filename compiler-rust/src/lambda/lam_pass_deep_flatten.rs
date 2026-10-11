@@ -4,6 +4,7 @@
 //! of named module-block bindings so downstream passes see a flat sequence of
 //! single bindings. Mirrors `Lam_pass_deep_flatten.deep_flatten`.
 
+use crate::lambda::map_box;
 use ahash::AHashMap as HashMap;
 
 use crate::context::IdGenerator;
@@ -11,7 +12,7 @@ use crate::ident::Ident;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_util::refine_let;
-use crate::lambda::{Apply, Lambda, LambdaSwitch, PrimInfo};
+use crate::lambda::{Lambda, PrimInfo};
 use crate::location::Location;
 
 enum FlattenGroup {
@@ -63,7 +64,7 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
     fn hit_variable(target: &Ident, lam: &Lambda) -> bool {
         match lam {
             Lambda::Lvar(id) => id.same(target),
-            Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+            Lambda::LglobalModule(_) | Lambda::Lconst(_) => false,
             Lambda::Lapply(apply) => {
                 hit_variable(target, &apply.ap_func)
                     || apply.ap_args.iter().any(|arg| hit_variable(target, arg))
@@ -131,11 +132,22 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
     ) -> Option<(HashMap<i32, Ident>, &'a Lambda)> {
         match lam {
             Lambda::Llet(LetKind::Alias, projected, value, body) => match value.as_ref() {
-                Lambda::Lprim(PrimInfo {
+                Lambda::Lprim(__prim2)
+                    if matches!(__prim2.as_ref(), PrimInfo {
                     primitive: Primitive::Pfield(index, _),
                     args,
                     loc: _,
-                }) if matches!(args.as_slice(), [Lambda::Lvar(tuple)] if tuple.same(id)) => {
+                } if matches!(args.as_slice(), [Lambda::Lvar(tuple)] if tuple.same(id))) =>
+                {
+                    let PrimInfo {
+                        primitive: Primitive::Pfield(index, _),
+                        args,
+                        loc: _,
+                    } = __prim2.as_ref()
+                    else {
+                        unreachable!()
+                    };
+
                     tuple_mapping.insert(*index, projected.clone());
                     can_eliminate_tuple(id, body, tuple_mapping)
                 }
@@ -164,11 +176,22 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
     ) -> (HashMap<i32, Ident>, Lambda) {
         match lam {
             Lambda::Llet(LetKind::Alias, projected, value, body) => match *value {
-                Lambda::Lprim(PrimInfo {
+                Lambda::Lprim(__prim1)
+                    if matches!(__prim1.as_ref(), PrimInfo {
                     primitive: Primitive::Pfield(index, _),
                     args,
                     loc: _,
-                }) if matches!(args.as_slice(), [Lambda::Lvar(tuple)] if tuple.same(id)) => {
+                } if matches!(args.as_slice(), [Lambda::Lvar(tuple)] if tuple.same(id))) =>
+                {
+                    let PrimInfo {
+                        primitive: Primitive::Pfield(index, _),
+                        args,
+                        loc: _,
+                    } = *__prim1
+                    else {
+                        unreachable!()
+                    };
+
                     let mut tuple_mapping = tuple_mapping;
                     tuple_mapping.insert(index, projected);
                     strip_tuple_owned(id, *body, tuple_mapping)
@@ -189,15 +212,35 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
             Lambda::Llet(LetKind::Alias | LetKind::Strict | LetKind::StrictOpt, _, value, rest)
                 if matches!(
                     value.as_ref(),
-                    Lambda::Lprim(PrimInfo {
-                        primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
-                        ..
-                    }) | Lambda::Lvar(_)
-                ) =>
+                    Lambda::Lprim(prim)
+                        if matches!(prim.primitive, Primitive::Pmakeblock(_, Mutable::Immutable))
+                ) || matches!(value.as_ref(), Lambda::Lvar(_)) =>
             {
                 rhs_is_beta_residue(rest)
             }
             Lambda::Lapply(_) => true,
+            _ => false,
+        }
+    }
+
+    /// lam_pass_deep_flatten.ml `regroups_binding`: whether `flatten`
+    /// restructures this binding. Every other binding is rebuilt in place.
+    fn regroups_binding(kind: LetKind, id: &Ident, arg: &Lambda) -> bool {
+        if rhs_is_beta_residue(arg) {
+            return false;
+        }
+        match arg {
+            Lambda::Llet(..) | Lambda::Lsequence(..) | Lambda::Lletrec(..) => true,
+            Lambda::Lprim(prim)
+                if matches!(prim.primitive, Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt) =>
+            {
+                !matches!(prim.args.as_slice(), [Lambda::Lvar(_)])
+            }
+            Lambda::Lprim(prim) => {
+                matches!(prim.primitive, Primitive::Pmakeblock(_, Mutable::Immutable))
+                    && matches!(id.name(), "match" | "include" | "param")
+                    && matches!(kind, LetKind::Alias | LetKind::Strict | LetKind::StrictOpt)
+            }
             _ => false,
         }
     }
@@ -212,24 +255,31 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
             }
             Lambda::Llet(kind, id, value, body) => {
                 let value = match *value {
-                    Lambda::Lprim(PrimInfo {
+                    Lambda::Lprim(__prim0)
+                        if matches!(__prim0.as_ref(), PrimInfo {
                         primitive,
                         args,
                         loc,
-                    }) if matches!(
+                    } if matches!(
                         &primitive,
                         Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt
-                    ) && args.len() == 1 =>
+                    ) && args.len() == 1) =>
                     {
+                        let PrimInfo {
+                            primitive,
+                            args,
+                            loc,
+                        } = *__prim0;
+
                         let mut args = args;
                         let arg = args.pop().expect("checked args length");
                         if matches!(arg, Lambda::Lvar(_)) {
                             let res = aux(
-                                Lambda::Lprim(PrimInfo {
+                                Lambda::Lprim(Box::new(PrimInfo {
                                     primitive,
                                     args: vec![arg],
                                     loc,
-                                }),
+                                })),
                                 id_gen,
                             );
                             acc.push(FlattenGroup::Single(kind, id, res));
@@ -240,20 +290,22 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
                             // JS-backend stamp source so the temporary cannot
                             // collide with an existing lambda binder.
                             let new_id = id.rename(id_gen);
-                            let lowered = Lambda::let_(
+                            let lowered = Lambda::Llet(
                                 kind,
                                 new_id.clone(),
-                                arg,
-                                Lambda::let_(
-                                    LetKind::Alias,
-                                    id,
-                                    Lambda::prim(
-                                        primitive,
-                                        vec![Lambda::var(new_id)],
-                                        Location::none(),
-                                    ),
-                                    *body,
-                                ),
+                                Box::new(arg),
+                                map_box(body, |inner| {
+                                    Lambda::let_(
+                                        LetKind::Alias,
+                                        id,
+                                        Lambda::prim(
+                                            primitive,
+                                            vec![Lambda::var(new_id)],
+                                            Location::none(),
+                                        ),
+                                        inner,
+                                    )
+                                }),
                             );
                             return flatten(acc, lowered, id_gen);
                         }
@@ -267,11 +319,8 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
                     (
                         "match" | "include" | "param",
                         LetKind::Alias | LetKind::Strict | LetKind::StrictOpt,
-                        Lambda::Lprim(PrimInfo {
-                            primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
-                            ..
-                        })
-                    )
+                        Lambda::Lprim(prim)
+                    ) if matches!(prim.primitive, Primitive::Pmakeblock(_, Mutable::Immutable))
                 );
                 if flatten_named_module_block {
                     let body = *body;
@@ -283,9 +332,10 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
                         // then doing the owned strip only after success.
                         let (tuple_mapping, stripped_body) =
                             strip_tuple_owned(&id, body, HashMap::new());
-                        let Lambda::Lprim(PrimInfo { args, .. }) = res else {
+                        let Lambda::Lprim(__prim201) = res else {
                             unreachable!();
                         };
+                        let PrimInfo { args, .. } = *__prim201;
                         let mut flattened_args = args
                             .into_iter()
                             .enumerate()
@@ -317,7 +367,10 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
             }
             Lambda::Lsequence(first, second) => {
                 let res = flatten(acc, *first, id_gen);
-                acc.push(FlattenGroup::Nop(res));
+                // `Lam_group.nop_cons` drops pure heads (lam_group.ml:36-39).
+                if !matches!(res, Lambda::Lvar(_) | Lambda::Lconst(_) | Lambda::Lfunction(_)) {
+                    acc.push(FlattenGroup::Nop(res));
+                }
                 flatten(acc, *second, id_gen)
             }
             _ => aux(lam, id_gen),
@@ -325,103 +378,49 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
     }
 
     fn aux(lam: Lambda, id_gen: &IdGenerator) -> Lambda {
+        aux_sharing(lam, id_gen).0
+    }
+
+    /// lam_pass_deep_flatten.ml `aux`: `Llet`/`Lletrec` are regrouped, every
+    /// other node goes through `Lambda_traverse.shallow_map_sharing`, which
+    /// rebuilds (through the folding smart constructors such as
+    /// `Lambda.seq`) only when a child changed.
+    fn aux_sharing(lam: Lambda, id_gen: &IdGenerator) -> crate::lambda::lambda_traverse::Mapped {
         match lam {
+            // `Lam_util.refine_let ~original:lam ~kind:str id (aux arg) (aux body)`;
+            // OCaml evaluates the arguments right to left.
+            Lambda::Llet(kind, id, value, body) if !regroups_binding(kind, &id, &value) => {
+                let (body, body_changed) = aux_sharing(*body, id_gen);
+                let (value, value_changed) = aux_sharing(*value, id_gen);
+                crate::lambda::lam_util::refine_let_original(
+                    kind,
+                    id,
+                    value,
+                    body,
+                    !(value_changed || body_changed),
+                )
+            }
             Lambda::Llet(_, _, _, _) => {
                 let mut groups = Vec::new();
                 let result = flatten(&mut groups, lam, id_gen);
-                lambda_of_groups(groups, result)
+                (lambda_of_groups(groups, result), true)
             }
-            Lambda::Lletrec(bindings, body) => Lambda::letrec(
-                bindings
+            Lambda::Lletrec(bindings, body) => {
+                let mut changed = false;
+                let bindings = bindings
                     .into_iter()
-                    .map(|(id, expr)| (id, aux(expr, id_gen)))
-                    .collect(),
-                aux(*body, id_gen),
-            ),
-            Lambda::Lsequence(first, second) => {
-                Lambda::seq(aux(*first, id_gen), aux(*second, id_gen))
+                    .map(|(id, expr)| {
+                        let (expr, c) = aux_sharing(expr, id_gen);
+                        changed |= c;
+                        (id, expr)
+                    })
+                    .collect();
+                let (body, c) = aux_sharing(*body, id_gen);
+                (Lambda::Lletrec(bindings, Box::new(body)), changed || c)
             }
-            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam,
-            Lambda::Lapply(apply) => Lambda::Lapply(Apply {
-                ap_func: Box::new(aux(*apply.ap_func, id_gen)),
-                ap_args: apply
-                    .ap_args
-                    .into_iter()
-                    .map(|arg| aux(arg, id_gen))
-                    .collect(),
-                ap_info: apply.ap_info,
-                ap_transformed_jsx: apply.ap_transformed_jsx,
+            lam => crate::lambda::lambda_traverse::shallow_map_sharing(lam, &mut |inner| {
+                aux_sharing(inner, id_gen)
             }),
-            Lambda::Lfunction(func) => {
-                Lambda::function_(func.arity, func.params, aux(*func.body, id_gen), func.attr)
-            }
-            Lambda::Lprim(info) => Lambda::prim(
-                info.primitive,
-                info.args.into_iter().map(|arg| aux(arg, id_gen)).collect(),
-                info.loc,
-            ),
-            Lambda::Lswitch(scrutinee, switch) => Lambda::Lswitch(
-                Box::new(aux(*scrutinee, id_gen)),
-                LambdaSwitch {
-                    sw_consts_full: switch.sw_consts_full,
-                    sw_consts: switch
-                        .sw_consts
-                        .into_iter()
-                        .map(|(tag, lam)| (tag, aux(lam, id_gen)))
-                        .collect(),
-                    sw_blocks_full: switch.sw_blocks_full,
-                    sw_blocks: switch
-                        .sw_blocks
-                        .into_iter()
-                        .map(|(tag, lam)| (tag, aux(lam, id_gen)))
-                        .collect(),
-                    sw_failaction: switch.sw_failaction.map(|lam| Box::new(aux(*lam, id_gen))),
-                    sw_dispatch: switch.sw_dispatch,
-                },
-            ),
-            Lambda::LstringSwitch(scrutinee, cases, default) => Lambda::LstringSwitch(
-                Box::new(aux(*scrutinee, id_gen)),
-                cases
-                    .into_iter()
-                    .map(|(tag, lam)| (tag, aux(lam, id_gen)))
-                    .collect(),
-                default.map(|lam| Box::new(aux(*lam, id_gen))),
-            ),
-            Lambda::LstaticRaise(id, args) => {
-                Lambda::LstaticRaise(id, args.into_iter().map(|arg| aux(arg, id_gen)).collect())
-            }
-            Lambda::LstaticCatch(body, ids, handler) => Lambda::LstaticCatch(
-                Box::new(aux(*body, id_gen)),
-                ids,
-                Box::new(aux(*handler, id_gen)),
-            ),
-            Lambda::LtryWith(body, exn, handler) => Lambda::LtryWith(
-                Box::new(aux(*body, id_gen)),
-                exn,
-                Box::new(aux(*handler, id_gen)),
-            ),
-            Lambda::LifThenElse(cond, then_, else_) => {
-                Lambda::if_(aux(*cond, id_gen), aux(*then_, id_gen), aux(*else_, id_gen))
-            }
-            Lambda::Lwhile(cond, body) => {
-                Lambda::Lwhile(Box::new(aux(*cond, id_gen)), Box::new(aux(*body, id_gen)))
-            }
-            Lambda::Lfor(id, start, end, direction, body) => Lambda::Lfor(
-                id,
-                Box::new(aux(*start, id_gen)),
-                Box::new(aux(*end, id_gen)),
-                direction,
-                Box::new(aux(*body, id_gen)),
-            ),
-            Lambda::Lfor_of(id, iterable, body) => {
-                Lambda::for_of(id, aux(*iterable, id_gen), aux(*body, id_gen))
-            }
-            Lambda::Lfor_await_of(id, iterable, body) => {
-                Lambda::for_await_of(id, aux(*iterable, id_gen), aux(*body, id_gen))
-            }
-            Lambda::Lbreak => Lambda::break_(),
-            Lambda::Lcontinue => Lambda::continue_(),
-            Lambda::Lassign(id, value) => Lambda::Lassign(id, Box::new(aux(*value, id_gen))),
         }
     }
 
@@ -518,7 +517,7 @@ mod tests {
             }
             Lambda::Lassign(_, value) => has_binding(value, target),
             Lambda::Lvar(_)
-            | Lambda::LglobalModule(_, _)
+            | Lambda::LglobalModule(_)
             | Lambda::Lconst(_)
             | Lambda::Lbreak
             | Lambda::Lcontinue => false,
@@ -600,9 +599,10 @@ mod tests {
             panic!("expected wrapper alias binding");
         };
         assert!(alias_id.same(&wrapped));
-        let Lambda::Lprim(PrimInfo { args, .. }) = *alias_value else {
+        let Lambda::Lprim(__prim200) = *alias_value else {
             panic!("expected nullable wrapper alias");
         };
+        let PrimInfo { args, .. } = *__prim200;
         assert!(matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(&split_id)));
     }
 }

@@ -1,5 +1,3 @@
-module IO = Res_io
-
 let data_dir = "tests/syntax_tests/data"
 
 (* test printing of .res file*)
@@ -27,6 +25,55 @@ let x: int
 |})
 
 let () = print_endline "✅ multi printer api tests"
+
+let () =
+  let filename =
+    Filename.concat data_dir "printer/comments/callbackTrailing.res"
+  in
+  let source = Ext_io.load_file filename in
+  let parse source =
+    let result =
+      Res_driver.parse_implementation_from_source ~display_filename:filename
+        ~source
+    in
+    assert (not result.invalid);
+    result
+  in
+  let format ~width result =
+    Res_printer.print_implementation ~width result.Res_driver.parsetree
+      ~comments:result.comments
+  in
+  let comment_texts result =
+    List.map
+      (fun comment -> String.trim (Res_comment.txt comment))
+      result.Res_driver.comments
+  in
+  List.iter
+    (fun width ->
+      let original = parse source in
+      let printed = format ~width original in
+      let reparsed = parse printed in
+      if comment_texts original <> comment_texts reparsed then
+        failwith
+          (Printf.sprintf
+             "Callback formatting changed comments at width %d.\n\
+              Source:\n\
+              %s\n\
+              Printed:\n\
+              %s"
+             width source printed);
+      let reprinted = format ~width reparsed in
+      if printed <> reprinted then
+        failwith
+          (Printf.sprintf
+             "Callback comment formatting is unstable at width %d.\n\
+              First pass:\n\
+              %s\n\
+              Second pass:\n\
+              %s"
+             width printed reprinted))
+    [20; 40; 80; 100; 120];
+  print_endline "✅ callback trailing comments are stable at multiple widths"
 
 module Outcome_printer_tests = struct
   let signature_to_outcome structure =
@@ -64,17 +111,14 @@ module Outcome_printer_tests = struct
           case to the `try` pattern match.\n");
       raise e
 
-  (* `tests/oprint/oprint.res` will be read into memory and typechecked.
+  (* `data/oprint/oprint.res` will be read into memory and typechecked.
    * The inferred signature (i.e. the type of the module `oprint.res`) will
    * then be converted to the outcome tree.
    * The outcome tree is printed to a string
-   * and stored in a snapshot `tests/oprint/expected/oprint.resi.txt` *)
+   * and stored in a snapshot `data/oprint/expected/oprint.resi.txt` *)
   let run () =
     let filename = Filename.concat data_dir "oprint/oprint.res" in
-    let result =
-      Res_driver.parsing_engine.parse_implementation ~for_printer:false
-        ~filename
-    in
+    let result = Res_driver.parsing_engine.parse_implementation ~filename in
     let signature =
       if result.Res_driver.invalid then (
         Res_driver.parsing_engine.string_of_diagnostics ~source:result.source
@@ -82,20 +126,24 @@ module Outcome_printer_tests = struct
         exit 1)
       else result.Res_driver.parsetree
     in
-    IO.write_file
-      ~filename:(Filename.concat data_dir "oprint/expected/oprint.resi.txt")
-      ~contents:(signature_to_outcome signature)
+    Ext_io.write_file
+      (Filename.concat data_dir "oprint/expected/oprint.resi.txt")
+      (signature_to_outcome signature)
 end
 
 module Parser_api_test = struct
   let make_default () =
     let src = "   let x = 1\nlet y = 2\nlet z = 3" in
     let parser = Res_parser.make src "test.res" in
-    assert (parser.scanner.lnum == 1);
-    assert (parser.scanner.line_offset == 0);
-    assert (parser.scanner.offset == 6);
-    assert (parser.token = Res_token.Let {unwrap = false});
-    print_endline "✅ Parser make: initializes parser and checking offsets"
+    assert (Res_parser.position parser = Lexing.dummy_pos);
+    assert (Res_parser.peek parser = Res_token.Let {unwrap = false});
+    assert ((Res_parser.start_pos parser).pos_lnum = 1);
+    assert ((Res_parser.start_pos parser).pos_bol = 0);
+    assert ((Res_parser.end_pos parser).pos_cnum = 6);
+    assert (Res_parser.position parser = Lexing.dummy_pos);
+    Res_parser.next parser;
+    assert ((Res_parser.position parser).pos_cnum = 6);
+    print_endline "✅ Parser make: initializes parser and checks positions"
 
   let unix_lf () =
     let src = "let x = 1\nlet y = 2\nlet z = 3" in

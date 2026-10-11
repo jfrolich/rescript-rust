@@ -154,16 +154,19 @@ let utf16_units_in_utf8_slice s start stop =
     else
       match String.unsafe_get s i with
       | '\n' -> loop (i + 1) 0
-      | c ->
-        let byte = Char.code c in
-        if byte < 0x80 then loop (i + 1) (count + 1)
-        else if byte land 0xE0 = 0xC0 && i + 1 < stop then
-          loop (i + 2) (count + 1)
-        else if byte land 0xF0 = 0xE0 && i + 2 < stop then
-          loop (i + 3) (count + 1)
-        else if byte land 0xF8 = 0xF0 && i + 3 < stop then
-          loop (i + 4) (count + 2)
-        else loop (i + 1) (count + 1)
+      | _ ->
+        let decoded = String.get_utf_8_uchar s i in
+        let width = Uchar.utf_decode_length decoded in
+        if i + width > stop then loop (i + 1) (count + 1)
+        else
+          let utf16_units =
+            if
+              Uchar.utf_decode_is_valid decoded
+              && Uchar.to_int (Uchar.utf_decode_uchar decoded) > 0xffff
+            then 2
+            else 1
+          in
+          loop (i + width) (count + utf16_units)
   in
   loop (max 0 start) 0
 
@@ -232,22 +235,22 @@ let encode_mappings mappings =
   let first_segment = ref true in
   mappings |> List.sort compare_mapping
   |> List.iter (fun mapping ->
-         while !current_line < mapping.generated_line do
-           Buffer.add_char buf ';';
-           incr current_line;
-           previous_generated_column := 0;
-           first_segment := true
-         done;
-         if not !first_segment then Buffer.add_char buf ',';
-         first_segment := false;
-         add_vlq buf (mapping.generated_column - !previous_generated_column);
-         add_vlq buf (mapping.source_index - !previous_source);
-         add_vlq buf (mapping.original_line - !previous_original_line);
-         add_vlq buf (mapping.original_column - !previous_original_column);
-         previous_generated_column := mapping.generated_column;
-         previous_source := mapping.source_index;
-         previous_original_line := mapping.original_line;
-         previous_original_column := mapping.original_column);
+      while !current_line < mapping.generated_line do
+        Buffer.add_char buf ';';
+        incr current_line;
+        previous_generated_column := 0;
+        first_segment := true
+      done;
+      if not !first_segment then Buffer.add_char buf ',';
+      first_segment := false;
+      add_vlq buf (mapping.generated_column - !previous_generated_column);
+      add_vlq buf (mapping.source_index - !previous_source);
+      add_vlq buf (mapping.original_line - !previous_original_line);
+      add_vlq buf (mapping.original_column - !previous_original_column);
+      previous_generated_column := mapping.generated_column;
+      previous_source := mapping.source_index;
+      previous_original_line := mapping.original_line;
+      previous_original_column := mapping.original_column);
   Buffer.contents buf
 
 let json builder =

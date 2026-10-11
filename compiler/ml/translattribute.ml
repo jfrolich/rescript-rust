@@ -66,8 +66,8 @@ let parse_inline_attribute (attr : t option) : Lambda.inline_attribute =
     in
     match payload with
     | PStr [] -> Always_inline
-    | PStr [{pstr_desc = Pstr_eval ({pexp_desc}, [])}] -> (
-      match pexp_desc with
+    | PStr [{pstr_desc = Pstr_eval (expression, [])}] -> (
+      match (Ast_payload.unwrap_braces expression).pexp_desc with
       | Pexp_ident {txt = Longident.Lident "never"} -> Never_inline
       | Pexp_ident {txt = Longident.Lident "always"} -> Always_inline
       | _ ->
@@ -81,7 +81,7 @@ let get_inline_attribute l =
   let attr, _ = find_attribute is_inline_attribute l in
   parse_inline_attribute attr
 
-let add_inline_attribute (expr : Lambda.lambda) loc attributes =
+let add_inline_attribute (expr : Lambda.t) loc attributes =
   match (expr, get_inline_attribute attributes) with
   | expr, Default_inline -> expr
   | Lfunction ({attr} as funct), inline ->
@@ -90,7 +90,7 @@ let add_inline_attribute (expr : Lambda.lambda) loc attributes =
     | Always_inline | Never_inline ->
       Location.prerr_warning loc (Warnings.Duplicated_attribute "inline"));
     let attr = {attr with inline} in
-    Lfunction {funct with attr}
+    Lambda.function_ ~loc:funct.loc ~attr ~params:funct.params ~body:funct.body
   | expr, Always_inline ->
     Location.prerr_warning loc (Warnings.Misplaced_attribute "inline");
     expr

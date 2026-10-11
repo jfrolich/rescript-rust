@@ -4,7 +4,7 @@
 //! of the program block. Also includes free variable analysis and side-effect
 //! checking for JS IR statements and expressions.
 
-use std::collections::HashSet;
+use ahash::AHashSet as HashSet;
 
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, Kind, UsedStats};
@@ -83,7 +83,7 @@ pub(crate) fn move_same_name_export_alias_to_export_tail(
         let binding_is_direct_literal = matches!(
             &initializer.desc,
             ExpressionDesc::Number(_)
-                | ExpressionDesc::Str { .. }
+                | ExpressionDesc::Str(_)
                 | ExpressionDesc::Bool(_)
                 | ExpressionDesc::Undefined { .. }
                 | ExpressionDesc::Null
@@ -267,13 +267,6 @@ fn same_name_export_alias_binding_ref<'a>(
         })
 }
 
-fn toplevel_declared_ident(stmt: &Statement) -> Option<&Ident> {
-    match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration { ident, .. }) => Some(ident),
-        _ => None,
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TailMoveInitializerKind {
     Qualified,
@@ -282,32 +275,13 @@ pub(crate) enum TailMoveInitializerKind {
     Other,
 }
 
-fn same_name_export_initializer_kind(
-    block: &Block,
-    initializer: &Expression,
-) -> TailMoveInitializerKind {
-    match &initializer.desc {
-        ExpressionDesc::Number(_)
-        | ExpressionDesc::Str { .. }
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null => TailMoveInitializerKind::Literal,
-        ExpressionDesc::Var(VIdent::Qualified(_, _)) => TailMoveInitializerKind::Qualified,
-        ExpressionDesc::Var(VIdent::Id(target)) => {
-            resolve_tail_move_initializer_kind(block, target)
-                .unwrap_or(TailMoveInitializerKind::Other)
-        }
-        _ => TailMoveInitializerKind::Other,
-    }
-}
-
 fn same_name_export_initializer_kind_ref(
     block: &[&Statement],
     initializer: &Expression,
 ) -> TailMoveInitializerKind {
     match &initializer.desc {
         ExpressionDesc::Number(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
         | ExpressionDesc::Bool(_)
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null => TailMoveInitializerKind::Literal,
@@ -380,7 +354,7 @@ pub(crate) fn resolve_tail_move_replacement_expression(
                 current = next.clone();
             }
             ExpressionDesc::Number(_)
-            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Str(_)
             | ExpressionDesc::Bool(_)
             | ExpressionDesc::Undefined { .. }
             | ExpressionDesc::Null => {
@@ -454,7 +428,7 @@ fn resolve_tail_move_replacement_expression_ref(
                 current = next.clone();
             }
             ExpressionDesc::Number(_)
-            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Str(_)
             | ExpressionDesc::Bool(_)
             | ExpressionDesc::Undefined { .. }
             | ExpressionDesc::Null => {
@@ -465,45 +439,6 @@ fn resolve_tail_move_replacement_expression_ref(
                 };
             }
             _ => return Expression::var(current),
-        }
-    }
-}
-
-pub(crate) fn tail_move_materialized_root_ident(
-    block: &Block,
-    initializer: &Expression,
-) -> Option<Ident> {
-    let ExpressionDesc::Var(VIdent::Id(start)) = &initializer.desc else {
-        return None;
-    };
-
-    let mut current = start.clone();
-    let mut seen = HashSet::new();
-
-    loop {
-        if !seen.insert(current.clone()) {
-            return None;
-        }
-
-        let stmt = block.iter().find(|stmt| {
-            matches!(
-                &stmt.desc,
-                StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(&current)
-            )
-        })?;
-
-        let StatementDesc::Variable(VariableDeclaration {
-            value: Some(value), ..
-        }) = &stmt.desc
-        else {
-            return Some(current);
-        };
-
-        match &value.desc {
-            ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
-                current = next.clone();
-            }
-            _ => return Some(current),
         }
     }
 }
@@ -579,7 +514,7 @@ pub(crate) fn resolve_tail_move_initializer_kind(
                 return Some(TailMoveInitializerKind::Qualified);
             }
             ExpressionDesc::Number(_)
-            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Str(_)
             | ExpressionDesc::Bool(_)
             | ExpressionDesc::Undefined { .. }
             | ExpressionDesc::Null => return Some(TailMoveInitializerKind::Literal),
@@ -621,7 +556,7 @@ fn resolve_tail_move_initializer_kind_ref(
                 return Some(TailMoveInitializerKind::Qualified);
             }
             ExpressionDesc::Number(_)
-            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Str(_)
             | ExpressionDesc::Bool(_)
             | ExpressionDesc::Undefined { .. }
             | ExpressionDesc::Null => return Some(TailMoveInitializerKind::Literal),
@@ -650,15 +585,6 @@ fn tail_move_uses_are_safe_to_inline_ref(block: &[&Statement], target: &Ident) -
         .all(|stmt| statement_uses_ident_only_in_tail_move_safe_positions(stmt, target))
 }
 
-fn qualified_tail_move_uses_are_safe_to_inline(
-    block: &[Statement],
-    target: &Ident,
-    replacement: &Expression,
-) -> bool {
-    same_name_ml_module_field_tail_move_replacement(replacement, target.name())
-        || tail_move_uses_are_safe_to_inline(block, target)
-}
-
 fn qualified_tail_move_uses_are_safe_to_inline_ref(
     block: &[&Statement],
     target: &Ident,
@@ -684,36 +610,6 @@ fn ml_module_field_tail_move_replacement(replacement: &Expression) -> bool {
         &replacement.desc,
         ExpressionDesc::Var(VIdent::Qualified(module, _)) if module.kind.eq(&Kind::Ml)
     )
-}
-
-pub(crate) fn later_toplevel_effect_allows_tail_move(
-    block: &[Statement],
-    target: &Ident,
-    initializer_kind: TailMoveInitializerKind,
-    replacement: &Expression,
-    replacement_is_recursive_function: bool,
-) -> bool {
-    if !later_toplevel_effect_statement(block) {
-        return true;
-    }
-    if matches!(initializer_kind, TailMoveInitializerKind::Literal) {
-        return true;
-    }
-    let has_remaining_use = block
-        .iter()
-        .any(|stmt| statement_mentions_ident_anywhere(stmt, target));
-    if !has_remaining_use {
-        return matches!(initializer_kind, TailMoveInitializerKind::Function)
-            && replacement_is_recursive_function;
-    }
-
-    match initializer_kind {
-        TailMoveInitializerKind::Function => tail_move_uses_are_safe_to_inline(block, target),
-        TailMoveInitializerKind::Qualified => {
-            qualified_tail_move_uses_are_safe_to_inline(block, target, replacement)
-        }
-        TailMoveInitializerKind::Literal | TailMoveInitializerKind::Other => false,
-    }
 }
 
 fn later_toplevel_effect_allows_tail_move_ref(
@@ -744,26 +640,6 @@ fn later_toplevel_effect_allows_tail_move_ref(
         }
         TailMoveInitializerKind::Literal | TailMoveInitializerKind::Other => false,
     }
-}
-
-fn replacement_resolves_to_recursive_function(block: &Block, replacement: &Expression) -> bool {
-    let ExpressionDesc::Var(VIdent::Id(binding)) = &replacement.desc else {
-        return false;
-    };
-    block.iter().any(|stmt| match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            ident,
-            value:
-                Some(Expression {
-                    desc: ExpressionDesc::Fun { body, .. },
-                    ..
-                }),
-            ..
-        }) if ident.same(binding) => body
-            .iter()
-            .any(|stmt| statement_mentions_ident_anywhere(stmt, binding)),
-        _ => false,
-    })
 }
 
 fn replacement_resolves_to_recursive_function_ref(
@@ -902,7 +778,9 @@ fn expression_uses_ident_only_in_tail_move_safe_positions(
         }
         ExpressionDesc::Var(VIdent::Qualified(_, _))
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
@@ -979,18 +857,21 @@ fn expression_uses_ident_only_in_tail_move_safe_positions(
                 )
             })
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             expression_uses_ident_only_in_tail_move_safe_positions(
                 tag,
                 target,
                 TailMoveUseContext::CallCallee,
-            ) && strings.iter().all(|expr| {
+            ) && values.iter().all(|expr| {
                 expression_uses_ident_only_in_tail_move_safe_positions(
                     expr,
                     target,
                     TailMoveUseContext::Other,
                 )
-            }) && values.iter().all(|expr| {
+            })
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
+            values.iter().all(|expr| {
                 expression_uses_ident_only_in_tail_move_safe_positions(
                     expr,
                     target,
@@ -1080,21 +961,6 @@ pub(crate) fn keeps_declared_same_name_reusable_export_binding(
     )
 }
 
-fn has_later_toplevel_function_binding(block: &[Statement]) -> bool {
-    block.iter().any(|stmt| {
-        matches!(
-            &stmt.desc,
-            StatementDesc::Variable(VariableDeclaration {
-                value: Some(Expression {
-                    desc: ExpressionDesc::Fun { .. },
-                    ..
-                }),
-                ..
-            })
-        )
-    })
-}
-
 fn has_later_toplevel_function_binding_ref(block: &[&Statement]) -> bool {
     block.iter().any(|stmt| {
         matches!(
@@ -1107,20 +973,6 @@ fn has_later_toplevel_function_binding_ref(block: &[&Statement]) -> bool {
                 ..
             })
         )
-    })
-}
-
-fn later_toplevel_function_mentions_ident(block: &[Statement], target: &Ident) -> bool {
-    block.iter().any(|stmt| match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            value:
-                Some(Expression {
-                    desc: ExpressionDesc::Fun { .. },
-                    ..
-                }),
-            ..
-        }) => statement_mentions_ident_anywhere(stmt, target),
-        _ => false,
     })
 }
 
@@ -1138,15 +990,6 @@ fn later_toplevel_function_mentions_ident_ref(block: &[&Statement], target: &Ide
     })
 }
 
-fn later_toplevel_initializer_mentions_ident(block: &[Statement], target: &Ident) -> bool {
-    block.iter().any(|stmt| match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            value: Some(value), ..
-        }) => expression_mentions_ident_outside_nested_functions(value, target),
-        _ => false,
-    })
-}
-
 fn later_toplevel_initializer_mentions_ident_ref(block: &[&Statement], target: &Ident) -> bool {
     block.iter().any(|stmt| match &stmt.desc {
         StatementDesc::Variable(VariableDeclaration {
@@ -1156,22 +999,8 @@ fn later_toplevel_initializer_mentions_ident_ref(block: &[&Statement], target: &
     })
 }
 
-fn later_toplevel_effect_statement(block: &[Statement]) -> bool {
-    block.iter().any(statement_has_toplevel_effect)
-}
-
 fn later_toplevel_effect_statement_ref(block: &[&Statement]) -> bool {
     block.iter().any(|stmt| statement_has_toplevel_effect(stmt))
-}
-
-fn uses_ident_before_first_toplevel_effect(block: &[Statement], target: &Ident) -> bool {
-    let effect_index = block
-        .iter()
-        .position(statement_has_toplevel_effect)
-        .unwrap_or(block.len());
-    block[..effect_index]
-        .iter()
-        .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
 }
 
 fn statement_has_toplevel_effect(stmt: &Statement) -> bool {
@@ -1188,7 +1017,9 @@ fn expression_mentions_ident_outside_nested_functions(expr: &Expression, target:
         ExpressionDesc::Var(VIdent::Id(ident)) => ident.same(target),
         ExpressionDesc::Var(VIdent::Qualified(_, _))
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
@@ -1228,12 +1059,14 @@ fn expression_mentions_ident_outside_nested_functions(expr: &Expression, target:
                     .iter()
                     .any(|arg| expression_mentions_ident_outside_nested_functions(arg, target))
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             expression_mentions_ident_outside_nested_functions(tag, target)
-                || strings
+                || values
                     .iter()
                     .any(|expr| expression_mentions_ident_outside_nested_functions(expr, target))
-                || values
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
+            values
                     .iter()
                     .any(|expr| expression_mentions_ident_outside_nested_functions(expr, target))
         }
@@ -1373,7 +1206,9 @@ fn substitute_export_alias_use_in_expression(
         ExpressionDesc::Var(VIdent::Id(_))
         | ExpressionDesc::Var(VIdent::Qualified(_, _))
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
@@ -1413,11 +1248,13 @@ fn substitute_export_alias_use_in_expression(
                 substitute_export_alias_use_in_expression(arg, target, replacement);
             }
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             substitute_export_alias_use_in_expression(tag, target, replacement);
-            for string in strings {
-                substitute_export_alias_use_in_expression(string, target, replacement);
+            for value in values {
+                substitute_export_alias_use_in_expression(value, target, replacement);
             }
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
             for value in values {
                 substitute_export_alias_use_in_expression(value, target, replacement);
             }
@@ -1553,7 +1390,9 @@ fn expression_mentions_ident_anywhere(expr: &Expression, target: &Ident) -> bool
         ExpressionDesc::Var(VIdent::Id(ident)) => ident.same(target),
         ExpressionDesc::Var(VIdent::Qualified(_, _))
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
@@ -1591,12 +1430,14 @@ fn expression_mentions_ident_anywhere(expr: &Expression, target: &Ident) -> bool
                     .iter()
                     .any(|arg| expression_mentions_ident_anywhere(arg, target))
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             expression_mentions_ident_anywhere(tag, target)
-                || strings
+                || values
                     .iter()
                     .any(|expr| expression_mentions_ident_anywhere(expr, target))
-                || values
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
+            values
                     .iter()
                     .any(|expr| expression_mentions_ident_anywhere(expr, target))
         }
@@ -1927,7 +1768,9 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
         | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Number(_) => {}
         ExpressionDesc::Length(inner, _)
@@ -1961,11 +1804,13 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
                 collect_expression_idents(arg, stats);
             }
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             collect_expression_idents(tag, stats);
-            for string in strings {
-                collect_expression_idents(string, stats);
+            for value in values {
+                collect_expression_idents(value, stats);
             }
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
             for value in values {
                 collect_expression_idents(value, stats);
             }
@@ -2028,7 +1873,7 @@ fn js_statement_no_side_effects(stmt: &Statement) -> bool {
             js_expr_no_side_effects(cond) && js_block_no_side_effects(body)
         }
         StatementDesc::ForRange(_, start, finish, _, _, body) => {
-            start.as_ref().is_none_or(js_expr_no_side_effects)
+            start.as_deref().is_none_or(js_expr_no_side_effects)
                 && js_expr_no_side_effects(finish)
                 && js_block_no_side_effects(body)
         }

@@ -12,9 +12,9 @@
 
 use super::marshal::{EmptyPayloadShareKind, MarshalWriter, PrimListShareKind};
 use super::serialize::Marshal;
-use crate::parse_arena::{LocIdx, StrIdx};
+use crate::parse_arena::LocIdx;
 use crate::parser::ast::{
-    ArgLabel, Arity, Attribute, Attributes, Case, ClosedFlag, Constant, ConstructorArguments,
+    PrimitiveRepr, ArgLabel, Arity, Attribute, Attributes, Case, ClosedFlag, Constant, ConstructorArguments, ConstructorTag,
     ConstructorDeclaration, CoreType, CoreTypeDesc, DirectionFlag, Expression, ExpressionDesc,
     ExpressionRecordField, Extension, ExtensionConstructor, ExtensionConstructorKind, FunParam,
     IncludeDeclaration, IncludeDescription, LabelDeclaration, ModuleBinding, ModuleDeclaration,
@@ -114,6 +114,9 @@ fn should_share_singleton_attr_list(name: &str) -> bool {
     matches!(
         name,
         "react.component" | "jsx.component" | "react.componentWithProps" | "jsx.componentWithProps"
+    // `Typemod_hide.attrs` (compiler/frontend/typemod_hide.ml:26) is one global
+    // list that `expand_reverse` puts on every `%%private` local module.
+            | "internal.local"
     )
 }
 
@@ -164,10 +167,10 @@ fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     if arena.get_string(vd.pval_name.txt) != "unsafe_expr" {
         return false;
     }
-    if vd.pval_prim.len() != 1 {
+    let Some(PrimitiveRepr::PrimName(prim)) = &vd.pval_prim else {
         return false;
-    }
-    let prim = arena.get_string(vd.pval_prim[0]);
+    };
+    let prim = arena.get_string(*prim);
     if prim != "#raw_expr" && prim != "#raw_stmt" {
         return false;
     }
@@ -293,7 +296,7 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     let eq_arg1_expr = arena.get_expr(eq_args[1].1);
     matches!(
         &*eq_arg1_expr.pexp_desc,
-        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(s, None) if s == "undefined")
+        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(s) if s.semantic() == "undefined")
     )
 }
 
@@ -316,7 +319,7 @@ fn is_external_raw_expansion_expr(expr: &Expression, w: &MarshalWriter<'_>) -> b
     let arg_expr = w.get_arena().get_expr(args[0].1);
     matches!(
         &*arg_expr.pexp_desc,
-        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(_, Some(delim)) if delim.is_empty())
+        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::RawSource(_))
     )
 }
 
@@ -480,6 +483,11 @@ fn marshal_attribute_list(
 /// When sharing is enabled and attrs match `[(name, PStr [])]` where name uses
 /// `Location.none` (LocIdx::default()), the attribute tuple is shared via
 /// `singleton_attr_list_table`.
+/// Marshal an attribute list without any parser-specific sharing.
+pub fn marshal_attributes_plain(attrs: &Attributes, w: &mut MarshalWriter<'_>) {
+    marshal_attributes(attrs, w, false, false, None);
+}
+
 fn marshal_attributes(
     attrs: &Attributes,
     w: &mut MarshalWriter<'_>,
@@ -807,6 +815,22 @@ impl Marshal for Arity {
 
 // ========== Constant ==========
 
+/// `String_literal.payload`: `Valid {source; semantic}` is tag 0, and
+/// `Invalid_source of string` is tag 1.
+fn marshal_string_literal(payload: &crate::string_literal::StringLiteral, w: &mut MarshalWriter<'_>) {
+    match payload {
+        crate::string_literal::StringLiteral::Valid { source, semantic } => {
+            w.write_block_header(0, 2);
+            w.write_str(source);
+            w.write_str(semantic);
+        }
+        crate::string_literal::StringLiteral::InvalidSource(source) => {
+            w.write_block_header(1, 1);
+            w.write_str(source);
+        }
+    }
+}
+
 impl Marshal for Constant {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
@@ -815,39 +839,27 @@ impl Marshal for Constant {
                 w.write_str(s);
                 suffix.marshal(w);
             }
-            Constant::Char(c) => {
-                w.write_block_header(1, 1);
-                w.write_int(*c as i64);
+            Constant::Char { source, semantic } => {
+                // Pconst_char {source; semantic}: inline record, tag 1.
+                w.write_block_header(1, 2);
+                w.write_str(source);
+                w.write_int(*semantic as i64);
             }
-            Constant::String(s, delim) => {
-                w.write_block_header(2, 2);
-                if w.debug_const_share
-                    && matches!(s.as_ref(), "None" | "Mic" | "Camera")
-                {
-                    eprintln!(
-                        "CONST {} delim={:?} obj={} ptr={:p} hit={:?}",
-                        s,
-                        delim,
-                        w.obj_counter(),
-                        s.as_ptr(),
-                        w.get_arena().constant_string_str_idx_by_identity(s)
-                    );
-                }
-                if delim.is_none() && s == "undefined" && w.in_external_ext() {
-                    let undefined_idx = w.get_arena().ppx_undefined_str();
-                    w.write_str_idx(undefined_idx);
-                } else if let Some(str_idx) = w.get_arena().constant_string_str_idx_by_identity(s) {
-                    w.write_str_idx(str_idx);
-                } else if w.get_arena().is_shareable_literal(s) {
-                    w.write_str_value_shared(s);
-                } else {
-                    w.write_str(s);
-                }
-                // Use content-based sharing for string delimiters like Some("js")
-                w.write_option_string(delim);
+            Constant::String(payload) => {
+                // Pconst_string of String_literal.payload, tag 2.
+                w.write_block_header(2, 1);
+                marshal_string_literal(payload, w);
+            }
+            Constant::Json(source) => {
+                w.write_block_header(3, 1);
+                w.write_str(source);
+            }
+            Constant::RawSource(source) => {
+                w.write_block_header(4, 1);
+                w.write_str(source);
             }
             Constant::Float(s, suffix) => {
-                w.write_block_header(3, 2);
+                w.write_block_header(5, 2);
                 w.write_str(s);
                 suffix.marshal(w);
             }
@@ -1121,8 +1133,7 @@ impl Marshal for Pattern {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 3);
         if let PatternDesc::Ppat_record(inner) = &*self.ppat_desc {
-            let (fields, flag) = &**inner;
-            let rest = w.get_arena().record_pat_rest(self.ppat_loc).cloned();
+            let (fields, flag, rest) = &**inner;
             w.write_block_header(7, 3);
             fields.marshal(w);
             flag.marshal(w);
@@ -1170,7 +1181,6 @@ impl Marshal for PatternDesc {
         // Ppat_unpack = tag 12
         // Ppat_exception = tag 13
         // Ppat_extension = tag 14
-        // Ppat_open = tag 15
         match self {
             PatternDesc::Ppat_any => w.write_int(0),
             PatternDesc::Ppat_var(s) => {
@@ -1208,10 +1218,11 @@ impl Marshal for PatternDesc {
                 pat.marshal(w);
             }
             PatternDesc::Ppat_record(inner) => {
-                let (ref fields, ref flag) = **inner;
-                w.write_block_header(7, 2);
+                let (ref fields, ref flag, ref rest) = **inner;
+                w.write_block_header(7, 3);
                 fields.marshal(w);
                 flag.marshal(w);
+                rest.marshal(w);
             }
             PatternDesc::Ppat_array(pats) => {
                 w.write_block_header(8, 1);
@@ -1243,11 +1254,6 @@ impl Marshal for PatternDesc {
             PatternDesc::Ppat_extension(ext) => {
                 w.write_block_header(14, 1);
                 ext.marshal(w);
-            }
-            PatternDesc::Ppat_open(lid, p) => {
-                w.write_block_header(15, 2);
-                lid.marshal(w);
-                p.marshal(w);
             }
         }
     }
@@ -1323,7 +1329,6 @@ impl Marshal for Expression {
         // sharing of singleton `(mknoloc name, PStr [])` module-level constants.
         //
         // Early-return expression types (preserve attribute tuple pointers):
-        // - Pexp_constant(Box::new(Pconst_string(_, Some _))): template literals
         // - Pexp_constant(Box::new(Pconst_integer(_, Some _))): int suffix stripping
         // - Pexp_extension: unknown extensions return unchanged
         // - Pexp_newtype: preserves attrs in record-with update
@@ -1333,7 +1338,7 @@ impl Marshal for Expression {
         // the default mapper which creates fresh tuples.
         let share_attrs = matches!(
             &*self.pexp_desc,
-            ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(_, Some(_)) | Constant::Integer(_, Some(_)))
+            ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::Integer(_, Some(_)))
         ) || matches!(
             &*self.pexp_desc,
             ExpressionDesc::Pexp_extension(_) | ExpressionDesc::Pexp_newtype(_)
@@ -1383,53 +1388,77 @@ impl Marshal for Expression {
 impl Marshal for ExpressionDesc {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         // Expression_desc variants - count only non-constant constructors:
-        // Pexp_ident = tag 0
-        // Pexp_constant = tag 1
-        // Pexp_let = tag 2
-        // Pexp_fun = tag 3
-        // Pexp_apply = tag 4
-        // Pexp_match = tag 5
-        // Pexp_try = tag 6
-        // Pexp_tuple = tag 7
-        // Pexp_construct = tag 8
-        // Pexp_variant = tag 9
-        // Pexp_record = tag 10
-        // Pexp_field = tag 11
-        // Pexp_setfield = tag 12
-        // Pexp_array = tag 13
-        // Pexp_ifthenelse = tag 14
-        // Pexp_sequence = tag 15
-        // Pexp_while = tag 16
-        // Pexp_for = tag 17
-        // Pexp_constraint = tag 18
-        // Pexp_coerce = tag 19
-        // Pexp_send = tag 20
-        // Pexp_letmodule = tag 21
-        // Pexp_letexception = tag 22
-        // Pexp_assert = tag 23
-        // Pexp_newtype = tag 24
-        // Pexp_pack = tag 25
-        // Pexp_open = tag 26
-        // Pexp_extension = tag 27
-        // Pexp_await = tag 28
-        // Pexp_jsx_element = tag 29
+        // Pexp_braces = tag 0
+        // Pexp_ident = tag 1
+        // Pexp_constant = tag 2
+        // Pexp_let = tag 3
+        // Pexp_fun = tag 4
+        // Pexp_apply = tag 5
+        // Pexp_match = tag 6
+        // Pexp_try = tag 7
+        // Pexp_tuple = tag 8
+        // Pexp_construct = tag 9
+        // Pexp_variant = tag 10
+        // Pexp_record = tag 11
+        // Pexp_field = tag 12
+        // Pexp_setfield = tag 13
+        // Pexp_array = tag 14
+        // Pexp_ifthenelse = tag 15
+        // Pexp_ternary = tag 16
+        // Pexp_sequence = tag 17
+        // Pexp_while = tag 18
+        // Pexp_for = tag 19
+        // Pexp_constraint = tag 20
+        // Pexp_coerce = tag 21
+        // Pexp_object_get = tag 22
+        // Pexp_object_set = tag 23
+        // Pexp_object_literal = tag 24
+        // Pexp_letmodule = tag 25
+        // Pexp_letexception = tag 26
+        // Pexp_assert = tag 27
+        // Pexp_pack = tag 28
+        // Pexp_open = tag 29
+        // Pexp_extension = tag 30
+        // Pexp_await = tag 31
+        // Pexp_jsx_element = tag 32
+        // Pexp_for_of = tag 33
+        // Pexp_for_await_of = tag 34
+        // Pexp_regexp = tag 35
+        // Pexp_template = tag 36
+        // Pexp_tagged_template = tag 37
         // Constant constructors (no payload):
         // Pexp_break = int 0
         // Pexp_continue = int 1
         match self {
             ExpressionDesc::Pexp_break => w.write_int(0),
             ExpressionDesc::Pexp_continue => w.write_int(1),
+            ExpressionDesc::Pexp_braces(braces) => {
+                w.write_block_header(0, 2);
+                braces.expr.marshal(w);
+                braces.braces_loc.marshal(w);
+            }
+            ExpressionDesc::Pexp_ternary(inner) => {
+                w.write_block_header(16, 3);
+                inner.0.marshal(w);
+                inner.1.marshal(w);
+                inner.2.marshal(w);
+            }
+            ExpressionDesc::Pexp_regexp(regexp) => {
+                w.write_block_header(35, 2);
+                w.write_str(&regexp.pattern);
+                w.write_str(&regexp.flags);
+            }
             ExpressionDesc::Pexp_ident(lid) => {
-                w.write_block_header(0, 1);
+                w.write_block_header(1, 1);
                 lid.marshal(w);
             }
             ExpressionDesc::Pexp_constant(c) => {
-                w.write_block_header(1, 1);
+                w.write_block_header(2, 1);
                 c.marshal(w);
             }
             ExpressionDesc::Pexp_let(inner) => {
                 let (ref flag, ref bindings, ref body) = **inner;
-                w.write_block_header(2, 3);
+                w.write_block_header(3, 3);
                 flag.marshal(w);
                 bindings.marshal(w);
                 body.marshal(w);
@@ -1448,7 +1477,7 @@ impl Marshal for ExpressionDesc {
                 let body = w.get_arena().nary_fun_body(inner);
                 // Pexp_fun of { newtypes; params; body; async }
                 // Inline record with 4 fields
-                w.write_block_header(3, 4);
+                w.write_block_header(4, 4);
                 // OCaml serializes each newtype as a tuple
                 // `(string loc * attributes)`; lists are cons cells.
                 if newtypes.is_empty() {
@@ -1478,25 +1507,13 @@ impl Marshal for ExpressionDesc {
                 } = **inner;
                 // Pexp_apply of { funct; args; partial; transformed_jsx }
                 // Inline record with 4 fields
-                w.write_block_header(4, 4);
+                w.write_block_header(5, 4);
                 funct.marshal(w);
                 args.marshal(w);
                 w.write_int(if *partial { 1 } else { 0 });
                 w.write_int(if *transformed_jsx { 1 } else { 0 });
             }
             ExpressionDesc::Pexp_match(inner) => {
-                let (ref e, ref cases) = **inner;
-                w.write_block_header(5, 2);
-                e.marshal(w);
-                if let Some(owner) = w.current_expr_idx() {
-                    w.enter_case_owner(owner);
-                    cases.marshal(w);
-                    w.exit_case_owner();
-                } else {
-                    cases.marshal(w);
-                }
-            }
-            ExpressionDesc::Pexp_try(inner) => {
                 let (ref e, ref cases) = **inner;
                 w.write_block_header(6, 2);
                 e.marshal(w);
@@ -1508,28 +1525,32 @@ impl Marshal for ExpressionDesc {
                     cases.marshal(w);
                 }
             }
+            ExpressionDesc::Pexp_try(inner) => {
+                let (ref e, ref cases) = **inner;
+                w.write_block_header(7, 2);
+                e.marshal(w);
+                if let Some(owner) = w.current_expr_idx() {
+                    w.enter_case_owner(owner);
+                    cases.marshal(w);
+                    w.exit_case_owner();
+                } else {
+                    cases.marshal(w);
+                }
+            }
             ExpressionDesc::Pexp_tuple(exprs) => {
-                w.write_block_header(7, 1);
+                w.write_block_header(8, 1);
                 exprs.marshal(w);
             }
-            ExpressionDesc::Pexp_construct(lid, expr) => {
-                let arg_idx = w
-                    .current_expr_idx()
-                    .and_then(|owner| w.get_arena().construct_arg(owner))
-                    .or(*expr);
-                w.write_block_header(8, 2);
+            ExpressionDesc::Pexp_construct(lid, args) => {
+                w.write_block_header(9, 2);
                 lid.marshal(w);
-                arg_idx.marshal(w);
+                args.marshal(w);
             }
             ExpressionDesc::Pexp_variant(inner) => {
-                let (ref label, ref expr) = **inner;
-                let arg_idx = w
-                    .current_expr_idx()
-                    .and_then(|owner| w.get_arena().variant_arg(owner))
-                    .or(*expr);
-                w.write_block_header(9, 2);
+                let (ref label, ref args) = **inner;
+                w.write_block_header(10, 2);
                 w.write_str(label);
-                arg_idx.marshal(w);
+                args.marshal(w);
             }
             ExpressionDesc::Pexp_record(inner) => {
                 let (ref fields, ref spread) = **inner;
@@ -1537,24 +1558,24 @@ impl Marshal for ExpressionDesc {
                     .current_expr_idx()
                     .and_then(|owner| w.get_arena().record_spread(owner))
                     .or(*spread);
-                w.write_block_header(10, 2);
+                w.write_block_header(11, 2);
                 fields.marshal(w);
                 spread_idx.marshal(w);
             }
             ExpressionDesc::Pexp_field(e, lid) => {
-                w.write_block_header(11, 2);
+                w.write_block_header(12, 2);
                 e.marshal(w);
                 lid.marshal(w);
             }
             ExpressionDesc::Pexp_setfield(inner) => {
                 let (ref e1, ref lid, ref e2) = **inner;
-                w.write_block_header(12, 3);
+                w.write_block_header(13, 3);
                 e1.marshal(w);
                 lid.marshal(w);
                 e2.marshal(w);
             }
             ExpressionDesc::Pexp_array(exprs) => {
-                w.write_block_header(13, 1);
+                w.write_block_header(14, 1);
                 exprs.marshal(w);
             }
             ExpressionDesc::Pexp_ifthenelse(inner) => {
@@ -1563,24 +1584,24 @@ impl Marshal for ExpressionDesc {
                     .current_expr_idx()
                     .and_then(|owner| w.get_arena().if_else_branch(owner))
                     .or(*e3);
-                w.write_block_header(14, 3);
+                w.write_block_header(15, 3);
                 e1.marshal(w);
                 e2.marshal(w);
                 else_idx.marshal(w);
             }
             ExpressionDesc::Pexp_sequence(e1, e2) => {
-                w.write_block_header(15, 2);
+                w.write_block_header(17, 2);
                 e1.marshal(w);
                 e2.marshal(w);
             }
             ExpressionDesc::Pexp_while(e1, e2) => {
-                w.write_block_header(16, 2);
+                w.write_block_header(18, 2);
                 e1.marshal(w);
                 e2.marshal(w);
             }
             ExpressionDesc::Pexp_for(inner) => {
                 let (ref pat, ref e1, ref e2, ref dir, ref e3) = **inner;
-                w.write_block_header(17, 5);
+                w.write_block_header(19, 5);
                 pat.marshal(w);
                 e1.marshal(w);
                 e2.marshal(w);
@@ -1589,7 +1610,7 @@ impl Marshal for ExpressionDesc {
             }
             ExpressionDesc::Pexp_constraint(inner) => {
                 let (ref e, ref t) = **inner;
-                w.write_block_header(18, 2);
+                w.write_block_header(20, 2);
                 e.marshal(w);
                 t.marshal(w);
             }
@@ -1600,20 +1621,31 @@ impl Marshal for ExpressionDesc {
                     .and_then(|owner| w.get_arena().coerce_from_type(owner));
                 // Pexp_coerce of expression * unit * core_type
                 // The middle field in Rust is Option<CoreType> but OCaml uses unit
-                w.write_block_header(19, 3);
+                w.write_block_header(21, 3);
                 e.marshal(w);
                 w.write_int(0); // unit = ()
                 t.marshal(w);
             }
-            ExpressionDesc::Pexp_send(inner) => {
+            ExpressionDesc::Pexp_object_get(inner) => {
                 let (ref e, ref label) = **inner;
-                w.write_block_header(20, 2);
+                w.write_block_header(22, 2);
                 e.marshal(w);
                 label.marshal(w);
             }
+            ExpressionDesc::Pexp_object_set(inner) => {
+                let (ref e, ref label, ref v) = **inner;
+                w.write_block_header(23, 3);
+                e.marshal(w);
+                label.marshal(w);
+                v.marshal(w);
+            }
+            ExpressionDesc::Pexp_object_literal(fields) => {
+                w.write_block_header(24, 1);
+                fields.marshal(w);
+            }
             ExpressionDesc::Pexp_letmodule(inner) => {
                 let (ref name, ref me, ref body) = **inner;
-                w.write_block_header(21, 3);
+                w.write_block_header(25, 3);
                 name.marshal(w);
                 w.enter_letmodule_expr();
                 me.marshal(w);
@@ -1622,55 +1654,66 @@ impl Marshal for ExpressionDesc {
             }
             ExpressionDesc::Pexp_letexception(inner) => {
                 let (ref ec, ref body) = **inner;
-                w.write_block_header(22, 2);
+                w.write_block_header(26, 2);
                 ec.marshal(w);
                 body.marshal(w);
             }
             ExpressionDesc::Pexp_assert(e) => {
-                w.write_block_header(23, 1);
+                w.write_block_header(27, 1);
                 e.marshal(w);
             }
             ExpressionDesc::Pexp_newtype(_) => {
                 unreachable!("Pexp_newtype is eliminated from the current n-ary parsetree")
             }
             ExpressionDesc::Pexp_pack(me) => {
-                w.write_block_header(24, 1);
+                w.write_block_header(28, 1);
                 w.enter_pack();
                 me.marshal(w);
                 w.exit_pack();
             }
             ExpressionDesc::Pexp_open(inner) => {
                 let (ref flag, ref lid, ref e) = **inner;
-                w.write_block_header(25, 3);
+                w.write_block_header(29, 3);
                 flag.marshal(w);
                 w.write_lident_loc_shared(lid.txt, lid.loc);
                 e.marshal(w);
             }
             ExpressionDesc::Pexp_extension(ext) => {
-                w.write_block_header(26, 1);
+                w.write_block_header(30, 1);
                 marshal_extension(ext, w, Some(EmptyPayloadShareKind::ParserAttr));
             }
             ExpressionDesc::Pexp_await(e) => {
-                w.write_block_header(27, 1);
+                w.write_block_header(31, 1);
                 e.marshal(w);
             }
             ExpressionDesc::Pexp_jsx_element(jsx) => {
-                w.write_block_header(28, 1);
+                w.write_block_header(32, 1);
                 jsx.marshal(w);
             }
             ExpressionDesc::Pexp_for_of(inner) => {
                 let (ref pat, ref iterable, ref body) = **inner;
-                w.write_block_header(29, 3);
+                w.write_block_header(33, 3);
                 pat.marshal(w);
                 iterable.marshal(w);
                 body.marshal(w);
             }
             ExpressionDesc::Pexp_for_await_of(inner) => {
                 let (ref pat, ref iterable, ref body) = **inner;
-                w.write_block_header(30, 3);
+                w.write_block_header(34, 3);
                 pat.marshal(w);
                 iterable.marshal(w);
                 body.marshal(w);
+            }
+            ExpressionDesc::Pexp_template(template) => {
+                w.write_block_header(36, 2);
+                template.source_segments.marshal(w);
+                template.values.marshal(w);
+            }
+            ExpressionDesc::Pexp_tagged_template(template) => {
+                w.write_block_header(37, 3);
+                template.tag.marshal(w);
+                template.raw_sources.marshal(w);
+                template.values.marshal(w);
             }
             ExpressionDesc::Pexp_inline_for(_)
             | ExpressionDesc::Pexp_comptime_typeinfo(_)
@@ -1926,14 +1969,18 @@ impl Marshal for ModuleExprDesc {
 
 impl Marshal for TypeDeclaration {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        // type_declaration has 8 fields
-        w.write_block_header(0, 8);
+        // type_declaration has 9 fields
+        w.write_block_header(0, 9);
         self.ptype_name.marshal(w);
         self.ptype_params.marshal(w);
         self.ptype_cstrs.marshal(w);
         self.ptype_kind.marshal(w);
         self.ptype_private.marshal(w);
         self.ptype_manifest.marshal(w);
+        w.write_int(match self.ptype_origin {
+            crate::parser::ast::TypeDeclarationOrigin::Declared => 0,
+            crate::parser::ast::TypeDeclarationOrigin::Inline_record_definition => 1,
+        });
         marshal_attributes(&self.ptype_attributes, w, false, false, None);
         self.ptype_loc.marshal(w);
     }
@@ -1956,10 +2003,45 @@ impl Marshal for TypeKind {
     }
 }
 
+/// `Parsetree.constructor_tag`: the string, int, float, bigint and bool cases
+/// are blocks with tags 0-4; `Pct_null` and `Pct_undefined` are the constant
+/// constructors 0 and 1.
+impl Marshal for ConstructorTag {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        match self {
+            ConstructorTag::Pct_string(s) => {
+                w.write_block_header(0, 1);
+                marshal_string_literal(s, w);
+            }
+            ConstructorTag::Pct_int(i) => {
+                w.write_block_header(1, 1);
+                w.write_str(i);
+            }
+            ConstructorTag::Pct_float(f) => {
+                w.write_block_header(2, 1);
+                w.write_str(f);
+            }
+            ConstructorTag::Pct_bigint(i) => {
+                w.write_block_header(3, 1);
+                w.write_str(i);
+            }
+            ConstructorTag::Pct_bool(b) => {
+                w.write_block_header(4, 1);
+                w.write_int(if *b { 1 } else { 0 });
+            }
+            ConstructorTag::Pct_null => w.write_int(0),
+            ConstructorTag::Pct_undefined => w.write_int(1),
+        }
+    }
+}
+
 impl Marshal for ConstructorDeclaration {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        w.write_block_header(0, 5);
+        // OCaml field order: pcd_name, pcd_runtime_tag, pcd_args, pcd_res,
+        // pcd_loc, pcd_attributes
+        w.write_block_header(0, 6);
         self.pcd_name.marshal(w);
+        self.pcd_runtime_tag.marshal(w);
         self.pcd_args.marshal(w);
         self.pcd_res.marshal(w);
         self.pcd_loc.marshal(w);
@@ -1984,9 +2066,19 @@ impl Marshal for ConstructorArguments {
 
 impl Marshal for LabelDeclaration {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        // OCaml field order: pld_name, pld_mutable, pld_optional, pld_type, pld_loc, pld_attributes
-        w.write_block_header(0, 6);
+        // OCaml field order: pld_name, pld_runtime_name, pld_mutable,
+        // pld_optional, pld_type, pld_loc, pld_attributes
+        w.write_block_header(0, 7);
         self.pld_name.marshal(w);
+        match &self.pld_runtime_name {
+            None => w.write_int(0),
+            Some(name) => {
+                w.write_block_header(0, 1);
+                w.write_block_header(0, 2);
+                marshal_string_literal(&name.txt, w);
+                name.loc.marshal(w);
+            }
+        }
         self.pld_mutable.marshal(w);
         w.write_int(if self.pld_optional { 1 } else { 0 });
         self.pld_type.marshal(w);
@@ -2039,7 +2131,7 @@ impl Marshal for ExtensionConstructorKind {
 impl Marshal for ValueDescription {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         let key = (self.pval_name.txt, self.pval_name.loc, self.pval_loc);
-        let shared_name_type = if self.pval_prim.is_empty() {
+        let shared_name_type = if self.pval_prim.is_none() {
             w.vd_name_type_table_get(&key).copied()
         } else {
             None
@@ -2063,60 +2155,64 @@ impl Marshal for ValueDescription {
             self.pval_type.marshal(w);
         }
 
-        if !self.pval_prim.is_empty() {
+        if self.pval_prim.is_some() {
             w.vd_name_type_table_insert(key, (name_obj_idx, type_obj_idx));
         }
 
-        // pval_prim contains raw binary data (FFI encoding blobs) that must be
-        // written as raw bytes, not Latin-1 converted. Use write_string directly.
-        marshal_prim_list(&self.pval_prim, w);
+        marshal_prim(&self.pval_prim, w);
         marshal_attributes(&self.pval_attributes, w, false, false, None);
         self.pval_loc.marshal(w);
     }
 }
 
-/// Write a list of pval_prim strings, converting from Latin-1 encoding back to raw bytes.
-/// FFI binary data is stored using Latin-1 encoding (each byte 0-255 becomes Unicode U+0000-U+00FF),
-/// so we need to convert back using chars().map(|c| c as u8) to get the original bytes.
-fn marshal_prim_list(prims: &[StrIdx], w: &mut MarshalWriter<'_>) {
-    if prims.is_empty() {
+/// Write `pval_prim : primitive_repr option`. The parser builds a fresh
+/// `Some (Prim_name s)`; the frontend's `Prim_name "#raw_expr"` /
+/// `Prim_name "#raw_stmt"` are static constants, so OCaml shares them.
+fn marshal_prim(prim: &Option<PrimitiveRepr>, w: &mut MarshalWriter<'_>) {
+    let Some(prim) = prim else {
         w.write_int(0);
+        return;
+    };
+    // `bsc -bs-ast` writes the AST after the builtin PPX digested externals
+    // (js_implementation.ml `after_parsing_impl`).
+    let prim = match prim {
+        PrimitiveRepr::PrimName(prim) => prim,
+        PrimitiveRepr::PrimFfi { name, spec } => {
+            w.write_block_header(0, 1);
+            w.write_block_header(1, 2);
+            w.write_str(name);
+            super::ffi_types::marshal_external_ffi(w, spec);
+            return;
+        }
+        PrimitiveRepr::PrimInlineConst(c) => {
+            w.write_block_header(0, 1);
+            w.write_block_header(2, 1);
+            super::ffi_types::marshal_inline_const(w, c);
+            return;
+        }
+    };
+    let prim = *prim;
+    w.write_block_header(0, 1);
+    if prim == w.get_arena().prim_raw_expr() {
+        w.write_prim_list_shared(PrimListShareKind::RawExpr, prim);
+        return;
+    }
+    if prim == w.get_arena().prim_raw_stmt() {
+        w.write_prim_list_shared(PrimListShareKind::RawStmt, prim);
+        return;
+    }
+    w.write_block_header(0, 1);
+    // OCaml keeps hyphenated JS prim names (e.g. "aria-details") fresh,
+    // while many other prim strings are physically shared.
+    let share_by_idx = {
+        let prim_str = w.get_arena().get_string(prim);
+        !prim_str.contains('-') && !matches!(prim_str, "open" | "type" | "begin" | "end" | "in" | "to")
+    };
+    if share_by_idx {
+        w.write_str_idx(prim);
     } else {
-        if prims.len() == 1 {
-            let prim = prims[0];
-            if prim == w.get_arena().prim_raw_expr() {
-                w.write_prim_list_shared(PrimListShareKind::RawExpr, prim);
-                return;
-            }
-            if prim == w.get_arena().prim_raw_stmt() {
-                w.write_prim_list_shared(PrimListShareKind::RawStmt, prim);
-                return;
-            }
-        }
-        for (i, prim) in prims.iter().enumerate() {
-            w.write_block_header(0, 2);
-            // OCaml keeps hyphenated JS prim names (e.g. "aria-details") fresh,
-            // while many other prim strings are physically shared.
-            let share_by_idx = {
-                let prim_str = w.get_arena().get_string(*prim);
-                !prim_str.contains('-')
-                    && !matches!(prim_str, "open" | "type" | "begin" | "end" | "in" | "to")
-            };
-            if share_by_idx {
-                w.write_str_idx(*prim);
-            } else {
-                let prim_bytes: Vec<u8> = w
-                    .get_arena()
-                    .get_string(*prim)
-                    .chars()
-                    .map(|c| c as u8)
-                    .collect();
-                w.write_string(&prim_bytes);
-            }
-            if i == prims.len() - 1 {
-                w.write_int(0);
-            }
-        }
+        let prim_bytes: Vec<u8> = w.get_arena().get_string(prim).chars().map(|c| c as u8).collect();
+        w.write_string(&prim_bytes);
     }
 }
 

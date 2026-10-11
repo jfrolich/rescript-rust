@@ -1,16 +1,11 @@
 use anyhow::Result;
 use fs2::FileExt;
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process;
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
-
-use crate::queue::FifoQueue;
-use crate::queue::*;
+use std::time::{Duration, Instant};
 
 /* This locking mechanism is meant to never be deleted. Instead, it stores the PID of the process
  * that's running, when trying to aquire a lock, it checks wether that process is still running. If
@@ -93,56 +88,9 @@ impl LockKind {
     }
 }
 
-pub const TIMEOUT_SECONDS: u64 = 60;
+const TIMEOUT_SECONDS: u64 = 60;
 
-pub fn await_lock_deletion(location: &Path, kind: LockKind) -> Result<(), Error> {
-    let now = SystemTime::now();
-    let lock_path = location.join(kind.file_name());
-    let queue = Arc::new(FifoQueue::<Result<Event, notify::Error>>::new());
-    let producer = queue.clone();
-
-    let mut watcher = RecommendedWatcher::new(move |res| producer.push(res), Config::default())
-        .map_err(|e| Error::AwaitingLockFile(AwaitLockError::Watcher(e)))?;
-
-    watcher
-        .watch(location, RecursiveMode::NonRecursive)
-        .map_err(|e| Error::AwaitingLockFile(AwaitLockError::Watcher(e)))?;
-
-    loop {
-        if !lock_path.exists() {
-            return Ok(());
-        }
-
-        while !queue.is_empty() {
-            match queue.pop() {
-                Ok(Event {
-                    kind: EventKind::Remove(_),
-                    paths,
-                    ..
-                }) if paths
-                    .iter()
-                    .any(|path| path == &lock_path || path.ends_with(kind.file_name())) =>
-                {
-                    return Ok(());
-                }
-                Ok(_) | Err(_) => (),
-            }
-        }
-
-        match now.elapsed() {
-            Ok(elapsed) if elapsed < Duration::from_secs(TIMEOUT_SECONDS) => {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Ok(_) | Err(_) => {
-                return Err(Error::AwaitingLockFile(AwaitLockError::Timeout(
-                    lock_path.to_string_lossy().to_string(),
-                )));
-            }
-        }
-    }
-}
-
-pub fn get(kind: LockKind, folder: &str) -> Lock {
+fn get(kind: LockKind, folder: &str) -> Lock {
     let project_folder = Path::new(folder);
     if !project_folder.exists() {
         return Lock::Error(Error::ProjectFolderMissing(project_folder.to_path_buf()));
@@ -176,10 +124,12 @@ pub fn get(kind: LockKind, folder: &str) -> Lock {
     loop {
         match guard_file.try_lock_exclusive() {
             Ok(()) => {
+                // The exclusive lock itself is kernel state on the open file;
+                // the PID written here is informational, so it is not synced
+                // (on macOS `sync_data` is a full-device flush).
                 if let Err(e) = guard_file.set_len(0).and_then(|()| {
                     guard_file.seek(SeekFrom::Start(0))?;
-                    guard_file.write_all(pid.to_string().as_bytes())?;
-                    guard_file.sync_data()
+                    guard_file.write_all(pid.to_string().as_bytes())
                 }) {
                     return Lock::Error(Error::WritingLockfile(e));
                 }
@@ -249,6 +199,7 @@ pub fn drop_lock(kind: LockKind, folder: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
     use tempfile::TempDir;

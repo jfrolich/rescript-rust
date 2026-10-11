@@ -165,7 +165,7 @@ pub(crate) fn simple_beta_reduce(
             if match store.view(function) {
                 NodeView::Var(_) => true,
                 NodeView::Prim(Primitive::Pfield(_, _), [base], _) => {
-                    matches!(store.view(*base), NodeView::GlobalModule(_, _))
+                    matches!(store.view(*base), NodeView::GlobalModule(_))
                 }
                 _ => false,
             } =>
@@ -243,7 +243,7 @@ fn rewrite_bounded(
     match store.snapshot(node) {
         NodeSnapshot::Var(id) => map.get(&id).copied().unwrap_or(node),
         NodeSnapshot::Const(_)
-        | NodeSnapshot::GlobalModule(_, _)
+        | NodeSnapshot::GlobalModule(_)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => node,
         NodeSnapshot::Let(kind, id, value, body) => {
@@ -358,7 +358,7 @@ fn propagate(
     for (param, arg) in params.iter().zip(args.iter().copied()) {
         let direct = matches!(store.view(arg), NodeView::Const(_) | NodeView::Var(_))
             || stats.is_some_and(|stats| {
-                !matches!(store.view(arg), NodeView::GlobalModule(_, _))
+                !matches!(store.view(arg), NodeView::GlobalModule(_))
                     && no_side_effects(store, arg)
                     && stats
                         .get(param)
@@ -446,14 +446,7 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: name.into(),
                 arg_types: vec![],
-                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
-                    kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
-                    spec: None,
-                    obj_params: None,
-                    return_wrapper: crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
-                    inline_constant: None,
-                },
-                dynamic_import: false,
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                 transformed_jsx: false,
             },
             vec![],

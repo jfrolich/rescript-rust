@@ -27,23 +27,53 @@ fn is_block_constructor(primitive: &Primitive) -> bool {
 fn is_safe_to_alias(lam: &Lambda) -> bool {
     match lam {
         Lambda::Lvar(_) | Lambda::Lconst(_) => true,
-        Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pfield(_, dbg_info),
-            args,
-            ..
-        }) if matches!(
-            dbg_info,
-            crate::lambda::lam_compat::FieldDbgInfo::Module { .. }
-        ) && args.len() == 1
-            && matches!(args[0], Lambda::LglobalModule(_, _) | Lambda::Lvar(_)) =>
+        // A template without interpolations is a JavaScript literal;
+        // repeating it preserves its value and source spelling.
+        Lambda::Lprim(prim)
+            if matches!(&prim.primitive, Primitive::Ptemplate(segments) if segments.len() == 1)
+                && prim.args.is_empty() =>
         {
             true
         }
-        Lambda::Lprim(PrimInfo {
+        Lambda::Lprim(__prim2)
+            if matches!(__prim2.as_ref(), PrimInfo {
+            primitive: Primitive::Pfield(_, dbg_info),
+            args,
+            ..
+        } if matches!(
+            dbg_info,
+            crate::lambda::lam_compat::FieldDbgInfo::Module { .. }
+        ) && args.len() == 1
+            && matches!(args[0], Lambda::LglobalModule(_) | Lambda::Lvar(_))) =>
+        {
+            let PrimInfo {
+                primitive: Primitive::Pfield(_, dbg_info),
+                args,
+                ..
+            } = __prim2.as_ref()
+            else {
+                unreachable!()
+            };
+
+            true
+        }
+        Lambda::Lprim(__prim1)
+            if matches!(__prim1.as_ref(), PrimInfo {
             primitive: Primitive::PsomeNotNest,
             args,
             ..
-        }) if args.len() == 1 => is_safe_to_alias(&args[0]),
+        } if args.len() == 1) =>
+        {
+            let PrimInfo {
+                primitive: Primitive::PsomeNotNest,
+                args,
+                ..
+            } = __prim1.as_ref()
+            else {
+                unreachable!()
+            };
+            is_safe_to_alias(&args[0])
+        }
         _ => false,
     }
 }
@@ -55,24 +85,55 @@ fn is_safe_to_alias(lam: &Lambda) -> bool {
 /// OCaml so that the JS backend never sees a binding that was over- or
 /// under-relaxed relative to the OCaml reference.
 pub fn refine_let(kind: LetKind, param: Ident, arg: Lambda, body: Lambda) -> Lambda {
-    match (&kind, &arg, &body) {
+    refine_let_parts(kind, param, arg, body)
+        .unwrap_or_else(|(kind, param, arg, body)| Lambda::let_(kind, param, arg, body))
+}
+
+/// `Lam_util.refine_let ~original`: when no refinement applies and neither
+/// the bound expression nor the body changed (`unchanged`), the binding is
+/// handed back as the original rather than counted as rebuilt.
+pub fn refine_let_original(
+    kind: LetKind,
+    param: Ident,
+    arg: Lambda,
+    body: Lambda,
+    unchanged: bool,
+) -> (Lambda, bool) {
+    match refine_let_parts(kind, param, arg, body) {
+        Ok(refined) => (refined, true),
+        Err((kind, param, arg, body)) => (Lambda::let_(kind, param, arg, body), !unchanged),
+    }
+}
+
+/// The refinement clauses of `refine_let`; `Err` hands the parts back when
+/// the binding falls through unrefined.
+fn refine_let_parts(
+    kind: LetKind,
+    param: Ident,
+    arg: Lambda,
+    body: Lambda,
+) -> Result<Lambda, (LetKind, Ident, Lambda, Lambda)> {
+    Ok(match (&kind, &arg, &body) {
         // (Return) `let[k] x = e in x` -> `e` (lam_util.ml:100-104).
         (_, _, Lambda::Lvar(w)) if w == &param => arg,
 
         // (Prim) `let[k] x = e in prim p [x]` -> `prim p [e]`, when `p` is not
         // a block constructor (lam_util.ml:105-111).
-        (
-            _,
-            _,
-            Lambda::Lprim(PrimInfo {
+        (_, _, Lambda::Lprim(__prim0))
+            if matches!(__prim0.as_ref(), PrimInfo {
                 primitive,
                 args,
                 loc,
-            }),
-        ) if args.len() == 1
+            } if args.len() == 1
             && matches!(&args[0], Lambda::Lvar(w) if w == &param)
-            && !is_block_constructor(primitive) =>
+            && !is_block_constructor(primitive)) =>
         {
+            let PrimInfo {
+                primitive,
+                args,
+                loc,
+            } = __prim0.as_ref();
+
             Lambda::prim(primitive.clone(), vec![arg], loc.clone())
         }
 
@@ -84,12 +145,12 @@ pub fn refine_let(kind: LetKind, param: Ident, arg: Lambda, body: Lambda) -> Lam
                 && matches!(&apply.ap_args[0], Lambda::Lvar(w) if w == &param)
                 && !hit_variable(&param, &apply.ap_func) =>
         {
-            Lambda::Lapply(Apply {
+            Lambda::Lapply(Box::new(Apply {
                 ap_func: apply.ap_func.clone(),
                 ap_args: vec![arg],
                 ap_info: apply.ap_info.clone(),
                 ap_transformed_jsx: apply.ap_transformed_jsx,
-            })
+            }))
         }
 
         // (Alias) `let[Strict|StrictOpt] x = e in body` with safe-to-alias e
@@ -111,8 +172,8 @@ pub fn refine_let(kind: LetKind, param: Ident, arg: Lambda, body: Lambda) -> Lam
         }
 
         // Fall-through: keep the original binding (lam_util.ml:137-138).
-        _ => Lambda::let_(kind, param, arg, body),
-    }
+        _ => return Err((kind, param, arg, body)),
+    })
 }
 
 /// Direct port of `Lam_util.field_flatten_get` (lam_util.ml:202-232).
@@ -134,7 +195,7 @@ pub fn field_flatten_get(
         // `Lam.global_module g`.
         Some(IdKind::Module(g)) => Lambda::prim(
             Primitive::Pfield(i, info.clone()),
-            vec![Lambda::global_module(g.clone(), false)],
+            vec![Lambda::global_module(g.clone())],
             Location::none(),
         ),
         // lam_util.ml:208-213 — ImmutableBlock: lift element if `SimpleForm`,
@@ -149,25 +210,28 @@ pub fn field_flatten_get(
         // resolve the field by name when `info` is `Fld_record`. If the named
         // slot holds a non-allocating constant, lift it as `Lam.const`.
         Some(IdKind::Constant(Constant::Block {
-            tag_info: TagInfo::Record { fields, .. },
-            elements,
-            ..
-        })) => match info {
-            FieldDbgInfo::Record { name } => {
-                let mut found: Option<&Constant> = None;
-                for (idx, (field_name, _)) in fields.iter().enumerate() {
-                    if field_name == name {
-                        found = elements.get(idx);
-                        break;
+            tag_info, elements, ..
+        })) if matches!(**tag_info, TagInfo::Record { .. }) => {
+            let TagInfo::Record { fields, .. } = &**tag_info else {
+                unreachable!()
+            };
+            match info {
+                FieldDbgInfo::Record { name } => {
+                    let mut found: Option<&Constant> = None;
+                    for (idx, (field_name, _)) in fields.iter().enumerate() {
+                        if field_name == name {
+                            found = elements.get(idx);
+                            break;
+                        }
+                    }
+                    match found {
+                        Some(c) if !c.is_allocating() => Lambda::const_(c.clone()),
+                        _ => lam(),
                     }
                 }
-                match found {
-                    Some(c) if !c.is_allocating() => Lambda::const_(c.clone()),
-                    _ => lam(),
-                }
+                _ => lam(),
             }
-            _ => lam(),
-        },
+        }
         // lam_util.ml:225-230 — Constant Const_block (other tag, ls):
         // lift the i-th element if it is non-allocating.
         Some(IdKind::Constant(Constant::Block { elements, .. })) => {
@@ -279,7 +343,7 @@ mod tests {
         let x = ident("x", 15);
         let f = ident("f", 16);
         let e = Lambda::Lconst(Constant::int(9));
-        let apply = Lambda::Lapply(Apply {
+        let apply = Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(Lambda::Lvar(f)),
             ap_args: vec![Lambda::Lvar(x.clone())],
             ap_info: crate::lambda::ApInfo {
@@ -288,7 +352,7 @@ mod tests {
                 status: crate::lambda::ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
-        });
+        }));
         let result = refine_let(LetKind::Strict, x, e, apply);
         match result {
             Lambda::Lapply(apply) => {

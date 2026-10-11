@@ -117,7 +117,6 @@ let pat sub {pat_extra; pat_desc; pat_env; _} =
   let extra = function
     | Tpat_type _ -> ()
     | Tpat_unpack -> ()
-    | Tpat_open (_, _, env) -> sub.env sub env
     | Tpat_constraint ct -> sub.typ sub ct
   in
   sub.env sub pat_env;
@@ -139,7 +138,7 @@ let pat sub {pat_extra; pat_desc; pat_env; _} =
 let expr sub {exp_extra; exp_desc; exp_env; _} =
   let extra = function
     | Texp_constraint cty -> sub.typ sub cty
-    | Texp_coerce cty2 -> sub.typ sub cty2
+    | Texp_coerce {target} -> sub.typ sub target
     | Texp_open (_, _, _, _) -> ()
   in
   List.iter (fun (e, _, _) -> extra e) exp_extra;
@@ -199,9 +198,16 @@ let expr sub {exp_extra; exp_desc; exp_env; _} =
   | Texp_for_await_of (_, _, exp1, exp2) ->
     sub.expr sub exp1;
     sub.expr sub exp2
-  | Texp_send (exp, _, expo) ->
+  | Texp_template {values} -> List.iter (sub.expr sub) values
+  | Texp_tagged_template {tag; values} ->
+    sub.expr sub tag;
+    List.iter (sub.expr sub) values
+  | Texp_object_get (exp, _) -> sub.expr sub exp
+  | Texp_object_set (exp, _, v) ->
     sub.expr sub exp;
-    Option.iter (sub.expr sub) expo
+    sub.expr sub v
+  | Texp_object_literal fields ->
+    List.iter (fun (_, e) -> sub.expr sub e) fields
   | Texp_letmodule (_, _, mexpr, exp) ->
     sub.module_expr sub mexpr;
     sub.expr sub exp

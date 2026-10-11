@@ -30,28 +30,24 @@ type tdcls = Parsetree.type_declaration list
 let app1 f arg1 = Exp.apply f [(Nolabel, arg1)]
 let app2 f arg1 arg2 = Exp.apply f [(Nolabel, arg1); (Nolabel, arg2)]
 
-let js_field (o : Parsetree.expression) m =
-  app2 (Exp.ident {txt = Lident "##"; loc = o.pexp_loc}) o (Exp.ident m)
+let js_field (o : Parsetree.expression) (m : Longident.t Asttypes.loc) =
+  let name =
+    match m.txt with
+    | Lident name -> name
+    | _ -> assert false
+  in
+  Exp.mk ~loc:m.loc (Ast_util.js_property m.loc o name)
 
 let handle_config (config : Parsetree.expression option) =
   match config with
   | Some config -> (
-    match config.pexp_desc with
-    | Pexp_record
-        ( [
-            {
-              lid = {txt = Lident "newType"};
-              x =
-                {
-                  pexp_desc =
-                    ( Pexp_construct
-                        ({txt = Lident (("true" | "false") as x)}, None)
-                    | Pexp_ident {txt = Lident ("newType" as x)} );
-                };
-            };
-          ],
-          None ) ->
-      not (x = "false")
+    match (Ast_payload.unwrap_braces config).pexp_desc with
+    | Pexp_record ([{lid = {txt = Lident "newType"}; x}], None) -> (
+      match (Ast_payload.unwrap_braces x).pexp_desc with
+      | Pexp_construct ({txt = Lident (("true" | "false") as value)}, {txt = []})
+      | Pexp_ident {txt = Lident ("newType" as value)} ->
+        value <> "false"
+      | _ -> U.invalid_config config)
     | Pexp_ident {txt = Lident "newType"} -> true
     | _ -> U.invalid_config config)
   | None -> false
@@ -68,7 +64,7 @@ let erase_type x = app1 erase_type_exp x
 let erase_type_str =
   let any = Typ.any () in
   Str.primitive
-    (Val.mk ~prim:["%identity"]
+    (Val.mk ~prim:(Parsetree.Prim_name "%identity")
        {loc = noloc; txt = erase_type_lit}
        (Ast_helper.Typ.arrow [{attrs = []; lbl = Nolabel; typ = any}] any))
 
@@ -77,7 +73,7 @@ let unsafe_index = "_index"
 let unsafe_index_get =
   let any = Typ.any () in
   Str.primitive
-    (Val.mk ~prim:[""]
+    (Val.mk ~prim:(Parsetree.Prim_name "")
        {loc = noloc; txt = unsafe_index}
        ~attrs:[Ast_attributes.get_index]
        (Ast_helper.Typ.arrow
@@ -113,7 +109,7 @@ let build_map (row_fields : Parsetree.row_field list) =
         (match tag with
         | Rtag ({txt}, attrs, _, []) ->
           let name : string =
-            match Ast_attributes.iter_process_bs_string_as attrs with
+            match Ast_attributes.as_string attrs with
             | Some name ->
               has_bs_as := true;
               name
@@ -187,27 +183,12 @@ let init () =
               | Ptype_record label_declarations ->
                 let exp =
                   coerce_result_to_new_type
-                    (Exp.extension
-                       ( {Asttypes.loc; txt = "obj"},
-                         PStr
-                           [
-                             Str.eval
-                               (Exp.record
-                                  (Ext_list.map label_declarations
-                                     (fun {pld_name = {loc; txt}} ->
-                                       let label =
-                                         {
-                                           Asttypes.loc;
-                                           txt = Longident.Lident txt;
-                                         }
-                                       in
-                                       {
-                                         Parsetree.lid = label;
-                                         x = Exp.field exp_param label;
-                                         opt = false;
-                                       }))
-                                  None);
-                           ] ))
+                    (Exp.object_literal ~loc
+                       (Ext_list.map label_declarations
+                          (fun {pld_name = {loc; txt}} ->
+                            ( {Asttypes.loc; txt},
+                              Exp.field exp_param
+                                {Asttypes.loc; txt = Longident.Lident txt} ))))
                 in
                 let to_js = to_js_body exp in
                 let obj_exp =

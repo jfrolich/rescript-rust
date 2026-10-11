@@ -72,15 +72,15 @@ pub struct Package {
     pub is_root: bool,
 }
 
-pub fn get_build_path(canonical_path: &Path) -> PathBuf {
+fn get_build_path(canonical_path: &Path) -> PathBuf {
     canonical_path.join("lib").join("bs")
 }
 
-pub fn get_js_path(canonical_path: &Path) -> PathBuf {
+fn get_js_path(canonical_path: &Path) -> PathBuf {
     canonical_path.join("lib").join("js")
 }
 
-pub fn get_esmodule_path(canonical_path: &Path) -> PathBuf {
+fn get_esmodule_path(canonical_path: &Path) -> PathBuf {
     canonical_path.join("lib").join("es6")
 }
 
@@ -97,15 +97,11 @@ impl Package {
         get_build_path(&self.path)
     }
 
-    pub fn get_compiler_info_path(&self) -> PathBuf {
-        self.get_build_path().join("compiler-info.json")
-    }
-
-    pub fn get_js_path(&self) -> PathBuf {
+    fn get_js_path(&self) -> PathBuf {
         get_js_path(&self.path)
     }
 
-    pub fn get_esmodule_path(&self) -> PathBuf {
+    fn get_esmodule_path(&self) -> PathBuf {
         get_esmodule_path(&self.path)
     }
 
@@ -123,13 +119,6 @@ impl Package {
             .to_suffix()
             .expect("namespace should be set for mlmap module");
         self.get_build_path().join(format!("{suffix}.cmi"))
-    }
-
-    pub fn is_source_file_type_dev(&self, path: &Path) -> bool {
-        self.source_files
-            .as_ref()
-            .and_then(|sf| sf.get(path).map(|sfm| sfm.is_type_dev))
-            .unwrap_or(false)
     }
 }
 
@@ -152,7 +141,7 @@ fn matches_filter(filter: &Option<regex::Regex>, path: &str) -> bool {
     }
 }
 
-pub fn read_folders(
+fn read_folders(
     filter: &Option<regex::Regex>,
     package_dir: &Path,
     path: &Path,
@@ -162,10 +151,22 @@ pub fn read_folders(
     let mut map: AHashMap<PathBuf, SourceFileMeta> = AHashMap::new();
     let path_buf = PathBuf::from(path);
     fs::metadata(package_dir.join(path))?;
+    let mut subdirs: Vec<PathBuf> = Vec::new();
 
     for entry in fs::read_dir(package_dir.join(&path_buf))? {
-        let entry_path_buf = entry.map(|entry| entry.path())?;
-        let metadata = fs::metadata(&entry_path_buf)?;
+        let entry = entry?;
+        let entry_path_buf = entry.path();
+        // The listing already says what an entry is; only symlinks need a
+        // `stat` (which follows them) to know whether they lead to a folder.
+        let file_type = entry.file_type()?;
+        let followed = if file_type.is_symlink() {
+            Some(fs::metadata(&entry_path_buf)?)
+        } else {
+            None
+        };
+        let is_dir = followed
+            .as_ref()
+            .map_or(file_type.is_dir(), |metadata| metadata.file_type().is_dir());
         let Some(name) = entry_path_buf
             .file_name()
             .and_then(|name| name.to_str())
@@ -179,25 +180,22 @@ pub fn read_folders(
         };
 
         let path_ext = entry_path_buf.extension().and_then(|x| x.to_str());
-        let new_path = path_buf.join(&name);
-        if metadata.file_type().is_dir() && recurse {
-            map.extend(read_folders(
-                filter,
-                package_dir,
-                &new_path,
-                recurse,
-                is_type_dev,
-            )?);
+        if is_dir && recurse {
+            subdirs.push(path_buf.join(&name));
         }
 
         match path_ext {
             Some(extension) if helpers::is_source_file(extension) && matches_filter(filter, &name) => {
+                let modified = match &followed {
+                    Some(metadata) => metadata.modified()?,
+                    None => fs::metadata(&entry_path_buf)?.modified()?,
+                };
                 let mut path = path.to_owned();
                 path.push(&name);
                 map.insert(
                     path,
                     SourceFileMeta {
-                        modified: metadata.modified()?,
+                        modified,
                         is_type_dev,
                     },
                 );
@@ -207,6 +205,16 @@ pub fn read_folders(
             }
             _ => (),
         }
+    }
+
+    // Large source trees dominate package discovery; walk sibling folders in
+    // parallel.
+    let nested: Vec<Result<AHashMap<PathBuf, SourceFileMeta>>> = subdirs
+        .par_iter()
+        .map(|subdir| read_folders(filter, package_dir, subdir, recurse, is_type_dev))
+        .collect();
+    for folder in nested {
+        map.extend(folder?);
     }
 
     Ok(map)
@@ -434,7 +442,7 @@ fn flatten_dependencies(dependencies: Vec<Dependency>) -> Vec<Dependency> {
     flattened
 }
 
-pub fn read_package_name(package_dir: &Path) -> Result<String> {
+fn read_package_name(package_dir: &Path) -> Result<String> {
     let read_name = |file_name: &str| -> Result<Option<String>> {
         let path = package_dir.join(file_name);
         if !Path::exists(&path) {
@@ -613,7 +621,7 @@ fn read_packages(
 /// can be marked with the type 'dev'. Which means that they may not be around in the distributed
 /// NPM package. The file reader allows for this, just warns when this happens.
 /// TODO -> Check whether we actually need the `fs::Metadata`
-pub fn get_source_files(
+fn get_source_files(
     package_name: &String,
     package_dir: &Path,
     filter: &Option<regex::Regex>,
@@ -726,17 +734,36 @@ fn collect_gentype_source_dirs(package: &Package) -> Vec<PathBuf> {
             return;
         }
         out.push(rel.to_path_buf());
-        let Ok(entries) = std::fs::read_dir(&abs) else {
-            return;
+        out.extend(walk_children(root, rel, &abs));
+    }
+
+    // Subdirectories are walked in parallel; results are concatenated in
+    // directory-entry order, so the output is identical to a serial walk.
+    fn walk_children(root: &Path, rel: &Path, abs: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(abs) else {
+            return Vec::new();
         };
-        for entry in entries.flatten() {
-            let Ok(child_meta) = entry.metadata() else {
-                continue;
-            };
-            if child_meta.is_dir() {
-                walk_recursive(root, &rel.join(entry.file_name()), out);
-            }
-        }
+        let child_dirs: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|entry| {
+                // `file_type` comes from the directory entry itself, so this
+                // avoids an lstat per file. Like `DirEntry::metadata`, it does
+                // not follow symlinks.
+                entry.file_type().is_ok_and(|file_type| file_type.is_dir())
+            })
+            .map(|entry| rel.join(entry.file_name()))
+            .collect();
+        child_dirs
+            .par_iter()
+            .map(|child| {
+                let mut out = Vec::new();
+                walk_recursive(root, child, &mut out);
+                out
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     for source in &package.source_folders {
@@ -769,7 +796,7 @@ fn collect_gentype_source_dirs(package: &Package) -> Vec<PathBuf> {
 /// `read_dependencies` — i.e. when the consumer is a local dep and we're not in `--prod`. This
 /// keeps dev-only feature requests (e.g. a shorthand `dev-dependencies` entry that would flip
 /// everything to "all features") from leaking into production builds.
-pub fn compute_active_features(
+fn compute_active_features(
     packages: &AHashMap<String, Package>,
     cli_features: Option<&Vec<String>>,
     prod: bool,
@@ -1137,24 +1164,6 @@ pub fn parse_packages(build_state: &mut BuildState) -> Result<()> {
     Ok(())
 }
 
-impl Package {
-    pub fn get_jsx_args(&self) -> Vec<String> {
-        self.config.get_jsx_args()
-    }
-
-    pub fn get_jsx_mode_args(&self) -> Vec<String> {
-        self.config.get_jsx_mode_args()
-    }
-
-    pub fn get_jsx_module_args(&self) -> Vec<String> {
-        self.config.get_jsx_module_args()
-    }
-
-    pub fn get_jsx_preserve_args(&self) -> Vec<String> {
-        self.config.get_jsx_preserve_args()
-    }
-}
-
 fn get_unallowed_dependents(
     packages: &AHashMap<String, Package>,
     package_name: &String,
@@ -1234,13 +1243,19 @@ pub fn validate_packages_dependencies(packages: &AHashMap<String, Package>) -> b
     let has_any_unallowed_dependent = !detected_unallowed_dependencies.is_empty();
 
     if has_any_unallowed_dependent {
-        log::error!(
-            "\nUpdate the {} value in the {} of the unallowed dependencies to solve the issue!",
-            console::style("unallowed_dependents").bold().dim(),
-            console::style("config.json").bold().dim()
-        )
+        log::error!("{}", unallowed_dependents_hint())
     }
     !has_any_unallowed_dependent
+}
+
+/// The hint printed after the list of unallowed dependencies, naming the
+/// package setting and the file that holds it.
+fn unallowed_dependents_hint() -> String {
+    format!(
+        "\nUpdate the {} value in the {} of the unallowed dependencies to solve the issue!",
+        console::style("allowed-dependents").bold().dim(),
+        console::style("rescript.json").bold().dim()
+    )
 }
 
 #[cfg(test)]
@@ -1255,7 +1270,7 @@ mod test {
     use std::sync::RwLock;
     use tempfile::TempDir;
 
-    pub struct CreatePackageArgs {
+    struct CreatePackageArgs {
         name: String,
         bs_deps: Vec<String>,
         build_dev_deps: Vec<String>,
@@ -1323,6 +1338,15 @@ mod test {
 
         let is_valid = super::validate_packages_dependencies(&packages);
         assert!(!is_valid)
+    }
+
+    #[test]
+    fn unallowed_dependents_hint_names_the_setting_and_its_file() {
+        let hint = console::strip_ansi_codes(&super::unallowed_dependents_hint()).into_owned();
+        assert_eq!(
+            hint,
+            "\nUpdate the allowed-dependents value in the rescript.json of the unallowed dependencies to solve the issue!"
+        );
     }
 
     #[test]
@@ -1778,5 +1802,44 @@ mod test {
             dep_active.is_empty(),
             "an explicit empty features list should activate no feature-tagged dirs, got {dep_active:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_folders_finds_sources_in_nested_and_symlinked_folders() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let pkg = root.path();
+        let write = |rel: &str| {
+            let file = pkg.join(rel);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "let x = 1\n").unwrap();
+        };
+        write("src/A.res");
+        write("src/A.resi");
+        write("src/notes.md");
+        write("src/deep/er/B.res");
+        write("src/deep/er/B.bs.js");
+        write("elsewhere/C.res");
+        std::os::unix::fs::symlink(pkg.join("elsewhere"), pkg.join("src/linked")).unwrap();
+        std::os::unix::fs::symlink(pkg.join("elsewhere/C.res"), pkg.join("src/D.res")).unwrap();
+
+        let found =
+            super::read_folders(&None, pkg, std::path::Path::new("src"), true, false).expect("read_folders");
+        let mut paths: Vec<String> = found.keys().map(|path| path.display().to_string()).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "src/A.res",
+                "src/A.resi",
+                "src/D.res",
+                "src/deep/er/B.res",
+                "src/linked/C.res",
+            ]
+        );
+
+        let shallow =
+            super::read_folders(&None, pkg, std::path::Path::new("src"), false, false).expect("read_folders");
+        assert_eq!(shallow.len(), 3);
     }
 }

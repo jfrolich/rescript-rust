@@ -255,7 +255,7 @@ impl Warning {
                 let mut msg = format!("deprecated: {message}");
                 if *can_be_automigrated {
                     msg.push_str(
-                        "\n\nThis can be automatically migrated by the ReScript migration tool. Run `rescript-tools migrate-all <project-root>` to run all automatic migrations available in your project, or `rescript-tools migrate <file>` to migrate a single file.",
+                        "\n\n  This can be automatically migrated by the ReScript migration tool. Run `rescript-tools migrate-all <project-root>` to run all automatic migrations available in your project, or `rescript-tools migrate <file>` to migrate a single file.",
                     );
                 }
                 msg
@@ -482,6 +482,9 @@ and may change in future versions."
                     .to_string()
             }
             Warning::AmbiguousPattern { vars } => {
+                // warnings.ml:386-393: `List.sort String.compare vars`.
+                let mut vars = vars.clone();
+                vars.sort();
                 let msg = if vars.len() == 1 {
                     format!("variable {}", vars[0])
                 } else {
@@ -543,7 +546,7 @@ and may change in future versions."
                     .unwrap_or_else(|| "something that is not `unit`".to_string());
                 let mut message = format!(
                     "This{}is at the top level and is expected to return `unit`. \
-                     But it's returning {}.\n\n\
+                     But it's returning {}.\n\n  \
                      In ReScript, anything at the top level must evaluate to `unit`. You \
                      can fix this by assigning the expression to a value, or piping it into \
                      the `ignore` function.",
@@ -556,8 +559,8 @@ and may change in future versions."
                         "yourExpression"
                     };
                     message.push_str(&format!(
-                        "\n\nPossible solutions:\n\
-                         - Assigning to a value that is then ignored: `let _ = {help_text}`\n\
+                        "\n\n  Possible solutions:\n  \
+                         - Assigning to a value that is then ignored: `let _ = {help_text}`\n  \
                          - Piping into the built-in ignore function to ignore the result: `{help_text}->ignore`"
                     ));
                 }
@@ -669,154 +672,133 @@ impl WarningConfig {
         n < self.errors.len() && self.errors[n]
     }
 
-    /// Parse a warning specification string.
-    ///
-    /// Format: `+n` to enable, `-n` to disable, `@n` to make error.
-    /// Can use ranges like `+1..10` or letters like `+A` for all.
+    /// OCaml `Warnings.parse_options false` (compiler/ext/warnings.ml:250-254):
+    /// the spec is applied to copies of the tables, which replace the current
+    /// state only if the whole spec is well formed.
     pub fn parse(&mut self, spec: &str) -> Result<(), String> {
-        let mut chars = spec.chars().peekable();
-
-        while let Some(c) = chars.next() {
-            match c {
-                '+' => self.apply_modifier(&mut chars, |active, _| *active = true)?,
-                '-' => self.apply_modifier(&mut chars, |active, _| *active = false)?,
-                '@' => self.apply_modifier(&mut chars, |active, error| {
-                    *active = true;
-                    *error = true;
-                })?,
-                'A'..='Z' => {
-                    for n in letter_warnings(c.to_ascii_lowercase()) {
-                        if n < self.active.len() {
-                            self.active[n] = true;
-                        }
-                    }
-                }
-                'a'..='z' => {
-                    for n in letter_warnings(c) {
-                        if n < self.active.len() {
-                            self.active[n] = false;
-                        }
-                    }
-                }
-                ' ' | '\t' | '\n' => {}
-                _ => return Err(format!("invalid warning specification: {}", c)),
-            }
-        }
-
-        Ok(())
+        self.parse_options(false, spec)
     }
 
-    /// Parse a warning-as-error specification.
-    ///
-    /// This mirrors OCaml's `Warnings.parse_options true`: `+n` and uppercase
-    /// letters set the error flag, `-n` and lowercase letters clear it, and
-    /// `@n` both enables the warning and marks it as an error.
+    /// OCaml `Warnings.parse_options true`: `+n`/uppercase letters set the
+    /// error flag, `-n`/lowercase letters clear it, `@n` enables the warning
+    /// and marks it as an error.
     pub fn parse_as_error(&mut self, spec: &str) -> Result<(), String> {
-        let mut chars = spec.chars().peekable();
+        self.parse_options(true, spec)
+    }
 
-        while let Some(c) = chars.next() {
-            match c {
-                '+' => self.apply_modifier(&mut chars, |_, error| *error = true)?,
-                '-' => self.apply_modifier(&mut chars, |_, error| *error = false)?,
-                '@' => self.apply_modifier(&mut chars, |active, error| {
-                    *active = true;
-                    *error = true;
-                })?,
-                'A'..='Z' => {
-                    for n in letter_warnings(c.to_ascii_lowercase()) {
-                        if n < self.errors.len() {
-                            self.errors[n] = true;
-                        }
-                    }
-                }
-                'a'..='z' => {
-                    for n in letter_warnings(c) {
-                        if n < self.errors.len() {
-                            self.errors[n] = false;
-                        }
-                    }
-                }
-                ' ' | '\t' | '\n' => {}
-                _ => return Err(format!("invalid warning specification: {}", c)),
-            }
-        }
-
+    fn parse_options(&mut self, errflag: bool, spec: &str) -> Result<(), String> {
+        let mut error = self.errors.clone();
+        let mut active = self.active.clone();
+        parse_opt(&mut error, &mut active, errflag, spec.as_bytes())?;
+        self.errors = error;
+        self.active = active;
         Ok(())
     }
+}
 
-    fn apply_modifier<F>(
-        &mut self,
-        chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-        mut modifier: F,
-    ) -> Result<(), String>
-    where
-        F: FnMut(&mut bool, &mut bool),
-    {
-        match chars.peek() {
-            Some('0'..='9') => {
-                let (start, end) = self.parse_range(chars)?;
-                for n in start..=end {
-                    if n < self.active.len() {
-                        modifier(&mut self.active[n], &mut self.errors[n]);
-                    }
-                }
-            }
-            Some('A'..='Z') | Some('a'..='z') => {
-                let letter = chars.next().unwrap().to_ascii_lowercase();
-                for n in letter_warnings(letter) {
-                    if n < self.active.len() {
-                        modifier(&mut self.active[n], &mut self.errors[n]);
-                    }
-                }
-            }
-            _ => return Err("expected number or letter after +/-/@".to_string()),
-        }
-        Ok(())
+/// OCaml `Warnings.last_warning_number` (compiler/ext/warnings.ml:134).
+const LAST_WARNING_NUMBER: usize = MAX_WARNING_NUMBER - 1;
+
+/// OCaml `Warnings.parse_opt` (compiler/ext/warnings.ml:192-248). `flags` is
+/// `error` when `errflag` is set and `active` otherwise.
+fn parse_opt(
+    error: &mut [bool],
+    active: &mut [bool],
+    errflag: bool,
+    s: &[u8],
+) -> Result<(), String> {
+    #[derive(Clone, Copy)]
+    enum Action {
+        Set,
+        Clear,
+        SetAll,
     }
-
-    fn parse_range(
-        &self,
-        chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-    ) -> Result<(usize, usize), String> {
-        let start = self.parse_number(chars)?;
-
-        // Check for range ".."
-        if chars.peek() == Some(&'.') {
-            chars.next();
-            if chars.peek() == Some(&'.') {
-                chars.next();
-                let end = self.parse_number(chars)?;
-                if end < start {
-                    return Err(format!("invalid range: {}..{}", start, end));
-                }
-                return Ok((start, end.min(MAX_WARNING_NUMBER - 1)));
+    let ill_formed = || Err("Ill-formed list of warnings".to_string());
+    let mut apply = |action: Action, n: usize| {
+        if n >= active.len() {
+            return;
+        }
+        match action {
+            Action::Set if errflag => error[n] = true,
+            Action::Set => active[n] = true,
+            Action::Clear if errflag => error[n] = false,
+            Action::Clear => active[n] = false,
+            Action::SetAll => {
+                active[n] = true;
+                error[n] = true;
             }
         }
-
-        Ok((start, start))
-    }
-
-    fn parse_number(
-        &self,
-        chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-    ) -> Result<usize, String> {
+    };
+    let get_num = |mut i: usize| {
         let mut n = 0usize;
-        while let Some(&c) = chars.peek() {
-            if c.is_ascii_digit() {
-                n = n * 10 + (c as usize - '0' as usize);
-                chars.next();
-            } else {
-                break;
-            }
+        while i < s.len() && s[i].is_ascii_digit() {
+            n = n.saturating_mul(10).saturating_add((s[i] - b'0') as usize);
+            i += 1;
         }
-        Ok(n)
+        (i, n)
+    };
+    let mut i = 0;
+    while i < s.len() {
+        let action = match s[i] {
+            c @ b'A'..=b'Z' => {
+                for n in letter_warnings(c.to_ascii_lowercase() as char) {
+                    apply(Action::Set, n);
+                }
+                i += 1;
+                continue;
+            }
+            c @ b'a'..=b'z' => {
+                for n in letter_warnings(c as char) {
+                    apply(Action::Clear, n);
+                }
+                i += 1;
+                continue;
+            }
+            b'+' => Action::Set,
+            b'-' => Action::Clear,
+            b'@' => Action::SetAll,
+            _ => return ill_formed(),
+        };
+        // loop_letter_num
+        i += 1;
+        if i >= s.len() {
+            return ill_formed();
+        }
+        match s[i] {
+            b'0'..=b'9' => {
+                let (next, n1) = get_num(i);
+                let (next, n2) = if next + 2 < s.len() && s[next] == b'.' && s[next + 1] == b'.' {
+                    let (next, n2) = get_num(next + 2);
+                    if n2 < n1 {
+                        return ill_formed();
+                    }
+                    (next, n2)
+                } else {
+                    (next, n1)
+                };
+                let mut n = n1;
+                while n <= n2.min(LAST_WARNING_NUMBER) {
+                    apply(action, n);
+                    n += 1;
+                }
+                i = next;
+            }
+            c @ (b'A'..=b'Z' | b'a'..=b'z') => {
+                for n in letter_warnings(c.to_ascii_lowercase() as char) {
+                    apply(action, n);
+                }
+                i += 1;
+            }
+            _ => return ill_formed(),
+        }
     }
+    Ok(())
 }
 
 /// Get warning numbers for a letter abbreviation.
 fn letter_warnings(letter: char) -> Vec<usize> {
     match letter {
-        'a' => (1..=MAX_WARNING_NUMBER).collect(),
+        'a' => (1..=LAST_WARNING_NUMBER).collect(),
         'c' => vec![1, 2],
         'd' => vec![3],
         'e' => vec![4],

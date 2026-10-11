@@ -17,6 +17,8 @@ use crate::parse_arena::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::string_literal::StringLiteral;
+
 /// Convert any `Cow<'_, str>` into `Cow<'static, str>` without unsafe.
 ///
 /// Borrowed values are copied into owned strings; owned values are moved through.
@@ -93,6 +95,14 @@ pub enum MutableFlag {
     Immutable,
     /// Mutable field.
     Mutable,
+}
+
+/// OCaml `type_declaration_origin`: inline records in field and external
+/// types are lifted to named declarations for type checking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TypeDeclarationOrigin {
+    Declared,
+    Inline_record_definition,
 }
 
 /// Private flag for type definitions.
@@ -176,12 +186,38 @@ pub type Label = Cow<'static, str>;
 pub enum Constant {
     /// Integer constant with optional suffix (l, L, n).
     Integer(Cow<'static, str>, Option<char>),
-    /// Character constant (Unicode codepoint).
-    Char(i32),
-    /// String constant with optional delimiter.
-    String(Cow<'static, str>, Option<Cow<'static, str>>),
+    /// An ordinary character literal (OCaml `Pconst_char {source; semantic}`):
+    /// `source` is the text between the single quotes as scanned, kept for
+    /// printing; `semantic` is the decoded Unicode code point.
+    Char {
+        source: Cow<'static, str>,
+        semantic: i32,
+    },
+    /// An ordinary double-quoted string literal (OCaml `Pconst_string`).
+    String(StringLiteral),
+    /// The JavaScript source inside a non-interpolated ``json`...` `` literal.
+    Json(Cow<'static, str>),
+    /// JavaScript source carried by a compiler extension such as `raw`,
+    /// `ffi` or `re`.
+    RawSource(Cow<'static, str>),
     /// Float constant with optional suffix.
     Float(Cow<'static, str>, Option<char>),
+}
+
+impl Constant {
+    /// OCaml `Ast_helper.Const.string`: a string constant with canonical
+    /// source spelling for a semantic value.
+    pub fn string(semantic: &str) -> Constant {
+        Constant::String(crate::string_literal::string_from_semantic(semantic))
+    }
+
+    /// OCaml `Ast_helper.Const.char`.
+    pub fn char(semantic: i32) -> Constant {
+        Constant::Char {
+            source: Cow::Owned(crate::string_literal::encode_char_source(semantic)),
+            semantic,
+        }
+    }
 }
 
 // ============================================================================
@@ -296,6 +332,16 @@ impl Attributes {
             }
             Some(v) => v.insert(index, attr),
         }
+    }
+
+    /// Remove and return the attribute at the given position.
+    pub fn remove(&mut self, index: usize) -> Attribute {
+        let v = self.0.as_mut().expect("remove from empty attributes");
+        let attr = v.remove(index);
+        if v.is_empty() {
+            self.0 = None;
+        }
+        attr
     }
 
     /// Extend with attributes from an iterator.
@@ -474,11 +520,23 @@ pub enum CoreTypeDesc {
 /// Package type: `module S with type t = T`.
 pub type PackageType = (Loc<LidentIdx>, Vec<(Loc<LidentIdx>, CoreTypeIdx)>);
 
+/// Constructor or variant arguments: the source list and the span of its
+/// parentheses (parsetree.ml `Pexp_construct`/`Ppat_construct`).
+pub fn ctor_args<T>(txt: Vec<T>, loc: LocIdx) -> Box<Loc<Vec<T>>> {
+    Box::new(Located { txt, loc })
+}
+
+/// One payload group of a polymorphic variant tag type.
+pub type VariantTypeArgs = Loc<Vec<CoreTypeIdx>>;
+
 /// Row field in a polymorphic variant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RowField {
-    /// Tag: `\`A of T1 & T2`.
-    Rtag(Loc<Label>, Attributes, bool, Vec<CoreTypeIdx>),
+    /// Tag: `\`A of T1 & T2`. Each payload group keeps the source argument
+    /// list and the span of its parentheses: `#A(T1, T2)` is one group
+    /// `[T1, T2]`, `#A((T1, T2))` one group `[Ptyp_tuple [T1, T2]]`
+    /// (parsetree.ml `variant_type_args`).
+    Rtag(Loc<Label>, Attributes, bool, Vec<VariantTypeArgs>),
     /// Inherited type: `[T]`.
     Rinherit(CoreTypeIdx),
 }
@@ -522,12 +580,16 @@ pub enum PatternDesc {
     Ppat_interval(Box<(Constant, Constant)>),
     /// Tuple: `(P1, P2, ..., Pn)`.
     Ppat_tuple(Box<Vec<PatIdx>>),
-    /// Constructor: `C` or `C(P)`.
-    Ppat_construct(Loc<LidentIdx>, Option<PatIdx>),
-    /// Variant: `\`A` or `\`A(P)`.
-    Ppat_variant(Box<(Label, Option<PatIdx>)>),
+    /// Constructor: `C`, `C(P)` or `C(P1, ..., Pn)`. The arguments are the
+    /// source list, located at the argument parentheses (or the enclosing
+    /// node when there are none); see parsetree.ml `Ppat_construct`.
+    Ppat_construct(Loc<LidentIdx>, Box<Loc<Vec<PatIdx>>>),
+    /// Variant: `#A`, `#A(P)` or `#A(P1, ..., Pn)`.
+    Ppat_variant(Box<(Label, Loc<Vec<PatIdx>>)>),
     /// Record: `{l1: P1, ..., ln: Pn}`.
-    Ppat_record(Box<(Vec<PatternRecordField>, ClosedFlag)>),
+    /// Record: `{l1: P1, ...}`, closed flag, and an optional `...Type.t as name` rest
+    /// (compiler/ml/parsetree.ml:164-168).
+    Ppat_record(Box<(Vec<PatternRecordField>, ClosedFlag, Option<RecordPatRest>)>),
     /// Array: `[P1, ..., Pn]`.
     Ppat_array(Box<Vec<PatIdx>>),
     /// Or-pattern: `P1 | P2`.
@@ -542,8 +604,6 @@ pub enum PatternDesc {
     Ppat_exception(PatIdx),
     /// Extension: `[%id]`.
     Ppat_extension(Box<Extension>),
-    /// Open: `M.(P)`.
-    Ppat_open(Loc<LidentIdx>, PatIdx),
 }
 
 /// A record field in a pattern.
@@ -557,8 +617,7 @@ pub struct PatternRecordField {
     pub opt: bool,
 }
 
-/// Record-rest pattern binding (`...Type.t as name`), stored in a sparse
-/// arena side table keyed by the record pattern's location.
+/// Record-rest pattern binding (`...Type.t as name`).
 /// Mirrors OCaml compiler/ml/parsetree.ml:164-168 `record_pat_rest`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecordPatRest {
@@ -620,9 +679,43 @@ pub struct PexpApply {
     pub transformed_jsx: bool,
 }
 
+/// OCaml `Pexp_template {source_segments; values}`: an ordinary backquoted
+/// expression. There is always one more source segment than value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PexpTemplate {
+    pub source_segments: Vec<StringLoc>,
+    pub values: Vec<ExprIdx>,
+}
+
+/// OCaml `Pexp_tagged_template {tag; raw_sources; values}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PexpTaggedTemplate {
+    pub tag: ExprIdx,
+    pub raw_sources: Vec<StringLoc>,
+    pub values: Vec<ExprIdx>,
+}
+
+/// OCaml `Pexp_braces {expr; braces_loc}`: explicit braces around an
+/// expression. The node's `pexp_loc` stays on the enclosed expression;
+/// `braces_loc` covers the delimiters for printing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PexpBraces {
+    pub expr: ExprIdx,
+    pub braces_loc: Location,
+}
+
+/// OCaml `Pexp_regexp {pattern; flags}`: literal source without delimiters.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PexpRegexp {
+    pub pattern: String,
+    pub flags: String,
+}
+
 /// Expression descriptions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExpressionDesc {
+    /// Explicit braces: `{E}`.
+    Pexp_braces(Box<PexpBraces>),
     /// Identifier: `x` or `M.x`.
     Pexp_ident(Loc<LidentIdx>),
     /// Constant: `1`, `'a'`, `"hello"`.
@@ -639,10 +732,11 @@ pub enum ExpressionDesc {
     Pexp_try(Box<(ExprIdx, Vec<Case>)>),
     /// Tuple: `(E1, E2, ..., En)`.
     Pexp_tuple(Box<Vec<ExprIdx>>),
-    /// Constructor: `C` or `C(E)`.
-    Pexp_construct(Loc<LidentIdx>, Option<ExprIdx>),
-    /// Variant: `\`A` or `\`A(E)`.
-    Pexp_variant(Box<(Label, Option<ExprIdx>)>),
+    /// Constructor: `C`, `C(E)` or `C(E1, ..., En)`, with the source argument
+    /// list located at its parentheses (parsetree.ml `Pexp_construct`).
+    Pexp_construct(Loc<LidentIdx>, Box<Loc<Vec<ExprIdx>>>),
+    /// Variant: `#A`, `#A(E)` or `#A(E1, ..., En)`.
+    Pexp_variant(Box<(Label, Loc<Vec<ExprIdx>>)>),
     /// Record: `{l1: E1, ..., ln: En}` or `{...E, l1: E1, ...}`.
     Pexp_record(Box<(Vec<ExpressionRecordField>, Option<ExprIdx>)>),
     /// Field access: `E.l`.
@@ -653,6 +747,8 @@ pub enum ExpressionDesc {
     Pexp_array(Box<Vec<ExprIdx>>),
     /// If-then-else: `if E1 { E2 } else { E3 }`.
     Pexp_ifthenelse(Box<(ExprIdx, ExprIdx, Option<ExprIdx>)>),
+    /// Ternary: `E1 ? E2 : E3`.
+    Pexp_ternary(Box<(ExprIdx, ExprIdx, ExprIdx)>),
     /// Sequence: `E1; E2`.
     Pexp_sequence(ExprIdx, ExprIdx),
     /// `break` (upstream #8348). Exits the nearest enclosing loop.
@@ -668,12 +764,18 @@ pub enum ExpressionDesc {
     Pexp_for_of(Box<(PatIdx, ExprIdx, ExprIdx)>),
     /// For-await-of: `for await pat of asyncIterable { body }` (upstream #7887).
     Pexp_for_await_of(Box<(PatIdx, ExprIdx, ExprIdx)>),
+    /// Regexp literal: `/pattern/flags`.
+    Pexp_regexp(Box<PexpRegexp>),
     /// Constraint: `(E: T)`.
     Pexp_constraint(Box<(ExprIdx, CoreTypeIdx)>),
     /// Coercion: `(E :> T)`.
     Pexp_coerce(Box<(ExprIdx, Option<CoreTypeIdx>, CoreTypeIdx)>),
-    /// Send: `E#m`.
-    Pexp_send(Box<(ExprIdx, Loc<Label>)>),
+    /// Object property read: `obj["x"]`.
+    Pexp_object_get(Box<(ExprIdx, Loc<Label>)>),
+    /// Object property write: `obj["x"] = v`.
+    Pexp_object_set(Box<(ExprIdx, Loc<Label>, ExprIdx)>),
+    /// Object literal: `{"a": 1, "b": true}`.
+    Pexp_object_literal(Box<Vec<(Loc<Label>, ExprIdx)>>),
     /// Let module: `{ module M = ME; E }`.
     Pexp_letmodule(Box<(StringLoc, ModExprIdx, ExprIdx)>),
     /// Let exception: `{ exception C; E }`.
@@ -690,6 +792,10 @@ pub enum ExpressionDesc {
     Pexp_extension(Box<Extension>),
     /// Await: `await E`.
     Pexp_await(ExprIdx),
+    /// An ordinary backquoted template: `` `a ${b}` ``.
+    Pexp_template(Box<PexpTemplate>),
+    /// A JavaScript tagged template: ``sql`id = ${id}` ``.
+    Pexp_tagged_template(Box<PexpTaggedTemplate>),
     /// JSX element.
     Pexp_jsx_element(Box<JsxElement>),
     /// Inline for: `inline for pat in collection { body }` (comptime loop unrolling).
@@ -1024,6 +1130,35 @@ pub enum SignatureItemDesc {
 // Declarations
 // ============================================================================
 
+/// `Parsetree.primitive_repr`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PrimitiveRepr {
+    /// As written in the source: an intrinsic (`"%identity"`, `"#raw_expr"`)
+    /// or the not-yet-digested JS name of an FFI external.
+    PrimName(StrIdx),
+    /// Produced by the frontend digestion of an FFI external's attributes;
+    /// never observed by external PPXes, which run before digestion.
+    PrimFfi {
+        name: String,
+        spec: Box<crate::types::external_ffi_types::ExternalFfi>,
+    },
+    /// An `@inline(<literal>)` value declaration: a compile-time constant.
+    PrimInlineConst(Box<crate::types::external_ffi_types::InlineConst>),
+}
+
+impl PrimitiveRepr {
+    /// `Ffi_debug.primitive_repr`: the strings the sexp parity printers
+    /// show for a primitive.
+    pub fn debug_strings(&self, arena: &crate::parse_arena::ParseArena) -> Vec<String> {
+        use crate::types::external_ffi_types::debug;
+        match self {
+            PrimitiveRepr::PrimName(s) => vec![arena.get_string(*s).to_string()],
+            PrimitiveRepr::PrimFfi { name, spec } => vec![name.clone(), debug::spec(spec)],
+            PrimitiveRepr::PrimInlineConst(c) => vec![debug::inline_const(c)],
+        }
+    }
+}
+
 /// Value description: `external` or `let` in signature.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValueDescription {
@@ -1031,8 +1166,8 @@ pub struct ValueDescription {
     pub pval_name: StringLoc,
     /// Type (arena index).
     pub pval_type: CoreTypeIdx,
-    /// Primitive names (for externals).
-    pub pval_prim: Vec<StrIdx>,
+    /// The primitive (for externals): `None` for `val x: T`.
+    pub pval_prim: Option<PrimitiveRepr>,
     /// Attributes.
     pub pval_attributes: Attributes,
     /// Location.
@@ -1054,6 +1189,8 @@ pub struct TypeDeclaration {
     pub ptype_private: PrivateFlag,
     /// Manifest (arena index).
     pub ptype_manifest: Option<CoreTypeIdx>,
+    /// Source origin (parsetree.ml `type_declaration_origin`).
+    pub ptype_origin: TypeDeclarationOrigin,
     /// Attributes.
     pub ptype_attributes: Attributes,
     /// Location.
@@ -1078,6 +1215,9 @@ pub enum TypeKind {
 pub struct ConstructorDeclaration {
     /// Name.
     pub pcd_name: StringLoc,
+    /// The `@as(...)` runtime tag, taken out of the attributes when the
+    /// constructor is built (OCaml `pcd_runtime_tag`).
+    pub pcd_runtime_tag: Option<Located<ConstructorTag>>,
     /// Arguments.
     pub pcd_args: ConstructorArguments,
     /// Return type (arena index).
@@ -1086,6 +1226,19 @@ pub struct ConstructorDeclaration {
     pub pcd_loc: Location,
     /// Attributes.
     pub pcd_attributes: Attributes,
+}
+
+/// OCaml `Parsetree.constructor_tag`: the literal a constructor's `@as`
+/// denotes, with its source spelling.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ConstructorTag {
+    Pct_string(StringLiteral),
+    Pct_int(String),
+    Pct_float(String),
+    Pct_bigint(String),
+    Pct_bool(bool),
+    Pct_null,
+    Pct_undefined,
 }
 
 /// Constructor arguments.
@@ -1102,6 +1255,9 @@ pub enum ConstructorArguments {
 pub struct LabelDeclaration {
     /// Name.
     pub pld_name: StringLoc,
+    /// The `@as("...")` rename, taken out of the attributes when the field is
+    /// built (OCaml `pld_runtime_name`). The location is the attribute's own.
+    pub pld_runtime_name: Option<Located<StringLiteral>>,
     /// Mutable flag.
     pub pld_mutable: MutableFlag,
     /// Type (arena index).
@@ -1255,7 +1411,7 @@ mod tests {
         let c = Constant::Integer(Cow::Borrowed("42"), None);
         assert!(matches!(c, Constant::Integer(..)));
 
-        let c = Constant::String(Cow::Borrowed("hello"), None);
+        let c = Constant::string("hello");
         assert!(matches!(c, Constant::String(..)));
     }
 

@@ -7,7 +7,7 @@
 use crate::lambda::lam_compat::LetKind;
 
 /// Binary operators
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BinOp {
     /// Assignment (=)
     Eq,
@@ -181,7 +181,7 @@ pub enum Level {
 }
 
 /// Module kind
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     /// OCaml/ReScript module
     Ml,
@@ -196,7 +196,7 @@ pub enum Kind {
 }
 
 /// Import attributes for ES modules
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ImportAttributes {
     /// Attribute key-value pairs in OCaml hashtable traversal order.
     pub entries: Vec<(String, String)>,
@@ -206,7 +206,7 @@ pub struct ImportAttributes {
 pub type Property = LetKind;
 
 /// Property name in object literals
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PropertyName {
     /// Literal string property
     Lit(String),
@@ -308,14 +308,14 @@ fn is_reserved_word(s: &str) -> bool {
 }
 
 /// Float literal
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FloatLit {
     /// The float value as a string (preserves precision)
     pub f: String,
 }
 
 /// BigInt literal
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BigIntLit {
     /// Is this a positive number?
     pub positive: bool,
@@ -324,7 +324,7 @@ pub struct BigIntLit {
 }
 
 /// Number literal
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Number {
     /// Float number
     Float(FloatLit),
@@ -368,7 +368,7 @@ impl Number {
 }
 
 /// Mutable flag for arrays/objects
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum MutableFlag {
     /// Mutable
     Mutable,
@@ -388,7 +388,7 @@ pub enum RecursiveInfo {
 }
 
 /// Used statistics for dead code elimination
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum UsedStats {
     /// Dead and pure (can be removed)
     DeadPure,
@@ -410,14 +410,14 @@ pub enum UsedStats {
 }
 
 /// Identifier usage info
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct IdentInfo {
     /// Usage statistics
     pub used_stats: UsedStats,
 }
 
 /// Length object type (for .length property)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LengthObject {
     Array,
     String,

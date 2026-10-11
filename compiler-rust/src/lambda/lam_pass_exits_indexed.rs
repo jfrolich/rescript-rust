@@ -86,7 +86,7 @@ pub(crate) fn count_exits(store: &IndexedLambda, root: NodeId) -> ExitCounts {
                 }
             }
             NodeView::Var(_)
-            | NodeView::GlobalModule(_, _)
+            | NodeView::GlobalModule(_)
             | NodeView::Const(_)
             | NodeView::Break
             | NodeView::Continue => {}
@@ -164,7 +164,7 @@ pub(crate) fn count_exits(store: &IndexedLambda, root: NodeId) -> ExitCounts {
 pub(crate) fn no_bounded_variables(store: &IndexedLambda, node: NodeId) -> bool {
     match store.view(node) {
         NodeView::Var(_)
-        | NodeView::GlobalModule(_, _)
+        | NodeView::GlobalModule(_)
         | NodeView::Const(_)
         | NodeView::Break
         | NodeView::Continue => true,
@@ -290,13 +290,21 @@ fn simplify(
         }
         NodeSnapshot::Var(_)
         | NodeSnapshot::Const(_)
-        | NodeSnapshot::GlobalModule(_, _)
+        | NodeSnapshot::GlobalModule(_)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => node,
+        // lam_pass_exits.ml:204 `Lambda_traverse.shallow_map_sharing`:
+        // rebuild through the smart constructors only when a child changed.
         snapshot => {
+            let mut changed = false;
             let mapped = map_children(store, snapshot, |store, child| {
-                simplify(store, counts, substitutions, id_gen, child)
+                let mapped = simplify(store, counts, substitutions, id_gen, child);
+                changed |= mapped != child;
+                mapped
             });
+            if !changed {
+                return node;
+            }
             append_rebuilt(store, mapped)
         }
     }
@@ -357,14 +365,14 @@ mod tests {
         let raise = || Lambda::LstaticRaise(7, vec![Lambda::Lvar(x.clone())]);
         let switch = Lambda::Lswitch(
             Box::new(raise()),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: false,
                 sw_consts: vec![(SwitchKey::Int(0), raise())],
                 sw_blocks_full: false,
                 sw_blocks: vec![(SwitchKey::Int(1), raise())],
                 sw_failaction: Some(Box::new(raise())),
                 sw_dispatch: SwitchDispatch::Direct,
-            },
+            }),
         );
         let lambda = Lambda::Lsequence(
             Box::new(Lambda::LstringSwitch(
@@ -508,11 +516,11 @@ mod tests {
                 Box::new(Lambda::LstaticRaise(72, vec![Lambda::unit()])),
                 (72, vec![parameter.clone()]),
                 Box::new(Lambda::Lsequence(
-                    Box::new(Lambda::Lprim(crate::lambda::PrimInfo {
+                    Box::new(Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                         primitive: Primitive::Pnot,
                         args: vec![Lambda::true_()],
                         loc: loc.clone(),
-                    })),
+                    }))),
                     Box::new(Lambda::Lvar(parameter)),
                 )),
             ),
@@ -520,11 +528,11 @@ mod tests {
         );
 
         let raw_unchanged_sibling = Lambda::Lsequence(
-            Box::new(Lambda::Lprim(crate::lambda::PrimInfo {
+            Box::new(Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                 primitive: Primitive::Pnot,
                 args: vec![Lambda::true_()],
                 loc: loc.clone(),
-            })),
+            }))),
             Box::new(Lambda::LstaticCatch(
                 Box::new(Lambda::unit()),
                 (71, vec![]),
@@ -543,24 +551,24 @@ mod tests {
                 Lambda::true_(),
             ),
             caught(
-                Lambda::Lprim(crate::lambda::PrimInfo {
+                Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                     primitive: Primitive::Pnot,
                     args: vec![raise()],
                     loc: loc.clone(),
-                }),
+                })),
                 Lambda::true_(),
             ),
             caught(
                 Lambda::Lswitch(
                     Box::new(raise()),
-                    LambdaSwitch {
+                    Box::new(LambdaSwitch {
                         sw_consts_full: true,
                         sw_consts: vec![(SwitchKey::Int(1), Lambda::true_())],
                         sw_blocks_full: true,
                         sw_blocks: vec![],
                         sw_failaction: Some(Box::new(Lambda::false_())),
                         sw_dispatch: SwitchDispatch::Direct,
-                    },
+                    }),
                 ),
                 Lambda::Lconst(Constant::int(1)),
             ),
@@ -578,11 +586,11 @@ mod tests {
                     Box::new(Lambda::true_()),
                     Box::new(Lambda::false_()),
                 ),
-                Lambda::Lprim(crate::lambda::PrimInfo {
+                Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                     primitive: Primitive::Pnot,
                     args: vec![Lambda::Lvar(id("boolean", 6))],
                     loc: loc.clone(),
-                }),
+                })),
             ),
             caught(
                 Lambda::LifThenElse(
@@ -596,7 +604,7 @@ mod tests {
                 Lambda::Lvar(id("condition", 7)),
             ),
             caught(
-                Lambda::Lapply(crate::lambda::Apply {
+                Lambda::Lapply(Box::new(crate::lambda::Apply {
                     ap_func: Box::new(raise()),
                     ap_args: vec![Lambda::true_()],
                     ap_info: crate::lambda::ApInfo {
@@ -605,20 +613,20 @@ mod tests {
                         status: crate::lambda::ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
-                }),
+                })),
                 Lambda::function_(
                     1,
                     vec![eta_param.clone()],
-                    Lambda::Lprim(crate::lambda::PrimInfo {
+                    Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                         primitive: Primitive::Pnot,
                         args: vec![Lambda::Lvar(eta_param)],
                         loc: loc.clone(),
-                    }),
+                    })),
                     crate::lambda::FunctionAttribute::default(),
                 ),
             ),
             caught(
-                Lambda::Lapply(crate::lambda::Apply {
+                Lambda::Lapply(Box::new(crate::lambda::Apply {
                     ap_func: Box::new(raise()),
                     ap_args: vec![Lambda::true_()],
                     ap_info: crate::lambda::ApInfo {
@@ -627,29 +635,29 @@ mod tests {
                         status: crate::lambda::ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
-                }),
+                })),
                 Lambda::function_(
                     1,
                     vec![id("wrapped", 8)],
-                    Lambda::Lprim(crate::lambda::PrimInfo {
+                    Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                         primitive: Primitive::PnullToOpt,
-                        args: vec![Lambda::Lprim(crate::lambda::PrimInfo {
+                        args: vec![Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                             primitive: Primitive::Pnot,
                             args: vec![Lambda::Lvar(id("wrapped", 8))],
                             loc: loc.clone(),
-                        })],
+                        }))],
                         loc: loc.clone(),
-                    }),
+                    })),
                     crate::lambda::FunctionAttribute::default(),
                 ),
             ),
             caught(
                 Lambda::Lsequence(Box::new(raise()), Box::new(Lambda::unit())),
-                Lambda::Lprim(crate::lambda::PrimInfo {
+                Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                     primitive: Primitive::PnullToOpt,
                     args: vec![Lambda::Lvar(id("v", 4))],
                     loc,
-                }),
+                })),
             ),
         ];
         for case in cases {
@@ -658,13 +666,13 @@ mod tests {
     }
 
     #[test]
-    fn substitution_resets_jsx_and_always_traverses_like_ocaml() {
+    fn substitution_keeps_jsx_and_shares_unchanged_nodes_like_ocaml() {
         let parameter = id("parameter", 180);
         let outer_loc = Location::new_for_error("subst.res", 20, 30);
         let inner_loc = Location::new_for_error("subst.res", 10, 15);
-        let handler = Lambda::Lapply(crate::lambda::Apply {
+        let handler = Lambda::Lapply(Box::new(crate::lambda::Apply {
             ap_func: Box::new(Lambda::Lvar(id("g", 181))),
-            ap_args: vec![Lambda::Lapply(crate::lambda::Apply {
+            ap_args: vec![Lambda::Lapply(Box::new(crate::lambda::Apply {
                 ap_func: Box::new(Lambda::Lvar(id("h", 182))),
                 ap_args: vec![Lambda::Lvar(parameter.clone())],
                 ap_info: crate::lambda::ApInfo {
@@ -673,14 +681,14 @@ mod tests {
                     status: crate::lambda::ApplyStatus::Uncurry,
                 },
                 ap_transformed_jsx: true,
-            })],
+            }))],
             ap_info: crate::lambda::ApInfo {
                 loc: outer_loc.clone(),
                 inlined: crate::lambda::InlineAttribute::Always,
                 status: crate::lambda::ApplyStatus::InferFull,
             },
             ap_transformed_jsx: true,
-        });
+        }));
         let result = simplify_indexed(
             Lambda::LstaticCatch(
                 Box::new(Lambda::LstaticRaise(93, vec![Lambda::unit()])),
@@ -695,23 +703,25 @@ mod tests {
         let Lambda::Lapply(outer) = *body else {
             panic!("expected outer application")
         };
-        assert!(!outer.ap_transformed_jsx);
+        // lambda_traverse.ml `shallow_map_sharing` rebuilds a changed
+        // application with its `ap_transformed_jsx`.
+        assert!(outer.ap_transformed_jsx);
         assert_eq!(outer.ap_info.loc, outer_loc);
         assert_eq!(outer.ap_info.status, crate::lambda::ApplyStatus::InferFull);
         let [Lambda::Lapply(inner)] = outer.ap_args.as_slice() else {
             panic!("expected nested application")
         };
-        assert!(!inner.ap_transformed_jsx);
+        assert!(inner.ap_transformed_jsx);
         assert_eq!(inner.ap_info.loc, inner_loc);
         assert_eq!(inner.ap_info.status, crate::lambda::ApplyStatus::Uncurry);
 
         let raw = Lambda::Lsequence(
-            Box::new(Lambda::Lprim(crate::lambda::PrimInfo {
+            Box::new(Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                 primitive: Primitive::Pnot,
                 args: vec![Lambda::true_()],
                 loc: Location::none(),
-            })),
-            Box::new(Lambda::Lapply(crate::lambda::Apply {
+            }))),
+            Box::new(Lambda::Lapply(Box::new(crate::lambda::Apply {
                 ap_func: Box::new(Lambda::Lvar(id("empty", 183))),
                 ap_args: vec![],
                 ap_info: crate::lambda::ApInfo {
@@ -720,15 +730,13 @@ mod tests {
                     status: crate::lambda::ApplyStatus::Na,
                 },
                 ap_transformed_jsx: true,
-            })),
+            }))),
         );
         let mut store = IndexedLambda::from_lambda(raw);
         let root = store.root();
+        // `subst_lambda` with nothing to replace keeps every node.
         let rewritten = substitute(&mut store, &VariableSubstitution::new(), root);
-        let result = store.materialize_node(rewritten);
-        assert!(matches!(result, Lambda::Lsequence(first, second)
-            if matches!(*first, Lambda::Lconst(Constant::JsFalse))
-                && matches!(*second, Lambda::Lapply(ref apply) if !apply.ap_transformed_jsx)));
+        assert_eq!(rewritten, root);
     }
 
     #[test]
@@ -747,11 +755,11 @@ mod tests {
                 let left = id("left", 200 + index as i32 * 2);
                 let right = id("right", 201 + index as i32 * 2);
                 let inner = if nested {
-                    Lambda::Lprim(crate::lambda::PrimInfo {
+                    Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                         primitive: Primitive::Pidentity,
                         args: vec![Lambda::Lvar(left.clone()), Lambda::Lvar(right.clone())],
                         loc: body_loc.clone(),
-                    })
+                    }))
                 } else {
                     Lambda::Lvar(left.clone())
                 };
@@ -763,14 +771,14 @@ mod tests {
                 let function = Lambda::function_(
                     2,
                     vec![left, right],
-                    Lambda::Lprim(crate::lambda::PrimInfo {
+                    Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                         primitive: wrapper.clone(),
                         args: body_args,
                         loc: body_loc,
-                    }),
+                    })),
                     crate::lambda::FunctionAttribute::default(),
                 );
-                let apply = Lambda::Lapply(crate::lambda::Apply {
+                let apply = Lambda::Lapply(Box::new(crate::lambda::Apply {
                     ap_func: Box::new(Lambda::LstaticRaise(91, vec![])),
                     ap_args: vec![
                         Lambda::Lconst(Constant::int(1)),
@@ -782,7 +790,7 @@ mod tests {
                         status: crate::lambda::ApplyStatus::Uncurry,
                     },
                     ap_transformed_jsx: true,
-                });
+                }));
                 let input = Lambda::LstaticCatch(Box::new(apply), (91, vec![]), Box::new(function));
                 if nested {
                     assert_exit_parity(input, 300);
@@ -819,16 +827,16 @@ mod tests {
         let function = Lambda::function_(
             7,
             vec![parameter.clone()],
-            Lambda::Lprim(crate::lambda::PrimInfo {
+            Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                 primitive: Primitive::Ptypeof,
                 args: vec![Lambda::Lconst(Constant::int(0))],
                 loc: Location::none(),
-            }),
+            })),
             attr,
         );
         let result = simplify_indexed(
             Lambda::LstaticCatch(
-                Box::new(Lambda::Lapply(crate::lambda::Apply {
+                Box::new(Lambda::Lapply(Box::new(crate::lambda::Apply {
                     ap_func: Box::new(Lambda::LstaticRaise(92, vec![])),
                     ap_args: vec![Lambda::Lvar(parameter)],
                     ap_info: crate::lambda::ApInfo {
@@ -837,7 +845,7 @@ mod tests {
                         status: crate::lambda::ApplyStatus::InferFull,
                     },
                     ap_transformed_jsx: true,
-                })),
+                }))),
                 (92, vec![]),
                 Box::new(function),
             ),
@@ -866,14 +874,14 @@ mod tests {
             for default in [None, Some(Box::new(Lambda::false_()))] {
                 let switch = Lambda::Lswitch(
                     Box::new(Lambda::Lconst(constant.clone())),
-                    LambdaSwitch {
+                    Box::new(LambdaSwitch {
                         sw_consts_full: false,
                         sw_consts: vec![],
                         sw_blocks_full: false,
                         sw_blocks: vec![],
                         sw_failaction: default,
                         sw_dispatch: SwitchDispatch::Direct,
-                    },
+                    }),
                 );
                 let catch = Lambda::LstaticCatch(
                     Box::new(Lambda::unit()),
@@ -894,19 +902,19 @@ mod tests {
     }
 
     #[test]
-    fn no_catch_still_runs_reference_smart_constructors() {
+    fn no_catch_keeps_nodes_and_rebuilds_use_reference_smart_constructors() {
         let loc = Location::none();
         let not_true = || {
-            Lambda::Lprim(crate::lambda::PrimInfo {
+            Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                 primitive: Primitive::Pnot,
                 args: vec![Lambda::true_()],
                 loc: loc.clone(),
-            })
+            }))
         };
-        assert!(matches!(
-            simplify_indexed(not_true(), 0),
-            Lambda::Lconst(Constant::JsFalse)
-        ));
+        // `Lambda_traverse.shallow_map_sharing` keeps unchanged nodes, so
+        // `simplify_exits` leaves `not true` alone; a rebuild folds it.
+        assert!(matches!(simplify_indexed(not_true(), 0), Lambda::Lprim(_)));
+        assert!(matches!(rebuild_indexed(not_true()), Lambda::Lconst(Constant::JsFalse)));
         let result = simplify_indexed(
             Lambda::Lsequence(
                 Box::new(not_true()),
@@ -915,41 +923,48 @@ mod tests {
             0,
         );
         assert!(matches!(result, Lambda::Lsequence(first, second)
-            if matches!(*first, Lambda::Lconst(Constant::JsFalse))
+            if matches!(*first, Lambda::Lprim(_))
                 && matches!(*second, Lambda::LstaticRaise(99, ref args) if args.is_empty())));
+    }
+
+    /// Rebuild the root through the indexed smart constructors.
+    fn rebuild_indexed(lambda: Lambda) -> Lambda {
+        let mut store = IndexedLambda::from_lambda(lambda);
+        let root = store.root();
+        let snapshot = store.snapshot(root);
+        let rebuilt = append_rebuilt(&mut store, snapshot);
+        store.materialize_node(rebuilt)
     }
 
     #[test]
     fn inherited_smart_constructor_debt_follows_ocaml_reference() {
-        use crate::types::{VariantBlockType, VariantTag, VariantTagType};
+        use crate::types::VariantTag;
         for tag_type in [
-            VariantTagType::Float("1.0".into()),
-            VariantTagType::BigInt("1".into()),
-            VariantTagType::Untagged(VariantBlockType::Unknown),
+            crate::types::VariantLiteralTag::Float("1.0".into()),
+            crate::types::VariantLiteralTag::BigInt("1".into()),
         ] {
             let condition = Constant::Constructor(VariantTag {
                 name: "C".into(),
-                tag_type: Some(tag_type),
+                literal: Some(tag_type),
             });
-            let result = simplify_indexed(
+            let result = rebuild_indexed(
                 Lambda::LifThenElse(
                     Box::new(Lambda::Lconst(condition)),
                     Box::new(Lambda::true_()),
                     Box::new(Lambda::false_()),
                 ),
-                0,
             );
             assert!(matches!(result, Lambda::LifThenElse(_, _, _)));
         }
 
         let int_tag = VariantTag {
             name: "One".into(),
-            tag_type: Some(VariantTagType::Int(1)),
+            literal: Some(crate::types::VariantLiteralTag::Int(1)),
         };
-        let result = simplify_indexed(
+        let result = rebuild_indexed(
             Lambda::Lswitch(
                 Box::new(Lambda::Lconst(Constant::int(1))),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: true,
                     sw_consts: vec![(
                         SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(
@@ -961,25 +976,24 @@ mod tests {
                     sw_blocks: vec![],
                     sw_failaction: Some(Box::new(Lambda::false_())),
                     sw_dispatch: SwitchDispatch::Direct,
-                },
+                }),
             ),
-            0,
         );
         assert!(matches!(result, Lambda::Lconst(Constant::JsTrue)));
 
-        let commented = simplify_indexed(
+        let commented = rebuild_indexed(
             Lambda::Lswitch(
                 Box::new(Lambda::Lconst(Constant::int_with_comment(
                     1,
                     crate::lambda::lam_constant::PointerInfo::Some("commented".into()),
                 ))),
-                LambdaSwitch {
+                Box::new(LambdaSwitch {
                     sw_consts_full: true,
                     sw_consts: vec![(
                         SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(
                             VariantTag {
                                 name: "One".into(),
-                                tag_type: Some(VariantTagType::Int(1)),
+                                literal: Some(crate::types::VariantLiteralTag::Int(1)),
                             },
                         )),
                         Lambda::true_(),
@@ -988,9 +1002,8 @@ mod tests {
                     sw_blocks: vec![],
                     sw_failaction: Some(Box::new(Lambda::false_())),
                     sw_dispatch: SwitchDispatch::Direct,
-                },
+                }),
             ),
-            0,
         );
         assert!(matches!(commented, Lambda::Lconst(Constant::JsFalse)));
 
@@ -1000,19 +1013,18 @@ mod tests {
         ] {
             let left = Constant::Constructor(VariantTag {
                 name: "A".into(),
-                tag_type: None,
+                literal: None,
             });
             let right = Constant::Constructor(VariantTag {
                 name: "B".into(),
-                tag_type: None,
+                literal: None,
             });
-            let result = simplify_indexed(
-                Lambda::Lprim(crate::lambda::PrimInfo {
+            let result = rebuild_indexed(
+                Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                     primitive: Primitive::Pintcomp(operation),
                     args: vec![Lambda::Lconst(left), Lambda::Lconst(right)],
                     loc: Location::none(),
-                }),
-                0,
+                })),
             );
             assert_eq!(
                 format!("{result:?}"),
@@ -1027,7 +1039,7 @@ mod tests {
         let mut lambda = Lambda::LstaticCatch(
             Box::new(Lambda::LstaticRaise(20, vec![])),
             (20, vec![]),
-            Box::new(Lambda::LglobalModule(id("M", 0), false)),
+            Box::new(Lambda::LglobalModule(id("M", 0))),
         );
         lambda = Lambda::Lassign(x.clone(), Box::new(lambda));
         lambda = Lambda::Lfor_await_of(
@@ -1060,14 +1072,14 @@ mod tests {
         );
         lambda = Lambda::Lswitch(
             Box::new(Lambda::Lvar(x)),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: true,
                 sw_consts: vec![(SwitchKey::Int(0), lambda)],
                 sw_blocks_full: true,
                 sw_blocks: vec![],
                 sw_failaction: None,
                 sw_dispatch: SwitchDispatch::Direct,
-            },
+            }),
         );
         assert_exit_parity(lambda, 40);
     }
@@ -1100,29 +1112,42 @@ mod tests {
         let loc = Location::none();
         let cases = (0..32)
             .map(|case| {
+                // A dead catch in each payload makes the pass rewrite it
+                // (shallow_map_sharing only rebuilds changed nodes).
                 let args = (0..16)
-                    .map(|value| Lambda::Lconst(Constant::int(case * 16 + value)))
+                    .map(|value| {
+                        let constant = Lambda::Lconst(Constant::int(case * 16 + value));
+                        if value == 0 {
+                            Lambda::LstaticCatch(
+                                Box::new(constant),
+                                (1000 + case, vec![]),
+                                Box::new(Lambda::unit()),
+                            )
+                        } else {
+                            constant
+                        }
+                    })
                     .collect::<Vec<_>>();
                 (
                     SwitchKey::Int(case),
-                    Lambda::Lprim(crate::lambda::PrimInfo {
+                    Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                         primitive: Primitive::Pmakearray,
                         args,
                         loc: loc.clone(),
-                    }),
+                    })),
                 )
             })
             .collect::<Vec<_>>();
         let lambda = Lambda::Lswitch(
             Box::new(Lambda::Lvar(id("scrutinee", 400))),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: true,
                 sw_consts: cases,
                 sw_blocks_full: true,
                 sw_blocks: vec![],
                 sw_failaction: None,
                 sw_dispatch: SwitchDispatch::Direct,
-            },
+            }),
         );
         let mut context = IndexedLambdaContext::from_lambda(lambda, []);
         context.simplify_exits(&IdGenerator::with_start_stamp(500));
@@ -1254,14 +1279,15 @@ mod tests {
             first.side_payload_shallow_occupied_bytes
         );
 
-        // OCaml always walks and rebuilds smart constructors, even without a catch.
+        // Without a catch nothing changes, so `shallow_map_sharing` keeps
+        // every node.
         context.simplify_exits(&indexed_gen);
         let second = context.storage_measurements();
-        assert_eq!(second.node_allocations, 14);
+        assert_eq!(second.node_allocations, first.node_allocations);
         assert_eq!(
             second.current_root_unique_nodes,
             first.current_root_unique_nodes
         );
-        assert_eq!(second.superseded_nodes, 6);
+        assert_eq!(second.superseded_nodes, first.superseded_nodes);
     }
 }

@@ -11,7 +11,7 @@ use crate::types::typedtree::{
     TypedSignature, TypedSignatureItem, TypedSignatureItemDesc,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Import {
     pub import_path: crate::gentype::import_path::T,
 }
@@ -27,7 +27,7 @@ pub enum AttributePayload {
     UnrecognizedPayload,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum T {
     GenType,
     GenTypeOpaque,
@@ -91,9 +91,11 @@ pub fn tag_is_intern_local(s: &str) -> bool {
 
 fn from_expr(arena: &ParseArena, expr: &Expression) -> Option<AttributePayload> {
     // Mirrors compiler/gentype/Annotation.ml:43-68.
+    if let Some(s) = crate::ast_payload::semantic_string_of_expression(arena, expr).ok().flatten() {
+        return Some(AttributePayload::StringPayload(s));
+    }
     match expr.pexp_desc.as_ref() {
         ExpressionDesc::Pexp_constant(constant) => match constant.as_ref() {
-            Constant::String(s, _) => Some(AttributePayload::StringPayload(s.to_string())),
             Constant::Integer(n, _) => Some(AttributePayload::IntPayload(n.to_string())),
             Constant::Float(s, _) => Some(AttributePayload::FloatPayload(s.to_string())),
             _ => None,
@@ -479,18 +481,18 @@ pub fn import_from_string(import_string: &str) -> Import {
     }
 }
 
-pub fn update_config_for_module(
+pub fn update_config_for_module<'c>(
     arena: &ParseArena,
-    config: &crate::gentype::config::T,
+    config: &'c crate::gentype::config::T,
     attributes: &Attributes,
-) -> crate::gentype::config::T {
+) -> std::borrow::Cow<'c, crate::gentype::config::T> {
     // Mirrors compiler/gentype/Annotation.ml:292-295.
     if has_attribute(arena, tag_is_gentype, attributes) {
         let mut config = config.clone();
         config.everything = true;
-        config
+        std::borrow::Cow::Owned(config)
     } else {
-        config.clone()
+        std::borrow::Cow::Borrowed(config)
     }
 }
 

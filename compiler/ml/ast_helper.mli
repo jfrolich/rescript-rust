@@ -36,7 +36,7 @@ val with_default_loc : loc -> (unit -> 'a) -> 'a
 
 module Const : sig
   val char : char -> constant
-  val string : ?quotation_delimiter:string -> string -> constant
+  val string : string -> constant
   val integer : ?suffix:char -> string -> constant
   val int : ?suffix:char -> int -> constant
   val int32 : ?suffix:char -> int32 -> constant
@@ -97,8 +97,13 @@ module Pat : sig
   val constant : ?loc:loc -> ?attrs:attrs -> constant -> pattern
   val interval : ?loc:loc -> ?attrs:attrs -> constant -> constant -> pattern
   val tuple : ?loc:loc -> ?attrs:attrs -> pattern list -> pattern
-  val construct : ?loc:loc -> ?attrs:attrs -> lid -> pattern option -> pattern
-  val variant : ?loc:loc -> ?attrs:attrs -> label -> pattern option -> pattern
+
+  (* Argument lists carry their own locations. Generated nodes must supply
+     an explicit fallback location; see the parsetree location contract. *)
+  val construct :
+    ?loc:loc -> ?attrs:attrs -> lid -> pattern list Location.loc -> pattern
+  val variant :
+    ?loc:loc -> ?attrs:attrs -> label -> pattern list Location.loc -> pattern
   val record :
     ?loc:loc ->
     ?attrs:attrs ->
@@ -111,7 +116,6 @@ module Pat : sig
   val constraint_ : ?loc:loc -> ?attrs:attrs -> pattern -> core_type -> pattern
   val type_ : ?loc:loc -> ?attrs:attrs -> lid -> pattern
   val unpack : ?loc:loc -> ?attrs:attrs -> str -> pattern
-  val open_ : ?loc:loc -> ?attrs:attrs -> lid -> pattern -> pattern
   val exception_ : ?loc:loc -> ?attrs:attrs -> pattern -> pattern
   val extension : ?loc:loc -> ?attrs:attrs -> extension -> pattern
 end
@@ -121,6 +125,7 @@ module Exp : sig
   val mk : ?loc:loc -> ?attrs:attrs -> expression_desc -> expression
   val attr : expression -> attribute -> expression
 
+  val braces : ?attrs:attrs -> braces_loc:loc -> expression -> expression
   val ident : ?loc:loc -> ?attrs:attrs -> lid -> expression
   val constant : ?loc:loc -> ?attrs:attrs -> constant -> expression
   val let_ :
@@ -153,9 +158,17 @@ module Exp : sig
   val try_ : ?loc:loc -> ?attrs:attrs -> expression -> case list -> expression
   val tuple : ?loc:loc -> ?attrs:attrs -> expression list -> expression
   val construct :
-    ?loc:loc -> ?attrs:attrs -> lid -> expression option -> expression
+    ?loc:loc ->
+    ?attrs:attrs ->
+    lid ->
+    expression list Location.loc ->
+    expression
   val variant :
-    ?loc:loc -> ?attrs:attrs -> label -> expression option -> expression
+    ?loc:loc ->
+    ?attrs:attrs ->
+    label ->
+    expression list Location.loc ->
+    expression
   val record :
     ?loc:loc ->
     ?attrs:attrs ->
@@ -172,6 +185,13 @@ module Exp : sig
     expression ->
     expression ->
     expression option ->
+    expression
+  val ternary :
+    ?loc:loc ->
+    ?attrs:attrs ->
+    expression ->
+    expression ->
+    expression ->
     expression
   val sequence :
     ?loc:loc -> ?attrs:attrs -> expression -> expression -> expression
@@ -205,7 +225,18 @@ module Exp : sig
   val coerce : ?loc:loc -> ?attrs:attrs -> expression -> core_type -> expression
   val constraint_ :
     ?loc:loc -> ?attrs:attrs -> expression -> core_type -> expression
-  val send : ?loc:loc -> ?attrs:attrs -> expression -> str -> expression
+  val object_get : ?loc:loc -> ?attrs:attrs -> expression -> str -> expression
+
+  val object_set :
+    ?loc:loc -> ?attrs:attrs -> expression -> str -> expression -> expression
+
+  val object_literal :
+    ?loc:loc -> ?attrs:attrs -> (str * expression) list -> expression
+
+  val regexp : ?loc:loc -> ?attrs:attrs -> string -> string -> expression
+
+  val template :
+    ?loc:loc -> ?attrs:attrs -> str list -> expression list -> expression
   val letmodule :
     ?loc:loc -> ?attrs:attrs -> str -> module_expr -> expression -> expression
   val letexception :
@@ -219,6 +250,13 @@ module Exp : sig
   val open_ :
     ?loc:loc -> ?attrs:attrs -> override_flag -> lid -> expression -> expression
   val extension : ?loc:loc -> ?attrs:attrs -> extension -> expression
+  val tagged_template :
+    ?loc:loc ->
+    ?attrs:attrs ->
+    expression ->
+    str list ->
+    expression list ->
+    expression
   val jsx_fragment :
     ?loc:loc ->
     ?attrs:attrs ->
@@ -255,7 +293,7 @@ module Val : sig
   val mk :
     ?loc:loc ->
     ?attrs:attrs ->
-    ?prim:string list ->
+    ?prim:primitive_repr ->
     str ->
     core_type ->
     value_description
@@ -271,24 +309,42 @@ module Type : sig
     ?kind:type_kind ->
     ?priv:private_flag ->
     ?manifest:core_type ->
+    ?origin:type_declaration_origin ->
     str ->
     type_declaration
+
+  val declaration_attributes : type_declaration -> attributes
+  (** Restore the inline-record marker for the frozen v0 PPX tree. *)
 
   val constructor :
     ?loc:loc ->
     ?attrs:attrs ->
     ?args:constructor_arguments ->
     ?res:core_type ->
+    ?runtime_tag:constructor_tag ->
     str ->
     constructor_declaration
+  (** A valid first [@as] in [attrs] is taken out and becomes the runtime tag,
+      unless one is given explicitly. *)
+
+  val constructor_attributes : constructor_declaration -> attrs
+  (** The attributes as written, with the constructor [@as] put back. *)
+
   val field :
     ?loc:loc ->
     ?attrs:attrs ->
     ?mut:mutable_flag ->
     ?optional:bool ->
+    ?runtime_name:string ->
     str ->
     core_type ->
     label_declaration
+  (** [@as("x")] in [attrs] is taken out and becomes the runtime name, unless
+      one is given explicitly. *)
+
+  val field_attributes : label_declaration -> attrs
+  (** The attributes as written, with the [@as] taken out by [field] put back.
+      For printers, which must reproduce the source. *)
 end
 
 (** Type extensions *)

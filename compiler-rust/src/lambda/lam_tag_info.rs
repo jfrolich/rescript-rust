@@ -9,13 +9,15 @@ use crate::parser::ast::MutableFlag;
 /// Block tag information
 ///
 /// Describes the kind of block being created, which affects code generation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TagInfo {
     /// Constructor block (variant)
     Constructor {
         name: String,
         num_nonconst: i32,
-        runtime: crate::types::BlockRuntime,
+        /// Untagged scalar constructors are erased during typedtree
+        /// translation; they cannot form Lambda or JavaScript blocks.
+        runtime: Box<crate::types::TaggedBlock>,
     },
 
     /// Inlined record (record inside a variant)
@@ -25,7 +27,7 @@ pub enum TagInfo {
         fields: Vec<(String, bool)>, // (name, optional)
         logical_field_count: Option<usize>,
         mutable_flag: MutableFlag,
-        runtime: crate::types::BlockRuntime,
+        runtime: Box<crate::types::VariantBlock>,
     },
 
     /// Tuple
@@ -102,14 +104,13 @@ impl TagInfo {
     pub fn constructor(name: impl Into<String>, num_nonconst: i32) -> Self {
         let name = name.into();
         TagInfo::Constructor {
-            runtime: crate::types::BlockRuntime {
+            runtime: Box::new(crate::types::TaggedBlock {
                 tag: crate::types::VariantTag {
                     name: name.clone(),
-                    tag_type: None,
+                    literal: None,
                 },
                 tag_name: None,
-                untagged: false,
-            },
+            }),
             name,
             num_nonconst,
         }

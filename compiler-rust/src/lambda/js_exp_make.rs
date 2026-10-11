@@ -21,7 +21,9 @@ pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::Var(_)
         | ExpressionDesc::Fun { .. }
         | ExpressionDesc::Number(_)
-        | ExpressionDesc::Str { .. } => true,
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_) => true,
         ExpressionDesc::StaticIndex(target, _, _) => js_expr_no_side_effects(target),
         ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right)
@@ -50,13 +52,31 @@ pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
                 && js_expr_no_side_effects(consequent)
                 && js_expr_no_side_effects(alternate)
         }
-        ExpressionDesc::Bin(op, left, right) => {
-            *op != BinOp::Eq && js_expr_no_side_effects(left) && js_expr_no_side_effects(right)
+        ExpressionDesc::Bin(BinOp::Eq, _, _) => false,
+        ExpressionDesc::Bin(op @ (BinOp::Pow | BinOp::Div | BinOp::Mod), left, right) => {
+            // js_analyzer.ml: on BigInt operands these throw (`**` on a
+            // negative exponent, `/` and `%` on a zero divisor). The operand
+            // types are not known here, so only a literal right operand that
+            // cannot throw is taken as pure.
+            let safe_literal = match &right.desc {
+                ExpressionDesc::Number(Number::BigInt(lit)) => {
+                    if *op == BinOp::Pow { lit.positive } else { lit.value != "0" }
+                }
+                ExpressionDesc::Number(Number::Int { i, .. }) => *op == BinOp::Pow || *i != 0,
+                ExpressionDesc::Number(Number::Float(_)) => true,
+                _ => false,
+            };
+            safe_literal && js_expr_no_side_effects(left)
         }
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+        ExpressionDesc::Bin(_, left, right) => {
+            js_expr_no_side_effects(left) && js_expr_no_side_effects(right)
+        }
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
             js_expr_no_side_effects(tag)
-                && strings.iter().all(js_expr_no_side_effects)
                 && values.iter().all(js_expr_no_side_effects)
+        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
+            values.iter().all(js_expr_no_side_effects)
         }
         ExpressionDesc::FlatCall(_, _)
         | ExpressionDesc::Call(_, _, _)
@@ -70,7 +90,11 @@ pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
 
 pub(crate) fn remove_pure_subexpression(expr: Expression) -> Option<Expression> {
     match expr.desc {
-        ExpressionDesc::Var(_) | ExpressionDesc::Str { .. } | ExpressionDesc::Number(_) => None,
+        ExpressionDesc::Var(_)
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
+        | ExpressionDesc::Number(_) => None,
         ExpressionDesc::ArrayIndex(left, right) => {
             if is_pure_subexpression(left.as_ref()) && is_pure_subexpression(right.as_ref()) {
                 None
@@ -295,28 +319,11 @@ pub(crate) fn runtime_compare_call_args(expr: &Expression) -> Option<(&Expressio
     }
 }
 
+/// js_exp_make.ml `string_comp`: literal operands fold by comparing their
+/// semantic values.
 pub(crate) fn compare_string_literals(left: &Expression, right: &Expression) -> Option<bool> {
-    match (&left.desc, &right.desc) {
-        (
-            ExpressionDesc::Str {
-                txt: left_txt,
-                delim: left_delim,
-            },
-            ExpressionDesc::Str {
-                txt: right_txt,
-                delim: right_delim,
-            },
-        ) if left_delim == right_delim => {
-            if left_txt == right_txt {
-                Some(true)
-            } else if is_simple_string_comparison(left_txt)
-                && is_simple_string_comparison(right_txt)
-            {
-                Some(false)
-            } else {
-                None
-            }
-        }
+    match (left.string_literal_semantic(), right.string_literal_semantic()) {
+        (Some(left), Some(right)) => Some(left == right),
         _ => None,
     }
 }
@@ -343,10 +350,6 @@ pub(crate) fn compare_bigint_literals(left: &Expression, right: &Expression) -> 
         ),
         _ => None,
     }
-}
-
-pub(crate) fn is_simple_string_comparison(text: &str) -> bool {
-    text.is_ascii() && !text.as_bytes().contains(&b'\\')
 }
 
 pub(crate) fn is_optional_block(expr: &Expression) -> bool {
@@ -426,8 +429,8 @@ pub(crate) fn both_bigint_literals(left: &Expression, right: &Expression) -> boo
 }
 
 pub(crate) fn both_string_literals(left: &Expression, right: &Expression) -> bool {
-    matches!(left.desc, ExpressionDesc::Str { .. })
-        && matches!(right.desc, ExpressionDesc::Str { .. })
+    matches!(left.desc, ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_))
+        && matches!(right.desc, ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_))
 }
 
 pub(crate) fn int_expr(value: i32) -> Expression {
@@ -603,7 +606,7 @@ pub(crate) fn ocaml_typeof_expr(expr: Expression) -> Expression {
     } = expr;
     match desc {
         ExpressionDesc::Number(_) | ExpressionDesc::Length(_, _) => Expression::string("number"),
-        ExpressionDesc::Str { .. } => Expression::string("string"),
+        ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_) => Expression::string("string"),
         ExpressionDesc::Array(_, _) => Expression::string("object"),
         ExpressionDesc::Bool(_) => Expression::string("boolean"),
         desc => Expression::new(ExpressionDesc::Typeof(Box::new(Expression {
@@ -646,8 +649,16 @@ pub(crate) fn pure_record_field_item(
     }
 
     match &target.desc {
-        ExpressionDesc::CamlBlock(items, _, TagInfo::Record { fields, .. })
-        | ExpressionDesc::CamlBlock(items, _, TagInfo::RecordInlined { fields, .. }) => {
+        ExpressionDesc::CamlBlock(items, _, tag)
+            if matches!(
+                **tag,
+                TagInfo::Record { .. } | TagInfo::RecordInlined { .. }
+            ) =>
+        {
+            let (TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. }) = &**tag
+            else {
+                unreachable!()
+            };
             for (item, (field_name, _)) in items.iter().zip(fields.iter()) {
                 if field_name == field {
                     return Some(item.clone());
@@ -669,8 +680,16 @@ pub(crate) fn direct_projection_from_pure_literal(
     }
 
     match &target.desc {
-        ExpressionDesc::CamlBlock(items, _, TagInfo::Record { fields, .. })
-        | ExpressionDesc::CamlBlock(items, _, TagInfo::RecordInlined { fields, .. }) => {
+        ExpressionDesc::CamlBlock(items, _, tag)
+            if matches!(
+                **tag,
+                TagInfo::Record { .. } | TagInfo::RecordInlined { .. }
+            ) =>
+        {
+            let (TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. }) = &**tag
+            else {
+                unreachable!()
+            };
             if let Some(field) = field {
                 for (item, (field_name, _)) in items.iter().zip(fields.iter()) {
                     if field_name == field {
@@ -796,80 +815,55 @@ pub(crate) fn is_type_object_expr(expr: Expression) -> Expression {
     raw_typeof_comparison(expr, BinOp::EqEqEq, "object")
 }
 
-pub(crate) fn strict_eq_int(expr: Expression, value: i32) -> Expression {
-    Expression::bin(BinOp::EqEqEq, expr, int_expr(value))
-}
-
-pub(crate) fn range_exclusion_or(expr: Expression, upper: i32, lower: i32) -> Expression {
-    Expression::bin(
-        BinOp::Or,
-        Expression::bin(BinOp::Gt, expr.clone(), int_expr(upper)),
-        Expression::bin(BinOp::Lt, expr, int_expr(lower)),
-    )
-}
-
-pub(crate) fn is_out_expr(expr: Expression, range: Expression) -> Expression {
-    match (int_literal(&range), &expr.desc) {
-        (Some(1), ExpressionDesc::Var(_)) => Expression::not(Expression::bin(
-            BinOp::Or,
-            strict_eq_int(expr.clone(), 0),
-            strict_eq_int(expr.clone(), 1),
-        )),
-        (Some(1), ExpressionDesc::Bin(BinOp::Plus, left, right)) => match (&left.desc, &right.desc)
-        {
-            (ExpressionDesc::Number(Number::Int { i, .. }), ExpressionDesc::Var(_)) => {
-                Expression::not(Expression::bin(
-                    BinOp::Or,
-                    strict_eq_int(right.as_ref().clone(), i.wrapping_neg()),
-                    strict_eq_int(right.as_ref().clone(), 1i32.wrapping_sub(*i)),
-                ))
-            }
-            (ExpressionDesc::Var(_), ExpressionDesc::Number(Number::Int { i, .. })) => {
-                Expression::not(Expression::bin(
-                    BinOp::Or,
-                    strict_eq_int(left.as_ref().clone(), i.wrapping_neg()),
-                    strict_eq_int(left.as_ref().clone(), 1i32.wrapping_sub(*i)),
-                ))
-            }
-            _ => Expression::bin(BinOp::Gt, expr, range),
-        },
-        (Some(1), ExpressionDesc::Bin(BinOp::Minus, left, right)) => {
-            match (&left.desc, &right.desc) {
-                (ExpressionDesc::Var(_), ExpressionDesc::Number(Number::Int { i, .. })) => {
-                    Expression::not(Expression::bin(
-                        BinOp::Or,
-                        strict_eq_int(left.as_ref().clone(), i.wrapping_add(1)),
-                        strict_eq_int(left.as_ref().clone(), *i),
-                    ))
-                }
-                _ => Expression::bin(BinOp::Gt, expr, range),
-            }
-        }
-        (Some(k), ExpressionDesc::Bin(BinOp::Minus, left, right)) => {
-            match (&left.desc, &right.desc) {
-                (ExpressionDesc::Var(_), ExpressionDesc::Number(Number::Int { i, .. })) => {
-                    range_exclusion_or(left.as_ref().clone(), i.wrapping_add(k), *i)
-                }
-                _ => Expression::bin(BinOp::Gt, expr, range),
-            }
-        }
-        (Some(k), ExpressionDesc::Var(_)) => range_exclusion_or(expr, k, 0),
-        (_, ExpressionDesc::Bin(BinOp::Bor, inner, zero))
-            if is_zero_int(zero.as_ref())
-                && matches!(
-                    inner.as_ref().desc,
-                    ExpressionDesc::Bin(BinOp::Plus | BinOp::Minus, _, _)
-                ) =>
-        {
-            is_out_expr(inner.as_ref().clone(), range)
-        }
-        _ => Expression::bin(BinOp::Gt, expr, range),
-    }
-}
-
 pub(crate) fn int_bnot(expr: Expression) -> Expression {
     match int_literal(&expr) {
         Some(value) => int_expr(!value),
         None => Expression::new(ExpressionDesc::JsBnot(Box::new(expr))),
+    }
+}
+
+/// js_exp_make.ml `interpolated_template`: fold literal values into their
+/// neighbouring segments; a template left without values is a literal.
+pub(crate) fn interpolated_template(
+    segments: Vec<crate::string_literal::TemplateSegment>,
+    values: Vec<Expression>,
+) -> Expression {
+    use crate::string_literal::{concat_template, template_from_semantic};
+    fn literal_segment(value: &Expression) -> Option<crate::string_literal::TemplateSegment> {
+        if value.comment.is_some() {
+            return None;
+        }
+        match &value.desc {
+            ExpressionDesc::Str(semantic) => Some(template_from_semantic(semantic)),
+            ExpressionDesc::TemplateLiteral(segment) => Some(segment.clone()),
+            _ => None,
+        }
+    }
+    assert_eq!(segments.len(), values.len() + 1, "a template has one more segment than value");
+    let mut segments = segments.into_iter();
+    let mut parts = vec![segments.next().expect("a template has at least one segment")];
+    let mut merged_segments = Vec::new();
+    let mut merged_values = Vec::new();
+    for (next_segment, value) in segments.zip(values) {
+        match literal_segment(&value) {
+            Some(literal) => {
+                parts.push(literal);
+                parts.push(next_segment);
+            }
+            None => {
+                merged_segments.push(concat_template(&parts));
+                merged_values.push(value);
+                parts = vec![next_segment];
+            }
+        }
+    }
+    merged_segments.push(concat_template(&parts));
+    if merged_segments.len() == 1 && merged_values.is_empty() {
+        Expression::new(ExpressionDesc::TemplateLiteral(merged_segments.pop().expect("one segment")))
+    } else {
+        Expression::new(ExpressionDesc::InterpolatedTemplate {
+            segments: merged_segments,
+            values: merged_values,
+        })
     }
 }

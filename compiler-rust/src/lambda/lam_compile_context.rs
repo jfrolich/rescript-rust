@@ -19,7 +19,7 @@ use crate::lambda::lam_constant::Constant;
 pub type JblLabel = i32;
 
 /// Recursion flag for functions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RecFlag {
     /// Recursive function
     Rec,
@@ -90,11 +90,8 @@ pub enum ExternalArityInfo {
 
 pub type ExternalArityFieldTable = HashMap<String, Option<ExternalArityInfo>>;
 
-#[derive(Debug, Clone, Default)]
-pub struct ExternalArityTable {
-    pub static_imports: HashMap<String, ExternalArityFieldTable>,
-    pub dynamic_imports: HashMap<String, ExternalArityFieldTable>,
-}
+/// `Lam_compile_env.query_external_id_info` results, per module and field.
+pub type ExternalArityTable = HashMap<String, ExternalArityFieldTable>;
 
 /// Lambda compilation statistics and metadata.
 #[derive(Debug, Clone)]
@@ -123,6 +120,10 @@ pub struct LamStats {
     /// in `coercion_module_alias_test`). Threading this shared counter through the
     /// simplify pipeline preserves OCaml's invariant.
     pub id_gen: std::sync::Arc<crate::context::IdGenerator>,
+    /// Whether collect stores inlinable function bodies in `FunctionId`.
+    /// Only `remove_alias` reads them, so a collect whose table is fully
+    /// re-collected before the next `simplify_alias` can skip the copies.
+    pub(crate) collect_function_payloads: bool,
 }
 
 impl LamStats {
@@ -135,6 +136,7 @@ impl LamStats {
             ident_tbl: HashMap::new(),
             external_arities: ExternalArityTable::default(),
             id_gen: std::sync::Arc::new(crate::context::IdGenerator::new()),
+            collect_function_payloads: true,
         }
     }
 

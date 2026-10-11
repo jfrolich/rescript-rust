@@ -36,7 +36,10 @@ pub fn hit_variable(fv: &Ident, l: &Lambda) -> bool {
             Lambda::Lassign(id, e) => hit_var(fv, id) || hit(fv, e),
             Lambda::LstaticCatch(e1, _, e2) => hit(fv, e1) || hit(fv, e2),
             Lambda::LtryWith(e1, _, e2) => hit(fv, e1) || hit(fv, e2),
-            Lambda::Lfunction(LFunction { body, .. }) => hit(fv, body),
+            Lambda::Lfunction(__func0) => {
+                let LFunction { body, .. } = __func0.as_ref();
+                hit(fv, body)
+            }
             Lambda::Llet(_, _, arg, body) => hit(fv, arg) || hit(fv, body),
             Lambda::Lletrec(decl, body) => hit(fv, body) || hit_list_snd(fv, decl),
             Lambda::Lfor(_, e1, e2, _, e3) => hit(fv, e1) || hit(fv, e2) || hit(fv, e3),
@@ -46,7 +49,7 @@ pub fn hit_variable(fv: &Ident, l: &Lambda) -> bool {
             Lambda::Lconst(_) => false,
             Lambda::Lapply(apply) => hit(fv, &apply.ap_func) || hit_list(fv, &apply.ap_args),
             // Global persistent module — play safe (lam_hit.ml:48).
-            Lambda::LglobalModule(_, _) => false,
+            Lambda::LglobalModule(_) => false,
             Lambda::Lprim(prim) => hit_list(fv, &prim.args),
             Lambda::Lswitch(arg, sw) => {
                 hit(fv, arg)

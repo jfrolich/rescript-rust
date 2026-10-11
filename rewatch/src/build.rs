@@ -3,11 +3,15 @@ pub mod clean;
 pub mod compile;
 pub mod compiler_info;
 pub mod deps;
+pub mod incremental;
 pub mod logs;
 pub mod namespaces;
 pub mod packages;
 pub mod parse;
+pub mod qos;
 pub mod read_compile_state;
+pub mod state_db;
+pub mod tooling;
 
 use self::parse::parser_args;
 use crate::build::compile::{mark_modules_with_deleted_deps_dirty, mark_modules_with_expired_deps_dirty};
@@ -17,7 +21,6 @@ use crate::helpers::emojis::*;
 use crate::helpers::{self};
 use crate::lock::{LockKind, drop_lock, get_lock_or_exit};
 use crate::project_context::ProjectContext;
-use crate::sourcedirs;
 use anyhow::{Context, Result, anyhow};
 use build_types::*;
 use console::style;
@@ -25,8 +28,6 @@ use indicatif::{ProgressBar, ProgressStyle};
 use log::log_enabled;
 use serde::Serialize;
 use std::fmt;
-use std::fs::File;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::{info_span, instrument};
@@ -53,6 +54,13 @@ fn is_dirty(module: &Module) -> bool {
 }
 
 fn mark_all_modules_dirty(build_state: &mut BuildCommandState) {
+    mark_modules_dirty(build_state, true);
+}
+
+/// Mark every module for parsing and compilation. Namespace maps are only
+/// reparsed when `namespaces` is set: they are not source files, and a build
+/// that has to compile every module does not otherwise report them as parsed.
+fn mark_modules_dirty(build_state: &mut BuildCommandState, namespaces: bool) {
     for module in build_state.modules.values_mut() {
         module.compile_dirty = true;
         match &mut module.source_type {
@@ -62,13 +70,17 @@ fn mark_all_modules_dirty(build_state: &mut BuildCommandState) {
                     interface.parse_dirty = true;
                 }
             }
-            SourceType::MlMap(mlmap) => mlmap.parse_dirty = true,
+            SourceType::MlMap(mlmap) => {
+                if namespaces {
+                    mlmap.parse_dirty = true;
+                }
+            }
         }
     }
 }
 
 #[derive(Serialize, Debug, Clone)]
-pub struct CompilerArgs {
+struct CompilerArgs {
     pub compiler_args: Vec<String>,
     pub parser_args: Vec<String>,
 }
@@ -175,8 +187,17 @@ pub fn get_compiler_args(rescript_file_path: &Path) -> Result<String> {
     Ok(result)
 }
 
-pub fn get_compiler_info(project_context: &ProjectContext) -> Result<CompilerInfo> {
-    let bsc_path = helpers::get_bsc();
+pub fn get_compiler_info(project_context: &ProjectContext, build_mode: BuildMode) -> Result<CompilerInfo> {
+    // In-process builds compile with the compiler linked into this
+    // executable, so its identity invalidates previous builds; only the bsc
+    // subprocess modes need an external bsc.
+    let bsc_path = if build_mode.is_in_process() {
+        std::env::current_exe()
+            .and_then(|path| path.canonicalize())
+            .context("Could not resolve the rescript executable")?
+    } else {
+        helpers::get_bsc()
+    };
     let bsc_hash = helpers::compute_file_hash(&bsc_path).ok_or(anyhow!(
         "Failed to compute bsc hash for {}",
         bsc_path.to_string_lossy()
@@ -199,7 +220,6 @@ pub fn initialize_build(
     plain_output: bool,
     warn_error: Option<String>,
     build_mode: BuildMode,
-    subprocess: bool,
     dump_typed_sexp: bool,
     prod: bool,
     features: Option<Vec<String>>,
@@ -209,15 +229,24 @@ pub fn initialize_build(
         "build.initialize",
         working_dir = %path.display(),
         in_process = build_mode.is_in_process(),
-        subprocess,
         prod
     )
     .entered();
     let project_context = ProjectContext::new(path)?;
-    let compiler = get_compiler_info(&project_context)?;
-
     let timing_clean_start = Instant::now();
-    let packages = packages::make(filter, &project_context, show_progress, prod, features.as_ref())?;
+    // Hashing the compiler binary is independent of package discovery, so
+    // overlap the two.
+    let (compiler, packages) = std::thread::scope(|scope| {
+        let compiler = scope.spawn(|| get_compiler_info(&project_context, build_mode));
+        let packages = packages::make(filter, &project_context, show_progress, prod, features.as_ref());
+        let compiler = compiler
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (compiler, packages)
+    });
+    let compiler = compiler?;
+    let packages = packages?;
+    phase_mark("init:packages-make");
 
     let source_map_args = project_context
         .get_root_config()
@@ -235,16 +264,22 @@ pub fn initialize_build(
         compiler,
         warn_error,
         build_mode,
-        subprocess,
         dump_typed_sexp,
         features,
         source_map_command,
     );
+    phase_mark("init:validate");
     packages::parse_packages(&mut build_state)?;
+    phase_mark("init:parse-packages");
 
-    let compile_assets_state = read_compile_state::read(&mut build_state)?;
-
-    let (diff_cleanup, total_cleanup) = clean::cleanup_previous_build(&mut build_state, compile_assets_state);
+    let (diff_cleanup, total_cleanup) = if build_state.build_mode().is_in_process() {
+        clean::cleanup_previous_in_process_build(&mut build_state)
+    } else {
+        let compile_assets_state = read_compile_state::read(&mut build_state)?;
+        clean::cleanup_previous_build(&mut build_state, compile_assets_state)
+    };
+    phase_mark("init:read-compile-state");
+    phase_mark("init:cleanup-previous");
     let timing_clean_total = timing_clean_start.elapsed();
 
     if show_progress {
@@ -337,7 +372,6 @@ pub fn incremental_build(
     initial_build: bool,
     show_progress: bool,
     only_incremental: bool,
-    create_sourcedirs: bool,
     plain_output: bool,
 ) -> Result<CompilationOutcome, IncrementalBuildError> {
     let build_folder = build_state.root_folder.clone();
@@ -348,7 +382,6 @@ pub fn incremental_build(
             initial_build,
             show_progress,
             only_incremental,
-            create_sourcedirs,
             plain_output,
         )
     })
@@ -356,6 +389,17 @@ pub fn incremental_build(
 
 // `build` needs to lock before initialization because initialization mutates previous
 // build artifacts. Keep the compile body separate so it can run under that wider lock.
+/// Print a wall-clock phase marker when RESCRIPT_BUILD_PHASES is set.
+pub fn phase_mark(label: &str) {
+    if std::env::var_os("RESCRIPT_BUILD_PHASES").is_some() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        eprintln!("[build-phase] {label} epoch_ms={now:.3}");
+    }
+}
+
 #[instrument(name = "build.incremental.unlocked", skip_all, fields(module_count = build_state.modules.len()))]
 pub fn incremental_build_without_lock(
     build_state: &mut BuildCommandState,
@@ -363,7 +407,6 @@ pub fn incremental_build_without_lock(
     initial_build: bool,
     show_progress: bool,
     only_incremental: bool,
-    create_sourcedirs: bool,
     plain_output: bool,
 ) -> Result<CompilationOutcome, IncrementalBuildError> {
     let phase_timing_enabled = rescript_compiler::timing::enabled();
@@ -375,6 +418,10 @@ pub fn incremental_build_without_lock(
         rescript_compiler::perf_counters::reset();
     }
     logs::initialize(&build_state.packages);
+    build_state.build_started_at = Some(std::time::SystemTime::now());
+    build_state.last_build_ok = false;
+    build_state.stopped_at_parse = false;
+    build_state.invalidated_modules.clear();
 
     // When dump_typed_sexp is set, force all modules parse_dirty and compile_dirty
     // so every file gets re-parsed (to store AST) and sexp-dumped
@@ -382,13 +429,71 @@ pub fn incremental_build_without_lock(
         mark_all_modules_dirty(build_state);
     }
 
-    // A fresh --in-process build has no disk-backed .cmi cache to consult.
-    // Seed the in-memory registry by parsing and compiling every module once;
-    // watch-mode rebuilds can then keep using the retained registry.
-    let needs_in_process_seed =
+    // A fresh in-process build has nothing compiled in memory, so every
+    // module compiles (in-process builds keep no artifacts on disk).
+    let fresh_in_process =
         build_state.build_mode().is_in_process() && build_state.module_registry.lock().unwrap().is_empty();
-    if needs_in_process_seed {
-        mark_all_modules_dirty(build_state);
+    // A fresh in-process build compiles only what changed since the JavaScript
+    // was written (see `incremental`). It still parses every module: the
+    // dependency graph comes from the parse.
+    let incremental = fresh_in_process && incremental::applies(build_state);
+    if incremental
+        && build_state.build_state.source_map_command == SourceMapCommand::Build
+        && incremental::everything_up_to_date(build_state)
+    {
+        for module in build_state.build_state.modules.values_mut() {
+            module.compile_dirty = false;
+        }
+        let parse_warnings = incremental::restore_parse_warnings(build_state);
+        // Nothing compiles; this reports the restored warnings.
+        let compile_warnings = compile::compile(build_state, false, || (), |_| ())
+            .map(|(_, warnings, _)| warnings)
+            .unwrap_or_default();
+        logs::finalize(&build_state.packages);
+        if show_progress {
+            if plain_output {
+                println!("Compiled 0 modules")
+            } else {
+                println!(
+                    "{}{} {}Compiled 0 modules, everything is up to date",
+                    LINE_CLEAR,
+                    format_step(2, 3),
+                    SWORDS,
+                );
+            }
+        }
+        let has_parse_warnings = has_output(&parse_warnings);
+        if has_parse_warnings {
+            eprintln!("{}", &parse_warnings);
+        }
+        let has_compile_warnings = has_output(&compile_warnings);
+        if has_compile_warnings {
+            eprintln!("{}", &compile_warnings);
+        }
+        if initial_build {
+            log_config_warnings(build_state);
+        }
+        write_compiler_info(build_state);
+        build_state.last_build_ok = true;
+        print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
+        return Ok(
+            if has_parse_warnings
+                || has_compile_warnings
+                || (initial_build && has_config_warnings(build_state))
+            {
+                CompilationOutcome::Warnings
+            } else {
+                CompilationOutcome::Clean
+            },
+        );
+    }
+    if fresh_in_process {
+        incremental::collect_source_mtimes(build_state);
+    }
+    if incremental {
+        incremental::seed_recorded_deps(build_state);
+    } else if fresh_in_process {
+        mark_modules_dirty(build_state, false);
     }
 
     let num_dirty_modules = build_state.modules.values().filter(|m| is_dirty(m)).count() as u64;
@@ -408,9 +513,63 @@ pub fn incremental_build_without_lock(
         .unwrap(),
     );
 
+    phase_mark("parse-start");
     let timing_parse_start = Instant::now();
     let timing_ast = Instant::now();
-    let result_asts = parse::generate_asts(build_state, || pb.inc(1));
+    let result_asts = if fresh_in_process {
+        // The runtime pre-compilation only needs the registry and the runtime
+        // sources, so run it while the project sources are parsed. `compile`
+        // later finds the runtime already registered and skips it.
+        compile::prepare_registry_for_runtime_precompile(build_state);
+        let registry = std::mem::take(&mut build_state.module_registry);
+        let runtime_root = build_state.build_state.compiler_info.runtime_path.clone();
+        let (result_asts, precompile_result) = std::thread::scope(|scope| {
+            let handle = std::thread::Builder::new()
+                .name("rewatch-runtime-precompile".to_string())
+                .stack_size(256 * 1024 * 1024)
+                .spawn_scoped(scope, || {
+                    let result = compile::pre_compile_runtime_modules(&registry, &runtime_root);
+                    phase_mark("runtime-precompile-done");
+                    result
+                });
+            let result_asts = if incremental {
+                incremental::parse_and_plan(build_state, || pb.inc(1))
+            } else {
+                parse::generate_asts(build_state, || pb.inc(1))
+            };
+            phase_mark("parse-asts-done");
+            let precompile_result = match handle {
+                Ok(handle) => handle.join().unwrap_or_else(|panic| {
+                    let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = panic.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "unknown".to_string()
+                    };
+                    Err(anyhow!("runtime pre-compilation panicked: {msg}"))
+                }),
+                Err(err) => Err(anyhow!("failed to spawn runtime pre-compilation thread: {err}")),
+            };
+            (result_asts, precompile_result)
+        });
+        build_state.module_registry = registry;
+        phase_mark("runtime-precompile-joined");
+        if let Err(err) = precompile_result {
+            if result_asts.is_ok() {
+                logs::finalize(&build_state.packages);
+                pb.finish();
+                print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
+                return Err(IncrementalBuildError {
+                    kind: IncrementalBuildErrorKind::CompileError(Some(err.to_string())),
+                    plain_output,
+                });
+            }
+        }
+        result_asts
+    } else {
+        parse::generate_asts(build_state, || pb.inc(1))
+    };
     let timing_ast_elapsed = timing_ast.elapsed();
 
     let parse_warnings = match result_asts {
@@ -420,6 +579,7 @@ pub fn incremental_build_without_lock(
         }
         Err(err) => {
             let _error_span = info_span!("build.parse_error").entered();
+            build_state.stopped_at_parse = true;
             logs::finalize(&build_state.packages);
 
             if !plain_output && show_progress {
@@ -442,9 +602,23 @@ pub fn incremental_build_without_lock(
             });
         }
     };
+    phase_mark("parse-end");
     let deleted_modules = build_state.deleted_modules.clone();
     deps::get_deps(build_state, &deleted_modules);
+    phase_mark("deps-end");
     let timing_parse_total = timing_parse_start.elapsed();
+    // An incremental build parses in two rounds; report what it parsed.
+    let num_dirty_modules = if incremental {
+        build_state
+            .stored_asts
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|key| key.ends_with(":impl"))
+            .count() as u64
+    } else {
+        num_dirty_modules
+    };
 
     if show_progress {
         if plain_output {
@@ -512,11 +686,9 @@ pub fn incremental_build_without_lock(
     })?;
 
     let compile_duration = start_compiling.elapsed();
+    phase_mark("compile-end");
 
     logs::finalize(&build_state.packages);
-    if create_sourcedirs {
-        sourcedirs::print(build_state);
-    }
     pb.finish();
     if !compile_errors.is_empty() {
         let _error_span = info_span!("build.compile_error").entered();
@@ -583,8 +755,10 @@ pub fn incremental_build_without_lock(
 
         // Write per-package compiler metadata to `lib/bs/compiler-info.json` (idempotent)
         write_compiler_info(build_state);
+        phase_mark("compiler-info-end");
 
         print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
+        build_state.last_build_ok = true;
         Ok(outcome)
     }
 }
@@ -682,21 +856,6 @@ fn log_unknown_config_field(package_name: &str, field_name: &str) {
     eprintln!("\n{}", style(warning).yellow());
 }
 
-// write build.ninja files in the packages after a non-incremental build
-// this is necessary to bust the editor tooling cache. The editor tooling
-// is watching this file.
-// we don't need to do this in an incremental build because there are no file
-// changes (deletes / additions)
-pub fn write_build_ninja(build_state: &BuildCommandState) {
-    for package in build_state.packages.values() {
-        // write empty file:
-        let build_path = package.get_build_path();
-        std::fs::create_dir_all(&build_path).expect("Unable to create build directory");
-        let mut f = File::create(build_path.join("build.ninja")).expect("Unable to write file");
-        f.write_all(b"").expect("unable to write to ninja file");
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 #[instrument(name = "rewatch.build", skip_all, fields(working_dir = %path.display()))]
 pub fn build(
@@ -704,11 +863,9 @@ pub fn build(
     path: &Path,
     show_progress: bool,
     no_timing: bool,
-    create_sourcedirs: bool,
     plain_output: bool,
     warn_error: Option<String>,
     build_mode: BuildMode,
-    subprocess: bool,
     dump_typed_sexp: bool,
     prod: bool,
     features: Option<Vec<String>>,
@@ -717,7 +874,6 @@ pub fn build(
         "rewatch.build",
         working_dir = %path.display(),
         in_process = build_mode.is_in_process(),
-        subprocess,
         prod
     )
     .entered();
@@ -727,6 +883,7 @@ pub fn build(
         None
     };
     let timing_total = Instant::now();
+    phase_mark("build-start");
     with_build_lock(path, || {
         let mut build_state = initialize_build(
             default_timing,
@@ -736,7 +893,6 @@ pub fn build(
             plain_output,
             warn_error,
             build_mode,
-            subprocess,
             dump_typed_sexp,
             prod,
             features,
@@ -750,7 +906,6 @@ pub fn build(
             true,
             show_progress,
             false,
-            create_sourcedirs,
             plain_output,
         ) {
             Ok(result) => {
@@ -766,12 +921,11 @@ pub fn build(
                     );
                 }
                 clean::cleanup_after_build(&build_state);
-                write_build_ninja(&build_state);
+                phase_mark("cleanup-end");
                 Ok(build_state)
             }
             Err(e) => {
                 clean::cleanup_after_build(&build_state);
-                write_build_ninja(&build_state);
                 Err(anyhow!("Incremental build failed. Error: {e}"))
             }
         }
@@ -854,11 +1008,9 @@ mod tests {
                 &build_project_folder,
                 false,
                 true,
-                false,
                 true,
                 None,
-                BuildMode::Default,
-                false,
+                BuildMode::ExternalBsc,
                 false,
                 false,
                 None,

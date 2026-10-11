@@ -22,17 +22,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA. *)
 
-(** In general three kinds of ast generation.
-    - convert a curried to type to uncurried 
-    - convert a curried fun to uncurried fun
-    - convert a uncuried application to normal 
-*)
-
-val record_as_js_object :
-  Location.t ->
-  Ast_mapper.mapper ->
-  Parsetree.expression Parsetree.record_element list ->
-  Parsetree.expression_desc
-
 val js_property :
   Location.t -> Parsetree.expression -> string -> Parsetree.expression_desc
+(** [js_property loc obj name] is the expression reading property [name] of
+    the JS object [obj]. *)

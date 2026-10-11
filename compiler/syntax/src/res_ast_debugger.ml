@@ -7,14 +7,8 @@ let print_engine =
       print_implementation =
         (fun ~width:_ ~filename:_ ~comments:_ structure ->
           Printast.implementation Format.std_formatter structure);
-      print_implementation_from_source =
-        (fun ~width:_ ~source:_ ~comments:_ structure ->
-          Printast.implementation Format.std_formatter structure);
       print_interface =
         (fun ~width:_ ~filename:_ ~comments:_ signature ->
-          Printast.interface Format.std_formatter signature);
-      print_interface_from_source =
-        (fun ~width:_ ~source:_ ~comments:_ signature ->
           Printast.interface Format.std_formatter signature);
     }
 
@@ -62,10 +56,6 @@ module Sexp_ast = struct
 
   let string txt =
     Sexp.atom ("\"" ^ Ext_ident.unwrap_uppercase_exotic txt ^ "\"")
-
-  (* For string constants - don't apply identifier transformations *)
-  let string_literal txt =
-    Sexp.atom ("\"" ^ txt ^ "\"")
 
   let char c = Sexp.atom ("'" ^ Char.escaped c ^ "'")
 
@@ -130,18 +120,23 @@ module Sexp_ast = struct
       match c with
       | Pconst_integer (txt, tag) ->
         Sexp.list [Sexp.atom "Pconst_integer"; string txt; opt_char tag]
-      | Pconst_char _ -> Sexp.list [Sexp.atom "Pconst_char"]
-      | Pconst_string (_, Some "INTERNAL_RES_CHAR_CONTENTS") ->
-        Sexp.list [Sexp.atom "Pconst_char"]
-      | Pconst_string (txt, tag) ->
+      | Pconst_char {source; semantic} ->
+        Sexp.list
+          [
+            Sexp.atom "Pconst_char";
+            string source;
+            Sexp.atom (string_of_int semantic);
+          ]
+      | Pconst_string payload ->
         Sexp.list
           [
             Sexp.atom "Pconst_string";
-            string_literal txt;
-            (match tag with
-            | Some txt -> Sexp.list [Sexp.atom "Some"; string_literal txt]
-            | None -> Sexp.atom "None");
+            string (String_literal.string_source payload);
+            string (String_literal.string_semantic payload);
           ]
+      | Pconst_json source -> Sexp.list [Sexp.atom "Pconst_json"; string source]
+      | Pconst_raw_source source ->
+        Sexp.list [Sexp.atom "Pconst_raw_source"; string source]
       | Pconst_float (txt, tag) ->
         Sexp.list [Sexp.atom "Pconst_float"; string txt; opt_char tag]
     in
@@ -418,7 +413,12 @@ module Sexp_ast = struct
         Sexp.atom "value_description";
         string vd.pval_name.Asttypes.txt;
         core_type vd.pval_type;
-        Sexp.list (map_empty ~f:string vd.pval_prim);
+        Sexp.list
+          (match vd.pval_prim with
+          | None -> []
+          | Some (Prim_name s) -> [string s]
+          | Some (Prim_ffi {name}) -> [string name; string "<ffi spec>"]
+          | Some (Prim_inline_const _) -> [string "<inline const>"]);
         attributes vd.pval_attributes;
       ]
 
@@ -454,6 +454,14 @@ module Sexp_ast = struct
             | Some typ -> Sexp.list [Sexp.atom "Some"; core_type typ]);
           ];
         Sexp.list [Sexp.atom "ptype_private"; private_flag td.ptype_private];
+        Sexp.list
+          [
+            Sexp.atom "ptype_origin";
+            Sexp.atom
+              (match td.ptype_origin with
+              | Declared -> "Declared"
+              | Inline_record_definition -> "Inline_record_definition");
+          ];
         attributes td.ptype_attributes;
       ]
 
@@ -535,7 +543,7 @@ module Sexp_ast = struct
             | None -> Sexp.atom "None"
             | Some typ -> Sexp.list [Sexp.atom "Some"; core_type typ]);
           ];
-        attributes cd.pcd_attributes;
+        attributes (Ast_helper.Type.constructor_attributes cd);
       ]
 
   and constructor_arguments args =
@@ -563,6 +571,18 @@ module Sexp_ast = struct
   and expression expr =
     let desc =
       match expr.pexp_desc with
+      | Pexp_braces {expr = inner; braces_loc} ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_braces";
+            Sexp.list
+              [
+                Sexp.atom "braces_loc";
+                Sexp.atom (string_of_int braces_loc.Location.loc_start.pos_cnum);
+                Sexp.atom (string_of_int braces_loc.loc_end.pos_cnum);
+              ];
+            expression inner;
+          ]
       | Pexp_ident longident_loc ->
         Sexp.list [Sexp.atom "Pexp_ident"; longident longident_loc.Asttypes.txt]
       | Pexp_constant c -> Sexp.list [Sexp.atom "Pexp_constant"; constant c]
@@ -627,23 +647,19 @@ module Sexp_ast = struct
       | Pexp_tuple exprs ->
         Sexp.list
           [Sexp.atom "Pexp_tuple"; Sexp.list (map_empty ~f:expression exprs)]
-      | Pexp_construct (longident_loc, expr_opt) ->
+      | Pexp_construct (longident_loc, {txt = exprs}) ->
         Sexp.list
           [
             Sexp.atom "Pexp_construct";
             longident longident_loc.Asttypes.txt;
-            (match expr_opt with
-            | None -> Sexp.atom "None"
-            | Some expr -> Sexp.list [Sexp.atom "Some"; expression expr]);
+            Sexp.list (map_empty ~f:expression exprs);
           ]
-      | Pexp_variant (lbl, expr_opt) ->
+      | Pexp_variant (lbl, {txt = exprs}) ->
         Sexp.list
           [
             Sexp.atom "Pexp_variant";
             string lbl;
-            (match expr_opt with
-            | None -> Sexp.atom "None"
-            | Some expr -> Sexp.list [Sexp.atom "Some"; expression expr]);
+            Sexp.list (map_empty ~f:expression exprs);
           ]
       | Pexp_record (rows, opt_expr) ->
         Sexp.list
@@ -687,6 +703,14 @@ module Sexp_ast = struct
             | None -> Sexp.atom "None"
             | Some expr -> Sexp.list [Sexp.atom "Some"; expression expr]);
           ]
+      | Pexp_ternary (condition, consequent, alternate) ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_ternary";
+            expression condition;
+            expression consequent;
+            expression alternate;
+          ]
       | Pexp_sequence (expr1, expr2) ->
         Sexp.list
           [Sexp.atom "Pexp_sequence"; expression expr1; expression expr2]
@@ -720,8 +744,21 @@ module Sexp_ast = struct
           [Sexp.atom "Pexp_constraint"; expression expr; core_type typexpr]
       | Pexp_coerce (expr, (), typexpr) ->
         Sexp.list [Sexp.atom "Pexp_coerce"; expression expr; core_type typexpr]
-      | Pexp_send (expr, {txt = method_name; _}) ->
-        Sexp.list [Sexp.atom "Pexp_send"; string method_name; expression expr]
+      | Pexp_object_get (expr, {txt = name; _}) ->
+        Sexp.list [Sexp.atom "Pexp_object_get"; string name; expression expr]
+      | Pexp_object_set (e1, {txt = name; _}, e2) ->
+        Sexp.list
+          [Sexp.atom "Pexp_object_set"; string name; expression e1; expression e2]
+      | Pexp_object_literal fields ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_object_literal";
+            Sexp.list
+              (map_empty
+                 ~f:(fun ((s : string Asttypes.loc), e) ->
+                   Sexp.list [Sexp.atom s.txt; expression e])
+                 fields);
+          ]
       | Pexp_letmodule (mod_name, mod_expr, expr) ->
         Sexp.list
           [
@@ -750,6 +787,24 @@ module Sexp_ast = struct
           ]
       | Pexp_extension ext ->
         Sexp.list [Sexp.atom "Pexp_extension"; extension ext]
+      | Pexp_regexp {pattern; flags} ->
+        Sexp.list [Sexp.atom "Pexp_regexp"; string pattern; string flags]
+      | Pexp_template {source_segments; values} ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_template";
+            Sexp.list
+              (List.map (fun {Asttypes.txt} -> string txt) source_segments);
+            Sexp.list (List.map expression values);
+          ]
+      | Pexp_tagged_template {tag; raw_sources; values} ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_tagged_template";
+            expression tag;
+            Sexp.list (List.map (fun {Asttypes.txt} -> string txt) raw_sources);
+            Sexp.list (List.map expression values);
+          ]
       | Pexp_await e -> Sexp.list [Sexp.atom "Pexp_await"; expression e]
       | Pexp_jsx_element (Jsx_fragment {jsx_fragment_children = xs}) ->
         Sexp.list
@@ -813,23 +868,19 @@ module Sexp_ast = struct
       | Ppat_tuple patterns ->
         Sexp.list
           [Sexp.atom "Ppat_tuple"; Sexp.list (map_empty ~f:pattern patterns)]
-      | Ppat_construct (longident_loc, opt_pattern) ->
+      | Ppat_construct (longident_loc, {txt = patterns}) ->
         Sexp.list
           [
             Sexp.atom "Ppat_construct";
             longident longident_loc.Location.txt;
-            (match opt_pattern with
-            | None -> Sexp.atom "None"
-            | Some p -> Sexp.list [Sexp.atom "some"; pattern p]);
+            Sexp.list (map_empty ~f:pattern patterns);
           ]
-      | Ppat_variant (lbl, opt_pattern) ->
+      | Ppat_variant (lbl, {txt = patterns}) ->
         Sexp.list
           [
             Sexp.atom "Ppat_variant";
             string lbl;
-            (match opt_pattern with
-            | None -> Sexp.atom "None"
-            | Some p -> Sexp.list [Sexp.atom "Some"; pattern p]);
+            Sexp.list (map_empty ~f:pattern patterns);
           ]
       | Ppat_record (rows, flag, rest) ->
         Sexp.list
@@ -871,13 +922,6 @@ module Sexp_ast = struct
       | Ppat_exception p -> Sexp.list [Sexp.atom "Ppat_exception"; pattern p]
       | Ppat_extension ext ->
         Sexp.list [Sexp.atom "Ppat_extension"; extension ext]
-      | Ppat_open (longident_loc, p) ->
-        Sexp.list
-          [
-            Sexp.atom "Ppat_open";
-            longident longident_loc.Location.txt;
-            pattern p;
-          ]
     in
     Sexp.list [Sexp.atom "pattern"; descr]
 
@@ -902,7 +946,11 @@ module Sexp_ast = struct
           string label_loc.txt;
           attributes attrs;
           Sexp.atom (if truth then "true" else "false");
-          Sexp.list (map_empty ~f:core_type types);
+          Sexp.list
+            (map_empty
+               ~f:(fun {Location.txt = types} ->
+                 Sexp.list (map_empty ~f:core_type types))
+               types);
         ]
     | Rinherit typexpr -> Sexp.list [Sexp.atom "Rinherit"; core_type typexpr]
 
@@ -1011,14 +1059,8 @@ module Sexp_ast = struct
         print_implementation =
           (fun ~width:_ ~filename:_ ~comments:_ parsetree ->
             parsetree |> structure |> Sexp.to_string |> print_string);
-        print_implementation_from_source =
-          (fun ~width:_ ~source:_ ~comments:_ parsetree ->
-            parsetree |> structure |> Sexp.to_string |> print_string);
         print_interface =
           (fun ~width:_ ~filename:_ ~comments:_ parsetree ->
-            parsetree |> signature |> Sexp.to_string |> print_string);
-        print_interface_from_source =
-          (fun ~width:_ ~source:_ ~comments:_ parsetree ->
             parsetree |> signature |> Sexp.to_string |> print_string);
       }
 end
@@ -1129,18 +1171,24 @@ module SexpAstWithLocs = struct
       match c with
       | Pconst_integer (txt, tag) ->
         Sexp.list [Sexp.atom "Pconst_integer"; string txt; opt_char tag]
-      | Pconst_char _ -> Sexp.list [Sexp.atom "Pconst_char"]
-      | Pconst_string (_, Some "INTERNAL_RES_CHAR_CONTENTS") ->
-        Sexp.list [Sexp.atom "Pconst_char"]
-      | Pconst_string (txt, tag) ->
+      | Pconst_char {source; semantic} ->
+        Sexp.list
+          [
+            Sexp.atom "Pconst_char";
+            string_literal source;
+            Sexp.atom (string_of_int semantic);
+          ]
+      | Pconst_string payload ->
         Sexp.list
           [
             Sexp.atom "Pconst_string";
-            string_literal txt;
-            (match tag with
-            | Some txt -> Sexp.list [Sexp.atom "Some"; string_literal txt]
-            | None -> Sexp.atom "None");
+            string_literal (String_literal.string_source payload);
+            string_literal (String_literal.string_semantic payload);
           ]
+      | Pconst_json source ->
+        Sexp.list [Sexp.atom "Pconst_json"; string_literal source]
+      | Pconst_raw_source source ->
+        Sexp.list [Sexp.atom "Pconst_raw_source"; string_literal source]
       | Pconst_float (txt, tag) ->
         Sexp.list [Sexp.atom "Pconst_float"; string txt; opt_char tag]
     in
@@ -1440,7 +1488,10 @@ module SexpAstWithLocs = struct
         string vd.pval_name.Asttypes.txt;
         location vd.pval_name.Asttypes.loc;
         core_type vd.pval_type;
-        Sexp.list (map_empty ~f:string vd.pval_prim);
+        Sexp.list (map_empty ~f:string
+             (match vd.pval_prim with
+             | None -> []
+             | Some prim -> Ffi_debug.primitive_repr prim));
         attributes vd.pval_attributes;
       ]
 
@@ -1478,6 +1529,14 @@ module SexpAstWithLocs = struct
             | Some typ -> Sexp.list [Sexp.atom "Some"; core_type typ]);
           ];
         Sexp.list [Sexp.atom "ptype_private"; private_flag td.ptype_private];
+        Sexp.list
+          [
+            Sexp.atom "ptype_origin";
+            Sexp.atom
+              (match td.ptype_origin with
+              | Declared -> "Declared"
+              | Inline_record_definition -> "Inline_record_definition");
+          ];
         attributes td.ptype_attributes;
       ]
 
@@ -1594,6 +1653,9 @@ module SexpAstWithLocs = struct
   and expression expr =
     let desc =
       match expr.pexp_desc with
+      | Pexp_braces {expr = inner; braces_loc} ->
+        Sexp.list
+          [Sexp.atom "Pexp_braces"; location braces_loc; expression inner]
       | Pexp_ident longident_loc ->
         Sexp.list [Sexp.atom "Pexp_ident"; longident longident_loc.Asttypes.txt; location longident_loc.Asttypes.loc]
       | Pexp_constant c -> Sexp.list [Sexp.atom "Pexp_constant"; constant c]
@@ -1661,24 +1723,22 @@ module SexpAstWithLocs = struct
       | Pexp_tuple exprs ->
         Sexp.list
           [Sexp.atom "Pexp_tuple"; Sexp.list (map_empty ~f:expression exprs)]
-      | Pexp_construct (longident_loc, expr_opt) ->
+      | Pexp_construct (longident_loc, args) ->
         Sexp.list
           [
             Sexp.atom "Pexp_construct";
             longident longident_loc.Asttypes.txt;
             location longident_loc.Asttypes.loc;
-            (match expr_opt with
-            | None -> Sexp.atom "None"
-            | Some expr -> Sexp.list [Sexp.atom "Some"; expression expr]);
+            Sexp.list (map_empty ~f:expression args.txt);
+            location args.loc;
           ]
-      | Pexp_variant (lbl, expr_opt) ->
+      | Pexp_variant (lbl, args) ->
         Sexp.list
           [
             Sexp.atom "Pexp_variant";
             string lbl;
-            (match expr_opt with
-            | None -> Sexp.atom "None"
-            | Some expr -> Sexp.list [Sexp.atom "Some"; expression expr]);
+            Sexp.list (map_empty ~f:expression args.txt);
+            location args.loc;
           ]
       | Pexp_record (rows, opt_expr) ->
         Sexp.list
@@ -1724,6 +1784,14 @@ module SexpAstWithLocs = struct
             | None -> Sexp.atom "None"
             | Some expr -> Sexp.list [Sexp.atom "Some"; expression expr]);
           ]
+      | Pexp_ternary (condition, consequent, alternate) ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_ternary";
+            expression condition;
+            expression consequent;
+            expression alternate;
+          ]
       | Pexp_sequence (expr1, expr2) ->
         Sexp.list
           [Sexp.atom "Pexp_sequence"; expression expr1; expression expr2]
@@ -1744,8 +1812,25 @@ module SexpAstWithLocs = struct
           [Sexp.atom "Pexp_constraint"; expression expr; core_type typexpr]
       | Pexp_coerce (expr, (), typexpr) ->
         Sexp.list [Sexp.atom "Pexp_coerce"; expression expr; core_type typexpr]
-      | Pexp_send (expr, {txt = method_name; loc}) ->
-        Sexp.list [Sexp.atom "Pexp_send"; string method_name; location loc; expression expr]
+      | Pexp_object_get (expr, {txt = name; loc}) ->
+        Sexp.list
+          [Sexp.atom "Pexp_object_get"; string name; location loc; expression expr]
+      | Pexp_object_set (e1, {txt = name; loc}, e2) ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_object_set";
+            string name;
+            location loc;
+            expression e1;
+            expression e2;
+          ]
+      | Pexp_object_literal fields ->
+        Sexp.list
+          (Sexp.atom "Pexp_object_literal"
+          :: List.map
+               (fun ((s : string Asttypes.loc), e) ->
+                 Sexp.list [string s.txt; location s.loc; expression e])
+               fields)
       | Pexp_letmodule (mod_name, mod_expr, expr) ->
         Sexp.list
           [
@@ -1774,8 +1859,33 @@ module SexpAstWithLocs = struct
             location longident_loc.Asttypes.loc;
             expression expr;
           ]
+      | Pexp_regexp {pattern; flags} ->
+        Sexp.list [Sexp.atom "Pexp_regexp"; string pattern; string flags]
       | Pexp_extension ext ->
         Sexp.list [Sexp.atom "Pexp_extension"; extension ext]
+      | Pexp_template {source_segments; values} ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_template";
+            Sexp.list
+              (List.map
+                 (fun {Asttypes.txt; loc} ->
+                   Sexp.list [string_literal txt; location loc])
+                 source_segments);
+            Sexp.list (List.map expression values);
+          ]
+      | Pexp_tagged_template {tag; raw_sources; values} ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_tagged_template";
+            expression tag;
+            Sexp.list
+              (List.map
+                 (fun {Asttypes.txt; loc} ->
+                   Sexp.list [string_literal txt; location loc])
+                 raw_sources);
+            Sexp.list (List.map expression values);
+          ]
       | Pexp_await e -> Sexp.list [Sexp.atom "Pexp_await"; expression e]
       | Pexp_jsx_element (Jsx_fragment {jsx_fragment_children = xs}) ->
         Sexp.list
@@ -1844,24 +1954,22 @@ module SexpAstWithLocs = struct
       | Ppat_tuple patterns ->
         Sexp.list
           [Sexp.atom "Ppat_tuple"; Sexp.list (map_empty ~f:pattern patterns)]
-      | Ppat_construct (longident_loc, opt_pattern) ->
+      | Ppat_construct (longident_loc, args) ->
         Sexp.list
           [
             Sexp.atom "Ppat_construct";
             longident longident_loc.Location.txt;
             location longident_loc.Location.loc;
-            (match opt_pattern with
-            | None -> Sexp.atom "None"
-            | Some p -> Sexp.list [Sexp.atom "some"; pattern p]);
+            Sexp.list (map_empty ~f:pattern args.txt);
+            location args.loc;
           ]
-      | Ppat_variant (lbl, opt_pattern) ->
+      | Ppat_variant (lbl, args) ->
         Sexp.list
           [
             Sexp.atom "Ppat_variant";
             string lbl;
-            (match opt_pattern with
-            | None -> Sexp.atom "None"
-            | Some p -> Sexp.list [Sexp.atom "Some"; pattern p]);
+            Sexp.list (map_empty ~f:pattern args.txt);
+            location args.loc;
           ]
       | Ppat_record (rows, flag, rest) ->
         Sexp.list
@@ -1899,14 +2007,6 @@ module SexpAstWithLocs = struct
       | Ppat_exception p -> Sexp.list [Sexp.atom "Ppat_exception"; pattern p]
       | Ppat_extension ext ->
         Sexp.list [Sexp.atom "Ppat_extension"; extension ext]
-      | Ppat_open (longident_loc, p) ->
-        Sexp.list
-          [
-            Sexp.atom "Ppat_open";
-            longident longident_loc.Location.txt;
-            location longident_loc.Location.loc;
-            pattern p;
-          ]
     in
     Sexp.list [Sexp.atom "pattern"; location p.ppat_loc; descr; attributes p.ppat_attributes]
 
@@ -1933,7 +2033,11 @@ module SexpAstWithLocs = struct
           location label_loc.loc;
           attributes attrs;
           Sexp.atom (if truth then "true" else "false");
-          Sexp.list (map_empty ~f:core_type types);
+          Sexp.list
+            (map_empty
+               ~f:(fun {Location.txt = types; loc} ->
+                 Sexp.list [Sexp.list (map_empty ~f:core_type types); location loc])
+               types);
         ]
     | Rinherit typexpr -> Sexp.list [Sexp.atom "Rinherit"; core_type typexpr]
 
@@ -2047,12 +2151,6 @@ module SexpAstWithLocs = struct
             parsetree |> structure |> Sexp.to_string |> print_string);
         print_interface =
           (fun ~width:_ ~filename:_ ~comments:_ parsetree ->
-            parsetree |> signature |> Sexp.to_string |> print_string);
-        print_implementation_from_source =
-          (fun ~width:_ ~source:_ ~comments:_ parsetree ->
-            parsetree |> structure |> Sexp.to_string |> print_string);
-        print_interface_from_source =
-          (fun ~width:_ ~source:_ ~comments:_ parsetree ->
             parsetree |> signature |> Sexp.to_string |> print_string);
       }
 end
@@ -3018,16 +3116,6 @@ module SexpAst0WithLocs = struct
             let tree0 = Ast_mapper_to0.default_mapper.signature
               Ast_mapper_to0.default_mapper parsetree in
             tree0 |> signature |> Sexp.to_string |> print_string);
-        print_implementation_from_source =
-          (fun ~width:_ ~source:_ ~comments:_ parsetree ->
-            let tree0 = Ast_mapper_to0.default_mapper.structure
-              Ast_mapper_to0.default_mapper parsetree in
-            tree0 |> structure |> Sexp.to_string |> print_string);
-        print_interface_from_source =
-          (fun ~width:_ ~source:_ ~comments:_ parsetree ->
-            let tree0 = Ast_mapper_to0.default_mapper.signature
-              Ast_mapper_to0.default_mapper parsetree in
-            tree0 |> signature |> Sexp.to_string |> print_string);
       }
 end
 
@@ -3040,18 +3128,8 @@ let comments_print_engine =
         let cmt_tbl = Comment_table.make () in
         Comment_table.walk_structure s cmt_tbl comments;
         Comment_table.log cmt_tbl);
-    Res_driver.print_implementation_from_source =
-      (fun ~width:_ ~source:_ ~comments s ->
-        let cmt_tbl = Comment_table.make () in
-        Comment_table.walk_structure s cmt_tbl comments;
-        Comment_table.log cmt_tbl);
     Res_driver.print_interface =
       (fun ~width:_ ~filename:_ ~comments s ->
-        let cmt_tbl = Comment_table.make () in
-        Comment_table.walk_signature s cmt_tbl comments;
-        Comment_table.log cmt_tbl);
-    Res_driver.print_interface_from_source =
-      (fun ~width:_ ~source:_ ~comments s ->
         let cmt_tbl = Comment_table.make () in
         Comment_table.walk_signature s cmt_tbl comments;
         Comment_table.log cmt_tbl);

@@ -7,7 +7,7 @@
 use crate::location::Position;
 use std::borrow::Cow;
 use std::io::IsTerminal;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 /// Count the number of digits in a number.
 fn digits_count(n: i32) -> usize {
@@ -63,37 +63,42 @@ fn seek_2_lines_after(src: &str, pos: &Position) -> (usize, i32) {
     (current_char, current_line)
 }
 
-/// Count leading spaces in a string.
-fn leading_space_count(s: &str) -> usize {
-    s.chars().take_while(|&c| c == ' ').count()
+/// Count leading spaces in a byte string (`leading_space_count`).
+fn leading_space_count(s: &[u8]) -> usize {
+    s.iter().take_while(|&&c| c == b' ').count()
 }
 
-fn char_len(s: &str) -> usize {
-    s.chars().count()
-}
-
-fn char_slice(s: &str, start: usize, end: usize) -> &str {
-    let start_byte = char_to_byte_idx(s, start);
-    let end_byte = char_to_byte_idx(s, end);
-    &s[start_byte..end_byte]
-}
-
-/// Break a long line into chunks of max_width characters.
-/// Matches OCaml's `break_long_line` in code_frame.ml.
-fn break_long_line(max_width: usize, line: &str) -> Vec<&str> {
-    if max_width == 0 || line.is_empty() {
-        return vec![line];
+/// `String.get_utf_8_uchar line pos |> Uchar.utf_decode_length`: the length
+/// of the UTF-8 sequence at `pos`, or of the invalid prefix that decoding
+/// consumed.
+fn utf_8_decode_length(s: &[u8], pos: usize) -> usize {
+    let rest = &s[pos..];
+    match std::str::from_utf8(&rest[..rest.len().min(4)]) {
+        Ok(text) => text.chars().next().map_or(1, char::len_utf8),
+        Err(err) if err.valid_up_to() > 0 => std::str::from_utf8(&rest[..err.valid_up_to()])
+            .ok()
+            .and_then(|text| text.chars().next())
+            .map_or(1, char::len_utf8),
+        Err(err) => err.error_len().unwrap_or(rest.len()).max(1),
     }
+}
+
+/// Break a long line into chunks of `max_width` characters
+/// (compiler/ml/code_frame.ml `break_long_line`).
+fn break_long_line(max_width: usize, line: &[u8]) -> Vec<&[u8]> {
+    let line_length = line.len();
     let mut result = Vec::new();
     let mut pos = 0;
-    let len = char_len(line);
-    while pos < len {
-        let chunk_length = max_width.min(len - pos);
-        result.push(char_slice(line, pos, pos + chunk_length));
-        pos += chunk_length;
-    }
-    if result.is_empty() {
-        result.push(line);
+    while pos < line_length {
+        let mut chunk_end = pos;
+        let mut remaining_width = max_width;
+        while chunk_end < line_length && remaining_width > 0 {
+            chunk_end += utf_8_decode_length(line, chunk_end);
+            remaining_width -= 1;
+        }
+        let chunk_end = chunk_end.min(line_length);
+        result.push(&line[pos..chunk_end]);
+        pos = chunk_end;
     }
     result
 }
@@ -105,17 +110,18 @@ enum Gutter {
     Elided,
 }
 
-/// A highlighted portion of a line.
-struct HighlightedString {
-    s: String,
-    start: usize,
-    end: usize,
+/// A highlighted portion of a line. `start`/`end_` are byte indices into `s`
+/// computed from `pos_cnum - pos_bol` (UTF-16 columns), exactly as OCaml does.
+struct HighlightedString<'a> {
+    s: &'a [u8],
+    start: isize,
+    end_: isize,
 }
 
 /// A line with gutter and content.
-struct Line {
+struct Line<'a> {
     gutter: Gutter,
-    content: Vec<HighlightedString>,
+    content: Vec<HighlightedString<'a>>,
 }
 
 #[derive(Clone, Copy)]
@@ -144,6 +150,46 @@ impl Default for ColorMode {
 }
 
 static COLOR_MODE: AtomicU8 = AtomicU8::new(ColorMode::Auto as u8);
+
+/// OCaml `Misc.Color.color_enabled` (compiler/ext/misc.ml:337-392) starts as
+/// `true` and takes the configured `-color` value at the first
+/// `Location.setup_colors`, which printing a located warning triggers. Error
+/// messages are formatted before the error itself is printed, so their
+/// embedded styles depend on whether a warning was printed first.
+static COLOR_SETUP: AtomicBool = AtomicBool::new(false);
+
+/// Record that a located report was printed (`Location.setup_colors`).
+pub fn mark_color_setup() {
+    COLOR_SETUP.store(true, Ordering::Relaxed);
+}
+
+/// Whether styles embedded in a formatted message are emitted.
+pub fn message_styles_enabled() -> bool {
+    !COLOR_SETUP.load(Ordering::Relaxed) || should_enable_color()
+}
+
+/// Remove SGR escape sequences from a formatted message when
+/// `message_styles_enabled` is false.
+pub fn apply_message_styles(message: &str) -> std::borrow::Cow<'_, str> {
+    if message_styles_enabled() || !message.contains('\x1b') {
+        return std::borrow::Cow::Borrowed(message);
+    }
+    let mut out = String::with_capacity(message.len());
+    let mut chars = message.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
 
 pub fn parse_color_mode(value: &str) -> Option<ColorMode> {
     match value {
@@ -191,6 +237,14 @@ pub fn colorize_intro(intro: &str, is_error: bool) -> String {
     format!("{color}{intro}{ANSI_RESET}")
 }
 
+/// `@{<filename>%s@}` (compiler/ext/misc.ml:334).
+pub fn colorize_filename(file: &str) -> String {
+    if !should_enable_color() {
+        return file.to_string();
+    }
+    format!("{ANSI_FILENAME}{file}{ANSI_RESET}")
+}
+
 pub fn colorize_location(location: &str) -> String {
     if !should_enable_color() {
         return location.to_string();
@@ -232,41 +286,6 @@ fn source_for_display(src: &str) -> Cow<'_, str> {
     }
 }
 
-fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
-    if char_idx == 0 {
-        return 0;
-    }
-    s.char_indices()
-        .nth(char_idx)
-        .map(|(idx, _)| idx)
-        .unwrap_or(s.len())
-}
-
-fn append_highlighted_segment(
-    buf: &mut String,
-    segment: &HighlightedString,
-    use_color: bool,
-    emphasis: Emphasis,
-) {
-    let segment_len = segment.s.chars().count();
-    let start_char = segment.start.min(segment_len);
-    let end_char = segment.end.min(segment_len);
-
-    if !use_color || end_char <= start_char {
-        buf.push_str(&segment.s);
-        return;
-    }
-
-    let start_byte = char_to_byte_idx(&segment.s, start_char);
-    let end_byte = char_to_byte_idx(&segment.s, end_char);
-
-    buf.push_str(&segment.s[..start_byte]);
-    buf.push_str(emphasis_ansi(emphasis));
-    buf.push_str(&segment.s[start_byte..end_byte]);
-    buf.push_str(ANSI_RESET);
-    buf.push_str(&segment.s[end_byte..]);
-}
-
 /// Print a code frame with source context around an error.
 ///
 /// This formats source code with:
@@ -280,6 +299,7 @@ pub fn print(src: &str, start_pos: &Position, end_pos: &Position) -> String {
 
 /// Print a code frame with warning highlighting.
 pub fn print_warning(src: &str, start_pos: &Position, end_pos: &Position) -> String {
+    mark_color_setup();
     print_impl(src, start_pos, end_pos, Emphasis::Warning)
 }
 
@@ -300,11 +320,11 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
     // 3 for separator + the 2 spaces around it
     let line_width = 78 - max_line_digits - indent - 3;
 
-    // Extract the relevant portion of source
-    let lines: Vec<(Gutter, &str)> = if start_offset < end_offset && end_offset <= src.len() {
-        let snippet = &src[start_offset..end_offset];
-        snippet
-            .split('\n')
+    // `String.sub src start (end - start) |> String.split_on_char '\n'`.
+    let bytes = src.as_bytes();
+    let lines: Vec<(Gutter, &[u8])> = if start_offset <= end_offset && end_offset <= bytes.len() {
+        bytes[start_offset..end_offset]
+            .split(|&c| c == b'\n')
             .enumerate()
             .filter_map(|(i, line)| {
                 let line_number = first_shown_line + i as i32;
@@ -327,19 +347,15 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
         vec![]
     };
 
-    // Calculate leading space to strip (minimum non-empty line indentation)
-    let leading_space_to_cut = lines
-        .iter()
-        .filter_map(|(_, line)| {
-            let spaces = leading_space_count(line);
-            if char_len(line) == spaces {
-                None // Line is all spaces, don't count
-            } else {
-                Some(spaces)
-            }
-        })
-        .min()
-        .unwrap_or(0);
+    let leading_space_to_cut = lines.iter().fold(99999usize, |current_max, (_, line)| {
+        let leading_spaces = leading_space_count(line);
+        if line.len() == leading_spaces {
+            // the line's nothing but spaces. Doesn't count
+            current_max
+        } else {
+            current_max.min(leading_spaces)
+        }
+    });
 
     let separator = if leading_space_to_cut == 0 {
         "│"
@@ -347,73 +363,63 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
         "┆"
     };
 
-    // Process lines with highlighting info, breaking long lines into chunks
-    let processed_lines: Vec<Line> = lines
+    let highlight_line_start_offset = start_pos.cnum as isize - start_pos.bol as isize;
+    let highlight_line_end_offset = end_pos.cnum as isize - end_pos.bol as isize;
+    let leading_cut = leading_space_to_cut as isize;
+    let processed_lines: Vec<Line<'_>> = lines
         .iter()
         .map(|(gutter, line)| {
-            let stripped = if char_len(line) > leading_space_to_cut {
-                char_slice(line, leading_space_to_cut, char_len(line))
+            let content: Vec<HighlightedString<'_>> = if line.len() <= leading_space_to_cut {
+                vec![HighlightedString {
+                    s: &[],
+                    start: 0,
+                    end_: 0,
+                }]
             } else {
-                ""
-            };
-
-            // Break long lines into chunks matching OCaml's break_long_line
-            let chunks = break_long_line(line_width, stripped);
-
-            let content: Vec<HighlightedString> = chunks
-                .iter()
-                .enumerate()
-                .map(|(chunk_idx, chunk)| match gutter {
-                    Gutter::Elided => HighlightedString {
-                        s: chunk.to_string(),
-                        start: 0,
-                        end: 0,
-                    },
-                    Gutter::Number(line_number) => {
-                        // Keep this policy aligned with compiler/ml/code_frame.ml.
-                        let highlight_line_start_offset =
-                            start_pos.cnum.saturating_sub(start_pos.bol) as isize;
-                        let highlight_line_end_offset =
-                            end_pos.cnum.saturating_sub(end_pos.bol) as isize;
-                        let leading_cut = leading_space_to_cut as isize;
-                        let chunk_len = chunk.chars().count() as isize;
-
-                        let start = if chunk_idx == 0 && *line_number == highlight_line_start {
-                            highlight_line_start_offset - leading_cut
-                        } else {
-                            0
-                        };
-
-                        let end = if *line_number < highlight_line_start {
-                            0
-                        } else if *line_number == highlight_line_start
-                            && *line_number == highlight_line_end
-                        {
-                            highlight_line_end_offset - leading_cut
-                        } else if *line_number == highlight_line_start {
-                            chunk_len
-                        } else if *line_number > highlight_line_start
-                            && *line_number < highlight_line_end
-                        {
-                            chunk_len
-                        } else if *line_number == highlight_line_end {
-                            highlight_line_end_offset - leading_cut
-                        } else {
-                            0
-                        };
-
-                        let start = start.clamp(0, chunk_len) as usize;
-                        let end = end.clamp(0, chunk_len) as usize;
-
-                        HighlightedString {
-                            s: chunk.to_string(),
-                            start,
-                            end,
+                break_long_line(line_width, &line[leading_space_to_cut..])
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, chunk)| match gutter {
+                        Gutter::Elided => HighlightedString {
+                            s: chunk,
+                            start: 0,
+                            end_: 0,
+                        },
+                        Gutter::Number(line_number) => {
+                            let line_number = *line_number;
+                            // OCaml measures `String.length line` of the
+                            // chunk here.
+                            let chunk_len = chunk.len() as isize;
+                            let start = if i == 0 && line_number == highlight_line_start {
+                                highlight_line_start_offset - leading_cut
+                            } else {
+                                0
+                            };
+                            let end_ = if line_number < highlight_line_start {
+                                0
+                            } else if line_number == highlight_line_start
+                                && line_number == highlight_line_end
+                            {
+                                highlight_line_end_offset - leading_cut
+                            } else if line_number == highlight_line_start
+                                || (line_number > highlight_line_start
+                                    && line_number < highlight_line_end)
+                            {
+                                chunk_len
+                            } else if line_number == highlight_line_end {
+                                highlight_line_end_offset - leading_cut
+                            } else {
+                                0
+                            };
+                            HighlightedString {
+                                s: chunk,
+                                start,
+                                end_,
+                            }
                         }
-                    }
-                })
-                .collect();
-
+                    })
+                    .collect()
+            };
             Line {
                 gutter: gutter.clone(),
                 content,
@@ -421,71 +427,128 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
         })
         .collect();
 
-    // Build output string
-    let mut buf = String::with_capacity(1024);
+    // `Code_frame.print`'s drawing (compiler/ml/code_frame.ml:222-298): every
+    // byte goes through `add_ch`, which emits an ANSI sequence only when the
+    // color differs from the previous byte's (across lines).
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FrameColor {
+        NoColor,
+        Dim,
+        Emphasis,
+    }
+    struct Frame {
+        buf: Vec<u8>,
+        last: FrameColor,
+        use_color: bool,
+        emphasis: &'static str,
+    }
+    impl Frame {
+        fn add_ch(&mut self, color: FrameColor, ch: u8) {
+            if !self.use_color || self.last == color {
+                self.buf.push(ch);
+                return;
+            }
+            let ansi: &[&str] = match (self.last, color) {
+                (FrameColor::NoColor, FrameColor::Dim) => &[ANSI_DIM],
+                (FrameColor::NoColor, FrameColor::Emphasis) => &[self.emphasis],
+                (_, FrameColor::NoColor) => &[ANSI_RESET],
+                (_, FrameColor::Dim) => &[ANSI_RESET, ANSI_DIM],
+                (_, FrameColor::Emphasis) => &[ANSI_RESET, self.emphasis],
+            };
+            for part in ansi {
+                self.buf.extend_from_slice(part.as_bytes());
+            }
+            self.buf.push(ch);
+            self.last = color;
+        }
 
+        fn add_str(&mut self, color: FrameColor, s: &str) {
+            for &ch in s.as_bytes() {
+                self.add_ch(color, ch);
+            }
+        }
+
+        fn draw_gutter(&mut self, width: usize, color: FrameColor, s: &str, separator: &str) {
+            for _ in 0..width.saturating_sub(s.len()) {
+                self.add_ch(FrameColor::NoColor, b' ');
+            }
+            self.add_str(color, s);
+            self.add_ch(FrameColor::NoColor, b' ');
+            self.add_str(FrameColor::Dim, separator);
+            self.add_ch(FrameColor::NoColor, b' ');
+        }
+    }
+
+    let mut frame = Frame {
+        buf: Vec::with_capacity(1024),
+        last: FrameColor::NoColor,
+        use_color,
+        emphasis: emphasis_ansi(emphasis),
+    };
+    let gutter_width = max_line_digits + indent;
     for line in &processed_lines {
         match &line.gutter {
             Gutter::Elided => {
-                // Draw elided gutter
-                for _ in 0..(max_line_digits + indent - 1) {
-                    buf.push(' ');
-                }
-                if use_color {
-                    buf.push_str(ANSI_DIM);
-                }
-                buf.push_str(".");
-                buf.push(' ');
-                buf.push_str(separator);
-                if use_color {
-                    buf.push_str(ANSI_RESET);
-                }
-                buf.push_str(" ...\n");
+                frame.draw_gutter(gutter_width, FrameColor::Dim, ".", separator);
+                frame.add_str(FrameColor::Dim, "...");
+                frame.add_ch(FrameColor::NoColor, b'\n');
             }
             Gutter::Number(line_number) => {
                 for (i, hs) in line.content.iter().enumerate() {
-                    // OCaml: first chunk shows line number, continuation chunks show empty gutter
                     let gutter_content = if i == 0 {
                         line_number.to_string()
                     } else {
                         String::new()
                     };
-                    for _ in 0..(max_line_digits + indent - gutter_content.len()) {
-                        buf.push(' ');
-                    }
-
-                    let is_highlighted_gutter = i == 0
+                    let gutter_color = if i == 0
                         && *line_number >= highlight_line_start
-                        && *line_number <= highlight_line_end;
-                    if use_color && is_highlighted_gutter {
-                        buf.push_str(emphasis_ansi(emphasis));
+                        && *line_number <= highlight_line_end
+                    {
+                        FrameColor::Emphasis
+                    } else {
+                        FrameColor::NoColor
+                    };
+                    frame.draw_gutter(gutter_width, gutter_color, &gutter_content, separator);
+                    for (ii, &ch) in hs.s.iter().enumerate() {
+                        let ii = ii as isize;
+                        let color = if ii >= hs.start && ii < hs.end_ {
+                            FrameColor::Emphasis
+                        } else {
+                            FrameColor::NoColor
+                        };
+                        frame.add_ch(color, ch);
                     }
-                    buf.push_str(&gutter_content);
-                    if use_color && is_highlighted_gutter {
-                        buf.push_str(ANSI_RESET);
-                    }
-                    buf.push(' ');
-                    if use_color {
-                        buf.push_str(ANSI_DIM);
-                    }
-                    buf.push_str(separator);
-                    if use_color {
-                        buf.push_str(ANSI_RESET);
-                    }
-                    buf.push(' ');
-
-                    append_highlighted_segment(&mut buf, hs, use_color, emphasis);
-                    buf.push('\n');
+                    frame.add_ch(FrameColor::NoColor, b'\n');
                 }
             }
         }
     }
 
-    buf
+    // OCaml writes these bytes as-is; a highlight boundary can fall inside a
+    // multi-byte character. A Rust `String` cannot carry the split sequence,
+    // so such bytes decode to U+FFFD.
+    match String::from_utf8(frame.buf) {
+        Ok(text) => text,
+        Err(err) => String::from_utf8_lossy(err.as_bytes()).into_owned(),
+    }
 }
 
 /// Format a location as "filename:line:col" or "filename:line:col-endcol"
+/// Whether `Location.normalize_range` (location.ml:53-73) gives a range: a
+/// column of -1 (a dummy position) prints the file name alone, with no code
+/// frame.
+pub fn has_printable_range(start_pos: &Position, end_pos: &Position) -> bool {
+    // Rust's `Location::none()` (line 0) stands for OCaml's `Location.none`,
+    // whose `pos_cnum = -1` makes the range unprintable (location.ml).
+    start_pos.line != 0
+        && start_pos.cnum - start_pos.bol != -1
+        && end_pos.cnum - end_pos.bol != -1
+}
+
 pub fn format_location(filename: &str, start_pos: &Position, end_pos: &Position) -> String {
+    if !has_printable_range(start_pos, end_pos) {
+        return filename.to_string();
+    }
     // OCaml uses 1-indexed columns: col = pos_cnum - pos_bol + 1
     let start_col = start_pos.cnum - start_pos.bol + 1;
     let end_col = end_pos.cnum - end_pos.bol; // OCaml doesn't add +1 for end (it's exclusive)
@@ -512,18 +575,22 @@ pub fn format_error(
 ) -> String {
     let mut result = String::new();
 
-    // Header
-    result.push_str("\n  Syntax error!\n");
+    // Header (OCaml `Res_diagnostics_printing_utils` colors it like other errors).
+    result.push_str("\n  ");
+    result.push_str(&colorize_intro("Syntax error!", true));
+    result.push('\n');
 
     // Location
     result.push_str("  ");
-    result.push_str(&format_location(filename, start_pos, end_pos));
+    result.push_str(&colorize_location(&format_location(filename, start_pos, end_pos)));
     result.push_str("\n\n");
 
-    // Code frame
-    result.push_str(&print(src, start_pos, end_pos));
-    // Extra blank line after code frame
-    result.push_str("\n");
+    // Code frame, printed only for a normalized range (location.ml:95-120).
+    if has_printable_range(start_pos, end_pos) {
+        result.push_str(&print(src, start_pos, end_pos));
+        // Extra blank line after code frame
+        result.push_str("\n");
+    }
 
     // Message
     result.push_str("  ");
@@ -551,10 +618,10 @@ mod tests {
 
     #[test]
     fn test_leading_space_count() {
-        assert_eq!(leading_space_count(""), 0);
-        assert_eq!(leading_space_count("hello"), 0);
-        assert_eq!(leading_space_count("  hello"), 2);
-        assert_eq!(leading_space_count("    "), 4);
+        assert_eq!(leading_space_count(b""), 0);
+        assert_eq!(leading_space_count(b"hello"), 0);
+        assert_eq!(leading_space_count(b"  hello"), 2);
+        assert_eq!(leading_space_count(b"    "), 4);
     }
 
     #[test]

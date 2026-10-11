@@ -25,7 +25,7 @@
 //! - OCaml runtime: runtime/caml/intext.h
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use crate::fast_hash::AHashMap as HashMap;
 
 use crate::location::{Location, Position};
 use crate::parse_arena::{ArityIdx, ExprIdx, LidentIdx, LocIdx, ParseArena, PosIdx, StrIdx};
@@ -119,6 +119,22 @@ impl PrimListShareKind {
 /// writer.write_string(b"hello");
 /// let bytes = writer.finish();
 /// ```
+
+/// A self-contained marshalled value: its encoded payload plus the object and
+/// heap-size counts it contributes. Shared references inside a fragment are
+/// relative to its own objects, so it can be embedded verbatim into another
+/// stream with [`MarshalWriter::write_fragment`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MarshalFragment {
+    /// Encoded payload (no marshal header).
+    pub bytes: Vec<u8>,
+    /// Number of shareable objects in the payload.
+    pub objects: u32,
+    /// Heap size in words on 32-bit platforms.
+    pub size_32: u32,
+    /// Heap size in words on 64-bit platforms.
+    pub size_64: u32,
+}
 
 #[derive(Debug)]
 pub struct MarshalWriter<'a> {
@@ -832,6 +848,10 @@ impl<'a> MarshalWriter<'a> {
     ///
     /// For raw binary data (e.g. pval_prim), use write_string() directly instead.
     pub fn write_str(&mut self, s: &str) {
+        if s.is_ascii() {
+            self.write_string(s.as_bytes());
+            return;
+        }
         let latin1_bytes: Vec<u8> = s.chars().map(|c| c as u8).collect();
         self.write_string(&latin1_bytes);
     }
@@ -1574,6 +1594,24 @@ impl<'a> MarshalWriter<'a> {
         result
     }
 
+    /// The written value as a self-contained [`MarshalFragment`].
+    pub fn fragment(&self) -> MarshalFragment {
+        MarshalFragment {
+            bytes: self.buffer.clone(),
+            objects: self.obj_counter,
+            size_32: self.size_32,
+            size_64: self.size_64,
+        }
+    }
+
+    /// Embed a fragment produced by another writer as the next value.
+    pub fn write_fragment(&mut self, fragment: &MarshalFragment) {
+        self.buffer.extend_from_slice(&fragment.bytes);
+        self.obj_counter += fragment.objects;
+        self.size_32 += fragment.size_32;
+        self.size_64 += fragment.size_64;
+    }
+
     /// Get just the payload without the header (for testing)
     pub fn payload(&self) -> &[u8] {
         &self.buffer
@@ -1670,7 +1708,7 @@ impl<'a> MarshalWriter<'a> {
         self.pstr_empty_table[idx] = Some(obj_idx);
     }
 
-    /// Write a shared single-element `pval_prim` list like ["#raw_expr"].
+    /// Write a shared static `Prim_name "#raw_expr"` block.
     pub(crate) fn write_prim_list_shared(&mut self, kind: PrimListShareKind, prim: StrIdx) {
         let idx = kind.as_index();
         if let Some(obj_idx) = self.prim_list_table[idx] {
@@ -1680,9 +1718,8 @@ impl<'a> MarshalWriter<'a> {
         }
 
         let obj_idx = self.obj_counter;
-        self.write_block_header(0, 2);
+        self.write_block_header(0, 1);
         self.write_str_idx(prim);
-        self.write_int(0); // []
         self.prim_list_table[idx] = Some(obj_idx);
     }
 

@@ -27,6 +27,22 @@ pub type Subst = HashMap<Ident, Lambda>;
 ///
 /// # Returns
 /// A new Lambda expression with substitutions applied.
+/// `Lambda_traverse.subst_lambda` (lambda_traverse.ml:235-241): replace
+/// variables and rebuild, through the smart constructors of
+/// `shallow_map_sharing`, only the nodes whose children changed.
+pub fn subst_lambda(s: &Subst, lam: Lambda) -> Lambda {
+    fn go(s: &Subst, lam: Lambda) -> crate::lambda::lambda_traverse::Mapped {
+        match lam {
+            Lambda::Lvar(ref id) => match s.get(id) {
+                Some(value) => (value.clone(), true),
+                None => (lam, false),
+            },
+            lam => crate::lambda::lambda_traverse::shallow_map_sharing(lam, &mut |inner| go(s, inner)),
+        }
+    }
+    go(s, lam).0
+}
+
 pub fn subst(s: &Subst, lam: &Lambda) -> Lambda {
     if s.is_empty() {
         return lam.clone();
@@ -44,19 +60,19 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
 
         Lambda::Lconst(_) => lam.clone(),
 
-        Lambda::Lapply(apply) => Lambda::Lapply(Apply {
+        Lambda::Lapply(apply) => Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(subst_aux(s, &apply.ap_func)),
             ap_args: apply.ap_args.iter().map(|arg| subst_aux(s, arg)).collect(),
             ap_info: apply.ap_info.clone(),
             ap_transformed_jsx: apply.ap_transformed_jsx,
-        }),
+        })),
 
-        Lambda::Lfunction(func) => Lambda::Lfunction(LFunction {
+        Lambda::Lfunction(func) => Lambda::Lfunction(Box::new(LFunction {
             arity: func.arity,
             params: func.params.clone(),
             body: Box::new(subst_aux(s, &func.body)),
             attr: func.attr.clone(),
-        }),
+        })),
 
         Lambda::Llet(kind, id, arg, body) => Lambda::Llet(
             *kind,
@@ -73,17 +89,17 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
             Lambda::Lletrec(new_bindings, Box::new(subst_aux(s, body)))
         }
 
-        Lambda::Lprim(prim_info) => Lambda::Lprim(PrimInfo {
+        Lambda::Lprim(prim_info) => Lambda::Lprim(Box::new(PrimInfo {
             primitive: prim_info.primitive.clone(),
             args: prim_info.args.iter().map(|arg| subst_aux(s, arg)).collect(),
             loc: prim_info.loc.clone(),
-        }),
+        })),
 
-        Lambda::LglobalModule(_, _) => lam.clone(),
+        Lambda::LglobalModule(_) => lam.clone(),
 
         Lambda::Lswitch(arg, switch) => Lambda::Lswitch(
             Box::new(subst_aux(s, arg)),
-            LambdaSwitch {
+            Box::new(LambdaSwitch {
                 sw_consts_full: switch.sw_consts_full,
                 sw_consts: switch
                     .sw_consts
@@ -101,7 +117,7 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
                     .as_ref()
                     .map(|f| Box::new(subst_aux(s, f))),
                 sw_dispatch: switch.sw_dispatch.clone(),
-            },
+            }),
         ),
 
         Lambda::LstringSwitch(arg, cases, default) => Lambda::LstringSwitch(

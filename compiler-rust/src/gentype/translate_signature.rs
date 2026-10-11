@@ -190,7 +190,7 @@ pub fn translate_signature_item(
                 crate::gentype::annotation::tag_is_gentype_import,
                 &value_description.val_attributes,
             );
-            if !value_description.val_prim.is_empty() || is_import {
+            if value_description.val_prim.is_some() || is_import {
                 crate::gentype::translation::translate_primitive(
                     ctx,
                     arena,

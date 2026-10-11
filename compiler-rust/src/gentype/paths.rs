@@ -152,7 +152,7 @@ pub fn get_cmt_file_from_cwd_with_exists(
 }
 
 pub fn get_cmt_file_with_exists(cmt: &str, exists: impl Fn(&Path) -> bool) -> String {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::new());
+    let cwd = crate::process_cwd::current_dir().unwrap_or_else(|_| PathBuf::new());
     get_cmt_file_from_cwd_with_exists(&cwd, cmt, exists)
 }
 

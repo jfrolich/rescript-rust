@@ -4,6 +4,14 @@ This directory organizes all planning, progress, and design documents by project
 
 ## Active Projects
 
+### [editor-tooling-rust](./editor-tooling-rust/)
+
+Port the editor tooling (analysis, reanalyze, rescript-tools) to Rust and run it inside `rescript watch` on the Rust typed tree, with no `.cmt`/`.cmi` files.
+
+| Document | Description |
+|----------|-------------|
+| [PLAN.md](./editor-tooling-rust/PLAN.md) | Architecture, design rules, status per command |
+
 ### [compiler-rewrite](./compiler-rewrite/)
 
 OCaml-to-Rust rewrite of the full ReScript compiler (~135K lines across 653 files). Phased migration with FFI boundaries, covering parser, type checker, Lambda/JS IR, and frontend integration. Currently in Phase 2 (Parser) and Phase 3 (Lambda IR).
@@ -93,6 +101,8 @@ Performance engineering for clean in-process builds through `rewatch` and the Ru
 | Document | Description |
 |----------|-------------|
 | [PLAN.md](./in-process-performance/PLAN.md) | Scope, success criteria, priority order, and benchmark command |
+| [ARCHITECTURE_INVESTIGATION.md](./in-process-performance/ARCHITECTURE_INVESTIGATION.md) | Stage-by-stage algorithms and data representations, fresh Tella profile, the three-constraint budget for a <1s clean build, and ranked architectural changes |
+| [THREAD_TYPE_STORE.md](./in-process-performance/THREAD_TYPE_STORE.md) | Per-thread persistent type store (proposal A without the POD-node prerequisite): profile evidence, OCaml reference semantics, ownership model, invariants, and staged landing plan |
 | [RALPH_TODO.md](./in-process-performance/RALPH_TODO.md) | Active performance checklist and validation gates |
 | [SCRATCHPAD.md](./in-process-performance/SCRATCHPAD.md) | Current measurements, slow-file notes, retained ideas, and rejected experiments |
 

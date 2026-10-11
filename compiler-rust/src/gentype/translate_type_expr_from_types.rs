@@ -61,38 +61,18 @@ pub fn path_to_list(path: &Path) -> Vec<String> {
 
 pub fn translate_obj_type(
     closed_flag: ClosedFlag,
-    fields_translations: Vec<(String, Translation)>,
+    fields_translations: Vec<(String, Mutable, Translation)>,
 ) -> Translation {
-    // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:24-57.
+    // Mirrors compiler/gentype/translate_type_expr_from_types.ml
+    // `translate_obj_type`.
     let dependencies = fields_translations
         .iter()
-        .flat_map(|(_, translation)| translation.dependencies.clone())
+        .flat_map(|(_, _, translation)| translation.dependencies.clone())
         .collect::<Vec<_>>();
-
-    fn check_mutable_field(
-        fields: &[(String, Translation)],
-        acc: &mut Vec<(String, Type, Mutable)>,
-    ) {
-        match fields {
-            [(previous_name, _), (name, translation), rest @ ..]
-                if crate::gentype::runtime::check_mutable_object_field(previous_name, name) =>
-            {
-                acc.push((name.clone(), translation.type_.clone(), Mutable::Mutable));
-                check_mutable_field(rest, acc);
-            }
-            [(name, translation), rest @ ..] => {
-                acc.push((name.clone(), translation.type_.clone(), Mutable::Immutable));
-                check_mutable_field(rest, acc);
-            }
-            [] => {}
-        }
-    }
-
-    let mut mutable_checked = Vec::new();
-    check_mutable_field(&fields_translations, &mut mutable_checked);
-    let fields = mutable_checked
+    let fields = fields_translations
         .into_iter()
-        .map(|(name, t, mutable_)| {
+        .map(|(name, mutable_, translation)| {
+            let t = translation.type_;
             let (optional, type_) = match t {
                 Type::Option(type_) => (Optional::Optional, *type_),
                 _ => (Optional::Mandatory, t),
@@ -876,18 +856,22 @@ fn get_field_types(
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
     type_env: &crate::gentype::type_env::T,
     type_expr: &TypeExprRef,
-) -> (ClosedFlag, Vec<(String, Translation)>) {
+) -> (ClosedFlag, Vec<(String, Mutable, Translation)>) {
     match type_expr_desc(ctx, type_expr) {
         TypeDesc::Tfield {
-            name, typ, rest, ..
+            name,
+            mutability,
+            typ,
+            rest,
         } => {
             let (closed_flag, mut fields) =
                 get_field_types(ctx, config, type_vars_gen, type_env, &rest);
-            let translation = match crate::gentype::runtime::is_mutable_object_field(&name) {
-                true => tr(ident("")),
-                false => translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &typ),
+            let mutable_ = match ctx.mutability_repr(mutability) {
+                crate::types::asttypes::MutableFlag::Mutable => Mutable::Mutable,
+                crate::types::asttypes::MutableFlag::Immutable => Mutable::Immutable,
             };
-            fields.insert(0, (name, translation));
+            let translation = translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &typ);
+            fields.insert(0, (name, mutable_, translation));
             (closed_flag, fields)
         }
         TypeDesc::Tlink(te) => get_field_types(ctx, config, type_vars_gen, type_env, &te),

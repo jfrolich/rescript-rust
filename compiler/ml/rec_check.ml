@@ -201,14 +201,15 @@ let rec classify_expression : Typedtree.expression -> sd =
     classify_expression e
   | Texp_ident _ | Texp_for _ | Texp_for_of _ | Texp_for_await_of _
   | Texp_constant _ | Texp_tuple _ | Texp_array _ | Texp_construct _
-  | Texp_variant _ | Texp_record _ | Texp_setfield _ | Texp_while _
-  | Texp_pack _ | Texp_function _ | Texp_extension_constructor _ | Texp_break
-  | Texp_continue ->
+  | Texp_variant _ | Texp_record _ | Texp_object_literal _ | Texp_setfield _
+  | Texp_while _ | Texp_pack _ | Texp_function _ | Texp_extension_constructor _
+  | Texp_break | Texp_continue ->
     Static
   | Texp_apply {funct = {exp_desc = Texp_ident (_, _, vd)}} when is_ref vd ->
     Static
-  | Texp_apply _ | Texp_match _ | Texp_ifthenelse _ | Texp_send _ | Texp_field _
-  | Texp_assert _ | Texp_try _ ->
+  | Texp_apply _ | Texp_match _ | Texp_ifthenelse _ | Texp_object_get _
+  | Texp_object_set _ | Texp_field _ | Texp_assert _ | Texp_try _
+  | Texp_tagged_template _ | Texp_template _ ->
     Dynamic
 
 let rec expression : Env.env -> Typedtree.expression -> Use.t =
@@ -260,6 +261,10 @@ let rec expression : Env.env -> Typedtree.expression -> Use.t =
   | Texp_apply {funct = e; args} ->
     let arg env (_, eo) = option expression env eo in
     Use.(join (inspect (expression env e)) (inspect (list arg env args)))
+  | Texp_tagged_template {tag; values} ->
+    Use.(
+      join (inspect (expression env tag)) (inspect (list expression env values)))
+  | Texp_template {values} -> Use.guard (list expression env values)
   | Texp_tuple exprs -> Use.guard (list expression env exprs)
   | Texp_array exprs -> Use.guard (list expression env exprs)
   | Texp_construct (_, desc, exprs) ->
@@ -296,9 +301,11 @@ let rec expression : Env.env -> Typedtree.expression -> Use.t =
     Use.(join (discard (expression env e1)) (expression env e2))
   | Texp_while (e1, e2) ->
     Use.(join (inspect (expression env e1)) (discard (expression env e2)))
-  | Texp_send (e1, _, eo) ->
-    Use.(
-      join (inspect (expression env e1)) (inspect (option expression env eo)))
+  | Texp_object_get (e1, _) -> Use.inspect (expression env e1)
+  | Texp_object_set (e1, _, e2) ->
+    Use.(join (inspect (expression env e1)) (inspect (expression env e2)))
+  | Texp_object_literal fields ->
+    Use.inspect (list (fun env (_, e) -> expression env e) env fields)
   | Texp_field (e, _, _) -> Use.(inspect (expression env e))
   | Texp_letexception (_, e) -> expression env e
   | Texp_assert e -> Use.inspect (expression env e)

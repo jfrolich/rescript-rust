@@ -42,7 +42,7 @@ let absorb_info (x : used_info) (y : used_info) =
    so uses of outer bindings are marked as captured. The optimizer uses the
    captured flag to restrict inlining without inflating the occurrence count. *)
 let collect_occurs lam : occ_tbl =
-  let occ : occ_tbl = Hash_ident.create 83 in
+  let occ : occ_tbl = Hash_ident.create 16 in
 
   (* Current use count of a variable. *)
   let used v =
@@ -92,7 +92,7 @@ let collect_occurs lam : occ_tbl =
         ())
   in
 
-  let rec count (bv : local_tbl) (lam : Lam.t) =
+  let rec count (bv : local_tbl) (lam : Lambda.t) =
     match lam with
     | Lfunction {body = l} -> count Map_ident.empty l
     (* when entering a function local [bv]
@@ -139,10 +139,6 @@ let collect_occurs lam : occ_tbl =
       when Ext_list.same_length params args
            && Lam_analysis.lfunction_can_be_inlined lfunction ->
       count bv (Lam_beta_reduce.no_names_beta_reduce params body args)
-    (* | Lapply{fn = Lfunction{function_kind = Tupled; params; body}; *)
-    (*          args = [Lprim {primitive = Pmakeblock _;  args; _}]; _} *)
-    (*   when  Ext_list.same_length params  args -> *)
-    (*   count bv (Lam_beta_reduce.beta_reduce   params body args) *)
     | Lapply {ap_func = l1; ap_args = ll; _} ->
       count bv l1;
       List.iter (count bv) ll

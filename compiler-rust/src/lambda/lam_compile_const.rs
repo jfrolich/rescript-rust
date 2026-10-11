@@ -3,7 +3,7 @@
 //! Port of `lam_compile_const.ml`.
 //! Extracted from `lam_compile.rs` for organization.
 
-use std::collections::HashMap;
+use ahash::AHashMap as HashMap;
 
 use super::js_exp_make::{
     int_expr, js_expr_no_side_effects, poly_var_tag_access, poly_var_value_access,
@@ -14,9 +14,9 @@ use crate::cmi::persistent_env::CmjExportConstant;
 use crate::ident::Ident;
 use crate::js_ir::op::{Kind, MutableFlag, Number};
 use crate::js_ir::printer::convert_ident_name;
-use crate::js_ir::{BinOp, Block, Delim, Expression, ExpressionDesc, ModuleId};
+use crate::js_ir::{BinOp, Block, Expression, ExpressionDesc, ModuleId};
 use crate::lambda::lam_compat::{FieldDbgInfo, SetFieldDbgInfo};
-use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo, StringDelim};
+use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo};
 use crate::lambda::lam_primitive::Primitive;
 
 impl LambdaCompiler {
@@ -70,10 +70,15 @@ impl LambdaCompiler {
             Constant::JsFalse => Expression::bool(false),
             Constant::Int {
                 i,
-                comment: Some(PointerInfo::Constructor(tag)),
-            } => match &tag.runtime_tag {
+                comment: Some(info),
+            } if matches!(**info, PointerInfo::Constructor(_)) => {
+                let PointerInfo::Constructor(tag) = &**info else {
+                    unreachable!()
+                };
+                match &tag.runtime_tag {
                 Some(ConstructorRuntimeTag::Int(value)) => Self::compile_runtime_int(*value),
-                Some(ConstructorRuntimeTag::String(value)) => Expression::string(value.clone()),
+                // OCaml `Js_exp_make.tag_type`: `String s -> str s`.
+                Some(ConstructorRuntimeTag::String(value)) => Expression::new(ExpressionDesc::Str(value.clone())),
                 Some(ConstructorRuntimeTag::Float(value)) => {
                     Expression::number(Number::float(value.clone()))
                 }
@@ -88,32 +93,33 @@ impl LambdaCompiler {
                     ExpressionDesc::Number(Number::int(*i)),
                     tag.name.clone(),
                 ),
+            }
             },
-            Constant::Int { i, comment } => match pointer_info_comment_text(comment.as_ref()) {
+            Constant::Int { i, comment } => match pointer_info_comment_text(comment.as_ref().map(|v| &**v)) {
                 Some(comment) => {
                     Expression::with_comment(ExpressionDesc::Number(Number::int(*i)), comment)
                 }
                 None => Expression::number(Number::int(*i)),
             },
-            Constant::Constructor(tag) => match &tag.tag_type {
-                Some(crate::types::VariantTagType::Int(value)) => {
-                    Expression::number(Number::int(*value))
+            Constant::Constructor(tag) => match &tag.literal {
+                Some(crate::types::VariantLiteralTag::Int(value)) => {
+                    Expression::number(Number::int(*value as i32))
                 }
-                Some(crate::types::VariantTagType::String(value)) => {
-                    Expression::string(value.clone())
+                // lam_compile_const.ml `E.tag_type t`: `String s -> str s`.
+                Some(crate::types::VariantLiteralTag::String(value)) => {
+                    Expression::new(ExpressionDesc::Str(value.clone()))
                 }
-                Some(crate::types::VariantTagType::Float(value)) => {
+                Some(crate::types::VariantLiteralTag::Float(value)) => {
                     Expression::number(Number::float(value.clone()))
                 }
-                Some(crate::types::VariantTagType::BigInt(value)) => {
-                    Expression::number(Number::bigint(true, value.clone()))
+                // js_exp_make.ml `literal_tag`: `Bigint_utils.parse_bigint`.
+                Some(crate::types::VariantLiteralTag::BigInt(value)) => {
+                    let (positive, digits) = crate::types::typecore::parse_bigint_literal(value);
+                    Expression::number(Number::bigint(positive, digits))
                 }
-                Some(crate::types::VariantTagType::Bool(value)) => Expression::bool(*value),
-                Some(crate::types::VariantTagType::Null) => Expression::null(),
-                Some(crate::types::VariantTagType::Undefined) => Expression::undefined(false),
-                Some(crate::types::VariantTagType::Untagged(_)) => {
-                    Expression::string(tag.name.clone())
-                }
+                Some(crate::types::VariantLiteralTag::Bool(value)) => Expression::bool(*value),
+                Some(crate::types::VariantLiteralTag::Null) => Expression::null(),
+                Some(crate::types::VariantLiteralTag::Undefined) => Expression::undefined(false),
                 None if tag.name == "[]" => Expression::with_comment(
                     ExpressionDesc::Number(Number::int(0)),
                     tag.name.clone(),
@@ -121,7 +127,7 @@ impl LambdaCompiler {
                 None => Expression::string(tag.name.clone()),
             },
             Constant::NativeInt { i, comment } => {
-                match pointer_info_comment_text(comment.as_ref()) {
+                match pointer_info_comment_text(comment.as_ref().map(|v| &**v)) {
                     Some(comment) => Expression::with_comment(
                         ExpressionDesc::Number(Number::float(i.to_string())),
                         comment,
@@ -130,24 +136,8 @@ impl LambdaCompiler {
                 }
             }
             Constant::Char(c) => Expression::number(Number::Int { i: *c, c: Some(*c) }),
-            Constant::String { s, delim } => {
-                let delim = match delim {
-                    Some(StringDelim::StarJ) => Delim::StarJ,
-                    // OCaml's lam_compile_const.ml lowers lambda string constants with
-                    // DNoQuotes through E.str, so they stay ordinary quoted JS strings.
-                    Some(StringDelim::NoQuotes) => Delim::None,
-                    Some(StringDelim::Backtick) => Delim::BackQuotes,
-                    Some(StringDelim::Plain) | None => Delim::None,
-                };
-                Expression::new(ExpressionDesc::Str {
-                    delim,
-                    txt: s.clone(),
-                })
-            }
-            Constant::ImmString(s) => Expression::new(ExpressionDesc::Str {
-                delim: Delim::None,
-                txt: s.clone(),
-            }),
+            Constant::String(s) => Expression::string(s.clone()),
+            Constant::ImmString(s) => Expression::new(ExpressionDesc::Str(s.clone())),
             Constant::Float(f) => Expression::number(Number::float(f.clone())),
             Constant::BigInt { negative, value } => {
                 Expression::number(Number::bigint(!negative, value.clone()))
