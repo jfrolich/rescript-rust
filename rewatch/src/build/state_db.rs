@@ -225,7 +225,19 @@ pub struct SourceDeps {
 pub const META_BUILD_STARTED_AT: &str = "build_started_at";
 pub const META_BUILD_OK: &str = "build_ok";
 
+/// Run SQLite's process-wide initialization once, before any connection is
+/// opened. Opening the per-package databases from several worker threads at
+/// once could otherwise race inside `sqlite3_initialize` and crash (a null
+/// mutex in `sqlite3_mutex_alloc`).
+fn ensure_sqlite_initialized() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let _ = Connection::open_in_memory();
+    });
+}
+
 fn open_existing(path: &Path) -> Option<Connection> {
+    ensure_sqlite_initialized();
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -236,6 +248,7 @@ fn open_existing(path: &Path) -> Option<Connection> {
 }
 
 fn open_for_write(package: &Package) -> rusqlite::Result<Connection> {
+    ensure_sqlite_initialized();
     let path = path(package);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
