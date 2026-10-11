@@ -273,6 +273,15 @@ fn source_step(
             );
         }
     }
+    // Members of a namespace compile with `-bs-ns`, which opens the map:
+    // its .cmi must be in lib/ocaml first.
+    deps.extend(
+        build_state
+            .modules
+            .iter()
+            .filter(|(_, other)| other.is_mlmap() && other.package_name == module.package_name)
+            .map(|(name, _)| name.clone()),
+    );
     deps.sort();
     deps.dedup();
     mkdirs.sort();
