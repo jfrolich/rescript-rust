@@ -141,6 +141,11 @@ fi
 
 cd "$PROJECT_ROOT"
 
+# Compiler cases run from the repository root without -bs-package-output, so
+# the default JS output lands in ./src. The package_* cases reach their
+# diagnostic only after that write succeeds.
+mkdir -p "$PROJECT_ROOT/src"
+
 safe_name() {
     printf '%s' "$1" | tr '/ ' '__' | tr -c 'A-Za-z0-9_.-' '_'
 }

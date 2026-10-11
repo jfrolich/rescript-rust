@@ -63,7 +63,13 @@ summary() {
 }
 
 if [[ $BUILD_OCAML -eq 1 ]]; then
-    step ocaml-reference make lib || { summary; exit 1; }
+    # In-process builds write no .cmi files, so the OCaml reference needs the
+    # runtime and Belt compiled by the OCaml bsc through the subprocess build.
+    rm -f packages/@rescript/runtime/.buildstamp packages/@rescript/belt/.buildstamp
+    step ocaml-reference bash -c '
+        make compiler &&
+        RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$PWD/_build/install/default/bin/bsc" make lib' ||
+        { summary; exit 1; }
 fi
 
 step rust-build bash -c '
@@ -71,6 +77,7 @@ step rust-build bash -c '
     cargo build --release --locked --manifest-path rewatch/Cargo.toml' || { summary; exit 1; }
 
 step fixtures env \
+    RESCRIPT_SUBPROCESS_BUILD=1 \
     RESCRIPT_BSC_EXE="$ROOT/_build/install/default/bin/bsc" \
     RESCRIPT_RUNTIME="$ROOT/packages/@rescript/runtime" \
     ./rewatch/target/release/rescript build tests/tests
