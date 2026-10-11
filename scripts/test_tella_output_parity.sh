@@ -2,7 +2,7 @@
 
 # Tella JS output parity: build the external project once with the OCaml
 # compiler, snapshot the generated JS, then build the same project with
-# rewatch --in-process and compare the generated JS outputs.
+# rescript (in process) and compare the generated JS outputs.
 #
 # Usage:
 #   ./scripts/test_tella_output_parity.sh [OPTIONS] [FILE|PATTERN]
@@ -60,14 +60,11 @@ done
 
 script_dir=$(cd "$(dirname "$0")"; pwd -P)
 PROJECT_ROOT=$(cd "$script_dir/.."; pwd -P)
-DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
-OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
 RUST_TARGET="${RUST_TARGET:-debug}"
 REWATCH_TARGET="${REWATCH_TARGET:-$RUST_TARGET}"
-RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc}"
-"$PROJECT_ROOT/scripts/rust_compiler_shims.sh" "$RUST_TARGET"
 REWATCH_BIN="${REWATCH_BIN:-$PROJECT_ROOT/rewatch/target/$REWATCH_TARGET/rescript}"
-RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/$("$script_dir/platform.sh")/bin/rescript.exe}"
+RESCRIPT_CLI="$REWATCH_BIN"
+source "$PROJECT_ROOT/scripts/parity_lib.sh"
 RESCRIPT_RUNTIME="${RESCRIPT_RUNTIME:-$PROJECT_ROOT/packages/@rescript/runtime}"
 TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
 TELLA_BUILD_DIR="${TELLA_BUILD_DIR:-$TELLA_DIR}"
@@ -84,15 +81,6 @@ if [[ ! -x "$OCAML_BSC" ]]; then
     exit 2
 fi
 
-if [[ ! -x "$RUST_BSC" ]]; then
-    echo -e "${RED}Error: Rust bsc not found at $RUST_BSC${RESET}" >&2
-    if [[ "$RUST_TARGET" == "release" ]]; then
-        echo "Run 'cargo build --release --manifest-path rewatch/Cargo.toml' first." >&2
-    else
-        echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' first." >&2
-    fi
-    exit 2
-fi
 
 if [[ ! -x "$REWATCH_BIN" ]]; then
     echo -e "${RED}Error: rewatch binary not found at $REWATCH_BIN${RESET}" >&2
@@ -323,9 +311,13 @@ touch "$TEMP_DIR/ocaml-build-start.marker"
 if ! run_build "Step 3: Building expected outputs with OCaml bsc..." "$TEMP_DIR/ocaml-build.log" bash -c '
     set -e
     cd "$0"
-    RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$1" "$2" clean
-    RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$1" "$2" build
-' "$TELLA_BUILD_DIR" "$OCAML_BSC" "$RESCRIPT_CLI"; then
+    # The OCaml side reads the runtime .cmi files: build the runtime with the
+    # OCaml bsc after the in-process build that writes its lib/ocaml sources.
+    "$2" build "$RESCRIPT_RUNTIME" > /dev/null 2>&1 || true
+    python3 "$3/scripts/build_ocaml_reference.py" --bsc "$1" --rescript "$2" "$RESCRIPT_RUNTIME"
+    "$2" clean
+    python3 "$3/scripts/build_ocaml_reference.py" --bsc "$1" --rescript "$2" .
+' "$TELLA_BUILD_DIR" "$OCAML_BSC" "$REWATCH_BIN" "$PROJECT_ROOT"; then
     cp "$TEMP_DIR/ocaml-build.log" "$CACHE_DIR/errors/ocaml-build.err" 2>/dev/null || true
     exit 2
 fi
@@ -362,12 +354,12 @@ fi
 echo "Snapshotted $EXPECTED_COUNT OCaml-generated JS outputs"
 echo ""
 
-if ! run_build "Step 4: Building actual outputs with rewatch --in-process..." "$TEMP_DIR/rust-build.log" bash -c '
+if ! run_build "Step 4: Building actual outputs with rescript (in process)..." "$TEMP_DIR/rust-build.log" bash -c '
     set -e
     cd "$0"
-    RESCRIPT_BSC_EXE="$2" "$1" clean
-    RESCRIPT_BSC_EXE="$2" "$1" build --in-process
-' "$TELLA_BUILD_DIR" "$REWATCH_BIN" "$RUST_BSC"; then
+    "$1" clean
+    "$1" build
+' "$TELLA_BUILD_DIR" "$REWATCH_BIN"; then
     cp "$TEMP_DIR/rust-build.log" "$CACHE_DIR/errors/rust-build.err" 2>/dev/null || true
     echo -e "${RED}Rust in-process build failed; log saved to $CACHE_DIR/errors/rust-build.err${RESET}" >&2
     exit 1

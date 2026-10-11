@@ -78,7 +78,6 @@ OCAML_BSC="${OCAML_BSC:-$PROJECT_ROOT/packages/@rescript/$("$PROJECT_ROOT/script
 RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc}"
 "$PROJECT_ROOT/scripts/rust_compiler_shims.sh" "$RUST_TARGET"
 REWATCH_BIN="${REWATCH_BIN:-$PROJECT_ROOT/rewatch/target/$REWATCH_TARGET/rescript}"
-RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/$("$PROJECT_ROOT/scripts/platform.sh")/bin/rescript.exe}"
 RESCRIPT_RUNTIME="${RESCRIPT_RUNTIME:-$PROJECT_ROOT/packages/@rescript/runtime}"
 RUST_BUILD_FLAG=""
 REWATCH_BUILD_FLAG=""
@@ -100,7 +99,7 @@ BOLD='\033[1m'
 RESET='\033[0m'
 
 missing=0
-for exe in "$OCAML_BSC" "$RUST_BSC" "$REWATCH_BIN" "$RESCRIPT_CLI"; do
+for exe in "$OCAML_BSC" "$RUST_BSC" "$REWATCH_BIN"; do
     if [[ ! -x "$exe" ]]; then
         echo -e "${RED}Missing compiler executable:${RESET} $exe" >&2
         missing=1
@@ -118,6 +117,13 @@ if [[ ! -d "$RESCRIPT_RUNTIME" ]]; then
     exit 2
 fi
 export RESCRIPT_RUNTIME
+# The OCaml side reads the runtime's .cmi files: build it with the OCaml bsc
+# (after the in-process build that provides its lib/ocaml sources).
+"$REWATCH_BIN" build "$RESCRIPT_RUNTIME" > /dev/null 2>&1 || true
+if ! python3 "$PROJECT_ROOT/scripts/build_ocaml_reference.py" --bsc "$OCAML_BSC" --rescript "$REWATCH_BIN" "$RESCRIPT_RUNTIME" > /dev/null; then
+    echo -e "${RED}OCaml reference build of the runtime failed${RESET}" >&2
+    exit 2
+fi
 if [[ ! -d "$FIXTURE_DIR" ]]; then
     echo -e "${YELLOW}No JS output parity fixtures found:${RESET} $FIXTURE_DIR"
     exit 0
@@ -257,8 +263,8 @@ compare_directory_case() {
     write_directory_project_config "$ocaml_project_dir" "$module_system" "$suffix" "$case_flags_raw" "$mode_flags_raw" "$extra_config_path"
     write_directory_project_config "$rust_project_dir" "$module_system" "$suffix" "$case_flags_raw" "$mode_flags_raw" "$extra_config_path"
 
-    run_capture "$ocaml_log" env RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --no-timing true "$ocaml_project_dir"
-    run_capture "$rust_log" env RESCRIPT_BSC_EXE="$RUST_BSC" "$REWATCH_BIN" build --in-process --no-timing true "$rust_project_dir"
+    run_capture "$ocaml_log" python3 "$PROJECT_ROOT/scripts/build_ocaml_reference.py" --bsc "$OCAML_BSC" --rescript "$REWATCH_BIN" "$ocaml_project_dir"
+    run_capture "$rust_log" "$REWATCH_BIN" build --no-timing true "$rust_project_dir"
 
     local ocaml_status rust_status
     ocaml_status=$(cat "$ocaml_log.status")

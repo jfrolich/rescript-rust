@@ -70,7 +70,6 @@ jobs:
       - name: Build native test corpus for compiler unit fixtures
         id: fixtures
         run: |
-          RESCRIPT_BSC_EXE="$PWD/_build/install/default/bin/bsc" \
           RESCRIPT_RUNTIME="$PWD/packages/@rescript/runtime" \
             ./rewatch/target/release/rescript build tests/tests
 

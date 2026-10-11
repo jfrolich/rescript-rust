@@ -41,12 +41,10 @@ done
 script_dir=$(cd "$(dirname "$0")"; pwd -P)
 PROJECT_ROOT=$(cd "$script_dir/.."; pwd -P)
 RUNTIME_DIR="$PROJECT_ROOT/packages/@rescript/runtime"
-DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
-OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
 RUST_TARGET="${RUST_TARGET:-debug}"
+source "$PROJECT_ROOT/scripts/parity_lib.sh"
 RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc}"
 "$PROJECT_ROOT/scripts/rust_compiler_shims.sh" "$RUST_TARGET"
-RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/$("$script_dir/platform.sh")/bin/rescript.exe}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-10}"
 CACHE_DIR="$PROJECT_ROOT/.parity-cache/stdlib-output"
 
@@ -102,8 +100,9 @@ echo ""
 
 echo -e "${BOLD}Step 1: Building stdlib/runtime with OCaml bsc...${RESET}"
 (
-    cd "$RUNTIME_DIR"
-    RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5
+    export RESCRIPT_RUNTIME="$RUNTIME_DIR"
+    "$RESCRIPT_CLI" build "$RUNTIME_DIR" > /dev/null 2>&1 || true
+    python3 "$PROJECT_ROOT/scripts/build_ocaml_reference.py" --bsc "$OCAML_BSC" --rescript "$RESCRIPT_CLI" "$RUNTIME_DIR" 2>&1 | tail -5
 )
 echo ""
 

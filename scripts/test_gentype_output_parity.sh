@@ -510,9 +510,13 @@ run_suite() {
     if ! run_build "$suite_name: building expected outputs with OCaml bsc" "$suite_cache/errors/ocaml-build.log" bash -c '
         set -e
         cd "$0"
-        RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$1" "$2" clean
-        RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$1" "$2" build
-    ' "$project_dir" "$OCAML_BSC" "$RESCRIPT_CLI"; then
+        # The OCaml side reads the runtime .cmi files: build the runtime with
+        # the OCaml bsc after the in-process build of its lib/ocaml sources.
+        "$2" build "$RESCRIPT_RUNTIME" > /dev/null 2>&1 || true
+        python3 "$3/scripts/build_ocaml_reference.py" --bsc "$1" --rescript "$2" "$RESCRIPT_RUNTIME"
+        "$2" clean
+        python3 "$3/scripts/build_ocaml_reference.py" --bsc "$1" --rescript "$2" .
+    ' "$project_dir" "$OCAML_BSC" "$REWATCH_BIN" "$PROJECT_ROOT"; then
         echo -e "${RED}$suite_name: OCaml build failed; cannot compute parity for this suite${RESET}" >&2
         failed_suites=$((failed_suites + 1))
         cleanup_suite
@@ -533,9 +537,9 @@ run_suite() {
     if ! run_build "$suite_name: building actual outputs with Rust in-process compiler" "$suite_cache/errors/rust-build.log" bash -c '
         set -e
         cd "$0"
-        RESCRIPT_BSC_EXE="$2" "$1" clean
-        RESCRIPT_BSC_EXE="$2" "$1" build --in-process
-    ' "$project_dir" "$REWATCH_BIN" "$RUST_BSC"; then
+        "$1" clean
+        "$1" build
+    ' "$project_dir" "$REWATCH_BIN"; then
         echo -e "${RED}$suite_name: Rust build failed; log saved to $suite_cache/errors/rust-build.log${RESET}" >&2
         failed_suites=$((failed_suites + 1))
         cleanup_suite

@@ -48,7 +48,7 @@ if [[ "${fixture_args[0]:-}" == "--help" || "${fixture_args[0]:-}" == "-h" ]]; t
     echo "JS snapshot suite under tests/tests/src."
     echo "This skips parser AST, syntax, and Spice PPX AST parity sections."
     echo "With --with-external, local tests still use the per-file harness, while Tella"
-    echo "is compared as an OCaml project build against a rewatch --in-process build."
+    echo "is compared as an OCaml reference build against an in-process rescript build."
     echo ""
     echo "Options:"
     echo "  --with-external  Include the external corpus via TELLA_DIR as well."
