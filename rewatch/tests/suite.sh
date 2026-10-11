@@ -146,6 +146,7 @@ fi
 ./watch/05-watch-ignores-non-source.sh &&
 ./watch/06-watch-missing-source-folder.sh &&
 ./watch/07-changed-interface-after-failed-implementation.sh &&
+./watch/08-watch-inlined-value-change.sh &&
 
 # Lock tests
 ./lock/01-lock-when-watching.sh &&

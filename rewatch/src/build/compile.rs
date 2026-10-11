@@ -1032,6 +1032,16 @@ pub fn compile(
         let mut js_metadata_ready: AHashSet<String> = AHashSet::new();
         let mut critical_in_flight: usize = 0;
         let mut critical_modules: AHashSet<String> = AHashSet::new();
+        // Without cut-off rounds, a dependent outside the dirty set is
+        // skipped when its dependencies are clean. An unchanged signature is
+        // not enough for that: dependents also inline the JS metadata
+        // (`let flag = true` becoming `false` keeps the signature). So such a
+        // module releases its dependents once its metadata is final
+        // (`metadata_same`). Cut-off builds compile every module of a round
+        // and decide the next round from item digests that cover the metadata.
+        let defer_clean_signatures = in_process_mode && !cutoff;
+        let mut deferred_clean: AHashSet<String> = AHashSet::new();
+        let mut metadata_same: AHashMap<String, bool> = AHashMap::new();
 
         rayon::in_place_scope(|scope| {
             let mut in_flight: usize = 0;
@@ -1178,6 +1188,10 @@ pub fn compile(
                             }
                             let module_name = msg.module_name.clone();
                             let is_clean = apply_signature_ready(build_command_state_ref, msg);
+                            if is_clean && defer_clean_signatures {
+                                deferred_clean.insert(module_name);
+                                continue;
+                            }
                             unblock_dependents(
                                 build_state_ref,
                                 &compile_universe,
@@ -1230,6 +1244,23 @@ pub fn compile(
                             }
                             let ready_name = msg.module_name;
                             js_metadata_ready.insert(ready_name.clone());
+                            if defer_clean_signatures {
+                                let same = build_command_state_ref.record_published_digest(&ready_name);
+                                metadata_same.insert(ready_name.clone(), same);
+                                if deferred_clean.remove(&ready_name) {
+                                    unblock_dependents(
+                                        build_state_ref,
+                                        &compile_universe,
+                                        &priorities,
+                                        &mut pending_deps,
+                                        &mut dirty_set,
+                                        &mut signature_ready,
+                                        &mut ready_heap,
+                                        &ready_name,
+                                        same,
+                                    );
+                                }
+                            }
 
                             if let Some(waiters) = waiting_js_by_dep.remove(&ready_name) {
                                 for waiter in waiters {
@@ -1267,8 +1298,29 @@ pub fn compile(
                                 has_errors = true;
                             }
 
-                            let is_clean = msg.is_clean;
                             let finished_name = msg.module_name.clone();
+                            let is_clean = if defer_clean_signatures && msg.is_compiled {
+                                let same = match metadata_same.get(&finished_name) {
+                                    Some(same) => *same,
+                                    None => build_command_state_ref.record_published_digest(&finished_name),
+                                };
+                                msg.is_clean && same && !module_failed
+                            } else {
+                                msg.is_clean
+                            };
+                            if deferred_clean.remove(&finished_name) {
+                                unblock_dependents(
+                                    build_state_ref,
+                                    &compile_universe,
+                                    &priorities,
+                                    &mut pending_deps,
+                                    &mut dirty_set,
+                                    &mut signature_ready,
+                                    &mut ready_heap,
+                                    &finished_name,
+                                    is_clean,
+                                );
+                            }
                             completed.insert(finished_name.clone());
                             js_metadata_ready.insert(finished_name.clone());
 
