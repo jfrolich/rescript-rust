@@ -15,6 +15,7 @@ RUST_DIR="$PROJECT_ROOT/compiler-rust"
 RUST_TARGET="${RUST_TARGET:-debug}"
 RUST_BSC="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc"
 RUST_PARSER="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/res_parser_rust"
+RUST_RESCRIPT="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/rescript"
 OCAML_BSC="$PROJECT_ROOT/packages/@rescript/$("$scriptDir/platform.sh")/bin/bsc.exe"
 RESCRIPT_CLI="$PROJECT_ROOT/packages/@rescript/$("$scriptDir/platform.sh")/bin/rescript.exe"
 OCAML_PARSER="$DUNE_BIN_DIR/res_parser"
@@ -75,6 +76,7 @@ while [[ $# -gt 0 ]]; do
             RUST_TARGET=release
             RUST_BSC="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc"
             RUST_PARSER="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/res_parser_rust"
+            RUST_RESCRIPT="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/rescript"
             shift
             ;;
         --verbose|-v)
@@ -188,6 +190,20 @@ find_rescript_project_root() {
         current_dir=$(dirname "$current_dir")
     done
 
+    return 1
+}
+
+# The nearest directory above file $1 with a rescript.json.
+find_rescript_config_root() {
+    local current_dir
+    current_dir=$(dirname "$1")
+    while [[ "$current_dir" != "/" && -n "$current_dir" ]]; do
+        if [[ -f "$current_dir/rescript.json" ]]; then
+            echo "$current_dir"
+            return 0
+        fi
+        current_dir=$(dirname "$current_dir")
+    done
     return 1
 }
 
@@ -694,6 +710,40 @@ run_js_compilation_tests() {
 
     echo "Testing $file_count files..."
 
+    # The Rust side is one in-process `rescript build` per project, which
+    # writes its JS over the checked-in snapshots. Save the snapshots first,
+    # compare each build output against its saved copy, then restore them.
+    local snapshot_dir="$TEMP_DIR/js/snapshots"
+    local -a js_projects=()
+    while read -r res_file; do
+        local abs_res="$res_file"
+        [[ "$abs_res" == /* ]] || abs_res="$PROJECT_ROOT/tests/tests/$res_file"
+        local snapshot="${abs_res%.res}.mjs"
+        [[ -f "$snapshot" ]] || snapshot="${abs_res%.res}.bs.js"
+        [[ -f "$snapshot" ]] || continue
+        mkdir -p "$snapshot_dir$(dirname "$snapshot")"
+        cp "$snapshot" "$snapshot_dir$snapshot"
+        # A module the build fails to compile must not pass on its old JS.
+        rm "$snapshot"
+        local project
+        project=$(find_rescript_config_root "$abs_res") || continue
+        [[ " ${js_projects[*]} " == *" $project "* ]] || js_projects+=("$project")
+    done < "$TEMP_DIR/js_files.txt"
+    find "$snapshot_dir" -type f | sed "s|^$snapshot_dir||" > "$TEMP_DIR/js_snapshots.txt"
+    restore_js_snapshots() {
+        while read -r snapshot; do
+            cp "$snapshot_dir$snapshot" "$snapshot"
+        done < "$TEMP_DIR/js_snapshots.txt"
+    }
+    trap restore_js_snapshots EXIT
+    local js_build_log="$TEMP_DIR/js/build.log"
+    : > "$js_build_log"
+    RESCRIPT_RUNTIME="$RESCRIPT_RUNTIME" "$RUST_RESCRIPT" build "$RESCRIPT_RUNTIME" >> "$js_build_log" 2>&1 || true
+    for project in "${js_projects[@]}"; do
+        echo "Building $project in process..."
+        RESCRIPT_RUNTIME="$RESCRIPT_RUNTIME" "$RUST_RESCRIPT" build "$project" >> "$js_build_log" 2>&1 || true
+    done
+
     local file_index=0
     while read -r res_file; do
         file_index=$((file_index + 1))
@@ -720,75 +770,13 @@ run_js_compilation_tests() {
             continue
         fi
 
-        # Create output directory.
-        #
-        # For project-owned compiler-args runs we compile checked-in `.ast`
-        # files from `<project>/lib/bs` with `-bs-package-output ...:src:...`.
-        # Pointing `-o` at another temp directory literally named `src`
-        # causes some modules (for example `Import.res`) to skip creating the
-        # requested output file even though compilation succeeds. Keep the
-        # output basename identical to the snapshot, but place it under a
-        # neutral per-file directory so the harness measures the emitted JS
-        # instead of a package-output path collision.
-        local safe_output_dir
-        safe_output_dir=$(echo "$res_file" | tr '/:' '__')
-        local output_dir="$TEMP_DIR/js/generated/$safe_output_dir"
-        mkdir -p "$output_dir"
-
-        # Compile with Rust bsc
-        local expected_ext="${expected_file##*.}"
-        local output_name="$(basename "${expected_file}")"
-        local actual_mjs="$output_dir/$output_name"
-        local compile_output="$TEMP_DIR/js/compile_output.txt"
-
-        local project_dir=""
-        local compiler_args_json=""
-        local -a compiler_args=()
-
-        project_dir=$(find_rescript_project_root "$full_res_file") || project_dir=""
-        if [[ -n "$project_dir" ]]; then
-            compiler_args_json=$(get_compiler_args_json "$project_dir" "$full_res_file") || compiler_args_json=""
-        fi
-
-        if [[ -n "$compiler_args_json" ]]; then
-            while IFS= read -r arg; do
-                compiler_args+=("$arg")
-            done < <(
-                printf '%s' "$compiler_args_json" | python3 -c 'import json, os, sys
-args = json.load(sys.stdin).get("compiler_args", [])
-runtime = os.environ.get("RESCRIPT_RUNTIME")
-i = 0
-while i < len(args):
-    if args[i] == "-runtime-path" and i + 1 < len(args) and runtime:
-        print(args[i])
-        print(runtime)
-        i += 2
-    else:
-        print(args[i])
-        i += 1'
-            )
-        fi
-
-        # Prefer the owning project's compiler-args so snapshot compilation
-        # runs with the same include paths, package output, JSX, and warnings
-        # as the checked-in build. Fall back to standalone compilation only
-        # when compiler-args metadata is unavailable.
+        local saved_snapshot="$snapshot_dir$(cd "$(dirname "$expected_file")" && pwd -P)/$(basename "$expected_file")"
+        local actual_mjs="$(cd "$(dirname "$expected_file")" && pwd -P)/$(basename "$expected_file")"
+        local compile_output="$js_build_log"
+        expected_file="$saved_snapshot"
         local compile_ok=false
-        if [[ "${#compiler_args[@]}" -gt 0 && -d "$project_dir/lib/bs" ]]; then
-            if (
-                cd "$project_dir/lib/bs" &&
-                timeout "$TIMEOUT_SECONDS" "$RUST_BSC" "${compiler_args[@]}" -o "$actual_mjs"
-            ) > "$compile_output" 2>&1; then
-                compile_ok=true
-            fi
-        elif [[ "$expected_ext" == "mjs" ]]; then
-            if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -bs-package-name rescript-tests -bs-module-type esmodule "$res_file" -o "$actual_mjs" > "$compile_output" 2>&1; then
-                compile_ok=true
-            fi
-        else
-            if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -bs-package-name rescript-tests "$res_file" -o "$actual_mjs" > "$compile_output" 2>&1; then
-                compile_ok=true
-            fi
+        if [[ -f "$saved_snapshot" ]]; then
+            compile_ok=true
         fi
         if $compile_ok; then
             # Check if output file was created
@@ -813,6 +801,8 @@ while i < len(args):
 
     done < "$TEMP_DIR/js_files.txt"
 
+    restore_js_snapshots
+    trap - EXIT
     cd "$PROJECT_ROOT"
 
     # Report results
